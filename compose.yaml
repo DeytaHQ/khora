@@ -1,0 +1,78 @@
+# Khora Development Infrastructure
+#
+# Provides PostgreSQL (with pgvector) and Neo4j for local development.
+# Run your app outside Docker with: uv run khora serve --reload
+#
+# Usage:
+#   docker compose up -d              # Start databases
+#   docker compose down               # Stop databases
+#   docker compose down -v            # Stop and remove data
+#   docker compose logs -f postgres   # Follow postgres logs
+#
+# Connection strings for .env:
+#   KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5433/khora
+#   KHORA_NEO4J_URL=bolt://neo4j:khora@localhost:7687
+
+services:
+  # ============================================================================
+  # PostgreSQL with pgvector
+  # ============================================================================
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: khora-postgres
+    environment:
+      POSTGRES_USER: khora
+      POSTGRES_PASSWORD: khora
+      POSTGRES_DB: khora
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U khora -d khora"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - khora-network
+
+  # ============================================================================
+  # Neo4j Graph Database
+  # ============================================================================
+  neo4j:
+    image: neo4j:5
+    container_name: khora-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-khora}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - khora-network
+
+volumes:
+  postgres_data:
+    name: khora_postgres_data
+  neo4j_data:
+    name: khora_neo4j_data
+  neo4j_logs:
+    name: khora_neo4j_logs
+
+networks:
+  khora-network:
+    name: khora-network
+    driver: bridge
