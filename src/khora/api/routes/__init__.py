@@ -1,5 +1,5 @@
 """API route modules for Khora."""
 
-from . import status
+from . import memory, namespaces, status, sync
 
-__all__ = ["status"]
+__all__ = ["status", "memory", "namespaces", "sync"]

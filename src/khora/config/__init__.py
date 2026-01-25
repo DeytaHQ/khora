@@ -1,6 +1,7 @@
 """Configuration module for Khora."""
 
-from .schema import KhoraConfig
+from .llm import LiteLLMConfig, acompletion, aembedding, configure_litellm, create_litellm_router
+from .schema import KhoraConfig, LLMSettings, PipelineSettings, StorageSettings, TenancySettings
 
 # Default config path
 DEFAULT_CONFIG_PATH = "config/khora.yaml"
@@ -31,6 +32,18 @@ def load_config(path: str | None = None) -> KhoraConfig:
 
 
 __all__ = [
+    # Main config
     "KhoraConfig",
     "load_config",
+    # Config sections
+    "StorageSettings",
+    "LLMSettings",
+    "PipelineSettings",
+    "TenancySettings",
+    # LiteLLM
+    "LiteLLMConfig",
+    "configure_litellm",
+    "create_litellm_router",
+    "acompletion",
+    "aembedding",
 ]

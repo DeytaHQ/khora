@@ -1,0 +1,468 @@
+"""Abstract protocols for storage backends.
+
+These protocols define the interface that all storage backends must implement,
+enabling dependency injection and easy testing with mocks.
+"""
+
+from __future__ import annotations
+
+from abc import abstractmethod
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from uuid import UUID
+
+if TYPE_CHECKING:
+    from khora.core.models import (
+        Chunk,
+        Document,
+        Entity,
+        Episode,
+        MemoryEvent,
+        MemoryNamespace,
+        Organization,
+        Relationship,
+        Workspace,
+    )
+
+
+@runtime_checkable
+class RelationalBackendProtocol(Protocol):
+    """Protocol for relational database backends (PostgreSQL).
+
+    Handles storage of documents, tenancy data, ACLs, and sync checkpoints.
+    """
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """Establish connection to the database."""
+        ...
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """Close database connections."""
+        ...
+
+    @abstractmethod
+    async def is_healthy(self) -> bool:
+        """Check if the backend is healthy and connected."""
+        ...
+
+    # Organization operations
+    @abstractmethod
+    async def create_organization(self, org: Organization) -> Organization:
+        """Create a new organization."""
+        ...
+
+    @abstractmethod
+    async def get_organization(self, org_id: UUID) -> Organization | None:
+        """Get an organization by ID."""
+        ...
+
+    @abstractmethod
+    async def get_organization_by_slug(self, slug: str) -> Organization | None:
+        """Get an organization by slug."""
+        ...
+
+    # Workspace operations
+    @abstractmethod
+    async def create_workspace(self, workspace: Workspace) -> Workspace:
+        """Create a new workspace."""
+        ...
+
+    @abstractmethod
+    async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+        """Get a workspace by ID."""
+        ...
+
+    @abstractmethod
+    async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
+        """List all workspaces in an organization."""
+        ...
+
+    # Namespace operations
+    @abstractmethod
+    async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+        """Create a new memory namespace."""
+        ...
+
+    @abstractmethod
+    async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+        """Get a namespace by ID."""
+        ...
+
+    @abstractmethod
+    async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
+        """Get a namespace by workspace ID and slug."""
+        ...
+
+    @abstractmethod
+    async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
+        """List all namespaces in a workspace."""
+        ...
+
+    @abstractmethod
+    async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+        """Update a namespace."""
+        ...
+
+    # Document operations
+    @abstractmethod
+    async def create_document(self, document: Document) -> Document:
+        """Create a new document."""
+        ...
+
+    @abstractmethod
+    async def get_document(self, document_id: UUID) -> Document | None:
+        """Get a document by ID."""
+        ...
+
+    @abstractmethod
+    async def list_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Document]:
+        """List documents in a namespace."""
+        ...
+
+    @abstractmethod
+    async def update_document(self, document: Document) -> Document:
+        """Update a document."""
+        ...
+
+    @abstractmethod
+    async def delete_document(self, document_id: UUID) -> bool:
+        """Delete a document."""
+        ...
+
+    @abstractmethod
+    async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+        """Get a document by its content checksum (for deduplication)."""
+        ...
+
+    # Sync checkpoint operations
+    @abstractmethod
+    async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+        """Get the last sync checkpoint for a source."""
+        ...
+
+    @abstractmethod
+    async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+        """Set the sync checkpoint for a source."""
+        ...
+
+
+@runtime_checkable
+class VectorBackendProtocol(Protocol):
+    """Protocol for vector database backends (pgvector).
+
+    Handles storage and retrieval of embeddings for semantic search.
+    """
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """Establish connection to the database."""
+        ...
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """Close database connections."""
+        ...
+
+    @abstractmethod
+    async def is_healthy(self) -> bool:
+        """Check if the backend is healthy and connected."""
+        ...
+
+    # Chunk operations
+    @abstractmethod
+    async def create_chunk(self, chunk: Chunk) -> Chunk:
+        """Create a new chunk with its embedding."""
+        ...
+
+    @abstractmethod
+    async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Create multiple chunks in a batch."""
+        ...
+
+    @abstractmethod
+    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+        """Get a chunk by ID."""
+        ...
+
+    @abstractmethod
+    async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+        """Get all chunks for a document."""
+        ...
+
+    @abstractmethod
+    async def delete_chunks_by_document(self, document_id: UUID) -> int:
+        """Delete all chunks for a document."""
+        ...
+
+    @abstractmethod
+    async def search_similar(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        *,
+        limit: int = 10,
+        min_similarity: float = 0.0,
+        filter_document_ids: list[UUID] | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """Search for similar chunks using vector similarity.
+
+        Returns list of (chunk, similarity_score) tuples.
+        """
+        ...
+
+    # Entity embedding operations
+    @abstractmethod
+    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+        """Update the embedding for an entity."""
+        ...
+
+    @abstractmethod
+    async def search_similar_entities(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        *,
+        limit: int = 10,
+        min_similarity: float = 0.0,
+    ) -> list[tuple[UUID, float]]:
+        """Search for similar entities by embedding."""
+        ...
+
+
+@runtime_checkable
+class GraphBackendProtocol(Protocol):
+    """Protocol for graph database backends (Neo4j).
+
+    Handles storage and traversal of the knowledge graph.
+    """
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """Establish connection to the database."""
+        ...
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """Close database connections."""
+        ...
+
+    @abstractmethod
+    async def is_healthy(self) -> bool:
+        """Check if the backend is healthy and connected."""
+        ...
+
+    # Entity operations
+    @abstractmethod
+    async def create_entity(self, entity: Entity) -> Entity:
+        """Create an entity node in the graph."""
+        ...
+
+    @abstractmethod
+    async def get_entity(self, entity_id: UUID) -> Entity | None:
+        """Get an entity by ID."""
+        ...
+
+    @abstractmethod
+    async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+        """Get an entity by name and type (for deduplication)."""
+        ...
+
+    @abstractmethod
+    async def update_entity(self, entity: Entity) -> Entity:
+        """Update an entity."""
+        ...
+
+    @abstractmethod
+    async def delete_entity(self, entity_id: UUID) -> bool:
+        """Delete an entity and its relationships."""
+        ...
+
+    @abstractmethod
+    async def list_entities(
+        self,
+        namespace_id: UUID,
+        *,
+        entity_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Entity]:
+        """List entities in a namespace."""
+        ...
+
+    # Relationship operations
+    @abstractmethod
+    async def create_relationship(self, relationship: Relationship) -> Relationship:
+        """Create a relationship between entities."""
+        ...
+
+    @abstractmethod
+    async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+        """Get a relationship by ID."""
+        ...
+
+    @abstractmethod
+    async def delete_relationship(self, relationship_id: UUID) -> bool:
+        """Delete a relationship."""
+        ...
+
+    @abstractmethod
+    async def get_entity_relationships(
+        self,
+        entity_id: UUID,
+        *,
+        direction: str = "both",  # "outgoing", "incoming", "both"
+        relationship_types: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[Relationship]:
+        """Get relationships for an entity."""
+        ...
+
+    # Episode operations
+    @abstractmethod
+    async def create_episode(self, episode: Episode) -> Episode:
+        """Create an episode node."""
+        ...
+
+    @abstractmethod
+    async def get_episode(self, episode_id: UUID) -> Episode | None:
+        """Get an episode by ID."""
+        ...
+
+    @abstractmethod
+    async def list_episodes(
+        self,
+        namespace_id: UUID,
+        *,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Episode]:
+        """List episodes in a time range."""
+        ...
+
+    # Graph traversal
+    @abstractmethod
+    async def find_paths(
+        self,
+        namespace_id: UUID,
+        source_entity_id: UUID,
+        target_entity_id: UUID,
+        *,
+        max_depth: int = 3,
+        relationship_types: list[str] | None = None,
+    ) -> list[list[dict[str, Any]]]:
+        """Find paths between two entities."""
+        ...
+
+    @abstractmethod
+    async def get_neighborhood(
+        self,
+        entity_id: UUID,
+        *,
+        depth: int = 1,
+        relationship_types: list[str] | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Get the neighborhood of an entity up to a certain depth."""
+        ...
+
+    @abstractmethod
+    async def search_entities_by_attribute(
+        self,
+        namespace_id: UUID,
+        attribute_name: str,
+        attribute_value: Any,
+        *,
+        limit: int = 100,
+    ) -> list[Entity]:
+        """Search entities by attribute value."""
+        ...
+
+
+@runtime_checkable
+class EventStoreProtocol(Protocol):
+    """Protocol for event store backends.
+
+    Handles the append-only event log for event sourcing.
+    """
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """Establish connection to the store."""
+        ...
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """Close connections."""
+        ...
+
+    @abstractmethod
+    async def is_healthy(self) -> bool:
+        """Check if the store is healthy."""
+        ...
+
+    @abstractmethod
+    async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+        """Append an event to the log."""
+        ...
+
+    @abstractmethod
+    async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+        """Append multiple events in a batch."""
+        ...
+
+    @abstractmethod
+    async def get_events(
+        self,
+        namespace_id: UUID,
+        *,
+        event_types: list[str] | None = None,
+        resource_type: str | None = None,
+        resource_id: UUID | None = None,
+        after: datetime | None = None,
+        before: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MemoryEvent]:
+        """Query events from the log."""
+        ...
+
+    @abstractmethod
+    async def get_events_for_resource(
+        self,
+        resource_type: str,
+        resource_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> list[MemoryEvent]:
+        """Get all events for a specific resource."""
+        ...
+
+    @abstractmethod
+    async def get_latest_event(
+        self,
+        resource_type: str,
+        resource_id: UUID,
+    ) -> MemoryEvent | None:
+        """Get the latest event for a resource."""
+        ...
+
+    @abstractmethod
+    async def count_events(
+        self,
+        namespace_id: UUID,
+        *,
+        event_types: list[str] | None = None,
+        after: datetime | None = None,
+    ) -> int:
+        """Count events matching criteria."""
+        ...

@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .routes import status
+from .routes import memory, namespaces, status, sync
 
 if TYPE_CHECKING:
     from ..config import KhoraConfig
@@ -55,6 +55,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Application lifespan manager for startup/shutdown events."""
     from ..db.session import close_db, run_migrations
+    from ..memory_lake import MemoryLake
+    from .deps import set_memory_lake
 
     # Startup
     logger.info("Starting Khora API server...")
@@ -62,10 +64,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Run database migrations
     await run_migrations()
 
+    # Initialize Memory Lake
+    config = app.state.config
+    lake = MemoryLake(config=config)
+    try:
+        await lake.connect()
+        set_memory_lake(lake)
+        app.state.memory_lake = lake
+        logger.info("Memory Lake initialized")
+    except Exception as e:
+        logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+        app.state.memory_lake = None
+
     yield
 
     # Shutdown
     logger.info("Shutting down Khora API server...")
+    if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+        await app.state.memory_lake.disconnect()
     await close_db()
 
 
@@ -114,5 +130,10 @@ def create_app(config: KhoraConfig | None = None) -> FastAPI:
     # Register routes
     # Status endpoint is public (no auth)
     app.include_router(status.router, tags=["status"])
+
+    # Memory Lake API routes
+    app.include_router(memory.router)
+    app.include_router(namespaces.router)
+    app.include_router(sync.router)
 
     return app

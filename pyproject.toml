@@ -25,6 +25,16 @@ dependencies = [
     # Terminal UI
     "rich>=13.0.0",
     "loguru>=0.7.3",
+    # LLM Access (unified interface)
+    "litellm>=1.80.15",
+    # Graph database
+    "neo4j>=6.1.0",
+    # Vector database
+    "pgvector>=0.4.2",
+    # Pipeline orchestration
+    "prefect>=3.6.12",
+    # Token counting
+    "tiktoken>=0.12.0",
 ]
 
 [project.optional-dependencies]

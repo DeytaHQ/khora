@@ -1,0 +1,37 @@
+# Anthropic Claude Configuration for Khora Memory Lake
+# Uses Claude Sonnet for high-quality extraction and reasoning
+
+model: "claude-sonnet-4-20250514"
+api_key_env: "ANTHROPIC_API_KEY"
+
+# Model parameters
+temperature: 0.7
+max_tokens: 8192
+
+# Request configuration
+timeout: 180
+max_retries: 3
+retry_wait: 2
+
+# Concurrency - lower for Claude due to rate limits
+max_concurrent_llm_calls: 10
+
+# Embedding configuration (using OpenAI for embeddings)
+embedding_model: "text-embedding-3-small"
+embedding_api_key_env: "OPENAI_API_KEY"
+embedding_dimension: 1536
+
+# Router configuration with fallbacks
+model_list:
+  - model_name: "claude-sonnet"
+    litellm_params:
+      model: "claude-sonnet-4-20250514"
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+  - model_name: "claude-sonnet"
+    litellm_params:
+      model: "claude-3-5-sonnet-20241022"
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+
+router_settings:
+  routing_strategy: "simple-shuffle"
+  num_retries: 2

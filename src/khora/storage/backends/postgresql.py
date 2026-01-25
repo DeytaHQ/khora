@@ -1,0 +1,464 @@
+"""PostgreSQL backend for relational data storage.
+
+Handles storage of documents, tenancy data, ACLs, and sync checkpoints
+using SQLAlchemy async with asyncpg.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+from uuid import UUID
+
+from loguru import logger
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+from khora.core.models import Document, DocumentMetadata, MemoryNamespace, Organization, TenancyMode, Workspace
+from khora.core.models.document import DocumentStatus
+from khora.db.models import (
+    Base,
+    DocumentModel,
+    MemoryNamespaceModel,
+    OrganizationModel,
+    SyncCheckpointModel,
+    WorkspaceModel,
+)
+
+if TYPE_CHECKING:
+    pass
+
+
+class PostgreSQLBackend:
+    """PostgreSQL backend for relational data.
+
+    Handles all relational data operations including multi-tenancy
+    hierarchy, documents, and sync checkpoints.
+    """
+
+    def __init__(self, database_url: str, *, echo: bool = False, pool_size: int = 5, max_overflow: int = 10) -> None:
+        """Initialize the PostgreSQL backend.
+
+        Args:
+            database_url: PostgreSQL connection URL
+            echo: Enable SQL echo logging
+            pool_size: Connection pool size
+            max_overflow: Maximum overflow connections
+        """
+        # Convert to async URL if needed
+        if database_url.startswith("postgresql://"):
+            database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+
+        self._database_url = database_url
+        self._echo = echo
+        self._pool_size = pool_size
+        self._max_overflow = max_overflow
+        self._engine: AsyncEngine | None = None
+        self._session_factory: async_sessionmaker[AsyncSession] | None = None
+
+    async def connect(self) -> None:
+        """Establish connection to the database."""
+        if self._engine is not None:
+            return
+
+        logger.info("Connecting to PostgreSQL...")
+        self._engine = create_async_engine(
+            self._database_url,
+            echo=self._echo,
+            pool_size=self._pool_size,
+            max_overflow=self._max_overflow,
+        )
+        self._session_factory = async_sessionmaker(
+            self._engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        logger.info("Connected to PostgreSQL")
+
+    async def disconnect(self) -> None:
+        """Close database connections."""
+        if self._engine is not None:
+            logger.info("Disconnecting from PostgreSQL...")
+            await self._engine.dispose()
+            self._engine = None
+            self._session_factory = None
+            logger.info("Disconnected from PostgreSQL")
+
+    async def is_healthy(self) -> bool:
+        """Check if the backend is healthy and connected."""
+        if self._engine is None or self._session_factory is None:
+            return False
+        try:
+            async with self._session_factory() as session:
+                await session.execute(select(1))
+            return True
+        except Exception as e:
+            logger.error(f"PostgreSQL health check failed: {e}")
+            return False
+
+    def _get_session(self) -> AsyncSession:
+        """Get a new database session."""
+        if self._session_factory is None:
+            raise RuntimeError("Backend not connected. Call connect() first.")
+        return self._session_factory()
+
+    async def create_tables(self) -> None:
+        """Create all database tables (for testing/development)."""
+        if self._engine is None:
+            raise RuntimeError("Backend not connected. Call connect() first.")
+        async with self._engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    # =========================================================================
+    # Organization operations
+    # =========================================================================
+
+    async def create_organization(self, org: Organization) -> Organization:
+        """Create a new organization."""
+        async with self._get_session() as session:
+            model = OrganizationModel(
+                id=str(org.id),
+                name=org.name,
+                slug=org.slug,
+                tenancy_mode=org.tenancy_mode,
+                metadata_=org.metadata,
+                created_at=org.created_at,
+                updated_at=org.updated_at,
+            )
+            session.add(model)
+            await session.commit()
+            await session.refresh(model)
+            return self._org_model_to_domain(model)
+
+    async def get_organization(self, org_id: UUID) -> Organization | None:
+        """Get an organization by ID."""
+        async with self._get_session() as session:
+            result = await session.execute(select(OrganizationModel).where(OrganizationModel.id == str(org_id)))
+            model = result.scalar_one_or_none()
+            return self._org_model_to_domain(model) if model else None
+
+    async def get_organization_by_slug(self, slug: str) -> Organization | None:
+        """Get an organization by slug."""
+        async with self._get_session() as session:
+            result = await session.execute(select(OrganizationModel).where(OrganizationModel.slug == slug))
+            model = result.scalar_one_or_none()
+            return self._org_model_to_domain(model) if model else None
+
+    def _org_model_to_domain(self, model: OrganizationModel) -> Organization:
+        """Convert OrganizationModel to domain Organization."""
+        return Organization(
+            id=UUID(model.id),
+            name=model.name,
+            slug=model.slug,
+            tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
+            metadata=model.metadata_,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    # =========================================================================
+    # Workspace operations
+    # =========================================================================
+
+    async def create_workspace(self, workspace: Workspace) -> Workspace:
+        """Create a new workspace."""
+        async with self._get_session() as session:
+            model = WorkspaceModel(
+                id=str(workspace.id),
+                organization_id=str(workspace.organization_id),
+                name=workspace.name,
+                slug=workspace.slug,
+                description=workspace.description,
+                metadata_=workspace.metadata,
+                created_at=workspace.created_at,
+                updated_at=workspace.updated_at,
+            )
+            session.add(model)
+            await session.commit()
+            await session.refresh(model)
+            return self._workspace_model_to_domain(model)
+
+    async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+        """Get a workspace by ID."""
+        async with self._get_session() as session:
+            result = await session.execute(select(WorkspaceModel).where(WorkspaceModel.id == str(workspace_id)))
+            model = result.scalar_one_or_none()
+            return self._workspace_model_to_domain(model) if model else None
+
+    async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
+        """List all workspaces in an organization."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(WorkspaceModel).where(WorkspaceModel.organization_id == str(organization_id))
+            )
+            return [self._workspace_model_to_domain(m) for m in result.scalars().all()]
+
+    def _workspace_model_to_domain(self, model: WorkspaceModel) -> Workspace:
+        """Convert WorkspaceModel to domain Workspace."""
+        return Workspace(
+            id=UUID(model.id),
+            organization_id=UUID(model.organization_id),
+            name=model.name,
+            slug=model.slug,
+            description=model.description,
+            metadata=model.metadata_,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    # =========================================================================
+    # Namespace operations
+    # =========================================================================
+
+    async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+        """Create a new memory namespace."""
+        async with self._get_session() as session:
+            model = MemoryNamespaceModel(
+                id=str(namespace.id),
+                workspace_id=str(namespace.workspace_id),
+                name=namespace.name,
+                slug=namespace.slug,
+                description=namespace.description,
+                config_overrides=namespace.config_overrides,
+                sync_checkpoints=namespace.sync_checkpoints,
+                metadata_=namespace.metadata,
+                created_at=namespace.created_at,
+                updated_at=namespace.updated_at,
+            )
+            session.add(model)
+            await session.commit()
+            await session.refresh(model)
+            return self._namespace_model_to_domain(model)
+
+    async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+        """Get a namespace by ID."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == str(namespace_id))
+            )
+            model = result.scalar_one_or_none()
+            return self._namespace_model_to_domain(model) if model else None
+
+    async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
+        """Get a namespace by workspace ID and slug."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(MemoryNamespaceModel).where(
+                    MemoryNamespaceModel.workspace_id == str(workspace_id), MemoryNamespaceModel.slug == slug
+                )
+            )
+            model = result.scalar_one_or_none()
+            return self._namespace_model_to_domain(model) if model else None
+
+    async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
+        """List all namespaces in a workspace."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
+            )
+            return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
+
+    async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+        """Update a namespace."""
+        async with self._get_session() as session:
+            await session.execute(
+                update(MemoryNamespaceModel)
+                .where(MemoryNamespaceModel.id == str(namespace.id))
+                .values(
+                    name=namespace.name,
+                    slug=namespace.slug,
+                    description=namespace.description,
+                    config_overrides=namespace.config_overrides,
+                    sync_checkpoints=namespace.sync_checkpoints,
+                    metadata_=namespace.metadata,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+            return namespace
+
+    def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
+        """Convert MemoryNamespaceModel to domain MemoryNamespace."""
+        return MemoryNamespace(
+            id=UUID(model.id),
+            workspace_id=UUID(model.workspace_id),
+            name=model.name,
+            slug=model.slug,
+            description=model.description,
+            config_overrides=model.config_overrides,
+            sync_checkpoints=model.sync_checkpoints,
+            metadata=model.metadata_,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    # =========================================================================
+    # Document operations
+    # =========================================================================
+
+    async def create_document(self, document: Document) -> Document:
+        """Create a new document."""
+        async with self._get_session() as session:
+            model = DocumentModel(
+                id=str(document.id),
+                namespace_id=str(document.namespace_id),
+                content=document.content,
+                status=document.status,
+                source=document.metadata.source,
+                source_type=document.metadata.source_type,
+                content_type=document.metadata.content_type,
+                title=document.metadata.title,
+                author=document.metadata.author,
+                language=document.metadata.language,
+                checksum=document.metadata.checksum,
+                size_bytes=document.metadata.size_bytes,
+                metadata_=document.metadata.custom,
+                chunk_count=document.chunk_count,
+                entity_count=document.entity_count,
+                error_message=document.error_message,
+                created_at=document.created_at,
+                updated_at=document.updated_at,
+                processed_at=document.processed_at,
+            )
+            session.add(model)
+            await session.commit()
+            await session.refresh(model)
+            return self._document_model_to_domain(model)
+
+    async def get_document(self, document_id: UUID) -> Document | None:
+        """Get a document by ID."""
+        async with self._get_session() as session:
+            result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+            model = result.scalar_one_or_none()
+            return self._document_model_to_domain(model) if model else None
+
+    async def list_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Document]:
+        """List documents in a namespace."""
+        async with self._get_session() as session:
+            query = select(DocumentModel).where(DocumentModel.namespace_id == str(namespace_id))
+            if status:
+                query = query.where(DocumentModel.status == status)
+            query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
+            result = await session.execute(query)
+            return [self._document_model_to_domain(m) for m in result.scalars().all()]
+
+    async def update_document(self, document: Document) -> Document:
+        """Update a document."""
+        async with self._get_session() as session:
+            await session.execute(
+                update(DocumentModel)
+                .where(DocumentModel.id == str(document.id))
+                .values(
+                    content=document.content,
+                    status=document.status,
+                    source=document.metadata.source,
+                    source_type=document.metadata.source_type,
+                    content_type=document.metadata.content_type,
+                    title=document.metadata.title,
+                    author=document.metadata.author,
+                    language=document.metadata.language,
+                    checksum=document.metadata.checksum,
+                    size_bytes=document.metadata.size_bytes,
+                    metadata_=document.metadata.custom,
+                    chunk_count=document.chunk_count,
+                    entity_count=document.entity_count,
+                    error_message=document.error_message,
+                    updated_at=datetime.now(UTC),
+                    processed_at=document.processed_at,
+                )
+            )
+            await session.commit()
+            return document
+
+    async def delete_document(self, document_id: UUID) -> bool:
+        """Delete a document."""
+        async with self._get_session() as session:
+            result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+            model = result.scalar_one_or_none()
+            if model:
+                await session.delete(model)
+                await session.commit()
+                return True
+            return False
+
+    async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+        """Get a document by its content checksum (for deduplication)."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
+                )
+            )
+            model = result.scalar_one_or_none()
+            return self._document_model_to_domain(model) if model else None
+
+    def _document_model_to_domain(self, model: DocumentModel) -> Document:
+        """Convert DocumentModel to domain Document."""
+        return Document(
+            id=UUID(model.id),
+            namespace_id=UUID(model.namespace_id),
+            content=model.content,
+            status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
+            metadata=DocumentMetadata(
+                source=model.source,
+                source_type=model.source_type,
+                content_type=model.content_type,
+                title=model.title,
+                author=model.author,
+                language=model.language,
+                checksum=model.checksum,
+                size_bytes=model.size_bytes,
+                custom=model.metadata_,
+            ),
+            chunk_count=model.chunk_count,
+            entity_count=model.entity_count,
+            error_message=model.error_message,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+            processed_at=model.processed_at,
+        )
+
+    # =========================================================================
+    # Sync checkpoint operations
+    # =========================================================================
+
+    async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+        """Get the last sync checkpoint for a source."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(SyncCheckpointModel).where(
+                    SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+                )
+            )
+            model = result.scalar_one_or_none()
+            return model.checkpoint if model else None
+
+    async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+        """Set the sync checkpoint for a source."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(SyncCheckpointModel).where(
+                    SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+                )
+            )
+            model = result.scalar_one_or_none()
+            if model:
+                model.checkpoint = checkpoint
+                model.updated_at = datetime.now(UTC)
+            else:
+                model = SyncCheckpointModel(
+                    namespace_id=str(namespace_id),
+                    source=source,
+                    checkpoint=checkpoint,
+                )
+                session.add(model)
+            await session.commit()

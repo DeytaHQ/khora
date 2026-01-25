@@ -1,0 +1,21 @@
+# OpenAI GPT Configuration for Khora Memory Lake
+# Uses GPT-4o-mini for cost-effective general use
+
+model: "gpt-4o-mini"
+api_key_env: "OPENAI_API_KEY"
+
+# Model parameters
+temperature: 0.7
+max_tokens: 8192
+
+# Request configuration
+timeout: 120
+max_retries: 3
+retry_wait: 2
+
+# Concurrency
+max_concurrent_llm_calls: 20
+
+# Embedding configuration
+embedding_model: "text-embedding-3-small"
+embedding_dimension: 1536
