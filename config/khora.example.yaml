@@ -1,0 +1,17 @@
+# Khora Configuration Example
+# Copy to khora.yaml and customize
+
+# Application settings
+app_name: khora
+environment: development
+debug: false
+
+# API settings
+api_host: "127.0.0.1"
+api_port: 8000
+
+# Authentication
+auth_enabled: true
+
+# Database
+# database_url: "postgresql://user:password@localhost:5432/khora"

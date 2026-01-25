@@ -1,0 +1,118 @@
+[project]
+name = "khora"
+version = "0.0.1"
+description = "Khora - Deyta's memory lake and materialization of knowledge"
+readme = "README.md"
+authors = [
+    { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    # Configuration
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0.0",
+    # FastAPI service
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.28.0",
+    # CLI
+    "click>=8.1.0",
+    # Async support
+    "asyncpg>=0.30.0",
+    # Database
+    "sqlalchemy[asyncio]>=2.0.0",
+    "alembic>=1.13.0",
+    # Terminal UI
+    "rich>=13.0.0",
+    "loguru>=0.7.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.12.0",
+    "pytest-asyncio>=1.3.0",
+    "coverage>=7.13.0",
+    "black>=25.12.0",
+    "ruff>=0.14.10",
+    "isort>=7.0.0",
+    "prek>=0.3.0",
+    "faker>=39.0.0",
+]
+# Data storage backends
+postgres = [
+    "asyncpg>=0.30.0",
+    "pgvector>=0.4.0",
+]
+
+[project.scripts]
+khora = "khora:main"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--cov=khora",
+    "--cov-branch",
+    "--cov-report=term-missing",
+    "--cov-fail-under=30",
+]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "e2e: End-to-end tests",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.black]
+target-version = ["py313"]
+line-length = 120
+
+[tool.isort]
+profile = "black"
+line_length = 120
+known_first_party = ["khora"]
+skip_gitignore = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]  # Line too long - handled by black
+
+[dependency-groups]
+dev = [
+    "prek>=0.3.0",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+]
