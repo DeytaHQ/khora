@@ -1,0 +1,50 @@
+# fly.toml - Khora Fly.io configuration
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+# To deploy:
+#   fly launch --no-deploy  # First time setup
+#   fly deploy              # Deploy updates
+
+app = 'khora-staging'
+primary_region = 'iad'
+
+[build]
+
+[deploy]
+  strategy = 'rolling'
+
+[env]
+  KHORA_ENVIRONMENT = 'staging'
+  KHORA_HOST = '0.0.0.0'
+  KHORA_LOG_LEVEL = 'INFO'
+  KHORA_PORT = '8000'
+
+[processes]
+  app = './docker-entrypoint.sh'
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [http_service.concurrency]
+    type = 'requests'
+    hard_limit = 250
+    soft_limit = 200
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '15s'
+    method = 'GET'
+    path = '/health'
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 512
