@@ -73,7 +73,7 @@ services:
   # Neo4j Graph Database
   # ============================================================================
   neo4j:
-    image: neo4j:5
+    image: neo4j:2025.12.1
     container_name: khora-neo4j
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-khora}
