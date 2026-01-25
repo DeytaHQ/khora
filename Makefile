@@ -32,8 +32,8 @@ help:
 	@echo "  make docker-clean     Remove images and volumes"
 	@echo ""
 	@echo "Connection Strings (for .env):"
-	@echo "  KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5433/khora"
-	@echo "  KHORA_NEO4J_URL=bolt://neo4j:khora@localhost:7687"
+	@echo "  KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5434/khora"
+	@echo "  KHORA_NEO4J_URL=bolt://neo4j:khora@localhost:7688"
 
 # ==============================================================================
 # Development Commands
@@ -47,11 +47,11 @@ dev:
 	@sleep 3
 	@docker compose ps
 	@echo ""
-	@echo "PostgreSQL: localhost:5433 (user: khora, pass: khora)"
-	@echo "Neo4j:      http://localhost:7474 (user: neo4j, pass: khora)"
+	@echo "PostgreSQL: localhost:5434 (user: khora, pass: khora)"
+	@echo "Neo4j:      http://localhost:7475 (user: neo4j, pass: khora)"
 	@echo ""
 	@echo "Add to .env:"
-	@echo "  KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5433/khora"
+	@echo "  KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5434/khora"
 	@echo ""
 	@echo "Start API: make serve"
 

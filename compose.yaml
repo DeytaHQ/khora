@@ -10,8 +10,13 @@
 #   docker compose logs -f postgres   # Follow postgres logs
 #
 # Connection strings for .env:
-#   KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5433/khora
-#   KHORA_NEO4J_URL=bolt://neo4j:khora@localhost:7687
+#   KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5434/khora
+#   KHORA_NEO4J_URL=bolt://neo4j:khora@localhost:7688
+#
+# Ports are intentionally non-standard to avoid conflicts with other projects:
+#   PostgreSQL: 5434 (not 5432/5433)
+#   Neo4j HTTP: 7475 (not 7474)
+#   Neo4j Bolt: 7688 (not 7687)
 
 services:
   # ============================================================================
@@ -25,7 +30,7 @@ services:
       POSTGRES_PASSWORD: khora
       POSTGRES_DB: khora
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "${POSTGRES_PORT:-5434}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -50,8 +55,8 @@ services:
       NEO4J_dbms_security_procedures_allowlist: "apoc.*"
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
     ports:
-      - "${NEO4J_HTTP_PORT:-7474}:7474"
-      - "${NEO4J_BOLT_PORT:-7687}:7687"
+      - "${NEO4J_HTTP_PORT:-7475}:7474"
+      - "${NEO4J_BOLT_PORT:-7688}:7687"
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
