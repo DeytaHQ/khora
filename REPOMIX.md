@@ -1542,7 +1542,7 @@ README.md
 20:     return {
 21:         "status": "ok",
 22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.1",
+23:         "version": "0.0.2",
 24:         "service": "khora",
 25:     }
 26: 
@@ -1557,7 +1557,7 @@ README.md
 35:     return {
 36:         "status": "healthy",
 37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.1",
+38:         "version": "0.0.2",
 39:     }
 40: 
 41: 
@@ -1953,7 +1953,7 @@ README.md
 11: 
 12: 
 13: @click.group()
-14: @click.version_option(version="0.0.1")
+14: @click.version_option(version="0.0.2")
 15: @click.option(
 16:     "--log-level",
 17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
@@ -8262,7 +8262,7 @@ README.md
 18:         data = response.json()
 19:         assert data["status"] == "ok"
 20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.1"
+21:         assert data["version"] == "0.0.2"
 22:         assert data["service"] == "khora"
 23: 
 24:     def test_health_check(self, test_client: TestClient) -> None:
@@ -8273,7 +8273,7 @@ README.md
 29:         data = response.json()
 30:         assert data["status"] == "healthy"
 31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.1"
+32:         assert data["version"] == "0.0.2"
 33: 
 34:     def test_readiness_check(self, test_client: TestClient) -> None:
 35:         """Test readiness check endpoint."""
@@ -8641,7 +8641,7 @@ README.md
 107:     app = FastAPI(
 108:         title="Khora",
 109:         description="Deyta's memory lake and materialization of knowledge",
-110:         version="0.0.1",
+110:         version="0.0.2",
 111:         lifespan=lifespan,
 112:         debug=config.debug,
 113:     )
@@ -11178,7 +11178,7 @@ README.md
 17: from .memory_lake import MemoryLake, RecallResult, RememberResult
 18: from .query import SearchMode
 19: 
-20: __version__ = "0.0.1"
+20: __version__ = "0.0.2"
 21: 
 22: __all__ = [
 23:     "main",
@@ -13166,8 +13166,8 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.0.1"
-  4: description = "Khora - Deyta's memory lake and materialization of knowledge"
+  3: version = "0.0.2"
+  4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
   7:     { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
@@ -17036,6 +17036,13 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-26 22:13:02 +0100
+**Message:** Add comprehensive search observability and introspection
+
+**Files:**
+- REPOMIX.md
+- src/khora/query/engine.py
 
 ## Commit: 2026-01-26 22:06:35 +0100
 **Message:** Implement Phase 1 performance optimizations

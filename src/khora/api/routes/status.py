@@ -20,7 +20,7 @@ async def status_check(request: Request) -> dict[str, Any]:
     return {
         "status": "ok",
         "timestamp": datetime.now(UTC).isoformat(),
-        "version": "0.0.1",
+        "version": "0.0.2",
         "service": "khora",
     }
 
@@ -35,7 +35,7 @@ async def health_check(request: Request) -> dict[str, Any]:
     return {
         "status": "healthy",
         "timestamp": datetime.now(UTC).isoformat(),
-        "version": "0.0.1",
+        "version": "0.0.2",
     }
 
 

@@ -1,7 +1,7 @@
 [project]
 name = "khora"
-version = "0.0.1"
-description = "Khora - Deyta's memory lake and materialization of knowledge"
+version = "0.0.2"
+description = "Khora is Memory Lake"
 readme = "README.md"
 authors = [
     { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
