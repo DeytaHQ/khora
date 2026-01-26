@@ -391,14 +391,17 @@ class PostgreSQLBackend:
             return False
 
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-        """Get a document by its content checksum (for deduplication)."""
+        """Get a document by its content checksum (for deduplication).
+
+        Returns the first matching document if multiple exist with the same checksum.
+        """
         async with self._get_session() as session:
             result = await session.execute(
                 select(DocumentModel).where(
                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
                 )
             )
-            model = result.scalar_one_or_none()
+            model = result.scalars().first()
             return self._document_model_to_domain(model) if model else None
 
     def _document_model_to_domain(self, model: DocumentModel) -> Document:

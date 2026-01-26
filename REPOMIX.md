@@ -7866,77 +7866,80 @@ README.md
 391:             return False
 392: 
 393:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-394:         """Get a document by its content checksum (for deduplication)."""
-395:         async with self._get_session() as session:
-396:             result = await session.execute(
-397:                 select(DocumentModel).where(
-398:                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
-399:                 )
-400:             )
-401:             model = result.scalar_one_or_none()
-402:             return self._document_model_to_domain(model) if model else None
-403: 
-404:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
-405:         """Convert DocumentModel to domain Document."""
-406:         return Document(
-407:             id=UUID(model.id),
-408:             namespace_id=UUID(model.namespace_id),
-409:             content=model.content,
-410:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
-411:             metadata=DocumentMetadata(
-412:                 source=model.source,
-413:                 source_type=model.source_type,
-414:                 content_type=model.content_type,
-415:                 title=model.title,
-416:                 author=model.author,
-417:                 language=model.language,
-418:                 checksum=model.checksum,
-419:                 size_bytes=model.size_bytes,
-420:                 custom=model.metadata_,
-421:             ),
-422:             chunk_count=model.chunk_count,
-423:             entity_count=model.entity_count,
-424:             error_message=model.error_message,
-425:             created_at=model.created_at,
-426:             updated_at=model.updated_at,
-427:             processed_at=model.processed_at,
-428:         )
-429: 
-430:     # =========================================================================
-431:     # Sync checkpoint operations
-432:     # =========================================================================
-433: 
-434:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-435:         """Get the last sync checkpoint for a source."""
-436:         async with self._get_session() as session:
-437:             result = await session.execute(
-438:                 select(SyncCheckpointModel).where(
-439:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-440:                 )
-441:             )
-442:             model = result.scalar_one_or_none()
-443:             return model.checkpoint if model else None
-444: 
-445:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-446:         """Set the sync checkpoint for a source."""
-447:         async with self._get_session() as session:
-448:             result = await session.execute(
-449:                 select(SyncCheckpointModel).where(
-450:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-451:                 )
-452:             )
-453:             model = result.scalar_one_or_none()
-454:             if model:
-455:                 model.checkpoint = checkpoint
-456:                 model.updated_at = datetime.now(UTC)
-457:             else:
-458:                 model = SyncCheckpointModel(
-459:                     namespace_id=str(namespace_id),
-460:                     source=source,
-461:                     checkpoint=checkpoint,
-462:                 )
-463:                 session.add(model)
-464:             await session.commit()
+394:         """Get a document by its content checksum (for deduplication).
+395: 
+396:         Returns the first matching document if multiple exist with the same checksum.
+397:         """
+398:         async with self._get_session() as session:
+399:             result = await session.execute(
+400:                 select(DocumentModel).where(
+401:                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
+402:                 )
+403:             )
+404:             model = result.scalars().first()
+405:             return self._document_model_to_domain(model) if model else None
+406: 
+407:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
+408:         """Convert DocumentModel to domain Document."""
+409:         return Document(
+410:             id=UUID(model.id),
+411:             namespace_id=UUID(model.namespace_id),
+412:             content=model.content,
+413:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
+414:             metadata=DocumentMetadata(
+415:                 source=model.source,
+416:                 source_type=model.source_type,
+417:                 content_type=model.content_type,
+418:                 title=model.title,
+419:                 author=model.author,
+420:                 language=model.language,
+421:                 checksum=model.checksum,
+422:                 size_bytes=model.size_bytes,
+423:                 custom=model.metadata_,
+424:             ),
+425:             chunk_count=model.chunk_count,
+426:             entity_count=model.entity_count,
+427:             error_message=model.error_message,
+428:             created_at=model.created_at,
+429:             updated_at=model.updated_at,
+430:             processed_at=model.processed_at,
+431:         )
+432: 
+433:     # =========================================================================
+434:     # Sync checkpoint operations
+435:     # =========================================================================
+436: 
+437:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+438:         """Get the last sync checkpoint for a source."""
+439:         async with self._get_session() as session:
+440:             result = await session.execute(
+441:                 select(SyncCheckpointModel).where(
+442:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+443:                 )
+444:             )
+445:             model = result.scalar_one_or_none()
+446:             return model.checkpoint if model else None
+447: 
+448:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+449:         """Set the sync checkpoint for a source."""
+450:         async with self._get_session() as session:
+451:             result = await session.execute(
+452:                 select(SyncCheckpointModel).where(
+453:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+454:                 )
+455:             )
+456:             model = result.scalar_one_or_none()
+457:             if model:
+458:                 model.checkpoint = checkpoint
+459:                 model.updated_at = datetime.now(UTC)
+460:             else:
+461:                 model = SyncCheckpointModel(
+462:                     namespace_id=str(namespace_id),
+463:                     source=source,
+464:                     checkpoint=checkpoint,
+465:                 )
+466:                 session.add(model)
+467:             await session.commit()
 ````
 
 ## File: src/khora/storage/__init__.py
@@ -10169,10 +10172,10 @@ README.md
  45:     content = doc_input.get("content", "")
  46:     checksum = compute_checksum(content)
  47: 
- 48:     # Check for existing document
+ 48:     # Check for existing document - skip if any document with same checksum exists
  49:     existing = await storage.get_document_by_checksum(namespace_id, checksum)
- 50:     if existing and existing.is_processed:
- 51:         logger.debug(f"Document unchanged (checksum={checksum[:8]}...)")
+ 50:     if existing:
+ 51:         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
  52:         return None
  53: 
  54:     # Create document
@@ -10368,6 +10371,278 @@ README.md
 244:         "total_entities": total_entities,
 245:         "total_relationships": total_relationships,
 246:     }
+````
+
+## File: src/khora/__init__.py
+````python
+ 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 2: 
+ 3: Khora provides a unified interface for:
+ 4: - Storing and retrieving knowledge artifacts
+ 5: - Materializing data transformations
+ 6: - Building memory graphs and relationships
+ 7: 
+ 8: Example usage:
+ 9:     from khora import MemoryLake
+10: 
+11:     async with MemoryLake() as lake:
+12:         await lake.remember("Important information to store")
+13:         results = await lake.recall("query about information")
+14: """
+15: 
+16: from .cli import main
+17: from .memory_lake import MemoryLake, RecallResult, RememberResult
+18: from .query import SearchMode
+19: 
+20: __version__ = "0.0.1"
+21: 
+22: __all__ = [
+23:     "main",
+24:     "MemoryLake",
+25:     "RememberResult",
+26:     "RecallResult",
+27:     "SearchMode",
+28: ]
+````
+
+## File: src/khora/config/schema.py
+````python
+  1: """Pydantic configuration models for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from dataclasses import dataclass
+  6: from pathlib import Path
+  7: from typing import Any
+  8: from urllib.parse import urlparse
+  9: 
+ 10: import yaml
+ 11: from pydantic import BaseModel, Field
+ 12: from pydantic_settings import BaseSettings, SettingsConfigDict
+ 13: 
+ 14: 
+ 15: @dataclass
+ 16: class ParsedNeo4jUrl:
+ 17:     """Parsed Neo4j URL components."""
+ 18: 
+ 19:     url: str  # URL without credentials (bolt://host:port)
+ 20:     user: str
+ 21:     password: str
+ 22:     database: str
+ 23: 
+ 24:     @classmethod
+ 25:     def parse(cls, url: str, default_user: str = "neo4j", default_database: str = "neo4j") -> ParsedNeo4jUrl:
+ 26:         """Parse a Neo4j URL with optional embedded credentials.
+ 27: 
+ 28:         Supports formats:
+ 29:         - bolt://host:port
+ 30:         - bolt://user:password@host:port
+ 31:         - bolt://user:password@host:port/database
+ 32:         """
+ 33:         parsed = urlparse(url)
+ 34: 
+ 35:         # Extract user and password from URL
+ 36:         user = parsed.username or default_user
+ 37:         password = parsed.password or ""
+ 38: 
+ 39:         # Extract database from path (e.g., /mydb -> mydb)
+ 40:         database = parsed.path.lstrip("/") if parsed.path and parsed.path != "/" else default_database
+ 41: 
+ 42:         # Reconstruct URL without credentials
+ 43:         host_port = parsed.hostname or "localhost"
+ 44:         if parsed.port:
+ 45:             host_port = f"{host_port}:{parsed.port}"
+ 46:         clean_url = f"{parsed.scheme}://{host_port}"
+ 47: 
+ 48:         return cls(url=clean_url, user=user, password=password, database=database)
+ 49: 
+ 50: 
+ 51: class StorageSettings(BaseModel):
+ 52:     """Storage backend configuration."""
+ 53: 
+ 54:     # PostgreSQL (relational)
+ 55:     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
+ 56: 
+ 57:     # pgvector
+ 58:     pgvector_url: str | None = Field(default=None, description="pgvector connection URL (defaults to postgresql_url)")
+ 59:     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+ 60: 
+ 61:     # Neo4j
+ 62:     neo4j_url: str | None = Field(default=None, description="Neo4j connection URL")
+ 63:     neo4j_user: str = Field(default="neo4j", description="Neo4j username")
+ 64:     neo4j_password: str = Field(default="", description="Neo4j password")
+ 65:     neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
+ 66: 
+ 67: 
+ 68: class LLMSettings(BaseModel):
+ 69:     """LLM configuration settings."""
+ 70: 
+ 71:     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
+ 72:     api_key_env: str = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
+ 73:     temperature: float = Field(default=0.7, description="Sampling temperature")
+ 74:     max_tokens: int = Field(default=2000, description="Maximum tokens to generate")
+ 75:     timeout: int = Field(default=30, description="Request timeout in seconds")
+ 76:     max_retries: int = Field(default=3, description="Maximum retries on failure")
+ 77:     max_concurrent_llm_calls: int = Field(default=10, description="Maximum concurrent LLM calls")
+ 78: 
+ 79:     # Embedding settings
+ 80:     embedding_model: str = Field(default="text-embedding-3-small", description="Embedding model")
+ 81:     embedding_dimension: int = Field(default=1536, description="Embedding dimension")
+ 82: 
+ 83:     # Router configuration
+ 84:     config_file: str | None = Field(default=None, description="Path to LiteLLM config YAML")
+ 85:     model_list: list[dict[str, Any]] | None = Field(default=None, description="Model list for router")
+ 86:     router_settings: dict[str, Any] | None = Field(default=None, description="Router settings")
+ 87: 
+ 88: 
+ 89: class PipelineSettings(BaseModel):
+ 90:     """Pipeline configuration settings."""
+ 91: 
+ 92:     # Chunking settings
+ 93:     chunking_strategy: str = Field(default="semantic", description="Chunking strategy: fixed, semantic, recursive")
+ 94:     chunk_size: int = Field(default=512, description="Target chunk size in tokens")
+ 95:     chunk_overlap: int = Field(default=50, description="Overlap between chunks in tokens")
+ 96: 
+ 97:     # Extraction settings
+ 98:     extract_entities: bool = Field(default=True, description="Extract entities from documents")
+ 99:     entity_types: list[str] = Field(
+100:         default=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
+101:         description="Entity types to extract",
+102:     )
+103: 
+104: 
+105: class TenancySettings(BaseModel):
+106:     """Multi-tenancy configuration settings."""
+107: 
+108:     default_mode: str = Field(default="shared", description="Default tenancy mode: shared or isolated")
+109:     enforce_namespace: bool = Field(default=True, description="Enforce namespace isolation")
+110: 
+111: 
+112: class KhoraConfig(BaseSettings):
+113:     """Main application configuration."""
+114: 
+115:     model_config = SettingsConfigDict(
+116:         env_prefix="KHORA_",
+117:         env_nested_delimiter="__",
+118:         case_sensitive=False,
+119:     )
+120: 
+121:     # Application settings
+122:     app_name: str = Field(
+123:         default="khora",
+124:         description="Application name",
+125:     )
+126:     environment: str = Field(
+127:         default="development",
+128:         description="Environment: development, staging, or production",
+129:     )
+130:     debug: bool = Field(
+131:         default=False,
+132:         description="Enable debug mode",
+133:     )
+134: 
+135:     # Authentication settings
+136:     auth_enabled: bool = Field(
+137:         default=True,
+138:         description="Enable authentication (set to False for local development)",
+139:     )
+140: 
+141:     # API settings
+142:     api_host: str = Field(
+143:         default="127.0.0.1",
+144:         description="API server host",
+145:     )
+146:     api_port: int = Field(
+147:         default=8000,
+148:         description="API server port",
+149:     )
+150: 
+151:     # Database for Khora internal state (shortcuts for storage.* URLs)
+152:     # These can be set via KHORA_DATABASE_URL and KHORA_NEO4J_URL environment variables
+153:     # Programmatic values take priority over environment variables
+154:     database_url: str | None = Field(
+155:         default=None,
+156:         description="PostgreSQL URL for Khora database (shortcut for storage.postgresql_url)",
+157:     )
+158:     neo4j_url: str | None = Field(
+159:         default=None,
+160:         description="Neo4j URL for graph storage (shortcut for storage.neo4j_url)",
+161:     )
+162: 
+163:     # Storage configuration
+164:     storage: StorageSettings = Field(default_factory=StorageSettings)
+165: 
+166:     # LLM configuration
+167:     llm: LLMSettings = Field(default_factory=LLMSettings)
+168: 
+169:     # Pipeline configuration
+170:     pipelines: PipelineSettings = Field(default_factory=PipelineSettings)
+171: 
+172:     # Tenancy configuration
+173:     tenancy: TenancySettings = Field(default_factory=TenancySettings)
+174: 
+175:     @classmethod
+176:     def from_yaml(cls, path: str | Path) -> KhoraConfig:
+177:         """Load configuration from a YAML file.
+178: 
+179:         Args:
+180:             path: Path to the YAML configuration file
+181: 
+182:         Returns:
+183:             KhoraConfig instance
+184:         """
+185:         path = Path(path)
+186:         with path.open() as f:
+187:             data = yaml.safe_load(f)
+188:         return cls.model_validate(data or {})
+189: 
+190:     def get_postgresql_url(self) -> str | None:
+191:         """Get PostgreSQL URL from config."""
+192:         return self.storage.postgresql_url or self.database_url
+193: 
+194:     def _get_raw_neo4j_url(self) -> str | None:
+195:         """Get raw Neo4j URL (may contain credentials)."""
+196:         return self.storage.neo4j_url or self.neo4j_url
+197: 
+198:     def _parse_neo4j_url(self) -> ParsedNeo4jUrl | None:
+199:         """Parse Neo4j URL and extract components."""
+200:         raw_url = self._get_raw_neo4j_url()
+201:         if not raw_url:
+202:             return None
+203:         return ParsedNeo4jUrl.parse(
+204:             raw_url,
+205:             default_user=self.storage.neo4j_user,
+206:             default_database=self.storage.neo4j_database,
+207:         )
+208: 
+209:     def get_neo4j_url(self) -> str | None:
+210:         """Get Neo4j URL without credentials (for driver connection).
+211: 
+212:         Parses URL like bolt://user:pass@host:port and returns bolt://host:port
+213:         """
+214:         parsed = self._parse_neo4j_url()
+215:         return parsed.url if parsed else None
+216: 
+217:     def get_neo4j_user(self) -> str:
+218:         """Get Neo4j username from URL or config."""
+219:         parsed = self._parse_neo4j_url()
+220:         if parsed:
+221:             return parsed.user
+222:         return self.storage.neo4j_user
+223: 
+224:     def get_neo4j_password(self) -> str:
+225:         """Get Neo4j password from URL or config."""
+226:         parsed = self._parse_neo4j_url()
+227:         if parsed:
+228:             return parsed.password
+229:         return self.storage.neo4j_password
+230: 
+231:     def get_neo4j_database(self) -> str:
+232:         """Get Neo4j database from URL or config."""
+233:         parsed = self._parse_neo4j_url()
+234:         if parsed:
+235:             return parsed.database
+236:         return self.storage.neo4j_database
 ````
 
 ## File: src/khora/storage/backends/neo4j.py
@@ -11129,278 +11404,6 @@ README.md
 755:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
-## File: src/khora/__init__.py
-````python
- 1: """Khora - Deyta's memory lake and materialization of knowledge.
- 2: 
- 3: Khora provides a unified interface for:
- 4: - Storing and retrieving knowledge artifacts
- 5: - Materializing data transformations
- 6: - Building memory graphs and relationships
- 7: 
- 8: Example usage:
- 9:     from khora import MemoryLake
-10: 
-11:     async with MemoryLake() as lake:
-12:         await lake.remember("Important information to store")
-13:         results = await lake.recall("query about information")
-14: """
-15: 
-16: from .cli import main
-17: from .memory_lake import MemoryLake, RecallResult, RememberResult
-18: from .query import SearchMode
-19: 
-20: __version__ = "0.0.1"
-21: 
-22: __all__ = [
-23:     "main",
-24:     "MemoryLake",
-25:     "RememberResult",
-26:     "RecallResult",
-27:     "SearchMode",
-28: ]
-````
-
-## File: src/khora/config/schema.py
-````python
-  1: """Pydantic configuration models for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from dataclasses import dataclass
-  6: from pathlib import Path
-  7: from typing import Any
-  8: from urllib.parse import urlparse
-  9: 
- 10: import yaml
- 11: from pydantic import BaseModel, Field
- 12: from pydantic_settings import BaseSettings, SettingsConfigDict
- 13: 
- 14: 
- 15: @dataclass
- 16: class ParsedNeo4jUrl:
- 17:     """Parsed Neo4j URL components."""
- 18: 
- 19:     url: str  # URL without credentials (bolt://host:port)
- 20:     user: str
- 21:     password: str
- 22:     database: str
- 23: 
- 24:     @classmethod
- 25:     def parse(cls, url: str, default_user: str = "neo4j", default_database: str = "neo4j") -> ParsedNeo4jUrl:
- 26:         """Parse a Neo4j URL with optional embedded credentials.
- 27: 
- 28:         Supports formats:
- 29:         - bolt://host:port
- 30:         - bolt://user:password@host:port
- 31:         - bolt://user:password@host:port/database
- 32:         """
- 33:         parsed = urlparse(url)
- 34: 
- 35:         # Extract user and password from URL
- 36:         user = parsed.username or default_user
- 37:         password = parsed.password or ""
- 38: 
- 39:         # Extract database from path (e.g., /mydb -> mydb)
- 40:         database = parsed.path.lstrip("/") if parsed.path and parsed.path != "/" else default_database
- 41: 
- 42:         # Reconstruct URL without credentials
- 43:         host_port = parsed.hostname or "localhost"
- 44:         if parsed.port:
- 45:             host_port = f"{host_port}:{parsed.port}"
- 46:         clean_url = f"{parsed.scheme}://{host_port}"
- 47: 
- 48:         return cls(url=clean_url, user=user, password=password, database=database)
- 49: 
- 50: 
- 51: class StorageSettings(BaseModel):
- 52:     """Storage backend configuration."""
- 53: 
- 54:     # PostgreSQL (relational)
- 55:     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
- 56: 
- 57:     # pgvector
- 58:     pgvector_url: str | None = Field(default=None, description="pgvector connection URL (defaults to postgresql_url)")
- 59:     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
- 60: 
- 61:     # Neo4j
- 62:     neo4j_url: str | None = Field(default=None, description="Neo4j connection URL")
- 63:     neo4j_user: str = Field(default="neo4j", description="Neo4j username")
- 64:     neo4j_password: str = Field(default="", description="Neo4j password")
- 65:     neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
- 66: 
- 67: 
- 68: class LLMSettings(BaseModel):
- 69:     """LLM configuration settings."""
- 70: 
- 71:     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
- 72:     api_key_env: str = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
- 73:     temperature: float = Field(default=0.7, description="Sampling temperature")
- 74:     max_tokens: int = Field(default=2000, description="Maximum tokens to generate")
- 75:     timeout: int = Field(default=30, description="Request timeout in seconds")
- 76:     max_retries: int = Field(default=3, description="Maximum retries on failure")
- 77:     max_concurrent_llm_calls: int = Field(default=10, description="Maximum concurrent LLM calls")
- 78: 
- 79:     # Embedding settings
- 80:     embedding_model: str = Field(default="text-embedding-3-small", description="Embedding model")
- 81:     embedding_dimension: int = Field(default=1536, description="Embedding dimension")
- 82: 
- 83:     # Router configuration
- 84:     config_file: str | None = Field(default=None, description="Path to LiteLLM config YAML")
- 85:     model_list: list[dict[str, Any]] | None = Field(default=None, description="Model list for router")
- 86:     router_settings: dict[str, Any] | None = Field(default=None, description="Router settings")
- 87: 
- 88: 
- 89: class PipelineSettings(BaseModel):
- 90:     """Pipeline configuration settings."""
- 91: 
- 92:     # Chunking settings
- 93:     chunking_strategy: str = Field(default="semantic", description="Chunking strategy: fixed, semantic, recursive")
- 94:     chunk_size: int = Field(default=512, description="Target chunk size in tokens")
- 95:     chunk_overlap: int = Field(default=50, description="Overlap between chunks in tokens")
- 96: 
- 97:     # Extraction settings
- 98:     extract_entities: bool = Field(default=True, description="Extract entities from documents")
- 99:     entity_types: list[str] = Field(
-100:         default=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
-101:         description="Entity types to extract",
-102:     )
-103: 
-104: 
-105: class TenancySettings(BaseModel):
-106:     """Multi-tenancy configuration settings."""
-107: 
-108:     default_mode: str = Field(default="shared", description="Default tenancy mode: shared or isolated")
-109:     enforce_namespace: bool = Field(default=True, description="Enforce namespace isolation")
-110: 
-111: 
-112: class KhoraConfig(BaseSettings):
-113:     """Main application configuration."""
-114: 
-115:     model_config = SettingsConfigDict(
-116:         env_prefix="KHORA_",
-117:         env_nested_delimiter="__",
-118:         case_sensitive=False,
-119:     )
-120: 
-121:     # Application settings
-122:     app_name: str = Field(
-123:         default="khora",
-124:         description="Application name",
-125:     )
-126:     environment: str = Field(
-127:         default="development",
-128:         description="Environment: development, staging, or production",
-129:     )
-130:     debug: bool = Field(
-131:         default=False,
-132:         description="Enable debug mode",
-133:     )
-134: 
-135:     # Authentication settings
-136:     auth_enabled: bool = Field(
-137:         default=True,
-138:         description="Enable authentication (set to False for local development)",
-139:     )
-140: 
-141:     # API settings
-142:     api_host: str = Field(
-143:         default="127.0.0.1",
-144:         description="API server host",
-145:     )
-146:     api_port: int = Field(
-147:         default=8000,
-148:         description="API server port",
-149:     )
-150: 
-151:     # Database for Khora internal state (shortcuts for storage.* URLs)
-152:     # These can be set via KHORA_DATABASE_URL and KHORA_NEO4J_URL environment variables
-153:     # Programmatic values take priority over environment variables
-154:     database_url: str | None = Field(
-155:         default=None,
-156:         description="PostgreSQL URL for Khora database (shortcut for storage.postgresql_url)",
-157:     )
-158:     neo4j_url: str | None = Field(
-159:         default=None,
-160:         description="Neo4j URL for graph storage (shortcut for storage.neo4j_url)",
-161:     )
-162: 
-163:     # Storage configuration
-164:     storage: StorageSettings = Field(default_factory=StorageSettings)
-165: 
-166:     # LLM configuration
-167:     llm: LLMSettings = Field(default_factory=LLMSettings)
-168: 
-169:     # Pipeline configuration
-170:     pipelines: PipelineSettings = Field(default_factory=PipelineSettings)
-171: 
-172:     # Tenancy configuration
-173:     tenancy: TenancySettings = Field(default_factory=TenancySettings)
-174: 
-175:     @classmethod
-176:     def from_yaml(cls, path: str | Path) -> KhoraConfig:
-177:         """Load configuration from a YAML file.
-178: 
-179:         Args:
-180:             path: Path to the YAML configuration file
-181: 
-182:         Returns:
-183:             KhoraConfig instance
-184:         """
-185:         path = Path(path)
-186:         with path.open() as f:
-187:             data = yaml.safe_load(f)
-188:         return cls.model_validate(data or {})
-189: 
-190:     def get_postgresql_url(self) -> str | None:
-191:         """Get PostgreSQL URL from config."""
-192:         return self.storage.postgresql_url or self.database_url
-193: 
-194:     def _get_raw_neo4j_url(self) -> str | None:
-195:         """Get raw Neo4j URL (may contain credentials)."""
-196:         return self.storage.neo4j_url or self.neo4j_url
-197: 
-198:     def _parse_neo4j_url(self) -> ParsedNeo4jUrl | None:
-199:         """Parse Neo4j URL and extract components."""
-200:         raw_url = self._get_raw_neo4j_url()
-201:         if not raw_url:
-202:             return None
-203:         return ParsedNeo4jUrl.parse(
-204:             raw_url,
-205:             default_user=self.storage.neo4j_user,
-206:             default_database=self.storage.neo4j_database,
-207:         )
-208: 
-209:     def get_neo4j_url(self) -> str | None:
-210:         """Get Neo4j URL without credentials (for driver connection).
-211: 
-212:         Parses URL like bolt://user:pass@host:port and returns bolt://host:port
-213:         """
-214:         parsed = self._parse_neo4j_url()
-215:         return parsed.url if parsed else None
-216: 
-217:     def get_neo4j_user(self) -> str:
-218:         """Get Neo4j username from URL or config."""
-219:         parsed = self._parse_neo4j_url()
-220:         if parsed:
-221:             return parsed.user
-222:         return self.storage.neo4j_user
-223: 
-224:     def get_neo4j_password(self) -> str:
-225:         """Get Neo4j password from URL or config."""
-226:         parsed = self._parse_neo4j_url()
-227:         if parsed:
-228:             return parsed.password
-229:         return self.storage.neo4j_password
-230: 
-231:     def get_neo4j_database(self) -> str:
-232:         """Get Neo4j database from URL or config."""
-233:         parsed = self._parse_neo4j_url()
-234:         if parsed:
-235:             return parsed.database
-236:         return self.storage.neo4j_database
-````
-
 ## File: src/khora/memory_lake.py
 ````python
   1: """MemoryLake - Primary API for Khora Memory Lake.
@@ -11688,17 +11691,17 @@ README.md
 283:         # Compute checksum
 284:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
 285: 
-286:         # Check for duplicate
+286:         # Check for duplicate - skip if any document with same checksum exists
 287:         existing = await self.storage.get_document_by_checksum(namespace_id, checksum)
-288:         if existing and existing.is_processed:
-289:             logger.debug(f"Document already exists (checksum={checksum[:8]}...)")
+288:         if existing:
+289:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
 290:             return RememberResult(
 291:                 document_id=existing.id,
 292:                 namespace_id=namespace_id,
 293:                 chunks_created=existing.chunk_count,
 294:                 entities_extracted=existing.entity_count,
 295:                 relationships_created=0,
-296:                 metadata={"duplicate": True},
+296:                 metadata={"duplicate": True, "status": str(existing.status)},
 297:             )
 298: 
 299:         # Create document
@@ -12819,6 +12822,13 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-26 13:59:16 +0100
+**Message:** Serialize dict properties to JSON for Neo4j storage
+
+**Files:**
+- REPOMIX.md
+- src/khora/storage/backends/neo4j.py
 
 ## Commit: 2026-01-26 13:57:44 +0100
 **Message:** Add JSON serialization helpers for Neo4j dict properties

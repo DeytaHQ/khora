@@ -45,10 +45,10 @@ async def stage_document(
     content = doc_input.get("content", "")
     checksum = compute_checksum(content)
 
-    # Check for existing document
+    # Check for existing document - skip if any document with same checksum exists
     existing = await storage.get_document_by_checksum(namespace_id, checksum)
-    if existing and existing.is_processed:
-        logger.debug(f"Document unchanged (checksum={checksum[:8]}...)")
+    if existing:
+        logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
         return None
 
     # Create document

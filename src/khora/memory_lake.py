@@ -283,17 +283,17 @@ class MemoryLake:
         # Compute checksum
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-        # Check for duplicate
+        # Check for duplicate - skip if any document with same checksum exists
         existing = await self.storage.get_document_by_checksum(namespace_id, checksum)
-        if existing and existing.is_processed:
-            logger.debug(f"Document already exists (checksum={checksum[:8]}...)")
+        if existing:
+            logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
             return RememberResult(
                 document_id=existing.id,
                 namespace_id=namespace_id,
                 chunks_created=existing.chunk_count,
                 entities_extracted=existing.entity_count,
                 relationships_created=0,
-                metadata={"duplicate": True},
+                metadata={"duplicate": True, "status": str(existing.status)},
             )
 
         # Create document
