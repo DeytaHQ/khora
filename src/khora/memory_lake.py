@@ -82,8 +82,10 @@ class MemoryLake:
         if storage_config:
             self._storage_config = storage_config
         else:
+            postgresql_url = self._config.get_postgresql_url()
             self._storage_config = StorageConfig(
-                postgresql_url=self._config.get_postgresql_url(),
+                postgresql_url=postgresql_url,
+                pgvector_url=postgresql_url,  # pgvector uses same database as relational
                 neo4j_url=self._config.get_neo4j_url(),
                 neo4j_user=self._config.get_neo4j_user(),
                 neo4j_password=self._config.get_neo4j_password(),

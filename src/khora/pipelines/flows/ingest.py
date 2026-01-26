@@ -12,6 +12,7 @@ from uuid import UUID
 
 from loguru import logger
 from prefect import flow, task
+from prefect.cache_policies import NO_CACHE
 
 from ..registry import pipeline
 
@@ -26,7 +27,7 @@ def compute_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-@task(name="stage_document")
+@task(name="stage_document", cache_policy=NO_CACHE)
 async def stage_document(
     doc_input: dict[str, Any],
     namespace_id: UUID,
@@ -72,7 +73,7 @@ async def stage_document(
     return await storage.create_document(document)
 
 
-@task(name="process_document")
+@task(name="process_document", cache_policy=NO_CACHE)
 async def process_document(
     document: Document,
     storage: StorageCoordinator,
