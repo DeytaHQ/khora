@@ -1,7 +1,9 @@
 # Khora Configuration Example
 # Copy to khora.yaml and customize
 
-# Application settings
+# =============================================================================
+# Application Settings
+# =============================================================================
 app_name: khora
 environment: development
 debug: false
@@ -13,5 +15,115 @@ api_port: 8000
 # Authentication
 auth_enabled: true
 
-# Database
-# database_url: "postgresql://user:password@localhost:5432/khora"
+# =============================================================================
+# Database Connections
+# =============================================================================
+# Shortcut URLs (can also use storage.* for explicit configuration)
+database_url: ${KHORA_DATABASE_URL:-postgresql://khora:khora@localhost:5432/khora}
+neo4j_url: ${KHORA_NEO4J_URL:-bolt://neo4j:password@localhost:7687}
+
+# Detailed storage configuration (optional, overrides shortcuts above)
+storage:
+  postgresql_url: null  # Uses database_url if null
+  pgvector_url: null    # Uses postgresql_url if null
+  embedding_dimension: 1536
+  neo4j_url: null       # Uses neo4j_url shortcut if null
+  neo4j_user: neo4j
+  neo4j_password: ""
+  neo4j_database: neo4j
+
+# =============================================================================
+# LLM Configuration
+# =============================================================================
+llm:
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+  temperature: 0.7
+  max_tokens: 2000
+  timeout: 30
+  max_retries: 3
+  max_concurrent_llm_calls: 10
+
+  # Embedding settings
+  embedding_model: text-embedding-3-small
+  embedding_dimension: 1536
+
+# =============================================================================
+# Pipeline Configuration (Extraction)
+# =============================================================================
+pipelines:
+  # Chunking
+  chunking_strategy: semantic  # fixed, semantic, recursive
+  chunk_size: 512
+  chunk_overlap: 50
+
+  # Entity extraction
+  extract_entities: true
+  entity_types:
+    - PERSON
+    - ORGANIZATION
+    - CONCEPT
+    - LOCATION
+    - EVENT
+    - PRODUCT
+    - TECHNOLOGY
+
+# =============================================================================
+# Query Configuration
+# =============================================================================
+query:
+  # Basic search settings
+  default_mode: hybrid  # vector, graph, hybrid, all
+  min_chunk_similarity: 0.2
+  min_entity_similarity: 0.2
+
+  # Fusion weights (should sum to ~1.0)
+  vector_weight: 0.5
+  graph_weight: 0.3
+  keyword_weight: 0.2
+
+  # Temporal settings
+  apply_recency_bias: false
+  recency_weight: 0.2
+  recency_decay_days: 30.0
+
+  # Query Understanding - LLM-based query interpretation
+  understanding:
+    enabled: true
+    expand_query: true       # Generate alternative query phrasings
+    extract_entities: true   # Extract entity mentions from query
+    detect_temporal: true    # Detect temporal references
+    model: null              # Use default LLM model
+
+  # Entity Linking - Link query mentions to stored entities
+  entity_linking:
+    enabled: true
+    exact_match: true
+    fuzzy_match: true
+    embedding_match: true
+    fuzzy_threshold: 0.8
+    embedding_threshold: 0.7
+    max_candidates: 5
+
+  # Reranking - Neural re-ranking of results
+  reranking:
+    enabled: false           # Requires sentence-transformers
+    method: cross_encoder    # cross_encoder or llm
+    model: null              # Uses default cross-encoder model
+    top_n: 50
+    final_k: 10
+
+  # Keyword Search - BM25-based full-text search
+  keyword_search:
+    enabled: true
+    method: bm25
+    use_stemming: true
+    use_stopwords: true
+    language: english
+
+# =============================================================================
+# Tenancy Configuration
+# =============================================================================
+tenancy:
+  default_mode: shared
+  enforce_namespace: true
