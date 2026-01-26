@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -19,10 +19,14 @@ from .base import (
 
 if TYPE_CHECKING:
     from khora.config import LiteLLMConfig
+    from khora.extraction.skills import ExpertiseConfig
 
 
 # Default entity types to extract
 DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
+
+# Default system prompt for extraction
+DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
 
 # Extraction prompt template with temporal awareness
 EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
@@ -140,12 +144,16 @@ class LLMEntityExtractor(EntityExtractor):
         text: str,
         *,
         entity_types: list[str] | None = None,
+        expertise: ExpertiseConfig | None = None,
+        context: dict[str, Any] | None = None,
     ) -> ExtractionResult:
         """Extract entities and relationships from text.
 
         Args:
             text: Text to extract from
             entity_types: Optional list of entity types to extract
+            expertise: Optional ExpertiseConfig for domain-specific extraction
+            context: Optional context dict for prompt template rendering
 
         Returns:
             ExtractionResult containing entities and relationships
@@ -153,17 +161,20 @@ class LLMEntityExtractor(EntityExtractor):
         if not text.strip():
             return ExtractionResult()
 
-        entity_types = entity_types or DEFAULT_ENTITY_TYPES
+        # Determine entity types from expertise or fallback
+        if expertise:
+            entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+        else:
+            entity_types = entity_types or DEFAULT_ENTITY_TYPES
 
         try:
             import litellm
         except ImportError:
             raise RuntimeError("litellm package not installed. Run: pip install litellm")
 
-        prompt = EXTRACTION_PROMPT.format(
-            entity_types=", ".join(entity_types),
-            text=text[:8000],  # Truncate very long texts
-        )
+        # Render prompts based on expertise
+        system_prompt = self._render_system_prompt(expertise, context)
+        extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
 
         async with self._semaphore:
             for attempt in range(self._max_retries):
@@ -171,11 +182,8 @@ class LLMEntityExtractor(EntityExtractor):
                     response = await litellm.acompletion(
                         model=self._model,
                         messages=[
-                            {
-                                "role": "system",
-                                "content": "You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON.",
-                            },
-                            {"role": "user", "content": prompt},
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": extraction_prompt},
                         ],
                         temperature=self._temperature,
                         max_tokens=self._max_tokens,
@@ -184,7 +192,13 @@ class LLMEntityExtractor(EntityExtractor):
                     )
 
                     content = response.choices[0].message.content
-                    return self._parse_response(content)
+                    result = self._parse_response(content)
+
+                    # Apply confidence filtering from expertise if available
+                    if expertise:
+                        result = self._filter_by_confidence(result, expertise)
+
+                    return result
 
                 except Exception as e:
                     if attempt < self._max_retries - 1:
@@ -195,17 +209,90 @@ class LLMEntityExtractor(EntityExtractor):
                         logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
                         return ExtractionResult(metadata={"error": str(e)})
 
+    def _render_system_prompt(
+        self,
+        expertise: ExpertiseConfig | None,
+        context: dict[str, Any] | None,
+    ) -> str:
+        """Render the system prompt, optionally using expertise config."""
+        if not expertise or not expertise.system_prompt:
+            return DEFAULT_SYSTEM_PROMPT
+
+        try:
+            from khora.extraction.skills.composer import ExpertiseComposer
+
+            composer = ExpertiseComposer()
+            return composer.render_prompt(
+                expertise.system_prompt,
+                expertise=expertise,
+                context=context,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to render system prompt: {e}")
+            return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
+
+    def _render_extraction_prompt(
+        self,
+        text: str,
+        entity_types: list[str],
+        expertise: ExpertiseConfig | None,
+        context: dict[str, Any] | None,
+    ) -> str:
+        """Render the extraction prompt, optionally using expertise config."""
+        # If expertise has a custom extraction prompt, use it
+        if expertise and expertise.extraction_prompt:
+            try:
+                from khora.extraction.skills.composer import ExpertiseComposer
+
+                composer = ExpertiseComposer()
+                return composer.render_prompt(
+                    expertise.extraction_prompt,
+                    expertise=expertise,
+                    context={**(context or {}), "text": text[:8000], "entity_types": entity_types},
+                )
+            except Exception as e:
+                logger.warning(f"Failed to render extraction prompt: {e}")
+
+        # Use default extraction prompt
+        return EXTRACTION_PROMPT.format(
+            entity_types=", ".join(entity_types),
+            text=text[:8000],  # Truncate very long texts
+        )
+
+    def _filter_by_confidence(
+        self,
+        result: ExtractionResult,
+        expertise: ExpertiseConfig,
+    ) -> ExtractionResult:
+        """Filter extraction results by confidence thresholds from expertise."""
+        min_entity = expertise.confidence.min_entity
+        min_relationship = expertise.confidence.min_relationship
+
+        filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
+        filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
+
+        return ExtractionResult(
+            entities=filtered_entities,
+            relationships=filtered_relationships,
+            events=result.events,
+            metadata=result.metadata,
+        )
+
     async def extract_batch(
         self,
         texts: list[str],
         *,
         entity_types: list[str] | None = None,
+        expertise: ExpertiseConfig | None = None,
+        context: dict[str, Any] | None = None,
     ) -> list[ExtractionResult]:
         """Extract from multiple texts concurrently.
 
         Args:
             texts: List of texts to extract from
             entity_types: Optional list of entity types to extract
+            expertise: Optional ExpertiseConfig for domain-specific extraction
+            context: Optional context dict for prompt template rendering
 
         Returns:
             List of ExtractionResult objects
@@ -213,7 +300,7 @@ class LLMEntityExtractor(EntityExtractor):
         if not texts:
             return []
 
-        tasks = [self.extract(text, entity_types=entity_types) for text in texts]
+        tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
         return await asyncio.gather(*tasks)
 
     def _parse_response(self, content: str) -> ExtractionResult:

@@ -1,0 +1,287 @@
+# Business Intelligence Expertise
+# For extracting entities from business reports, metrics, and stakeholder communications
+
+name: business_intel
+version: "1.0.0"
+description: "Expert knowledge for business intelligence and analytics"
+
+extends:
+  - builtin:general
+
+system_prompt: |
+  You are an expert in business intelligence and analytics. You understand:
+
+  - Financial metrics and KPIs (revenue, ARR, MRR, churn, CAC, LTV)
+  - Business reporting structures and executive communications
+  - Market analysis and competitive intelligence
+  - Stakeholder relationships and organizational dynamics
+  - Strategic initiatives and business outcomes
+  - Risk factors and mitigation strategies
+
+  When extracting entities:
+  - Identify specific metrics with their values and time periods
+  - Extract stakeholders and their roles in decisions
+  - Map business units, products, and market segments
+  - Note trends, comparisons, and year-over-year changes
+  - Capture strategic goals and their progress indicators
+  - Identify risks, opportunities, and action items
+
+entity_types:
+  - name: METRIC
+    description: "A business metric, KPI, or measurement"
+    attributes:
+      required: [name]
+      optional: [value, unit, period, target, previous_value, trend]
+    identifiers: [name, period]
+
+  - name: REPORT
+    description: "A business report or analysis document"
+    attributes:
+      required: [title]
+      optional: [type, period, author, audience, date]
+    identifiers: [title, date]
+
+  - name: BUSINESS_UNIT
+    description: "A business unit, division, or segment"
+    attributes:
+      required: [name]
+      optional: [leader, revenue, headcount, products]
+    identifiers: [name]
+
+  - name: MARKET_SEGMENT
+    description: "A market segment or customer category"
+    attributes:
+      required: [name]
+      optional: [size, growth_rate, competitors, characteristics]
+    identifiers: [name]
+
+  - name: COMPETITOR
+    description: "A competitive company or product"
+    attributes:
+      required: [name]
+      optional: [market_share, strengths, weaknesses, strategy]
+    identifiers: [name]
+
+  - name: STRATEGIC_INITIATIVE
+    description: "A strategic initiative or program"
+    attributes:
+      required: [name]
+      optional: [owner, status, timeline, budget, objectives]
+    identifiers: [name]
+
+  - name: GOAL
+    description: "A business goal or objective"
+    attributes:
+      required: [description]
+      optional: [target, deadline, owner, status, metrics]
+    identifiers: [description]
+
+  - name: RISK
+    description: "A business risk or threat"
+    attributes:
+      required: [description]
+      optional: [severity, likelihood, impact, mitigation, owner]
+    identifiers: [description]
+
+  - name: OPPORTUNITY
+    description: "A business opportunity"
+    attributes:
+      required: [description]
+      optional: [potential_value, timeline, requirements, owner]
+    identifiers: [description]
+
+  - name: DECISION
+    description: "A business decision or resolution"
+    attributes:
+      required: [description]
+      optional: [decision_maker, date, rationale, impact]
+    identifiers: [description, date]
+
+  - name: ACTION_ITEM
+    description: "An action item or task from meetings/reports"
+    attributes:
+      required: [description]
+      optional: [owner, due_date, status, priority, context]
+    identifiers: [description, owner]
+
+  - name: STAKEHOLDER
+    description: "A business stakeholder (internal or external)"
+    attributes:
+      required: [name]
+      optional: [role, organization, influence, interests, communication_preference]
+    identifiers: [name, organization]
+
+  - name: BUDGET
+    description: "A budget allocation or financial plan"
+    attributes:
+      required: [name]
+      optional: [amount, period, category, owner, status]
+    identifiers: [name, period]
+
+  - name: FORECAST
+    description: "A business forecast or projection"
+    attributes:
+      required: [metric]
+      optional: [value, period, confidence, assumptions, scenario]
+    identifiers: [metric, period]
+
+  - name: TREND
+    description: "A business or market trend"
+    attributes:
+      required: [description]
+      optional: [direction, magnitude, period, impact]
+    identifiers: [description]
+
+  - name: QUARTER
+    description: "A fiscal quarter reference"
+    attributes:
+      required: [quarter, year]
+      optional: [start_date, end_date]
+    identifiers: [quarter, year]
+
+relationship_types:
+  - name: MEASURES
+    description: "Metric measures aspect of business"
+    source_types: [METRIC]
+    target_types: [BUSINESS_UNIT, PRODUCT, MARKET_SEGMENT, GOAL]
+
+  - name: REPORTED_IN
+    description: "Entity reported in document"
+    source_types: [METRIC, DECISION, ACTION_ITEM]
+    target_types: [REPORT]
+
+  - name: OWNS_BUDGET
+    description: "Person/unit owns budget"
+    source_types: [PERSON, BUSINESS_UNIT]
+    target_types: [BUDGET]
+
+  - name: FUNDS
+    description: "Budget funds initiative"
+    source_types: [BUDGET]
+    target_types: [STRATEGIC_INITIATIVE, PROJECT]
+
+  - name: ADDRESSES_RISK
+    description: "Initiative addresses risk"
+    source_types: [STRATEGIC_INITIATIVE, ACTION_ITEM]
+    target_types: [RISK]
+
+  - name: PURSUES_OPPORTUNITY
+    description: "Initiative pursues opportunity"
+    source_types: [STRATEGIC_INITIATIVE]
+    target_types: [OPPORTUNITY]
+
+  - name: CONTRIBUTES_TO_GOAL
+    description: "Entity contributes to goal"
+    source_types: [STRATEGIC_INITIATIVE, METRIC, ACTION_ITEM]
+    target_types: [GOAL]
+
+  - name: COMPETES_IN
+    description: "Company competes in segment"
+    source_types: [ORGANIZATION, COMPETITOR]
+    target_types: [MARKET_SEGMENT]
+
+  - name: TARGETS
+    description: "Product/initiative targets segment"
+    source_types: [PRODUCT, STRATEGIC_INITIATIVE]
+    target_types: [MARKET_SEGMENT]
+
+  - name: SPONSORS
+    description: "Stakeholder sponsors initiative"
+    source_types: [STAKEHOLDER, PERSON]
+    target_types: [STRATEGIC_INITIATIVE]
+
+  - name: DECIDED_BY
+    description: "Decision made by stakeholder"
+    source_types: [DECISION]
+    target_types: [STAKEHOLDER, PERSON]
+
+  - name: FORECASTS
+    description: "Forecast predicts metric"
+    source_types: [FORECAST]
+    target_types: [METRIC]
+
+  - name: INDICATES_TREND
+    description: "Metric indicates trend"
+    source_types: [METRIC]
+    target_types: [TREND]
+
+  - name: ASSIGNED_TO
+    description: "Action item assigned to person"
+    source_types: [ACTION_ITEM]
+    target_types: [PERSON, STAKEHOLDER]
+
+tool_schemas:
+  financial_metrics:
+    revenue_metrics: [ARR, MRR, revenue, bookings, billings]
+    growth_metrics: [growth_rate, yoy_growth, qoq_growth, cagr]
+    efficiency_metrics: [gross_margin, operating_margin, net_margin, rule_of_40]
+    customer_metrics: [customers, nrr, grr, churn, cac, ltv, arpu]
+    unit_metrics: [dau, mau, conversion_rate, retention]
+
+  period_patterns:
+    quarter_pattern: "Q[1-4]\\s*'?\\d{2,4}"
+    year_pattern: "FY\\s*'?\\d{2,4}"
+    half_pattern: "H[1-2]\\s*'?\\d{2,4}"
+
+  trend_indicators:
+    positive: [increased, grew, improved, exceeded, beat]
+    negative: [decreased, declined, fell, missed, below]
+    neutral: [maintained, flat, stable, unchanged]
+
+correlation_rules:
+  - name: metric_value_match
+    description: "Match metrics mentioned with values"
+    pattern: "(\\$?[\\d,]+(?:\\.\\d+)?[KMB]?|\\d+%)"
+    entity_types: [METRIC]
+    confidence: 0.85
+
+  - name: quarter_reference
+    description: "Match fiscal quarter references"
+    pattern: "Q[1-4]\\s*'?\\d{2,4}"
+    entity_types: [QUARTER]
+    confidence: 0.95
+
+  - name: stakeholder_mention
+    description: "Match stakeholder name mentions"
+    match_fields: [name]
+    entity_types: [STAKEHOLDER, PERSON]
+    confidence: 0.9
+
+inference_rules:
+  - name: metric_ownership
+    description: "Business unit owns metrics that measure it"
+    when:
+      - relationship: MEASURES
+        source_type: METRIC
+        target_type: BUSINESS_UNIT
+    then:
+      relationship: OWNS
+      source: first.target
+      target: first.source
+    confidence: 0.8
+
+  - name: goal_responsibility
+    description: "Initiative owner responsible for goal contribution"
+    when:
+      - relationship: OWNS
+        source_type: PERSON
+        target_type: STRATEGIC_INITIATIVE
+      - relationship: CONTRIBUTES_TO_GOAL
+        source_type: STRATEGIC_INITIATIVE
+        target_type: GOAL
+    then:
+      relationship: RESPONSIBLE_FOR
+      source: first.source
+      target: second.target
+    confidence: 0.7
+
+confidence:
+  min_entity: 0.5
+  min_relationship: 0.5
+  min_inferred: 0.4
+
+expansion:
+  enabled: true
+  depth: 2
+  cross_tool_unification: true
+  relationship_inference: true

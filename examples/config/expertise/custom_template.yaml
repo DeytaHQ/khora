@@ -1,0 +1,125 @@
+# Custom Expertise Template
+# Copy this file and customize for your domain
+
+name: my_custom_expertise
+version: "1.0.0"
+description: "Description of your custom expertise domain"
+
+# Optional: Inherit from other expertise configurations
+# extends:
+#   - builtin:general
+#   - file:./other_expertise.yaml
+
+# System prompt for the LLM (Jinja2 templates supported)
+# Available variables: expertise, entity_types, relationship_types, tool_schemas, tools, parent_prompt
+system_prompt: |
+  You are an expert in [YOUR DOMAIN]. You understand:
+
+  - [Domain concept 1]
+  - [Domain concept 2]
+  - [Domain concept 3]
+
+  When extracting entities:
+  - [Extraction guideline 1]
+  - [Extraction guideline 2]
+  - [Extraction guideline 3]
+
+# Optional: Custom extraction prompt (leave commented to use default)
+# extraction_prompt: |
+#   Extract entities from the following text...
+#   {{ text }}
+
+# Define the entity types for your domain
+entity_types:
+  # Example entity type - customize or replace
+  - name: EXAMPLE_ENTITY
+    description: "Description of what this entity represents"
+    attributes:
+      required: [name]  # Required attributes
+      optional: [description, category, metadata]  # Optional attributes
+    identifiers: [name]  # Fields used for cross-tool matching
+    aliases: [ALTERNATE_NAME]  # Alternative names for this type
+
+  # Add more entity types as needed
+  # - name: ANOTHER_ENTITY
+  #   description: "..."
+  #   attributes:
+  #     required: [id]
+  #     optional: [...]
+  #   identifiers: [id]
+
+# Define relationship types between entities
+relationship_types:
+  # Example relationship type - customize or replace
+  - name: EXAMPLE_RELATIONSHIP
+    description: "Description of what this relationship means"
+    source_types: [EXAMPLE_ENTITY]  # Types that can be the source
+    target_types: [EXAMPLE_ENTITY]  # Types that can be the target
+    bidirectional: false  # Set to true if relationship works both ways
+    properties: []  # Expected properties on this relationship
+
+  # Add more relationship types as needed
+  # - name: ANOTHER_RELATIONSHIP
+  #   description: "..."
+  #   source_types: [...]
+  #   target_types: [...]
+
+# Optional: Tool-specific schemas for structured extraction
+tool_schemas: {}
+  # example_tool:
+  #   field_pattern: "[A-Z]+-\\d+"
+  #   valid_statuses: [active, inactive, pending]
+
+# Optional: Rules for correlating entities across different sources
+correlation_rules: []
+  # - name: email_match
+  #   description: "Match entities by email address"
+  #   match_fields: [email]
+  #   entity_types: [PERSON]
+  #   confidence: 0.95
+  #
+  # - name: id_pattern_match
+  #   description: "Match entities by ID pattern"
+  #   pattern: "[A-Z]+-\\d+"
+  #   entity_types: [TICKET]
+  #   creates_relationship: REFERENCES
+  #   confidence: 0.9
+
+# Optional: Rules for inferring new relationships from existing ones
+inference_rules: []
+  # - name: example_inference
+  #   description: "If A relates to B and B relates to C, infer A relates to C"
+  #   when:
+  #     - relationship: EXAMPLE_RELATIONSHIP
+  #       source_type: EXAMPLE_ENTITY
+  #       target_type: EXAMPLE_ENTITY
+  #     - relationship: EXAMPLE_RELATIONSHIP
+  #       source_type: EXAMPLE_ENTITY
+  #       target_type: EXAMPLE_ENTITY
+  #   then:
+  #     relationship: INDIRECT_RELATIONSHIP
+  #     source: first.source
+  #     target: second.target
+  #   confidence: 0.7
+
+# Confidence thresholds for filtering extracted/inferred data
+confidence:
+  min_entity: 0.5  # Minimum confidence for entities
+  min_relationship: 0.5  # Minimum confidence for relationships
+  min_inferred: 0.3  # Minimum confidence for inferred relationships
+
+# Semantic expansion settings
+expansion:
+  enabled: true  # Enable/disable expansion
+  depth: 2  # How many hops to expand
+  cross_tool_unification: true  # Unify entities across tools
+  relationship_inference: true  # Apply inference rules
+  max_entities_per_expansion: 100  # Limit entities per expansion pass
+
+# Optional: Additional metadata about this expertise
+metadata:
+  author: "Your Name"
+  domain: "Your Domain"
+  keywords:
+    - keyword1
+    - keyword2

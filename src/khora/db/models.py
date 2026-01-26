@@ -120,6 +120,9 @@ class MemoryNamespaceModel(Base):
     relationships: Mapped[list[RelationshipModel]] = relationship("RelationshipModel", back_populates="namespace")
     episodes: Mapped[list[EpisodeModel]] = relationship("EpisodeModel", back_populates="namespace")
     events: Mapped[list[MemoryEventModel]] = relationship("MemoryEventModel", back_populates="namespace")
+    expertise_definitions: Mapped[list[ExpertiseDefinitionModel]] = relationship(
+        "ExpertiseDefinitionModel", back_populates="namespace"
+    )
 
     __table_args__ = (UniqueConstraint("workspace_id", "slug", name="uq_namespace_workspace_slug"),)
 
@@ -512,3 +515,53 @@ class SyncCheckpointModel(Base):
 
     def __repr__(self) -> str:
         return f"<SyncCheckpoint(namespace_id={self.namespace_id!r}, source={self.source!r})>"
+
+
+# =============================================================================
+# Expertise Definition Model
+# =============================================================================
+
+
+class ExpertiseDefinitionModel(Base):
+    """Stored expertise configuration for a namespace.
+
+    Allows namespaces to have custom expertise definitions that control
+    entity extraction, relationship types, correlation rules, and inference rules.
+    """
+
+    __tablename__ = "expertise_definitions"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    namespace_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(32), default="1.0.0")
+    description: Mapped[str] = mapped_column(Text, default="")
+
+    # The full expertise configuration as JSONB
+    # Contains: entity_types, relationship_types, tool_schemas, correlation_rules,
+    # inference_rules, confidence, expansion, system_prompt, extraction_prompt
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+    # Status
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+    )
+
+    # Relationships
+    namespace: Mapped[MemoryNamespaceModel] = relationship(
+        "MemoryNamespaceModel", back_populates="expertise_definitions"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("namespace_id", "name", name="uq_expertise_namespace_name"),
+        Index("ix_expertise_namespace_active", "namespace_id", "is_active"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"

@@ -1,0 +1,291 @@
+# Technical Documentation Expertise
+# For extracting entities from API docs, code, architecture documentation
+
+name: technical_docs
+version: "1.0.0"
+description: "Expert knowledge for technical documentation and code"
+
+extends:
+  - builtin:general
+
+system_prompt: |
+  You are an expert in technical documentation analysis. You understand:
+
+  - API documentation structures (endpoints, methods, parameters, responses)
+  - Code patterns and software architecture
+  - System design concepts (microservices, databases, caching, messaging)
+  - Programming languages and frameworks
+  - DevOps and infrastructure concepts
+  - Security patterns and authentication flows
+
+  When extracting entities:
+  - Identify specific APIs, endpoints, and their purposes
+  - Extract technology stack components and dependencies
+  - Map architectural relationships between systems
+  - Note configuration options and their effects
+  - Capture error codes, status codes, and their meanings
+  - Identify security considerations and requirements
+
+entity_types:
+  - name: API
+    description: "A REST/GraphQL/gRPC API or service endpoint"
+    attributes:
+      required: [name]
+      optional: [version, base_url, auth_type, description]
+    identifiers: [name, base_url]
+
+  - name: ENDPOINT
+    description: "A specific API endpoint or route"
+    attributes:
+      required: [path, method]
+      optional: [api, description, auth_required, rate_limit, parameters, response_type]
+    identifiers: [path, method]
+
+  - name: PARAMETER
+    description: "An API parameter, configuration option, or function argument"
+    attributes:
+      required: [name]
+      optional: [type, required, default, description, constraints]
+    identifiers: [name]
+
+  - name: DATA_MODEL
+    description: "A data structure, schema, or model definition"
+    attributes:
+      required: [name]
+      optional: [fields, type, description, validation_rules]
+    identifiers: [name]
+
+  - name: SERVICE
+    description: "A microservice, backend service, or system component"
+    attributes:
+      required: [name]
+      optional: [type, port, protocol, dependencies, description]
+    identifiers: [name]
+
+  - name: DATABASE
+    description: "A database, data store, or persistence layer"
+    attributes:
+      required: [name]
+      optional: [type, engine, version, schema]
+    identifiers: [name]
+
+  - name: FRAMEWORK
+    description: "A software framework or library"
+    attributes:
+      required: [name]
+      optional: [version, language, type, license]
+    identifiers: [name, version]
+
+  - name: LANGUAGE
+    description: "A programming language"
+    attributes:
+      required: [name]
+      optional: [version, paradigm]
+    identifiers: [name]
+
+  - name: FUNCTION
+    description: "A function, method, or procedure"
+    attributes:
+      required: [name]
+      optional: [signature, return_type, parameters, description, class]
+    identifiers: [name, class]
+
+  - name: CLASS
+    description: "A class, interface, or type definition"
+    attributes:
+      required: [name]
+      optional: [module, methods, properties, parent_class, interfaces]
+    identifiers: [name, module]
+
+  - name: MODULE
+    description: "A module, package, or namespace"
+    attributes:
+      required: [name]
+      optional: [path, exports, description]
+    identifiers: [name, path]
+
+  - name: ERROR_CODE
+    description: "An error code, status code, or exception type"
+    attributes:
+      required: [code]
+      optional: [message, description, resolution, http_status]
+    identifiers: [code]
+
+  - name: CONFIG_OPTION
+    description: "A configuration option or environment variable"
+    attributes:
+      required: [name]
+      optional: [type, default, description, required, env_var]
+    identifiers: [name]
+
+  - name: PROTOCOL
+    description: "A communication protocol or standard"
+    attributes:
+      required: [name]
+      optional: [version, port, security]
+    identifiers: [name]
+
+  - name: ALGORITHM
+    description: "An algorithm or computational method"
+    attributes:
+      required: [name]
+      optional: [complexity, type, use_case]
+    identifiers: [name]
+
+  - name: DESIGN_PATTERN
+    description: "A software design pattern"
+    attributes:
+      required: [name]
+      optional: [category, intent, participants]
+    identifiers: [name]
+
+  - name: SECURITY_MECHANISM
+    description: "A security mechanism, auth method, or encryption scheme"
+    attributes:
+      required: [name]
+      optional: [type, strength, use_case]
+    identifiers: [name]
+
+relationship_types:
+  - name: EXPOSES
+    description: "Service exposes an API or endpoint"
+    source_types: [SERVICE, API]
+    target_types: [ENDPOINT, API]
+
+  - name: CALLS
+    description: "Component calls another component"
+    source_types: [SERVICE, FUNCTION, ENDPOINT]
+    target_types: [SERVICE, FUNCTION, ENDPOINT, API]
+
+  - name: STORES_IN
+    description: "Service stores data in database"
+    source_types: [SERVICE]
+    target_types: [DATABASE]
+
+  - name: USES_FRAMEWORK
+    description: "Component uses a framework"
+    source_types: [SERVICE, MODULE]
+    target_types: [FRAMEWORK]
+
+  - name: WRITTEN_IN
+    description: "Component written in language"
+    source_types: [SERVICE, MODULE, FUNCTION]
+    target_types: [LANGUAGE]
+
+  - name: RETURNS
+    description: "Function/endpoint returns a type"
+    source_types: [FUNCTION, ENDPOINT]
+    target_types: [DATA_MODEL, ERROR_CODE]
+
+  - name: ACCEPTS
+    description: "Endpoint/function accepts parameters"
+    source_types: [ENDPOINT, FUNCTION]
+    target_types: [PARAMETER, DATA_MODEL]
+
+  - name: INHERITS_FROM
+    description: "Class inherits from parent"
+    source_types: [CLASS]
+    target_types: [CLASS]
+
+  - name: IMPLEMENTS
+    description: "Class implements interface/pattern"
+    source_types: [CLASS, SERVICE]
+    target_types: [CLASS, DESIGN_PATTERN, PROTOCOL]
+
+  - name: CONTAINS
+    description: "Module/class contains other elements"
+    source_types: [MODULE, CLASS, SERVICE]
+    target_types: [CLASS, FUNCTION, MODULE]
+
+  - name: CONFIGURED_BY
+    description: "Component configured by option"
+    source_types: [SERVICE, API]
+    target_types: [CONFIG_OPTION]
+
+  - name: SECURED_BY
+    description: "Component secured by mechanism"
+    source_types: [API, ENDPOINT, SERVICE]
+    target_types: [SECURITY_MECHANISM]
+
+  - name: RAISES
+    description: "Function/endpoint can raise error"
+    source_types: [FUNCTION, ENDPOINT]
+    target_types: [ERROR_CODE]
+
+  - name: COMMUNICATES_VIA
+    description: "Services communicate via protocol"
+    source_types: [SERVICE]
+    target_types: [PROTOCOL]
+
+tool_schemas:
+  openapi:
+    version_pattern: "\\d+\\.\\d+\\.\\d+"
+    method_types: [get, post, put, patch, delete, options, head]
+    parameter_locations: [path, query, header, cookie, body]
+    response_codes: [200, 201, 204, 400, 401, 403, 404, 500, 502, 503]
+
+  graphql:
+    types: [Query, Mutation, Subscription, Type, Input, Enum, Interface, Union]
+    directives: [deprecated, skip, include]
+
+  code_patterns:
+    function_pattern: "(def|function|func|fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)"
+    class_pattern: "class\\s+([A-Z][a-zA-Z0-9_]*)"
+    import_pattern: "(import|from|require|use)\\s+['\"]?([a-zA-Z0-9_./]+)"
+
+correlation_rules:
+  - name: function_reference
+    description: "Match function references across documentation"
+    pattern: "([a-zA-Z_][a-zA-Z0-9_]*)\\(\\)"
+    entity_types: [FUNCTION]
+    creates_relationship: REFERENCES
+    confidence: 0.8
+
+  - name: class_reference
+    description: "Match class references"
+    pattern: "([A-Z][a-zA-Z0-9]+)(?:\\.\\w+|\\s+class|\\s+object)"
+    entity_types: [CLASS]
+    creates_relationship: REFERENCES
+    confidence: 0.85
+
+  - name: endpoint_reference
+    description: "Match API endpoint patterns"
+    pattern: "(GET|POST|PUT|PATCH|DELETE)\\s+(/[a-zA-Z0-9/{}_-]+)"
+    entity_types: [ENDPOINT]
+    confidence: 0.9
+
+inference_rules:
+  - name: service_dependency
+    description: "If service A calls service B, A depends on B"
+    when:
+      - relationship: CALLS
+        source_type: SERVICE
+        target_type: SERVICE
+    then:
+      relationship: DEPENDS_ON
+      source: first.source
+      target: first.target
+    confidence: 0.9
+
+  - name: api_ownership
+    description: "Service exposing API owns it"
+    when:
+      - relationship: EXPOSES
+        source_type: SERVICE
+        target_type: API
+    then:
+      relationship: OWNS
+      source: first.source
+      target: first.target
+    confidence: 0.95
+
+confidence:
+  min_entity: 0.6
+  min_relationship: 0.5
+  min_inferred: 0.4
+
+expansion:
+  enabled: true
+  depth: 3
+  cross_tool_unification: true
+  relationship_inference: true

@@ -1,0 +1,682 @@
+# SaaS Expert - Corporate SaaS Tools Data Mapping and Correlation
+# Expertise for extracting and correlating entities across Jira, Salesforce,
+# HubSpot, Notion, Slack, GitHub, and other corporate tools.
+
+name: saas_expert
+version: "1.0.0"
+description: "Expert knowledge for corporate SaaS tools data mapping and correlation"
+
+extends:
+  - builtin:general
+
+system_prompt: |
+  You are an expert system specializing in corporate SaaS tools data mapping and correlation.
+
+  ## Your Expertise Includes:
+
+  ### Project Management (Jira, Linear, Asana, Monday.com)
+  - Issue hierarchies: Epics → Stories → Subtasks
+  - Workflow states and transitions (To Do, In Progress, Review, Done)
+  - Issue linking patterns (blocks, relates to, duplicates, is cloned by)
+  - Sprint organization, velocity tracking, and capacity planning
+  - Issue key patterns like PROJ-123, identifying projects from prefixes
+  - Labels, components, and fix versions as classification systems
+
+  ### CRM Systems (Salesforce, HubSpot, Attio, Pipedrive)
+  - Account hierarchies and parent-child relationships
+  - Contact roles: Decision Maker, Champion, Influencer, End User, Blocker
+  - Opportunity/Deal stages: Prospecting, Qualification, Proposal, Negotiation, Closed
+  - Activity types: Calls, Emails, Meetings, Tasks, Notes
+  - Lead scoring and conversion patterns
+  - Account ownership and territory assignment
+
+  ### Knowledge Management (Notion, Confluence, Coda)
+  - Document hierarchies: Workspaces → Pages → Databases
+  - Cross-linking patterns and backlinks
+  - @mentions as entity references
+  - Database relations and rollups
+  - Page templates and content types
+
+  ### Communication (Slack, Microsoft Teams, Discord)
+  - Channel naming conventions: team-*, proj-*, support-*, customer-*
+  - Thread context and conversation flow
+  - @mentions indicating involvement or responsibility
+  - Reactions and emoji as sentiment indicators
+  - Message links referencing other tools
+
+  ### Development (GitHub, GitLab, Bitbucket)
+  - Repository structure and ownership
+  - Branch naming patterns: feature/*, fix/*, hotfix/*, release/*
+  - Commit message conventions: fix #123, closes #456, refs PROJ-789
+  - PR/MR states: Draft, Review, Approved, Merged, Closed
+  - Code review patterns and approval workflows
+  - CI/CD pipeline status and deployment tracking
+
+  ### HR & Identity (BambooHR, Workday, Okta)
+  - Employee records and organizational structure
+  - Department and team hierarchies
+  - Role and permission assignments
+  - Onboarding and offboarding workflows
+
+  ## Cross-Tool Correlation Patterns:
+
+  1. **Issue References**: "PROJ-123" in Slack messages → Jira ticket
+  2. **Person Unification**: Same person across email, Slack handle, Jira username, GitHub
+  3. **Customer Correlation**: Company in Slack channel → Deal in Salesforce → Support tickets
+  4. **Project-to-Code**: Project in Notion → Epics in Jira → PRs in GitHub
+  5. **Temporal Correlations**: Deal closed → Onboarding starts → Feature requests appear
+  6. **Communication Links**: Discussion thread → Decision made → Ticket created
+
+  When extracting, pay attention to:
+  - Tool-specific identifiers (issue keys, usernames, channel names)
+  - Cross-references between tools
+  - Status and state information
+  - Ownership and assignment relationships
+  - Temporal sequences of related activities
+
+entity_types:
+  # Work Management Entities
+  - name: PROJECT
+    description: "A project, initiative, or workstream spanning multiple tasks"
+    attributes:
+      required: [name, source_tool]
+      optional: [key, status, owner, team, start_date, end_date, description]
+    identifiers: [key, name]
+
+  - name: EPIC
+    description: "A large body of work that can be broken down into stories/tasks"
+    attributes:
+      required: [key, title, source_tool]
+      optional: [status, assignee, project, priority, labels]
+    identifiers: [key]
+
+  - name: TICKET
+    description: "An issue, task, story, bug, or work item in project management"
+    attributes:
+      required: [key, title, source_tool]
+      optional: [status, assignee, priority, labels, sprint, story_points, epic_key]
+    identifiers: [key]
+
+  - name: SPRINT
+    description: "A time-boxed iteration in agile development"
+    attributes:
+      required: [name, source_tool]
+      optional: [start_date, end_date, goal, status, team]
+    identifiers: [name, start_date]
+
+  - name: MILESTONE
+    description: "A significant checkpoint or deliverable date"
+    attributes:
+      required: [name]
+      optional: [due_date, status, project]
+    identifiers: [name, due_date]
+
+  - name: COMPONENT
+    description: "A subsystem or module within a project"
+    attributes:
+      required: [name]
+      optional: [project, lead, description]
+    identifiers: [name, project]
+
+  # CRM Entities
+  - name: CUSTOMER
+    description: "A company, account, or organization in the CRM"
+    attributes:
+      required: [name, source_tool]
+      optional: [domain, industry, arr, mrr, employee_count, owner, tier, status]
+    identifiers: [domain, name]
+
+  - name: CONTACT
+    description: "A person associated with a customer account"
+    attributes:
+      required: [name, source_tool]
+      optional: [email, title, role, phone, account, is_champion, is_decision_maker]
+    identifiers: [email, name]
+
+  - name: DEAL
+    description: "A sales opportunity or deal in the pipeline"
+    attributes:
+      required: [name, source_tool]
+      optional: [stage, amount, close_date, owner, account, probability, type]
+    identifiers: [name, account]
+
+  - name: PIPELINE
+    description: "A sales or process pipeline with stages"
+    attributes:
+      required: [name, source_tool]
+      optional: [stages, type]
+    identifiers: [name]
+
+  - name: PIPELINE_STAGE
+    description: "A stage within a pipeline"
+    attributes:
+      required: [name, pipeline]
+      optional: [order, probability, duration_days]
+    identifiers: [name, pipeline]
+
+  - name: ACTIVITY
+    description: "A logged activity: call, meeting, email, task"
+    attributes:
+      required: [type, source_tool]
+      optional: [subject, date, duration, participants, account, deal, notes]
+    identifiers: [subject, date]
+
+  # Marketing Entities
+  - name: CAMPAIGN
+    description: "A marketing campaign or initiative"
+    attributes:
+      required: [name, source_tool]
+      optional: [type, status, start_date, end_date, budget, target_audience]
+    identifiers: [name]
+
+  - name: LEAD
+    description: "A potential customer or prospect"
+    attributes:
+      required: [name, source_tool]
+      optional: [email, company, source, status, score, owner]
+    identifiers: [email, name]
+
+  # Knowledge Management Entities
+  - name: WORKSPACE
+    description: "A workspace or team space in knowledge tools"
+    attributes:
+      required: [name, source_tool]
+      optional: [owner, members, visibility]
+    identifiers: [name]
+
+  - name: PAGE
+    description: "A document, page, or wiki article"
+    attributes:
+      required: [title, source_tool]
+      optional: [url, workspace, author, created_date, last_modified, parent_page]
+    identifiers: [url, title]
+
+  - name: DATABASE
+    description: "A structured database or table in knowledge tools"
+    attributes:
+      required: [name, source_tool]
+      optional: [workspace, schema, row_count]
+    identifiers: [name, workspace]
+
+  # Communication Entities
+  - name: CHANNEL
+    description: "A communication channel in Slack, Teams, etc."
+    attributes:
+      required: [name, source_tool]
+      optional: [type, purpose, topic, members, is_private]
+    identifiers: [name]
+
+  - name: THREAD
+    description: "A conversation thread or discussion"
+    attributes:
+      required: [source_tool]
+      optional: [channel, topic, participants, start_date, message_count]
+    identifiers: [channel, start_date]
+
+  - name: MESSAGE
+    description: "A chat message or communication"
+    attributes:
+      required: [source_tool]
+      optional: [channel, thread, author, timestamp, content_preview]
+    identifiers: [channel, timestamp]
+
+  # Development Entities
+  - name: REPOSITORY
+    description: "A code repository in GitHub, GitLab, etc."
+    attributes:
+      required: [name, source_tool]
+      optional: [organization, language, visibility, default_branch, url]
+    identifiers: [name, organization]
+
+  - name: PULL_REQUEST
+    description: "A pull request or merge request"
+    attributes:
+      required: [number, title, source_tool]
+      optional: [repository, author, status, branch, target_branch, reviewers]
+    identifiers: [number, repository]
+
+  - name: COMMIT
+    description: "A code commit"
+    attributes:
+      required: [sha, source_tool]
+      optional: [repository, author, message, timestamp, files_changed]
+    identifiers: [sha]
+
+  - name: BRANCH
+    description: "A code branch"
+    attributes:
+      required: [name, source_tool]
+      optional: [repository, type, base_branch]
+    identifiers: [name, repository]
+
+  - name: DEPLOYMENT
+    description: "A deployment or release to an environment"
+    attributes:
+      required: [environment, source_tool]
+      optional: [version, timestamp, status, repository, commit_sha]
+    identifiers: [environment, version]
+
+  - name: RELEASE
+    description: "A software release or version"
+    attributes:
+      required: [version, source_tool]
+      optional: [repository, release_date, release_notes, tag]
+    identifiers: [version, repository]
+
+  # HR/Organization Entities
+  - name: EMPLOYEE
+    description: "An employee or team member"
+    attributes:
+      required: [name, source_tool]
+      optional: [email, title, department, team, manager, start_date, location]
+    identifiers: [email, name]
+
+  - name: DEPARTMENT
+    description: "A department or division"
+    attributes:
+      required: [name]
+      optional: [head, parent_department, employee_count]
+    identifiers: [name]
+
+  - name: TEAM
+    description: "A team or squad"
+    attributes:
+      required: [name]
+      optional: [lead, department, members, purpose]
+    identifiers: [name]
+
+  - name: ROLE
+    description: "A job role or position"
+    attributes:
+      required: [title]
+      optional: [department, level, responsibilities]
+    identifiers: [title]
+
+  # Cross-Tool Entities
+  - name: INTEGRATION
+    description: "An integration or connection between tools"
+    attributes:
+      required: [name, source_tool, target_tool]
+      optional: [type, status, sync_frequency]
+    identifiers: [name, source_tool, target_tool]
+
+  - name: WORKFLOW
+    description: "An automated workflow or process"
+    attributes:
+      required: [name, source_tool]
+      optional: [trigger, actions, status]
+    identifiers: [name]
+
+  - name: AUTOMATION
+    description: "An automated rule or action"
+    attributes:
+      required: [name, source_tool]
+      optional: [trigger_type, condition, action]
+    identifiers: [name]
+
+relationship_types:
+  # Work Management Relationships
+  - name: ASSIGNED_TO
+    description: "Entity assigned to a person"
+    source_types: [TICKET, DEAL, TASK, PULL_REQUEST]
+    target_types: [PERSON, EMPLOYEE]
+
+  - name: BELONGS_TO_PROJECT
+    description: "Entity is part of a project"
+    source_types: [TICKET, EPIC, SPRINT, COMPONENT]
+    target_types: [PROJECT]
+
+  - name: BELONGS_TO_EPIC
+    description: "Ticket belongs to an epic"
+    source_types: [TICKET]
+    target_types: [EPIC]
+
+  - name: BELONGS_TO_SPRINT
+    description: "Ticket is in a sprint"
+    source_types: [TICKET]
+    target_types: [SPRINT]
+
+  - name: BLOCKS
+    description: "Issue blocks another issue"
+    source_types: [TICKET]
+    target_types: [TICKET]
+
+  - name: BLOCKED_BY
+    description: "Issue is blocked by another"
+    source_types: [TICKET]
+    target_types: [TICKET]
+
+  - name: SUBTASK_OF
+    description: "Issue is a subtask of another"
+    source_types: [TICKET]
+    target_types: [TICKET, EPIC]
+
+  - name: DUPLICATES
+    description: "Issue duplicates another"
+    source_types: [TICKET]
+    target_types: [TICKET]
+    bidirectional: true
+
+  # CRM Relationships
+  - name: ACCOUNT_CONTACT
+    description: "Contact belongs to account"
+    source_types: [CONTACT]
+    target_types: [CUSTOMER]
+
+  - name: OWNS_DEAL
+    description: "Person owns a deal"
+    source_types: [PERSON, EMPLOYEE]
+    target_types: [DEAL]
+
+  - name: DEAL_FOR
+    description: "Deal is for an account"
+    source_types: [DEAL]
+    target_types: [CUSTOMER]
+
+  - name: CHAMPION_OF
+    description: "Contact is champion for deal/account"
+    source_types: [CONTACT]
+    target_types: [DEAL, CUSTOMER]
+
+  - name: DECISION_MAKER_FOR
+    description: "Contact is decision maker"
+    source_types: [CONTACT]
+    target_types: [DEAL, CUSTOMER]
+
+  - name: BLOCKER_FOR
+    description: "Contact is blocking a deal"
+    source_types: [CONTACT]
+    target_types: [DEAL]
+
+  # Cross-Tool Relationships
+  - name: MENTIONED_IN
+    description: "Entity mentioned in another context"
+    source_types: ["*"]
+    target_types: [MESSAGE, PAGE, TICKET, COMMIT]
+
+  - name: DISCUSSED_IN
+    description: "Topic discussed in communication"
+    source_types: ["*"]
+    target_types: [CHANNEL, THREAD, MESSAGE]
+
+  - name: DOCUMENTED_IN
+    description: "Entity documented in knowledge base"
+    source_types: ["*"]
+    target_types: [PAGE, DATABASE]
+
+  - name: TRACKED_IN
+    description: "Work tracked in project management"
+    source_types: ["*"]
+    target_types: [TICKET, PROJECT, EPIC]
+
+  - name: REFERENCES
+    description: "Cross-tool reference"
+    source_types: ["*"]
+    target_types: ["*"]
+
+  # Development Relationships
+  - name: AUTHORED_BY
+    description: "Code or PR authored by person"
+    source_types: [COMMIT, PULL_REQUEST]
+    target_types: [PERSON, EMPLOYEE]
+
+  - name: REVIEWS
+    description: "Person reviews code"
+    source_types: [PERSON, EMPLOYEE]
+    target_types: [PULL_REQUEST]
+
+  - name: MERGED_INTO
+    description: "PR merged into branch/repo"
+    source_types: [PULL_REQUEST, BRANCH]
+    target_types: [BRANCH, REPOSITORY]
+
+  - name: RESOLVES
+    description: "PR/commit resolves an issue"
+    source_types: [PULL_REQUEST, COMMIT]
+    target_types: [TICKET]
+
+  - name: TRIGGERED_BY
+    description: "Deployment triggered by commit/PR"
+    source_types: [DEPLOYMENT]
+    target_types: [COMMIT, PULL_REQUEST]
+
+  - name: CONTAINS_COMMIT
+    description: "Release contains commits"
+    source_types: [RELEASE]
+    target_types: [COMMIT]
+
+  # Workflow Relationships
+  - name: FOLLOWED_BY
+    description: "Process step followed by another"
+    source_types: [ACTIVITY, EVENT]
+    target_types: [ACTIVITY, EVENT]
+
+  - name: CAUSED
+    description: "Action caused another action"
+    source_types: ["*"]
+    target_types: ["*"]
+
+  - name: ESCALATED_TO
+    description: "Issue escalated to person/team"
+    source_types: [TICKET, DEAL]
+    target_types: [PERSON, TEAM]
+
+  - name: CONVERTED_FROM
+    description: "Entity converted from another"
+    source_types: [DEAL, CUSTOMER]
+    target_types: [LEAD]
+
+  # Organization Relationships
+  - name: MEMBER_OF
+    description: "Person is member of team/department"
+    source_types: [PERSON, EMPLOYEE]
+    target_types: [TEAM, DEPARTMENT, CHANNEL]
+
+  - name: LEADS
+    description: "Person leads team/department"
+    source_types: [PERSON, EMPLOYEE]
+    target_types: [TEAM, DEPARTMENT, PROJECT]
+
+tool_schemas:
+  jira:
+    issue_key_pattern: "[A-Z][A-Z0-9]+-\\d+"
+    hierarchy: [EPIC, STORY, TASK, SUBTASK, BUG]
+    statuses: [backlog, to_do, in_progress, in_review, done, closed]
+    priority_levels: [blocker, critical, major, minor, trivial]
+    link_types: [blocks, is_blocked_by, duplicates, relates_to, clones, is_cloned_by]
+
+  salesforce:
+    object_types: [Account, Contact, Opportunity, Lead, Case, Task, Event]
+    opportunity_stages: [prospecting, qualification, needs_analysis, value_proposition, decision_makers, proposal, negotiation, closed_won, closed_lost]
+    contact_roles: [Decision Maker, Champion, Influencer, End User, Blocker, Economic Buyer, Technical Buyer]
+    account_types: [Customer, Partner, Prospect, Competitor]
+
+  hubspot:
+    object_types: [Company, Contact, Deal, Ticket, Product]
+    deal_stages: [appointmentscheduled, qualifiedtobuy, presentationscheduled, decisionmakerboughtin, contractsent, closedwon, closedlost]
+    lifecycle_stages: [subscriber, lead, marketing_qualified_lead, sales_qualified_lead, opportunity, customer, evangelist]
+
+  slack:
+    channel_prefixes:
+      team: "team-"
+      project: "proj-"
+      support: "support-"
+      customer: "customer-"
+      announcement: "announce-"
+    mention_pattern: "<@[A-Z0-9]+>"
+    channel_link_pattern: "<#[A-Z0-9]+\\|[^>]+>"
+    url_pattern: "<https?://[^|]+(?:\\|[^>]+)?>"
+
+  github:
+    issue_reference_pattern: "#\\d+"
+    mention_pattern: "@[a-zA-Z0-9-]+"
+    branch_prefixes:
+      feature: "feature/"
+      fix: "fix/"
+      hotfix: "hotfix/"
+      release: "release/"
+      chore: "chore/"
+    commit_reference_patterns:
+      - "(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\\s+#\\d+"
+      - "refs?\\s+#\\d+"
+      - "[A-Z]+-\\d+"
+    pr_states: [draft, open, merged, closed]
+
+  notion:
+    page_types: [page, database, template]
+    property_types: [title, text, number, select, multi_select, date, person, files, checkbox, url, email, phone, formula, relation, rollup]
+    mention_pattern: "@[^\\s]+"
+
+  linear:
+    issue_key_pattern: "[A-Z]+-\\d+"
+    statuses: [backlog, todo, in_progress, in_review, done, canceled]
+    priority_levels: [urgent, high, medium, low, no_priority]
+
+  attio:
+    object_types: [Company, Person, Deal, Note, Task]
+    record_types: [company, person, deal]
+
+correlation_rules:
+  - name: jira_issue_reference
+    description: "Match Jira issue keys across tools"
+    pattern: "[A-Z][A-Z0-9]+-\\d+"
+    entity_types: [TICKET, EPIC]
+    creates_relationship: REFERENCES
+    confidence: 0.95
+
+  - name: github_issue_reference
+    description: "Match GitHub issue numbers in commits/PRs"
+    pattern: "#\\d+"
+    entity_types: [TICKET, PULL_REQUEST]
+    creates_relationship: RESOLVES
+    confidence: 0.9
+
+  - name: email_person_match
+    description: "Unify people by email address"
+    match_fields: [email]
+    entity_types: [PERSON, CONTACT, EMPLOYEE]
+    confidence: 0.95
+
+  - name: domain_company_match
+    description: "Match companies by email domain"
+    pattern: "@([a-zA-Z0-9-]+\\.[a-zA-Z]{2,})"
+    match_fields: [domain]
+    entity_types: [CUSTOMER, ORGANIZATION]
+    confidence: 0.85
+
+  - name: slack_mention_match
+    description: "Match Slack @mentions to people"
+    pattern: "<@[A-Z0-9]+>"
+    entity_types: [PERSON, EMPLOYEE]
+    creates_relationship: MENTIONED_IN
+    confidence: 0.9
+
+  - name: github_mention_match
+    description: "Match GitHub @mentions to people"
+    pattern: "@[a-zA-Z0-9-]+"
+    entity_types: [PERSON, EMPLOYEE]
+    creates_relationship: MENTIONED_IN
+    confidence: 0.85
+
+  - name: url_page_match
+    description: "Match URLs to pages/documents"
+    pattern: "https?://[^\\s]+"
+    entity_types: [PAGE]
+    creates_relationship: REFERENCES
+    confidence: 0.8
+
+inference_rules:
+  - name: project_stakeholder
+    description: "Project owner is stakeholder of project tickets"
+    when:
+      - relationship: LEADS
+        source_type: PERSON
+        target_type: PROJECT
+      - relationship: BELONGS_TO_PROJECT
+        source_type: TICKET
+        target_type: PROJECT
+    then:
+      relationship: STAKEHOLDER_OF
+      source: first.source
+      target: second.source
+    confidence: 0.7
+
+  - name: deal_influence
+    description: "Champion contact influences deal outcome"
+    when:
+      - relationship: CHAMPION_OF
+        source_type: CONTACT
+        target_type: DEAL
+    then:
+      relationship: INFLUENCES
+      source: first.source
+      target: first.target
+    confidence: 0.8
+
+  - name: communication_involvement
+    description: "Person mentioned in project channel is involved in project"
+    when:
+      - relationship: MENTIONED_IN
+        source_type: PERSON
+        target_type: MESSAGE
+      - relationship: DISCUSSED_IN
+        source_type: PROJECT
+        target_type: CHANNEL
+    then:
+      relationship: INVOLVED_IN
+      source: first.source
+      target: second.source
+    confidence: 0.6
+
+  - name: pr_collaboration
+    description: "PR author and reviewer collaborate"
+    when:
+      - relationship: AUTHORED_BY
+        source_type: PULL_REQUEST
+        target_type: PERSON
+      - relationship: REVIEWS
+        source_type: PERSON
+        target_type: PULL_REQUEST
+    then:
+      relationship: COLLABORATES_WITH
+      source: first.target
+      target: second.source
+    confidence: 0.75
+
+  - name: customer_ticket_ownership
+    description: "Account owner is responsible for customer's tickets"
+    when:
+      - relationship: OWNS
+        source_type: PERSON
+        target_type: CUSTOMER
+      - relationship: TRACKED_IN
+        source_type: CUSTOMER
+        target_type: TICKET
+    then:
+      relationship: RESPONSIBLE_FOR
+      source: first.source
+      target: second.target
+    confidence: 0.65
+
+confidence:
+  min_entity: 0.5
+  min_relationship: 0.5
+  min_inferred: 0.3
+
+expansion:
+  enabled: true
+  depth: 2
+  cross_tool_unification: true
+  relationship_inference: true
+  max_entities_per_expansion: 100
+
+metadata:
+  author: "Khora"
+  domain: "Corporate SaaS"
+  keywords:
+    - project management
+    - CRM
+    - sales
+    - development
+    - communication
+    - knowledge management

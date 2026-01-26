@@ -2,6 +2,7 @@
 
 Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
 Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph
+Phase 3 (Expansion, optional): Semantic expansion, entity unification, relationship inference
 
 Supports parallel document processing with configurable concurrency.
 """
@@ -21,6 +22,7 @@ from ..registry import pipeline
 
 if TYPE_CHECKING:
     from khora.core.models import Document
+    from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
 
 
@@ -86,7 +88,10 @@ async def process_document(
     embedding_model: str = "text-embedding-3-small",
     extraction_model: str = "gpt-4o-mini",
     skill_name: str = "general_entities",
+    expertise: ExpertiseConfig | str | None = None,
     max_concurrent_extractions: int = 10,
+    enable_expansion: bool = False,
+    extraction_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -94,9 +99,41 @@ async def process_document(
     1. Chunk the document
     2. Generate embeddings for chunks (batched)
     3. Extract entities and relationships (parallel)
-    4. Store everything (batched)
+    4. (Optional) Semantic expansion - unify entities, infer relationships
+    5. Store everything (batched)
+
+    Args:
+        document: Document to process
+        storage: Storage coordinator
+        chunk_strategy: Chunking strategy
+        chunk_size: Target chunk size
+        embedding_model: Model for embeddings
+        extraction_model: Model for extraction
+        skill_name: Legacy skill name (ignored if expertise provided)
+        expertise: ExpertiseConfig, expertise name, or file path
+        max_concurrent_extractions: Maximum concurrent LLM extractions
+        enable_expansion: Whether to run semantic expansion
+        extraction_context: Context dict for prompt template rendering
     """
     from ..tasks import chunk_document, embed_chunks, extract_entities
+
+    # Resolve expertise if needed
+    resolved_expertise: ExpertiseConfig | None = None
+    if expertise is not None:
+        from khora.extraction.skills import ExpertiseConfig as EC
+        from khora.extraction.skills import load_expertise
+
+        if isinstance(expertise, EC):
+            resolved_expertise = expertise
+        elif isinstance(expertise, str):
+            try:
+                resolved_expertise = load_expertise(expertise)
+            except Exception:
+                pass
+
+    # Check if expansion is enabled in expertise config
+    if resolved_expertise and resolved_expertise.expansion.enabled:
+        enable_expansion = True
 
     # Mark as processing
     document.mark_processing()
@@ -119,10 +156,33 @@ async def process_document(
         entities, relationships = await extract_entities(
             chunks,
             skill_name=skill_name,
+            expertise=resolved_expertise,
             model=extraction_model,
             max_concurrent=max_concurrent_extractions,
+            context=extraction_context,
         )
         logger.info(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
+
+        # Step 4 (Optional): Semantic expansion
+        inferred_relationships = []
+        if enable_expansion and resolved_expertise:
+            from khora.extraction.expansion import SemanticExpander
+
+            expander = SemanticExpander(expertise=resolved_expertise)
+            expansion_result = await expander.expand(
+                entities=entities,
+                relationships=relationships,
+                namespace_id=document.namespace_id,
+            )
+
+            entities = expansion_result.entities
+            relationships = expansion_result.relationships
+            inferred_relationships = expansion_result.inferred_relationships
+
+            logger.info(
+                f"Document {document.id}: expansion unified to {len(entities)} entities, "
+                f"inferred {len(inferred_relationships)} relationships"
+            )
 
         # Step 4: Store chunks (batched)
         await storage.create_chunks_batch(chunks)
@@ -151,8 +211,9 @@ async def process_document(
             async with entity_semaphore:
                 return await storage.create_relationship(rel)
 
-        if relationships:
-            await asyncio.gather(*[store_relationship(r) for r in relationships])
+        all_relationships = relationships + inferred_relationships
+        if all_relationships:
+            await asyncio.gather(*[store_relationship(r) for r in all_relationships])
 
         # Mark as completed
         document.mark_completed(len(chunks), len(entities))
@@ -163,6 +224,7 @@ async def process_document(
             "chunks": len(chunks),
             "entities": len(entities),
             "relationships": len(relationships),
+            "inferred_relationships": len(inferred_relationships),
         }
 
     except Exception as e:
@@ -171,7 +233,7 @@ async def process_document(
         raise
 
 
-@pipeline("ingest", description="Two-phase document ingestion", tags=["ingestion"])
+@pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
 @flow(name="ingest_documents", log_prints=True)
 async def ingest_documents(
     namespace_id: UUID,
@@ -179,30 +241,37 @@ async def ingest_documents(
     storage: StorageCoordinator | None = None,
     *,
     skill_name: str = "general_entities",
+    expertise: ExpertiseConfig | str | None = None,
     chunk_strategy: str = "semantic",
     chunk_size: int = 512,
     embedding_model: str = "text-embedding-3-small",
     extraction_model: str = "gpt-4o-mini",
     max_concurrent_documents: int = 5,
     max_concurrent_extractions: int = 10,
+    enable_expansion: bool = False,
+    extraction_context: dict[str, Any] | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
 
     Phase 1: Stage documents (checksum-based change detection)
     Phase 2: Process changed documents in parallel (chunk, embed, extract)
+    Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
 
     Args:
         namespace_id: Target namespace
         documents: List of document dicts with 'content' and optional metadata
         storage: StorageCoordinator instance
-        skill_name: Extraction skill to use
+        skill_name: Legacy extraction skill to use (ignored if expertise provided)
+        expertise: ExpertiseConfig, expertise name string, or file path
         chunk_strategy: Chunking strategy
         chunk_size: Target chunk size
         embedding_model: Model for embeddings
         extraction_model: Model for extraction
         max_concurrent_documents: Maximum documents to process in parallel
         max_concurrent_extractions: Maximum concurrent LLM extractions per document
+        enable_expansion: Whether to run semantic expansion
+        extraction_context: Context dict for prompt template rendering
 
     Returns:
         Summary of ingestion results
@@ -247,7 +316,10 @@ async def ingest_documents(
                 embedding_model=embedding_model,
                 extraction_model=extraction_model,
                 skill_name=skill_name,
+                expertise=expertise,
                 max_concurrent_extractions=max_concurrent_extractions,
+                enable_expansion=enable_expansion,
+                extraction_context=extraction_context,
             )
 
     results = await asyncio.gather(
@@ -269,6 +341,7 @@ async def ingest_documents(
     total_chunks = sum(r["chunks"] for r in successful_results)
     total_entities = sum(r["entities"] for r in successful_results)
     total_relationships = sum(r["relationships"] for r in successful_results)
+    total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
 
     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
 
@@ -280,4 +353,5 @@ async def ingest_documents(
         "total_chunks": total_chunks,
         "total_entities": total_entities,
         "total_relationships": total_relationships,
+        "total_inferred_relationships": total_inferred,
     }

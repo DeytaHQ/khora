@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from khora.extraction.skills import ExpertiseConfig
 
 
 @dataclass
@@ -84,12 +87,16 @@ class EntityExtractor(ABC):
         text: str,
         *,
         entity_types: list[str] | None = None,
+        expertise: ExpertiseConfig | None = None,
+        context: dict[str, Any] | None = None,
     ) -> ExtractionResult:
         """Extract entities and relationships from text.
 
         Args:
             text: Text to extract from
             entity_types: Optional list of entity types to extract
+            expertise: Optional ExpertiseConfig for domain-specific extraction
+            context: Optional context dict for prompt template rendering
 
         Returns:
             ExtractionResult containing entities and relationships
@@ -102,12 +109,16 @@ class EntityExtractor(ABC):
         texts: list[str],
         *,
         entity_types: list[str] | None = None,
+        expertise: ExpertiseConfig | None = None,
+        context: dict[str, Any] | None = None,
     ) -> list[ExtractionResult]:
         """Extract from multiple texts.
 
         Args:
             texts: List of texts to extract from
             entity_types: Optional list of entity types to extract
+            expertise: Optional ExpertiseConfig for domain-specific extraction
+            context: Optional context dict for prompt template rendering
 
         Returns:
             List of ExtractionResult objects

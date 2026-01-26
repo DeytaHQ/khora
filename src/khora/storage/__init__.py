@@ -19,6 +19,7 @@ from .backends.pgvector import PgVectorBackend
 from .backends.postgresql import PostgreSQLBackend
 from .coordinator import StorageCoordinator
 from .event_store import PostgreSQLEventStore
+from .expertise_store import ExpertiseStore
 from .factory import StorageConfig, StorageFactory, create_storage_coordinator
 
 __all__ = [
@@ -37,4 +38,6 @@ __all__ = [
     "StorageConfig",
     "StorageFactory",
     "create_storage_coordinator",
+    # Expertise
+    "ExpertiseStore",
 ]

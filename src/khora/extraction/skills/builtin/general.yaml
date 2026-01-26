@@ -1,0 +1,214 @@
+# General Entity Extraction Expertise
+# Basic entity types suitable for most documents
+
+name: general
+version: "1.0.0"
+description: "General-purpose entity and relationship extraction"
+
+system_prompt: |
+  You are an expert entity extraction system. Your task is to identify and extract
+  entities and their relationships from text with high precision.
+
+  Guidelines:
+  - Extract entities that are clearly mentioned or strongly implied
+  - Use canonical names (e.g., "Acme Corporation" not "Acme Corp")
+  - Identify relationships between entities when the connection is clear
+  - Include temporal information when dates or times are mentioned
+  - Assign confidence scores based on how explicitly entities are mentioned
+
+entity_types:
+  - name: PERSON
+    description: "A human individual - named person, role holder, or specific individual"
+    attributes:
+      required: [name]
+      optional: [title, role, email, organization, location]
+    identifiers: [name, email]
+    aliases: [INDIVIDUAL, HUMAN, USER]
+
+  - name: ORGANIZATION
+    description: "A company, institution, government body, or organized group"
+    attributes:
+      required: [name]
+      optional: [type, industry, location, website, founded]
+    identifiers: [name, website]
+    aliases: [COMPANY, INSTITUTION, AGENCY, GROUP]
+
+  - name: LOCATION
+    description: "A geographic place - city, country, region, address, or landmark"
+    attributes:
+      required: [name]
+      optional: [type, country, coordinates, address]
+    identifiers: [name, coordinates]
+    aliases: [PLACE, GEOGRAPHY, ADDRESS]
+
+  - name: CONCEPT
+    description: "An abstract idea, topic, theory, methodology, or field of study"
+    attributes:
+      required: [name]
+      optional: [category, definition, related_concepts]
+    identifiers: [name]
+    aliases: [IDEA, TOPIC, THEORY, METHODOLOGY]
+
+  - name: EVENT
+    description: "A significant occurrence, meeting, conference, or milestone"
+    attributes:
+      required: [name]
+      optional: [date, location, participants, type]
+    identifiers: [name, date]
+    aliases: [OCCURRENCE, MEETING, CONFERENCE, MILESTONE]
+
+  - name: TECHNOLOGY
+    description: "A tool, software, platform, programming language, or technical system"
+    attributes:
+      required: [name]
+      optional: [type, version, vendor, category]
+    identifiers: [name, version]
+    aliases: [TOOL, SOFTWARE, PLATFORM, SYSTEM]
+
+  - name: PRODUCT
+    description: "A commercial product, service offering, or deliverable"
+    attributes:
+      required: [name]
+      optional: [vendor, category, price, version]
+    identifiers: [name, vendor]
+    aliases: [SERVICE, OFFERING]
+
+  - name: DATE
+    description: "A specific date, time period, or temporal reference"
+    attributes:
+      required: [value]
+      optional: [type, precision]
+    identifiers: [value]
+    aliases: [TIME, PERIOD, TIMESTAMP]
+
+relationship_types:
+  - name: WORKS_FOR
+    description: "Employment or contractor relationship"
+    source_types: [PERSON]
+    target_types: [ORGANIZATION]
+
+  - name: KNOWS
+    description: "Personal or professional acquaintance"
+    source_types: [PERSON]
+    target_types: [PERSON]
+    bidirectional: true
+
+  - name: MANAGES
+    description: "Management or supervisory relationship"
+    source_types: [PERSON]
+    target_types: [PERSON, ORGANIZATION, PRODUCT]
+
+  - name: REPORTS_TO
+    description: "Reporting hierarchy relationship"
+    source_types: [PERSON]
+    target_types: [PERSON]
+
+  - name: COLLABORATES_WITH
+    description: "Working together on projects or initiatives"
+    source_types: [PERSON, ORGANIZATION]
+    target_types: [PERSON, ORGANIZATION]
+    bidirectional: true
+
+  - name: OWNS
+    description: "Ownership or possession relationship"
+    source_types: [PERSON, ORGANIZATION]
+    target_types: [ORGANIZATION, PRODUCT, TECHNOLOGY]
+
+  - name: PART_OF
+    description: "Component or membership relationship"
+    source_types: ["*"]
+    target_types: ["*"]
+
+  - name: LOCATED_IN
+    description: "Physical or headquarters location"
+    source_types: [PERSON, ORGANIZATION, EVENT]
+    target_types: [LOCATION]
+
+  - name: HEADQUARTERED_IN
+    description: "Organization's primary location"
+    source_types: [ORGANIZATION]
+    target_types: [LOCATION]
+
+  - name: RELATES_TO
+    description: "General association or connection"
+    source_types: ["*"]
+    target_types: ["*"]
+
+  - name: DEPENDS_ON
+    description: "Dependency or prerequisite relationship"
+    source_types: [TECHNOLOGY, PRODUCT, CONCEPT]
+    target_types: [TECHNOLOGY, PRODUCT, CONCEPT]
+
+  - name: IMPLEMENTS
+    description: "Implementation or realization of concept/standard"
+    source_types: [TECHNOLOGY, PRODUCT]
+    target_types: [CONCEPT, TECHNOLOGY]
+
+  - name: PRECEDES
+    description: "Temporal ordering - comes before"
+    source_types: [EVENT]
+    target_types: [EVENT]
+
+  - name: FOLLOWS
+    description: "Temporal ordering - comes after"
+    source_types: [EVENT]
+    target_types: [EVENT]
+
+  - name: ASSOCIATED_WITH
+    description: "General association without specific semantics"
+    source_types: ["*"]
+    target_types: ["*"]
+    bidirectional: true
+
+  - name: COMPETES_WITH
+    description: "Competitive relationship in market"
+    source_types: [ORGANIZATION, PRODUCT]
+    target_types: [ORGANIZATION, PRODUCT]
+    bidirectional: true
+
+  - name: PARTNERS_WITH
+    description: "Partnership or alliance"
+    source_types: [ORGANIZATION]
+    target_types: [ORGANIZATION]
+    bidirectional: true
+
+  - name: USES
+    description: "Usage or utilization relationship"
+    source_types: [PERSON, ORGANIZATION]
+    target_types: [TECHNOLOGY, PRODUCT]
+
+  - name: CREATED_BY
+    description: "Creation or authorship"
+    source_types: [PRODUCT, TECHNOLOGY, CONCEPT]
+    target_types: [PERSON, ORGANIZATION]
+
+# No tool-specific schemas for general expertise
+tool_schemas: {}
+
+# Basic correlation rules
+correlation_rules:
+  - name: person_email_match
+    description: "Match people by email address"
+    match_fields: [email]
+    entity_types: [PERSON]
+    confidence: 0.95
+
+  - name: org_name_match
+    description: "Match organizations by name"
+    match_fields: [name]
+    entity_types: [ORGANIZATION]
+    confidence: 0.9
+
+# No inference rules for general expertise
+inference_rules: []
+
+confidence:
+  min_entity: 0.5
+  min_relationship: 0.5
+  min_inferred: 0.3
+
+expansion:
+  enabled: true
+  depth: 2
+  cross_tool_unification: true
+  relationship_inference: false

@@ -1,0 +1,380 @@
+# Healthcare Domain Expertise
+# For extracting entities from healthcare and medical documentation
+
+name: healthcare
+version: "1.0.0"
+description: "Expert knowledge for healthcare and medical domains"
+
+extends:
+  - builtin:general
+
+system_prompt: |
+  You are an expert in healthcare data and medical documentation. You understand:
+
+  - Electronic Health Records (EHR) systems (Epic, Cerner, Allscripts)
+  - Medical terminology and clinical concepts
+  - Healthcare workflows and care coordination
+  - Medical coding systems (ICD-10, CPT, SNOMED, LOINC)
+  - Patient journeys and care episodes
+  - Healthcare regulations (HIPAA) and compliance requirements
+  - Clinical trials and research protocols
+
+  When extracting entities:
+  - Identify patients, providers, and care team members
+  - Extract diagnoses, procedures, and medications
+  - Map care episodes and clinical encounters
+  - Note lab results and vital signs with their values
+  - Capture care plans and treatment protocols
+  - Identify healthcare facilities and departments
+
+  IMPORTANT: Be mindful of PHI (Protected Health Information) and never extract
+  identifiable patient information unless specifically authorized.
+
+entity_types:
+  - name: PATIENT
+    description: "A healthcare patient (use anonymized IDs only)"
+    attributes:
+      required: [identifier]
+      optional: [age_range, gender, conditions, care_team]
+    identifiers: [identifier]
+
+  - name: PROVIDER
+    description: "A healthcare provider (physician, nurse, specialist)"
+    attributes:
+      required: [name]
+      optional: [specialty, credentials, npi, organization, department]
+    identifiers: [name, npi]
+
+  - name: DIAGNOSIS
+    description: "A medical diagnosis or condition"
+    attributes:
+      required: [name]
+      optional: [icd_code, severity, onset_date, status, category]
+    identifiers: [icd_code, name]
+
+  - name: PROCEDURE
+    description: "A medical procedure or intervention"
+    attributes:
+      required: [name]
+      optional: [cpt_code, date, provider, outcome, body_site]
+    identifiers: [cpt_code, name]
+
+  - name: MEDICATION
+    description: "A prescribed or administered medication"
+    attributes:
+      required: [name]
+      optional: [dosage, frequency, route, ndc_code, prescriber, start_date, end_date]
+    identifiers: [name, ndc_code]
+
+  - name: LAB_RESULT
+    description: "A laboratory test result"
+    attributes:
+      required: [test_name]
+      optional: [value, unit, reference_range, loinc_code, date, status]
+    identifiers: [test_name, loinc_code]
+
+  - name: VITAL_SIGN
+    description: "A vital sign measurement"
+    attributes:
+      required: [type]
+      optional: [value, unit, date, status]
+    identifiers: [type, date]
+
+  - name: ENCOUNTER
+    description: "A clinical encounter or visit"
+    attributes:
+      required: [type]
+      optional: [date, provider, facility, department, reason, outcome]
+    identifiers: [type, date]
+
+  - name: CARE_EPISODE
+    description: "A care episode or treatment period"
+    attributes:
+      required: [description]
+      optional: [start_date, end_date, diagnoses, providers, facility]
+    identifiers: [description, start_date]
+
+  - name: CARE_PLAN
+    description: "A treatment or care plan"
+    attributes:
+      required: [name]
+      optional: [goals, interventions, timeline, care_team, status]
+    identifiers: [name]
+
+  - name: FACILITY
+    description: "A healthcare facility or organization"
+    attributes:
+      required: [name]
+      optional: [type, location, departments, npi]
+    identifiers: [name, npi]
+
+  - name: DEPARTMENT
+    description: "A hospital department or clinical unit"
+    attributes:
+      required: [name]
+      optional: [facility, head, specialty]
+    identifiers: [name, facility]
+
+  - name: INSURANCE
+    description: "An insurance plan or payer"
+    attributes:
+      required: [name]
+      optional: [type, plan_type, coverage]
+    identifiers: [name]
+
+  - name: CLINICAL_TRIAL
+    description: "A clinical trial or research study"
+    attributes:
+      required: [name]
+      optional: [nct_number, phase, sponsor, status, enrollment]
+    identifiers: [nct_number, name]
+
+  - name: SYMPTOM
+    description: "A reported symptom or complaint"
+    attributes:
+      required: [description]
+      optional: [severity, duration, onset, body_site]
+    identifiers: [description]
+
+  - name: ALLERGY
+    description: "A documented allergy"
+    attributes:
+      required: [allergen]
+      optional: [reaction, severity, onset_date]
+    identifiers: [allergen]
+
+  - name: MEDICAL_DEVICE
+    description: "A medical device or equipment"
+    attributes:
+      required: [name]
+      optional: [type, manufacturer, model, implant_date]
+    identifiers: [name]
+
+  - name: REFERRAL
+    description: "A clinical referral"
+    attributes:
+      required: [specialty]
+      optional: [referring_provider, receiving_provider, reason, date, status]
+    identifiers: [specialty, date]
+
+relationship_types:
+  - name: DIAGNOSED_WITH
+    description: "Patient diagnosed with condition"
+    source_types: [PATIENT]
+    target_types: [DIAGNOSIS]
+
+  - name: UNDERWENT
+    description: "Patient underwent procedure"
+    source_types: [PATIENT]
+    target_types: [PROCEDURE]
+
+  - name: PRESCRIBED
+    description: "Provider prescribed medication"
+    source_types: [PROVIDER]
+    target_types: [MEDICATION]
+
+  - name: TAKING
+    description: "Patient taking medication"
+    source_types: [PATIENT]
+    target_types: [MEDICATION]
+
+  - name: ORDERED
+    description: "Provider ordered test/procedure"
+    source_types: [PROVIDER]
+    target_types: [LAB_RESULT, PROCEDURE]
+
+  - name: TREATED_BY
+    description: "Patient treated by provider"
+    source_types: [PATIENT]
+    target_types: [PROVIDER]
+
+  - name: TREATS
+    description: "Medication/procedure treats condition"
+    source_types: [MEDICATION, PROCEDURE]
+    target_types: [DIAGNOSIS]
+
+  - name: INDICATES
+    description: "Result indicates condition"
+    source_types: [LAB_RESULT, VITAL_SIGN, SYMPTOM]
+    target_types: [DIAGNOSIS]
+
+  - name: PART_OF_EPISODE
+    description: "Encounter part of care episode"
+    source_types: [ENCOUNTER]
+    target_types: [CARE_EPISODE]
+
+  - name: FOLLOWS_PLAN
+    description: "Care follows care plan"
+    source_types: [CARE_EPISODE, ENCOUNTER]
+    target_types: [CARE_PLAN]
+
+  - name: WORKS_AT
+    description: "Provider works at facility"
+    source_types: [PROVIDER]
+    target_types: [FACILITY, DEPARTMENT]
+
+  - name: ENROLLED_IN
+    description: "Patient enrolled in trial"
+    source_types: [PATIENT]
+    target_types: [CLINICAL_TRIAL]
+
+  - name: CAUSED_BY
+    description: "Condition caused by another"
+    source_types: [DIAGNOSIS, SYMPTOM]
+    target_types: [DIAGNOSIS, MEDICATION, PROCEDURE]
+
+  - name: ALLERGIC_TO
+    description: "Patient allergic to substance"
+    source_types: [PATIENT]
+    target_types: [ALLERGY]
+
+  - name: REFERRED_TO
+    description: "Referral to specialty/provider"
+    source_types: [REFERRAL]
+    target_types: [PROVIDER, DEPARTMENT]
+
+  - name: REFERRED_BY
+    description: "Referral from provider"
+    source_types: [REFERRAL]
+    target_types: [PROVIDER]
+
+  - name: IMPLANTED
+    description: "Device implanted in patient"
+    source_types: [MEDICAL_DEVICE]
+    target_types: [PATIENT]
+
+  - name: COVERED_BY
+    description: "Patient covered by insurance"
+    source_types: [PATIENT]
+    target_types: [INSURANCE]
+
+tool_schemas:
+  coding_systems:
+    icd10:
+      pattern: "[A-TV-Z][0-9][0-9AB]\\.?[0-9A-TV-Z]{0,4}"
+      categories:
+        - A00-B99: Infectious diseases
+        - C00-D49: Neoplasms
+        - D50-D89: Blood diseases
+        - E00-E89: Endocrine diseases
+        - F01-F99: Mental disorders
+        - G00-G99: Nervous system
+        - H00-H59: Eye and adnexa
+        - I00-I99: Circulatory system
+        - J00-J99: Respiratory system
+        - K00-K95: Digestive system
+    cpt:
+      pattern: "\\d{5}"
+      ranges:
+        evaluation_management: "99201-99499"
+        anesthesia: "00100-01999"
+        surgery: "10004-69990"
+        radiology: "70010-79999"
+        pathology: "80047-89398"
+        medicine: "90281-99607"
+    loinc:
+      pattern: "\\d{1,5}-\\d"
+
+  vital_signs:
+    types:
+      - blood_pressure: {systolic: "mmHg", diastolic: "mmHg"}
+      - heart_rate: {unit: "bpm"}
+      - temperature: {unit: "°F or °C"}
+      - respiratory_rate: {unit: "breaths/min"}
+      - oxygen_saturation: {unit: "%"}
+      - weight: {unit: "kg or lbs"}
+      - height: {unit: "cm or in"}
+      - bmi: {unit: "kg/m²"}
+
+  encounter_types:
+    - inpatient
+    - outpatient
+    - emergency
+    - observation
+    - telehealth
+    - home_health
+
+correlation_rules:
+  - name: icd_code_match
+    description: "Match ICD-10 diagnosis codes"
+    pattern: "[A-TV-Z][0-9][0-9AB]\\.?[0-9A-TV-Z]{0,4}"
+    entity_types: [DIAGNOSIS]
+    confidence: 0.95
+
+  - name: cpt_code_match
+    description: "Match CPT procedure codes"
+    pattern: "\\d{5}"
+    entity_types: [PROCEDURE]
+    confidence: 0.9
+
+  - name: npi_match
+    description: "Match NPI numbers"
+    pattern: "\\d{10}"
+    match_fields: [npi]
+    entity_types: [PROVIDER, FACILITY]
+    confidence: 0.95
+
+  - name: medication_name_match
+    description: "Match medication names"
+    match_fields: [name]
+    entity_types: [MEDICATION]
+    confidence: 0.85
+
+inference_rules:
+  - name: care_team_membership
+    description: "Provider treating patient is part of care team"
+    when:
+      - relationship: TREATED_BY
+        source_type: PATIENT
+        target_type: PROVIDER
+    then:
+      relationship: MEMBER_OF_CARE_TEAM
+      source: first.target
+      target: first.source
+    confidence: 0.85
+
+  - name: medication_condition_link
+    description: "Medication prescribed likely treats diagnosed condition"
+    when:
+      - relationship: TAKING
+        source_type: PATIENT
+        target_type: MEDICATION
+      - relationship: DIAGNOSED_WITH
+        source_type: PATIENT
+        target_type: DIAGNOSIS
+    then:
+      relationship: TREATS
+      source: first.target
+      target: second.target
+    confidence: 0.6
+
+  - name: provider_facility_dept
+    description: "Provider in department works at department's facility"
+    when:
+      - relationship: WORKS_AT
+        source_type: PROVIDER
+        target_type: DEPARTMENT
+      - relationship: PART_OF
+        source_type: DEPARTMENT
+        target_type: FACILITY
+    then:
+      relationship: WORKS_AT
+      source: first.source
+      target: second.target
+    confidence: 0.95
+
+confidence:
+  min_entity: 0.6
+  min_relationship: 0.5
+  min_inferred: 0.4
+
+expansion:
+  enabled: true
+  depth: 2
+  cross_tool_unification: true
+  relationship_inference: true
+
+metadata:
+  domain: "Healthcare"
+  compliance: ["HIPAA"]
+  note: "Always ensure PHI is handled according to HIPAA regulations"
