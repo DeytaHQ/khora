@@ -115,7 +115,9 @@ class Entity:
         self.mention_count += other.mention_count
 
         # Merge attributes (prefer existing)
-        for key, value in other.attributes.items():
+        # Handle case where attributes might be a list instead of dict (defensive)
+        other_attrs = other.attributes if isinstance(other.attributes, dict) else {}
+        for key, value in other_attrs.items():
             if key not in self.attributes:
                 self.attributes[key] = value
 

@@ -321,12 +321,17 @@ class LLMEntityExtractor(EntityExtractor):
                         valid_until=t.get("valid_until"),
                     )
 
+                # Ensure attributes is a dict (LLM sometimes returns a list)
+                attrs = e.get("attributes", {})
+                if not isinstance(attrs, dict):
+                    attrs = {}
+
                 entities.append(
                     ExtractedEntity(
                         name=e.get("name", ""),
                         entity_type=e.get("entity_type", "CONCEPT"),
                         description=e.get("description", ""),
-                        attributes=e.get("attributes", {}),
+                        attributes=attrs,
                         aliases=e.get("aliases", []),
                         temporal=temporal,
                         confidence=e.get("confidence", 0.9),
