@@ -2,10 +2,13 @@
 
 Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
 Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph
+
+Supports parallel document processing with configurable concurrency.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -83,14 +86,15 @@ async def process_document(
     embedding_model: str = "text-embedding-3-small",
     extraction_model: str = "gpt-4o-mini",
     skill_name: str = "general_entities",
+    max_concurrent_extractions: int = 10,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
     Steps:
     1. Chunk the document
-    2. Generate embeddings for chunks
-    3. Extract entities and relationships
-    4. Store everything
+    2. Generate embeddings for chunks (batched)
+    3. Extract entities and relationships (parallel)
+    4. Store everything (batched)
     """
     from ..tasks import chunk_document, embed_chunks, extract_entities
 
@@ -107,40 +111,48 @@ async def process_document(
         )
         logger.info(f"Document {document.id}: created {len(chunks)} chunks")
 
-        # Step 2: Embed
+        # Step 2: Embed (already batched internally)
         chunks = await embed_chunks(chunks, model=embedding_model)
         logger.info(f"Document {document.id}: generated embeddings")
 
-        # Step 3: Extract entities
+        # Step 3: Extract entities (parallel extraction across chunks)
         entities, relationships = await extract_entities(
             chunks,
             skill_name=skill_name,
             model=extraction_model,
+            max_concurrent=max_concurrent_extractions,
         )
         logger.info(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
 
-        # Step 4: Store chunks
+        # Step 4: Store chunks (batched)
         await storage.create_chunks_batch(chunks)
 
-        # Step 5: Store entities
-        stored_entities = []
-        for entity in entities:
-            # Check for existing entity (dedup)
-            existing = await storage.get_entity_by_name(
-                document.namespace_id,
-                entity.name,
-                entity.entity_type.value,
-            )
-            if existing:
-                existing.merge_with(entity)
-                stored = await storage.update_entity(existing)
-            else:
-                stored = await storage.create_entity(entity)
-            stored_entities.append(stored)
+        # Step 5: Store entities with deduplication
+        # Process entities concurrently but with semaphore to avoid overwhelming the DB
+        entity_semaphore = asyncio.Semaphore(20)
 
-        # Step 6: Store relationships
-        for relationship in relationships:
-            await storage.create_relationship(relationship)
+        async def store_entity(entity):
+            async with entity_semaphore:
+                existing = await storage.get_entity_by_name(
+                    document.namespace_id,
+                    entity.name,
+                    entity.entity_type.value,
+                )
+                if existing:
+                    existing.merge_with(entity)
+                    return await storage.update_entity(existing)
+                else:
+                    return await storage.create_entity(entity)
+
+        await asyncio.gather(*[store_entity(e) for e in entities])
+
+        # Step 6: Store relationships concurrently
+        async def store_relationship(rel):
+            async with entity_semaphore:
+                return await storage.create_relationship(rel)
+
+        if relationships:
+            await asyncio.gather(*[store_relationship(r) for r in relationships])
 
         # Mark as completed
         document.mark_completed(len(chunks), len(entities))
@@ -171,12 +183,14 @@ async def ingest_documents(
     chunk_size: int = 512,
     embedding_model: str = "text-embedding-3-small",
     extraction_model: str = "gpt-4o-mini",
+    max_concurrent_documents: int = 5,
+    max_concurrent_extractions: int = 10,
     **kwargs,
 ) -> dict[str, Any]:
-    """Two-phase document ingestion flow.
+    """Two-phase document ingestion flow with parallel processing.
 
     Phase 1: Stage documents (checksum-based change detection)
-    Phase 2: Process changed documents (chunk, embed, extract)
+    Phase 2: Process changed documents in parallel (chunk, embed, extract)
 
     Args:
         namespace_id: Target namespace
@@ -187,6 +201,8 @@ async def ingest_documents(
         chunk_size: Target chunk size
         embedding_model: Model for embeddings
         extraction_model: Model for extraction
+        max_concurrent_documents: Maximum documents to process in parallel
+        max_concurrent_extractions: Maximum concurrent LLM extractions per document
 
     Returns:
         Summary of ingestion results
@@ -196,12 +212,15 @@ async def ingest_documents(
 
     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
 
-    # Phase 1: Stage documents
-    staged_docs = []
-    for doc_input in documents:
-        doc = await stage_document(doc_input, namespace_id, storage)
-        if doc:
-            staged_docs.append(doc)
+    # Phase 1: Stage documents (can run in parallel too)
+    staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
+
+    async def stage_with_limit(doc_input):
+        async with staging_semaphore:
+            return await stage_document(doc_input, namespace_id, storage)
+
+    staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+    staged_docs = [doc for doc in staged_results if doc is not None]
 
     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
 
@@ -215,31 +234,49 @@ async def ingest_documents(
             "total_relationships": 0,
         }
 
-    # Phase 2: Process staged documents
-    results = []
-    for doc in staged_docs:
-        result = await process_document(
-            doc,
-            storage,
-            chunk_strategy=chunk_strategy,
-            chunk_size=chunk_size,
-            embedding_model=embedding_model,
-            extraction_model=extraction_model,
-            skill_name=skill_name,
-        )
-        results.append(result)
+    # Phase 2: Process staged documents in parallel with controlled concurrency
+    doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+
+    async def process_with_limit(doc):
+        async with doc_semaphore:
+            return await process_document(
+                doc,
+                storage,
+                chunk_strategy=chunk_strategy,
+                chunk_size=chunk_size,
+                embedding_model=embedding_model,
+                extraction_model=extraction_model,
+                skill_name=skill_name,
+                max_concurrent_extractions=max_concurrent_extractions,
+            )
+
+    results = await asyncio.gather(
+        *[process_with_limit(doc) for doc in staged_docs],
+        return_exceptions=True,
+    )
+
+    # Filter out exceptions and count errors
+    successful_results = []
+    error_count = 0
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Document processing failed: {result}")
+            error_count += 1
+        else:
+            successful_results.append(result)
 
     # Aggregate results
-    total_chunks = sum(r["chunks"] for r in results)
-    total_entities = sum(r["entities"] for r in results)
-    total_relationships = sum(r["relationships"] for r in results)
+    total_chunks = sum(r["chunks"] for r in successful_results)
+    total_entities = sum(r["entities"] for r in successful_results)
+    total_relationships = sum(r["relationships"] for r in successful_results)
 
-    logger.info(f"Ingestion complete: {len(results)} documents processed")
+    logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
 
     return {
         "total_documents": len(documents),
-        "processed_documents": len(results),
-        "skipped_documents": len(documents) - len(results),
+        "processed_documents": len(successful_results),
+        "skipped_documents": len(documents) - len(staged_docs),
+        "failed_documents": error_count,
         "total_chunks": total_chunks,
         "total_entities": total_entities,
         "total_relationships": total_relationships,

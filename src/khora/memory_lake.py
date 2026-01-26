@@ -6,6 +6,7 @@ Provides a simple, unified interface for memory storage and retrieval.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -330,6 +331,74 @@ class MemoryLake:
             entities_extracted=result["entities"],
             relationships_created=result["relationships"],
         )
+
+    async def remember_batch(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        namespace: str | UUID | None = None,
+        skill_name: str = "general_entities",
+        max_concurrent: int = 5,
+    ) -> list[RememberResult]:
+        """Store multiple documents in the memory lake concurrently.
+
+        This is more efficient than calling remember() for each document
+        as it processes documents in parallel with controlled concurrency.
+
+        Args:
+            documents: List of document dicts with keys:
+                - content: str (required)
+                - title: str (optional)
+                - source: str (optional)
+                - metadata: dict (optional)
+            namespace: Namespace name, ID, or None for default
+            skill_name: Extraction skill to use
+            max_concurrent: Maximum concurrent document processing
+
+        Returns:
+            List of RememberResult objects (one per document)
+        """
+        if not documents:
+            return []
+
+        namespace_id = await self._resolve_namespace(namespace)
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def process_single(doc_data: dict[str, Any]) -> RememberResult:
+            async with semaphore:
+                return await self.remember(
+                    content=doc_data.get("content", ""),
+                    namespace=namespace_id,
+                    title=doc_data.get("title", ""),
+                    source=doc_data.get("source", ""),
+                    metadata=doc_data.get("metadata"),
+                    skill_name=doc_data.get("skill_name", skill_name),
+                )
+
+        results = await asyncio.gather(
+            *[process_single(doc) for doc in documents],
+            return_exceptions=True,
+        )
+
+        # Convert exceptions to failed results
+        final_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Document {i} failed: {result}")
+                final_results.append(
+                    RememberResult(
+                        document_id=UUID("00000000-0000-0000-0000-000000000000"),
+                        namespace_id=namespace_id,
+                        chunks_created=0,
+                        entities_extracted=0,
+                        relationships_created=0,
+                        metadata={"error": str(result), "failed": True},
+                    )
+                )
+            else:
+                final_results.append(result)
+
+        return final_results
 
     async def recall(
         self,

@@ -5219,110 +5219,116 @@ README.md
  16:     *,
  17:     skill_name: str = "general_entities",
  18:     model: str = "gpt-4o-mini",
- 19: ) -> tuple[list[Entity], list[Relationship]]:
- 20:     """Extract entities and relationships from chunks.
- 21: 
- 22:     Args:
- 23:         chunks: Chunks to extract from
- 24:         skill_name: Extraction skill to use
- 25:         model: LLM model for extraction
- 26: 
- 27:     Returns:
- 28:         Tuple of (entities, relationships)
- 29:     """
- 30:     from khora.core.models import Entity, Relationship
- 31:     from khora.core.models.entity import EntityType, RelationshipType
- 32:     from khora.extraction.extractors import LLMEntityExtractor
- 33:     from khora.extraction.skills.registry import get_default_registry
- 34: 
- 35:     if not chunks:
- 36:         return [], []
- 37: 
- 38:     # Get extraction skill
- 39:     registry = get_default_registry()
- 40:     skill = registry.get_or_default(skill_name)
+ 19:     max_concurrent: int = 10,
+ 20: ) -> tuple[list[Entity], list[Relationship]]:
+ 21:     """Extract entities and relationships from chunks.
+ 22: 
+ 23:     Uses batch extraction for parallel processing of multiple chunks.
+ 24: 
+ 25:     Args:
+ 26:         chunks: Chunks to extract from
+ 27:         skill_name: Extraction skill to use
+ 28:         model: LLM model for extraction
+ 29:         max_concurrent: Maximum concurrent extractions
+ 30: 
+ 31:     Returns:
+ 32:         Tuple of (entities, relationships)
+ 33:     """
+ 34:     from khora.core.models import Entity, Relationship
+ 35:     from khora.core.models.entity import EntityType, RelationshipType
+ 36:     from khora.extraction.extractors import LLMEntityExtractor
+ 37:     from khora.extraction.skills.registry import get_default_registry
+ 38: 
+ 39:     if not chunks:
+ 40:         return [], []
  41: 
- 42:     # Create extractor
- 43:     extractor = LLMEntityExtractor(model=model)
- 44: 
- 45:     # Extract from each chunk
- 46:     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
- 47:     all_relationships: list[Relationship] = []
+ 42:     # Get extraction skill
+ 43:     registry = get_default_registry()
+ 44:     skill = registry.get_or_default(skill_name)
+ 45: 
+ 46:     # Create extractor with concurrency limit
+ 47:     extractor = LLMEntityExtractor(model=model, max_concurrent=max_concurrent)
  48: 
- 49:     for chunk in chunks:
- 50:         result = await extractor.extract(chunk.content, entity_types=skill.entity_types)
- 51: 
- 52:         # Process entities
- 53:         for extracted in result.entities:
- 54:             if extracted.confidence < skill.min_entity_confidence:
- 55:                 continue
+ 49:     # Extract from all chunks in parallel using batch extraction
+ 50:     texts = [chunk.content for chunk in chunks]
+ 51:     results = await extractor.extract_batch(texts, entity_types=skill.entity_types)
+ 52: 
+ 53:     # Process results
+ 54:     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
+ 55:     all_relationships: list[Relationship] = []
  56: 
- 57:             # Deduplicate by name
- 58:             key = f"{extracted.name}:{extracted.entity_type}"
- 59:             if key in all_entities:
- 60:                 # Merge into existing
- 61:                 existing = all_entities[key]
- 62:                 existing.mention_count += 1
- 63:                 if chunk.document_id not in existing.source_document_ids:
- 64:                     existing.source_document_ids.append(chunk.document_id)
- 65:                 if chunk.id not in existing.source_chunk_ids:
- 66:                     existing.source_chunk_ids.append(chunk.id)
- 67:             else:
- 68:                 # Create new entity
- 69:                 entity_type = EntityType.CONCEPT
- 70:                 try:
- 71:                     entity_type = EntityType(extracted.entity_type)
- 72:                 except ValueError:
- 73:                     pass
- 74: 
- 75:                 entity = Entity(
- 76:                     namespace_id=chunk.namespace_id,
- 77:                     name=extracted.name,
- 78:                     entity_type=entity_type,
- 79:                     description=extracted.description,
- 80:                     attributes=extracted.attributes,
- 81:                     source_document_ids=[chunk.document_id],
- 82:                     source_chunk_ids=[chunk.id],
- 83:                     confidence=extracted.confidence,
- 84:                 )
- 85:                 all_entities[key] = entity
- 86: 
- 87:         # Process relationships
- 88:         for extracted_rel in result.relationships:
- 89:             if extracted_rel.confidence < skill.min_relationship_confidence:
- 90:                 continue
- 91: 
- 92:             rel_type = RelationshipType.RELATES_TO
- 93:             try:
- 94:                 rel_type = RelationshipType(extracted_rel.relationship_type)
- 95:             except ValueError:
- 96:                 pass
+ 57:     for chunk, result in zip(chunks, results):
+ 58:         # Process entities
+ 59:         for extracted in result.entities:
+ 60:             if extracted.confidence < skill.min_entity_confidence:
+ 61:                 continue
+ 62: 
+ 63:             # Deduplicate by name
+ 64:             key = f"{extracted.name}:{extracted.entity_type}"
+ 65:             if key in all_entities:
+ 66:                 # Merge into existing
+ 67:                 existing = all_entities[key]
+ 68:                 existing.mention_count += 1
+ 69:                 if chunk.document_id not in existing.source_document_ids:
+ 70:                     existing.source_document_ids.append(chunk.document_id)
+ 71:                 if chunk.id not in existing.source_chunk_ids:
+ 72:                     existing.source_chunk_ids.append(chunk.id)
+ 73:             else:
+ 74:                 # Create new entity
+ 75:                 entity_type = EntityType.CONCEPT
+ 76:                 try:
+ 77:                     entity_type = EntityType(extracted.entity_type)
+ 78:                 except ValueError:
+ 79:                     pass
+ 80: 
+ 81:                 entity = Entity(
+ 82:                     namespace_id=chunk.namespace_id,
+ 83:                     name=extracted.name,
+ 84:                     entity_type=entity_type,
+ 85:                     description=extracted.description,
+ 86:                     attributes=extracted.attributes,
+ 87:                     source_document_ids=[chunk.document_id],
+ 88:                     source_chunk_ids=[chunk.id],
+ 89:                     confidence=extracted.confidence,
+ 90:                 )
+ 91:                 all_entities[key] = entity
+ 92: 
+ 93:         # Process relationships
+ 94:         for extracted_rel in result.relationships:
+ 95:             if extracted_rel.confidence < skill.min_relationship_confidence:
+ 96:                 continue
  97: 
- 98:             # Find source and target entities
- 99:             source_key = next(
-100:                 (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
-101:                 None,
-102:             )
-103:             target_key = next(
-104:                 (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
-105:                 None,
-106:             )
-107: 
-108:             if source_key and target_key:
-109:                 relationship = Relationship(
-110:                     namespace_id=chunk.namespace_id,
-111:                     source_entity_id=all_entities[source_key].id,
-112:                     target_entity_id=all_entities[target_key].id,
-113:                     relationship_type=rel_type,
-114:                     description=extracted_rel.description,
-115:                     properties=extracted_rel.properties,
-116:                     source_document_ids=[chunk.document_id],
-117:                     source_chunk_ids=[chunk.id],
-118:                     confidence=extracted_rel.confidence,
-119:                 )
-120:                 all_relationships.append(relationship)
-121: 
-122:     return list(all_entities.values()), all_relationships
+ 98:             rel_type = RelationshipType.RELATES_TO
+ 99:             try:
+100:                 rel_type = RelationshipType(extracted_rel.relationship_type)
+101:             except ValueError:
+102:                 pass
+103: 
+104:             # Find source and target entities
+105:             source_key = next(
+106:                 (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
+107:                 None,
+108:             )
+109:             target_key = next(
+110:                 (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
+111:                 None,
+112:             )
+113: 
+114:             if source_key and target_key:
+115:                 relationship = Relationship(
+116:                     namespace_id=chunk.namespace_id,
+117:                     source_entity_id=all_entities[source_key].id,
+118:                     target_entity_id=all_entities[target_key].id,
+119:                     relationship_type=rel_type,
+120:                     description=extracted_rel.description,
+121:                     properties=extracted_rel.properties,
+122:                     source_document_ids=[chunk.document_id],
+123:                     source_chunk_ids=[chunk.id],
+124:                     confidence=extracted_rel.confidence,
+125:                 )
+126:                 all_relationships.append(relationship)
+127: 
+128:     return list(all_entities.values()), all_relationships
 ````
 
 ## File: src/khora/pipelines/__init__.py
@@ -7469,477 +7475,6 @@ README.md
 327:                 "chunk_embeddings": chunk_count.scalar_one(),
 328:                 "entity_embeddings": entity_count.scalar_one(),
 329:             }
-````
-
-## File: src/khora/storage/backends/postgresql.py
-````python
-  1: """PostgreSQL backend for relational data storage.
-  2: 
-  3: Handles storage of documents, tenancy data, ACLs, and sync checkpoints
-  4: using SQLAlchemy async with asyncpg.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from datetime import UTC, datetime
- 10: from typing import TYPE_CHECKING
- 11: from uuid import UUID
- 12: 
- 13: from loguru import logger
- 14: from sqlalchemy import select, update
- 15: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
- 16: 
- 17: from khora.core.models import Document, DocumentMetadata, MemoryNamespace, Organization, TenancyMode, Workspace
- 18: from khora.core.models.document import DocumentStatus
- 19: from khora.db.models import (
- 20:     Base,
- 21:     DocumentModel,
- 22:     MemoryNamespaceModel,
- 23:     OrganizationModel,
- 24:     SyncCheckpointModel,
- 25:     WorkspaceModel,
- 26: )
- 27: 
- 28: if TYPE_CHECKING:
- 29:     pass
- 30: 
- 31: 
- 32: class PostgreSQLBackend:
- 33:     """PostgreSQL backend for relational data.
- 34: 
- 35:     Handles all relational data operations including multi-tenancy
- 36:     hierarchy, documents, and sync checkpoints.
- 37:     """
- 38: 
- 39:     def __init__(self, database_url: str, *, echo: bool = False, pool_size: int = 5, max_overflow: int = 10) -> None:
- 40:         """Initialize the PostgreSQL backend.
- 41: 
- 42:         Args:
- 43:             database_url: PostgreSQL connection URL
- 44:             echo: Enable SQL echo logging
- 45:             pool_size: Connection pool size
- 46:             max_overflow: Maximum overflow connections
- 47:         """
- 48:         # Convert to async URL if needed
- 49:         if database_url.startswith("postgresql://"):
- 50:             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
- 51:         elif database_url.startswith("postgres://"):
- 52:             database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
- 53: 
- 54:         self._database_url = database_url
- 55:         self._echo = echo
- 56:         self._pool_size = pool_size
- 57:         self._max_overflow = max_overflow
- 58:         self._engine: AsyncEngine | None = None
- 59:         self._session_factory: async_sessionmaker[AsyncSession] | None = None
- 60: 
- 61:     async def connect(self) -> None:
- 62:         """Establish connection to the database."""
- 63:         if self._engine is not None:
- 64:             return
- 65: 
- 66:         logger.info("Connecting to PostgreSQL...")
- 67:         self._engine = create_async_engine(
- 68:             self._database_url,
- 69:             echo=self._echo,
- 70:             pool_size=self._pool_size,
- 71:             max_overflow=self._max_overflow,
- 72:         )
- 73:         self._session_factory = async_sessionmaker(
- 74:             self._engine,
- 75:             class_=AsyncSession,
- 76:             expire_on_commit=False,
- 77:         )
- 78:         logger.info("Connected to PostgreSQL")
- 79: 
- 80:     async def disconnect(self) -> None:
- 81:         """Close database connections."""
- 82:         if self._engine is not None:
- 83:             logger.info("Disconnecting from PostgreSQL...")
- 84:             await self._engine.dispose()
- 85:             self._engine = None
- 86:             self._session_factory = None
- 87:             logger.info("Disconnected from PostgreSQL")
- 88: 
- 89:     async def is_healthy(self) -> bool:
- 90:         """Check if the backend is healthy and connected."""
- 91:         if self._engine is None or self._session_factory is None:
- 92:             return False
- 93:         try:
- 94:             async with self._session_factory() as session:
- 95:                 await session.execute(select(1))
- 96:             return True
- 97:         except Exception as e:
- 98:             logger.error(f"PostgreSQL health check failed: {e}")
- 99:             return False
-100: 
-101:     def _get_session(self) -> AsyncSession:
-102:         """Get a new database session."""
-103:         if self._session_factory is None:
-104:             raise RuntimeError("Backend not connected. Call connect() first.")
-105:         return self._session_factory()
-106: 
-107:     async def create_tables(self) -> None:
-108:         """Create all database tables (for testing/development)."""
-109:         if self._engine is None:
-110:             raise RuntimeError("Backend not connected. Call connect() first.")
-111:         async with self._engine.begin() as conn:
-112:             await conn.run_sync(Base.metadata.create_all)
-113: 
-114:     # =========================================================================
-115:     # Organization operations
-116:     # =========================================================================
-117: 
-118:     async def create_organization(self, org: Organization) -> Organization:
-119:         """Create a new organization."""
-120:         async with self._get_session() as session:
-121:             model = OrganizationModel(
-122:                 id=str(org.id),
-123:                 name=org.name,
-124:                 slug=org.slug,
-125:                 tenancy_mode=org.tenancy_mode,
-126:                 metadata_=org.metadata,
-127:                 created_at=org.created_at,
-128:                 updated_at=org.updated_at,
-129:             )
-130:             session.add(model)
-131:             await session.commit()
-132:             await session.refresh(model)
-133:             return self._org_model_to_domain(model)
-134: 
-135:     async def get_organization(self, org_id: UUID) -> Organization | None:
-136:         """Get an organization by ID."""
-137:         async with self._get_session() as session:
-138:             result = await session.execute(select(OrganizationModel).where(OrganizationModel.id == str(org_id)))
-139:             model = result.scalar_one_or_none()
-140:             return self._org_model_to_domain(model) if model else None
-141: 
-142:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
-143:         """Get an organization by slug."""
-144:         async with self._get_session() as session:
-145:             result = await session.execute(select(OrganizationModel).where(OrganizationModel.slug == slug))
-146:             model = result.scalar_one_or_none()
-147:             return self._org_model_to_domain(model) if model else None
-148: 
-149:     def _org_model_to_domain(self, model: OrganizationModel) -> Organization:
-150:         """Convert OrganizationModel to domain Organization."""
-151:         return Organization(
-152:             id=UUID(model.id),
-153:             name=model.name,
-154:             slug=model.slug,
-155:             tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
-156:             metadata=model.metadata_,
-157:             created_at=model.created_at,
-158:             updated_at=model.updated_at,
-159:         )
-160: 
-161:     # =========================================================================
-162:     # Workspace operations
-163:     # =========================================================================
-164: 
-165:     async def create_workspace(self, workspace: Workspace) -> Workspace:
-166:         """Create a new workspace."""
-167:         async with self._get_session() as session:
-168:             model = WorkspaceModel(
-169:                 id=str(workspace.id),
-170:                 organization_id=str(workspace.organization_id),
-171:                 name=workspace.name,
-172:                 slug=workspace.slug,
-173:                 description=workspace.description,
-174:                 metadata_=workspace.metadata,
-175:                 created_at=workspace.created_at,
-176:                 updated_at=workspace.updated_at,
-177:             )
-178:             session.add(model)
-179:             await session.commit()
-180:             await session.refresh(model)
-181:             return self._workspace_model_to_domain(model)
-182: 
-183:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
-184:         """Get a workspace by ID."""
-185:         async with self._get_session() as session:
-186:             result = await session.execute(select(WorkspaceModel).where(WorkspaceModel.id == str(workspace_id)))
-187:             model = result.scalar_one_or_none()
-188:             return self._workspace_model_to_domain(model) if model else None
-189: 
-190:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
-191:         """List all workspaces in an organization."""
-192:         async with self._get_session() as session:
-193:             result = await session.execute(
-194:                 select(WorkspaceModel).where(WorkspaceModel.organization_id == str(organization_id))
-195:             )
-196:             return [self._workspace_model_to_domain(m) for m in result.scalars().all()]
-197: 
-198:     def _workspace_model_to_domain(self, model: WorkspaceModel) -> Workspace:
-199:         """Convert WorkspaceModel to domain Workspace."""
-200:         return Workspace(
-201:             id=UUID(model.id),
-202:             organization_id=UUID(model.organization_id),
-203:             name=model.name,
-204:             slug=model.slug,
-205:             description=model.description,
-206:             metadata=model.metadata_,
-207:             created_at=model.created_at,
-208:             updated_at=model.updated_at,
-209:         )
-210: 
-211:     # =========================================================================
-212:     # Namespace operations
-213:     # =========================================================================
-214: 
-215:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-216:         """Create a new memory namespace."""
-217:         async with self._get_session() as session:
-218:             model = MemoryNamespaceModel(
-219:                 id=str(namespace.id),
-220:                 workspace_id=str(namespace.workspace_id),
-221:                 name=namespace.name,
-222:                 slug=namespace.slug,
-223:                 description=namespace.description,
-224:                 config_overrides=namespace.config_overrides,
-225:                 sync_checkpoints=namespace.sync_checkpoints,
-226:                 metadata_=namespace.metadata,
-227:                 created_at=namespace.created_at,
-228:                 updated_at=namespace.updated_at,
-229:             )
-230:             session.add(model)
-231:             await session.commit()
-232:             await session.refresh(model)
-233:             return self._namespace_model_to_domain(model)
-234: 
-235:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-236:         """Get a namespace by ID."""
-237:         async with self._get_session() as session:
-238:             result = await session.execute(
-239:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == str(namespace_id))
-240:             )
-241:             model = result.scalar_one_or_none()
-242:             return self._namespace_model_to_domain(model) if model else None
-243: 
-244:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
-245:         """Get a namespace by workspace ID and slug."""
-246:         async with self._get_session() as session:
-247:             result = await session.execute(
-248:                 select(MemoryNamespaceModel).where(
-249:                     MemoryNamespaceModel.workspace_id == str(workspace_id), MemoryNamespaceModel.slug == slug
-250:                 )
-251:             )
-252:             model = result.scalar_one_or_none()
-253:             return self._namespace_model_to_domain(model) if model else None
-254: 
-255:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
-256:         """List all namespaces in a workspace."""
-257:         async with self._get_session() as session:
-258:             result = await session.execute(
-259:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
-260:             )
-261:             return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
-262: 
-263:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-264:         """Update a namespace."""
-265:         async with self._get_session() as session:
-266:             await session.execute(
-267:                 update(MemoryNamespaceModel)
-268:                 .where(MemoryNamespaceModel.id == str(namespace.id))
-269:                 .values(
-270:                     name=namespace.name,
-271:                     slug=namespace.slug,
-272:                     description=namespace.description,
-273:                     config_overrides=namespace.config_overrides,
-274:                     sync_checkpoints=namespace.sync_checkpoints,
-275:                     metadata_=namespace.metadata,
-276:                     updated_at=datetime.now(UTC),
-277:                 )
-278:             )
-279:             await session.commit()
-280:             return namespace
-281: 
-282:     def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
-283:         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
-284:         return MemoryNamespace(
-285:             id=UUID(model.id),
-286:             workspace_id=UUID(model.workspace_id),
-287:             name=model.name,
-288:             slug=model.slug,
-289:             description=model.description,
-290:             config_overrides=model.config_overrides,
-291:             sync_checkpoints=model.sync_checkpoints,
-292:             metadata=model.metadata_,
-293:             created_at=model.created_at,
-294:             updated_at=model.updated_at,
-295:         )
-296: 
-297:     # =========================================================================
-298:     # Document operations
-299:     # =========================================================================
-300: 
-301:     async def create_document(self, document: Document) -> Document:
-302:         """Create a new document."""
-303:         async with self._get_session() as session:
-304:             model = DocumentModel(
-305:                 id=str(document.id),
-306:                 namespace_id=str(document.namespace_id),
-307:                 content=document.content,
-308:                 status=document.status,
-309:                 source=document.metadata.source,
-310:                 source_type=document.metadata.source_type,
-311:                 content_type=document.metadata.content_type,
-312:                 title=document.metadata.title,
-313:                 author=document.metadata.author,
-314:                 language=document.metadata.language,
-315:                 checksum=document.metadata.checksum,
-316:                 size_bytes=document.metadata.size_bytes,
-317:                 metadata_=document.metadata.custom,
-318:                 chunk_count=document.chunk_count,
-319:                 entity_count=document.entity_count,
-320:                 error_message=document.error_message,
-321:                 created_at=document.created_at,
-322:                 updated_at=document.updated_at,
-323:                 processed_at=document.processed_at,
-324:             )
-325:             session.add(model)
-326:             await session.commit()
-327:             await session.refresh(model)
-328:             return self._document_model_to_domain(model)
-329: 
-330:     async def get_document(self, document_id: UUID) -> Document | None:
-331:         """Get a document by ID."""
-332:         async with self._get_session() as session:
-333:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
-334:             model = result.scalar_one_or_none()
-335:             return self._document_model_to_domain(model) if model else None
-336: 
-337:     async def list_documents(
-338:         self,
-339:         namespace_id: UUID,
-340:         *,
-341:         status: str | None = None,
-342:         limit: int = 100,
-343:         offset: int = 0,
-344:     ) -> list[Document]:
-345:         """List documents in a namespace."""
-346:         async with self._get_session() as session:
-347:             query = select(DocumentModel).where(DocumentModel.namespace_id == str(namespace_id))
-348:             if status:
-349:                 query = query.where(DocumentModel.status == status)
-350:             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
-351:             result = await session.execute(query)
-352:             return [self._document_model_to_domain(m) for m in result.scalars().all()]
-353: 
-354:     async def update_document(self, document: Document) -> Document:
-355:         """Update a document."""
-356:         async with self._get_session() as session:
-357:             await session.execute(
-358:                 update(DocumentModel)
-359:                 .where(DocumentModel.id == str(document.id))
-360:                 .values(
-361:                     content=document.content,
-362:                     status=document.status,
-363:                     source=document.metadata.source,
-364:                     source_type=document.metadata.source_type,
-365:                     content_type=document.metadata.content_type,
-366:                     title=document.metadata.title,
-367:                     author=document.metadata.author,
-368:                     language=document.metadata.language,
-369:                     checksum=document.metadata.checksum,
-370:                     size_bytes=document.metadata.size_bytes,
-371:                     metadata_=document.metadata.custom,
-372:                     chunk_count=document.chunk_count,
-373:                     entity_count=document.entity_count,
-374:                     error_message=document.error_message,
-375:                     updated_at=datetime.now(UTC),
-376:                     processed_at=document.processed_at,
-377:                 )
-378:             )
-379:             await session.commit()
-380:             return document
-381: 
-382:     async def delete_document(self, document_id: UUID) -> bool:
-383:         """Delete a document."""
-384:         async with self._get_session() as session:
-385:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
-386:             model = result.scalar_one_or_none()
-387:             if model:
-388:                 await session.delete(model)
-389:                 await session.commit()
-390:                 return True
-391:             return False
-392: 
-393:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-394:         """Get a document by its content checksum (for deduplication).
-395: 
-396:         Returns the first matching document if multiple exist with the same checksum.
-397:         """
-398:         async with self._get_session() as session:
-399:             result = await session.execute(
-400:                 select(DocumentModel).where(
-401:                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
-402:                 )
-403:             )
-404:             model = result.scalars().first()
-405:             return self._document_model_to_domain(model) if model else None
-406: 
-407:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
-408:         """Convert DocumentModel to domain Document."""
-409:         return Document(
-410:             id=UUID(model.id),
-411:             namespace_id=UUID(model.namespace_id),
-412:             content=model.content,
-413:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
-414:             metadata=DocumentMetadata(
-415:                 source=model.source,
-416:                 source_type=model.source_type,
-417:                 content_type=model.content_type,
-418:                 title=model.title,
-419:                 author=model.author,
-420:                 language=model.language,
-421:                 checksum=model.checksum,
-422:                 size_bytes=model.size_bytes,
-423:                 custom=model.metadata_,
-424:             ),
-425:             chunk_count=model.chunk_count,
-426:             entity_count=model.entity_count,
-427:             error_message=model.error_message,
-428:             created_at=model.created_at,
-429:             updated_at=model.updated_at,
-430:             processed_at=model.processed_at,
-431:         )
-432: 
-433:     # =========================================================================
-434:     # Sync checkpoint operations
-435:     # =========================================================================
-436: 
-437:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-438:         """Get the last sync checkpoint for a source."""
-439:         async with self._get_session() as session:
-440:             result = await session.execute(
-441:                 select(SyncCheckpointModel).where(
-442:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-443:                 )
-444:             )
-445:             model = result.scalar_one_or_none()
-446:             return model.checkpoint if model else None
-447: 
-448:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-449:         """Set the sync checkpoint for a source."""
-450:         async with self._get_session() as session:
-451:             result = await session.execute(
-452:                 select(SyncCheckpointModel).where(
-453:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-454:                 )
-455:             )
-456:             model = result.scalar_one_or_none()
-457:             if model:
-458:                 model.checkpoint = checkpoint
-459:                 model.updated_at = datetime.now(UTC)
-460:             else:
-461:                 model = SyncCheckpointModel(
-462:                     namespace_id=str(namespace_id),
-463:                     source=source,
-464:                     checkpoint=checkpoint,
-465:                 )
-466:                 session.add(model)
-467:             await session.commit()
 ````
 
 ## File: src/khora/storage/__init__.py
@@ -10123,254 +9658,475 @@ README.md
 514:         return f"<SyncCheckpoint(namespace_id={self.namespace_id!r}, source={self.source!r})>"
 ````
 
-## File: src/khora/pipelines/flows/ingest.py
+## File: src/khora/storage/backends/postgresql.py
 ````python
-  1: """Two-phase ingestion flow for Khora Memory Lake.
+  1: """PostgreSQL backend for relational data storage.
   2: 
-  3: Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
-  4: Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph
+  3: Handles storage of documents, tenancy data, ACLs, and sync checkpoints
+  4: using SQLAlchemy async with asyncpg.
   5: """
   6: 
   7: from __future__ import annotations
   8: 
-  9: import hashlib
- 10: from typing import TYPE_CHECKING, Any
+  9: from datetime import UTC, datetime
+ 10: from typing import TYPE_CHECKING
  11: from uuid import UUID
  12: 
  13: from loguru import logger
- 14: from prefect import flow, task
- 15: from prefect.cache_policies import NO_CACHE
+ 14: from sqlalchemy import select, update
+ 15: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
  16: 
- 17: from ..registry import pipeline
- 18: 
- 19: if TYPE_CHECKING:
- 20:     from khora.core.models import Document
- 21:     from khora.storage import StorageCoordinator
- 22: 
- 23: 
- 24: @task(name="compute_checksum")
- 25: def compute_checksum(content: str) -> str:
- 26:     """Compute SHA-256 checksum of content."""
- 27:     return hashlib.sha256(content.encode("utf-8")).hexdigest()
- 28: 
- 29: 
- 30: @task(name="stage_document", cache_policy=NO_CACHE)
- 31: async def stage_document(
- 32:     doc_input: dict[str, Any],
- 33:     namespace_id: UUID,
- 34:     storage: StorageCoordinator,
- 35: ) -> Document | None:
- 36:     """Stage a document for processing.
- 37: 
- 38:     Checks if document already exists (by checksum) and creates it if new.
- 39: 
- 40:     Returns:
- 41:         Document if new or updated, None if unchanged
- 42:     """
- 43:     from khora.core.models import Document, DocumentMetadata
- 44: 
- 45:     content = doc_input.get("content", "")
- 46:     checksum = compute_checksum(content)
- 47: 
- 48:     # Check for existing document - skip if any document with same checksum exists
- 49:     existing = await storage.get_document_by_checksum(namespace_id, checksum)
- 50:     if existing:
- 51:         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
- 52:         return None
+ 17: from khora.core.models import Document, DocumentMetadata, MemoryNamespace, Organization, TenancyMode, Workspace
+ 18: from khora.core.models.document import DocumentStatus
+ 19: from khora.db.models import (
+ 20:     Base,
+ 21:     DocumentModel,
+ 22:     MemoryNamespaceModel,
+ 23:     OrganizationModel,
+ 24:     SyncCheckpointModel,
+ 25:     WorkspaceModel,
+ 26: )
+ 27: 
+ 28: if TYPE_CHECKING:
+ 29:     pass
+ 30: 
+ 31: 
+ 32: class PostgreSQLBackend:
+ 33:     """PostgreSQL backend for relational data.
+ 34: 
+ 35:     Handles all relational data operations including multi-tenancy
+ 36:     hierarchy, documents, and sync checkpoints.
+ 37:     """
+ 38: 
+ 39:     def __init__(self, database_url: str, *, echo: bool = False, pool_size: int = 5, max_overflow: int = 10) -> None:
+ 40:         """Initialize the PostgreSQL backend.
+ 41: 
+ 42:         Args:
+ 43:             database_url: PostgreSQL connection URL
+ 44:             echo: Enable SQL echo logging
+ 45:             pool_size: Connection pool size
+ 46:             max_overflow: Maximum overflow connections
+ 47:         """
+ 48:         # Convert to async URL if needed
+ 49:         if database_url.startswith("postgresql://"):
+ 50:             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+ 51:         elif database_url.startswith("postgres://"):
+ 52:             database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
  53: 
- 54:     # Create document
- 55:     metadata = DocumentMetadata(
- 56:         source=doc_input.get("source", ""),
- 57:         source_type=doc_input.get("source_type", "manual"),
- 58:         content_type=doc_input.get("content_type", "text/plain"),
- 59:         title=doc_input.get("title", ""),
- 60:         author=doc_input.get("author", ""),
- 61:         language=doc_input.get("language", "en"),
- 62:         checksum=checksum,
- 63:         size_bytes=len(content.encode("utf-8")),
- 64:         custom=doc_input.get("metadata", {}),
- 65:     )
- 66: 
- 67:     document = Document(
- 68:         namespace_id=namespace_id,
- 69:         content=content,
- 70:         metadata=metadata,
- 71:     )
- 72: 
- 73:     return await storage.create_document(document)
- 74: 
- 75: 
- 76: @task(name="process_document", cache_policy=NO_CACHE)
- 77: async def process_document(
- 78:     document: Document,
- 79:     storage: StorageCoordinator,
- 80:     *,
- 81:     chunk_strategy: str = "semantic",
- 82:     chunk_size: int = 512,
- 83:     embedding_model: str = "text-embedding-3-small",
- 84:     extraction_model: str = "gpt-4o-mini",
- 85:     skill_name: str = "general_entities",
- 86: ) -> dict[str, Any]:
- 87:     """Process a document through the enrichment pipeline.
+ 54:         self._database_url = database_url
+ 55:         self._echo = echo
+ 56:         self._pool_size = pool_size
+ 57:         self._max_overflow = max_overflow
+ 58:         self._engine: AsyncEngine | None = None
+ 59:         self._session_factory: async_sessionmaker[AsyncSession] | None = None
+ 60: 
+ 61:     async def connect(self) -> None:
+ 62:         """Establish connection to the database."""
+ 63:         if self._engine is not None:
+ 64:             return
+ 65: 
+ 66:         logger.info("Connecting to PostgreSQL...")
+ 67:         self._engine = create_async_engine(
+ 68:             self._database_url,
+ 69:             echo=self._echo,
+ 70:             pool_size=self._pool_size,
+ 71:             max_overflow=self._max_overflow,
+ 72:         )
+ 73:         self._session_factory = async_sessionmaker(
+ 74:             self._engine,
+ 75:             class_=AsyncSession,
+ 76:             expire_on_commit=False,
+ 77:         )
+ 78:         logger.info("Connected to PostgreSQL")
+ 79: 
+ 80:     async def disconnect(self) -> None:
+ 81:         """Close database connections."""
+ 82:         if self._engine is not None:
+ 83:             logger.info("Disconnecting from PostgreSQL...")
+ 84:             await self._engine.dispose()
+ 85:             self._engine = None
+ 86:             self._session_factory = None
+ 87:             logger.info("Disconnected from PostgreSQL")
  88: 
- 89:     Steps:
- 90:     1. Chunk the document
- 91:     2. Generate embeddings for chunks
- 92:     3. Extract entities and relationships
- 93:     4. Store everything
- 94:     """
- 95:     from ..tasks import chunk_document, embed_chunks, extract_entities
- 96: 
- 97:     # Mark as processing
- 98:     document.mark_processing()
- 99:     await storage.update_document(document)
+ 89:     async def is_healthy(self) -> bool:
+ 90:         """Check if the backend is healthy and connected."""
+ 91:         if self._engine is None or self._session_factory is None:
+ 92:             return False
+ 93:         try:
+ 94:             async with self._session_factory() as session:
+ 95:                 await session.execute(select(1))
+ 96:             return True
+ 97:         except Exception as e:
+ 98:             logger.error(f"PostgreSQL health check failed: {e}")
+ 99:             return False
 100: 
-101:     try:
-102:         # Step 1: Chunk
-103:         chunks = await chunk_document(
-104:             document,
-105:             strategy=chunk_strategy,
-106:             chunk_size=chunk_size,
-107:         )
-108:         logger.info(f"Document {document.id}: created {len(chunks)} chunks")
-109: 
-110:         # Step 2: Embed
-111:         chunks = await embed_chunks(chunks, model=embedding_model)
-112:         logger.info(f"Document {document.id}: generated embeddings")
+101:     def _get_session(self) -> AsyncSession:
+102:         """Get a new database session."""
+103:         if self._session_factory is None:
+104:             raise RuntimeError("Backend not connected. Call connect() first.")
+105:         return self._session_factory()
+106: 
+107:     async def create_tables(self) -> None:
+108:         """Create all database tables (for testing/development)."""
+109:         if self._engine is None:
+110:             raise RuntimeError("Backend not connected. Call connect() first.")
+111:         async with self._engine.begin() as conn:
+112:             await conn.run_sync(Base.metadata.create_all)
 113: 
-114:         # Step 3: Extract entities
-115:         entities, relationships = await extract_entities(
-116:             chunks,
-117:             skill_name=skill_name,
-118:             model=extraction_model,
-119:         )
-120:         logger.info(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
-121: 
-122:         # Step 4: Store chunks
-123:         await storage.create_chunks_batch(chunks)
-124: 
-125:         # Step 5: Store entities
-126:         stored_entities = []
-127:         for entity in entities:
-128:             # Check for existing entity (dedup)
-129:             existing = await storage.get_entity_by_name(
-130:                 document.namespace_id,
-131:                 entity.name,
-132:                 entity.entity_type.value,
-133:             )
-134:             if existing:
-135:                 existing.merge_with(entity)
-136:                 stored = await storage.update_entity(existing)
-137:             else:
-138:                 stored = await storage.create_entity(entity)
-139:             stored_entities.append(stored)
-140: 
-141:         # Step 6: Store relationships
-142:         for relationship in relationships:
-143:             await storage.create_relationship(relationship)
-144: 
-145:         # Mark as completed
-146:         document.mark_completed(len(chunks), len(entities))
-147:         await storage.update_document(document)
+114:     # =========================================================================
+115:     # Organization operations
+116:     # =========================================================================
+117: 
+118:     async def create_organization(self, org: Organization) -> Organization:
+119:         """Create a new organization."""
+120:         async with self._get_session() as session:
+121:             model = OrganizationModel(
+122:                 id=str(org.id),
+123:                 name=org.name,
+124:                 slug=org.slug,
+125:                 tenancy_mode=org.tenancy_mode,
+126:                 metadata_=org.metadata,
+127:                 created_at=org.created_at,
+128:                 updated_at=org.updated_at,
+129:             )
+130:             session.add(model)
+131:             await session.commit()
+132:             await session.refresh(model)
+133:             return self._org_model_to_domain(model)
+134: 
+135:     async def get_organization(self, org_id: UUID) -> Organization | None:
+136:         """Get an organization by ID."""
+137:         async with self._get_session() as session:
+138:             result = await session.execute(select(OrganizationModel).where(OrganizationModel.id == str(org_id)))
+139:             model = result.scalar_one_or_none()
+140:             return self._org_model_to_domain(model) if model else None
+141: 
+142:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
+143:         """Get an organization by slug."""
+144:         async with self._get_session() as session:
+145:             result = await session.execute(select(OrganizationModel).where(OrganizationModel.slug == slug))
+146:             model = result.scalar_one_or_none()
+147:             return self._org_model_to_domain(model) if model else None
 148: 
-149:         return {
-150:             "document_id": str(document.id),
-151:             "chunks": len(chunks),
-152:             "entities": len(entities),
-153:             "relationships": len(relationships),
-154:         }
-155: 
-156:     except Exception as e:
-157:         document.mark_failed(str(e))
-158:         await storage.update_document(document)
-159:         raise
+149:     def _org_model_to_domain(self, model: OrganizationModel) -> Organization:
+150:         """Convert OrganizationModel to domain Organization."""
+151:         return Organization(
+152:             id=UUID(model.id),
+153:             name=model.name,
+154:             slug=model.slug,
+155:             tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
+156:             metadata=model.metadata_,
+157:             created_at=model.created_at,
+158:             updated_at=model.updated_at,
+159:         )
 160: 
-161: 
-162: @pipeline("ingest", description="Two-phase document ingestion", tags=["ingestion"])
-163: @flow(name="ingest_documents", log_prints=True)
-164: async def ingest_documents(
-165:     namespace_id: UUID,
-166:     documents: list[dict[str, Any]],
-167:     storage: StorageCoordinator | None = None,
-168:     *,
-169:     skill_name: str = "general_entities",
-170:     chunk_strategy: str = "semantic",
-171:     chunk_size: int = 512,
-172:     embedding_model: str = "text-embedding-3-small",
-173:     extraction_model: str = "gpt-4o-mini",
-174:     **kwargs,
-175: ) -> dict[str, Any]:
-176:     """Two-phase document ingestion flow.
-177: 
-178:     Phase 1: Stage documents (checksum-based change detection)
-179:     Phase 2: Process changed documents (chunk, embed, extract)
-180: 
-181:     Args:
-182:         namespace_id: Target namespace
-183:         documents: List of document dicts with 'content' and optional metadata
-184:         storage: StorageCoordinator instance
-185:         skill_name: Extraction skill to use
-186:         chunk_strategy: Chunking strategy
-187:         chunk_size: Target chunk size
-188:         embedding_model: Model for embeddings
-189:         extraction_model: Model for extraction
-190: 
-191:     Returns:
-192:         Summary of ingestion results
-193:     """
-194:     if storage is None:
-195:         raise ValueError("storage is required")
-196: 
-197:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
-198: 
-199:     # Phase 1: Stage documents
-200:     staged_docs = []
-201:     for doc_input in documents:
-202:         doc = await stage_document(doc_input, namespace_id, storage)
-203:         if doc:
-204:             staged_docs.append(doc)
-205: 
-206:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
-207: 
-208:     if not staged_docs:
-209:         return {
-210:             "total_documents": len(documents),
-211:             "processed_documents": 0,
-212:             "skipped_documents": len(documents),
-213:             "total_chunks": 0,
-214:             "total_entities": 0,
-215:             "total_relationships": 0,
-216:         }
-217: 
-218:     # Phase 2: Process staged documents
-219:     results = []
-220:     for doc in staged_docs:
-221:         result = await process_document(
-222:             doc,
-223:             storage,
-224:             chunk_strategy=chunk_strategy,
-225:             chunk_size=chunk_size,
-226:             embedding_model=embedding_model,
-227:             extraction_model=extraction_model,
-228:             skill_name=skill_name,
-229:         )
-230:         results.append(result)
-231: 
-232:     # Aggregate results
-233:     total_chunks = sum(r["chunks"] for r in results)
-234:     total_entities = sum(r["entities"] for r in results)
-235:     total_relationships = sum(r["relationships"] for r in results)
-236: 
-237:     logger.info(f"Ingestion complete: {len(results)} documents processed")
-238: 
-239:     return {
-240:         "total_documents": len(documents),
-241:         "processed_documents": len(results),
-242:         "skipped_documents": len(documents) - len(results),
-243:         "total_chunks": total_chunks,
-244:         "total_entities": total_entities,
-245:         "total_relationships": total_relationships,
-246:     }
+161:     # =========================================================================
+162:     # Workspace operations
+163:     # =========================================================================
+164: 
+165:     async def create_workspace(self, workspace: Workspace) -> Workspace:
+166:         """Create a new workspace."""
+167:         async with self._get_session() as session:
+168:             model = WorkspaceModel(
+169:                 id=str(workspace.id),
+170:                 organization_id=str(workspace.organization_id),
+171:                 name=workspace.name,
+172:                 slug=workspace.slug,
+173:                 description=workspace.description,
+174:                 metadata_=workspace.metadata,
+175:                 created_at=workspace.created_at,
+176:                 updated_at=workspace.updated_at,
+177:             )
+178:             session.add(model)
+179:             await session.commit()
+180:             await session.refresh(model)
+181:             return self._workspace_model_to_domain(model)
+182: 
+183:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+184:         """Get a workspace by ID."""
+185:         async with self._get_session() as session:
+186:             result = await session.execute(select(WorkspaceModel).where(WorkspaceModel.id == str(workspace_id)))
+187:             model = result.scalar_one_or_none()
+188:             return self._workspace_model_to_domain(model) if model else None
+189: 
+190:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
+191:         """List all workspaces in an organization."""
+192:         async with self._get_session() as session:
+193:             result = await session.execute(
+194:                 select(WorkspaceModel).where(WorkspaceModel.organization_id == str(organization_id))
+195:             )
+196:             return [self._workspace_model_to_domain(m) for m in result.scalars().all()]
+197: 
+198:     def _workspace_model_to_domain(self, model: WorkspaceModel) -> Workspace:
+199:         """Convert WorkspaceModel to domain Workspace."""
+200:         return Workspace(
+201:             id=UUID(model.id),
+202:             organization_id=UUID(model.organization_id),
+203:             name=model.name,
+204:             slug=model.slug,
+205:             description=model.description,
+206:             metadata=model.metadata_,
+207:             created_at=model.created_at,
+208:             updated_at=model.updated_at,
+209:         )
+210: 
+211:     # =========================================================================
+212:     # Namespace operations
+213:     # =========================================================================
+214: 
+215:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+216:         """Create a new memory namespace."""
+217:         async with self._get_session() as session:
+218:             model = MemoryNamespaceModel(
+219:                 id=str(namespace.id),
+220:                 workspace_id=str(namespace.workspace_id),
+221:                 name=namespace.name,
+222:                 slug=namespace.slug,
+223:                 description=namespace.description,
+224:                 config_overrides=namespace.config_overrides,
+225:                 sync_checkpoints=namespace.sync_checkpoints,
+226:                 metadata_=namespace.metadata,
+227:                 created_at=namespace.created_at,
+228:                 updated_at=namespace.updated_at,
+229:             )
+230:             session.add(model)
+231:             await session.commit()
+232:             await session.refresh(model)
+233:             return self._namespace_model_to_domain(model)
+234: 
+235:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+236:         """Get a namespace by ID."""
+237:         async with self._get_session() as session:
+238:             result = await session.execute(
+239:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == str(namespace_id))
+240:             )
+241:             model = result.scalar_one_or_none()
+242:             return self._namespace_model_to_domain(model) if model else None
+243: 
+244:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
+245:         """Get a namespace by workspace ID and slug."""
+246:         async with self._get_session() as session:
+247:             result = await session.execute(
+248:                 select(MemoryNamespaceModel).where(
+249:                     MemoryNamespaceModel.workspace_id == str(workspace_id), MemoryNamespaceModel.slug == slug
+250:                 )
+251:             )
+252:             model = result.scalar_one_or_none()
+253:             return self._namespace_model_to_domain(model) if model else None
+254: 
+255:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
+256:         """List all namespaces in a workspace."""
+257:         async with self._get_session() as session:
+258:             result = await session.execute(
+259:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
+260:             )
+261:             return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
+262: 
+263:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+264:         """Update a namespace."""
+265:         async with self._get_session() as session:
+266:             await session.execute(
+267:                 update(MemoryNamespaceModel)
+268:                 .where(MemoryNamespaceModel.id == str(namespace.id))
+269:                 .values(
+270:                     name=namespace.name,
+271:                     slug=namespace.slug,
+272:                     description=namespace.description,
+273:                     config_overrides=namespace.config_overrides,
+274:                     sync_checkpoints=namespace.sync_checkpoints,
+275:                     metadata_=namespace.metadata,
+276:                     updated_at=datetime.now(UTC),
+277:                 )
+278:             )
+279:             await session.commit()
+280:             return namespace
+281: 
+282:     def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
+283:         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
+284:         return MemoryNamespace(
+285:             id=UUID(model.id),
+286:             workspace_id=UUID(model.workspace_id),
+287:             name=model.name,
+288:             slug=model.slug,
+289:             description=model.description,
+290:             config_overrides=model.config_overrides,
+291:             sync_checkpoints=model.sync_checkpoints,
+292:             metadata=model.metadata_,
+293:             created_at=model.created_at,
+294:             updated_at=model.updated_at,
+295:         )
+296: 
+297:     # =========================================================================
+298:     # Document operations
+299:     # =========================================================================
+300: 
+301:     async def create_document(self, document: Document) -> Document:
+302:         """Create a new document."""
+303:         async with self._get_session() as session:
+304:             model = DocumentModel(
+305:                 id=str(document.id),
+306:                 namespace_id=str(document.namespace_id),
+307:                 content=document.content,
+308:                 status=document.status,
+309:                 source=document.metadata.source,
+310:                 source_type=document.metadata.source_type,
+311:                 content_type=document.metadata.content_type,
+312:                 title=document.metadata.title,
+313:                 author=document.metadata.author,
+314:                 language=document.metadata.language,
+315:                 checksum=document.metadata.checksum,
+316:                 size_bytes=document.metadata.size_bytes,
+317:                 metadata_=document.metadata.custom,
+318:                 chunk_count=document.chunk_count,
+319:                 entity_count=document.entity_count,
+320:                 error_message=document.error_message,
+321:                 created_at=document.created_at,
+322:                 updated_at=document.updated_at,
+323:                 processed_at=document.processed_at,
+324:             )
+325:             session.add(model)
+326:             await session.commit()
+327:             await session.refresh(model)
+328:             return self._document_model_to_domain(model)
+329: 
+330:     async def get_document(self, document_id: UUID) -> Document | None:
+331:         """Get a document by ID."""
+332:         async with self._get_session() as session:
+333:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+334:             model = result.scalar_one_or_none()
+335:             return self._document_model_to_domain(model) if model else None
+336: 
+337:     async def list_documents(
+338:         self,
+339:         namespace_id: UUID,
+340:         *,
+341:         status: str | None = None,
+342:         limit: int = 100,
+343:         offset: int = 0,
+344:     ) -> list[Document]:
+345:         """List documents in a namespace."""
+346:         async with self._get_session() as session:
+347:             query = select(DocumentModel).where(DocumentModel.namespace_id == str(namespace_id))
+348:             if status:
+349:                 query = query.where(DocumentModel.status == status)
+350:             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
+351:             result = await session.execute(query)
+352:             return [self._document_model_to_domain(m) for m in result.scalars().all()]
+353: 
+354:     async def update_document(self, document: Document) -> Document:
+355:         """Update a document."""
+356:         async with self._get_session() as session:
+357:             await session.execute(
+358:                 update(DocumentModel)
+359:                 .where(DocumentModel.id == str(document.id))
+360:                 .values(
+361:                     content=document.content,
+362:                     status=document.status,
+363:                     source=document.metadata.source,
+364:                     source_type=document.metadata.source_type,
+365:                     content_type=document.metadata.content_type,
+366:                     title=document.metadata.title,
+367:                     author=document.metadata.author,
+368:                     language=document.metadata.language,
+369:                     checksum=document.metadata.checksum,
+370:                     size_bytes=document.metadata.size_bytes,
+371:                     metadata_=document.metadata.custom,
+372:                     chunk_count=document.chunk_count,
+373:                     entity_count=document.entity_count,
+374:                     error_message=document.error_message,
+375:                     updated_at=datetime.now(UTC),
+376:                     processed_at=document.processed_at,
+377:                 )
+378:             )
+379:             await session.commit()
+380:             return document
+381: 
+382:     async def delete_document(self, document_id: UUID) -> bool:
+383:         """Delete a document."""
+384:         async with self._get_session() as session:
+385:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+386:             model = result.scalar_one_or_none()
+387:             if model:
+388:                 await session.delete(model)
+389:                 await session.commit()
+390:                 return True
+391:             return False
+392: 
+393:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+394:         """Get a document by its content checksum (for deduplication).
+395: 
+396:         Returns the first matching document if multiple exist with the same checksum.
+397:         """
+398:         async with self._get_session() as session:
+399:             result = await session.execute(
+400:                 select(DocumentModel).where(
+401:                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
+402:                 )
+403:             )
+404:             model = result.scalars().first()
+405:             return self._document_model_to_domain(model) if model else None
+406: 
+407:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
+408:         """Convert DocumentModel to domain Document."""
+409:         return Document(
+410:             id=UUID(model.id),
+411:             namespace_id=UUID(model.namespace_id),
+412:             content=model.content,
+413:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
+414:             metadata=DocumentMetadata(
+415:                 source=model.source,
+416:                 source_type=model.source_type,
+417:                 content_type=model.content_type,
+418:                 title=model.title,
+419:                 author=model.author,
+420:                 language=model.language,
+421:                 checksum=model.checksum,
+422:                 size_bytes=model.size_bytes,
+423:                 custom=model.metadata_,
+424:             ),
+425:             chunk_count=model.chunk_count,
+426:             entity_count=model.entity_count,
+427:             error_message=model.error_message,
+428:             created_at=model.created_at,
+429:             updated_at=model.updated_at,
+430:             processed_at=model.processed_at,
+431:         )
+432: 
+433:     # =========================================================================
+434:     # Sync checkpoint operations
+435:     # =========================================================================
+436: 
+437:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+438:         """Get the last sync checkpoint for a source."""
+439:         async with self._get_session() as session:
+440:             result = await session.execute(
+441:                 select(SyncCheckpointModel).where(
+442:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+443:                 )
+444:             )
+445:             model = result.scalar_one_or_none()
+446:             return model.checkpoint if model else None
+447: 
+448:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+449:         """Set the sync checkpoint for a source."""
+450:         async with self._get_session() as session:
+451:             result = await session.execute(
+452:                 select(SyncCheckpointModel).where(
+453:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+454:                 )
+455:             )
+456:             model = result.scalar_one_or_none()
+457:             if model:
+458:                 model.checkpoint = checkpoint
+459:                 model.updated_at = datetime.now(UTC)
+460:             else:
+461:                 model = SyncCheckpointModel(
+462:                     namespace_id=str(namespace_id),
+463:                     source=source,
+464:                     checkpoint=checkpoint,
+465:                 )
+466:                 session.add(model)
+467:             await session.commit()
 ````
 
 ## File: src/khora/__init__.py
@@ -10643,6 +10399,293 @@ README.md
 234:         if parsed:
 235:             return parsed.database
 236:         return self.storage.neo4j_database
+````
+
+## File: src/khora/pipelines/flows/ingest.py
+````python
+  1: """Two-phase ingestion flow for Khora Memory Lake.
+  2: 
+  3: Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
+  4: Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph
+  5: 
+  6: Supports parallel document processing with configurable concurrency.
+  7: """
+  8: 
+  9: from __future__ import annotations
+ 10: 
+ 11: import asyncio
+ 12: import hashlib
+ 13: from typing import TYPE_CHECKING, Any
+ 14: from uuid import UUID
+ 15: 
+ 16: from loguru import logger
+ 17: from prefect import flow, task
+ 18: from prefect.cache_policies import NO_CACHE
+ 19: 
+ 20: from ..registry import pipeline
+ 21: 
+ 22: if TYPE_CHECKING:
+ 23:     from khora.core.models import Document
+ 24:     from khora.storage import StorageCoordinator
+ 25: 
+ 26: 
+ 27: @task(name="compute_checksum")
+ 28: def compute_checksum(content: str) -> str:
+ 29:     """Compute SHA-256 checksum of content."""
+ 30:     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+ 31: 
+ 32: 
+ 33: @task(name="stage_document", cache_policy=NO_CACHE)
+ 34: async def stage_document(
+ 35:     doc_input: dict[str, Any],
+ 36:     namespace_id: UUID,
+ 37:     storage: StorageCoordinator,
+ 38: ) -> Document | None:
+ 39:     """Stage a document for processing.
+ 40: 
+ 41:     Checks if document already exists (by checksum) and creates it if new.
+ 42: 
+ 43:     Returns:
+ 44:         Document if new or updated, None if unchanged
+ 45:     """
+ 46:     from khora.core.models import Document, DocumentMetadata
+ 47: 
+ 48:     content = doc_input.get("content", "")
+ 49:     checksum = compute_checksum(content)
+ 50: 
+ 51:     # Check for existing document - skip if any document with same checksum exists
+ 52:     existing = await storage.get_document_by_checksum(namespace_id, checksum)
+ 53:     if existing:
+ 54:         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
+ 55:         return None
+ 56: 
+ 57:     # Create document
+ 58:     metadata = DocumentMetadata(
+ 59:         source=doc_input.get("source", ""),
+ 60:         source_type=doc_input.get("source_type", "manual"),
+ 61:         content_type=doc_input.get("content_type", "text/plain"),
+ 62:         title=doc_input.get("title", ""),
+ 63:         author=doc_input.get("author", ""),
+ 64:         language=doc_input.get("language", "en"),
+ 65:         checksum=checksum,
+ 66:         size_bytes=len(content.encode("utf-8")),
+ 67:         custom=doc_input.get("metadata", {}),
+ 68:     )
+ 69: 
+ 70:     document = Document(
+ 71:         namespace_id=namespace_id,
+ 72:         content=content,
+ 73:         metadata=metadata,
+ 74:     )
+ 75: 
+ 76:     return await storage.create_document(document)
+ 77: 
+ 78: 
+ 79: @task(name="process_document", cache_policy=NO_CACHE)
+ 80: async def process_document(
+ 81:     document: Document,
+ 82:     storage: StorageCoordinator,
+ 83:     *,
+ 84:     chunk_strategy: str = "semantic",
+ 85:     chunk_size: int = 512,
+ 86:     embedding_model: str = "text-embedding-3-small",
+ 87:     extraction_model: str = "gpt-4o-mini",
+ 88:     skill_name: str = "general_entities",
+ 89:     max_concurrent_extractions: int = 10,
+ 90: ) -> dict[str, Any]:
+ 91:     """Process a document through the enrichment pipeline.
+ 92: 
+ 93:     Steps:
+ 94:     1. Chunk the document
+ 95:     2. Generate embeddings for chunks (batched)
+ 96:     3. Extract entities and relationships (parallel)
+ 97:     4. Store everything (batched)
+ 98:     """
+ 99:     from ..tasks import chunk_document, embed_chunks, extract_entities
+100: 
+101:     # Mark as processing
+102:     document.mark_processing()
+103:     await storage.update_document(document)
+104: 
+105:     try:
+106:         # Step 1: Chunk
+107:         chunks = await chunk_document(
+108:             document,
+109:             strategy=chunk_strategy,
+110:             chunk_size=chunk_size,
+111:         )
+112:         logger.info(f"Document {document.id}: created {len(chunks)} chunks")
+113: 
+114:         # Step 2: Embed (already batched internally)
+115:         chunks = await embed_chunks(chunks, model=embedding_model)
+116:         logger.info(f"Document {document.id}: generated embeddings")
+117: 
+118:         # Step 3: Extract entities (parallel extraction across chunks)
+119:         entities, relationships = await extract_entities(
+120:             chunks,
+121:             skill_name=skill_name,
+122:             model=extraction_model,
+123:             max_concurrent=max_concurrent_extractions,
+124:         )
+125:         logger.info(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
+126: 
+127:         # Step 4: Store chunks (batched)
+128:         await storage.create_chunks_batch(chunks)
+129: 
+130:         # Step 5: Store entities with deduplication
+131:         # Process entities concurrently but with semaphore to avoid overwhelming the DB
+132:         entity_semaphore = asyncio.Semaphore(20)
+133: 
+134:         async def store_entity(entity):
+135:             async with entity_semaphore:
+136:                 existing = await storage.get_entity_by_name(
+137:                     document.namespace_id,
+138:                     entity.name,
+139:                     entity.entity_type.value,
+140:                 )
+141:                 if existing:
+142:                     existing.merge_with(entity)
+143:                     return await storage.update_entity(existing)
+144:                 else:
+145:                     return await storage.create_entity(entity)
+146: 
+147:         await asyncio.gather(*[store_entity(e) for e in entities])
+148: 
+149:         # Step 6: Store relationships concurrently
+150:         async def store_relationship(rel):
+151:             async with entity_semaphore:
+152:                 return await storage.create_relationship(rel)
+153: 
+154:         if relationships:
+155:             await asyncio.gather(*[store_relationship(r) for r in relationships])
+156: 
+157:         # Mark as completed
+158:         document.mark_completed(len(chunks), len(entities))
+159:         await storage.update_document(document)
+160: 
+161:         return {
+162:             "document_id": str(document.id),
+163:             "chunks": len(chunks),
+164:             "entities": len(entities),
+165:             "relationships": len(relationships),
+166:         }
+167: 
+168:     except Exception as e:
+169:         document.mark_failed(str(e))
+170:         await storage.update_document(document)
+171:         raise
+172: 
+173: 
+174: @pipeline("ingest", description="Two-phase document ingestion", tags=["ingestion"])
+175: @flow(name="ingest_documents", log_prints=True)
+176: async def ingest_documents(
+177:     namespace_id: UUID,
+178:     documents: list[dict[str, Any]],
+179:     storage: StorageCoordinator | None = None,
+180:     *,
+181:     skill_name: str = "general_entities",
+182:     chunk_strategy: str = "semantic",
+183:     chunk_size: int = 512,
+184:     embedding_model: str = "text-embedding-3-small",
+185:     extraction_model: str = "gpt-4o-mini",
+186:     max_concurrent_documents: int = 5,
+187:     max_concurrent_extractions: int = 10,
+188:     **kwargs,
+189: ) -> dict[str, Any]:
+190:     """Two-phase document ingestion flow with parallel processing.
+191: 
+192:     Phase 1: Stage documents (checksum-based change detection)
+193:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
+194: 
+195:     Args:
+196:         namespace_id: Target namespace
+197:         documents: List of document dicts with 'content' and optional metadata
+198:         storage: StorageCoordinator instance
+199:         skill_name: Extraction skill to use
+200:         chunk_strategy: Chunking strategy
+201:         chunk_size: Target chunk size
+202:         embedding_model: Model for embeddings
+203:         extraction_model: Model for extraction
+204:         max_concurrent_documents: Maximum documents to process in parallel
+205:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
+206: 
+207:     Returns:
+208:         Summary of ingestion results
+209:     """
+210:     if storage is None:
+211:         raise ValueError("storage is required")
+212: 
+213:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
+214: 
+215:     # Phase 1: Stage documents (can run in parallel too)
+216:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
+217: 
+218:     async def stage_with_limit(doc_input):
+219:         async with staging_semaphore:
+220:             return await stage_document(doc_input, namespace_id, storage)
+221: 
+222:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+223:     staged_docs = [doc for doc in staged_results if doc is not None]
+224: 
+225:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
+226: 
+227:     if not staged_docs:
+228:         return {
+229:             "total_documents": len(documents),
+230:             "processed_documents": 0,
+231:             "skipped_documents": len(documents),
+232:             "total_chunks": 0,
+233:             "total_entities": 0,
+234:             "total_relationships": 0,
+235:         }
+236: 
+237:     # Phase 2: Process staged documents in parallel with controlled concurrency
+238:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+239: 
+240:     async def process_with_limit(doc):
+241:         async with doc_semaphore:
+242:             return await process_document(
+243:                 doc,
+244:                 storage,
+245:                 chunk_strategy=chunk_strategy,
+246:                 chunk_size=chunk_size,
+247:                 embedding_model=embedding_model,
+248:                 extraction_model=extraction_model,
+249:                 skill_name=skill_name,
+250:                 max_concurrent_extractions=max_concurrent_extractions,
+251:             )
+252: 
+253:     results = await asyncio.gather(
+254:         *[process_with_limit(doc) for doc in staged_docs],
+255:         return_exceptions=True,
+256:     )
+257: 
+258:     # Filter out exceptions and count errors
+259:     successful_results = []
+260:     error_count = 0
+261:     for result in results:
+262:         if isinstance(result, Exception):
+263:             logger.error(f"Document processing failed: {result}")
+264:             error_count += 1
+265:         else:
+266:             successful_results.append(result)
+267: 
+268:     # Aggregate results
+269:     total_chunks = sum(r["chunks"] for r in successful_results)
+270:     total_entities = sum(r["entities"] for r in successful_results)
+271:     total_relationships = sum(r["relationships"] for r in successful_results)
+272: 
+273:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
+274: 
+275:     return {
+276:         "total_documents": len(documents),
+277:         "processed_documents": len(successful_results),
+278:         "skipped_documents": len(documents) - len(staged_docs),
+279:         "failed_documents": error_count,
+280:         "total_chunks": total_chunks,
+281:         "total_entities": total_entities,
+282:         "total_relationships": total_relationships,
+283:     }
 ````
 
 ## File: src/khora/storage/backends/neo4j.py
@@ -11404,511 +11447,6 @@ README.md
 755:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
-## File: src/khora/memory_lake.py
-````python
-  1: """MemoryLake - Primary API for Khora Memory Lake.
-  2: 
-  3: This is the main entry point for using Khora as a library.
-  4: Provides a simple, unified interface for memory storage and retrieval.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import hashlib
- 10: from collections.abc import AsyncGenerator
- 11: from contextlib import asynccontextmanager
- 12: from dataclasses import dataclass, field
- 13: from typing import TYPE_CHECKING, Any
- 14: from uuid import UUID
- 15: 
- 16: from loguru import logger
- 17: 
- 18: from khora.config import KhoraConfig, LiteLLMConfig, load_config
- 19: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
- 20: from khora.extraction.embedders import LiteLLMEmbedder
- 21: from khora.query import HybridQueryEngine, QueryConfig, SearchMode
- 22: from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
- 23: 
- 24: if TYPE_CHECKING:
- 25:     pass
- 26: 
- 27: 
- 28: @dataclass
- 29: class RememberResult:
- 30:     """Result of a remember operation."""
- 31: 
- 32:     document_id: UUID
- 33:     namespace_id: UUID
- 34:     chunks_created: int
- 35:     entities_extracted: int
- 36:     relationships_created: int
- 37:     metadata: dict[str, Any] = field(default_factory=dict)
- 38: 
- 39: 
- 40: @dataclass
- 41: class RecallResult:
- 42:     """Result of a recall operation."""
- 43: 
- 44:     query: str
- 45:     namespace_id: UUID
- 46:     chunks: list[tuple[Any, float]]
- 47:     entities: list[tuple[Any, float]]
- 48:     context_text: str
- 49:     metadata: dict[str, Any] = field(default_factory=dict)
- 50: 
- 51: 
- 52: class MemoryLake:
- 53:     """Primary interface for Khora Memory Lake.
- 54: 
- 55:     Provides a simple API for storing and retrieving memories:
- 56:     - remember(): Store content in the memory lake
- 57:     - recall(): Retrieve relevant memories for a query
- 58:     - forget(): Remove memories
- 59: 
- 60:     Can be used as a context manager for automatic connection handling.
- 61: 
- 62:     Usage:
- 63:         async with MemoryLake() as lake:
- 64:             await lake.remember("Important fact...", namespace="my-ns")
- 65:             results = await lake.recall("What do I know about...", namespace="my-ns")
- 66:     """
- 67: 
- 68:     def __init__(
- 69:         self,
- 70:         config: KhoraConfig | None = None,
- 71:         storage_config: StorageConfig | None = None,
- 72:     ) -> None:
- 73:         """Initialize the Memory Lake.
- 74: 
- 75:         Args:
- 76:             config: Khora configuration (loads from env if None)
- 77:             storage_config: Storage configuration (derived from config if None)
- 78:         """
- 79:         self._config = config or load_config()
- 80: 
- 81:         # Set up storage config
- 82:         if storage_config:
- 83:             self._storage_config = storage_config
- 84:         else:
- 85:             postgresql_url = self._config.get_postgresql_url()
- 86:             self._storage_config = StorageConfig(
- 87:                 postgresql_url=postgresql_url,
- 88:                 pgvector_url=postgresql_url,  # pgvector uses same database as relational
- 89:                 neo4j_url=self._config.get_neo4j_url(),
- 90:                 neo4j_user=self._config.get_neo4j_user(),
- 91:                 neo4j_password=self._config.get_neo4j_password(),
- 92:                 neo4j_database=self._config.get_neo4j_database(),
- 93:                 pgvector_embedding_dimension=self._config.storage.embedding_dimension,
- 94:             )
- 95: 
- 96:         self._storage: StorageCoordinator | None = None
- 97:         self._embedder: LiteLLMEmbedder | None = None
- 98:         self._query_engine: HybridQueryEngine | None = None
- 99:         self._connected = False
-100: 
-101:         # Default namespace for simple usage
-102:         self._default_namespace_id: UUID | None = None
-103: 
-104:     async def connect(self) -> None:
-105:         """Connect to all storage backends."""
-106:         if self._connected:
-107:             return
-108: 
-109:         logger.info("Connecting Memory Lake...")
-110: 
-111:         # Create and connect storage
-112:         self._storage = create_storage_coordinator(self._storage_config)
-113:         await self._storage.connect()
-114: 
-115:         # Create embedder
-116:         llm_config = LiteLLMConfig(
-117:             model=self._config.llm.model,
-118:             embedding_model=self._config.llm.embedding_model,
-119:             embedding_dimension=self._config.llm.embedding_dimension,
-120:             timeout=self._config.llm.timeout,
-121:             max_retries=self._config.llm.max_retries,
-122:         )
-123:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
-124: 
-125:         # Create query engine
-126:         self._query_engine = HybridQueryEngine(
-127:             storage=self._storage,
-128:             embedder=self._embedder,
-129:         )
-130: 
-131:         self._connected = True
-132:         logger.info("Memory Lake connected")
-133: 
-134:     async def disconnect(self) -> None:
-135:         """Disconnect from all storage backends."""
-136:         if not self._connected:
-137:             return
-138: 
-139:         logger.info("Disconnecting Memory Lake...")
-140: 
-141:         if self._storage:
-142:             await self._storage.disconnect()
-143:             self._storage = None
-144: 
-145:         self._embedder = None
-146:         self._query_engine = None
-147:         self._connected = False
-148: 
-149:         logger.info("Memory Lake disconnected")
-150: 
-151:     async def __aenter__(self) -> MemoryLake:
-152:         """Async context manager entry."""
-153:         await self.connect()
-154:         return self
-155: 
-156:     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-157:         """Async context manager exit."""
-158:         await self.disconnect()
-159: 
-160:     @property
-161:     def storage(self) -> StorageCoordinator:
-162:         """Get the storage coordinator."""
-163:         if self._storage is None:
-164:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
-165:         return self._storage
-166: 
-167:     @property
-168:     def query_engine(self) -> HybridQueryEngine:
-169:         """Get the query engine."""
-170:         if self._query_engine is None:
-171:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
-172:         return self._query_engine
-173: 
-174:     # =========================================================================
-175:     # Namespace Management
-176:     # =========================================================================
-177: 
-178:     async def create_namespace(
-179:         self,
-180:         name: str,
-181:         workspace_id: UUID,
-182:         *,
-183:         description: str = "",
-184:         config_overrides: dict[str, Any] | None = None,
-185:     ) -> MemoryNamespace:
-186:         """Create a new memory namespace.
-187: 
-188:         Args:
-189:             name: Namespace name
-190:             workspace_id: Parent workspace ID
-191:             description: Optional description
-192:             config_overrides: Optional configuration overrides
-193: 
-194:         Returns:
-195:             Created MemoryNamespace
-196:         """
-197:         namespace = MemoryNamespace(
-198:             workspace_id=workspace_id,
-199:             name=name,
-200:             description=description,
-201:             config_overrides=config_overrides or {},
-202:         )
-203:         return await self.storage.create_namespace(namespace)
-204: 
-205:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-206:         """Get a namespace by ID."""
-207:         return await self.storage.get_namespace(namespace_id)
-208: 
-209:     async def get_or_create_default_namespace(self) -> UUID:
-210:         """Get or create a default namespace for simple usage."""
-211:         if self._default_namespace_id:
-212:             return self._default_namespace_id
-213: 
-214:         # Try to find existing default namespace
-215:         # For simplicity, we'll create a default org/workspace/namespace
-216:         default_org = await self.storage.get_organization_by_slug("default")
-217:         if not default_org:
-218:             default_org = await self.storage.create_organization(Organization(name="Default", slug="default"))
-219: 
-220:         workspaces = await self.storage.list_workspaces(default_org.id)
-221:         if workspaces:
-222:             default_workspace = workspaces[0]
-223:         else:
-224:             default_workspace = await self.storage.create_workspace(
-225:                 Workspace(
-226:                     organization_id=default_org.id,
-227:                     name="Default",
-228:                     slug="default",
-229:                 )
-230:             )
-231: 
-232:         namespaces = await self.storage.list_namespaces(default_workspace.id)
-233:         if namespaces:
-234:             default_namespace = namespaces[0]
-235:         else:
-236:             default_namespace = await self.storage.create_namespace(
-237:                 MemoryNamespace(
-238:                     workspace_id=default_workspace.id,
-239:                     name="Default",
-240:                     slug="default",
-241:                 )
-242:             )
-243: 
-244:         self._default_namespace_id = default_namespace.id
-245:         return self._default_namespace_id
-246: 
-247:     # =========================================================================
-248:     # Core API: remember, recall, forget
-249:     # =========================================================================
-250: 
-251:     async def remember(
-252:         self,
-253:         content: str,
-254:         *,
-255:         namespace: str | UUID | None = None,
-256:         title: str = "",
-257:         source: str = "",
-258:         metadata: dict[str, Any] | None = None,
-259:         skill_name: str = "general_entities",
-260:     ) -> RememberResult:
-261:         """Store content in the memory lake.
-262: 
-263:         This is the primary method for adding memories. It:
-264:         1. Creates a document
-265:         2. Chunks the content
-266:         3. Generates embeddings
-267:         4. Extracts entities and relationships
-268: 
-269:         Args:
-270:             content: Content to remember
-271:             namespace: Namespace name, ID, or None for default
-272:             title: Optional title for the content
-273:             source: Optional source identifier
-274:             metadata: Optional metadata
-275:             skill_name: Extraction skill to use
-276: 
-277:         Returns:
-278:             RememberResult with details
-279:         """
-280:         # Resolve namespace
-281:         namespace_id = await self._resolve_namespace(namespace)
-282: 
-283:         # Compute checksum
-284:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-285: 
-286:         # Check for duplicate - skip if any document with same checksum exists
-287:         existing = await self.storage.get_document_by_checksum(namespace_id, checksum)
-288:         if existing:
-289:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
-290:             return RememberResult(
-291:                 document_id=existing.id,
-292:                 namespace_id=namespace_id,
-293:                 chunks_created=existing.chunk_count,
-294:                 entities_extracted=existing.entity_count,
-295:                 relationships_created=0,
-296:                 metadata={"duplicate": True, "status": str(existing.status)},
-297:             )
-298: 
-299:         # Create document
-300:         doc_metadata = DocumentMetadata(
-301:             title=title,
-302:             source=source,
-303:             source_type="api",
-304:             checksum=checksum,
-305:             size_bytes=len(content.encode("utf-8")),
-306:             custom=metadata or {},
-307:         )
-308:         document = Document(
-309:             namespace_id=namespace_id,
-310:             content=content,
-311:             metadata=doc_metadata,
-312:         )
-313:         document = await self.storage.create_document(document)
-314: 
-315:         # Process through pipeline
-316:         from khora.pipelines.flows.ingest import process_document
-317: 
-318:         result = await process_document(
-319:             document,
-320:             self.storage,
-321:             skill_name=skill_name,
-322:             embedding_model=self._config.llm.embedding_model,
-323:             extraction_model=self._config.llm.model,
-324:         )
-325: 
-326:         return RememberResult(
-327:             document_id=document.id,
-328:             namespace_id=namespace_id,
-329:             chunks_created=result["chunks"],
-330:             entities_extracted=result["entities"],
-331:             relationships_created=result["relationships"],
-332:         )
-333: 
-334:     async def recall(
-335:         self,
-336:         query: str,
-337:         *,
-338:         namespace: str | UUID | None = None,
-339:         limit: int = 10,
-340:         mode: SearchMode = SearchMode.HYBRID,
-341:         min_similarity: float = 0.5,
-342:     ) -> RecallResult:
-343:         """Recall memories relevant to a query.
-344: 
-345:         This is the primary method for retrieving memories. It:
-346:         1. Embeds the query
-347:         2. Searches across vector, graph, and keyword indexes
-348:         3. Fuses results using Reciprocal Rank Fusion
-349:         4. Returns ranked results
-350: 
-351:         Args:
-352:             query: Query text
-353:             namespace: Namespace name, ID, or None for default
-354:             limit: Maximum results to return
-355:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
-356:             min_similarity: Minimum similarity threshold
-357: 
-358:         Returns:
-359:             RecallResult with matched memories
-360:         """
-361:         namespace_id = await self._resolve_namespace(namespace)
-362: 
-363:         config = QueryConfig(
-364:             mode=mode,
-365:             max_chunks=limit,
-366:             max_entities=limit,
-367:             min_chunk_similarity=min_similarity,
-368:             min_entity_similarity=min_similarity,
-369:         )
-370: 
-371:         result = await self.query_engine.query(query, namespace_id, config=config)
-372: 
-373:         return RecallResult(
-374:             query=query,
-375:             namespace_id=namespace_id,
-376:             chunks=result.chunks,
-377:             entities=result.entities,
-378:             context_text=result.get_context_text(max_chunks=limit),
-379:             metadata=result.metadata,
-380:         )
-381: 
-382:     async def forget(
-383:         self,
-384:         document_id: UUID,
-385:         *,
-386:         namespace: str | UUID | None = None,
-387:     ) -> bool:
-388:         """Remove a memory from the lake.
-389: 
-390:         Args:
-391:             document_id: ID of the document to remove
-392:             namespace: Namespace for verification (optional)
-393: 
-394:         Returns:
-395:             True if deleted, False if not found
-396:         """
-397:         # Verify namespace if provided
-398:         if namespace:
-399:             namespace_id = await self._resolve_namespace(namespace)
-400:             document = await self.storage.get_document(document_id)
-401:             if document and document.namespace_id != namespace_id:
-402:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-403:                 return False
-404: 
-405:         return await self.storage.delete_document(document_id)
-406: 
-407:     # =========================================================================
-408:     # Entity Operations
-409:     # =========================================================================
-410: 
-411:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-412:         """Get an entity by ID."""
-413:         return await self.storage.get_entity(entity_id)
-414: 
-415:     async def list_entities(
-416:         self,
-417:         *,
-418:         namespace: str | UUID | None = None,
-419:         entity_type: str | None = None,
-420:         limit: int = 100,
-421:     ) -> list[Entity]:
-422:         """List entities in a namespace."""
-423:         namespace_id = await self._resolve_namespace(namespace)
-424:         return await self.storage.list_entities(namespace_id, entity_type=entity_type, limit=limit)
-425: 
-426:     async def find_related_entities(
-427:         self,
-428:         entity_id: UUID,
-429:         *,
-430:         namespace: str | UUID | None = None,
-431:         max_depth: int = 2,
-432:         limit: int = 20,
-433:     ) -> list[tuple[Entity, float]]:
-434:         """Find entities related to a given entity."""
-435:         namespace_id = await self._resolve_namespace(namespace)
-436:         return await self.query_engine.find_related_entities(
-437:             entity_id,
-438:             namespace_id,
-439:             max_depth=max_depth,
-440:             limit=limit,
-441:         )
-442: 
-443:     # =========================================================================
-444:     # Helpers
-445:     # =========================================================================
-446: 
-447:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
-448:         """Resolve a namespace reference to a UUID."""
-449:         if namespace is None:
-450:             return await self.get_or_create_default_namespace()
-451: 
-452:         if isinstance(namespace, UUID):
-453:             return namespace
-454: 
-455:         # Try to parse as UUID
-456:         try:
-457:             return UUID(namespace)
-458:         except ValueError:
-459:             pass
-460: 
-461:         # Look up by slug in default workspace
-462:         default_ns_id = await self.get_or_create_default_namespace()
-463:         default_ns = await self.storage.get_namespace(default_ns_id)
-464:         if default_ns:
-465:             ns = await self.storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
-466:             if ns:
-467:                 return ns.id
-468: 
-469:         raise ValueError(f"Namespace not found: {namespace}")
-470: 
-471:     async def health_check(self) -> dict[str, Any]:
-472:         """Check health of all components."""
-473:         if not self._connected:
-474:             return {"status": "disconnected"}
-475: 
-476:         storage_health = await self.storage.health_check()
-477: 
-478:         return {
-479:             "status": "healthy" if storage_health.is_healthy else "degraded",
-480:             "storage": storage_health.summary,
-481:         }
-482: 
-483: 
-484: # Convenience function for one-off usage
-485: @asynccontextmanager
-486: async def memory_lake(
-487:     config: KhoraConfig | None = None,
-488: ) -> AsyncGenerator[MemoryLake]:
-489:     """Context manager for one-off Memory Lake usage.
-490: 
-491:     Usage:
-492:         async with memory_lake() as lake:
-493:             await lake.remember("Hello, world!")
-494:             result = await lake.recall("greeting")
-495:     """
-496:     lake = MemoryLake(config=config)
-497:     try:
-498:         await lake.connect()
-499:         yield lake
-500:     finally:
-501:         await lake.disconnect()
-````
-
 ## File: CLAUDE.md
 ````markdown
   1: # Khora - Development Guide
@@ -12237,6 +11775,580 @@ README.md
 129:     "ruff>=0.14.14",
 130:     "isort>=7.0.0",
 131: ]
+````
+
+## File: src/khora/memory_lake.py
+````python
+  1: """MemoryLake - Primary API for Khora Memory Lake.
+  2: 
+  3: This is the main entry point for using Khora as a library.
+  4: Provides a simple, unified interface for memory storage and retrieval.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: import asyncio
+ 10: import hashlib
+ 11: from collections.abc import AsyncGenerator
+ 12: from contextlib import asynccontextmanager
+ 13: from dataclasses import dataclass, field
+ 14: from typing import TYPE_CHECKING, Any
+ 15: from uuid import UUID
+ 16: 
+ 17: from loguru import logger
+ 18: 
+ 19: from khora.config import KhoraConfig, LiteLLMConfig, load_config
+ 20: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+ 21: from khora.extraction.embedders import LiteLLMEmbedder
+ 22: from khora.query import HybridQueryEngine, QueryConfig, SearchMode
+ 23: from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+ 24: 
+ 25: if TYPE_CHECKING:
+ 26:     pass
+ 27: 
+ 28: 
+ 29: @dataclass
+ 30: class RememberResult:
+ 31:     """Result of a remember operation."""
+ 32: 
+ 33:     document_id: UUID
+ 34:     namespace_id: UUID
+ 35:     chunks_created: int
+ 36:     entities_extracted: int
+ 37:     relationships_created: int
+ 38:     metadata: dict[str, Any] = field(default_factory=dict)
+ 39: 
+ 40: 
+ 41: @dataclass
+ 42: class RecallResult:
+ 43:     """Result of a recall operation."""
+ 44: 
+ 45:     query: str
+ 46:     namespace_id: UUID
+ 47:     chunks: list[tuple[Any, float]]
+ 48:     entities: list[tuple[Any, float]]
+ 49:     context_text: str
+ 50:     metadata: dict[str, Any] = field(default_factory=dict)
+ 51: 
+ 52: 
+ 53: class MemoryLake:
+ 54:     """Primary interface for Khora Memory Lake.
+ 55: 
+ 56:     Provides a simple API for storing and retrieving memories:
+ 57:     - remember(): Store content in the memory lake
+ 58:     - recall(): Retrieve relevant memories for a query
+ 59:     - forget(): Remove memories
+ 60: 
+ 61:     Can be used as a context manager for automatic connection handling.
+ 62: 
+ 63:     Usage:
+ 64:         async with MemoryLake() as lake:
+ 65:             await lake.remember("Important fact...", namespace="my-ns")
+ 66:             results = await lake.recall("What do I know about...", namespace="my-ns")
+ 67:     """
+ 68: 
+ 69:     def __init__(
+ 70:         self,
+ 71:         config: KhoraConfig | None = None,
+ 72:         storage_config: StorageConfig | None = None,
+ 73:     ) -> None:
+ 74:         """Initialize the Memory Lake.
+ 75: 
+ 76:         Args:
+ 77:             config: Khora configuration (loads from env if None)
+ 78:             storage_config: Storage configuration (derived from config if None)
+ 79:         """
+ 80:         self._config = config or load_config()
+ 81: 
+ 82:         # Set up storage config
+ 83:         if storage_config:
+ 84:             self._storage_config = storage_config
+ 85:         else:
+ 86:             postgresql_url = self._config.get_postgresql_url()
+ 87:             self._storage_config = StorageConfig(
+ 88:                 postgresql_url=postgresql_url,
+ 89:                 pgvector_url=postgresql_url,  # pgvector uses same database as relational
+ 90:                 neo4j_url=self._config.get_neo4j_url(),
+ 91:                 neo4j_user=self._config.get_neo4j_user(),
+ 92:                 neo4j_password=self._config.get_neo4j_password(),
+ 93:                 neo4j_database=self._config.get_neo4j_database(),
+ 94:                 pgvector_embedding_dimension=self._config.storage.embedding_dimension,
+ 95:             )
+ 96: 
+ 97:         self._storage: StorageCoordinator | None = None
+ 98:         self._embedder: LiteLLMEmbedder | None = None
+ 99:         self._query_engine: HybridQueryEngine | None = None
+100:         self._connected = False
+101: 
+102:         # Default namespace for simple usage
+103:         self._default_namespace_id: UUID | None = None
+104: 
+105:     async def connect(self) -> None:
+106:         """Connect to all storage backends."""
+107:         if self._connected:
+108:             return
+109: 
+110:         logger.info("Connecting Memory Lake...")
+111: 
+112:         # Create and connect storage
+113:         self._storage = create_storage_coordinator(self._storage_config)
+114:         await self._storage.connect()
+115: 
+116:         # Create embedder
+117:         llm_config = LiteLLMConfig(
+118:             model=self._config.llm.model,
+119:             embedding_model=self._config.llm.embedding_model,
+120:             embedding_dimension=self._config.llm.embedding_dimension,
+121:             timeout=self._config.llm.timeout,
+122:             max_retries=self._config.llm.max_retries,
+123:         )
+124:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
+125: 
+126:         # Create query engine
+127:         self._query_engine = HybridQueryEngine(
+128:             storage=self._storage,
+129:             embedder=self._embedder,
+130:         )
+131: 
+132:         self._connected = True
+133:         logger.info("Memory Lake connected")
+134: 
+135:     async def disconnect(self) -> None:
+136:         """Disconnect from all storage backends."""
+137:         if not self._connected:
+138:             return
+139: 
+140:         logger.info("Disconnecting Memory Lake...")
+141: 
+142:         if self._storage:
+143:             await self._storage.disconnect()
+144:             self._storage = None
+145: 
+146:         self._embedder = None
+147:         self._query_engine = None
+148:         self._connected = False
+149: 
+150:         logger.info("Memory Lake disconnected")
+151: 
+152:     async def __aenter__(self) -> MemoryLake:
+153:         """Async context manager entry."""
+154:         await self.connect()
+155:         return self
+156: 
+157:     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+158:         """Async context manager exit."""
+159:         await self.disconnect()
+160: 
+161:     @property
+162:     def storage(self) -> StorageCoordinator:
+163:         """Get the storage coordinator."""
+164:         if self._storage is None:
+165:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+166:         return self._storage
+167: 
+168:     @property
+169:     def query_engine(self) -> HybridQueryEngine:
+170:         """Get the query engine."""
+171:         if self._query_engine is None:
+172:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+173:         return self._query_engine
+174: 
+175:     # =========================================================================
+176:     # Namespace Management
+177:     # =========================================================================
+178: 
+179:     async def create_namespace(
+180:         self,
+181:         name: str,
+182:         workspace_id: UUID,
+183:         *,
+184:         description: str = "",
+185:         config_overrides: dict[str, Any] | None = None,
+186:     ) -> MemoryNamespace:
+187:         """Create a new memory namespace.
+188: 
+189:         Args:
+190:             name: Namespace name
+191:             workspace_id: Parent workspace ID
+192:             description: Optional description
+193:             config_overrides: Optional configuration overrides
+194: 
+195:         Returns:
+196:             Created MemoryNamespace
+197:         """
+198:         namespace = MemoryNamespace(
+199:             workspace_id=workspace_id,
+200:             name=name,
+201:             description=description,
+202:             config_overrides=config_overrides or {},
+203:         )
+204:         return await self.storage.create_namespace(namespace)
+205: 
+206:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+207:         """Get a namespace by ID."""
+208:         return await self.storage.get_namespace(namespace_id)
+209: 
+210:     async def get_or_create_default_namespace(self) -> UUID:
+211:         """Get or create a default namespace for simple usage."""
+212:         if self._default_namespace_id:
+213:             return self._default_namespace_id
+214: 
+215:         # Try to find existing default namespace
+216:         # For simplicity, we'll create a default org/workspace/namespace
+217:         default_org = await self.storage.get_organization_by_slug("default")
+218:         if not default_org:
+219:             default_org = await self.storage.create_organization(Organization(name="Default", slug="default"))
+220: 
+221:         workspaces = await self.storage.list_workspaces(default_org.id)
+222:         if workspaces:
+223:             default_workspace = workspaces[0]
+224:         else:
+225:             default_workspace = await self.storage.create_workspace(
+226:                 Workspace(
+227:                     organization_id=default_org.id,
+228:                     name="Default",
+229:                     slug="default",
+230:                 )
+231:             )
+232: 
+233:         namespaces = await self.storage.list_namespaces(default_workspace.id)
+234:         if namespaces:
+235:             default_namespace = namespaces[0]
+236:         else:
+237:             default_namespace = await self.storage.create_namespace(
+238:                 MemoryNamespace(
+239:                     workspace_id=default_workspace.id,
+240:                     name="Default",
+241:                     slug="default",
+242:                 )
+243:             )
+244: 
+245:         self._default_namespace_id = default_namespace.id
+246:         return self._default_namespace_id
+247: 
+248:     # =========================================================================
+249:     # Core API: remember, recall, forget
+250:     # =========================================================================
+251: 
+252:     async def remember(
+253:         self,
+254:         content: str,
+255:         *,
+256:         namespace: str | UUID | None = None,
+257:         title: str = "",
+258:         source: str = "",
+259:         metadata: dict[str, Any] | None = None,
+260:         skill_name: str = "general_entities",
+261:     ) -> RememberResult:
+262:         """Store content in the memory lake.
+263: 
+264:         This is the primary method for adding memories. It:
+265:         1. Creates a document
+266:         2. Chunks the content
+267:         3. Generates embeddings
+268:         4. Extracts entities and relationships
+269: 
+270:         Args:
+271:             content: Content to remember
+272:             namespace: Namespace name, ID, or None for default
+273:             title: Optional title for the content
+274:             source: Optional source identifier
+275:             metadata: Optional metadata
+276:             skill_name: Extraction skill to use
+277: 
+278:         Returns:
+279:             RememberResult with details
+280:         """
+281:         # Resolve namespace
+282:         namespace_id = await self._resolve_namespace(namespace)
+283: 
+284:         # Compute checksum
+285:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+286: 
+287:         # Check for duplicate - skip if any document with same checksum exists
+288:         existing = await self.storage.get_document_by_checksum(namespace_id, checksum)
+289:         if existing:
+290:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
+291:             return RememberResult(
+292:                 document_id=existing.id,
+293:                 namespace_id=namespace_id,
+294:                 chunks_created=existing.chunk_count,
+295:                 entities_extracted=existing.entity_count,
+296:                 relationships_created=0,
+297:                 metadata={"duplicate": True, "status": str(existing.status)},
+298:             )
+299: 
+300:         # Create document
+301:         doc_metadata = DocumentMetadata(
+302:             title=title,
+303:             source=source,
+304:             source_type="api",
+305:             checksum=checksum,
+306:             size_bytes=len(content.encode("utf-8")),
+307:             custom=metadata or {},
+308:         )
+309:         document = Document(
+310:             namespace_id=namespace_id,
+311:             content=content,
+312:             metadata=doc_metadata,
+313:         )
+314:         document = await self.storage.create_document(document)
+315: 
+316:         # Process through pipeline
+317:         from khora.pipelines.flows.ingest import process_document
+318: 
+319:         result = await process_document(
+320:             document,
+321:             self.storage,
+322:             skill_name=skill_name,
+323:             embedding_model=self._config.llm.embedding_model,
+324:             extraction_model=self._config.llm.model,
+325:         )
+326: 
+327:         return RememberResult(
+328:             document_id=document.id,
+329:             namespace_id=namespace_id,
+330:             chunks_created=result["chunks"],
+331:             entities_extracted=result["entities"],
+332:             relationships_created=result["relationships"],
+333:         )
+334: 
+335:     async def remember_batch(
+336:         self,
+337:         documents: list[dict[str, Any]],
+338:         *,
+339:         namespace: str | UUID | None = None,
+340:         skill_name: str = "general_entities",
+341:         max_concurrent: int = 5,
+342:     ) -> list[RememberResult]:
+343:         """Store multiple documents in the memory lake concurrently.
+344: 
+345:         This is more efficient than calling remember() for each document
+346:         as it processes documents in parallel with controlled concurrency.
+347: 
+348:         Args:
+349:             documents: List of document dicts with keys:
+350:                 - content: str (required)
+351:                 - title: str (optional)
+352:                 - source: str (optional)
+353:                 - metadata: dict (optional)
+354:             namespace: Namespace name, ID, or None for default
+355:             skill_name: Extraction skill to use
+356:             max_concurrent: Maximum concurrent document processing
+357: 
+358:         Returns:
+359:             List of RememberResult objects (one per document)
+360:         """
+361:         if not documents:
+362:             return []
+363: 
+364:         namespace_id = await self._resolve_namespace(namespace)
+365:         semaphore = asyncio.Semaphore(max_concurrent)
+366: 
+367:         async def process_single(doc_data: dict[str, Any]) -> RememberResult:
+368:             async with semaphore:
+369:                 return await self.remember(
+370:                     content=doc_data.get("content", ""),
+371:                     namespace=namespace_id,
+372:                     title=doc_data.get("title", ""),
+373:                     source=doc_data.get("source", ""),
+374:                     metadata=doc_data.get("metadata"),
+375:                     skill_name=doc_data.get("skill_name", skill_name),
+376:                 )
+377: 
+378:         results = await asyncio.gather(
+379:             *[process_single(doc) for doc in documents],
+380:             return_exceptions=True,
+381:         )
+382: 
+383:         # Convert exceptions to failed results
+384:         final_results = []
+385:         for i, result in enumerate(results):
+386:             if isinstance(result, Exception):
+387:                 logger.error(f"Document {i} failed: {result}")
+388:                 final_results.append(
+389:                     RememberResult(
+390:                         document_id=UUID("00000000-0000-0000-0000-000000000000"),
+391:                         namespace_id=namespace_id,
+392:                         chunks_created=0,
+393:                         entities_extracted=0,
+394:                         relationships_created=0,
+395:                         metadata={"error": str(result), "failed": True},
+396:                     )
+397:                 )
+398:             else:
+399:                 final_results.append(result)
+400: 
+401:         return final_results
+402: 
+403:     async def recall(
+404:         self,
+405:         query: str,
+406:         *,
+407:         namespace: str | UUID | None = None,
+408:         limit: int = 10,
+409:         mode: SearchMode = SearchMode.HYBRID,
+410:         min_similarity: float = 0.5,
+411:     ) -> RecallResult:
+412:         """Recall memories relevant to a query.
+413: 
+414:         This is the primary method for retrieving memories. It:
+415:         1. Embeds the query
+416:         2. Searches across vector, graph, and keyword indexes
+417:         3. Fuses results using Reciprocal Rank Fusion
+418:         4. Returns ranked results
+419: 
+420:         Args:
+421:             query: Query text
+422:             namespace: Namespace name, ID, or None for default
+423:             limit: Maximum results to return
+424:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
+425:             min_similarity: Minimum similarity threshold
+426: 
+427:         Returns:
+428:             RecallResult with matched memories
+429:         """
+430:         namespace_id = await self._resolve_namespace(namespace)
+431: 
+432:         config = QueryConfig(
+433:             mode=mode,
+434:             max_chunks=limit,
+435:             max_entities=limit,
+436:             min_chunk_similarity=min_similarity,
+437:             min_entity_similarity=min_similarity,
+438:         )
+439: 
+440:         result = await self.query_engine.query(query, namespace_id, config=config)
+441: 
+442:         return RecallResult(
+443:             query=query,
+444:             namespace_id=namespace_id,
+445:             chunks=result.chunks,
+446:             entities=result.entities,
+447:             context_text=result.get_context_text(max_chunks=limit),
+448:             metadata=result.metadata,
+449:         )
+450: 
+451:     async def forget(
+452:         self,
+453:         document_id: UUID,
+454:         *,
+455:         namespace: str | UUID | None = None,
+456:     ) -> bool:
+457:         """Remove a memory from the lake.
+458: 
+459:         Args:
+460:             document_id: ID of the document to remove
+461:             namespace: Namespace for verification (optional)
+462: 
+463:         Returns:
+464:             True if deleted, False if not found
+465:         """
+466:         # Verify namespace if provided
+467:         if namespace:
+468:             namespace_id = await self._resolve_namespace(namespace)
+469:             document = await self.storage.get_document(document_id)
+470:             if document and document.namespace_id != namespace_id:
+471:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
+472:                 return False
+473: 
+474:         return await self.storage.delete_document(document_id)
+475: 
+476:     # =========================================================================
+477:     # Entity Operations
+478:     # =========================================================================
+479: 
+480:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+481:         """Get an entity by ID."""
+482:         return await self.storage.get_entity(entity_id)
+483: 
+484:     async def list_entities(
+485:         self,
+486:         *,
+487:         namespace: str | UUID | None = None,
+488:         entity_type: str | None = None,
+489:         limit: int = 100,
+490:     ) -> list[Entity]:
+491:         """List entities in a namespace."""
+492:         namespace_id = await self._resolve_namespace(namespace)
+493:         return await self.storage.list_entities(namespace_id, entity_type=entity_type, limit=limit)
+494: 
+495:     async def find_related_entities(
+496:         self,
+497:         entity_id: UUID,
+498:         *,
+499:         namespace: str | UUID | None = None,
+500:         max_depth: int = 2,
+501:         limit: int = 20,
+502:     ) -> list[tuple[Entity, float]]:
+503:         """Find entities related to a given entity."""
+504:         namespace_id = await self._resolve_namespace(namespace)
+505:         return await self.query_engine.find_related_entities(
+506:             entity_id,
+507:             namespace_id,
+508:             max_depth=max_depth,
+509:             limit=limit,
+510:         )
+511: 
+512:     # =========================================================================
+513:     # Helpers
+514:     # =========================================================================
+515: 
+516:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
+517:         """Resolve a namespace reference to a UUID."""
+518:         if namespace is None:
+519:             return await self.get_or_create_default_namespace()
+520: 
+521:         if isinstance(namespace, UUID):
+522:             return namespace
+523: 
+524:         # Try to parse as UUID
+525:         try:
+526:             return UUID(namespace)
+527:         except ValueError:
+528:             pass
+529: 
+530:         # Look up by slug in default workspace
+531:         default_ns_id = await self.get_or_create_default_namespace()
+532:         default_ns = await self.storage.get_namespace(default_ns_id)
+533:         if default_ns:
+534:             ns = await self.storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
+535:             if ns:
+536:                 return ns.id
+537: 
+538:         raise ValueError(f"Namespace not found: {namespace}")
+539: 
+540:     async def health_check(self) -> dict[str, Any]:
+541:         """Check health of all components."""
+542:         if not self._connected:
+543:             return {"status": "disconnected"}
+544: 
+545:         storage_health = await self.storage.health_check()
+546: 
+547:         return {
+548:             "status": "healthy" if storage_health.is_healthy else "degraded",
+549:             "storage": storage_health.summary,
+550:         }
+551: 
+552: 
+553: # Convenience function for one-off usage
+554: @asynccontextmanager
+555: async def memory_lake(
+556:     config: KhoraConfig | None = None,
+557: ) -> AsyncGenerator[MemoryLake]:
+558:     """Context manager for one-off Memory Lake usage.
+559: 
+560:     Usage:
+561:         async with memory_lake() as lake:
+562:             await lake.remember("Hello, world!")
+563:             result = await lake.recall("greeting")
+564:     """
+565:     lake = MemoryLake(config=config)
+566:     try:
+567:         await lake.connect()
+568:         yield lake
+569:     finally:
+570:         await lake.disconnect()
 ````
 
 ## File: README.md
@@ -12822,6 +12934,15 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-26 14:15:33 +0100
+**Message:** Fix duplicate document detection to prevent race conditions
+
+**Files:**
+- REPOMIX.md
+- src/khora/memory_lake.py
+- src/khora/pipelines/flows/ingest.py
+- src/khora/storage/backends/postgresql.py
 
 ## Commit: 2026-01-26 13:59:16 +0100
 **Message:** Serialize dict properties to JSON for Neo4j storage

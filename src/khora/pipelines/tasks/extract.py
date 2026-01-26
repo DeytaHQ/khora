@@ -16,13 +16,17 @@ async def extract_entities(
     *,
     skill_name: str = "general_entities",
     model: str = "gpt-4o-mini",
+    max_concurrent: int = 10,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
+
+    Uses batch extraction for parallel processing of multiple chunks.
 
     Args:
         chunks: Chunks to extract from
         skill_name: Extraction skill to use
         model: LLM model for extraction
+        max_concurrent: Maximum concurrent extractions
 
     Returns:
         Tuple of (entities, relationships)
@@ -39,16 +43,18 @@ async def extract_entities(
     registry = get_default_registry()
     skill = registry.get_or_default(skill_name)
 
-    # Create extractor
-    extractor = LLMEntityExtractor(model=model)
+    # Create extractor with concurrency limit
+    extractor = LLMEntityExtractor(model=model, max_concurrent=max_concurrent)
 
-    # Extract from each chunk
+    # Extract from all chunks in parallel using batch extraction
+    texts = [chunk.content for chunk in chunks]
+    results = await extractor.extract_batch(texts, entity_types=skill.entity_types)
+
+    # Process results
     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
     all_relationships: list[Relationship] = []
 
-    for chunk in chunks:
-        result = await extractor.extract(chunk.content, entity_types=skill.entity_types)
-
+    for chunk, result in zip(chunks, results):
         # Process entities
         for extracted in result.entities:
             if extracted.confidence < skill.min_entity_confidence:
