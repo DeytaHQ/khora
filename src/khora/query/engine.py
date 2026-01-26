@@ -11,6 +11,7 @@ with configurable fusion weights. Now enhanced with:
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
@@ -43,25 +44,144 @@ class SearchMode(Enum):
 
 
 @dataclass
-class SearchMethodContribution:
-    """Tracks which search methods contributed to results."""
+class SearchMethodStats:
+    """Statistics for a single search method."""
 
-    vector: int = 0  # Number of results from vector search
-    graph: int = 0  # Number of results from graph search
-    keyword: int = 0  # Number of results from keyword search
+    chunk_count: int = 0
+    entity_count: int = 0
+    chunk_ids: list[str] = field(default_factory=list)
+    entity_ids: list[str] = field(default_factory=list)
 
-    # Detailed breakdown
-    vector_chunks: list[str] = field(default_factory=list)  # Chunk IDs from vector
-    graph_chunks: list[str] = field(default_factory=list)  # Chunk IDs from graph
-    keyword_chunks: list[str] = field(default_factory=list)  # Chunk IDs from keyword
+    # Score statistics
+    min_score: float = 0.0
+    max_score: float = 0.0
+    avg_score: float = 0.0
+
+    # Timing (in milliseconds)
+    latency_ms: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
-            "vector": {"count": self.vector, "chunk_ids": self.vector_chunks[:10]},
-            "graph": {"count": self.graph, "chunk_ids": self.graph_chunks[:10]},
-            "keyword": {"count": self.keyword, "chunk_ids": self.keyword_chunks[:10]},
+            "chunks": {
+                "count": self.chunk_count,
+                "ids": self.chunk_ids[:10],  # Limit for readability
+            },
+            "entities": {
+                "count": self.entity_count,
+                "ids": self.entity_ids[:10],
+            },
+            "scores": {
+                "min": round(self.min_score, 4),
+                "max": round(self.max_score, 4),
+                "avg": round(self.avg_score, 4),
+            },
+            "latency_ms": round(self.latency_ms, 2),
         }
+
+
+@dataclass
+class SearchMethodContribution:
+    """Tracks which search methods contributed to results with detailed statistics."""
+
+    # Per-method statistics
+    vector: SearchMethodStats = field(default_factory=SearchMethodStats)
+    graph: SearchMethodStats = field(default_factory=SearchMethodStats)
+    keyword: SearchMethodStats = field(default_factory=SearchMethodStats)
+
+    # Overlap analysis
+    vector_only_chunks: list[str] = field(default_factory=list)  # Chunks found ONLY by vector
+    graph_only_chunks: list[str] = field(default_factory=list)  # Chunks found ONLY by graph
+    keyword_only_chunks: list[str] = field(default_factory=list)  # Chunks found ONLY by keyword
+    vector_graph_overlap: list[str] = field(default_factory=list)  # Chunks found by both vector AND graph
+    vector_keyword_overlap: list[str] = field(default_factory=list)  # Chunks found by both vector AND keyword
+    graph_keyword_overlap: list[str] = field(default_factory=list)  # Chunks found by both graph AND keyword
+    all_methods_overlap: list[str] = field(default_factory=list)  # Chunks found by ALL methods
+
+    # Entity overlap
+    vector_only_entities: list[str] = field(default_factory=list)
+    graph_only_entities: list[str] = field(default_factory=list)
+    vector_graph_entity_overlap: list[str] = field(default_factory=list)
+
+    # Total timing
+    total_search_latency_ms: float = 0.0
+    fusion_latency_ms: float = 0.0
+
+    def compute_overlaps(self) -> None:
+        """Compute overlap statistics from per-method chunk/entity lists."""
+        vector_set = set(self.vector.chunk_ids)
+        graph_set = set(self.graph.chunk_ids)
+        keyword_set = set(self.keyword.chunk_ids)
+
+        # Chunk overlaps
+        self.vector_graph_overlap = list(vector_set & graph_set)
+        self.vector_keyword_overlap = list(vector_set & keyword_set)
+        self.graph_keyword_overlap = list(graph_set & keyword_set)
+        self.all_methods_overlap = list(vector_set & graph_set & keyword_set)
+
+        # Exclusive chunks
+        self.vector_only_chunks = list(vector_set - graph_set - keyword_set)
+        self.graph_only_chunks = list(graph_set - vector_set - keyword_set)
+        self.keyword_only_chunks = list(keyword_set - vector_set - graph_set)
+
+        # Entity overlaps
+        vector_entities = set(self.vector.entity_ids)
+        graph_entities = set(self.graph.entity_ids)
+        self.vector_graph_entity_overlap = list(vector_entities & graph_entities)
+        self.vector_only_entities = list(vector_entities - graph_entities)
+        self.graph_only_entities = list(graph_entities - vector_entities)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary with comprehensive statistics."""
+        total_unique_chunks = len(set(self.vector.chunk_ids) | set(self.graph.chunk_ids) | set(self.keyword.chunk_ids))
+        total_unique_entities = len(set(self.vector.entity_ids) | set(self.graph.entity_ids))
+
+        return {
+            "summary": {
+                "total_unique_chunks": total_unique_chunks,
+                "total_unique_entities": total_unique_entities,
+                "total_search_latency_ms": round(self.total_search_latency_ms, 2),
+                "fusion_latency_ms": round(self.fusion_latency_ms, 2),
+            },
+            "by_method": {
+                "vector": self.vector.to_dict(),
+                "graph": self.graph.to_dict(),
+                "keyword": self.keyword.to_dict(),
+            },
+            "chunk_overlap": {
+                "vector_only": {"count": len(self.vector_only_chunks), "ids": self.vector_only_chunks[:5]},
+                "graph_only": {"count": len(self.graph_only_chunks), "ids": self.graph_only_chunks[:5]},
+                "keyword_only": {"count": len(self.keyword_only_chunks), "ids": self.keyword_only_chunks[:5]},
+                "vector_and_graph": {"count": len(self.vector_graph_overlap), "ids": self.vector_graph_overlap[:5]},
+                "vector_and_keyword": {
+                    "count": len(self.vector_keyword_overlap),
+                    "ids": self.vector_keyword_overlap[:5],
+                },
+                "graph_and_keyword": {"count": len(self.graph_keyword_overlap), "ids": self.graph_keyword_overlap[:5]},
+                "all_three_methods": {"count": len(self.all_methods_overlap), "ids": self.all_methods_overlap[:5]},
+            },
+            "entity_overlap": {
+                "vector_only": {"count": len(self.vector_only_entities), "ids": self.vector_only_entities[:5]},
+                "graph_only": {"count": len(self.graph_only_entities), "ids": self.graph_only_entities[:5]},
+                "vector_and_graph": {
+                    "count": len(self.vector_graph_entity_overlap),
+                    "ids": self.vector_graph_entity_overlap[:5],
+                },
+            },
+        }
+
+    # Legacy property for backwards compatibility
+    @property
+    def vector_chunks(self) -> list[str]:
+        return self.vector.chunk_ids
+
+    @property
+    def graph_chunks(self) -> list[str]:
+        return self.graph.chunk_ids
+
+    @property
+    def keyword_chunks(self) -> list[str]:
+        return self.keyword.chunk_ids
 
 
 @dataclass
@@ -475,6 +595,8 @@ class HybridQueryEngine:
         all_entity_results: dict[str, list[tuple[Any, float]]] = {}
         graph_context: dict[str, Any] = {}
 
+        search_start_time = time.perf_counter()
+
         for i, q in enumerate(queries_to_search):
             suffix = "" if i == 0 else f"_exp{i}"
 
@@ -485,22 +607,30 @@ class HybridQueryEngine:
 
             # Execute searches in parallel based on mode
             tasks = []
+            task_types = []  # Track which task is which for timing
 
             if cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
-                tasks.append(self._vector_search(namespace_id, query_embedding, cfg))
+                tasks.append(self._timed_search(self._vector_search(namespace_id, query_embedding, cfg), "vector"))
+                task_types.append("vector")
 
             if cfg.mode in (SearchMode.GRAPH, SearchMode.HYBRID, SearchMode.ALL):
-                tasks.append(self._graph_search(namespace_id, q, query_embedding, cfg, linked_entity_ids))
+                tasks.append(
+                    self._timed_search(
+                        self._graph_search(namespace_id, q, query_embedding, cfg, linked_entity_ids), "graph"
+                    )
+                )
+                task_types.append("graph")
 
             if cfg.mode == SearchMode.ALL and cfg.enable_keyword_search:
                 # Use BM25 keyword search with extracted keywords if available
                 keywords = understanding.keywords if understanding else None
-                tasks.append(self._keyword_search_bm25(namespace_id, q, cfg, keywords))
+                tasks.append(self._timed_search(self._keyword_search_bm25(namespace_id, q, cfg, keywords), "keyword"))
+                task_types.append("keyword")
 
             # Execute in parallel
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Process results and track contributions
+            # Process results and track contributions with detailed stats
             for j, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Search {j} failed: {result}")
@@ -508,29 +638,54 @@ class HybridQueryEngine:
 
                 if isinstance(result, dict):
                     source_type = result.get("source", f"search_{j}")
+                    latency_ms = result.get("latency_ms", 0.0)
 
                     if "chunks" in result:
                         source = source_type + suffix
                         all_chunk_results[source] = result["chunks"]
 
-                        # Track contributions by search method
+                        # Track contributions by search method with detailed stats
                         chunk_ids = [str(c.id) for c, _ in result["chunks"]]
+                        scores = [s for _, s in result["chunks"]]
+
                         if source_type == "vector":
-                            search_contributions.vector += len(result["chunks"])
-                            search_contributions.vector_chunks.extend(chunk_ids)
+                            search_contributions.vector.chunk_count += len(result["chunks"])
+                            search_contributions.vector.chunk_ids.extend(chunk_ids)
+                            search_contributions.vector.latency_ms = latency_ms
+                            if scores:
+                                search_contributions.vector.min_score = min(scores)
+                                search_contributions.vector.max_score = max(scores)
+                                search_contributions.vector.avg_score = sum(scores) / len(scores)
                         elif source_type == "graph":
-                            search_contributions.graph += len(result["chunks"])
-                            search_contributions.graph_chunks.extend(chunk_ids)
+                            search_contributions.graph.chunk_count += len(result["chunks"])
+                            search_contributions.graph.chunk_ids.extend(chunk_ids)
+                            search_contributions.graph.latency_ms = latency_ms
+                            if scores:
+                                search_contributions.graph.min_score = min(scores)
+                                search_contributions.graph.max_score = max(scores)
+                                search_contributions.graph.avg_score = sum(scores) / len(scores)
                         elif source_type == "keyword":
-                            search_contributions.keyword += len(result["chunks"])
-                            search_contributions.keyword_chunks.extend(chunk_ids)
+                            search_contributions.keyword.chunk_count += len(result["chunks"])
+                            search_contributions.keyword.chunk_ids.extend(chunk_ids)
+                            search_contributions.keyword.latency_ms = latency_ms
+                            if scores:
+                                search_contributions.keyword.min_score = min(scores)
+                                search_contributions.keyword.max_score = max(scores)
+                                search_contributions.keyword.avg_score = sum(scores) / len(scores)
 
                     if "entities" in result:
                         source = source_type + suffix
                         all_entity_results[source] = result["entities"]
 
-                        # Track entities searched via graph
-                        if source_type == "graph":
+                        # Track entity stats
+                        entity_ids = [str(e.id) for e, _ in result["entities"]]
+                        if source_type == "vector":
+                            search_contributions.vector.entity_count += len(result["entities"])
+                            search_contributions.vector.entity_ids.extend(entity_ids)
+                        elif source_type == "graph":
+                            search_contributions.graph.entity_count += len(result["entities"])
+                            search_contributions.graph.entity_ids.extend(entity_ids)
+                            # Also track entity names for graph info
                             for entity, _ in result["entities"]:
                                 graph_info.entities_searched.append(entity.name)
 
@@ -545,7 +700,12 @@ class HybridQueryEngine:
                                         (rel.get("from", ""), rel.get("type", ""), rel.get("to", ""))
                                     )
 
+        # Record total search time
+        search_contributions.total_search_latency_ms = (time.perf_counter() - search_start_time) * 1000
+
         # Step 4: Apply RRF fusion
+        fusion_start_time = time.perf_counter()
+
         fused_chunks = []
         if all_chunk_results:
             weights = {
@@ -578,6 +738,8 @@ class HybridQueryEngine:
                 weights=weights,
                 id_extractor=lambda e: str(e.id),
             )
+
+        search_contributions.fusion_latency_ms = (time.perf_counter() - fusion_start_time) * 1000
 
         # Boost linked entities
         if linked_entity_ids:
@@ -632,6 +794,9 @@ class HybridQueryEngine:
         # Update graph info with depth used
         graph_info.neighborhood_depth = cfg.max_graph_depth
 
+        # Compute overlap statistics
+        search_contributions.compute_overlaps()
+
         # Add search method info to metadata
         metadata["search_methods"] = search_contributions.to_dict()
         metadata["graph_traversal"] = graph_info.to_dict()
@@ -646,6 +811,28 @@ class HybridQueryEngine:
             graph_info=graph_info,
             temporal_info=temporal_info,
         )
+
+    async def _timed_search(
+        self,
+        search_coro: Any,
+        source_type: str,
+    ) -> dict[str, Any]:
+        """Wrap a search coroutine with timing instrumentation.
+
+        Args:
+            search_coro: The search coroutine to execute
+            source_type: The type of search (vector, graph, keyword)
+
+        Returns:
+            Search result dict with latency_ms added
+        """
+        start_time = time.perf_counter()
+        result = await search_coro
+        latency_ms = (time.perf_counter() - start_time) * 1000
+
+        if isinstance(result, dict):
+            result["latency_ms"] = latency_ms
+        return result
 
     async def _vector_search(
         self,
