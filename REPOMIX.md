@@ -10134,9 +10134,9 @@ README.md
  85:             self._storage_config = StorageConfig(
  86:                 postgresql_url=self._config.get_postgresql_url(),
  87:                 neo4j_url=self._config.get_neo4j_url(),
- 88:                 neo4j_user=self._config.storage.neo4j_user,
- 89:                 neo4j_password=self._config.storage.neo4j_password,
- 90:                 neo4j_database=self._config.storage.neo4j_database,
+ 88:                 neo4j_user=self._config.get_neo4j_user(),
+ 89:                 neo4j_password=self._config.get_neo4j_password(),
+ 90:                 neo4j_database=self._config.get_neo4j_database(),
  91:                 pgvector_embedding_dimension=self._config.storage.embedding_dimension,
  92:             )
  93: 
@@ -11045,154 +11045,238 @@ README.md
   2: 
   3: from __future__ import annotations
   4: 
-  5: from pathlib import Path
-  6: from typing import Any
-  7: 
-  8: import yaml
-  9: from pydantic import BaseModel, Field
- 10: from pydantic_settings import BaseSettings, SettingsConfigDict
- 11: 
- 12: 
- 13: class StorageSettings(BaseModel):
- 14:     """Storage backend configuration."""
- 15: 
- 16:     # PostgreSQL (relational)
- 17:     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
+  5: from dataclasses import dataclass
+  6: from pathlib import Path
+  7: from typing import Any
+  8: from urllib.parse import urlparse
+  9: 
+ 10: import yaml
+ 11: from pydantic import BaseModel, Field
+ 12: from pydantic_settings import BaseSettings, SettingsConfigDict
+ 13: 
+ 14: 
+ 15: @dataclass
+ 16: class ParsedNeo4jUrl:
+ 17:     """Parsed Neo4j URL components."""
  18: 
- 19:     # pgvector
- 20:     pgvector_url: str | None = Field(default=None, description="pgvector connection URL (defaults to postgresql_url)")
- 21:     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
- 22: 
- 23:     # Neo4j
- 24:     neo4j_url: str | None = Field(default=None, description="Neo4j connection URL")
- 25:     neo4j_user: str = Field(default="neo4j", description="Neo4j username")
- 26:     neo4j_password: str = Field(default="", description="Neo4j password")
- 27:     neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
- 28: 
- 29: 
- 30: class LLMSettings(BaseModel):
- 31:     """LLM configuration settings."""
- 32: 
- 33:     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
- 34:     api_key_env: str = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
- 35:     temperature: float = Field(default=0.7, description="Sampling temperature")
- 36:     max_tokens: int = Field(default=2000, description="Maximum tokens to generate")
- 37:     timeout: int = Field(default=30, description="Request timeout in seconds")
- 38:     max_retries: int = Field(default=3, description="Maximum retries on failure")
- 39:     max_concurrent_llm_calls: int = Field(default=10, description="Maximum concurrent LLM calls")
- 40: 
- 41:     # Embedding settings
- 42:     embedding_model: str = Field(default="text-embedding-3-small", description="Embedding model")
- 43:     embedding_dimension: int = Field(default=1536, description="Embedding dimension")
- 44: 
- 45:     # Router configuration
- 46:     config_file: str | None = Field(default=None, description="Path to LiteLLM config YAML")
- 47:     model_list: list[dict[str, Any]] | None = Field(default=None, description="Model list for router")
- 48:     router_settings: dict[str, Any] | None = Field(default=None, description="Router settings")
+ 19:     url: str  # URL without credentials (bolt://host:port)
+ 20:     user: str
+ 21:     password: str
+ 22:     database: str
+ 23: 
+ 24:     @classmethod
+ 25:     def parse(cls, url: str, default_user: str = "neo4j", default_database: str = "neo4j") -> ParsedNeo4jUrl:
+ 26:         """Parse a Neo4j URL with optional embedded credentials.
+ 27: 
+ 28:         Supports formats:
+ 29:         - bolt://host:port
+ 30:         - bolt://user:password@host:port
+ 31:         - bolt://user:password@host:port/database
+ 32:         """
+ 33:         parsed = urlparse(url)
+ 34: 
+ 35:         # Extract user and password from URL
+ 36:         user = parsed.username or default_user
+ 37:         password = parsed.password or ""
+ 38: 
+ 39:         # Extract database from path (e.g., /mydb -> mydb)
+ 40:         database = parsed.path.lstrip("/") if parsed.path and parsed.path != "/" else default_database
+ 41: 
+ 42:         # Reconstruct URL without credentials
+ 43:         host_port = parsed.hostname or "localhost"
+ 44:         if parsed.port:
+ 45:             host_port = f"{host_port}:{parsed.port}"
+ 46:         clean_url = f"{parsed.scheme}://{host_port}"
+ 47: 
+ 48:         return cls(url=clean_url, user=user, password=password, database=database)
  49: 
  50: 
- 51: class PipelineSettings(BaseModel):
- 52:     """Pipeline configuration settings."""
+ 51: class StorageSettings(BaseModel):
+ 52:     """Storage backend configuration."""
  53: 
- 54:     # Chunking settings
- 55:     chunking_strategy: str = Field(default="semantic", description="Chunking strategy: fixed, semantic, recursive")
- 56:     chunk_size: int = Field(default=512, description="Target chunk size in tokens")
- 57:     chunk_overlap: int = Field(default=50, description="Overlap between chunks in tokens")
- 58: 
- 59:     # Extraction settings
- 60:     extract_entities: bool = Field(default=True, description="Extract entities from documents")
- 61:     entity_types: list[str] = Field(
- 62:         default=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
- 63:         description="Entity types to extract",
- 64:     )
- 65: 
+ 54:     # PostgreSQL (relational)
+ 55:     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
+ 56: 
+ 57:     # pgvector
+ 58:     pgvector_url: str | None = Field(default=None, description="pgvector connection URL (defaults to postgresql_url)")
+ 59:     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+ 60: 
+ 61:     # Neo4j
+ 62:     neo4j_url: str | None = Field(default=None, description="Neo4j connection URL")
+ 63:     neo4j_user: str = Field(default="neo4j", description="Neo4j username")
+ 64:     neo4j_password: str = Field(default="", description="Neo4j password")
+ 65:     neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
  66: 
- 67: class TenancySettings(BaseModel):
- 68:     """Multi-tenancy configuration settings."""
- 69: 
- 70:     default_mode: str = Field(default="shared", description="Default tenancy mode: shared or isolated")
- 71:     enforce_namespace: bool = Field(default=True, description="Enforce namespace isolation")
- 72: 
- 73: 
- 74: class KhoraConfig(BaseSettings):
- 75:     """Main application configuration."""
- 76: 
- 77:     model_config = SettingsConfigDict(
- 78:         env_prefix="KHORA_",
- 79:         env_nested_delimiter="__",
- 80:         case_sensitive=False,
- 81:     )
+ 67: 
+ 68: class LLMSettings(BaseModel):
+ 69:     """LLM configuration settings."""
+ 70: 
+ 71:     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
+ 72:     api_key_env: str = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
+ 73:     temperature: float = Field(default=0.7, description="Sampling temperature")
+ 74:     max_tokens: int = Field(default=2000, description="Maximum tokens to generate")
+ 75:     timeout: int = Field(default=30, description="Request timeout in seconds")
+ 76:     max_retries: int = Field(default=3, description="Maximum retries on failure")
+ 77:     max_concurrent_llm_calls: int = Field(default=10, description="Maximum concurrent LLM calls")
+ 78: 
+ 79:     # Embedding settings
+ 80:     embedding_model: str = Field(default="text-embedding-3-small", description="Embedding model")
+ 81:     embedding_dimension: int = Field(default=1536, description="Embedding dimension")
  82: 
- 83:     # Application settings
- 84:     app_name: str = Field(
- 85:         default="khora",
- 86:         description="Application name",
- 87:     )
- 88:     environment: str = Field(
- 89:         default="development",
- 90:         description="Environment: development, staging, or production",
- 91:     )
- 92:     debug: bool = Field(
- 93:         default=False,
- 94:         description="Enable debug mode",
- 95:     )
+ 83:     # Router configuration
+ 84:     config_file: str | None = Field(default=None, description="Path to LiteLLM config YAML")
+ 85:     model_list: list[dict[str, Any]] | None = Field(default=None, description="Model list for router")
+ 86:     router_settings: dict[str, Any] | None = Field(default=None, description="Router settings")
+ 87: 
+ 88: 
+ 89: class PipelineSettings(BaseModel):
+ 90:     """Pipeline configuration settings."""
+ 91: 
+ 92:     # Chunking settings
+ 93:     chunking_strategy: str = Field(default="semantic", description="Chunking strategy: fixed, semantic, recursive")
+ 94:     chunk_size: int = Field(default=512, description="Target chunk size in tokens")
+ 95:     chunk_overlap: int = Field(default=50, description="Overlap between chunks in tokens")
  96: 
- 97:     # Authentication settings
- 98:     auth_enabled: bool = Field(
- 99:         default=True,
-100:         description="Enable authentication (set to False for local development)",
-101:     )
-102: 
-103:     # API settings
-104:     api_host: str = Field(
-105:         default="127.0.0.1",
-106:         description="API server host",
-107:     )
-108:     api_port: int = Field(
-109:         default=8000,
-110:         description="API server port",
-111:     )
-112: 
-113:     # Database for Khora internal state (shortcut for storage.postgresql_url)
-114:     database_url: str | None = Field(
-115:         default=None,
-116:         description="PostgreSQL URL for Khora database",
-117:     )
-118: 
-119:     # Storage configuration
-120:     storage: StorageSettings = Field(default_factory=StorageSettings)
-121: 
-122:     # LLM configuration
-123:     llm: LLMSettings = Field(default_factory=LLMSettings)
-124: 
-125:     # Pipeline configuration
-126:     pipelines: PipelineSettings = Field(default_factory=PipelineSettings)
-127: 
-128:     # Tenancy configuration
-129:     tenancy: TenancySettings = Field(default_factory=TenancySettings)
-130: 
-131:     @classmethod
-132:     def from_yaml(cls, path: str | Path) -> KhoraConfig:
-133:         """Load configuration from a YAML file.
+ 97:     # Extraction settings
+ 98:     extract_entities: bool = Field(default=True, description="Extract entities from documents")
+ 99:     entity_types: list[str] = Field(
+100:         default=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
+101:         description="Entity types to extract",
+102:     )
+103: 
+104: 
+105: class TenancySettings(BaseModel):
+106:     """Multi-tenancy configuration settings."""
+107: 
+108:     default_mode: str = Field(default="shared", description="Default tenancy mode: shared or isolated")
+109:     enforce_namespace: bool = Field(default=True, description="Enforce namespace isolation")
+110: 
+111: 
+112: class KhoraConfig(BaseSettings):
+113:     """Main application configuration."""
+114: 
+115:     model_config = SettingsConfigDict(
+116:         env_prefix="KHORA_",
+117:         env_nested_delimiter="__",
+118:         case_sensitive=False,
+119:     )
+120: 
+121:     # Application settings
+122:     app_name: str = Field(
+123:         default="khora",
+124:         description="Application name",
+125:     )
+126:     environment: str = Field(
+127:         default="development",
+128:         description="Environment: development, staging, or production",
+129:     )
+130:     debug: bool = Field(
+131:         default=False,
+132:         description="Enable debug mode",
+133:     )
 134: 
-135:         Args:
-136:             path: Path to the YAML configuration file
-137: 
-138:         Returns:
-139:             KhoraConfig instance
-140:         """
-141:         path = Path(path)
-142:         with path.open() as f:
-143:             data = yaml.safe_load(f)
-144:         return cls.model_validate(data or {})
-145: 
-146:     def get_postgresql_url(self) -> str | None:
-147:         """Get PostgreSQL URL from config."""
-148:         return self.storage.postgresql_url or self.database_url
-149: 
-150:     def get_neo4j_url(self) -> str | None:
-151:         """Get Neo4j URL from config."""
-152:         return self.storage.neo4j_url
+135:     # Authentication settings
+136:     auth_enabled: bool = Field(
+137:         default=True,
+138:         description="Enable authentication (set to False for local development)",
+139:     )
+140: 
+141:     # API settings
+142:     api_host: str = Field(
+143:         default="127.0.0.1",
+144:         description="API server host",
+145:     )
+146:     api_port: int = Field(
+147:         default=8000,
+148:         description="API server port",
+149:     )
+150: 
+151:     # Database for Khora internal state (shortcuts for storage.* URLs)
+152:     # These can be set via KHORA_DATABASE_URL and KHORA_NEO4J_URL environment variables
+153:     # Programmatic values take priority over environment variables
+154:     database_url: str | None = Field(
+155:         default=None,
+156:         description="PostgreSQL URL for Khora database (shortcut for storage.postgresql_url)",
+157:     )
+158:     neo4j_url: str | None = Field(
+159:         default=None,
+160:         description="Neo4j URL for graph storage (shortcut for storage.neo4j_url)",
+161:     )
+162: 
+163:     # Storage configuration
+164:     storage: StorageSettings = Field(default_factory=StorageSettings)
+165: 
+166:     # LLM configuration
+167:     llm: LLMSettings = Field(default_factory=LLMSettings)
+168: 
+169:     # Pipeline configuration
+170:     pipelines: PipelineSettings = Field(default_factory=PipelineSettings)
+171: 
+172:     # Tenancy configuration
+173:     tenancy: TenancySettings = Field(default_factory=TenancySettings)
+174: 
+175:     @classmethod
+176:     def from_yaml(cls, path: str | Path) -> KhoraConfig:
+177:         """Load configuration from a YAML file.
+178: 
+179:         Args:
+180:             path: Path to the YAML configuration file
+181: 
+182:         Returns:
+183:             KhoraConfig instance
+184:         """
+185:         path = Path(path)
+186:         with path.open() as f:
+187:             data = yaml.safe_load(f)
+188:         return cls.model_validate(data or {})
+189: 
+190:     def get_postgresql_url(self) -> str | None:
+191:         """Get PostgreSQL URL from config."""
+192:         return self.storage.postgresql_url or self.database_url
+193: 
+194:     def _get_raw_neo4j_url(self) -> str | None:
+195:         """Get raw Neo4j URL (may contain credentials)."""
+196:         return self.storage.neo4j_url or self.neo4j_url
+197: 
+198:     def _parse_neo4j_url(self) -> ParsedNeo4jUrl | None:
+199:         """Parse Neo4j URL and extract components."""
+200:         raw_url = self._get_raw_neo4j_url()
+201:         if not raw_url:
+202:             return None
+203:         return ParsedNeo4jUrl.parse(
+204:             raw_url,
+205:             default_user=self.storage.neo4j_user,
+206:             default_database=self.storage.neo4j_database,
+207:         )
+208: 
+209:     def get_neo4j_url(self) -> str | None:
+210:         """Get Neo4j URL without credentials (for driver connection).
+211: 
+212:         Parses URL like bolt://user:pass@host:port and returns bolt://host:port
+213:         """
+214:         parsed = self._parse_neo4j_url()
+215:         return parsed.url if parsed else None
+216: 
+217:     def get_neo4j_user(self) -> str:
+218:         """Get Neo4j username from URL or config."""
+219:         parsed = self._parse_neo4j_url()
+220:         if parsed:
+221:             return parsed.user
+222:         return self.storage.neo4j_user
+223: 
+224:     def get_neo4j_password(self) -> str:
+225:         """Get Neo4j password from URL or config."""
+226:         parsed = self._parse_neo4j_url()
+227:         if parsed:
+228:             return parsed.password
+229:         return self.storage.neo4j_password
+230: 
+231:     def get_neo4j_database(self) -> str:
+232:         """Get Neo4j database from URL or config."""
+233:         parsed = self._parse_neo4j_url()
+234:         if parsed:
+235:             return parsed.database
+236:         return self.storage.neo4j_database
 ````
 
 ## File: src/khora/db/__init__.py
@@ -11907,58 +11991,84 @@ README.md
 111: 
 112: | Variable | Description | Default |
 113: |----------|-------------|---------|
-114: | KHORA_DATABASE_URL | PostgreSQL connection URL | Required |
-115: | KHORA_NEO4J_URL | Neo4j connection URL | bolt://localhost:7687 |
-116: | KHORA_NEO4J_USER | Neo4j username | neo4j |
-117: | KHORA_NEO4J_PASSWORD | Neo4j password | Required for Neo4j |
-118: | KHORA_DEBUG | Enable debug mode | false |
-119: | KHORA_API_HOST | API server host | 127.0.0.1 |
-120: | KHORA_API_PORT | API server port | 8100 |
-121: | KHORA_AUTH_ENABLED | Enable authentication | true |
-122: | OPENAI_API_KEY | OpenAI API key (for embeddings) | - |
-123: | ANTHROPIC_API_KEY | Anthropic API key (for extraction) | - |
-124: 
-125: ## Library Usage
+114: | KHORA_DATABASE_URL | PostgreSQL/pgvector connection URL | Required |
+115: | KHORA_NEO4J_URL | Neo4j connection URL (bolt://user:pass@host:port) | - |
+116: | KHORA_DEBUG | Enable debug mode | false |
+117: | KHORA_API_HOST | API server host | 127.0.0.1 |
+118: | KHORA_API_PORT | API server port | 8100 |
+119: | KHORA_AUTH_ENABLED | Enable authentication | true |
+120: | OPENAI_API_KEY | OpenAI API key (for embeddings) | - |
+121: | ANTHROPIC_API_KEY | Anthropic API key (for extraction) | - |
+122: 
+123: **URL formats:**
+124: - PostgreSQL: `postgresql://user:password@host:port/database`
+125: - Neo4j: `bolt://user:password@host:port` or `bolt://user:password@host:port/database`
 126: 
-127: ```python
-128: from khora import MemoryLake, SearchMode
-129: 
-130: async with MemoryLake() as lake:
-131:     # Store a memory
-132:     result = await lake.remember("Content to store", title="Title")
+127: **Note:** Programmatic configuration takes priority over environment variables.
+128: 
+129: ## Library Usage
+130: 
+131: ```python
+132: from khora import MemoryLake, SearchMode
 133: 
-134:     # Recall memories
-135:     memories = await lake.recall("query", mode=SearchMode.HYBRID)
-136: 
-137:     # Forget a memory
-138:     await lake.forget(result.document_id)
-139: ```
-140: 
-141: ## API Endpoints
-142: 
-143: ### Memory Operations
-144: - `POST /memory/remember` - Store content
-145: - `POST /memory/recall` - Search memories
-146: - `DELETE /memory/forget` - Remove memory
-147: - `GET /memory/documents/{id}` - Get document
-148: - `GET /memory/entities` - List entities
-149: - `GET /memory/entities/{id}/related` - Related entities
-150: 
-151: ### Namespace Management
-152: - `POST /namespaces/organizations` - Create organization
-153: - `POST /namespaces/workspaces` - Create workspace
-154: - `POST /namespaces/` - Create namespace
+134: # Simple usage - uses KHORA_DATABASE_URL and KHORA_NEO4J_URL env vars
+135: async with MemoryLake() as lake:
+136:     # Store a memory
+137:     result = await lake.remember("Content to store", title="Title")
+138: 
+139:     # Recall memories
+140:     memories = await lake.recall("query", mode=SearchMode.HYBRID)
+141: 
+142:     # Forget a memory
+143:     await lake.forget(result.document_id)
+144: 
+145: # Programmatic configuration (overrides env vars)
+146: from khora.config import KhoraConfig
+147: from khora.storage import StorageConfig
+148: 
+149: config = KhoraConfig(
+150:     database_url="postgresql://user:pass@localhost:5432/mydb",
+151:     neo4j_url="bolt://localhost:7687",
+152: )
+153: async with MemoryLake(config=config) as lake:
+154:     ...
 155: 
-156: ### Sync & Pipelines
-157: - `POST /sync/ingest` - Ingest documents
-158: - `POST /sync/source` - Sync from source
-159: - `GET /sync/pipelines` - List pipelines
-160: 
-161: ### Health Checks
-162: - `GET /status` - Service status
-163: - `GET /health` - Health check
-164: - `GET /health/ready` - Readiness probe
-165: - `GET /health/live` - Liveness probe
+156: # Or override storage directly
+157: storage_config = StorageConfig(
+158:     postgresql_url="postgresql://...",
+159:     neo4j_url="bolt://...",
+160:     neo4j_user="neo4j",
+161:     neo4j_password="secret",
+162: )
+163: async with MemoryLake(storage_config=storage_config) as lake:
+164:     ...
+165: ```
+166: 
+167: ## API Endpoints
+168: 
+169: ### Memory Operations
+170: - `POST /memory/remember` - Store content
+171: - `POST /memory/recall` - Search memories
+172: - `DELETE /memory/forget` - Remove memory
+173: - `GET /memory/documents/{id}` - Get document
+174: - `GET /memory/entities` - List entities
+175: - `GET /memory/entities/{id}/related` - Related entities
+176: 
+177: ### Namespace Management
+178: - `POST /namespaces/organizations` - Create organization
+179: - `POST /namespaces/workspaces` - Create workspace
+180: - `POST /namespaces/` - Create namespace
+181: 
+182: ### Sync & Pipelines
+183: - `POST /sync/ingest` - Ingest documents
+184: - `POST /sync/source` - Sync from source
+185: - `GET /sync/pipelines` - List pipelines
+186: 
+187: ### Health Checks
+188: - `GET /status` - Service status
+189: - `GET /health` - Health check
+190: - `GET /health/ready` - Readiness probe
+191: - `GET /health/live` - Liveness probe
 ````
 
 ## File: pyproject.toml
@@ -12684,6 +12794,7 @@ README.md
 - .pre-commit-config.yaml
 - CLAUDE.md
 - README.md
+- REPOMIX.md
 - repomix.config.json
 - scripts/update_repomix.py
 

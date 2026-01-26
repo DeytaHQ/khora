@@ -111,10 +111,8 @@ src/khora/
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| KHORA_DATABASE_URL | PostgreSQL connection URL | Required |
-| KHORA_NEO4J_URL | Neo4j connection URL | bolt://localhost:7687 |
-| KHORA_NEO4J_USER | Neo4j username | neo4j |
-| KHORA_NEO4J_PASSWORD | Neo4j password | Required for Neo4j |
+| KHORA_DATABASE_URL | PostgreSQL/pgvector connection URL | Required |
+| KHORA_NEO4J_URL | Neo4j connection URL (bolt://user:pass@host:port) | - |
 | KHORA_DEBUG | Enable debug mode | false |
 | KHORA_API_HOST | API server host | 127.0.0.1 |
 | KHORA_API_PORT | API server port | 8100 |
@@ -122,11 +120,18 @@ src/khora/
 | OPENAI_API_KEY | OpenAI API key (for embeddings) | - |
 | ANTHROPIC_API_KEY | Anthropic API key (for extraction) | - |
 
+**URL formats:**
+- PostgreSQL: `postgresql://user:password@host:port/database`
+- Neo4j: `bolt://user:password@host:port` or `bolt://user:password@host:port/database`
+
+**Note:** Programmatic configuration takes priority over environment variables.
+
 ## Library Usage
 
 ```python
 from khora import MemoryLake, SearchMode
 
+# Simple usage - uses KHORA_DATABASE_URL and KHORA_NEO4J_URL env vars
 async with MemoryLake() as lake:
     # Store a memory
     result = await lake.remember("Content to store", title="Title")
@@ -136,6 +141,27 @@ async with MemoryLake() as lake:
 
     # Forget a memory
     await lake.forget(result.document_id)
+
+# Programmatic configuration (overrides env vars)
+from khora.config import KhoraConfig
+from khora.storage import StorageConfig
+
+config = KhoraConfig(
+    database_url="postgresql://user:pass@localhost:5432/mydb",
+    neo4j_url="bolt://localhost:7687",
+)
+async with MemoryLake(config=config) as lake:
+    ...
+
+# Or override storage directly
+storage_config = StorageConfig(
+    postgresql_url="postgresql://...",
+    neo4j_url="bolt://...",
+    neo4j_user="neo4j",
+    neo4j_password="secret",
+)
+async with MemoryLake(storage_config=storage_config) as lake:
+    ...
 ```
 
 ## API Endpoints

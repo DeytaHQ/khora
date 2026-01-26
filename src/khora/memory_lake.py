@@ -85,9 +85,9 @@ class MemoryLake:
             self._storage_config = StorageConfig(
                 postgresql_url=self._config.get_postgresql_url(),
                 neo4j_url=self._config.get_neo4j_url(),
-                neo4j_user=self._config.storage.neo4j_user,
-                neo4j_password=self._config.storage.neo4j_password,
-                neo4j_database=self._config.storage.neo4j_database,
+                neo4j_user=self._config.get_neo4j_user(),
+                neo4j_password=self._config.get_neo4j_password(),
+                neo4j_database=self._config.get_neo4j_database(),
                 pgvector_embedding_dimension=self._config.storage.embedding_dimension,
             )
 

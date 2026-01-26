@@ -2,12 +2,50 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+@dataclass
+class ParsedNeo4jUrl:
+    """Parsed Neo4j URL components."""
+
+    url: str  # URL without credentials (bolt://host:port)
+    user: str
+    password: str
+    database: str
+
+    @classmethod
+    def parse(cls, url: str, default_user: str = "neo4j", default_database: str = "neo4j") -> ParsedNeo4jUrl:
+        """Parse a Neo4j URL with optional embedded credentials.
+
+        Supports formats:
+        - bolt://host:port
+        - bolt://user:password@host:port
+        - bolt://user:password@host:port/database
+        """
+        parsed = urlparse(url)
+
+        # Extract user and password from URL
+        user = parsed.username or default_user
+        password = parsed.password or ""
+
+        # Extract database from path (e.g., /mydb -> mydb)
+        database = parsed.path.lstrip("/") if parsed.path and parsed.path != "/" else default_database
+
+        # Reconstruct URL without credentials
+        host_port = parsed.hostname or "localhost"
+        if parsed.port:
+            host_port = f"{host_port}:{parsed.port}"
+        clean_url = f"{parsed.scheme}://{host_port}"
+
+        return cls(url=clean_url, user=user, password=password, database=database)
 
 
 class StorageSettings(BaseModel):
@@ -110,10 +148,16 @@ class KhoraConfig(BaseSettings):
         description="API server port",
     )
 
-    # Database for Khora internal state (shortcut for storage.postgresql_url)
+    # Database for Khora internal state (shortcuts for storage.* URLs)
+    # These can be set via KHORA_DATABASE_URL and KHORA_NEO4J_URL environment variables
+    # Programmatic values take priority over environment variables
     database_url: str | None = Field(
         default=None,
-        description="PostgreSQL URL for Khora database",
+        description="PostgreSQL URL for Khora database (shortcut for storage.postgresql_url)",
+    )
+    neo4j_url: str | None = Field(
+        default=None,
+        description="Neo4j URL for graph storage (shortcut for storage.neo4j_url)",
     )
 
     # Storage configuration
@@ -147,6 +191,46 @@ class KhoraConfig(BaseSettings):
         """Get PostgreSQL URL from config."""
         return self.storage.postgresql_url or self.database_url
 
+    def _get_raw_neo4j_url(self) -> str | None:
+        """Get raw Neo4j URL (may contain credentials)."""
+        return self.storage.neo4j_url or self.neo4j_url
+
+    def _parse_neo4j_url(self) -> ParsedNeo4jUrl | None:
+        """Parse Neo4j URL and extract components."""
+        raw_url = self._get_raw_neo4j_url()
+        if not raw_url:
+            return None
+        return ParsedNeo4jUrl.parse(
+            raw_url,
+            default_user=self.storage.neo4j_user,
+            default_database=self.storage.neo4j_database,
+        )
+
     def get_neo4j_url(self) -> str | None:
-        """Get Neo4j URL from config."""
-        return self.storage.neo4j_url
+        """Get Neo4j URL without credentials (for driver connection).
+
+        Parses URL like bolt://user:pass@host:port and returns bolt://host:port
+        """
+        parsed = self._parse_neo4j_url()
+        return parsed.url if parsed else None
+
+    def get_neo4j_user(self) -> str:
+        """Get Neo4j username from URL or config."""
+        parsed = self._parse_neo4j_url()
+        if parsed:
+            return parsed.user
+        return self.storage.neo4j_user
+
+    def get_neo4j_password(self) -> str:
+        """Get Neo4j password from URL or config."""
+        parsed = self._parse_neo4j_url()
+        if parsed:
+            return parsed.password
+        return self.storage.neo4j_password
+
+    def get_neo4j_database(self) -> str:
+        """Get Neo4j database from URL or config."""
+        parsed = self._parse_neo4j_url()
+        if parsed:
+            return parsed.database
+        return self.storage.neo4j_database
