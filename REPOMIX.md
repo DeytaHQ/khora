@@ -10818,7 +10818,7 @@ README.md
 319:             # Execute searches in parallel based on mode
 320:             tasks = []
 321: 
-322:             if cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and query_embedding:
+322:             if cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
 323:                 tasks.append(self._vector_search(namespace_id, query_embedding, cfg))
 324: 
 325:             if cfg.mode in (SearchMode.GRAPH, SearchMode.HYBRID, SearchMode.ALL):
@@ -11021,7 +11021,7 @@ README.md
 522:                         logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
 523: 
 524:         # Also find similar entities via embedding
-525:         if query_embedding:
+525:         if query_embedding is not None:
 526:             entity_ids_scores = await self._storage.search_similar_entities(
 527:                 namespace_id,
 528:                 query_embedding,
@@ -15591,6 +15591,13 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-26 18:20:32 +0100
+**Message:** Update example config with new query settings
+
+**Files:**
+- REPOMIX.md
+- config/khora.example.yaml
 
 ## Commit: 2026-01-26 18:17:06 +0100
 **Message:** Add advanced query features and entity resolution

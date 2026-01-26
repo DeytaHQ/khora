@@ -319,7 +319,7 @@ class HybridQueryEngine:
             # Execute searches in parallel based on mode
             tasks = []
 
-            if cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and query_embedding:
+            if cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
                 tasks.append(self._vector_search(namespace_id, query_embedding, cfg))
 
             if cfg.mode in (SearchMode.GRAPH, SearchMode.HYBRID, SearchMode.ALL):
@@ -522,7 +522,7 @@ class HybridQueryEngine:
                         logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
 
         # Also find similar entities via embedding
-        if query_embedding:
+        if query_embedding is not None:
             entity_ids_scores = await self._storage.search_similar_entities(
                 namespace_id,
                 query_embedding,
