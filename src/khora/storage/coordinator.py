@@ -508,6 +508,70 @@ class StorageCoordinator:
         return {"entities": [], "relationships": []}
 
     # =========================================================================
+    # Batch operations (optimized for parallel fetching)
+    # =========================================================================
+
+    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+        """Fetch multiple entities in a single query.
+
+        Args:
+            entity_ids: List of entity IDs to fetch
+
+        Returns:
+            Dictionary mapping entity ID to Entity object
+        """
+        if not entity_ids:
+            return {}
+        if self.graph:
+            return await self.graph.get_entities_batch(entity_ids)
+        return {}
+
+    async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+        """Fetch multiple documents in a single query.
+
+        Args:
+            document_ids: List of document IDs to fetch
+
+        Returns:
+            Dictionary mapping document ID to Document object
+        """
+        if not document_ids:
+            return {}
+        if self.relational:
+            return await self.relational.get_documents_batch(document_ids)
+        return {}
+
+    async def get_neighborhoods_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        depth: int = 1,
+        relationship_types: list[str] | None = None,
+        limit_per_entity: int = 20,
+    ) -> dict[UUID, dict[str, Any]]:
+        """Get neighborhoods for multiple entities in a single query.
+
+        Args:
+            entity_ids: List of entity IDs
+            depth: Max traversal depth
+            relationship_types: Optional relationship type filter
+            limit_per_entity: Max nodes per entity neighborhood
+
+        Returns:
+            Dictionary mapping entity ID to neighborhood data
+        """
+        if not entity_ids:
+            return {}
+        if self.graph:
+            return await self.graph.get_neighborhoods_batch(
+                entity_ids,
+                depth=depth,
+                relationship_types=relationship_types,
+                limit_per_entity=limit_per_entity,
+            )
+        return {}
+
+    # =========================================================================
     # Event operations (delegated to event store)
     # =========================================================================
 

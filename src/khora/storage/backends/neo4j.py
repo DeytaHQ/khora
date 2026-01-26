@@ -231,6 +231,33 @@ class Neo4jBackend:
                 return self._record_to_entity(record["e"])
             return None
 
+    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+        """Fetch multiple entities in a single query.
+
+        Args:
+            entity_ids: List of entity IDs to fetch
+
+        Returns:
+            Dictionary mapping entity ID to Entity object
+        """
+        if not entity_ids:
+            return {}
+
+        driver = self._get_driver()
+        id_strings = [str(eid) for eid in entity_ids]
+
+        async with driver.session(database=self._database) as session:
+            result = await session.run(
+                """
+                MATCH (e:Entity)
+                WHERE e.id IN $ids
+                RETURN e
+                """,
+                ids=id_strings,
+            )
+            records = await result.data()
+            return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
+
     async def update_entity(self, entity: Entity) -> Entity:
         """Update an entity."""
         driver = self._get_driver()
@@ -724,6 +751,62 @@ class Neo4jBackend:
                 return {"entities": nodes, "relationships": relationships}
 
             return {"entities": [], "relationships": []}
+
+    async def get_neighborhoods_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        depth: int = 1,
+        relationship_types: list[str] | None = None,
+        limit_per_entity: int = 20,
+    ) -> dict[UUID, dict[str, Any]]:
+        """Get neighborhoods for multiple entities in parallel.
+
+        Args:
+            entity_ids: List of entity IDs
+            depth: Max traversal depth
+            relationship_types: Optional relationship type filter
+            limit_per_entity: Max nodes per entity neighborhood
+
+        Returns:
+            Dictionary mapping entity ID to neighborhood data
+        """
+        if not entity_ids:
+            return {}
+
+        driver = self._get_driver()
+        id_strings = [str(eid) for eid in entity_ids]
+
+        rel_filter = ""
+        if relationship_types:
+            rel_filter = ":" + "|".join(relationship_types)
+
+        # Use UNWIND to process all entities in a single query
+        query = f"""
+        UNWIND $entity_ids AS eid
+        MATCH (center:Entity {{id: eid}})
+        OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+        WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+        RETURN eid, neighbors, rels
+        """
+
+        async with driver.session(database=self._database) as session:
+            result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+            records = await result.data()
+
+            neighborhoods = {}
+            for record in records:
+                eid = UUID(record["eid"])
+                nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
+                relationships = []
+                for rel_list in record.get("rels") or []:
+                    if rel_list:
+                        for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+                            if r:
+                                relationships.append(dict(r))
+                neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+
+            return neighborhoods
 
     async def search_entities_by_attribute(
         self,

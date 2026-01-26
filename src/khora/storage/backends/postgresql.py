@@ -404,6 +404,25 @@ class PostgreSQLBackend:
             model = result.scalars().first()
             return self._document_model_to_domain(model) if model else None
 
+    async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+        """Fetch multiple documents in a single query.
+
+        Args:
+            document_ids: List of document IDs to fetch
+
+        Returns:
+            Dictionary mapping document ID to Document object
+        """
+        if not document_ids:
+            return {}
+
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(DocumentModel.id.in_([str(did) for did in document_ids]))
+            )
+            models = result.scalars().all()
+            return {UUID(m.id): self._document_model_to_domain(m) for m in models}
+
     def _document_model_to_domain(self, model: DocumentModel) -> Document:
         """Convert DocumentModel to domain Document."""
         return Document(

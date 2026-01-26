@@ -229,9 +229,10 @@ class AgenticSearchAgent:
         step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
         trace.add_step(step1)
 
-        # Collect results
+        # Collect results (batch fetch document sources for all chunks)
+        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
         for chunk, score in step1_result.chunks:
-            source = await self._get_chunk_source(chunk, namespace_id)
+            source = chunk_sources.get(str(chunk.id), "unknown")
             all_chunks[str(chunk.id)] = (chunk, score, source)
 
         for entity, score in step1_result.entities:
@@ -267,11 +268,12 @@ class AgenticSearchAgent:
                 step = self._analyze_results(step_result, fq_query, i + 2, fq_reasoning)
                 trace.add_step(step)
 
-                # Collect new results (keep higher scores)
+                # Collect new results (keep higher scores) - batch fetch sources
+                step_chunk_sources = await self._get_chunk_sources_batch(step_result.chunks)
                 for chunk, score in step_result.chunks:
                     chunk_id = str(chunk.id)
                     if chunk_id not in all_chunks or all_chunks[chunk_id][1] < score:
-                        source = await self._get_chunk_source(chunk, namespace_id)
+                        source = step_chunk_sources.get(chunk_id, "unknown")
                         all_chunks[chunk_id] = (chunk, score, source)
 
                 for entity, score in step_result.entities:
@@ -400,6 +402,38 @@ class AgenticSearchAgent:
         except Exception:
             pass
         return "unknown"
+
+    async def _get_chunk_sources_batch(self, chunks: list[tuple[Chunk, float]]) -> dict[str, str]:
+        """Get source systems for multiple chunks in a single batch query.
+
+        Args:
+            chunks: List of (chunk, score) tuples
+
+        Returns:
+            Dictionary mapping chunk ID to source string
+        """
+        if not chunks:
+            return {}
+
+        # Collect unique document IDs
+        doc_ids = list({chunk.document_id for chunk, _ in chunks})
+
+        # Batch fetch all documents
+        docs_map = await self._engine._storage.get_documents_batch(doc_ids)
+
+        # Build chunk_id -> source mapping
+        sources: dict[str, str] = {}
+        for chunk, _ in chunks:
+            doc = docs_map.get(chunk.document_id)
+            if doc and doc.metadata:
+                source = doc.metadata.custom.get("source_system", "")
+                if not source and doc.metadata.source:
+                    source = doc.metadata.source.split("/")[0]
+                sources[str(chunk.id)] = source or "unknown"
+            else:
+                sources[str(chunk.id)] = "unknown"
+
+        return sources
 
     def _generate_summary_fast(
         self,

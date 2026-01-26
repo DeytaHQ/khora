@@ -670,12 +670,10 @@ class HybridQueryEngine:
             min_similarity=config.min_entity_similarity,
         )
 
-        # Fetch full entities
-        entities = []
-        for entity_id, score in entity_ids_scores:
-            entity = await self._storage.get_entity(entity_id)
-            if entity:
-                entities.append((entity, score))
+        # Fetch full entities in batch (optimization: single query instead of N queries)
+        entity_ids = [eid for eid, _ in entity_ids_scores]
+        entities_map = await self._storage.get_entities_batch(entity_ids)
+        entities = [(entities_map[eid], score) for eid, score in entity_ids_scores if eid in entities_map]
 
         return {
             "source": "vector",
@@ -705,30 +703,22 @@ class HybridQueryEngine:
         """
         entities = []
         graph_context = {}
-        seen_entity_ids = set()
+        seen_entity_ids: set[UUID] = set()
 
-        # Start with linked entities if available (high priority)
+        # Collect all entity IDs we need to fetch
+        all_entity_ids_to_fetch: list[UUID] = []
+        linked_scores: dict[UUID, float] = {}
+        similar_scores: dict[UUID, float] = {}
+
+        # Linked entities (high priority)
         if linked_entity_ids:
             for entity_id in linked_entity_ids[:5]:
-                if entity_id in seen_entity_ids:
-                    continue
-                entity = await self._storage.get_entity(entity_id)
-                if entity:
-                    entities.append((entity, 1.0))  # High confidence from linking
+                if entity_id not in seen_entity_ids:
+                    all_entity_ids_to_fetch.append(entity_id)
+                    linked_scores[entity_id] = 1.0  # High confidence from linking
                     seen_entity_ids.add(entity_id)
 
-                    # Get neighborhood for linked entities
-                    try:
-                        neighborhood = await self._storage.get_neighborhood(
-                            entity_id,
-                            depth=config.max_graph_depth,
-                            limit=20,
-                        )
-                        graph_context[str(entity_id)] = neighborhood
-                    except Exception as e:
-                        logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
-
-        # Also find similar entities via embedding
+        # Similar entities via embedding
         if query_embedding is not None:
             entity_ids_scores = await self._storage.search_similar_entities(
                 namespace_id,
@@ -737,25 +727,34 @@ class HybridQueryEngine:
                 min_similarity=config.min_entity_similarity,
             )
 
-            # Expand neighborhood for top entities
             for entity_id, score in entity_ids_scores[:3]:
-                if entity_id in seen_entity_ids:
-                    continue
-                entity = await self._storage.get_entity(entity_id)
-                if entity:
-                    entities.append((entity, score))
+                if entity_id not in seen_entity_ids:
+                    all_entity_ids_to_fetch.append(entity_id)
+                    similar_scores[entity_id] = score
                     seen_entity_ids.add(entity_id)
 
-                    # Get neighborhood
-                    try:
-                        neighborhood = await self._storage.get_neighborhood(
-                            entity_id,
-                            depth=config.max_graph_depth,
-                            limit=20,
-                        )
-                        graph_context[str(entity_id)] = neighborhood
-                    except Exception as e:
-                        logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
+        # Batch fetch all entities and neighborhoods in parallel
+        if all_entity_ids_to_fetch:
+            # Fetch entities and neighborhoods in parallel
+            entities_map, neighborhoods = await asyncio.gather(
+                self._storage.get_entities_batch(all_entity_ids_to_fetch),
+                self._storage.get_neighborhoods_batch(
+                    all_entity_ids_to_fetch,
+                    depth=config.max_graph_depth,
+                    limit_per_entity=20,
+                ),
+            )
+
+            # Process results maintaining priority order
+            for entity_id in all_entity_ids_to_fetch:
+                if entity_id in entities_map:
+                    entity = entities_map[entity_id]
+                    score = linked_scores.get(entity_id) or similar_scores.get(entity_id, 0.5)
+                    entities.append((entity, score))
+
+                    # Add neighborhood to context
+                    if entity_id in neighborhoods:
+                        graph_context[str(entity_id)] = neighborhoods[entity_id]
 
         # Get related chunks through entities
         chunks = []

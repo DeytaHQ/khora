@@ -6002,213 +6002,247 @@ README.md
 229:         step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
 230:         trace.add_step(step1)
 231: 
-232:         # Collect results
-233:         for chunk, score in step1_result.chunks:
-234:             source = await self._get_chunk_source(chunk, namespace_id)
-235:             all_chunks[str(chunk.id)] = (chunk, score, source)
-236: 
-237:         for entity, score in step1_result.entities:
-238:             all_entities[str(entity.id)] = (entity, score)
-239: 
-240:         # Step 2+: Execute pre-computed follow-up queries
-241:         if max_steps >= 2 and "understanding" in step1_result.metadata:
-242:             follow_up_queries = step1_result.metadata["understanding"].get("follow_up_queries", [])
-243: 
-244:             # Also check for queries generated from result analysis
-245:             additional_follow_ups = self._generate_additional_follow_ups(step1_result, step1)
-246:             all_follow_ups = list(follow_up_queries) + additional_follow_ups
-247: 
-248:             for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
-249:                 if isinstance(follow_up, dict):
-250:                     fq_query = follow_up.get("query", "")
-251:                     fq_reasoning = follow_up.get("reasoning", f"Follow-up query {i+1}")
-252:                 else:
-253:                     fq_query = str(follow_up)
-254:                     fq_reasoning = f"Pre-computed follow-up query {i+1}"
-255: 
-256:                 if not fq_query:
-257:                     continue
-258: 
-259:                 logger.info(f"Agentic search step {i+2}: '{fq_query[:50]}...'")
-260: 
-261:                 step_result = await self._engine.query(
-262:                     fq_query,
-263:                     namespace_id,
-264:                     config=config,
-265:                 )
-266: 
-267:                 step = self._analyze_results(step_result, fq_query, i + 2, fq_reasoning)
-268:                 trace.add_step(step)
-269: 
-270:                 # Collect new results (keep higher scores)
-271:                 for chunk, score in step_result.chunks:
-272:                     chunk_id = str(chunk.id)
-273:                     if chunk_id not in all_chunks or all_chunks[chunk_id][1] < score:
-274:                         source = await self._get_chunk_source(chunk, namespace_id)
-275:                         all_chunks[chunk_id] = (chunk, score, source)
-276: 
-277:                 for entity, score in step_result.entities:
-278:                     entity_id = str(entity.id)
-279:                     if entity_id not in all_entities or all_entities[entity_id][1] < score:
-280:                         all_entities[entity_id] = (entity, score)
-281: 
-282:         # Generate summary (without additional LLM call)
-283:         summary = self._generate_summary_fast(query, all_chunks, all_entities, trace)
-284: 
-285:         # Finalize trace
-286:         trace.completed_at = datetime.utcnow()
-287:         trace.summary = summary
-288:         trace.total_unique_chunks = len(all_chunks)
-289:         trace.total_unique_entities = len(all_entities)
-290: 
-291:         # Count sources
-292:         for _, (_, _, source) in all_chunks.items():
-293:             trace.sources_explored[source] = trace.sources_explored.get(source, 0) + 1
-294: 
-295:         # Sort results by score
-296:         sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
-297:         sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
-298: 
-299:         return AgenticSearchResult(
-300:             chunks=sorted_chunks,
-301:             entities=sorted_entities,
-302:             summary=summary,
-303:             trace=trace,
-304:             understanding=understanding,
-305:             metadata={
-306:                 "original_query": query,
-307:                 "total_steps": len(trace.steps),
-308:                 "sources_explored": trace.sources_explored,
-309:                 "complexity_score": trace.complexity_score,
-310:             },
-311:         )
-312: 
-313:     def _analyze_results(
-314:         self,
-315:         result: QueryResult,
-316:         query: str,
-317:         step_number: int,
-318:         reasoning: str,
-319:     ) -> SearchStep:
-320:         """Analyze search results and create a step record."""
-321:         step = SearchStep(
-322:             step_number=step_number,
-323:             query=query,
-324:             reasoning=reasoning,
-325:         )
-326: 
-327:         step.total_chunks = len(result.chunks)
-328:         step.total_entities = len(result.entities)
-329: 
-330:         # Extract search method contributions
-331:         if result.search_contributions:
-332:             step.vector_hits = result.search_contributions.vector
-333:             step.graph_hits = result.search_contributions.graph
-334:             step.keyword_hits = result.search_contributions.keyword
-335: 
-336:         # Extract graph info
-337:         if result.graph_info:
-338:             step.entities_linked = result.graph_info.entities_linked
-339:             step.relationships_traversed = result.graph_info.relationships_traversed
-340: 
-341:         # Extract temporal info
-342:         if result.temporal_info:
-343:             step.temporal_filter_applied = result.temporal_info.filter_applied
-344:             if result.temporal_info.time_start or result.temporal_info.time_end:
-345:                 step.time_range = (result.temporal_info.time_start, result.temporal_info.time_end)
-346: 
-347:         return step
+232:         # Collect results (batch fetch document sources for all chunks)
+233:         chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+234:         for chunk, score in step1_result.chunks:
+235:             source = chunk_sources.get(str(chunk.id), "unknown")
+236:             all_chunks[str(chunk.id)] = (chunk, score, source)
+237: 
+238:         for entity, score in step1_result.entities:
+239:             all_entities[str(entity.id)] = (entity, score)
+240: 
+241:         # Step 2+: Execute pre-computed follow-up queries
+242:         if max_steps >= 2 and "understanding" in step1_result.metadata:
+243:             follow_up_queries = step1_result.metadata["understanding"].get("follow_up_queries", [])
+244: 
+245:             # Also check for queries generated from result analysis
+246:             additional_follow_ups = self._generate_additional_follow_ups(step1_result, step1)
+247:             all_follow_ups = list(follow_up_queries) + additional_follow_ups
+248: 
+249:             for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
+250:                 if isinstance(follow_up, dict):
+251:                     fq_query = follow_up.get("query", "")
+252:                     fq_reasoning = follow_up.get("reasoning", f"Follow-up query {i+1}")
+253:                 else:
+254:                     fq_query = str(follow_up)
+255:                     fq_reasoning = f"Pre-computed follow-up query {i+1}"
+256: 
+257:                 if not fq_query:
+258:                     continue
+259: 
+260:                 logger.info(f"Agentic search step {i+2}: '{fq_query[:50]}...'")
+261: 
+262:                 step_result = await self._engine.query(
+263:                     fq_query,
+264:                     namespace_id,
+265:                     config=config,
+266:                 )
+267: 
+268:                 step = self._analyze_results(step_result, fq_query, i + 2, fq_reasoning)
+269:                 trace.add_step(step)
+270: 
+271:                 # Collect new results (keep higher scores) - batch fetch sources
+272:                 step_chunk_sources = await self._get_chunk_sources_batch(step_result.chunks)
+273:                 for chunk, score in step_result.chunks:
+274:                     chunk_id = str(chunk.id)
+275:                     if chunk_id not in all_chunks or all_chunks[chunk_id][1] < score:
+276:                         source = step_chunk_sources.get(chunk_id, "unknown")
+277:                         all_chunks[chunk_id] = (chunk, score, source)
+278: 
+279:                 for entity, score in step_result.entities:
+280:                     entity_id = str(entity.id)
+281:                     if entity_id not in all_entities or all_entities[entity_id][1] < score:
+282:                         all_entities[entity_id] = (entity, score)
+283: 
+284:         # Generate summary (without additional LLM call)
+285:         summary = self._generate_summary_fast(query, all_chunks, all_entities, trace)
+286: 
+287:         # Finalize trace
+288:         trace.completed_at = datetime.utcnow()
+289:         trace.summary = summary
+290:         trace.total_unique_chunks = len(all_chunks)
+291:         trace.total_unique_entities = len(all_entities)
+292: 
+293:         # Count sources
+294:         for _, (_, _, source) in all_chunks.items():
+295:             trace.sources_explored[source] = trace.sources_explored.get(source, 0) + 1
+296: 
+297:         # Sort results by score
+298:         sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
+299:         sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
+300: 
+301:         return AgenticSearchResult(
+302:             chunks=sorted_chunks,
+303:             entities=sorted_entities,
+304:             summary=summary,
+305:             trace=trace,
+306:             understanding=understanding,
+307:             metadata={
+308:                 "original_query": query,
+309:                 "total_steps": len(trace.steps),
+310:                 "sources_explored": trace.sources_explored,
+311:                 "complexity_score": trace.complexity_score,
+312:             },
+313:         )
+314: 
+315:     def _analyze_results(
+316:         self,
+317:         result: QueryResult,
+318:         query: str,
+319:         step_number: int,
+320:         reasoning: str,
+321:     ) -> SearchStep:
+322:         """Analyze search results and create a step record."""
+323:         step = SearchStep(
+324:             step_number=step_number,
+325:             query=query,
+326:             reasoning=reasoning,
+327:         )
+328: 
+329:         step.total_chunks = len(result.chunks)
+330:         step.total_entities = len(result.entities)
+331: 
+332:         # Extract search method contributions
+333:         if result.search_contributions:
+334:             step.vector_hits = result.search_contributions.vector
+335:             step.graph_hits = result.search_contributions.graph
+336:             step.keyword_hits = result.search_contributions.keyword
+337: 
+338:         # Extract graph info
+339:         if result.graph_info:
+340:             step.entities_linked = result.graph_info.entities_linked
+341:             step.relationships_traversed = result.graph_info.relationships_traversed
+342: 
+343:         # Extract temporal info
+344:         if result.temporal_info:
+345:             step.temporal_filter_applied = result.temporal_info.filter_applied
+346:             if result.temporal_info.time_start or result.temporal_info.time_end:
+347:                 step.time_range = (result.temporal_info.time_start, result.temporal_info.time_end)
 348: 
-349:     def _generate_additional_follow_ups(
-350:         self,
-351:         result: QueryResult,
-352:         analysis: SearchStep,
-353:     ) -> list[dict[str, Any]]:
-354:         """Generate additional follow-up queries based on result analysis.
-355: 
-356:         These are computed locally without LLM calls, based on:
-357:         - Under-represented sources
-358:         - High-scoring entities found
-359:         """
-360:         follow_ups = []
-361: 
-362:         # Check for source imbalance
-363:         if analysis.sources_hit:
-364:             total_hits = sum(analysis.sources_hit.values())
-365:             if total_hits > 0:
-366:                 dominant_source = max(analysis.sources_hit.items(), key=lambda x: x[1])
-367:                 if dominant_source[1] / total_hits > 0.8:
-368:                     # One source dominates - target others
-369:                     for source in ["linear", "notion", "attio", "gong"]:
-370:                         if source != dominant_source[0] and analysis.sources_hit.get(source, 0) == 0:
-371:                             follow_ups.append(
-372:                                 {
-373:                                     "query": f"{analysis.query} {source}",
-374:                                     "reasoning": f"Targeting under-represented source: {source}",
-375:                                 }
-376:                             )
-377:                             break
-378: 
-379:         # Explore top entities
-380:         if result.entities and len(result.entities) > 0:
-381:             top_entity = result.entities[0][0]
-382:             follow_ups.append(
-383:                 {
-384:                     "query": f"{top_entity.name} context details",
-385:                     "reasoning": f"Exploring top entity: {top_entity.name}",
-386:                 }
-387:             )
-388: 
-389:         return follow_ups[:2]  # Limit to 2 additional
+349:         return step
+350: 
+351:     def _generate_additional_follow_ups(
+352:         self,
+353:         result: QueryResult,
+354:         analysis: SearchStep,
+355:     ) -> list[dict[str, Any]]:
+356:         """Generate additional follow-up queries based on result analysis.
+357: 
+358:         These are computed locally without LLM calls, based on:
+359:         - Under-represented sources
+360:         - High-scoring entities found
+361:         """
+362:         follow_ups = []
+363: 
+364:         # Check for source imbalance
+365:         if analysis.sources_hit:
+366:             total_hits = sum(analysis.sources_hit.values())
+367:             if total_hits > 0:
+368:                 dominant_source = max(analysis.sources_hit.items(), key=lambda x: x[1])
+369:                 if dominant_source[1] / total_hits > 0.8:
+370:                     # One source dominates - target others
+371:                     for source in ["linear", "notion", "attio", "gong"]:
+372:                         if source != dominant_source[0] and analysis.sources_hit.get(source, 0) == 0:
+373:                             follow_ups.append(
+374:                                 {
+375:                                     "query": f"{analysis.query} {source}",
+376:                                     "reasoning": f"Targeting under-represented source: {source}",
+377:                                 }
+378:                             )
+379:                             break
+380: 
+381:         # Explore top entities
+382:         if result.entities and len(result.entities) > 0:
+383:             top_entity = result.entities[0][0]
+384:             follow_ups.append(
+385:                 {
+386:                     "query": f"{top_entity.name} context details",
+387:                     "reasoning": f"Exploring top entity: {top_entity.name}",
+388:                 }
+389:             )
 390: 
-391:     async def _get_chunk_source(self, chunk: Chunk, namespace_id: UUID) -> str:
-392:         """Get the source system for a chunk."""
-393:         try:
-394:             doc = await self._engine._storage.get_document(chunk.document_id)
-395:             if doc and doc.metadata:
-396:                 source = doc.metadata.custom.get("source_system", "")
-397:                 if not source and doc.metadata.source:
-398:                     source = doc.metadata.source.split("/")[0]
-399:                 return source or "unknown"
-400:         except Exception:
-401:             pass
-402:         return "unknown"
-403: 
-404:     def _generate_summary_fast(
-405:         self,
-406:         query: str,
-407:         chunks: dict[str, tuple[Chunk, float, str]],
-408:         entities: dict[str, tuple[Entity, float]],
-409:         trace: AgenticSearchTrace,
-410:     ) -> str:
-411:         """Generate a summary without additional LLM call.
-412: 
-413:         Uses structured data from the search to create a useful summary.
+391:         return follow_ups[:2]  # Limit to 2 additional
+392: 
+393:     async def _get_chunk_source(self, chunk: Chunk, namespace_id: UUID) -> str:
+394:         """Get the source system for a chunk."""
+395:         try:
+396:             doc = await self._engine._storage.get_document(chunk.document_id)
+397:             if doc and doc.metadata:
+398:                 source = doc.metadata.custom.get("source_system", "")
+399:                 if not source and doc.metadata.source:
+400:                     source = doc.metadata.source.split("/")[0]
+401:                 return source or "unknown"
+402:         except Exception:
+403:             pass
+404:         return "unknown"
+405: 
+406:     async def _get_chunk_sources_batch(self, chunks: list[tuple[Chunk, float]]) -> dict[str, str]:
+407:         """Get source systems for multiple chunks in a single batch query.
+408: 
+409:         Args:
+410:             chunks: List of (chunk, score) tuples
+411: 
+412:         Returns:
+413:             Dictionary mapping chunk ID to source string
 414:         """
-415:         sources = {}
-416:         for _, (_, _, source) in chunks.items():
-417:             sources[source] = sources.get(source, 0) + 1
-418: 
-419:         source_parts = [f"{s}: {c}" for s, c in sorted(sources.items(), key=lambda x: -x[1])]
-420:         source_summary = ", ".join(source_parts) if source_parts else "none"
-421: 
-422:         entity_names = [e.name for e, _ in sorted(entities.values(), key=lambda x: -x[1])[:5]]
-423:         entity_summary = ", ".join(entity_names) if entity_names else "none found"
-424: 
-425:         # Build structured summary
-426:         parts = [
-427:             f"Found {len(chunks)} results across {len(sources)} sources ({source_summary}).",
-428:         ]
-429: 
-430:         if entity_names:
-431:             parts.append(f"Key entities: {entity_summary}.")
-432: 
-433:         parts.append(f"Explored in {len(trace.steps)} steps.")
-434: 
-435:         if trace.complexity_score > 0.7:
-436:             parts.append("Query was identified as complex, requiring multi-step exploration.")
+415:         if not chunks:
+416:             return {}
+417: 
+418:         # Collect unique document IDs
+419:         doc_ids = list({chunk.document_id for chunk, _ in chunks})
+420: 
+421:         # Batch fetch all documents
+422:         docs_map = await self._engine._storage.get_documents_batch(doc_ids)
+423: 
+424:         # Build chunk_id -> source mapping
+425:         sources: dict[str, str] = {}
+426:         for chunk, _ in chunks:
+427:             doc = docs_map.get(chunk.document_id)
+428:             if doc and doc.metadata:
+429:                 source = doc.metadata.custom.get("source_system", "")
+430:                 if not source and doc.metadata.source:
+431:                     source = doc.metadata.source.split("/")[0]
+432:                 sources[str(chunk.id)] = source or "unknown"
+433:             else:
+434:                 sources[str(chunk.id)] = "unknown"
+435: 
+436:         return sources
 437: 
-438:         return " ".join(parts)
+438:     def _generate_summary_fast(
+439:         self,
+440:         query: str,
+441:         chunks: dict[str, tuple[Chunk, float, str]],
+442:         entities: dict[str, tuple[Entity, float]],
+443:         trace: AgenticSearchTrace,
+444:     ) -> str:
+445:         """Generate a summary without additional LLM call.
+446: 
+447:         Uses structured data from the search to create a useful summary.
+448:         """
+449:         sources = {}
+450:         for _, (_, _, source) in chunks.items():
+451:             sources[source] = sources.get(source, 0) + 1
+452: 
+453:         source_parts = [f"{s}: {c}" for s, c in sorted(sources.items(), key=lambda x: -x[1])]
+454:         source_summary = ", ".join(source_parts) if source_parts else "none"
+455: 
+456:         entity_names = [e.name for e, _ in sorted(entities.values(), key=lambda x: -x[1])[:5]]
+457:         entity_summary = ", ".join(entity_names) if entity_names else "none found"
+458: 
+459:         # Build structured summary
+460:         parts = [
+461:             f"Found {len(chunks)} results across {len(sources)} sources ({source_summary}).",
+462:         ]
+463: 
+464:         if entity_names:
+465:             parts.append(f"Key entities: {entity_summary}.")
+466: 
+467:         parts.append(f"Explored in {len(trace.steps)} steps.")
+468: 
+469:         if trace.complexity_score > 0.7:
+470:             parts.append("Query was identified as complex, requiring multi-step exploration.")
+471: 
+472:         return " ".join(parts)
 ````
 
 ## File: src/khora/query/fusion.py
@@ -10367,222 +10401,6 @@ README.md
 66: ]
 ````
 
-## File: src/khora/query/temporal.py
-````python
-  1: """Temporal query support for Khora Memory Lake."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from dataclasses import dataclass, field
-  6: from datetime import datetime, timedelta
-  7: from enum import Enum
-  8: 
-  9: 
- 10: class TemporalOperator(str, Enum):
- 11:     """Temporal query operators."""
- 12: 
- 13:     BEFORE = "before"
- 14:     AFTER = "after"
- 15:     BETWEEN = "between"
- 16:     DURING = "during"  # Within a specific time period
- 17:     OVERLAPS = "overlaps"  # Overlaps with a time range
- 18: 
- 19: 
- 20: @dataclass
- 21: class TemporalFilter:
- 22:     """Filter for temporal queries."""
- 23: 
- 24:     operator: TemporalOperator = TemporalOperator.AFTER
- 25:     start_time: datetime | None = None
- 26:     end_time: datetime | None = None
- 27: 
- 28:     # For relative time queries
- 29:     relative_days: int | None = None
- 30:     relative_hours: int | None = None
- 31: 
- 32:     # Alias properties for consistency
- 33:     @property
- 34:     def start_date(self) -> datetime | None:
- 35:         """Alias for start_time."""
- 36:         return self.start_time
- 37: 
- 38:     @property
- 39:     def end_date(self) -> datetime | None:
- 40:         """Alias for end_time."""
- 41:         return self.end_time
- 42: 
- 43:     def __init__(
- 44:         self,
- 45:         operator: TemporalOperator = TemporalOperator.AFTER,
- 46:         start_time: datetime | None = None,
- 47:         end_time: datetime | None = None,
- 48:         start_date: datetime | None = None,
- 49:         end_date: datetime | None = None,
- 50:         relative_days: int | None = None,
- 51:         relative_hours: int | None = None,
- 52:     ) -> None:
- 53:         """Initialize with flexible date/time naming."""
- 54:         self.operator = operator
- 55:         self.start_time = start_time or start_date
- 56:         self.end_time = end_time or end_date
- 57:         self.relative_days = relative_days
- 58:         self.relative_hours = relative_hours
- 59: 
- 60:         # Auto-detect operator if not specified
- 61:         if self.start_time and self.end_time:
- 62:             self.operator = TemporalOperator.BETWEEN
- 63:         elif self.end_time and not self.start_time:
- 64:             self.operator = TemporalOperator.BEFORE
- 65: 
- 66:     @classmethod
- 67:     def last_days(cls, days: int) -> TemporalFilter:
- 68:         """Create a filter for the last N days."""
- 69:         return cls(
- 70:             operator=TemporalOperator.AFTER,
- 71:             start_time=datetime.now() - timedelta(days=days),
- 72:         )
- 73: 
- 74:     @classmethod
- 75:     def last_hours(cls, hours: int) -> TemporalFilter:
- 76:         """Create a filter for the last N hours."""
- 77:         return cls(
- 78:             operator=TemporalOperator.AFTER,
- 79:             start_time=datetime.now() - timedelta(hours=hours),
- 80:         )
- 81: 
- 82:     @classmethod
- 83:     def before(cls, time: datetime) -> TemporalFilter:
- 84:         """Create a filter for before a specific time."""
- 85:         return cls(operator=TemporalOperator.BEFORE, end_time=time)
- 86: 
- 87:     @classmethod
- 88:     def after(cls, time: datetime) -> TemporalFilter:
- 89:         """Create a filter for after a specific time."""
- 90:         return cls(operator=TemporalOperator.AFTER, start_time=time)
- 91: 
- 92:     @classmethod
- 93:     def between(cls, start: datetime, end: datetime) -> TemporalFilter:
- 94:         """Create a filter for a time range."""
- 95:         return cls(operator=TemporalOperator.BETWEEN, start_time=start, end_time=end)
- 96: 
- 97:     def get_effective_times(self) -> tuple[datetime | None, datetime | None]:
- 98:         """Get the effective start and end times."""
- 99:         start = self.start_time
-100:         end = self.end_time
-101: 
-102:         # Handle relative times
-103:         if self.relative_days is not None:
-104:             start = datetime.now() - timedelta(days=self.relative_days)
-105:         if self.relative_hours is not None:
-106:             start = datetime.now() - timedelta(hours=self.relative_hours)
-107: 
-108:         return start, end
-109: 
-110:     def matches(self, timestamp: datetime) -> bool:
-111:         """Check if a timestamp matches this filter.
-112: 
-113:         Handles timezone-aware and timezone-naive datetime comparison
-114:         by normalizing both to the same timezone awareness.
-115:         """
-116:         start, end = self.get_effective_times()
-117: 
-118:         # Normalize timezone awareness for comparison
-119:         ts = self._normalize_tz(timestamp)
-120:         start_norm = self._normalize_tz(start) if start else None
-121:         end_norm = self._normalize_tz(end) if end else None
-122: 
-123:         if self.operator == TemporalOperator.BEFORE:
-124:             return end_norm is not None and ts < end_norm
-125:         elif self.operator == TemporalOperator.AFTER:
-126:             return start_norm is not None and ts > start_norm
-127:         elif self.operator == TemporalOperator.BETWEEN:
-128:             if start_norm is None or end_norm is None:
-129:                 return True
-130:             return start_norm <= ts <= end_norm
-131:         else:
-132:             return True
-133: 
-134:     @staticmethod
-135:     def _normalize_tz(dt: datetime | None) -> datetime | None:
-136:         """Normalize datetime to naive UTC for comparison.
-137: 
-138:         Converts timezone-aware datetimes to UTC then strips tzinfo.
-139:         Leaves timezone-naive datetimes as-is (assumes UTC).
-140:         """
-141:         if dt is None:
-142:             return None
-143: 
-144:         if dt.tzinfo is not None:
-145:             # Convert to UTC and make naive
-146:             from datetime import UTC
-147: 
-148:             utc_dt = dt.astimezone(UTC)
-149:             return utc_dt.replace(tzinfo=None)
-150:         else:
-151:             # Already naive, assume UTC
-152:             return dt
-153: 
-154: 
-155: @dataclass
-156: class TemporalQuery:
-157:     """Query with temporal context."""
-158: 
-159:     query: str
-160:     filters: list[TemporalFilter] = field(default_factory=list)
-161: 
-162:     # Temporal weighting
-163:     recency_weight: float = 0.0  # 0 = no recency bias, 1 = strong recency bias
-164:     decay_days: float = 30.0  # Half-life for recency decay
-165: 
-166:     # Context window
-167:     context_window_days: int | None = None  # Limit context to recent period
-168: 
-169:     def add_filter(self, filter: TemporalFilter) -> TemporalQuery:
-170:         """Add a temporal filter."""
-171:         self.filters.append(filter)
-172:         return self
-173: 
-174:     def with_recency_bias(self, weight: float = 0.3, decay_days: float = 30.0) -> TemporalQuery:
-175:         """Add recency bias to scoring."""
-176:         self.recency_weight = weight
-177:         self.decay_days = decay_days
-178:         return self
-179: 
-180:     def calculate_recency_score(self, timestamp: datetime) -> float:
-181:         """Calculate recency score for a timestamp.
-182: 
-183:         Uses exponential decay with configurable half-life.
-184:         Handles timezone-aware and timezone-naive datetime comparison.
-185:         """
-186:         if self.recency_weight == 0:
-187:             return 1.0
-188: 
-189:         import math
-190: 
-191:         # Normalize both to naive UTC for comparison
-192:         now = datetime.utcnow()
-193:         ts = timestamp
-194: 
-195:         if ts.tzinfo is not None:
-196:             from datetime import UTC
-197: 
-198:             ts = ts.astimezone(UTC).replace(tzinfo=None)
-199: 
-200:         age_days = (now - ts).total_seconds() / (24 * 60 * 60)
-201: 
-202:         # Exponential decay: score = 0.5^(age/half_life)
-203:         decay = math.pow(0.5, age_days / self.decay_days)
-204: 
-205:         # Blend with recency weight
-206:         return (1 - self.recency_weight) + (self.recency_weight * decay)
-207: 
-208:     def get_context_filter(self) -> TemporalFilter | None:
-209:         """Get a filter for the context window."""
-210:         if self.context_window_days is None:
-211:             return None
-212:         return TemporalFilter.last_days(self.context_window_days)
-````
-
 ## File: src/khora/query/understanding.py
 ````python
   1: """Query understanding module for Khora Memory Lake.
@@ -11747,67 +11565,86 @@ README.md
 404:             model = result.scalars().first()
 405:             return self._document_model_to_domain(model) if model else None
 406: 
-407:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
-408:         """Convert DocumentModel to domain Document."""
-409:         return Document(
-410:             id=UUID(model.id),
-411:             namespace_id=UUID(model.namespace_id),
-412:             content=model.content,
-413:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
-414:             metadata=DocumentMetadata(
-415:                 source=model.source,
-416:                 source_type=model.source_type,
-417:                 content_type=model.content_type,
-418:                 title=model.title,
-419:                 author=model.author,
-420:                 language=model.language,
-421:                 checksum=model.checksum,
-422:                 size_bytes=model.size_bytes,
-423:                 custom=model.metadata_,
-424:             ),
-425:             chunk_count=model.chunk_count,
-426:             entity_count=model.entity_count,
-427:             error_message=model.error_message,
-428:             created_at=model.created_at,
-429:             updated_at=model.updated_at,
-430:             processed_at=model.processed_at,
-431:         )
-432: 
-433:     # =========================================================================
-434:     # Sync checkpoint operations
-435:     # =========================================================================
-436: 
-437:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-438:         """Get the last sync checkpoint for a source."""
-439:         async with self._get_session() as session:
-440:             result = await session.execute(
-441:                 select(SyncCheckpointModel).where(
-442:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-443:                 )
-444:             )
-445:             model = result.scalar_one_or_none()
-446:             return model.checkpoint if model else None
-447: 
-448:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-449:         """Set the sync checkpoint for a source."""
-450:         async with self._get_session() as session:
-451:             result = await session.execute(
-452:                 select(SyncCheckpointModel).where(
-453:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-454:                 )
-455:             )
-456:             model = result.scalar_one_or_none()
-457:             if model:
-458:                 model.checkpoint = checkpoint
-459:                 model.updated_at = datetime.now(UTC)
-460:             else:
-461:                 model = SyncCheckpointModel(
-462:                     namespace_id=str(namespace_id),
-463:                     source=source,
-464:                     checkpoint=checkpoint,
-465:                 )
-466:                 session.add(model)
-467:             await session.commit()
+407:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+408:         """Fetch multiple documents in a single query.
+409: 
+410:         Args:
+411:             document_ids: List of document IDs to fetch
+412: 
+413:         Returns:
+414:             Dictionary mapping document ID to Document object
+415:         """
+416:         if not document_ids:
+417:             return {}
+418: 
+419:         async with self._get_session() as session:
+420:             result = await session.execute(
+421:                 select(DocumentModel).where(DocumentModel.id.in_([str(did) for did in document_ids]))
+422:             )
+423:             models = result.scalars().all()
+424:             return {UUID(m.id): self._document_model_to_domain(m) for m in models}
+425: 
+426:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
+427:         """Convert DocumentModel to domain Document."""
+428:         return Document(
+429:             id=UUID(model.id),
+430:             namespace_id=UUID(model.namespace_id),
+431:             content=model.content,
+432:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
+433:             metadata=DocumentMetadata(
+434:                 source=model.source,
+435:                 source_type=model.source_type,
+436:                 content_type=model.content_type,
+437:                 title=model.title,
+438:                 author=model.author,
+439:                 language=model.language,
+440:                 checksum=model.checksum,
+441:                 size_bytes=model.size_bytes,
+442:                 custom=model.metadata_,
+443:             ),
+444:             chunk_count=model.chunk_count,
+445:             entity_count=model.entity_count,
+446:             error_message=model.error_message,
+447:             created_at=model.created_at,
+448:             updated_at=model.updated_at,
+449:             processed_at=model.processed_at,
+450:         )
+451: 
+452:     # =========================================================================
+453:     # Sync checkpoint operations
+454:     # =========================================================================
+455: 
+456:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+457:         """Get the last sync checkpoint for a source."""
+458:         async with self._get_session() as session:
+459:             result = await session.execute(
+460:                 select(SyncCheckpointModel).where(
+461:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+462:                 )
+463:             )
+464:             model = result.scalar_one_or_none()
+465:             return model.checkpoint if model else None
+466: 
+467:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+468:         """Set the sync checkpoint for a source."""
+469:         async with self._get_session() as session:
+470:             result = await session.execute(
+471:                 select(SyncCheckpointModel).where(
+472:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+473:                 )
+474:             )
+475:             model = result.scalar_one_or_none()
+476:             if model:
+477:                 model.checkpoint = checkpoint
+478:                 model.updated_at = datetime.now(UTC)
+479:             else:
+480:                 model = SyncCheckpointModel(
+481:                     namespace_id=str(namespace_id),
+482:                     source=source,
+483:                     checkpoint=checkpoint,
+484:                 )
+485:                 session.add(model)
+486:             await session.commit()
 ````
 
 ## File: src/khora/storage/coordinator.py
@@ -12322,62 +12159,126 @@ README.md
 508:         return {"entities": [], "relationships": []}
 509: 
 510:     # =========================================================================
-511:     # Event operations (delegated to event store)
+511:     # Batch operations (optimized for parallel fetching)
 512:     # =========================================================================
 513: 
-514:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-515:         """Append an event to the log."""
-516:         if not self.event_store:
-517:             raise RuntimeError("Event store not configured")
-518:         return await self.event_store.append_event(event)
+514:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+515:         """Fetch multiple entities in a single query.
+516: 
+517:         Args:
+518:             entity_ids: List of entity IDs to fetch
 519: 
-520:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-521:         """Append multiple events in a batch."""
-522:         if not self.event_store:
-523:             raise RuntimeError("Event store not configured")
-524:         return await self.event_store.append_events_batch(events)
-525: 
-526:     async def get_events(
-527:         self,
-528:         namespace_id: UUID,
-529:         *,
-530:         event_types: list[str] | None = None,
-531:         resource_type: str | None = None,
-532:         resource_id: UUID | None = None,
-533:         after: datetime | None = None,
-534:         before: datetime | None = None,
-535:         limit: int = 100,
-536:         offset: int = 0,
-537:     ) -> list[MemoryEvent]:
-538:         """Query events from the log."""
-539:         if not self.event_store:
-540:             raise RuntimeError("Event store not configured")
-541:         return await self.event_store.get_events(
-542:             namespace_id,
-543:             event_types=event_types,
-544:             resource_type=resource_type,
-545:             resource_id=resource_id,
-546:             after=after,
-547:             before=before,
-548:             limit=limit,
-549:             offset=offset,
-550:         )
-551: 
-552:     # =========================================================================
-553:     # Sync checkpoint operations (delegated to relational)
-554:     # =========================================================================
-555: 
-556:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-557:         """Get the last sync checkpoint for a source."""
-558:         if not self.relational:
-559:             raise RuntimeError("Relational backend not configured")
-560:         return await self.relational.get_sync_checkpoint(namespace_id, source)
-561: 
-562:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-563:         """Set the sync checkpoint for a source."""
-564:         if not self.relational:
-565:             raise RuntimeError("Relational backend not configured")
-566:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
+520:         Returns:
+521:             Dictionary mapping entity ID to Entity object
+522:         """
+523:         if not entity_ids:
+524:             return {}
+525:         if self.graph:
+526:             return await self.graph.get_entities_batch(entity_ids)
+527:         return {}
+528: 
+529:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+530:         """Fetch multiple documents in a single query.
+531: 
+532:         Args:
+533:             document_ids: List of document IDs to fetch
+534: 
+535:         Returns:
+536:             Dictionary mapping document ID to Document object
+537:         """
+538:         if not document_ids:
+539:             return {}
+540:         if self.relational:
+541:             return await self.relational.get_documents_batch(document_ids)
+542:         return {}
+543: 
+544:     async def get_neighborhoods_batch(
+545:         self,
+546:         entity_ids: list[UUID],
+547:         *,
+548:         depth: int = 1,
+549:         relationship_types: list[str] | None = None,
+550:         limit_per_entity: int = 20,
+551:     ) -> dict[UUID, dict[str, Any]]:
+552:         """Get neighborhoods for multiple entities in a single query.
+553: 
+554:         Args:
+555:             entity_ids: List of entity IDs
+556:             depth: Max traversal depth
+557:             relationship_types: Optional relationship type filter
+558:             limit_per_entity: Max nodes per entity neighborhood
+559: 
+560:         Returns:
+561:             Dictionary mapping entity ID to neighborhood data
+562:         """
+563:         if not entity_ids:
+564:             return {}
+565:         if self.graph:
+566:             return await self.graph.get_neighborhoods_batch(
+567:                 entity_ids,
+568:                 depth=depth,
+569:                 relationship_types=relationship_types,
+570:                 limit_per_entity=limit_per_entity,
+571:             )
+572:         return {}
+573: 
+574:     # =========================================================================
+575:     # Event operations (delegated to event store)
+576:     # =========================================================================
+577: 
+578:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+579:         """Append an event to the log."""
+580:         if not self.event_store:
+581:             raise RuntimeError("Event store not configured")
+582:         return await self.event_store.append_event(event)
+583: 
+584:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+585:         """Append multiple events in a batch."""
+586:         if not self.event_store:
+587:             raise RuntimeError("Event store not configured")
+588:         return await self.event_store.append_events_batch(events)
+589: 
+590:     async def get_events(
+591:         self,
+592:         namespace_id: UUID,
+593:         *,
+594:         event_types: list[str] | None = None,
+595:         resource_type: str | None = None,
+596:         resource_id: UUID | None = None,
+597:         after: datetime | None = None,
+598:         before: datetime | None = None,
+599:         limit: int = 100,
+600:         offset: int = 0,
+601:     ) -> list[MemoryEvent]:
+602:         """Query events from the log."""
+603:         if not self.event_store:
+604:             raise RuntimeError("Event store not configured")
+605:         return await self.event_store.get_events(
+606:             namespace_id,
+607:             event_types=event_types,
+608:             resource_type=resource_type,
+609:             resource_id=resource_id,
+610:             after=after,
+611:             before=before,
+612:             limit=limit,
+613:             offset=offset,
+614:         )
+615: 
+616:     # =========================================================================
+617:     # Sync checkpoint operations (delegated to relational)
+618:     # =========================================================================
+619: 
+620:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+621:         """Get the last sync checkpoint for a source."""
+622:         if not self.relational:
+623:             raise RuntimeError("Relational backend not configured")
+624:         return await self.relational.get_sync_checkpoint(namespace_id, source)
+625: 
+626:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+627:         """Set the sync checkpoint for a source."""
+628:         if not self.relational:
+629:             raise RuntimeError("Relational backend not configured")
+630:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
 ## File: src/khora/__init__.py
@@ -12479,6 +12380,222 @@ README.md
 63:     "acompletion",
 64:     "aembedding",
 65: ]
+````
+
+## File: src/khora/query/temporal.py
+````python
+  1: """Temporal query support for Khora Memory Lake."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from dataclasses import dataclass, field
+  6: from datetime import datetime, timedelta
+  7: from enum import Enum
+  8: 
+  9: 
+ 10: class TemporalOperator(str, Enum):
+ 11:     """Temporal query operators."""
+ 12: 
+ 13:     BEFORE = "before"
+ 14:     AFTER = "after"
+ 15:     BETWEEN = "between"
+ 16:     DURING = "during"  # Within a specific time period
+ 17:     OVERLAPS = "overlaps"  # Overlaps with a time range
+ 18: 
+ 19: 
+ 20: @dataclass
+ 21: class TemporalFilter:
+ 22:     """Filter for temporal queries."""
+ 23: 
+ 24:     operator: TemporalOperator = TemporalOperator.AFTER
+ 25:     start_time: datetime | None = None
+ 26:     end_time: datetime | None = None
+ 27: 
+ 28:     # For relative time queries
+ 29:     relative_days: int | None = None
+ 30:     relative_hours: int | None = None
+ 31: 
+ 32:     # Alias properties for consistency
+ 33:     @property
+ 34:     def start_date(self) -> datetime | None:
+ 35:         """Alias for start_time."""
+ 36:         return self.start_time
+ 37: 
+ 38:     @property
+ 39:     def end_date(self) -> datetime | None:
+ 40:         """Alias for end_time."""
+ 41:         return self.end_time
+ 42: 
+ 43:     def __init__(
+ 44:         self,
+ 45:         operator: TemporalOperator = TemporalOperator.AFTER,
+ 46:         start_time: datetime | None = None,
+ 47:         end_time: datetime | None = None,
+ 48:         start_date: datetime | None = None,
+ 49:         end_date: datetime | None = None,
+ 50:         relative_days: int | None = None,
+ 51:         relative_hours: int | None = None,
+ 52:     ) -> None:
+ 53:         """Initialize with flexible date/time naming."""
+ 54:         self.operator = operator
+ 55:         self.start_time = start_time or start_date
+ 56:         self.end_time = end_time or end_date
+ 57:         self.relative_days = relative_days
+ 58:         self.relative_hours = relative_hours
+ 59: 
+ 60:         # Auto-detect operator if not specified
+ 61:         if self.start_time and self.end_time:
+ 62:             self.operator = TemporalOperator.BETWEEN
+ 63:         elif self.end_time and not self.start_time:
+ 64:             self.operator = TemporalOperator.BEFORE
+ 65: 
+ 66:     @classmethod
+ 67:     def last_days(cls, days: int) -> TemporalFilter:
+ 68:         """Create a filter for the last N days."""
+ 69:         return cls(
+ 70:             operator=TemporalOperator.AFTER,
+ 71:             start_time=datetime.now() - timedelta(days=days),
+ 72:         )
+ 73: 
+ 74:     @classmethod
+ 75:     def last_hours(cls, hours: int) -> TemporalFilter:
+ 76:         """Create a filter for the last N hours."""
+ 77:         return cls(
+ 78:             operator=TemporalOperator.AFTER,
+ 79:             start_time=datetime.now() - timedelta(hours=hours),
+ 80:         )
+ 81: 
+ 82:     @classmethod
+ 83:     def before(cls, time: datetime) -> TemporalFilter:
+ 84:         """Create a filter for before a specific time."""
+ 85:         return cls(operator=TemporalOperator.BEFORE, end_time=time)
+ 86: 
+ 87:     @classmethod
+ 88:     def after(cls, time: datetime) -> TemporalFilter:
+ 89:         """Create a filter for after a specific time."""
+ 90:         return cls(operator=TemporalOperator.AFTER, start_time=time)
+ 91: 
+ 92:     @classmethod
+ 93:     def between(cls, start: datetime, end: datetime) -> TemporalFilter:
+ 94:         """Create a filter for a time range."""
+ 95:         return cls(operator=TemporalOperator.BETWEEN, start_time=start, end_time=end)
+ 96: 
+ 97:     def get_effective_times(self) -> tuple[datetime | None, datetime | None]:
+ 98:         """Get the effective start and end times."""
+ 99:         start = self.start_time
+100:         end = self.end_time
+101: 
+102:         # Handle relative times
+103:         if self.relative_days is not None:
+104:             start = datetime.now() - timedelta(days=self.relative_days)
+105:         if self.relative_hours is not None:
+106:             start = datetime.now() - timedelta(hours=self.relative_hours)
+107: 
+108:         return start, end
+109: 
+110:     def matches(self, timestamp: datetime) -> bool:
+111:         """Check if a timestamp matches this filter.
+112: 
+113:         Handles timezone-aware and timezone-naive datetime comparison
+114:         by normalizing both to the same timezone awareness.
+115:         """
+116:         start, end = self.get_effective_times()
+117: 
+118:         # Normalize timezone awareness for comparison
+119:         ts = self._normalize_tz(timestamp)
+120:         start_norm = self._normalize_tz(start) if start else None
+121:         end_norm = self._normalize_tz(end) if end else None
+122: 
+123:         if self.operator == TemporalOperator.BEFORE:
+124:             return end_norm is not None and ts < end_norm
+125:         elif self.operator == TemporalOperator.AFTER:
+126:             return start_norm is not None and ts > start_norm
+127:         elif self.operator == TemporalOperator.BETWEEN:
+128:             if start_norm is None or end_norm is None:
+129:                 return True
+130:             return start_norm <= ts <= end_norm
+131:         else:
+132:             return True
+133: 
+134:     @staticmethod
+135:     def _normalize_tz(dt: datetime | None) -> datetime | None:
+136:         """Normalize datetime to naive UTC for comparison.
+137: 
+138:         Converts timezone-aware datetimes to UTC then strips tzinfo.
+139:         Leaves timezone-naive datetimes as-is (assumes UTC).
+140:         """
+141:         if dt is None:
+142:             return None
+143: 
+144:         if dt.tzinfo is not None:
+145:             # Convert to UTC and make naive
+146:             from datetime import UTC
+147: 
+148:             utc_dt = dt.astimezone(UTC)
+149:             return utc_dt.replace(tzinfo=None)
+150:         else:
+151:             # Already naive, assume UTC
+152:             return dt
+153: 
+154: 
+155: @dataclass
+156: class TemporalQuery:
+157:     """Query with temporal context."""
+158: 
+159:     query: str
+160:     filters: list[TemporalFilter] = field(default_factory=list)
+161: 
+162:     # Temporal weighting
+163:     recency_weight: float = 0.0  # 0 = no recency bias, 1 = strong recency bias
+164:     decay_days: float = 30.0  # Half-life for recency decay
+165: 
+166:     # Context window
+167:     context_window_days: int | None = None  # Limit context to recent period
+168: 
+169:     def add_filter(self, filter: TemporalFilter) -> TemporalQuery:
+170:         """Add a temporal filter."""
+171:         self.filters.append(filter)
+172:         return self
+173: 
+174:     def with_recency_bias(self, weight: float = 0.3, decay_days: float = 30.0) -> TemporalQuery:
+175:         """Add recency bias to scoring."""
+176:         self.recency_weight = weight
+177:         self.decay_days = decay_days
+178:         return self
+179: 
+180:     def calculate_recency_score(self, timestamp: datetime) -> float:
+181:         """Calculate recency score for a timestamp.
+182: 
+183:         Uses exponential decay with configurable half-life.
+184:         Handles timezone-aware and timezone-naive datetime comparison.
+185:         """
+186:         if self.recency_weight == 0:
+187:             return 1.0
+188: 
+189:         import math
+190: 
+191:         # Normalize both to naive UTC for comparison
+192:         now = datetime.utcnow()
+193:         ts = timestamp
+194: 
+195:         if ts.tzinfo is not None:
+196:             from datetime import UTC
+197: 
+198:             ts = ts.astimezone(UTC).replace(tzinfo=None)
+199: 
+200:         age_days = (now - ts).total_seconds() / (24 * 60 * 60)
+201: 
+202:         # Exponential decay: score = 0.5^(age/half_life)
+203:         decay = math.pow(0.5, age_days / self.decay_days)
+204: 
+205:         # Blend with recency weight
+206:         return (1 - self.recency_weight) + (self.recency_weight * decay)
+207: 
+208:     def get_context_filter(self) -> TemporalFilter | None:
+209:         """Get a filter for the context window."""
+210:         if self.context_window_days is None:
+211:             return None
+212:         return TemporalFilter.last_days(self.context_window_days)
 ````
 
 ## File: src/khora/storage/backends/neo4j.py
@@ -12716,528 +12833,611 @@ README.md
 231:                 return self._record_to_entity(record["e"])
 232:             return None
 233: 
-234:     async def update_entity(self, entity: Entity) -> Entity:
-235:         """Update an entity."""
-236:         driver = self._get_driver()
-237: 
-238:         async def _update(tx: AsyncManagedTransaction) -> None:
-239:             query = """
-240:             MATCH (e:Entity {id: $id})
-241:             SET e.name = $name,
-242:                 e.description = $description,
-243:                 e.attributes = $attributes,
-244:                 e.source_document_ids = $source_document_ids,
-245:                 e.source_chunk_ids = $source_chunk_ids,
-246:                 e.mention_count = $mention_count,
-247:                 e.valid_from = $valid_from,
-248:                 e.valid_until = $valid_until,
-249:                 e.confidence = $confidence,
-250:                 e.metadata = $metadata,
-251:                 e.updated_at = $updated_at
-252:             """
-253:             await tx.run(
-254:                 query,
-255:                 id=str(entity.id),
-256:                 name=entity.name,
-257:                 description=entity.description,
-258:                 attributes=_serialize_dict(entity.attributes),
-259:                 source_document_ids=[str(d) for d in entity.source_document_ids],
-260:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-261:                 mention_count=entity.mention_count,
-262:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
-263:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
-264:                 confidence=entity.confidence,
-265:                 metadata=_serialize_dict(entity.metadata),
-266:                 updated_at=entity.updated_at.isoformat(),
-267:             )
-268: 
-269:         async with driver.session(database=self._database) as session:
-270:             await session.execute_write(_update)
-271: 
-272:         return entity
-273: 
-274:     async def delete_entity(self, entity_id: UUID) -> bool:
-275:         """Delete an entity and its relationships."""
-276:         driver = self._get_driver()
-277: 
-278:         async def _delete(tx: AsyncManagedTransaction) -> int:
-279:             result = await tx.run(
-280:                 """
-281:                 MATCH (e:Entity {id: $id})
-282:                 DETACH DELETE e
-283:                 RETURN count(e) as deleted
-284:                 """,
-285:                 id=str(entity_id),
-286:             )
-287:             record = await result.single()
-288:             return record["deleted"] if record else 0
-289: 
-290:         async with driver.session(database=self._database) as session:
-291:             deleted = await session.execute_write(_delete)
-292:             return deleted > 0
-293: 
-294:     async def list_entities(
-295:         self,
-296:         namespace_id: UUID,
-297:         *,
-298:         entity_type: str | None = None,
-299:         limit: int = 100,
-300:         offset: int = 0,
-301:     ) -> list[Entity]:
-302:         """List entities in a namespace."""
+234:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+235:         """Fetch multiple entities in a single query.
+236: 
+237:         Args:
+238:             entity_ids: List of entity IDs to fetch
+239: 
+240:         Returns:
+241:             Dictionary mapping entity ID to Entity object
+242:         """
+243:         if not entity_ids:
+244:             return {}
+245: 
+246:         driver = self._get_driver()
+247:         id_strings = [str(eid) for eid in entity_ids]
+248: 
+249:         async with driver.session(database=self._database) as session:
+250:             result = await session.run(
+251:                 """
+252:                 MATCH (e:Entity)
+253:                 WHERE e.id IN $ids
+254:                 RETURN e
+255:                 """,
+256:                 ids=id_strings,
+257:             )
+258:             records = await result.data()
+259:             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
+260: 
+261:     async def update_entity(self, entity: Entity) -> Entity:
+262:         """Update an entity."""
+263:         driver = self._get_driver()
+264: 
+265:         async def _update(tx: AsyncManagedTransaction) -> None:
+266:             query = """
+267:             MATCH (e:Entity {id: $id})
+268:             SET e.name = $name,
+269:                 e.description = $description,
+270:                 e.attributes = $attributes,
+271:                 e.source_document_ids = $source_document_ids,
+272:                 e.source_chunk_ids = $source_chunk_ids,
+273:                 e.mention_count = $mention_count,
+274:                 e.valid_from = $valid_from,
+275:                 e.valid_until = $valid_until,
+276:                 e.confidence = $confidence,
+277:                 e.metadata = $metadata,
+278:                 e.updated_at = $updated_at
+279:             """
+280:             await tx.run(
+281:                 query,
+282:                 id=str(entity.id),
+283:                 name=entity.name,
+284:                 description=entity.description,
+285:                 attributes=_serialize_dict(entity.attributes),
+286:                 source_document_ids=[str(d) for d in entity.source_document_ids],
+287:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+288:                 mention_count=entity.mention_count,
+289:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
+290:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
+291:                 confidence=entity.confidence,
+292:                 metadata=_serialize_dict(entity.metadata),
+293:                 updated_at=entity.updated_at.isoformat(),
+294:             )
+295: 
+296:         async with driver.session(database=self._database) as session:
+297:             await session.execute_write(_update)
+298: 
+299:         return entity
+300: 
+301:     async def delete_entity(self, entity_id: UUID) -> bool:
+302:         """Delete an entity and its relationships."""
 303:         driver = self._get_driver()
 304: 
-305:         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
-306:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
-307: 
-308:         if entity_type:
-309:             query += " WHERE e.entity_type = $entity_type"
-310:             params["entity_type"] = entity_type
-311: 
-312:         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
-313:         params["offset"] = offset
-314:         params["limit"] = limit
-315: 
-316:         async with driver.session(database=self._database) as session:
-317:             result = await session.run(query, **params)
-318:             records = await result.data()
-319:             return [self._record_to_entity(r["e"]) for r in records]
+305:         async def _delete(tx: AsyncManagedTransaction) -> int:
+306:             result = await tx.run(
+307:                 """
+308:                 MATCH (e:Entity {id: $id})
+309:                 DETACH DELETE e
+310:                 RETURN count(e) as deleted
+311:                 """,
+312:                 id=str(entity_id),
+313:             )
+314:             record = await result.single()
+315:             return record["deleted"] if record else 0
+316: 
+317:         async with driver.session(database=self._database) as session:
+318:             deleted = await session.execute_write(_delete)
+319:             return deleted > 0
 320: 
-321:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
-322:         """Convert a Neo4j node to a domain Entity."""
-323:         return Entity(
-324:             id=UUID(node["id"]),
-325:             namespace_id=UUID(node["namespace_id"]),
-326:             name=node["name"],
-327:             entity_type=EntityType(node["entity_type"]),
-328:             description=node.get("description", ""),
-329:             attributes=_deserialize_dict(node.get("attributes")),
-330:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-331:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
-332:             mention_count=node.get("mention_count", 1),
-333:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
-334:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
-335:             confidence=node.get("confidence", 1.0),
-336:             metadata=_deserialize_dict(node.get("metadata")),
-337:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
-338:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
-339:         )
-340: 
-341:     # =========================================================================
-342:     # Relationship operations
-343:     # =========================================================================
-344: 
-345:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-346:         """Create a relationship between entities."""
-347:         driver = self._get_driver()
-348: 
-349:         rel_type = (
-350:             relationship.relationship_type.value
-351:             if isinstance(relationship.relationship_type, RelationshipType)
-352:             else relationship.relationship_type
-353:         )
-354: 
-355:         async def _create(tx: AsyncManagedTransaction) -> None:
-356:             # Use dynamic relationship type
-357:             query = f"""
-358:             MATCH (source:Entity {{id: $source_id}})
-359:             MATCH (target:Entity {{id: $target_id}})
-360:             CREATE (source)-[r:{rel_type} {{
-361:                 id: $id,
-362:                 namespace_id: $namespace_id,
-363:                 description: $description,
-364:                 properties: $properties,
-365:                 source_document_ids: $source_document_ids,
-366:                 source_chunk_ids: $source_chunk_ids,
-367:                 valid_from: $valid_from,
-368:                 valid_until: $valid_until,
-369:                 confidence: $confidence,
-370:                 weight: $weight,
-371:                 metadata: $metadata,
-372:                 created_at: $created_at,
-373:                 updated_at: $updated_at
-374:             }}]->(target)
-375:             """
-376:             await tx.run(
-377:                 query,
-378:                 source_id=str(relationship.source_entity_id),
-379:                 target_id=str(relationship.target_entity_id),
-380:                 id=str(relationship.id),
-381:                 namespace_id=str(relationship.namespace_id),
-382:                 description=relationship.description,
-383:                 properties=_serialize_dict(relationship.properties),
-384:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
-385:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
-386:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
-387:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
-388:                 confidence=relationship.confidence,
-389:                 weight=relationship.weight,
-390:                 metadata=_serialize_dict(relationship.metadata),
-391:                 created_at=relationship.created_at.isoformat(),
-392:                 updated_at=relationship.updated_at.isoformat(),
-393:             )
-394: 
-395:         async with driver.session(database=self._database) as session:
-396:             await session.execute_write(_create)
-397: 
-398:         return relationship
-399: 
-400:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-401:         """Get a relationship by ID."""
-402:         driver = self._get_driver()
-403: 
-404:         async with driver.session(database=self._database) as session:
-405:             result = await session.run(
-406:                 """
-407:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
-408:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
-409:                 """,
-410:                 id=str(relationship_id),
-411:             )
-412:             record = await result.single()
-413:             if record:
-414:                 return self._record_to_relationship(
-415:                     record["r"],
-416:                     record["source_id"],
-417:                     record["target_id"],
-418:                     record["rel_type"],
-419:                 )
-420:             return None
+321:     async def list_entities(
+322:         self,
+323:         namespace_id: UUID,
+324:         *,
+325:         entity_type: str | None = None,
+326:         limit: int = 100,
+327:         offset: int = 0,
+328:     ) -> list[Entity]:
+329:         """List entities in a namespace."""
+330:         driver = self._get_driver()
+331: 
+332:         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
+333:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+334: 
+335:         if entity_type:
+336:             query += " WHERE e.entity_type = $entity_type"
+337:             params["entity_type"] = entity_type
+338: 
+339:         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
+340:         params["offset"] = offset
+341:         params["limit"] = limit
+342: 
+343:         async with driver.session(database=self._database) as session:
+344:             result = await session.run(query, **params)
+345:             records = await result.data()
+346:             return [self._record_to_entity(r["e"]) for r in records]
+347: 
+348:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
+349:         """Convert a Neo4j node to a domain Entity."""
+350:         return Entity(
+351:             id=UUID(node["id"]),
+352:             namespace_id=UUID(node["namespace_id"]),
+353:             name=node["name"],
+354:             entity_type=EntityType(node["entity_type"]),
+355:             description=node.get("description", ""),
+356:             attributes=_deserialize_dict(node.get("attributes")),
+357:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+358:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+359:             mention_count=node.get("mention_count", 1),
+360:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
+361:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
+362:             confidence=node.get("confidence", 1.0),
+363:             metadata=_deserialize_dict(node.get("metadata")),
+364:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+365:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+366:         )
+367: 
+368:     # =========================================================================
+369:     # Relationship operations
+370:     # =========================================================================
+371: 
+372:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+373:         """Create a relationship between entities."""
+374:         driver = self._get_driver()
+375: 
+376:         rel_type = (
+377:             relationship.relationship_type.value
+378:             if isinstance(relationship.relationship_type, RelationshipType)
+379:             else relationship.relationship_type
+380:         )
+381: 
+382:         async def _create(tx: AsyncManagedTransaction) -> None:
+383:             # Use dynamic relationship type
+384:             query = f"""
+385:             MATCH (source:Entity {{id: $source_id}})
+386:             MATCH (target:Entity {{id: $target_id}})
+387:             CREATE (source)-[r:{rel_type} {{
+388:                 id: $id,
+389:                 namespace_id: $namespace_id,
+390:                 description: $description,
+391:                 properties: $properties,
+392:                 source_document_ids: $source_document_ids,
+393:                 source_chunk_ids: $source_chunk_ids,
+394:                 valid_from: $valid_from,
+395:                 valid_until: $valid_until,
+396:                 confidence: $confidence,
+397:                 weight: $weight,
+398:                 metadata: $metadata,
+399:                 created_at: $created_at,
+400:                 updated_at: $updated_at
+401:             }}]->(target)
+402:             """
+403:             await tx.run(
+404:                 query,
+405:                 source_id=str(relationship.source_entity_id),
+406:                 target_id=str(relationship.target_entity_id),
+407:                 id=str(relationship.id),
+408:                 namespace_id=str(relationship.namespace_id),
+409:                 description=relationship.description,
+410:                 properties=_serialize_dict(relationship.properties),
+411:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
+412:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
+413:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
+414:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
+415:                 confidence=relationship.confidence,
+416:                 weight=relationship.weight,
+417:                 metadata=_serialize_dict(relationship.metadata),
+418:                 created_at=relationship.created_at.isoformat(),
+419:                 updated_at=relationship.updated_at.isoformat(),
+420:             )
 421: 
-422:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-423:         """Delete a relationship."""
-424:         driver = self._get_driver()
-425: 
-426:         async def _delete(tx: AsyncManagedTransaction) -> int:
-427:             result = await tx.run(
-428:                 """
-429:                 MATCH ()-[r {id: $id}]->()
-430:                 DELETE r
-431:                 RETURN count(r) as deleted
-432:                 """,
-433:                 id=str(relationship_id),
-434:             )
-435:             record = await result.single()
-436:             return record["deleted"] if record else 0
-437: 
-438:         async with driver.session(database=self._database) as session:
-439:             deleted = await session.execute_write(_delete)
-440:             return deleted > 0
-441: 
-442:     async def get_entity_relationships(
-443:         self,
-444:         entity_id: UUID,
-445:         *,
-446:         direction: str = "both",
-447:         relationship_types: list[str] | None = None,
-448:         limit: int = 100,
-449:     ) -> list[Relationship]:
-450:         """Get relationships for an entity."""
+422:         async with driver.session(database=self._database) as session:
+423:             await session.execute_write(_create)
+424: 
+425:         return relationship
+426: 
+427:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+428:         """Get a relationship by ID."""
+429:         driver = self._get_driver()
+430: 
+431:         async with driver.session(database=self._database) as session:
+432:             result = await session.run(
+433:                 """
+434:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
+435:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+436:                 """,
+437:                 id=str(relationship_id),
+438:             )
+439:             record = await result.single()
+440:             if record:
+441:                 return self._record_to_relationship(
+442:                     record["r"],
+443:                     record["source_id"],
+444:                     record["target_id"],
+445:                     record["rel_type"],
+446:                 )
+447:             return None
+448: 
+449:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+450:         """Delete a relationship."""
 451:         driver = self._get_driver()
 452: 
-453:         # Build relationship type filter
-454:         rel_filter = ""
-455:         if relationship_types:
-456:             rel_filter = ":" + "|".join(relationship_types)
-457: 
-458:         # Build direction query
-459:         if direction == "outgoing":
-460:             pattern = f"(e)-[r{rel_filter}]->(other)"
-461:         elif direction == "incoming":
-462:             pattern = f"(other)-[r{rel_filter}]->(e)"
-463:         else:  # both
-464:             pattern = f"(e)-[r{rel_filter}]-(other)"
-465: 
-466:         query = f"""
-467:         MATCH {pattern}
-468:         WHERE e.id = $entity_id
-469:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
-470:         LIMIT $limit
-471:         """
-472: 
-473:         async with driver.session(database=self._database) as session:
-474:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
-475:             records = await result.data()
-476:             return [
-477:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
-478:             ]
+453:         async def _delete(tx: AsyncManagedTransaction) -> int:
+454:             result = await tx.run(
+455:                 """
+456:                 MATCH ()-[r {id: $id}]->()
+457:                 DELETE r
+458:                 RETURN count(r) as deleted
+459:                 """,
+460:                 id=str(relationship_id),
+461:             )
+462:             record = await result.single()
+463:             return record["deleted"] if record else 0
+464: 
+465:         async with driver.session(database=self._database) as session:
+466:             deleted = await session.execute_write(_delete)
+467:             return deleted > 0
+468: 
+469:     async def get_entity_relationships(
+470:         self,
+471:         entity_id: UUID,
+472:         *,
+473:         direction: str = "both",
+474:         relationship_types: list[str] | None = None,
+475:         limit: int = 100,
+476:     ) -> list[Relationship]:
+477:         """Get relationships for an entity."""
+478:         driver = self._get_driver()
 479: 
-480:     def _record_to_relationship(
-481:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
-482:     ) -> Relationship:
-483:         """Convert a Neo4j relationship to a domain Relationship."""
-484:         return Relationship(
-485:             id=UUID(rel["id"]),
-486:             namespace_id=UUID(rel["namespace_id"]),
-487:             source_entity_id=UUID(source_id),
-488:             target_entity_id=UUID(target_id),
-489:             relationship_type=(
-490:                 RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else RelationshipType.CUSTOM
-491:             ),
-492:             description=rel.get("description", ""),
-493:             properties=_deserialize_dict(rel.get("properties")),
-494:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
-495:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
-496:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
-497:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
-498:             confidence=rel.get("confidence", 1.0),
-499:             weight=rel.get("weight", 1.0),
-500:             metadata=_deserialize_dict(rel.get("metadata")),
-501:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
-502:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
-503:         )
-504: 
-505:     # =========================================================================
-506:     # Episode operations
-507:     # =========================================================================
-508: 
-509:     async def create_episode(self, episode: Episode) -> Episode:
-510:         """Create an episode node."""
-511:         driver = self._get_driver()
-512: 
-513:         async def _create(tx: AsyncManagedTransaction) -> None:
-514:             query = """
-515:             CREATE (ep:Episode {
-516:                 id: $id,
-517:                 namespace_id: $namespace_id,
-518:                 name: $name,
-519:                 description: $description,
-520:                 occurred_at: $occurred_at,
-521:                 duration_seconds: $duration_seconds,
-522:                 entity_ids: $entity_ids,
-523:                 source_document_ids: $source_document_ids,
-524:                 source_chunk_ids: $source_chunk_ids,
-525:                 metadata: $metadata,
-526:                 created_at: $created_at,
-527:                 updated_at: $updated_at
-528:             })
-529:             """
-530:             await tx.run(
-531:                 query,
-532:                 id=str(episode.id),
-533:                 namespace_id=str(episode.namespace_id),
-534:                 name=episode.name,
-535:                 description=episode.description,
-536:                 occurred_at=episode.occurred_at.isoformat(),
-537:                 duration_seconds=episode.duration_seconds,
-538:                 entity_ids=[str(e) for e in episode.entity_ids],
-539:                 source_document_ids=[str(d) for d in episode.source_document_ids],
-540:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
-541:                 metadata=_serialize_dict(episode.metadata),
-542:                 created_at=episode.created_at.isoformat(),
-543:                 updated_at=episode.updated_at.isoformat(),
-544:             )
-545: 
-546:             # Create links to entities
-547:             if episode.entity_ids:
-548:                 link_query = """
-549:                 MATCH (ep:Episode {id: $episode_id})
-550:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
-551:                 CREATE (ep)-[:INVOLVES]->(e)
-552:                 """
-553:                 await tx.run(
-554:                     link_query,
-555:                     episode_id=str(episode.id),
-556:                     entity_ids=[str(e) for e in episode.entity_ids],
-557:                 )
-558: 
-559:         async with driver.session(database=self._database) as session:
-560:             await session.execute_write(_create)
-561: 
-562:         return episode
-563: 
-564:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-565:         """Get an episode by ID."""
-566:         driver = self._get_driver()
-567: 
-568:         async with driver.session(database=self._database) as session:
-569:             result = await session.run(
-570:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
-571:                 id=str(episode_id),
-572:             )
-573:             record = await result.single()
-574:             if record:
-575:                 return self._record_to_episode(record["ep"])
-576:             return None
-577: 
-578:     async def list_episodes(
-579:         self,
-580:         namespace_id: UUID,
-581:         *,
-582:         start_time: datetime | None = None,
-583:         end_time: datetime | None = None,
-584:         limit: int = 100,
-585:     ) -> list[Episode]:
-586:         """List episodes in a time range."""
-587:         driver = self._get_driver()
+480:         # Build relationship type filter
+481:         rel_filter = ""
+482:         if relationship_types:
+483:             rel_filter = ":" + "|".join(relationship_types)
+484: 
+485:         # Build direction query
+486:         if direction == "outgoing":
+487:             pattern = f"(e)-[r{rel_filter}]->(other)"
+488:         elif direction == "incoming":
+489:             pattern = f"(other)-[r{rel_filter}]->(e)"
+490:         else:  # both
+491:             pattern = f"(e)-[r{rel_filter}]-(other)"
+492: 
+493:         query = f"""
+494:         MATCH {pattern}
+495:         WHERE e.id = $entity_id
+496:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
+497:         LIMIT $limit
+498:         """
+499: 
+500:         async with driver.session(database=self._database) as session:
+501:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
+502:             records = await result.data()
+503:             return [
+504:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+505:             ]
+506: 
+507:     def _record_to_relationship(
+508:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
+509:     ) -> Relationship:
+510:         """Convert a Neo4j relationship to a domain Relationship."""
+511:         return Relationship(
+512:             id=UUID(rel["id"]),
+513:             namespace_id=UUID(rel["namespace_id"]),
+514:             source_entity_id=UUID(source_id),
+515:             target_entity_id=UUID(target_id),
+516:             relationship_type=(
+517:                 RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else RelationshipType.CUSTOM
+518:             ),
+519:             description=rel.get("description", ""),
+520:             properties=_deserialize_dict(rel.get("properties")),
+521:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
+522:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
+523:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
+524:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
+525:             confidence=rel.get("confidence", 1.0),
+526:             weight=rel.get("weight", 1.0),
+527:             metadata=_deserialize_dict(rel.get("metadata")),
+528:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
+529:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
+530:         )
+531: 
+532:     # =========================================================================
+533:     # Episode operations
+534:     # =========================================================================
+535: 
+536:     async def create_episode(self, episode: Episode) -> Episode:
+537:         """Create an episode node."""
+538:         driver = self._get_driver()
+539: 
+540:         async def _create(tx: AsyncManagedTransaction) -> None:
+541:             query = """
+542:             CREATE (ep:Episode {
+543:                 id: $id,
+544:                 namespace_id: $namespace_id,
+545:                 name: $name,
+546:                 description: $description,
+547:                 occurred_at: $occurred_at,
+548:                 duration_seconds: $duration_seconds,
+549:                 entity_ids: $entity_ids,
+550:                 source_document_ids: $source_document_ids,
+551:                 source_chunk_ids: $source_chunk_ids,
+552:                 metadata: $metadata,
+553:                 created_at: $created_at,
+554:                 updated_at: $updated_at
+555:             })
+556:             """
+557:             await tx.run(
+558:                 query,
+559:                 id=str(episode.id),
+560:                 namespace_id=str(episode.namespace_id),
+561:                 name=episode.name,
+562:                 description=episode.description,
+563:                 occurred_at=episode.occurred_at.isoformat(),
+564:                 duration_seconds=episode.duration_seconds,
+565:                 entity_ids=[str(e) for e in episode.entity_ids],
+566:                 source_document_ids=[str(d) for d in episode.source_document_ids],
+567:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
+568:                 metadata=_serialize_dict(episode.metadata),
+569:                 created_at=episode.created_at.isoformat(),
+570:                 updated_at=episode.updated_at.isoformat(),
+571:             )
+572: 
+573:             # Create links to entities
+574:             if episode.entity_ids:
+575:                 link_query = """
+576:                 MATCH (ep:Episode {id: $episode_id})
+577:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
+578:                 CREATE (ep)-[:INVOLVES]->(e)
+579:                 """
+580:                 await tx.run(
+581:                     link_query,
+582:                     episode_id=str(episode.id),
+583:                     entity_ids=[str(e) for e in episode.entity_ids],
+584:                 )
+585: 
+586:         async with driver.session(database=self._database) as session:
+587:             await session.execute_write(_create)
 588: 
-589:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
-590:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
-591:         conditions = []
-592: 
-593:         if start_time:
-594:             conditions.append("ep.occurred_at >= $start_time")
-595:             params["start_time"] = start_time.isoformat()
-596:         if end_time:
-597:             conditions.append("ep.occurred_at <= $end_time")
-598:             params["end_time"] = end_time.isoformat()
-599: 
-600:         if conditions:
-601:             query += " WHERE " + " AND ".join(conditions)
-602: 
-603:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
-604:         params["limit"] = limit
-605: 
-606:         async with driver.session(database=self._database) as session:
-607:             result = await session.run(query, **params)
-608:             records = await result.data()
-609:             return [self._record_to_episode(r["ep"]) for r in records]
-610: 
-611:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
-612:         """Convert a Neo4j node to a domain Episode."""
-613:         return Episode(
-614:             id=UUID(node["id"]),
-615:             namespace_id=UUID(node["namespace_id"]),
-616:             name=node["name"],
-617:             description=node.get("description", ""),
-618:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
-619:             duration_seconds=node.get("duration_seconds"),
-620:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
-621:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-622:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
-623:             metadata=_deserialize_dict(node.get("metadata")),
-624:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
-625:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
-626:         )
-627: 
-628:     # =========================================================================
-629:     # Graph traversal
-630:     # =========================================================================
-631: 
-632:     async def find_paths(
-633:         self,
-634:         namespace_id: UUID,
-635:         source_entity_id: UUID,
-636:         target_entity_id: UUID,
-637:         *,
-638:         max_depth: int = 3,
-639:         relationship_types: list[str] | None = None,
-640:     ) -> list[list[dict[str, Any]]]:
-641:         """Find paths between two entities."""
-642:         driver = self._get_driver()
-643: 
-644:         rel_filter = ""
-645:         if relationship_types:
-646:             rel_filter = ":" + "|".join(relationship_types)
-647: 
-648:         query = f"""
-649:         MATCH path = shortestPath(
-650:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
-651:         )
-652:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
-653:         RETURN path
-654:         LIMIT 10
-655:         """
-656: 
-657:         async with driver.session(database=self._database) as session:
-658:             result = await session.run(
-659:                 query,
-660:                 source_id=str(source_entity_id),
-661:                 target_id=str(target_entity_id),
-662:                 namespace_id=str(namespace_id),
-663:             )
-664:             records = await result.data()
-665: 
-666:             paths = []
-667:             for record in records:
-668:                 path = record["path"]
-669:                 path_elements = []
-670:                 for element in path:
-671:                     if hasattr(element, "items"):  # Node
-672:                         path_elements.append({"type": "node", "data": dict(element)})
-673:                     else:  # Relationship
-674:                         path_elements.append({"type": "relationship", "data": dict(element)})
-675:                 paths.append(path_elements)
-676: 
-677:             return paths
-678: 
-679:     async def get_neighborhood(
-680:         self,
-681:         entity_id: UUID,
-682:         *,
-683:         depth: int = 1,
-684:         relationship_types: list[str] | None = None,
-685:         limit: int = 50,
-686:     ) -> dict[str, Any]:
-687:         """Get the neighborhood of an entity up to a certain depth."""
-688:         driver = self._get_driver()
-689: 
-690:         rel_filter = ""
-691:         if relationship_types:
-692:             rel_filter = ":" + "|".join(relationship_types)
-693: 
-694:         query = f"""
-695:         MATCH (center:Entity {{id: $entity_id}})
-696:         CALL apoc.path.subgraphAll(center, {{
-697:             maxLevel: {depth},
-698:             relationshipFilter: '{rel_filter.lstrip(":")}',
-699:             limit: $limit
-700:         }})
-701:         YIELD nodes, relationships
-702:         RETURN nodes, relationships
-703:         """
-704: 
-705:         # Fallback query if APOC is not available
-706:         fallback_query = f"""
-707:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
-708:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
-709:         LIMIT $limit
-710:         """
-711: 
-712:         async with driver.session(database=self._database) as session:
-713:             try:
-714:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
-715:                 record = await result.single()
-716:             except Exception:
-717:                 # Fallback if APOC not available
-718:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
-719:                 record = await result.single()
+589:         return episode
+590: 
+591:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+592:         """Get an episode by ID."""
+593:         driver = self._get_driver()
+594: 
+595:         async with driver.session(database=self._database) as session:
+596:             result = await session.run(
+597:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
+598:                 id=str(episode_id),
+599:             )
+600:             record = await result.single()
+601:             if record:
+602:                 return self._record_to_episode(record["ep"])
+603:             return None
+604: 
+605:     async def list_episodes(
+606:         self,
+607:         namespace_id: UUID,
+608:         *,
+609:         start_time: datetime | None = None,
+610:         end_time: datetime | None = None,
+611:         limit: int = 100,
+612:     ) -> list[Episode]:
+613:         """List episodes in a time range."""
+614:         driver = self._get_driver()
+615: 
+616:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
+617:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+618:         conditions = []
+619: 
+620:         if start_time:
+621:             conditions.append("ep.occurred_at >= $start_time")
+622:             params["start_time"] = start_time.isoformat()
+623:         if end_time:
+624:             conditions.append("ep.occurred_at <= $end_time")
+625:             params["end_time"] = end_time.isoformat()
+626: 
+627:         if conditions:
+628:             query += " WHERE " + " AND ".join(conditions)
+629: 
+630:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
+631:         params["limit"] = limit
+632: 
+633:         async with driver.session(database=self._database) as session:
+634:             result = await session.run(query, **params)
+635:             records = await result.data()
+636:             return [self._record_to_episode(r["ep"]) for r in records]
+637: 
+638:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
+639:         """Convert a Neo4j node to a domain Episode."""
+640:         return Episode(
+641:             id=UUID(node["id"]),
+642:             namespace_id=UUID(node["namespace_id"]),
+643:             name=node["name"],
+644:             description=node.get("description", ""),
+645:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
+646:             duration_seconds=node.get("duration_seconds"),
+647:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
+648:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+649:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+650:             metadata=_deserialize_dict(node.get("metadata")),
+651:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+652:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+653:         )
+654: 
+655:     # =========================================================================
+656:     # Graph traversal
+657:     # =========================================================================
+658: 
+659:     async def find_paths(
+660:         self,
+661:         namespace_id: UUID,
+662:         source_entity_id: UUID,
+663:         target_entity_id: UUID,
+664:         *,
+665:         max_depth: int = 3,
+666:         relationship_types: list[str] | None = None,
+667:     ) -> list[list[dict[str, Any]]]:
+668:         """Find paths between two entities."""
+669:         driver = self._get_driver()
+670: 
+671:         rel_filter = ""
+672:         if relationship_types:
+673:             rel_filter = ":" + "|".join(relationship_types)
+674: 
+675:         query = f"""
+676:         MATCH path = shortestPath(
+677:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+678:         )
+679:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+680:         RETURN path
+681:         LIMIT 10
+682:         """
+683: 
+684:         async with driver.session(database=self._database) as session:
+685:             result = await session.run(
+686:                 query,
+687:                 source_id=str(source_entity_id),
+688:                 target_id=str(target_entity_id),
+689:                 namespace_id=str(namespace_id),
+690:             )
+691:             records = await result.data()
+692: 
+693:             paths = []
+694:             for record in records:
+695:                 path = record["path"]
+696:                 path_elements = []
+697:                 for element in path:
+698:                     if hasattr(element, "items"):  # Node
+699:                         path_elements.append({"type": "node", "data": dict(element)})
+700:                     else:  # Relationship
+701:                         path_elements.append({"type": "relationship", "data": dict(element)})
+702:                 paths.append(path_elements)
+703: 
+704:             return paths
+705: 
+706:     async def get_neighborhood(
+707:         self,
+708:         entity_id: UUID,
+709:         *,
+710:         depth: int = 1,
+711:         relationship_types: list[str] | None = None,
+712:         limit: int = 50,
+713:     ) -> dict[str, Any]:
+714:         """Get the neighborhood of an entity up to a certain depth."""
+715:         driver = self._get_driver()
+716: 
+717:         rel_filter = ""
+718:         if relationship_types:
+719:             rel_filter = ":" + "|".join(relationship_types)
 720: 
-721:             if record:
-722:                 nodes = [dict(n) for n in record.get("nodes", [])]
-723:                 relationships = [dict(r) for r in record.get("relationships", [])]
-724:                 return {"entities": nodes, "relationships": relationships}
-725: 
-726:             return {"entities": [], "relationships": []}
-727: 
-728:     async def search_entities_by_attribute(
-729:         self,
-730:         namespace_id: UUID,
-731:         attribute_name: str,
-732:         attribute_value: Any,
-733:         *,
-734:         limit: int = 100,
-735:     ) -> list[Entity]:
-736:         """Search entities by attribute value."""
-737:         driver = self._get_driver()
+721:         query = f"""
+722:         MATCH (center:Entity {{id: $entity_id}})
+723:         CALL apoc.path.subgraphAll(center, {{
+724:             maxLevel: {depth},
+725:             relationshipFilter: '{rel_filter.lstrip(":")}',
+726:             limit: $limit
+727:         }})
+728:         YIELD nodes, relationships
+729:         RETURN nodes, relationships
+730:         """
+731: 
+732:         # Fallback query if APOC is not available
+733:         fallback_query = f"""
+734:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+735:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+736:         LIMIT $limit
+737:         """
 738: 
-739:         query = """
-740:         MATCH (e:Entity {namespace_id: $namespace_id})
-741:         WHERE e.attributes[$attribute_name] = $attribute_value
-742:         RETURN e
-743:         LIMIT $limit
-744:         """
-745: 
-746:         async with driver.session(database=self._database) as session:
-747:             result = await session.run(
-748:                 query,
-749:                 namespace_id=str(namespace_id),
-750:                 attribute_name=attribute_name,
-751:                 attribute_value=attribute_value,
-752:                 limit=limit,
-753:             )
-754:             records = await result.data()
-755:             return [self._record_to_entity(r["e"]) for r in records]
+739:         async with driver.session(database=self._database) as session:
+740:             try:
+741:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
+742:                 record = await result.single()
+743:             except Exception:
+744:                 # Fallback if APOC not available
+745:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
+746:                 record = await result.single()
+747: 
+748:             if record:
+749:                 nodes = [dict(n) for n in record.get("nodes", [])]
+750:                 relationships = [dict(r) for r in record.get("relationships", [])]
+751:                 return {"entities": nodes, "relationships": relationships}
+752: 
+753:             return {"entities": [], "relationships": []}
+754: 
+755:     async def get_neighborhoods_batch(
+756:         self,
+757:         entity_ids: list[UUID],
+758:         *,
+759:         depth: int = 1,
+760:         relationship_types: list[str] | None = None,
+761:         limit_per_entity: int = 20,
+762:     ) -> dict[UUID, dict[str, Any]]:
+763:         """Get neighborhoods for multiple entities in parallel.
+764: 
+765:         Args:
+766:             entity_ids: List of entity IDs
+767:             depth: Max traversal depth
+768:             relationship_types: Optional relationship type filter
+769:             limit_per_entity: Max nodes per entity neighborhood
+770: 
+771:         Returns:
+772:             Dictionary mapping entity ID to neighborhood data
+773:         """
+774:         if not entity_ids:
+775:             return {}
+776: 
+777:         driver = self._get_driver()
+778:         id_strings = [str(eid) for eid in entity_ids]
+779: 
+780:         rel_filter = ""
+781:         if relationship_types:
+782:             rel_filter = ":" + "|".join(relationship_types)
+783: 
+784:         # Use UNWIND to process all entities in a single query
+785:         query = f"""
+786:         UNWIND $entity_ids AS eid
+787:         MATCH (center:Entity {{id: eid}})
+788:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+789:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+790:         RETURN eid, neighbors, rels
+791:         """
+792: 
+793:         async with driver.session(database=self._database) as session:
+794:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+795:             records = await result.data()
+796: 
+797:             neighborhoods = {}
+798:             for record in records:
+799:                 eid = UUID(record["eid"])
+800:                 nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
+801:                 relationships = []
+802:                 for rel_list in record.get("rels") or []:
+803:                     if rel_list:
+804:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+805:                             if r:
+806:                                 relationships.append(dict(r))
+807:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+808: 
+809:             return neighborhoods
+810: 
+811:     async def search_entities_by_attribute(
+812:         self,
+813:         namespace_id: UUID,
+814:         attribute_name: str,
+815:         attribute_value: Any,
+816:         *,
+817:         limit: int = 100,
+818:     ) -> list[Entity]:
+819:         """Search entities by attribute value."""
+820:         driver = self._get_driver()
+821: 
+822:         query = """
+823:         MATCH (e:Entity {namespace_id: $namespace_id})
+824:         WHERE e.attributes[$attribute_name] = $attribute_value
+825:         RETURN e
+826:         LIMIT $limit
+827:         """
+828: 
+829:         async with driver.session(database=self._database) as session:
+830:             result = await session.run(
+831:                 query,
+832:                 namespace_id=str(namespace_id),
+833:                 attribute_name=attribute_name,
+834:                 attribute_value=attribute_value,
+835:                 limit=limit,
+836:             )
+837:             records = await result.data()
+838:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
 ## File: src/khora/storage/backends/pgvector.py
@@ -15210,279 +15410,278 @@ README.md
 670:             min_similarity=config.min_entity_similarity,
 671:         )
 672: 
-673:         # Fetch full entities
-674:         entities = []
-675:         for entity_id, score in entity_ids_scores:
-676:             entity = await self._storage.get_entity(entity_id)
-677:             if entity:
-678:                 entities.append((entity, score))
-679: 
-680:         return {
-681:             "source": "vector",
-682:             "chunks": chunk_results,
-683:             "entities": entities,
-684:         }
-685: 
-686:     async def _graph_search(
-687:         self,
-688:         namespace_id: UUID,
-689:         query_text: str,
-690:         query_embedding: list[float] | None,
-691:         config: QueryConfig,
-692:         linked_entity_ids: list[UUID] | None = None,
-693:     ) -> dict[str, Any]:
-694:         """Perform graph-based search.
-695: 
-696:         Args:
-697:             namespace_id: Namespace to search in
-698:             query_text: Query text
-699:             query_embedding: Query embedding (optional)
-700:             config: Query configuration
-701:             linked_entity_ids: Entity IDs from entity linking (optional)
-702: 
-703:         Returns:
-704:             Dict with chunks, entities, and graph context
-705:         """
-706:         entities = []
-707:         graph_context = {}
-708:         seen_entity_ids = set()
-709: 
-710:         # Start with linked entities if available (high priority)
-711:         if linked_entity_ids:
-712:             for entity_id in linked_entity_ids[:5]:
-713:                 if entity_id in seen_entity_ids:
-714:                     continue
-715:                 entity = await self._storage.get_entity(entity_id)
-716:                 if entity:
-717:                     entities.append((entity, 1.0))  # High confidence from linking
-718:                     seen_entity_ids.add(entity_id)
-719: 
-720:                     # Get neighborhood for linked entities
-721:                     try:
-722:                         neighborhood = await self._storage.get_neighborhood(
-723:                             entity_id,
-724:                             depth=config.max_graph_depth,
-725:                             limit=20,
-726:                         )
-727:                         graph_context[str(entity_id)] = neighborhood
-728:                     except Exception as e:
-729:                         logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
-730: 
-731:         # Also find similar entities via embedding
-732:         if query_embedding is not None:
-733:             entity_ids_scores = await self._storage.search_similar_entities(
-734:                 namespace_id,
-735:                 query_embedding,
-736:                 limit=5,
-737:                 min_similarity=config.min_entity_similarity,
-738:             )
-739: 
-740:             # Expand neighborhood for top entities
-741:             for entity_id, score in entity_ids_scores[:3]:
-742:                 if entity_id in seen_entity_ids:
-743:                     continue
-744:                 entity = await self._storage.get_entity(entity_id)
-745:                 if entity:
-746:                     entities.append((entity, score))
-747:                     seen_entity_ids.add(entity_id)
-748: 
-749:                     # Get neighborhood
-750:                     try:
-751:                         neighborhood = await self._storage.get_neighborhood(
-752:                             entity_id,
-753:                             depth=config.max_graph_depth,
-754:                             limit=20,
-755:                         )
-756:                         graph_context[str(entity_id)] = neighborhood
-757:                     except Exception as e:
-758:                         logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
-759: 
-760:         # Get related chunks through entities
-761:         chunks = []
-762:         seen_chunk_ids = set()
-763:         for entity, score in entities:
-764:             # Get chunks that mention this entity
-765:             for chunk_id in entity.source_chunk_ids[:5]:
-766:                 if chunk_id in seen_chunk_ids:
-767:                     continue
-768:                 chunk = await self._storage.get_chunk(chunk_id)
-769:                 if chunk:
-770:                     # Score based on entity score and mention count
-771:                     chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
-772:                     chunks.append((chunk, chunk_score))
-773:                     seen_chunk_ids.add(chunk_id)
-774: 
-775:         return {
-776:             "source": "graph",
-777:             "chunks": chunks,
-778:             "entities": entities,
-779:             "graph_context": graph_context,
-780:         }
-781: 
-782:     async def _keyword_search(
-783:         self,
-784:         namespace_id: UUID,
-785:         query_text: str,
-786:         config: QueryConfig,
-787:     ) -> dict[str, Any]:
-788:         """Perform keyword-based search (legacy, returns empty).
-789: 
-790:         Use _keyword_search_bm25 for actual BM25-based search.
-791:         """
-792:         return {
-793:             "source": "keyword",
-794:             "chunks": [],
-795:             "entities": [],
-796:         }
-797: 
-798:     async def _keyword_search_bm25(
-799:         self,
-800:         namespace_id: UUID,
-801:         query_text: str,
-802:         config: QueryConfig,
-803:         keywords: list[str] | None = None,
-804:     ) -> dict[str, Any]:
-805:         """Perform BM25-based keyword search.
-806: 
-807:         Args:
-808:             namespace_id: Namespace to search in
-809:             query_text: Query text
-810:             config: Query configuration
-811:             keywords: Optional pre-extracted keywords from query understanding
-812: 
-813:         Returns:
-814:             Dict with chunks and entities
-815:         """
-816:         ns_key = str(namespace_id)
-817: 
-818:         # Build or get keyword index for this namespace
-819:         if ns_key not in self._keyword_searchers:
-820:             try:
-821:                 # Fetch all chunks for the namespace (up to a limit)
-822:                 chunks = await self._storage.list_chunks(
-823:                     namespace_id,
-824:                     limit=10000,  # Reasonable limit for in-memory index
-825:                 )
-826:                 if chunks:
-827:                     searcher = KeywordSearcher(
-828:                         use_stemming=True,
-829:                         remove_stopwords=True,
-830:                     )
-831:                     searcher.index_chunks(chunks)
-832:                     self._keyword_searchers[ns_key] = searcher
-833:                     logger.debug(f"Built BM25 index with {len(chunks)} chunks")
-834:                 else:
-835:                     logger.debug("No chunks to index for keyword search")
-836:                     return {"source": "keyword", "chunks": [], "entities": []}
-837:             except Exception as e:
-838:                 logger.warning(f"Failed to build keyword index: {e}")
-839:                 return {"source": "keyword", "chunks": [], "entities": []}
-840: 
-841:         searcher = self._keyword_searchers.get(ns_key)
-842:         if not searcher:
-843:             return {"source": "keyword", "chunks": [], "entities": []}
-844: 
-845:         try:
-846:             # Use keywords if available, otherwise use query text
-847:             if keywords:
-848:                 results = searcher.search_with_keywords(
-849:                     keywords,
-850:                     limit=config.max_chunks * 2,
-851:                     min_score=0.1,
-852:                 )
-853:             else:
-854:                 results = searcher.search(
-855:                     query_text,
-856:                     limit=config.max_chunks * 2,
-857:                     min_score=0.1,
-858:                 )
-859: 
-860:             # Normalize BM25 scores to 0-1 range
-861:             normalized_results = [(chunk, normalize_bm25_score(score)) for chunk, score in results]
-862: 
-863:             return {
-864:                 "source": "keyword",
-865:                 "chunks": normalized_results,
-866:                 "entities": [],  # Keyword search doesn't directly find entities
-867:             }
-868:         except Exception as e:
-869:             logger.warning(f"Keyword search failed: {e}")
-870:             return {"source": "keyword", "chunks": [], "entities": []}
-871: 
-872:     async def find_related_entities(
-873:         self,
-874:         entity_id: UUID,
-875:         namespace_id: UUID,
-876:         *,
-877:         max_depth: int = 2,
-878:         limit: int = 20,
-879:     ) -> list[tuple[Entity, float]]:
-880:         """Find entities related to a given entity through the graph.
-881: 
-882:         Args:
-883:             entity_id: Starting entity
-884:             namespace_id: Namespace to search in
-885:             max_depth: Maximum relationship depth
-886:             limit: Maximum entities to return
-887: 
-888:         Returns:
-889:             List of (entity, relevance_score) tuples
-890:         """
-891:         neighborhood = await self._storage.get_neighborhood(
-892:             entity_id,
-893:             depth=max_depth,
-894:             limit=limit,
-895:         )
-896: 
-897:         entities = []
-898:         for node in neighborhood.get("entities", []):
-899:             entity = await self._storage.get_entity(UUID(node["id"]))
-900:             if entity:
-901:                 # Score based on path length (shorter = higher score)
-902:                 # This is simplified - full impl would consider actual path lengths
-903:                 score = 1.0 / (1 + len(neighborhood.get("relationships", [])))
-904:                 entities.append((entity, score))
-905: 
-906:         return entities
-907: 
-908:     async def temporal_query(
-909:         self,
-910:         query: TemporalQuery,
-911:         namespace_id: UUID,
-912:         *,
-913:         config: QueryConfig | None = None,
-914:     ) -> QueryResult:
-915:         """Execute a query with temporal context.
-916: 
-917:         Args:
-918:             query: TemporalQuery with filters and settings
-919:             namespace_id: Namespace to search in
-920:             config: Optional query config override
-921: 
-922:         Returns:
-923:             QueryResult with temporal filtering applied
-924:         """
-925:         cfg = config or QueryConfig()
-926: 
-927:         # Apply temporal settings to config
-928:         if query.recency_weight > 0:
-929:             cfg.apply_recency_bias = True
-930:             cfg.recency_weight = query.recency_weight
-931:             cfg.recency_decay_days = query.decay_days
-932: 
-933:         # Get context filter
-934:         temporal_filter = None
-935:         if query.filters:
-936:             temporal_filter = query.filters[0]  # Use first filter for now
-937:         elif query.context_window_days:
-938:             temporal_filter = query.get_context_filter()
-939: 
-940:         return await self.query(
-941:             query.query,
-942:             namespace_id,
-943:             config=cfg,
-944:             temporal_filter=temporal_filter,
-945:         )
+673:         # Fetch full entities in batch (optimization: single query instead of N queries)
+674:         entity_ids = [eid for eid, _ in entity_ids_scores]
+675:         entities_map = await self._storage.get_entities_batch(entity_ids)
+676:         entities = [(entities_map[eid], score) for eid, score in entity_ids_scores if eid in entities_map]
+677: 
+678:         return {
+679:             "source": "vector",
+680:             "chunks": chunk_results,
+681:             "entities": entities,
+682:         }
+683: 
+684:     async def _graph_search(
+685:         self,
+686:         namespace_id: UUID,
+687:         query_text: str,
+688:         query_embedding: list[float] | None,
+689:         config: QueryConfig,
+690:         linked_entity_ids: list[UUID] | None = None,
+691:     ) -> dict[str, Any]:
+692:         """Perform graph-based search.
+693: 
+694:         Args:
+695:             namespace_id: Namespace to search in
+696:             query_text: Query text
+697:             query_embedding: Query embedding (optional)
+698:             config: Query configuration
+699:             linked_entity_ids: Entity IDs from entity linking (optional)
+700: 
+701:         Returns:
+702:             Dict with chunks, entities, and graph context
+703:         """
+704:         entities = []
+705:         graph_context = {}
+706:         seen_entity_ids: set[UUID] = set()
+707: 
+708:         # Collect all entity IDs we need to fetch
+709:         all_entity_ids_to_fetch: list[UUID] = []
+710:         linked_scores: dict[UUID, float] = {}
+711:         similar_scores: dict[UUID, float] = {}
+712: 
+713:         # Linked entities (high priority)
+714:         if linked_entity_ids:
+715:             for entity_id in linked_entity_ids[:5]:
+716:                 if entity_id not in seen_entity_ids:
+717:                     all_entity_ids_to_fetch.append(entity_id)
+718:                     linked_scores[entity_id] = 1.0  # High confidence from linking
+719:                     seen_entity_ids.add(entity_id)
+720: 
+721:         # Similar entities via embedding
+722:         if query_embedding is not None:
+723:             entity_ids_scores = await self._storage.search_similar_entities(
+724:                 namespace_id,
+725:                 query_embedding,
+726:                 limit=5,
+727:                 min_similarity=config.min_entity_similarity,
+728:             )
+729: 
+730:             for entity_id, score in entity_ids_scores[:3]:
+731:                 if entity_id not in seen_entity_ids:
+732:                     all_entity_ids_to_fetch.append(entity_id)
+733:                     similar_scores[entity_id] = score
+734:                     seen_entity_ids.add(entity_id)
+735: 
+736:         # Batch fetch all entities and neighborhoods in parallel
+737:         if all_entity_ids_to_fetch:
+738:             # Fetch entities and neighborhoods in parallel
+739:             entities_map, neighborhoods = await asyncio.gather(
+740:                 self._storage.get_entities_batch(all_entity_ids_to_fetch),
+741:                 self._storage.get_neighborhoods_batch(
+742:                     all_entity_ids_to_fetch,
+743:                     depth=config.max_graph_depth,
+744:                     limit_per_entity=20,
+745:                 ),
+746:             )
+747: 
+748:             # Process results maintaining priority order
+749:             for entity_id in all_entity_ids_to_fetch:
+750:                 if entity_id in entities_map:
+751:                     entity = entities_map[entity_id]
+752:                     score = linked_scores.get(entity_id) or similar_scores.get(entity_id, 0.5)
+753:                     entities.append((entity, score))
+754: 
+755:                     # Add neighborhood to context
+756:                     if entity_id in neighborhoods:
+757:                         graph_context[str(entity_id)] = neighborhoods[entity_id]
+758: 
+759:         # Get related chunks through entities
+760:         chunks = []
+761:         seen_chunk_ids = set()
+762:         for entity, score in entities:
+763:             # Get chunks that mention this entity
+764:             for chunk_id in entity.source_chunk_ids[:5]:
+765:                 if chunk_id in seen_chunk_ids:
+766:                     continue
+767:                 chunk = await self._storage.get_chunk(chunk_id)
+768:                 if chunk:
+769:                     # Score based on entity score and mention count
+770:                     chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+771:                     chunks.append((chunk, chunk_score))
+772:                     seen_chunk_ids.add(chunk_id)
+773: 
+774:         return {
+775:             "source": "graph",
+776:             "chunks": chunks,
+777:             "entities": entities,
+778:             "graph_context": graph_context,
+779:         }
+780: 
+781:     async def _keyword_search(
+782:         self,
+783:         namespace_id: UUID,
+784:         query_text: str,
+785:         config: QueryConfig,
+786:     ) -> dict[str, Any]:
+787:         """Perform keyword-based search (legacy, returns empty).
+788: 
+789:         Use _keyword_search_bm25 for actual BM25-based search.
+790:         """
+791:         return {
+792:             "source": "keyword",
+793:             "chunks": [],
+794:             "entities": [],
+795:         }
+796: 
+797:     async def _keyword_search_bm25(
+798:         self,
+799:         namespace_id: UUID,
+800:         query_text: str,
+801:         config: QueryConfig,
+802:         keywords: list[str] | None = None,
+803:     ) -> dict[str, Any]:
+804:         """Perform BM25-based keyword search.
+805: 
+806:         Args:
+807:             namespace_id: Namespace to search in
+808:             query_text: Query text
+809:             config: Query configuration
+810:             keywords: Optional pre-extracted keywords from query understanding
+811: 
+812:         Returns:
+813:             Dict with chunks and entities
+814:         """
+815:         ns_key = str(namespace_id)
+816: 
+817:         # Build or get keyword index for this namespace
+818:         if ns_key not in self._keyword_searchers:
+819:             try:
+820:                 # Fetch all chunks for the namespace (up to a limit)
+821:                 chunks = await self._storage.list_chunks(
+822:                     namespace_id,
+823:                     limit=10000,  # Reasonable limit for in-memory index
+824:                 )
+825:                 if chunks:
+826:                     searcher = KeywordSearcher(
+827:                         use_stemming=True,
+828:                         remove_stopwords=True,
+829:                     )
+830:                     searcher.index_chunks(chunks)
+831:                     self._keyword_searchers[ns_key] = searcher
+832:                     logger.debug(f"Built BM25 index with {len(chunks)} chunks")
+833:                 else:
+834:                     logger.debug("No chunks to index for keyword search")
+835:                     return {"source": "keyword", "chunks": [], "entities": []}
+836:             except Exception as e:
+837:                 logger.warning(f"Failed to build keyword index: {e}")
+838:                 return {"source": "keyword", "chunks": [], "entities": []}
+839: 
+840:         searcher = self._keyword_searchers.get(ns_key)
+841:         if not searcher:
+842:             return {"source": "keyword", "chunks": [], "entities": []}
+843: 
+844:         try:
+845:             # Use keywords if available, otherwise use query text
+846:             if keywords:
+847:                 results = searcher.search_with_keywords(
+848:                     keywords,
+849:                     limit=config.max_chunks * 2,
+850:                     min_score=0.1,
+851:                 )
+852:             else:
+853:                 results = searcher.search(
+854:                     query_text,
+855:                     limit=config.max_chunks * 2,
+856:                     min_score=0.1,
+857:                 )
+858: 
+859:             # Normalize BM25 scores to 0-1 range
+860:             normalized_results = [(chunk, normalize_bm25_score(score)) for chunk, score in results]
+861: 
+862:             return {
+863:                 "source": "keyword",
+864:                 "chunks": normalized_results,
+865:                 "entities": [],  # Keyword search doesn't directly find entities
+866:             }
+867:         except Exception as e:
+868:             logger.warning(f"Keyword search failed: {e}")
+869:             return {"source": "keyword", "chunks": [], "entities": []}
+870: 
+871:     async def find_related_entities(
+872:         self,
+873:         entity_id: UUID,
+874:         namespace_id: UUID,
+875:         *,
+876:         max_depth: int = 2,
+877:         limit: int = 20,
+878:     ) -> list[tuple[Entity, float]]:
+879:         """Find entities related to a given entity through the graph.
+880: 
+881:         Args:
+882:             entity_id: Starting entity
+883:             namespace_id: Namespace to search in
+884:             max_depth: Maximum relationship depth
+885:             limit: Maximum entities to return
+886: 
+887:         Returns:
+888:             List of (entity, relevance_score) tuples
+889:         """
+890:         neighborhood = await self._storage.get_neighborhood(
+891:             entity_id,
+892:             depth=max_depth,
+893:             limit=limit,
+894:         )
+895: 
+896:         entities = []
+897:         for node in neighborhood.get("entities", []):
+898:             entity = await self._storage.get_entity(UUID(node["id"]))
+899:             if entity:
+900:                 # Score based on path length (shorter = higher score)
+901:                 # This is simplified - full impl would consider actual path lengths
+902:                 score = 1.0 / (1 + len(neighborhood.get("relationships", [])))
+903:                 entities.append((entity, score))
+904: 
+905:         return entities
+906: 
+907:     async def temporal_query(
+908:         self,
+909:         query: TemporalQuery,
+910:         namespace_id: UUID,
+911:         *,
+912:         config: QueryConfig | None = None,
+913:     ) -> QueryResult:
+914:         """Execute a query with temporal context.
+915: 
+916:         Args:
+917:             query: TemporalQuery with filters and settings
+918:             namespace_id: Namespace to search in
+919:             config: Optional query config override
+920: 
+921:         Returns:
+922:             QueryResult with temporal filtering applied
+923:         """
+924:         cfg = config or QueryConfig()
+925: 
+926:         # Apply temporal settings to config
+927:         if query.recency_weight > 0:
+928:             cfg.apply_recency_bias = True
+929:             cfg.recency_weight = query.recency_weight
+930:             cfg.recency_decay_days = query.decay_days
+931: 
+932:         # Get context filter
+933:         temporal_filter = None
+934:         if query.filters:
+935:             temporal_filter = query.filters[0]  # Use first filter for now
+936:         elif query.context_window_days:
+937:             temporal_filter = query.get_context_filter()
+938: 
+939:         return await self.query(
+940:             query.query,
+941:             namespace_id,
+942:             config=cfg,
+943:             temporal_filter=temporal_filter,
+944:         )
 ````
 
 ## File: README.md
@@ -16650,6 +16849,13 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-26 21:25:56 +0100
+**Message:** Fix timezone-aware datetime comparison in temporal filtering
+
+**Files:**
+- REPOMIX.md
+- src/khora/query/temporal.py
 
 ## Commit: 2026-01-26 20:58:19 +0100
 **Message:** Add agentic query capabilities and enhance temporal search
