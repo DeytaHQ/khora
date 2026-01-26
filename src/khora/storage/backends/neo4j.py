@@ -6,6 +6,7 @@ in Neo4j graph database.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -15,6 +16,32 @@ from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
 
 from khora.core.models import Entity, Episode, Relationship
 from khora.core.models.entity import EntityType, RelationshipType
+
+
+def _serialize_dict(value: dict[str, Any] | None) -> str | None:
+    """Serialize a dict to JSON string for Neo4j storage.
+
+    Neo4j property values can only be primitive types or arrays thereof,
+    not nested objects. We serialize dicts to JSON strings.
+    """
+    if value is None:
+        return None
+    return json.dumps(value)
+
+
+def _deserialize_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
+    """Deserialize a JSON string back to dict.
+
+    Handles both string (new format) and dict (legacy) values.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 class Neo4jBackend:
@@ -153,14 +180,14 @@ class Neo4jBackend:
                     entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
                 ),
                 description=entity.description,
-                attributes=entity.attributes,
+                attributes=_serialize_dict(entity.attributes),
                 source_document_ids=[str(d) for d in entity.source_document_ids],
                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
                 mention_count=entity.mention_count,
                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
                 confidence=entity.confidence,
-                metadata=entity.metadata,
+                metadata=_serialize_dict(entity.metadata),
                 created_at=entity.created_at.isoformat(),
                 updated_at=entity.updated_at.isoformat(),
             )
