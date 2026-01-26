@@ -108,19 +108,48 @@ class TemporalFilter:
         return start, end
 
     def matches(self, timestamp: datetime) -> bool:
-        """Check if a timestamp matches this filter."""
+        """Check if a timestamp matches this filter.
+
+        Handles timezone-aware and timezone-naive datetime comparison
+        by normalizing both to the same timezone awareness.
+        """
         start, end = self.get_effective_times()
 
+        # Normalize timezone awareness for comparison
+        ts = self._normalize_tz(timestamp)
+        start_norm = self._normalize_tz(start) if start else None
+        end_norm = self._normalize_tz(end) if end else None
+
         if self.operator == TemporalOperator.BEFORE:
-            return end is not None and timestamp < end
+            return end_norm is not None and ts < end_norm
         elif self.operator == TemporalOperator.AFTER:
-            return start is not None and timestamp > start
+            return start_norm is not None and ts > start_norm
         elif self.operator == TemporalOperator.BETWEEN:
-            if start is None or end is None:
+            if start_norm is None or end_norm is None:
                 return True
-            return start <= timestamp <= end
+            return start_norm <= ts <= end_norm
         else:
             return True
+
+    @staticmethod
+    def _normalize_tz(dt: datetime | None) -> datetime | None:
+        """Normalize datetime to naive UTC for comparison.
+
+        Converts timezone-aware datetimes to UTC then strips tzinfo.
+        Leaves timezone-naive datetimes as-is (assumes UTC).
+        """
+        if dt is None:
+            return None
+
+        if dt.tzinfo is not None:
+            # Convert to UTC and make naive
+            from datetime import UTC
+
+            utc_dt = dt.astimezone(UTC)
+            return utc_dt.replace(tzinfo=None)
+        else:
+            # Already naive, assume UTC
+            return dt
 
 
 @dataclass
@@ -152,21 +181,25 @@ class TemporalQuery:
         """Calculate recency score for a timestamp.
 
         Uses exponential decay with configurable half-life.
+        Handles timezone-aware and timezone-naive datetime comparison.
         """
         if self.recency_weight == 0:
             return 1.0
 
-        now = datetime.now()
-        if timestamp.tzinfo:
-            from datetime import UTC
-
-            now = datetime.now(UTC)
-
-        age_days = (now - timestamp).total_seconds() / (24 * 60 * 60)
-
-        # Exponential decay: score = 0.5^(age/half_life)
         import math
 
+        # Normalize both to naive UTC for comparison
+        now = datetime.utcnow()
+        ts = timestamp
+
+        if ts.tzinfo is not None:
+            from datetime import UTC
+
+            ts = ts.astimezone(UTC).replace(tzinfo=None)
+
+        age_days = (now - ts).total_seconds() / (24 * 60 * 60)
+
+        # Exponential decay: score = 0.5^(age/half_life)
         decay = math.pow(0.5, age_days / self.decay_days)
 
         # Blend with recency weight
