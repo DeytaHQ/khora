@@ -109,6 +109,73 @@ class TenancySettings(BaseModel):
     enforce_namespace: bool = Field(default=True, description="Enforce namespace isolation")
 
 
+class QueryUnderstandingSettings(BaseModel):
+    """Query understanding configuration."""
+
+    enabled: bool = Field(default=True, description="Enable LLM-based query understanding")
+    expand_query: bool = Field(default=True, description="Generate query expansions/reformulations")
+    extract_entities: bool = Field(default=True, description="Extract entity mentions from query")
+    detect_temporal: bool = Field(default=True, description="Detect temporal references in query")
+    model: str | None = Field(default=None, description="Model to use for query understanding (defaults to main LLM)")
+
+
+class EntityLinkingSettings(BaseModel):
+    """Entity linking configuration."""
+
+    enabled: bool = Field(default=True, description="Enable entity linking")
+    exact_match: bool = Field(default=True, description="Use exact name matching")
+    fuzzy_match: bool = Field(default=True, description="Use fuzzy name matching")
+    embedding_match: bool = Field(default=True, description="Use embedding similarity matching")
+    fuzzy_threshold: float = Field(default=0.8, ge=0.0, le=1.0, description="Minimum fuzzy match ratio")
+    embedding_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum embedding similarity")
+    max_candidates: int = Field(default=5, ge=1, description="Maximum entity candidates per mention")
+
+
+class RerankingSettings(BaseModel):
+    """Reranking configuration."""
+
+    enabled: bool = Field(default=False, description="Enable result reranking")
+    method: str = Field(default="cross_encoder", description="Reranking method: cross_encoder, llm")
+    model: str | None = Field(default=None, description="Model for reranking (cross-encoder model or LLM)")
+    top_n: int = Field(default=50, ge=1, description="Number of candidates to rerank")
+    final_k: int = Field(default=10, ge=1, description="Number of results after reranking")
+
+
+class KeywordSearchSettings(BaseModel):
+    """Keyword search configuration."""
+
+    enabled: bool = Field(default=True, description="Enable keyword search")
+    method: str = Field(default="bm25", description="Keyword search method: bm25, fulltext")
+    use_stemming: bool = Field(default=True, description="Apply stemming to search terms")
+    use_stopwords: bool = Field(default=True, description="Remove stopwords from search")
+    language: str = Field(default="english", description="Language for stemming and stopwords")
+
+
+class QuerySettings(BaseModel):
+    """Query pipeline configuration."""
+
+    # Basic search settings
+    default_mode: str = Field(default="hybrid", description="Default search mode: vector, graph, hybrid, all")
+    min_chunk_similarity: float = Field(default=0.3, ge=0.0, le=1.0, description="Minimum chunk similarity threshold")
+    min_entity_similarity: float = Field(default=0.3, ge=0.0, le=1.0, description="Minimum entity similarity threshold")
+
+    # Fusion weights
+    vector_weight: float = Field(default=0.5, ge=0.0, le=1.0, description="Weight for vector search in fusion")
+    graph_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for graph search in fusion")
+    keyword_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight for keyword search in fusion")
+
+    # Temporal settings
+    apply_recency_bias: bool = Field(default=False, description="Apply recency bias to results")
+    recency_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight of recency in scoring")
+    recency_decay_days: float = Field(default=30.0, ge=1.0, description="Days for recency score to decay by half")
+
+    # Sub-component settings
+    understanding: QueryUnderstandingSettings = Field(default_factory=QueryUnderstandingSettings)
+    entity_linking: EntityLinkingSettings = Field(default_factory=EntityLinkingSettings)
+    reranking: RerankingSettings = Field(default_factory=RerankingSettings)
+    keyword_search: KeywordSearchSettings = Field(default_factory=KeywordSearchSettings)
+
+
 class KhoraConfig(BaseSettings):
     """Main application configuration."""
 
@@ -171,6 +238,9 @@ class KhoraConfig(BaseSettings):
 
     # Tenancy configuration
     tenancy: TenancySettings = Field(default_factory=TenancySettings)
+
+    # Query pipeline configuration
+    query: QuerySettings = Field(default_factory=QuerySettings)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> KhoraConfig:

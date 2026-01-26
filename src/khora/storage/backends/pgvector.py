@@ -305,6 +305,42 @@ class PgVectorBackend:
     # Utility operations
     # =========================================================================
 
+    async def count_chunks(self, namespace_id: UUID) -> int:
+        """Count total chunks in a namespace."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(func.count(ChunkModel.id)).where(ChunkModel.namespace_id == str(namespace_id))
+            )
+            return result.scalar_one()
+
+    async def list_chunks(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[Chunk]:
+        """List chunks in a namespace.
+
+        Args:
+            namespace_id: Namespace ID
+            limit: Maximum chunks to return
+            offset: Offset for pagination
+
+        Returns:
+            List of chunks
+        """
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(ChunkModel)
+                .where(ChunkModel.namespace_id == str(namespace_id))
+                .order_by(ChunkModel.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            rows = result.scalars().all()
+            return [self._chunk_from_model(row) for row in rows]
+
     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
         """Get statistics about embeddings in a namespace."""
         async with self._get_session() as session:

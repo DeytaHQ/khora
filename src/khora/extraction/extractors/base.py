@@ -8,6 +8,16 @@ from typing import Any
 
 
 @dataclass
+class TemporalInfo:
+    """Temporal information for entities, relationships, or events."""
+
+    mentioned_at: str | None = None  # When mentioned in context
+    occurred_at: str | None = None  # When event occurred
+    valid_from: str | None = None  # Start of validity period
+    valid_until: str | None = None  # End of validity period
+
+
+@dataclass
 class ExtractedEntity:
     """An entity extracted from text."""
 
@@ -16,6 +26,12 @@ class ExtractedEntity:
     description: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
     confidence: float = 1.0
+
+    # Aliases for entity resolution
+    aliases: list[str] = field(default_factory=list)
+
+    # Temporal information
+    temporal: TemporalInfo | None = None
 
     # Source tracking
     source_text: str = ""
@@ -34,6 +50,20 @@ class ExtractedRelationship:
     properties: dict[str, Any] = field(default_factory=dict)
     confidence: float = 1.0
 
+    # Temporal information
+    temporal: TemporalInfo | None = None
+
+
+@dataclass
+class ExtractedEvent:
+    """An event extracted from text."""
+
+    description: str
+    event_type: str = "EVENT"
+    occurred_at: str | None = None
+    participants: list[str] = field(default_factory=list)
+    confidence: float = 1.0
+
 
 @dataclass
 class ExtractionResult:
@@ -41,6 +71,7 @@ class ExtractionResult:
 
     entities: list[ExtractedEntity] = field(default_factory=list)
     relationships: list[ExtractedRelationship] = field(default_factory=list)
+    events: list[ExtractedEvent] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

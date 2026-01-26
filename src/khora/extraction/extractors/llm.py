@@ -8,7 +8,14 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from .base import EntityExtractor, ExtractedEntity, ExtractedRelationship, ExtractionResult
+from .base import (
+    EntityExtractor,
+    ExtractedEntity,
+    ExtractedEvent,
+    ExtractedRelationship,
+    ExtractionResult,
+    TemporalInfo,
+)
 
 if TYPE_CHECKING:
     from khora.config import LiteLLMConfig
@@ -17,8 +24,8 @@ if TYPE_CHECKING:
 # Default entity types to extract
 DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
 
-# Extraction prompt template
-EXTRACTION_PROMPT = """Extract entities and relationships from the following text.
+# Extraction prompt template with temporal awareness
+EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
 
 Entity types to extract: {entity_types}
 
@@ -29,23 +36,49 @@ Return a JSON object with the following structure:
 {{
     "entities": [
         {{
-            "name": "entity name",
-            "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|etc",
-            "description": "brief description",
-            "attributes": {{"key": "value"}}
+            "name": "entity name (canonical form, properly capitalized)",
+            "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|PRODUCT|DATE|etc",
+            "description": "brief description of the entity",
+            "attributes": {{"key": "value"}},
+            "aliases": ["alternative names", "nicknames", "abbreviations"],
+            "temporal": {{
+                "mentioned_at": "when entity is mentioned (if temporal context exists)",
+                "valid_from": "ISO date or null if entity validity period is mentioned",
+                "valid_until": "ISO date or null if entity validity period ends"
+            }}
         }}
     ],
     "relationships": [
         {{
-            "source_entity": "source entity name",
-            "target_entity": "target entity name",
-            "relationship_type": "WORKS_FOR|KNOWS|LOCATED_IN|RELATES_TO|etc",
-            "description": "brief description"
+            "source_entity": "source entity name (must match an entity above)",
+            "target_entity": "target entity name (must match an entity above)",
+            "relationship_type": "WORKS_FOR|KNOWS|MANAGES|REPORTS_TO|COLLABORATES_WITH|OWNS|PART_OF|LOCATED_IN|RELATES_TO|DEPENDS_ON|IMPLEMENTS|PRECEDES|FOLLOWS|ASSOCIATED_WITH|etc",
+            "description": "brief description of relationship",
+            "temporal": {{
+                "occurred_at": "when relationship occurred/started",
+                "valid_from": "ISO date or null if relationship has time bounds",
+                "valid_until": "ISO date or null if relationship ended"
+            }}
+        }}
+    ],
+    "events": [
+        {{
+            "description": "what happened",
+            "occurred_at": "when it occurred (ISO date or descriptive)",
+            "participants": ["entity names involved"],
+            "event_type": "MEETING|DECISION|MILESTONE|ANNOUNCEMENT|INCIDENT|etc"
         }}
     ]
 }}
 
-Extract all relevant entities and relationships. Be thorough but only include entities that are clearly mentioned.
+Guidelines:
+- Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
+- Include aliases for entities that have multiple names/abbreviations
+- Extract temporal information when dates, times, or relative time references appear
+- For events, capture the when, who, and what
+- Be thorough but precise - only extract entities that are clearly mentioned
+- Ensure relationship source/target names match extracted entity names exactly
+
 Return ONLY valid JSON, no other text."""
 
 
@@ -191,18 +224,40 @@ class LLMEntityExtractor(EntityExtractor):
 
             entities = []
             for e in data.get("entities", []):
+                # Parse temporal info if present
+                temporal = None
+                if "temporal" in e and e["temporal"]:
+                    t = e["temporal"]
+                    temporal = TemporalInfo(
+                        mentioned_at=t.get("mentioned_at"),
+                        valid_from=t.get("valid_from"),
+                        valid_until=t.get("valid_until"),
+                    )
+
                 entities.append(
                     ExtractedEntity(
                         name=e.get("name", ""),
                         entity_type=e.get("entity_type", "CONCEPT"),
                         description=e.get("description", ""),
                         attributes=e.get("attributes", {}),
+                        aliases=e.get("aliases", []),
+                        temporal=temporal,
                         confidence=e.get("confidence", 0.9),
                     )
                 )
 
             relationships = []
             for r in data.get("relationships", []):
+                # Parse temporal info if present
+                temporal = None
+                if "temporal" in r and r["temporal"]:
+                    t = r["temporal"]
+                    temporal = TemporalInfo(
+                        occurred_at=t.get("occurred_at"),
+                        valid_from=t.get("valid_from"),
+                        valid_until=t.get("valid_until"),
+                    )
+
                 relationships.append(
                     ExtractedRelationship(
                         source_entity=r.get("source_entity", ""),
@@ -210,11 +265,28 @@ class LLMEntityExtractor(EntityExtractor):
                         relationship_type=r.get("relationship_type", "RELATES_TO"),
                         description=r.get("description", ""),
                         properties=r.get("properties", {}),
+                        temporal=temporal,
                         confidence=r.get("confidence", 0.9),
                     )
                 )
 
-            return ExtractionResult(entities=entities, relationships=relationships)
+            events = []
+            for ev in data.get("events", []):
+                events.append(
+                    ExtractedEvent(
+                        description=ev.get("description", ""),
+                        event_type=ev.get("event_type", "EVENT"),
+                        occurred_at=ev.get("occurred_at"),
+                        participants=ev.get("participants", []),
+                        confidence=ev.get("confidence", 0.9),
+                    )
+                )
+
+            return ExtractionResult(
+                entities=entities,
+                relationships=relationships,
+                events=events,
+            )
 
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse extraction response as JSON: {e}")

@@ -1,7 +1,18 @@
 """Configuration module for Khora."""
 
 from .llm import LiteLLMConfig, acompletion, aembedding, configure_litellm, create_litellm_router
-from .schema import KhoraConfig, LLMSettings, PipelineSettings, StorageSettings, TenancySettings
+from .schema import (
+    EntityLinkingSettings,
+    KeywordSearchSettings,
+    KhoraConfig,
+    LLMSettings,
+    PipelineSettings,
+    QuerySettings,
+    QueryUnderstandingSettings,
+    RerankingSettings,
+    StorageSettings,
+    TenancySettings,
+)
 
 # Default config path
 DEFAULT_CONFIG_PATH = "config/khora.yaml"
@@ -40,6 +51,11 @@ __all__ = [
     "LLMSettings",
     "PipelineSettings",
     "TenancySettings",
+    "QuerySettings",
+    "QueryUnderstandingSettings",
+    "EntityLinkingSettings",
+    "RerankingSettings",
+    "KeywordSearchSettings",
     # LiteLLM
     "LiteLLMConfig",
     "configure_litellm",

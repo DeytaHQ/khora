@@ -298,6 +298,39 @@ class StorageCoordinator:
             filter_document_ids=filter_document_ids,
         )
 
+    async def count_chunks(self, namespace_id: UUID) -> int:
+        """Count chunks in a namespace."""
+        if not self.vector:
+            raise RuntimeError("Vector backend not configured")
+        return await self.vector.count_chunks(namespace_id)
+
+    async def list_chunks(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[Chunk]:
+        """List chunks in a namespace.
+
+        Args:
+            namespace_id: Namespace ID
+            limit: Maximum chunks to return
+            offset: Offset for pagination
+
+        Returns:
+            List of chunks
+        """
+        if not self.vector:
+            raise RuntimeError("Vector backend not configured")
+        return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
+
+    async def count_entities(self, namespace_id: UUID) -> int:
+        """Count entities in a namespace."""
+        if self.graph:
+            return await self.graph.count_entities(namespace_id)
+        return 0
+
     # =========================================================================
     # Entity operations (cross-backend)
     # =========================================================================
