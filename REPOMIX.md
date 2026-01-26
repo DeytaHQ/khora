@@ -141,6 +141,7 @@ src/
       registry.py
     query/
       __init__.py
+      agentic.py
       engine.py
       fusion.py
       keyword.py
@@ -178,6 +179,448 @@ README.md
 ```
 
 # Files
+
+## File: src/khora/query/agentic.py
+````python
+  1: """Agentic search for Khora Memory Lake.
+  2: 
+  3: Provides a two-step exploration agent that:
+  4: 1. Performs initial search with comprehensive query understanding (single LLM call)
+  5: 2. Uses pre-computed follow-up queries from understanding for deeper exploration
+  6: 3. Explores multiple sources even if initial hits are concentrated
+  7: 4. Maintains full trace log of search reasoning
+  8: 
+  9: The key efficiency gain: ALL LLM extraction happens in the initial query understanding
+ 10: call. Follow-up queries are pre-computed, eliminating additional LLM round-trips.
+ 11: """
+ 12: 
+ 13: from __future__ import annotations
+ 14: 
+ 15: from dataclasses import dataclass, field
+ 16: from datetime import datetime
+ 17: from typing import TYPE_CHECKING, Any
+ 18: from uuid import UUID
+ 19: 
+ 20: from loguru import logger
+ 21: 
+ 22: if TYPE_CHECKING:
+ 23:     from khora.config.llm import LiteLLMConfig
+ 24:     from khora.core.models import Chunk, Entity
+ 25:     from khora.query.engine import HybridQueryEngine, QueryConfig, QueryResult
+ 26:     from khora.query.understanding import UnderstandingResult
+ 27: 
+ 28: 
+ 29: @dataclass
+ 30: class SearchStep:
+ 31:     """A single step in the agentic search process."""
+ 32: 
+ 33:     step_number: int
+ 34:     query: str
+ 35:     reasoning: str
+ 36:     timestamp: datetime = field(default_factory=datetime.utcnow)
+ 37: 
+ 38:     # Results summary
+ 39:     total_chunks: int = 0
+ 40:     total_entities: int = 0
+ 41:     sources_hit: dict[str, int] = field(default_factory=dict)
+ 42: 
+ 43:     # Search method contributions
+ 44:     vector_hits: int = 0
+ 45:     graph_hits: int = 0
+ 46:     keyword_hits: int = 0
+ 47: 
+ 48:     # Graph elements triggered
+ 49:     entities_linked: list[str] = field(default_factory=list)
+ 50:     relationships_traversed: list[tuple[str, str, str]] = field(default_factory=list)
+ 51: 
+ 52:     # Temporal info
+ 53:     temporal_filter_applied: bool = False
+ 54:     time_range: tuple[datetime | None, datetime | None] | None = None
+ 55: 
+ 56: 
+ 57: @dataclass
+ 58: class AgenticSearchTrace:
+ 59:     """Full trace of an agentic search session."""
+ 60: 
+ 61:     session_id: str
+ 62:     original_query: str
+ 63:     started_at: datetime = field(default_factory=datetime.utcnow)
+ 64:     completed_at: datetime | None = None
+ 65: 
+ 66:     # Query understanding (from single LLM call)
+ 67:     understanding_reasoning: str = ""
+ 68:     complexity_score: float = 0.0
+ 69:     source_priority: dict[str, float] = field(default_factory=dict)
+ 70: 
+ 71:     steps: list[SearchStep] = field(default_factory=list)
+ 72: 
+ 73:     # Final summary
+ 74:     summary: str = ""
+ 75:     total_unique_chunks: int = 0
+ 76:     total_unique_entities: int = 0
+ 77:     sources_explored: dict[str, int] = field(default_factory=dict)
+ 78: 
+ 79:     def add_step(self, step: SearchStep) -> None:
+ 80:         """Add a search step to the trace."""
+ 81:         self.steps.append(step)
+ 82: 
+ 83:     def to_dict(self) -> dict[str, Any]:
+ 84:         """Convert trace to dictionary for logging/storage."""
+ 85:         return {
+ 86:             "session_id": self.session_id,
+ 87:             "original_query": self.original_query,
+ 88:             "started_at": self.started_at.isoformat(),
+ 89:             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+ 90:             "understanding_reasoning": self.understanding_reasoning,
+ 91:             "complexity_score": self.complexity_score,
+ 92:             "source_priority": self.source_priority,
+ 93:             "steps": [
+ 94:                 {
+ 95:                     "step_number": s.step_number,
+ 96:                     "query": s.query,
+ 97:                     "reasoning": s.reasoning,
+ 98:                     "timestamp": s.timestamp.isoformat(),
+ 99:                     "total_chunks": s.total_chunks,
+100:                     "total_entities": s.total_entities,
+101:                     "sources_hit": s.sources_hit,
+102:                     "search_contributions": {
+103:                         "vector": s.vector_hits,
+104:                         "graph": s.graph_hits,
+105:                         "keyword": s.keyword_hits,
+106:                     },
+107:                     "entities_linked": s.entities_linked,
+108:                     "relationships_traversed": [
+109:                         {"from": f, "type": r, "to": t} for f, r, t in s.relationships_traversed
+110:                     ],
+111:                     "temporal_filter_applied": s.temporal_filter_applied,
+112:                     "time_range": (
+113:                         [
+114:                             s.time_range[0].isoformat() if s.time_range and s.time_range[0] else None,
+115:                             s.time_range[1].isoformat() if s.time_range and s.time_range[1] else None,
+116:                         ]
+117:                         if s.time_range
+118:                         else None
+119:                     ),
+120:                 }
+121:                 for s in self.steps
+122:             ],
+123:             "summary": self.summary,
+124:             "total_unique_chunks": self.total_unique_chunks,
+125:             "total_unique_entities": self.total_unique_entities,
+126:             "sources_explored": self.sources_explored,
+127:         }
+128: 
+129: 
+130: @dataclass
+131: class AgenticSearchResult:
+132:     """Result from agentic search."""
+133: 
+134:     # Combined results from all steps
+135:     chunks: list[tuple[Chunk, float, str]] = field(default_factory=list)
+136:     entities: list[tuple[Entity, float]] = field(default_factory=list)
+137: 
+138:     # Summary (generated without additional LLM call if possible)
+139:     summary: str = ""
+140: 
+141:     # Full trace
+142:     trace: AgenticSearchTrace | None = None
+143: 
+144:     # Query understanding (from single LLM call)
+145:     understanding: UnderstandingResult | None = None
+146: 
+147:     # Metadata
+148:     metadata: dict[str, Any] = field(default_factory=dict)
+149: 
+150: 
+151: class AgenticSearchAgent:
+152:     """Two-step exploration agent for deep search.
+153: 
+154:     EFFICIENCY: All LLM extraction happens in the initial query understanding.
+155:     The understanding result includes:
+156:     - Pre-computed follow-up queries with reasoning
+157:     - Source priority recommendations
+158:     - Search strategy (weights for vector/graph/keyword)
+159:     - Complexity assessment
+160: 
+161:     This eliminates additional LLM calls during exploration.
+162:     """
+163: 
+164:     def __init__(
+165:         self,
+166:         engine: HybridQueryEngine,
+167:         llm_config: LiteLLMConfig | None = None,
+168:     ) -> None:
+169:         """Initialize the agentic search agent.
+170: 
+171:         Args:
+172:             engine: The hybrid query engine to use
+173:             llm_config: LLM configuration (used by engine's query understanding)
+174:         """
+175:         self._engine = engine
+176:         self._llm_config = llm_config
+177: 
+178:     async def search(
+179:         self,
+180:         query: str,
+181:         namespace_id: UUID,
+182:         config: QueryConfig | None = None,
+183:         max_steps: int = 3,
+184:     ) -> AgenticSearchResult:
+185:         """Perform agentic search with multi-step exploration.
+186: 
+187:         The search process:
+188:         1. Initial query with comprehensive understanding (single LLM call)
+189:         2. Execute pre-computed follow-up queries (no additional LLM calls)
+190:         3. Merge and rank all results
+191: 
+192:         Args:
+193:             query: Original search query
+194:             namespace_id: Namespace to search in
+195:             config: Query configuration
+196:             max_steps: Maximum exploration steps (default 3)
+197: 
+198:         Returns:
+199:             AgenticSearchResult with combined results and trace
+200:         """
+201:         import uuid
+202: 
+203:         trace = AgenticSearchTrace(
+204:             session_id=str(uuid.uuid4()),
+205:             original_query=query,
+206:         )
+207: 
+208:         all_chunks: dict[str, tuple[Chunk, float, str]] = {}
+209:         all_entities: dict[str, tuple[Entity, float]] = {}
+210:         understanding: UnderstandingResult | None = None
+211: 
+212:         # Step 1: Initial search (this triggers comprehensive query understanding)
+213:         logger.info(f"Agentic search step 1: '{query[:50]}...'")
+214: 
+215:         step1_result = await self._engine.query(
+216:             query,
+217:             namespace_id,
+218:             config=config,
+219:         )
+220: 
+221:         # Extract understanding from result metadata
+222:         if "understanding" in step1_result.metadata:
+223:             understanding_data = step1_result.metadata["understanding"]
+224:             trace.understanding_reasoning = understanding_data.get("reasoning", "")
+225:             trace.complexity_score = understanding_data.get("complexity_score", 0.5)
+226:             trace.source_priority = understanding_data.get("source_priority", {})
+227: 
+228:         # Analyze and record step 1
+229:         step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
+230:         trace.add_step(step1)
+231: 
+232:         # Collect results
+233:         for chunk, score in step1_result.chunks:
+234:             source = await self._get_chunk_source(chunk, namespace_id)
+235:             all_chunks[str(chunk.id)] = (chunk, score, source)
+236: 
+237:         for entity, score in step1_result.entities:
+238:             all_entities[str(entity.id)] = (entity, score)
+239: 
+240:         # Step 2+: Execute pre-computed follow-up queries
+241:         if max_steps >= 2 and "understanding" in step1_result.metadata:
+242:             follow_up_queries = step1_result.metadata["understanding"].get("follow_up_queries", [])
+243: 
+244:             # Also check for queries generated from result analysis
+245:             additional_follow_ups = self._generate_additional_follow_ups(step1_result, step1)
+246:             all_follow_ups = list(follow_up_queries) + additional_follow_ups
+247: 
+248:             for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
+249:                 if isinstance(follow_up, dict):
+250:                     fq_query = follow_up.get("query", "")
+251:                     fq_reasoning = follow_up.get("reasoning", f"Follow-up query {i+1}")
+252:                 else:
+253:                     fq_query = str(follow_up)
+254:                     fq_reasoning = f"Pre-computed follow-up query {i+1}"
+255: 
+256:                 if not fq_query:
+257:                     continue
+258: 
+259:                 logger.info(f"Agentic search step {i+2}: '{fq_query[:50]}...'")
+260: 
+261:                 step_result = await self._engine.query(
+262:                     fq_query,
+263:                     namespace_id,
+264:                     config=config,
+265:                 )
+266: 
+267:                 step = self._analyze_results(step_result, fq_query, i + 2, fq_reasoning)
+268:                 trace.add_step(step)
+269: 
+270:                 # Collect new results (keep higher scores)
+271:                 for chunk, score in step_result.chunks:
+272:                     chunk_id = str(chunk.id)
+273:                     if chunk_id not in all_chunks or all_chunks[chunk_id][1] < score:
+274:                         source = await self._get_chunk_source(chunk, namespace_id)
+275:                         all_chunks[chunk_id] = (chunk, score, source)
+276: 
+277:                 for entity, score in step_result.entities:
+278:                     entity_id = str(entity.id)
+279:                     if entity_id not in all_entities or all_entities[entity_id][1] < score:
+280:                         all_entities[entity_id] = (entity, score)
+281: 
+282:         # Generate summary (without additional LLM call)
+283:         summary = self._generate_summary_fast(query, all_chunks, all_entities, trace)
+284: 
+285:         # Finalize trace
+286:         trace.completed_at = datetime.utcnow()
+287:         trace.summary = summary
+288:         trace.total_unique_chunks = len(all_chunks)
+289:         trace.total_unique_entities = len(all_entities)
+290: 
+291:         # Count sources
+292:         for _, (_, _, source) in all_chunks.items():
+293:             trace.sources_explored[source] = trace.sources_explored.get(source, 0) + 1
+294: 
+295:         # Sort results by score
+296:         sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
+297:         sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
+298: 
+299:         return AgenticSearchResult(
+300:             chunks=sorted_chunks,
+301:             entities=sorted_entities,
+302:             summary=summary,
+303:             trace=trace,
+304:             understanding=understanding,
+305:             metadata={
+306:                 "original_query": query,
+307:                 "total_steps": len(trace.steps),
+308:                 "sources_explored": trace.sources_explored,
+309:                 "complexity_score": trace.complexity_score,
+310:             },
+311:         )
+312: 
+313:     def _analyze_results(
+314:         self,
+315:         result: QueryResult,
+316:         query: str,
+317:         step_number: int,
+318:         reasoning: str,
+319:     ) -> SearchStep:
+320:         """Analyze search results and create a step record."""
+321:         step = SearchStep(
+322:             step_number=step_number,
+323:             query=query,
+324:             reasoning=reasoning,
+325:         )
+326: 
+327:         step.total_chunks = len(result.chunks)
+328:         step.total_entities = len(result.entities)
+329: 
+330:         # Extract search method contributions
+331:         if result.search_contributions:
+332:             step.vector_hits = result.search_contributions.vector
+333:             step.graph_hits = result.search_contributions.graph
+334:             step.keyword_hits = result.search_contributions.keyword
+335: 
+336:         # Extract graph info
+337:         if result.graph_info:
+338:             step.entities_linked = result.graph_info.entities_linked
+339:             step.relationships_traversed = result.graph_info.relationships_traversed
+340: 
+341:         # Extract temporal info
+342:         if result.temporal_info:
+343:             step.temporal_filter_applied = result.temporal_info.filter_applied
+344:             if result.temporal_info.time_start or result.temporal_info.time_end:
+345:                 step.time_range = (result.temporal_info.time_start, result.temporal_info.time_end)
+346: 
+347:         return step
+348: 
+349:     def _generate_additional_follow_ups(
+350:         self,
+351:         result: QueryResult,
+352:         analysis: SearchStep,
+353:     ) -> list[dict[str, Any]]:
+354:         """Generate additional follow-up queries based on result analysis.
+355: 
+356:         These are computed locally without LLM calls, based on:
+357:         - Under-represented sources
+358:         - High-scoring entities found
+359:         """
+360:         follow_ups = []
+361: 
+362:         # Check for source imbalance
+363:         if analysis.sources_hit:
+364:             total_hits = sum(analysis.sources_hit.values())
+365:             if total_hits > 0:
+366:                 dominant_source = max(analysis.sources_hit.items(), key=lambda x: x[1])
+367:                 if dominant_source[1] / total_hits > 0.8:
+368:                     # One source dominates - target others
+369:                     for source in ["linear", "notion", "attio", "gong"]:
+370:                         if source != dominant_source[0] and analysis.sources_hit.get(source, 0) == 0:
+371:                             follow_ups.append(
+372:                                 {
+373:                                     "query": f"{analysis.query} {source}",
+374:                                     "reasoning": f"Targeting under-represented source: {source}",
+375:                                 }
+376:                             )
+377:                             break
+378: 
+379:         # Explore top entities
+380:         if result.entities and len(result.entities) > 0:
+381:             top_entity = result.entities[0][0]
+382:             follow_ups.append(
+383:                 {
+384:                     "query": f"{top_entity.name} context details",
+385:                     "reasoning": f"Exploring top entity: {top_entity.name}",
+386:                 }
+387:             )
+388: 
+389:         return follow_ups[:2]  # Limit to 2 additional
+390: 
+391:     async def _get_chunk_source(self, chunk: Chunk, namespace_id: UUID) -> str:
+392:         """Get the source system for a chunk."""
+393:         try:
+394:             doc = await self._engine._storage.get_document(chunk.document_id)
+395:             if doc and doc.metadata:
+396:                 source = doc.metadata.custom.get("source_system", "")
+397:                 if not source and doc.metadata.source:
+398:                     source = doc.metadata.source.split("/")[0]
+399:                 return source or "unknown"
+400:         except Exception:
+401:             pass
+402:         return "unknown"
+403: 
+404:     def _generate_summary_fast(
+405:         self,
+406:         query: str,
+407:         chunks: dict[str, tuple[Chunk, float, str]],
+408:         entities: dict[str, tuple[Entity, float]],
+409:         trace: AgenticSearchTrace,
+410:     ) -> str:
+411:         """Generate a summary without additional LLM call.
+412: 
+413:         Uses structured data from the search to create a useful summary.
+414:         """
+415:         sources = {}
+416:         for _, (_, _, source) in chunks.items():
+417:             sources[source] = sources.get(source, 0) + 1
+418: 
+419:         source_parts = [f"{s}: {c}" for s, c in sorted(sources.items(), key=lambda x: -x[1])]
+420:         source_summary = ", ".join(source_parts) if source_parts else "none"
+421: 
+422:         entity_names = [e.name for e, _ in sorted(entities.values(), key=lambda x: -x[1])[:5]]
+423:         entity_summary = ", ".join(entity_names) if entity_names else "none found"
+424: 
+425:         # Build structured summary
+426:         parts = [
+427:             f"Found {len(chunks)} results across {len(sources)} sources ({source_summary}).",
+428:         ]
+429: 
+430:         if entity_names:
+431:             parts.append(f"Key entities: {entity_summary}.")
+432: 
+433:         parts.append(f"Explored in {len(trace.steps)} steps.")
+434: 
+435:         if trace.complexity_score > 0.7:
+436:             parts.append("Query was identified as complex, requiring multi-step exploration.")
+437: 
+438:         return " ".join(parts)
+````
 
 ## File: alembic/env.py
 ````python
@@ -7178,542 +7621,910 @@ README.md
  29:     relative_days: int | None = None
  30:     relative_hours: int | None = None
  31: 
- 32:     @classmethod
- 33:     def last_days(cls, days: int) -> TemporalFilter:
- 34:         """Create a filter for the last N days."""
- 35:         return cls(
- 36:             operator=TemporalOperator.AFTER,
- 37:             start_time=datetime.now() - timedelta(days=days),
- 38:         )
- 39: 
- 40:     @classmethod
- 41:     def last_hours(cls, hours: int) -> TemporalFilter:
- 42:         """Create a filter for the last N hours."""
- 43:         return cls(
- 44:             operator=TemporalOperator.AFTER,
- 45:             start_time=datetime.now() - timedelta(hours=hours),
- 46:         )
- 47: 
- 48:     @classmethod
- 49:     def before(cls, time: datetime) -> TemporalFilter:
- 50:         """Create a filter for before a specific time."""
- 51:         return cls(operator=TemporalOperator.BEFORE, end_time=time)
- 52: 
- 53:     @classmethod
- 54:     def after(cls, time: datetime) -> TemporalFilter:
- 55:         """Create a filter for after a specific time."""
- 56:         return cls(operator=TemporalOperator.AFTER, start_time=time)
- 57: 
- 58:     @classmethod
- 59:     def between(cls, start: datetime, end: datetime) -> TemporalFilter:
- 60:         """Create a filter for a time range."""
- 61:         return cls(operator=TemporalOperator.BETWEEN, start_time=start, end_time=end)
- 62: 
- 63:     def get_effective_times(self) -> tuple[datetime | None, datetime | None]:
- 64:         """Get the effective start and end times."""
- 65:         start = self.start_time
- 66:         end = self.end_time
- 67: 
- 68:         # Handle relative times
- 69:         if self.relative_days is not None:
- 70:             start = datetime.now() - timedelta(days=self.relative_days)
- 71:         if self.relative_hours is not None:
- 72:             start = datetime.now() - timedelta(hours=self.relative_hours)
+ 32:     # Alias properties for consistency
+ 33:     @property
+ 34:     def start_date(self) -> datetime | None:
+ 35:         """Alias for start_time."""
+ 36:         return self.start_time
+ 37: 
+ 38:     @property
+ 39:     def end_date(self) -> datetime | None:
+ 40:         """Alias for end_time."""
+ 41:         return self.end_time
+ 42: 
+ 43:     def __init__(
+ 44:         self,
+ 45:         operator: TemporalOperator = TemporalOperator.AFTER,
+ 46:         start_time: datetime | None = None,
+ 47:         end_time: datetime | None = None,
+ 48:         start_date: datetime | None = None,
+ 49:         end_date: datetime | None = None,
+ 50:         relative_days: int | None = None,
+ 51:         relative_hours: int | None = None,
+ 52:     ) -> None:
+ 53:         """Initialize with flexible date/time naming."""
+ 54:         self.operator = operator
+ 55:         self.start_time = start_time or start_date
+ 56:         self.end_time = end_time or end_date
+ 57:         self.relative_days = relative_days
+ 58:         self.relative_hours = relative_hours
+ 59: 
+ 60:         # Auto-detect operator if not specified
+ 61:         if self.start_time and self.end_time:
+ 62:             self.operator = TemporalOperator.BETWEEN
+ 63:         elif self.end_time and not self.start_time:
+ 64:             self.operator = TemporalOperator.BEFORE
+ 65: 
+ 66:     @classmethod
+ 67:     def last_days(cls, days: int) -> TemporalFilter:
+ 68:         """Create a filter for the last N days."""
+ 69:         return cls(
+ 70:             operator=TemporalOperator.AFTER,
+ 71:             start_time=datetime.now() - timedelta(days=days),
+ 72:         )
  73: 
- 74:         return start, end
- 75: 
- 76:     def matches(self, timestamp: datetime) -> bool:
- 77:         """Check if a timestamp matches this filter."""
- 78:         start, end = self.get_effective_times()
- 79: 
- 80:         if self.operator == TemporalOperator.BEFORE:
- 81:             return end is not None and timestamp < end
- 82:         elif self.operator == TemporalOperator.AFTER:
- 83:             return start is not None and timestamp > start
- 84:         elif self.operator == TemporalOperator.BETWEEN:
- 85:             if start is None or end is None:
- 86:                 return True
- 87:             return start <= timestamp <= end
- 88:         else:
- 89:             return True
- 90: 
+ 74:     @classmethod
+ 75:     def last_hours(cls, hours: int) -> TemporalFilter:
+ 76:         """Create a filter for the last N hours."""
+ 77:         return cls(
+ 78:             operator=TemporalOperator.AFTER,
+ 79:             start_time=datetime.now() - timedelta(hours=hours),
+ 80:         )
+ 81: 
+ 82:     @classmethod
+ 83:     def before(cls, time: datetime) -> TemporalFilter:
+ 84:         """Create a filter for before a specific time."""
+ 85:         return cls(operator=TemporalOperator.BEFORE, end_time=time)
+ 86: 
+ 87:     @classmethod
+ 88:     def after(cls, time: datetime) -> TemporalFilter:
+ 89:         """Create a filter for after a specific time."""
+ 90:         return cls(operator=TemporalOperator.AFTER, start_time=time)
  91: 
- 92: @dataclass
- 93: class TemporalQuery:
- 94:     """Query with temporal context."""
- 95: 
- 96:     query: str
- 97:     filters: list[TemporalFilter] = field(default_factory=list)
- 98: 
- 99:     # Temporal weighting
-100:     recency_weight: float = 0.0  # 0 = no recency bias, 1 = strong recency bias
-101:     decay_days: float = 30.0  # Half-life for recency decay
-102: 
-103:     # Context window
-104:     context_window_days: int | None = None  # Limit context to recent period
-105: 
-106:     def add_filter(self, filter: TemporalFilter) -> TemporalQuery:
-107:         """Add a temporal filter."""
-108:         self.filters.append(filter)
-109:         return self
-110: 
-111:     def with_recency_bias(self, weight: float = 0.3, decay_days: float = 30.0) -> TemporalQuery:
-112:         """Add recency bias to scoring."""
-113:         self.recency_weight = weight
-114:         self.decay_days = decay_days
-115:         return self
-116: 
-117:     def calculate_recency_score(self, timestamp: datetime) -> float:
-118:         """Calculate recency score for a timestamp.
-119: 
-120:         Uses exponential decay with configurable half-life.
-121:         """
-122:         if self.recency_weight == 0:
-123:             return 1.0
+ 92:     @classmethod
+ 93:     def between(cls, start: datetime, end: datetime) -> TemporalFilter:
+ 94:         """Create a filter for a time range."""
+ 95:         return cls(operator=TemporalOperator.BETWEEN, start_time=start, end_time=end)
+ 96: 
+ 97:     def get_effective_times(self) -> tuple[datetime | None, datetime | None]:
+ 98:         """Get the effective start and end times."""
+ 99:         start = self.start_time
+100:         end = self.end_time
+101: 
+102:         # Handle relative times
+103:         if self.relative_days is not None:
+104:             start = datetime.now() - timedelta(days=self.relative_days)
+105:         if self.relative_hours is not None:
+106:             start = datetime.now() - timedelta(hours=self.relative_hours)
+107: 
+108:         return start, end
+109: 
+110:     def matches(self, timestamp: datetime) -> bool:
+111:         """Check if a timestamp matches this filter."""
+112:         start, end = self.get_effective_times()
+113: 
+114:         if self.operator == TemporalOperator.BEFORE:
+115:             return end is not None and timestamp < end
+116:         elif self.operator == TemporalOperator.AFTER:
+117:             return start is not None and timestamp > start
+118:         elif self.operator == TemporalOperator.BETWEEN:
+119:             if start is None or end is None:
+120:                 return True
+121:             return start <= timestamp <= end
+122:         else:
+123:             return True
 124: 
-125:         now = datetime.now()
-126:         if timestamp.tzinfo:
-127:             from datetime import UTC
-128: 
-129:             now = datetime.now(UTC)
-130: 
-131:         age_days = (now - timestamp).total_seconds() / (24 * 60 * 60)
+125: 
+126: @dataclass
+127: class TemporalQuery:
+128:     """Query with temporal context."""
+129: 
+130:     query: str
+131:     filters: list[TemporalFilter] = field(default_factory=list)
 132: 
-133:         # Exponential decay: score = 0.5^(age/half_life)
-134:         import math
-135: 
-136:         decay = math.pow(0.5, age_days / self.decay_days)
-137: 
-138:         # Blend with recency weight
-139:         return (1 - self.recency_weight) + (self.recency_weight * decay)
-140: 
-141:     def get_context_filter(self) -> TemporalFilter | None:
-142:         """Get a filter for the context window."""
-143:         if self.context_window_days is None:
-144:             return None
-145:         return TemporalFilter.last_days(self.context_window_days)
+133:     # Temporal weighting
+134:     recency_weight: float = 0.0  # 0 = no recency bias, 1 = strong recency bias
+135:     decay_days: float = 30.0  # Half-life for recency decay
+136: 
+137:     # Context window
+138:     context_window_days: int | None = None  # Limit context to recent period
+139: 
+140:     def add_filter(self, filter: TemporalFilter) -> TemporalQuery:
+141:         """Add a temporal filter."""
+142:         self.filters.append(filter)
+143:         return self
+144: 
+145:     def with_recency_bias(self, weight: float = 0.3, decay_days: float = 30.0) -> TemporalQuery:
+146:         """Add recency bias to scoring."""
+147:         self.recency_weight = weight
+148:         self.decay_days = decay_days
+149:         return self
+150: 
+151:     def calculate_recency_score(self, timestamp: datetime) -> float:
+152:         """Calculate recency score for a timestamp.
+153: 
+154:         Uses exponential decay with configurable half-life.
+155:         """
+156:         if self.recency_weight == 0:
+157:             return 1.0
+158: 
+159:         now = datetime.now()
+160:         if timestamp.tzinfo:
+161:             from datetime import UTC
+162: 
+163:             now = datetime.now(UTC)
+164: 
+165:         age_days = (now - timestamp).total_seconds() / (24 * 60 * 60)
+166: 
+167:         # Exponential decay: score = 0.5^(age/half_life)
+168:         import math
+169: 
+170:         decay = math.pow(0.5, age_days / self.decay_days)
+171: 
+172:         # Blend with recency weight
+173:         return (1 - self.recency_weight) + (self.recency_weight * decay)
+174: 
+175:     def get_context_filter(self) -> TemporalFilter | None:
+176:         """Get a filter for the context window."""
+177:         if self.context_window_days is None:
+178:             return None
+179:         return TemporalFilter.last_days(self.context_window_days)
 ````
 
 ## File: src/khora/query/understanding.py
 ````python
   1: """Query understanding module for Khora Memory Lake.
   2: 
-  3: Provides LLM-based query interpretation including:
-  4: - Intent detection
-  5: - Entity mention extraction
-  6: - Temporal reference detection
+  3: Provides comprehensive LLM-based query interpretation in a SINGLE request:
+  4: - Intent detection and complexity assessment
+  5: - Entity mention extraction with relationship hints
+  6: - Temporal reference detection with computed ISO dates
   7: - Query expansion/reformulation
-  8: - Keyword extraction
-  9: """
- 10: 
- 11: from __future__ import annotations
- 12: 
- 13: import json
- 14: from dataclasses import dataclass, field
- 15: from enum import Enum, auto
- 16: from typing import TYPE_CHECKING, Any
- 17: 
- 18: from loguru import logger
- 19: 
- 20: if TYPE_CHECKING:
- 21:     from khora.config.llm import LiteLLMConfig
- 22: 
+  8: - Keyword extraction for BM25
+  9: - Source prioritization (slack, linear, notion, attio, gong, github)
+ 10: - Search strategy recommendations
+ 11: - Follow-up query suggestions for agentic search
+ 12: """
+ 13: 
+ 14: from __future__ import annotations
+ 15: 
+ 16: import json
+ 17: from dataclasses import dataclass, field
+ 18: from datetime import datetime
+ 19: from enum import Enum, auto
+ 20: from typing import TYPE_CHECKING
+ 21: 
+ 22: from loguru import logger
  23: 
- 24: class QueryIntent(Enum):
- 25:     """Types of query intent."""
+ 24: if TYPE_CHECKING:
+ 25:     from khora.config.llm import LiteLLMConfig
  26: 
- 27:     SEARCH = auto()  # General search for information
- 28:     QUESTION = auto()  # Specific question expecting an answer
- 29:     TEMPORAL = auto()  # Query about time-based events
- 30:     COMPARISON = auto()  # Query comparing entities or concepts
- 31:     NAVIGATION = auto()  # Query to find specific entities
- 32:     UNKNOWN = auto()
- 33: 
- 34: 
- 35: @dataclass
- 36: class EntityMention:
- 37:     """An entity mentioned in the query."""
+ 27: 
+ 28: class QueryIntent(Enum):
+ 29:     """Types of query intent."""
+ 30: 
+ 31:     SEARCH = auto()  # General search for information
+ 32:     QUESTION = auto()  # Specific question expecting an answer
+ 33:     TEMPORAL = auto()  # Query about time-based events
+ 34:     COMPARISON = auto()  # Query comparing entities or concepts
+ 35:     NAVIGATION = auto()  # Query to find specific entities
+ 36:     AGGREGATION = auto()  # Query requiring aggregation/summary
+ 37:     UNKNOWN = auto()
  38: 
- 39:     name: str
- 40:     entity_type: str  # PERSON, ORGANIZATION, CONCEPT, etc.
- 41:     confidence: float = 1.0
- 42:     start_pos: int | None = None
- 43:     end_pos: int | None = None
- 44: 
- 45: 
- 46: @dataclass
- 47: class TemporalReference:
- 48:     """A temporal reference in the query."""
- 49: 
- 50:     type: str  # relative, absolute, range
- 51:     value: str  # "last week", "2024-01-15", etc.
- 52:     normalized: str | None = None  # ISO format or semantic (e.g., "past_7_days")
- 53: 
- 54: 
- 55: @dataclass
- 56: class UnderstandingResult:
- 57:     """Result of query understanding."""
- 58: 
- 59:     original_query: str
- 60:     intent: QueryIntent
- 61:     entities: list[EntityMention] = field(default_factory=list)
- 62:     temporal_references: list[TemporalReference] = field(default_factory=list)
- 63:     expanded_queries: list[str] = field(default_factory=list)
- 64:     keywords: list[str] = field(default_factory=list)
- 65:     confidence: float = 1.0
- 66:     metadata: dict[str, Any] = field(default_factory=dict)
- 67: 
- 68:     @property
- 69:     def has_temporal(self) -> bool:
- 70:         """Check if query has temporal references."""
- 71:         return len(self.temporal_references) > 0
+ 39: 
+ 40: class AnswerType(Enum):
+ 41:     """Expected answer type."""
+ 42: 
+ 43:     LIST = auto()  # List of items
+ 44:     SUMMARY = auto()  # Narrative summary
+ 45:     FACT = auto()  # Specific fact or value
+ 46:     EXPLANATION = auto()  # Detailed explanation
+ 47:     COMPARISON = auto()  # Side-by-side comparison
+ 48:     TIMELINE = auto()  # Chronological sequence
+ 49:     UNKNOWN = auto()
+ 50: 
+ 51: 
+ 52: @dataclass
+ 53: class EntityMention:
+ 54:     """An entity mentioned in the query."""
+ 55: 
+ 56:     name: str
+ 57:     entity_type: str  # PERSON, ORGANIZATION, CONCEPT, etc.
+ 58:     confidence: float = 1.0
+ 59:     aliases: list[str] = field(default_factory=list)  # Alternative names/spellings
+ 60:     context_hint: str = ""  # Additional context for disambiguation
+ 61: 
+ 62: 
+ 63: @dataclass
+ 64: class RelationshipHint:
+ 65:     """A relationship to explore in the graph."""
+ 66: 
+ 67:     from_entity: str
+ 68:     relationship_type: str  # WORKS_WITH, MENTIONED_IN, RELATED_TO, etc.
+ 69:     to_entity: str | None = None  # None means "find related entities"
+ 70:     importance: float = 1.0
+ 71: 
  72: 
- 73:     @property
- 74:     def has_entities(self) -> bool:
- 75:         """Check if query mentions entities."""
- 76:         return len(self.entities) > 0
- 77: 
- 78:     def get_all_queries(self) -> list[str]:
- 79:         """Get original query plus all expansions."""
- 80:         return [self.original_query] + self.expanded_queries
- 81: 
- 82: 
- 83: QUERY_UNDERSTANDING_PROMPT = """You are a query understanding system for a corporate memory lake containing:
- 84: - Slack messages, Linear issues, Notion documents
- 85: - Attio CRM records, Gong call transcripts
- 86: - BambooHR employee data, GitHub activity
- 87: 
- 88: Analyze the following query and extract structured information.
+ 73: @dataclass
+ 74: class TemporalReference:
+ 75:     """A temporal reference in the query.
+ 76: 
+ 77:     The LLM extracts temporal references and computes actual ISO date bounds.
+ 78:     """
+ 79: 
+ 80:     type: str  # relative, absolute, range
+ 81:     text: str  # Original text "last week", "yesterday", etc.
+ 82:     start_date: datetime | None = None
+ 83:     end_date: datetime | None = None
+ 84: 
+ 85: 
+ 86: @dataclass
+ 87: class SourcePriority:
+ 88:     """Priority hints for data sources."""
  89: 
- 90: Query: {query}
- 91: 
- 92: Respond with a JSON object containing:
- 93: {{
- 94:     "intent": "search|question|temporal|comparison|navigation",
- 95:     "entities": [
- 96:         {{
- 97:             "name": "entity name",
- 98:             "type": "PERSON|ORGANIZATION|CONCEPT|PRODUCT|TECHNOLOGY|LOCATION|EVENT",
- 99:             "confidence": 0.0-1.0
-100:         }}
-101:     ],
-102:     "temporal_references": [
-103:         {{
-104:             "type": "relative|absolute|range",
-105:             "value": "original text",
-106:             "normalized": "ISO date or semantic like past_7_days"
-107:         }}
-108:     ],
-109:     "expanded_queries": [
-110:         "alternative phrasing 1",
-111:         "alternative phrasing 2"
-112:     ],
-113:     "keywords": ["keyword1", "keyword2"],
-114:     "confidence": 0.0-1.0
-115: }}
+ 90:     slack: float = 1.0
+ 91:     linear: float = 1.0
+ 92:     notion: float = 1.0
+ 93:     attio: float = 1.0
+ 94:     gong: float = 1.0
+ 95:     github: float = 1.0
+ 96:     bamboohr: float = 1.0
+ 97: 
+ 98:     def get_top_sources(self, n: int = 3) -> list[str]:
+ 99:         """Get top N prioritized sources."""
+100:         sources = [
+101:             ("slack", self.slack),
+102:             ("linear", self.linear),
+103:             ("notion", self.notion),
+104:             ("attio", self.attio),
+105:             ("gong", self.gong),
+106:             ("github", self.github),
+107:             ("bamboohr", self.bamboohr),
+108:         ]
+109:         sources.sort(key=lambda x: x[1], reverse=True)
+110:         return [s[0] for s in sources[:n] if s[1] > 0]
+111: 
+112: 
+113: @dataclass
+114: class SearchStrategy:
+115:     """Recommended search strategy."""
 116: 
-117: Guidelines:
-118: - Extract ALL mentioned entities (people, companies, products, concepts)
-119: - Detect temporal references like "last week", "yesterday", "in January"
-120: - Generate 2-3 alternative query phrasings that capture the same intent
-121: - Extract important keywords for full-text search
-122: - Be precise about entity types based on context
-123: 
-124: Respond ONLY with the JSON object, no explanation."""
+117:     use_vector: bool = True
+118:     use_graph: bool = True
+119:     use_keyword: bool = True
+120: 
+121:     # Weights (should sum to ~1.0)
+122:     vector_weight: float = 0.4
+123:     graph_weight: float = 0.3
+124:     keyword_weight: float = 0.3
 125: 
-126: 
-127: class QueryUnderstanding:
-128:     """LLM-based query understanding for enhanced search."""
+126:     # Graph-specific
+127:     graph_depth: int = 2
+128:     explore_neighborhoods: bool = True
 129: 
-130:     def __init__(
-131:         self,
-132:         llm_config: LiteLLMConfig | None = None,
-133:         model: str | None = None,
-134:     ) -> None:
-135:         """Initialize query understanding.
-136: 
-137:         Args:
-138:             llm_config: LiteLLM configuration
-139:             model: Optional model override (defaults to config model)
-140:         """
-141:         self._llm_config = llm_config
-142:         self._model = model
+130:     # Reasoning
+131:     strategy_reasoning: str = ""
+132: 
+133: 
+134: @dataclass
+135: class FollowUpQuery:
+136:     """A suggested follow-up query for deeper exploration."""
+137: 
+138:     query: str
+139:     reasoning: str
+140:     target_sources: list[str] = field(default_factory=list)
+141:     priority: float = 1.0
+142: 
 143: 
-144:     async def understand(
-145:         self,
-146:         query: str,
-147:         *,
-148:         expand_query: bool = True,
-149:         extract_entities: bool = True,
-150:         detect_temporal: bool = True,
-151:     ) -> UnderstandingResult:
-152:         """Understand a query using LLM.
-153: 
-154:         Args:
-155:             query: The query to understand
-156:             expand_query: Whether to generate query expansions
-157:             extract_entities: Whether to extract entity mentions
-158:             detect_temporal: Whether to detect temporal references
-159: 
-160:         Returns:
-161:             UnderstandingResult with extracted information
-162:         """
-163:         from khora.config.llm import LiteLLMConfig, acompletion
-164: 
-165:         config = self._llm_config or LiteLLMConfig()
-166:         if self._model:
-167:             config = LiteLLMConfig(
-168:                 model=self._model,
-169:                 temperature=0.1,  # Low temperature for consistent extraction
-170:                 max_tokens=1000,
-171:             )
-172:         else:
-173:             config = LiteLLMConfig(
-174:                 model=config.model,
-175:                 temperature=0.1,
-176:                 max_tokens=1000,
-177:             )
-178: 
-179:         try:
-180:             prompt = QUERY_UNDERSTANDING_PROMPT.format(query=query)
-181:             response = await acompletion(prompt, config)
-182: 
-183:             # Parse JSON response
-184:             result = self._parse_response(response, query)
+144: @dataclass
+145: class UnderstandingResult:
+146:     """Comprehensive result of query understanding - extracted in single LLM call."""
+147: 
+148:     original_query: str
+149:     intent: QueryIntent
+150:     answer_type: AnswerType = AnswerType.UNKNOWN
+151: 
+152:     # Core extractions
+153:     entities: list[EntityMention] = field(default_factory=list)
+154:     relationships: list[RelationshipHint] = field(default_factory=list)
+155:     temporal_references: list[TemporalReference] = field(default_factory=list)
+156: 
+157:     # Search optimization
+158:     expanded_queries: list[str] = field(default_factory=list)
+159:     keywords: list[str] = field(default_factory=list)
+160:     source_priority: SourcePriority = field(default_factory=SourcePriority)
+161:     search_strategy: SearchStrategy = field(default_factory=SearchStrategy)
+162: 
+163:     # Agentic search support
+164:     follow_up_queries: list[FollowUpQuery] = field(default_factory=list)
+165:     requires_multi_step: bool = False
+166:     complexity_score: float = 0.5  # 0-1, higher = more complex
+167: 
+168:     # Metadata
+169:     confidence: float = 1.0
+170:     reasoning: str = ""  # LLM's reasoning about the query
+171: 
+172:     @property
+173:     def has_temporal(self) -> bool:
+174:         """Check if query has temporal references."""
+175:         return len(self.temporal_references) > 0
+176: 
+177:     @property
+178:     def has_entities(self) -> bool:
+179:         """Check if query mentions entities."""
+180:         return len(self.entities) > 0
+181: 
+182:     def get_all_queries(self) -> list[str]:
+183:         """Get original query plus all expansions."""
+184:         return [self.original_query] + self.expanded_queries
 185: 
-186:             # Filter based on settings
-187:             if not expand_query:
-188:                 result.expanded_queries = []
-189:             if not extract_entities:
-190:                 result.entities = []
-191:             if not detect_temporal:
-192:                 result.temporal_references = []
+186:     def get_entity_names(self) -> list[str]:
+187:         """Get all entity names including aliases."""
+188:         names = []
+189:         for e in self.entities:
+190:             names.append(e.name)
+191:             names.extend(e.aliases)
+192:         return names
 193: 
-194:             return result
-195: 
-196:         except Exception as e:
-197:             logger.warning(f"Query understanding failed: {e}")
-198:             # Return basic result on failure
-199:             return UnderstandingResult(
-200:                 original_query=query,
-201:                 intent=QueryIntent.SEARCH,
-202:                 keywords=self._extract_keywords_simple(query),
-203:                 confidence=0.5,
-204:             )
-205: 
-206:     def _parse_response(self, response: str, original_query: str) -> UnderstandingResult:
-207:         """Parse the LLM response into UnderstandingResult.
+194: 
+195: # Comprehensive prompt that extracts everything in one shot
+196: COMPREHENSIVE_UNDERSTANDING_PROMPT = """You are an expert query understanding system for a corporate memory lake.
+197: 
+198: DATA SOURCES AVAILABLE:
+199: - Slack: Team messages, channels, threads, reactions
+200: - Linear: Issues, projects, cycles, comments, labels
+201: - Notion: Documents, wikis, databases, pages
+202: - Attio: CRM records, companies, contacts, deals, meetings
+203: - Gong: Sales calls, recordings, transcripts, key moments
+204: - GitHub: Repositories, PRs, issues, commits, code reviews
+205: - BambooHR: Employee data, org structure, time off
+206: 
+207: CURRENT DATETIME: {current_datetime}
 208: 
-209:         Args:
-210:             response: Raw LLM response
-211:             original_query: Original query text
+209: QUERY: {query}
+210: 
+211: Analyze this query comprehensively and return a JSON object with ALL of the following:
 212: 
-213:         Returns:
-214:             Parsed UnderstandingResult
-215:         """
-216:         # Clean up response (handle markdown code blocks)
-217:         response = response.strip()
-218:         if response.startswith("```"):
-219:             # Remove markdown code block
-220:             lines = response.split("\n")
-221:             response = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-222: 
-223:         try:
-224:             data = json.loads(response)
-225:         except json.JSONDecodeError:
-226:             logger.warning(f"Failed to parse query understanding response: {response[:100]}")
-227:             return UnderstandingResult(
-228:                 original_query=original_query,
-229:                 intent=QueryIntent.SEARCH,
-230:                 confidence=0.5,
-231:             )
-232: 
-233:         # Map intent
-234:         intent_map = {
-235:             "search": QueryIntent.SEARCH,
-236:             "question": QueryIntent.QUESTION,
-237:             "temporal": QueryIntent.TEMPORAL,
-238:             "comparison": QueryIntent.COMPARISON,
-239:             "navigation": QueryIntent.NAVIGATION,
-240:         }
-241:         intent = intent_map.get(data.get("intent", "search").lower(), QueryIntent.UNKNOWN)
-242: 
-243:         # Parse entities
-244:         entities = []
-245:         for e in data.get("entities", []):
-246:             entities.append(
-247:                 EntityMention(
-248:                     name=e.get("name", ""),
-249:                     entity_type=e.get("type", "CONCEPT"),
-250:                     confidence=e.get("confidence", 1.0),
-251:                 )
-252:             )
-253: 
-254:         # Parse temporal references
-255:         temporal_refs = []
-256:         for t in data.get("temporal_references", []):
-257:             temporal_refs.append(
-258:                 TemporalReference(
-259:                     type=t.get("type", "relative"),
-260:                     value=t.get("value", ""),
-261:                     normalized=t.get("normalized"),
-262:                 )
-263:             )
-264: 
-265:         return UnderstandingResult(
-266:             original_query=original_query,
-267:             intent=intent,
-268:             entities=entities,
-269:             temporal_references=temporal_refs,
-270:             expanded_queries=data.get("expanded_queries", []),
-271:             keywords=data.get("keywords", []),
-272:             confidence=data.get("confidence", 1.0),
-273:         )
+213: {{
+214:     "intent": "search|question|temporal|comparison|navigation|aggregation",
+215:     "answer_type": "list|summary|fact|explanation|comparison|timeline",
+216: 
+217:     "entities": [
+218:         {{
+219:             "name": "exact name",
+220:             "type": "PERSON|ORGANIZATION|PRODUCT|PROJECT|TECHNOLOGY|CONCEPT|LOCATION|EVENT|TEAM|CHANNEL",
+221:             "confidence": 0.0-1.0,
+222:             "aliases": ["alternative names", "nicknames", "abbreviations"],
+223:             "context_hint": "additional context for disambiguation"
+224:         }}
+225:     ],
+226: 
+227:     "relationships": [
+228:         {{
+229:             "from_entity": "entity name",
+230:             "relationship_type": "WORKS_ON|MENTIONED_IN|RELATED_TO|CREATED|OWNS|MANAGES|REPORTS_TO|COLLABORATES_WITH|DISCUSSED_IN|BLOCKED_BY",
+231:             "to_entity": "target entity or null to discover",
+232:             "importance": 0.0-1.0
+233:         }}
+234:     ],
+235: 
+236:     "temporal": [
+237:         {{
+238:             "type": "relative|absolute|range",
+239:             "text": "original temporal phrase",
+240:             "start_date": "ISO 8601 datetime or null",
+241:             "end_date": "ISO 8601 datetime or null"
+242:         }}
+243:     ],
+244: 
+245:     "expanded_queries": [
+246:         "semantically equivalent rephrasing 1",
+247:         "rephrasing targeting different vocabulary 2",
+248:         "more specific version if query is vague"
+249:     ],
+250: 
+251:     "keywords": ["important", "search", "terms", "for", "bm25"],
+252: 
+253:     "source_priority": {{
+254:         "slack": 0.0-1.0,
+255:         "linear": 0.0-1.0,
+256:         "notion": 0.0-1.0,
+257:         "attio": 0.0-1.0,
+258:         "gong": 0.0-1.0,
+259:         "github": 0.0-1.0,
+260:         "bamboohr": 0.0-1.0
+261:     }},
+262: 
+263:     "search_strategy": {{
+264:         "use_vector": true/false,
+265:         "use_graph": true/false,
+266:         "use_keyword": true/false,
+267:         "vector_weight": 0.0-1.0,
+268:         "graph_weight": 0.0-1.0,
+269:         "keyword_weight": 0.0-1.0,
+270:         "graph_depth": 1-3,
+271:         "explore_neighborhoods": true/false,
+272:         "reasoning": "why this strategy"
+273:     }},
 274: 
-275:     def _extract_keywords_simple(self, query: str) -> list[str]:
-276:         """Simple keyword extraction without LLM.
-277: 
-278:         Args:
-279:             query: Query text
-280: 
-281:         Returns:
-282:             List of keywords
-283:         """
-284:         # Simple stopword removal and tokenization
-285:         stopwords = {
-286:             "a",
-287:             "an",
-288:             "the",
-289:             "is",
-290:             "are",
-291:             "was",
-292:             "were",
-293:             "be",
-294:             "been",
-295:             "being",
-296:             "have",
-297:             "has",
-298:             "had",
-299:             "do",
-300:             "does",
-301:             "did",
-302:             "will",
-303:             "would",
-304:             "could",
-305:             "should",
-306:             "may",
-307:             "might",
-308:             "must",
-309:             "shall",
-310:             "can",
-311:             "need",
-312:             "dare",
-313:             "ought",
-314:             "used",
-315:             "to",
-316:             "of",
-317:             "in",
-318:             "for",
-319:             "on",
-320:             "with",
-321:             "at",
-322:             "by",
-323:             "from",
-324:             "as",
-325:             "into",
-326:             "through",
-327:             "during",
-328:             "before",
-329:             "after",
-330:             "above",
-331:             "below",
-332:             "between",
-333:             "under",
-334:             "again",
-335:             "further",
-336:             "then",
-337:             "once",
-338:             "here",
-339:             "there",
-340:             "when",
-341:             "where",
-342:             "why",
-343:             "how",
-344:             "all",
-345:             "each",
-346:             "few",
-347:             "more",
-348:             "most",
-349:             "other",
-350:             "some",
-351:             "such",
-352:             "no",
-353:             "nor",
-354:             "not",
-355:             "only",
-356:             "own",
-357:             "same",
-358:             "so",
-359:             "than",
-360:             "too",
-361:             "very",
-362:             "just",
-363:             "and",
-364:             "but",
-365:             "if",
-366:             "or",
-367:             "because",
-368:             "until",
-369:             "while",
-370:             "what",
-371:             "which",
-372:             "who",
-373:             "whom",
-374:             "this",
-375:             "that",
-376:             "these",
-377:             "those",
-378:             "am",
-379:             "i",
-380:             "me",
-381:             "my",
-382:             "myself",
-383:             "we",
-384:             "our",
-385:             "ours",
-386:             "ourselves",
-387:             "you",
-388:             "your",
-389:             "yours",
-390:             "yourself",
-391:             "yourselves",
-392:             "he",
-393:             "him",
-394:             "his",
-395:             "himself",
-396:             "she",
-397:             "her",
-398:             "hers",
-399:             "herself",
-400:             "it",
-401:             "its",
-402:             "itself",
-403:             "they",
-404:             "them",
-405:             "their",
-406:             "theirs",
-407:             "themselves",
-408:         }
-409: 
-410:         # Tokenize and filter
-411:         words = query.lower().split()
-412:         keywords = [
-413:             w.strip(".,!?;:'\"()[]{}")
-414:             for w in words
-415:             if w.lower().strip(".,!?;:'\"()[]{}") not in stopwords and len(w) > 2
-416:         ]
-417: 
-418:         return keywords
+275:     "follow_up_queries": [
+276:         {{
+277:             "query": "specific follow-up to explore deeper",
+278:             "reasoning": "why this follow-up helps",
+279:             "target_sources": ["slack", "linear"],
+280:             "priority": 0.0-1.0
+281:         }}
+282:     ],
+283: 
+284:     "requires_multi_step": true/false,
+285:     "complexity_score": 0.0-1.0,
+286:     "confidence": 0.0-1.0,
+287:     "reasoning": "brief explanation of your analysis"
+288: }}
+289: 
+290: GUIDELINES:
+291: 1. ENTITIES: Extract ALL mentioned entities. Include likely aliases (e.g., "JavaScript" -> ["JS", "Javascript"]). Use context_hint for ambiguous names.
+292: 
+293: 2. RELATIONSHIPS: Infer likely relationships to explore. If someone asks about a person's work, suggest WORKS_ON relationships. For project questions, suggest RELATED_TO, BLOCKED_BY.
+294: 
+295: 3. TEMPORAL: Compute actual ISO dates from the current datetime. Handle:
+296:    - "last week" -> 7 days ago to now
+297:    - "yesterday" -> that day's full range
+298:    - "Q3" -> July 1 to Sept 30
+299:    - "recently" -> last 14 days
+300:    - Use null for open bounds
+301: 
+302: 4. SOURCE PRIORITY: Set higher weights (0.8-1.0) for likely relevant sources:
+303:    - Technical questions -> github, linear high
+304:    - People questions -> slack, bamboohr high
+305:    - Sales/deals -> attio, gong high
+306:    - Documentation -> notion high
+307:    - Set 0.0-0.3 for unlikely sources
+308: 
+309: 5. SEARCH STRATEGY:
+310:    - Entity-heavy queries -> higher graph_weight
+311:    - Keyword-specific queries -> higher keyword_weight
+312:    - Semantic/conceptual queries -> higher vector_weight
+313:    - Weights should roughly sum to 1.0
+314: 
+315: 6. FOLLOW-UP QUERIES: Generate 2-4 queries that would help if initial results are insufficient:
+316:    - Target under-represented sources
+317:    - Explore specific entities found
+318:    - Narrow down time ranges
+319:    - Try alternative phrasings
+320: 
+321: 7. COMPLEXITY: Set requires_multi_step=true and high complexity_score for:
+322:    - Questions requiring information synthesis
+323:    - Comparisons across multiple entities
+324:    - Queries spanning multiple data sources
+325:    - Aggregation or trend analysis
+326: 
+327: Respond with ONLY the JSON object, no markdown, no explanation."""
+328: 
+329: 
+330: class QueryUnderstanding:
+331:     """Comprehensive LLM-based query understanding.
+332: 
+333:     Extracts ALL information in a single LLM call for efficiency:
+334:     - Intent, entities, relationships
+335:     - Temporal references with computed dates
+336:     - Query expansions and keywords
+337:     - Source prioritization
+338:     - Search strategy recommendations
+339:     - Follow-up queries for agentic search
+340:     """
+341: 
+342:     def __init__(
+343:         self,
+344:         llm_config: LiteLLMConfig | None = None,
+345:         model: str | None = None,
+346:     ) -> None:
+347:         """Initialize query understanding.
+348: 
+349:         Args:
+350:             llm_config: LiteLLM configuration
+351:             model: Optional model override (defaults to config model)
+352:         """
+353:         self._llm_config = llm_config
+354:         self._model = model
+355: 
+356:     async def understand(
+357:         self,
+358:         query: str,
+359:         *,
+360:         expand_query: bool = True,
+361:         extract_entities: bool = True,
+362:         detect_temporal: bool = True,
+363:     ) -> UnderstandingResult:
+364:         """Understand a query comprehensively using a single LLM call.
+365: 
+366:         Args:
+367:             query: The query to understand
+368:             expand_query: Whether to include query expansions in result
+369:             extract_entities: Whether to include entity mentions in result
+370:             detect_temporal: Whether to include temporal references in result
+371: 
+372:         Returns:
+373:             UnderstandingResult with all extracted information
+374:         """
+375:         from khora.config.llm import LiteLLMConfig, acompletion
+376: 
+377:         config = self._llm_config or LiteLLMConfig()
+378:         model = self._model or config.model
+379: 
+380:         # Use appropriate settings for structured extraction
+381:         extraction_config = LiteLLMConfig(
+382:             model=model,
+383:             temperature=0.1,  # Low temperature for consistent extraction
+384:             max_tokens=2000,  # More tokens for comprehensive response
+385:         )
+386: 
+387:         try:
+388:             current_dt = datetime.utcnow().isoformat() + "Z"
+389:             prompt = COMPREHENSIVE_UNDERSTANDING_PROMPT.format(
+390:                 query=query,
+391:                 current_datetime=current_dt,
+392:             )
+393:             response = await acompletion(prompt, extraction_config)
+394: 
+395:             # Parse comprehensive JSON response
+396:             result = self._parse_comprehensive_response(response, query)
+397: 
+398:             # Filter based on settings (but we extracted everything efficiently)
+399:             if not expand_query:
+400:                 result.expanded_queries = []
+401:             if not extract_entities:
+402:                 result.entities = []
+403:                 result.relationships = []
+404:             if not detect_temporal:
+405:                 result.temporal_references = []
+406: 
+407:             return result
+408: 
+409:         except Exception as e:
+410:             logger.warning(f"Query understanding failed: {e}")
+411:             # Return basic result on failure
+412:             return UnderstandingResult(
+413:                 original_query=query,
+414:                 intent=QueryIntent.SEARCH,
+415:                 keywords=self._extract_keywords_simple(query),
+416:                 confidence=0.3,
+417:             )
+418: 
+419:     def _parse_comprehensive_response(self, response: str, original_query: str) -> UnderstandingResult:
+420:         """Parse the comprehensive LLM response.
+421: 
+422:         Args:
+423:             response: Raw LLM response
+424:             original_query: Original query text
+425: 
+426:         Returns:
+427:             Fully populated UnderstandingResult
+428:         """
+429:         # Clean up response (handle markdown code blocks)
+430:         response = response.strip()
+431:         if response.startswith("```"):
+432:             lines = response.split("\n")
+433:             if lines[-1].strip() == "```":
+434:                 response = "\n".join(lines[1:-1])
+435:             else:
+436:                 response = "\n".join(lines[1:])
+437:             response = response.strip()
+438:         if response.startswith("```json"):
+439:             response = response[7:]
+440:         if response.endswith("```"):
+441:             response = response[:-3]
+442: 
+443:         try:
+444:             data = json.loads(response)
+445:         except json.JSONDecodeError as e:
+446:             logger.warning(f"Failed to parse query understanding response: {e}")
+447:             logger.debug(f"Response was: {response[:500]}")
+448:             return UnderstandingResult(
+449:                 original_query=original_query,
+450:                 intent=QueryIntent.SEARCH,
+451:                 confidence=0.3,
+452:             )
+453: 
+454:         # Parse intent
+455:         intent_map = {
+456:             "search": QueryIntent.SEARCH,
+457:             "question": QueryIntent.QUESTION,
+458:             "temporal": QueryIntent.TEMPORAL,
+459:             "comparison": QueryIntent.COMPARISON,
+460:             "navigation": QueryIntent.NAVIGATION,
+461:             "aggregation": QueryIntent.AGGREGATION,
+462:         }
+463:         intent = intent_map.get(data.get("intent", "search").lower(), QueryIntent.UNKNOWN)
+464: 
+465:         # Parse answer type
+466:         answer_map = {
+467:             "list": AnswerType.LIST,
+468:             "summary": AnswerType.SUMMARY,
+469:             "fact": AnswerType.FACT,
+470:             "explanation": AnswerType.EXPLANATION,
+471:             "comparison": AnswerType.COMPARISON,
+472:             "timeline": AnswerType.TIMELINE,
+473:         }
+474:         answer_type = answer_map.get(data.get("answer_type", "summary").lower(), AnswerType.UNKNOWN)
+475: 
+476:         # Parse entities
+477:         entities = []
+478:         for e in data.get("entities", []):
+479:             entities.append(
+480:                 EntityMention(
+481:                     name=e.get("name", ""),
+482:                     entity_type=e.get("type", "CONCEPT"),
+483:                     confidence=float(e.get("confidence", 1.0)),
+484:                     aliases=e.get("aliases", []),
+485:                     context_hint=e.get("context_hint", ""),
+486:                 )
+487:             )
+488: 
+489:         # Parse relationships
+490:         relationships = []
+491:         for r in data.get("relationships", []):
+492:             relationships.append(
+493:                 RelationshipHint(
+494:                     from_entity=r.get("from_entity", ""),
+495:                     relationship_type=r.get("relationship_type", "RELATED_TO"),
+496:                     to_entity=r.get("to_entity"),
+497:                     importance=float(r.get("importance", 1.0)),
+498:                 )
+499:             )
+500: 
+501:         # Parse temporal references
+502:         temporal_refs = []
+503:         for t in data.get("temporal", []):
+504:             start_date = self._parse_iso_date(t.get("start_date"))
+505:             end_date = self._parse_iso_date(t.get("end_date"))
+506:             temporal_refs.append(
+507:                 TemporalReference(
+508:                     type=t.get("type", "relative"),
+509:                     text=t.get("text", ""),
+510:                     start_date=start_date,
+511:                     end_date=end_date,
+512:                 )
+513:             )
+514: 
+515:         # Parse source priority
+516:         sp_data = data.get("source_priority", {})
+517:         source_priority = SourcePriority(
+518:             slack=float(sp_data.get("slack", 1.0)),
+519:             linear=float(sp_data.get("linear", 1.0)),
+520:             notion=float(sp_data.get("notion", 1.0)),
+521:             attio=float(sp_data.get("attio", 1.0)),
+522:             gong=float(sp_data.get("gong", 1.0)),
+523:             github=float(sp_data.get("github", 1.0)),
+524:             bamboohr=float(sp_data.get("bamboohr", 1.0)),
+525:         )
+526: 
+527:         # Parse search strategy
+528:         ss_data = data.get("search_strategy", {})
+529:         search_strategy = SearchStrategy(
+530:             use_vector=ss_data.get("use_vector", True),
+531:             use_graph=ss_data.get("use_graph", True),
+532:             use_keyword=ss_data.get("use_keyword", True),
+533:             vector_weight=float(ss_data.get("vector_weight", 0.4)),
+534:             graph_weight=float(ss_data.get("graph_weight", 0.3)),
+535:             keyword_weight=float(ss_data.get("keyword_weight", 0.3)),
+536:             graph_depth=int(ss_data.get("graph_depth", 2)),
+537:             explore_neighborhoods=ss_data.get("explore_neighborhoods", True),
+538:             strategy_reasoning=ss_data.get("reasoning", ""),
+539:         )
+540: 
+541:         # Parse follow-up queries
+542:         follow_ups = []
+543:         for fq in data.get("follow_up_queries", []):
+544:             follow_ups.append(
+545:                 FollowUpQuery(
+546:                     query=fq.get("query", ""),
+547:                     reasoning=fq.get("reasoning", ""),
+548:                     target_sources=fq.get("target_sources", []),
+549:                     priority=float(fq.get("priority", 1.0)),
+550:                 )
+551:             )
+552: 
+553:         return UnderstandingResult(
+554:             original_query=original_query,
+555:             intent=intent,
+556:             answer_type=answer_type,
+557:             entities=entities,
+558:             relationships=relationships,
+559:             temporal_references=temporal_refs,
+560:             expanded_queries=data.get("expanded_queries", []),
+561:             keywords=data.get("keywords", []),
+562:             source_priority=source_priority,
+563:             search_strategy=search_strategy,
+564:             follow_up_queries=follow_ups,
+565:             requires_multi_step=data.get("requires_multi_step", False),
+566:             complexity_score=float(data.get("complexity_score", 0.5)),
+567:             confidence=float(data.get("confidence", 1.0)),
+568:             reasoning=data.get("reasoning", ""),
+569:         )
+570: 
+571:     def _parse_iso_date(self, date_str: str | None) -> datetime | None:
+572:         """Parse an ISO 8601 date string from LLM output.
+573: 
+574:         Args:
+575:             date_str: ISO date string or None
+576: 
+577:         Returns:
+578:             datetime object or None
+579:         """
+580:         if not date_str or date_str == "null":
+581:             return None
+582: 
+583:         try:
+584:             date_str = date_str.strip()
+585: 
+586:             # Remove trailing Z
+587:             if date_str.endswith("Z"):
+588:                 date_str = date_str[:-1]
+589: 
+590:             # Try common formats
+591:             for fmt in [
+592:                 "%Y-%m-%dT%H:%M:%S.%f",
+593:                 "%Y-%m-%dT%H:%M:%S",
+594:                 "%Y-%m-%dT%H:%M",
+595:                 "%Y-%m-%d",
+596:             ]:
+597:                 try:
+598:                     return datetime.strptime(date_str, fmt)
+599:                 except ValueError:
+600:                     continue
+601: 
+602:             # Last resort
+603:             return datetime.fromisoformat(date_str)
+604: 
+605:         except (ValueError, TypeError) as e:
+606:             logger.debug(f"Failed to parse ISO date '{date_str}': {e}")
+607:             return None
+608: 
+609:     def _extract_keywords_simple(self, query: str) -> list[str]:
+610:         """Simple keyword extraction without LLM (fallback).
+611: 
+612:         Args:
+613:             query: Query text
+614: 
+615:         Returns:
+616:             List of keywords
+617:         """
+618:         stopwords = {
+619:             "a",
+620:             "an",
+621:             "the",
+622:             "is",
+623:             "are",
+624:             "was",
+625:             "were",
+626:             "be",
+627:             "been",
+628:             "being",
+629:             "have",
+630:             "has",
+631:             "had",
+632:             "do",
+633:             "does",
+634:             "did",
+635:             "will",
+636:             "would",
+637:             "could",
+638:             "should",
+639:             "may",
+640:             "might",
+641:             "must",
+642:             "shall",
+643:             "can",
+644:             "need",
+645:             "to",
+646:             "of",
+647:             "in",
+648:             "for",
+649:             "on",
+650:             "with",
+651:             "at",
+652:             "by",
+653:             "from",
+654:             "as",
+655:             "into",
+656:             "through",
+657:             "during",
+658:             "before",
+659:             "after",
+660:             "above",
+661:             "below",
+662:             "between",
+663:             "under",
+664:             "again",
+665:             "further",
+666:             "then",
+667:             "once",
+668:             "here",
+669:             "there",
+670:             "when",
+671:             "where",
+672:             "why",
+673:             "how",
+674:             "all",
+675:             "each",
+676:             "few",
+677:             "more",
+678:             "most",
+679:             "other",
+680:             "some",
+681:             "such",
+682:             "no",
+683:             "nor",
+684:             "not",
+685:             "only",
+686:             "own",
+687:             "same",
+688:             "so",
+689:             "than",
+690:             "too",
+691:             "very",
+692:             "just",
+693:             "and",
+694:             "but",
+695:             "if",
+696:             "or",
+697:             "because",
+698:             "until",
+699:             "while",
+700:             "what",
+701:             "which",
+702:             "who",
+703:             "whom",
+704:             "this",
+705:             "that",
+706:             "these",
+707:             "those",
+708:             "am",
+709:             "i",
+710:             "me",
+711:             "my",
+712:             "myself",
+713:             "we",
+714:             "our",
+715:             "ours",
+716:             "ourselves",
+717:             "you",
+718:             "your",
+719:             "yours",
+720:             "yourself",
+721:             "yourselves",
+722:             "he",
+723:             "him",
+724:             "his",
+725:             "himself",
+726:             "she",
+727:             "her",
+728:             "hers",
+729:             "herself",
+730:             "it",
+731:             "its",
+732:             "itself",
+733:             "they",
+734:             "them",
+735:             "their",
+736:             "theirs",
+737:             "themselves",
+738:             "about",
+739:             "tell",
+740:             "find",
+741:             "show",
+742:             "get",
+743:         }
+744: 
+745:         words = query.lower().split()
+746:         keywords = [
+747:             w.strip(".,!?;:'\"()[]{}")
+748:             for w in words
+749:             if w.lower().strip(".,!?;:'\"()[]{}") not in stopwords and len(w) > 2
+750:         ]
+751: 
+752:         return keywords
 ````
 
 ## File: src/khora/storage/backends/__init__.py
@@ -10495,375 +11306,6 @@ README.md
 66: ]
 ````
 
-## File: src/khora/storage/backends/pgvector.py
-````python
-  1: """pgvector backend for vector embeddings storage.
-  2: 
-  3: Handles storage and retrieval of embeddings for semantic search
-  4: using pgvector extension in PostgreSQL.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from datetime import UTC, datetime
- 10: from typing import TYPE_CHECKING
- 11: from uuid import UUID
- 12: 
- 13: from loguru import logger
- 14: from sqlalchemy import delete, func, select, text, update
- 15: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
- 16: 
- 17: from khora.core.models import Chunk, ChunkMetadata
- 18: from khora.db.models import Base, ChunkModel, EntityModel
- 19: 
- 20: if TYPE_CHECKING:
- 21:     pass
- 22: 
- 23: 
- 24: class PgVectorBackend:
- 25:     """pgvector backend for vector embeddings.
- 26: 
- 27:     Handles all vector operations including chunk storage,
- 28:     similarity search, and entity embeddings.
- 29:     """
- 30: 
- 31:     def __init__(
- 32:         self,
- 33:         database_url: str,
- 34:         *,
- 35:         embedding_dimension: int = 1536,
- 36:         echo: bool = False,
- 37:         pool_size: int = 5,
- 38:         max_overflow: int = 10,
- 39:     ) -> None:
- 40:         """Initialize the pgvector backend.
- 41: 
- 42:         Args:
- 43:             database_url: PostgreSQL connection URL (with pgvector extension)
- 44:             embedding_dimension: Dimension of embedding vectors
- 45:             echo: Enable SQL echo logging
- 46:             pool_size: Connection pool size
- 47:             max_overflow: Maximum overflow connections
- 48:         """
- 49:         # Convert to async URL if needed
- 50:         if database_url.startswith("postgresql://"):
- 51:             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
- 52:         elif database_url.startswith("postgres://"):
- 53:             database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
- 54: 
- 55:         self._database_url = database_url
- 56:         self._embedding_dimension = embedding_dimension
- 57:         self._echo = echo
- 58:         self._pool_size = pool_size
- 59:         self._max_overflow = max_overflow
- 60:         self._engine: AsyncEngine | None = None
- 61:         self._session_factory: async_sessionmaker[AsyncSession] | None = None
- 62: 
- 63:     async def connect(self) -> None:
- 64:         """Establish connection to the database."""
- 65:         if self._engine is not None:
- 66:             return
- 67: 
- 68:         logger.info("Connecting to pgvector...")
- 69:         self._engine = create_async_engine(
- 70:             self._database_url,
- 71:             echo=self._echo,
- 72:             pool_size=self._pool_size,
- 73:             max_overflow=self._max_overflow,
- 74:         )
- 75:         self._session_factory = async_sessionmaker(
- 76:             self._engine,
- 77:             class_=AsyncSession,
- 78:             expire_on_commit=False,
- 79:         )
- 80: 
- 81:         # Ensure pgvector extension is enabled
- 82:         async with self._engine.begin() as conn:
- 83:             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
- 84: 
- 85:         logger.info("Connected to pgvector")
- 86: 
- 87:     async def disconnect(self) -> None:
- 88:         """Close database connections."""
- 89:         if self._engine is not None:
- 90:             logger.info("Disconnecting from pgvector...")
- 91:             await self._engine.dispose()
- 92:             self._engine = None
- 93:             self._session_factory = None
- 94:             logger.info("Disconnected from pgvector")
- 95: 
- 96:     async def is_healthy(self) -> bool:
- 97:         """Check if the backend is healthy and connected."""
- 98:         if self._engine is None or self._session_factory is None:
- 99:             return False
-100:         try:
-101:             async with self._session_factory() as session:
-102:                 await session.execute(select(1))
-103:             return True
-104:         except Exception as e:
-105:             logger.error(f"pgvector health check failed: {e}")
-106:             return False
-107: 
-108:     def _get_session(self) -> AsyncSession:
-109:         """Get a new database session."""
-110:         if self._session_factory is None:
-111:             raise RuntimeError("Backend not connected. Call connect() first.")
-112:         return self._session_factory()
-113: 
-114:     async def create_tables(self) -> None:
-115:         """Create all database tables (for testing/development)."""
-116:         if self._engine is None:
-117:             raise RuntimeError("Backend not connected. Call connect() first.")
-118:         async with self._engine.begin() as conn:
-119:             await conn.run_sync(Base.metadata.create_all)
-120: 
-121:     # =========================================================================
-122:     # Chunk operations
-123:     # =========================================================================
-124: 
-125:     async def create_chunk(self, chunk: Chunk) -> Chunk:
-126:         """Create a new chunk with its embedding."""
-127:         async with self._get_session() as session:
-128:             model = ChunkModel(
-129:                 id=str(chunk.id),
-130:                 namespace_id=str(chunk.namespace_id),
-131:                 document_id=str(chunk.document_id),
-132:                 content=chunk.content,
-133:                 chunk_index=chunk.metadata.chunk_index,
-134:                 start_char=chunk.metadata.start_char,
-135:                 end_char=chunk.metadata.end_char,
-136:                 token_count=chunk.metadata.token_count,
-137:                 metadata_=chunk.metadata.custom,
-138:                 embedding=chunk.embedding,
-139:                 embedding_model=chunk.embedding_model,
-140:                 created_at=chunk.created_at,
-141:             )
-142:             session.add(model)
-143:             await session.commit()
-144:             await session.refresh(model)
-145:             return self._chunk_model_to_domain(model)
-146: 
-147:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
-148:         """Create multiple chunks in a batch."""
-149:         if not chunks:
-150:             return []
-151: 
-152:         async with self._get_session() as session:
-153:             models = [
-154:                 ChunkModel(
-155:                     id=str(chunk.id),
-156:                     namespace_id=str(chunk.namespace_id),
-157:                     document_id=str(chunk.document_id),
-158:                     content=chunk.content,
-159:                     chunk_index=chunk.metadata.chunk_index,
-160:                     start_char=chunk.metadata.start_char,
-161:                     end_char=chunk.metadata.end_char,
-162:                     token_count=chunk.metadata.token_count,
-163:                     metadata_=chunk.metadata.custom,
-164:                     embedding=chunk.embedding,
-165:                     embedding_model=chunk.embedding_model,
-166:                     created_at=chunk.created_at,
-167:                 )
-168:                 for chunk in chunks
-169:             ]
-170:             session.add_all(models)
-171:             await session.commit()
-172:             return chunks
-173: 
-174:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-175:         """Get a chunk by ID."""
-176:         async with self._get_session() as session:
-177:             result = await session.execute(select(ChunkModel).where(ChunkModel.id == str(chunk_id)))
-178:             model = result.scalar_one_or_none()
-179:             return self._chunk_model_to_domain(model) if model else None
-180: 
-181:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-182:         """Get all chunks for a document."""
-183:         async with self._get_session() as session:
-184:             result = await session.execute(
-185:                 select(ChunkModel).where(ChunkModel.document_id == str(document_id)).order_by(ChunkModel.chunk_index)
-186:             )
-187:             return [self._chunk_model_to_domain(m) for m in result.scalars().all()]
-188: 
-189:     async def delete_chunks_by_document(self, document_id: UUID) -> int:
-190:         """Delete all chunks for a document."""
-191:         async with self._get_session() as session:
-192:             result = await session.execute(delete(ChunkModel).where(ChunkModel.document_id == str(document_id)))
-193:             await session.commit()
-194:             return result.rowcount
-195: 
-196:     async def search_similar(
-197:         self,
-198:         namespace_id: UUID,
-199:         query_embedding: list[float],
-200:         *,
-201:         limit: int = 10,
-202:         min_similarity: float = 0.0,
-203:         filter_document_ids: list[UUID] | None = None,
-204:     ) -> list[tuple[Chunk, float]]:
-205:         """Search for similar chunks using vector similarity.
-206: 
-207:         Uses cosine similarity for matching. Returns list of (chunk, similarity_score) tuples.
-208:         """
-209:         async with self._get_session() as session:
-210:             # Build cosine similarity expression
-211:             # pgvector uses <=> for cosine distance, so similarity = 1 - distance
-212:             similarity = 1 - ChunkModel.embedding.cosine_distance(query_embedding)
-213: 
-214:             query = (
-215:                 select(ChunkModel, similarity.label("similarity"))
-216:                 .where(
-217:                     ChunkModel.namespace_id == str(namespace_id),
-218:                     ChunkModel.embedding.is_not(None),
-219:                 )
-220:                 .order_by(similarity.desc())
-221:                 .limit(limit)
-222:             )
-223: 
-224:             if filter_document_ids:
-225:                 query = query.where(ChunkModel.document_id.in_([str(d) for d in filter_document_ids]))
-226: 
-227:             if min_similarity > 0:
-228:                 query = query.where(similarity >= min_similarity)
-229: 
-230:             result = await session.execute(query)
-231:             rows = result.all()
-232: 
-233:             return [(self._chunk_model_to_domain(row.ChunkModel), row.similarity) for row in rows]
-234: 
-235:     def _chunk_model_to_domain(self, model: ChunkModel) -> Chunk:
-236:         """Convert ChunkModel to domain Chunk."""
-237:         return Chunk(
-238:             id=UUID(model.id),
-239:             namespace_id=UUID(model.namespace_id),
-240:             document_id=UUID(model.document_id),
-241:             content=model.content,
-242:             metadata=ChunkMetadata(
-243:                 document_id=UUID(model.document_id),
-244:                 chunk_index=model.chunk_index,
-245:                 start_char=model.start_char,
-246:                 end_char=model.end_char,
-247:                 token_count=model.token_count,
-248:                 custom=model.metadata_,
-249:             ),
-250:             embedding=list(model.embedding) if model.embedding is not None else None,
-251:             embedding_model=model.embedding_model,
-252:             created_at=model.created_at,
-253:         )
-254: 
-255:     # =========================================================================
-256:     # Entity embedding operations
-257:     # =========================================================================
-258: 
-259:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-260:         """Update the embedding for an entity."""
-261:         async with self._get_session() as session:
-262:             await session.execute(
-263:                 update(EntityModel)
-264:                 .where(EntityModel.id == str(entity_id))
-265:                 .values(
-266:                     embedding=embedding,
-267:                     embedding_model=model,
-268:                     updated_at=datetime.now(UTC),
-269:                 )
-270:             )
-271:             await session.commit()
-272: 
-273:     async def search_similar_entities(
-274:         self,
-275:         namespace_id: UUID,
-276:         query_embedding: list[float],
-277:         *,
-278:         limit: int = 10,
-279:         min_similarity: float = 0.0,
-280:     ) -> list[tuple[UUID, float]]:
-281:         """Search for similar entities by embedding.
-282: 
-283:         Returns list of (entity_id, similarity_score) tuples.
-284:         """
-285:         async with self._get_session() as session:
-286:             similarity = 1 - EntityModel.embedding.cosine_distance(query_embedding)
-287: 
-288:             query = (
-289:                 select(EntityModel.id, similarity.label("similarity"))
-290:                 .where(
-291:                     EntityModel.namespace_id == str(namespace_id),
-292:                     EntityModel.embedding.is_not(None),
-293:                 )
-294:                 .order_by(similarity.desc())
-295:                 .limit(limit)
-296:             )
-297: 
-298:             if min_similarity > 0:
-299:                 query = query.where(similarity >= min_similarity)
-300: 
-301:             result = await session.execute(query)
-302:             return [(UUID(row.id), row.similarity) for row in result.all()]
-303: 
-304:     # =========================================================================
-305:     # Utility operations
-306:     # =========================================================================
-307: 
-308:     async def count_chunks(self, namespace_id: UUID) -> int:
-309:         """Count total chunks in a namespace."""
-310:         async with self._get_session() as session:
-311:             result = await session.execute(
-312:                 select(func.count(ChunkModel.id)).where(ChunkModel.namespace_id == str(namespace_id))
-313:             )
-314:             return result.scalar_one()
-315: 
-316:     async def list_chunks(
-317:         self,
-318:         namespace_id: UUID,
-319:         *,
-320:         limit: int = 1000,
-321:         offset: int = 0,
-322:     ) -> list[Chunk]:
-323:         """List chunks in a namespace.
-324: 
-325:         Args:
-326:             namespace_id: Namespace ID
-327:             limit: Maximum chunks to return
-328:             offset: Offset for pagination
-329: 
-330:         Returns:
-331:             List of chunks
-332:         """
-333:         async with self._get_session() as session:
-334:             result = await session.execute(
-335:                 select(ChunkModel)
-336:                 .where(ChunkModel.namespace_id == str(namespace_id))
-337:                 .order_by(ChunkModel.created_at.desc())
-338:                 .limit(limit)
-339:                 .offset(offset)
-340:             )
-341:             rows = result.scalars().all()
-342:             return [self._chunk_from_model(row) for row in rows]
-343: 
-344:     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
-345:         """Get statistics about embeddings in a namespace."""
-346:         async with self._get_session() as session:
-347:             # Count chunks with embeddings
-348:             chunk_count = await session.execute(
-349:                 select(func.count(ChunkModel.id)).where(
-350:                     ChunkModel.namespace_id == str(namespace_id),
-351:                     ChunkModel.embedding.is_not(None),
-352:                 )
-353:             )
-354:             # Count entities with embeddings
-355:             entity_count = await session.execute(
-356:                 select(func.count(EntityModel.id)).where(
-357:                     EntityModel.namespace_id == str(namespace_id),
-358:                     EntityModel.embedding.is_not(None),
-359:                 )
-360:             )
-361: 
-362:             return {
-363:                 "chunk_embeddings": chunk_count.scalar_one(),
-364:                 "entity_embeddings": entity_count.scalar_one(),
-365:             }
-````
-
 ## File: src/khora/storage/backends/postgresql.py
 ````python
   1: """PostgreSQL backend for relational data storage.
@@ -12053,699 +12495,906 @@ README.md
  43: 
  44: 
  45: @dataclass
- 46: class QueryResult:
- 47:     """Result from a query."""
+ 46: class SearchMethodContribution:
+ 47:     """Tracks which search methods contributed to results."""
  48: 
- 49:     chunks: list[tuple[Chunk, float]] = field(default_factory=list)
- 50:     entities: list[tuple[Entity, float]] = field(default_factory=list)
- 51:     graph_context: dict[str, Any] = field(default_factory=dict)
- 52:     metadata: dict[str, Any] = field(default_factory=dict)
- 53: 
- 54:     @property
- 55:     def top_chunks(self) -> list[Chunk]:
- 56:         """Get top chunks without scores."""
- 57:         return [chunk for chunk, _ in self.chunks]
- 58: 
- 59:     @property
- 60:     def top_entities(self) -> list[Entity]:
- 61:         """Get top entities without scores."""
- 62:         return [entity for entity, _ in self.entities]
- 63: 
- 64:     def get_context_text(self, max_chunks: int = 5) -> str:
- 65:         """Get concatenated text from top chunks for LLM context."""
- 66:         texts = []
- 67:         for chunk, score in self.chunks[:max_chunks]:
- 68:             texts.append(chunk.content)
- 69:         return "\n\n---\n\n".join(texts)
+ 49:     vector: int = 0  # Number of results from vector search
+ 50:     graph: int = 0  # Number of results from graph search
+ 51:     keyword: int = 0  # Number of results from keyword search
+ 52: 
+ 53:     # Detailed breakdown
+ 54:     vector_chunks: list[str] = field(default_factory=list)  # Chunk IDs from vector
+ 55:     graph_chunks: list[str] = field(default_factory=list)  # Chunk IDs from graph
+ 56:     keyword_chunks: list[str] = field(default_factory=list)  # Chunk IDs from keyword
+ 57: 
+ 58:     def to_dict(self) -> dict[str, Any]:
+ 59:         """Convert to dictionary."""
+ 60:         return {
+ 61:             "vector": {"count": self.vector, "chunk_ids": self.vector_chunks[:10]},
+ 62:             "graph": {"count": self.graph, "chunk_ids": self.graph_chunks[:10]},
+ 63:             "keyword": {"count": self.keyword, "chunk_ids": self.keyword_chunks[:10]},
+ 64:         }
+ 65: 
+ 66: 
+ 67: @dataclass
+ 68: class GraphTraversalInfo:
+ 69:     """Information about graph elements triggered during search."""
  70: 
- 71: 
- 72: @dataclass
- 73: class QueryConfig:
- 74:     """Configuration for query execution."""
+ 71:     entities_searched: list[str] = field(default_factory=list)  # Entity names searched
+ 72:     entities_linked: list[str] = field(default_factory=list)  # Entities linked from query
+ 73:     relationships_traversed: list[tuple[str, str, str]] = field(default_factory=list)  # (from, rel, to)
+ 74:     neighborhood_depth: int = 0
  75: 
- 76:     # Search mode
- 77:     mode: SearchMode = SearchMode.HYBRID
- 78: 
- 79:     # Result limits
- 80:     max_chunks: int = 10
- 81:     max_entities: int = 10
- 82:     max_graph_depth: int = 2
- 83: 
- 84:     # Similarity thresholds
- 85:     min_chunk_similarity: float = 0.3
- 86:     min_entity_similarity: float = 0.3
+ 76:     def to_dict(self) -> dict[str, Any]:
+ 77:         """Convert to dictionary."""
+ 78:         return {
+ 79:             "entities_searched": self.entities_searched[:20],
+ 80:             "entities_linked": self.entities_linked[:10],
+ 81:             "relationships_traversed": [
+ 82:                 {"from": f, "relationship": r, "to": t} for f, r, t in self.relationships_traversed[:20]
+ 83:             ],
+ 84:             "neighborhood_depth": self.neighborhood_depth,
+ 85:         }
+ 86: 
  87: 
- 88:     # Fusion weights
- 89:     vector_weight: float = 0.5
- 90:     graph_weight: float = 0.3
- 91:     keyword_weight: float = 0.2
- 92: 
- 93:     # RRF parameter
- 94:     rrf_k: int = 60
- 95: 
- 96:     # Temporal settings
- 97:     apply_recency_bias: bool = False
- 98:     recency_weight: float = 0.2
- 99:     recency_decay_days: float = 30.0
-100: 
-101:     # Query understanding settings
-102:     enable_query_understanding: bool = True
-103:     enable_query_expansion: bool = True
-104:     enable_entity_extraction: bool = True
-105:     enable_temporal_detection: bool = True
-106: 
-107:     # Entity linking settings
-108:     enable_entity_linking: bool = True
-109:     entity_linking_fuzzy_threshold: float = 0.8
-110:     entity_linking_embedding_threshold: float = 0.7
-111:     entity_linking_max_candidates: int = 5
+ 88: @dataclass
+ 89: class TemporalInfo:
+ 90:     """Information about temporal filtering applied."""
+ 91: 
+ 92:     detected: bool = False
+ 93:     filter_applied: bool = False
+ 94:     time_start: Any = None  # datetime or None
+ 95:     time_end: Any = None  # datetime or None
+ 96:     reference_text: str = ""  # Original temporal reference like "last 7 days"
+ 97: 
+ 98:     def to_dict(self) -> dict[str, Any]:
+ 99:         """Convert to dictionary."""
+100:         return {
+101:             "detected": self.detected,
+102:             "filter_applied": self.filter_applied,
+103:             "time_start": self.time_start.isoformat() if self.time_start else None,
+104:             "time_end": self.time_end.isoformat() if self.time_end else None,
+105:             "reference_text": self.reference_text,
+106:         }
+107: 
+108: 
+109: @dataclass
+110: class QueryResult:
+111:     """Result from a query with enhanced metadata."""
 112: 
-113:     # Reranking settings
-114:     enable_reranking: bool = False
-115:     reranking_method: str = "cross_encoder"
-116:     reranking_top_n: int = 50
-117:     reranking_final_k: int = 10
-118: 
-119:     # Keyword search settings
-120:     enable_keyword_search: bool = True
-121:     keyword_search_method: str = "bm25"
+113:     chunks: list[tuple[Chunk, float]] = field(default_factory=list)
+114:     entities: list[tuple[Entity, float]] = field(default_factory=list)
+115:     graph_context: dict[str, Any] = field(default_factory=dict)
+116:     metadata: dict[str, Any] = field(default_factory=dict)
+117: 
+118:     # Enhanced tracking
+119:     search_contributions: SearchMethodContribution | None = None
+120:     graph_info: GraphTraversalInfo | None = None
+121:     temporal_info: TemporalInfo | None = None
 122: 
-123:     @classmethod
-124:     def from_settings(cls, settings: Any) -> QueryConfig:
-125:         """Create QueryConfig from QuerySettings.
-126: 
-127:         Args:
-128:             settings: QuerySettings from KhoraConfig
-129: 
-130:         Returns:
-131:             QueryConfig instance
-132:         """
-133:         mode_map = {
-134:             "vector": SearchMode.VECTOR,
-135:             "graph": SearchMode.GRAPH,
-136:             "hybrid": SearchMode.HYBRID,
-137:             "all": SearchMode.ALL,
-138:         }
+123:     @property
+124:     def top_chunks(self) -> list[Chunk]:
+125:         """Get top chunks without scores."""
+126:         return [chunk for chunk, _ in self.chunks]
+127: 
+128:     @property
+129:     def top_entities(self) -> list[Entity]:
+130:         """Get top entities without scores."""
+131:         return [entity for entity, _ in self.entities]
+132: 
+133:     def get_context_text(self, max_chunks: int = 5) -> str:
+134:         """Get concatenated text from top chunks for LLM context."""
+135:         texts = []
+136:         for chunk, score in self.chunks[:max_chunks]:
+137:             texts.append(chunk.content)
+138:         return "\n\n---\n\n".join(texts)
 139: 
-140:         return cls(
-141:             mode=mode_map.get(settings.default_mode.lower(), SearchMode.HYBRID),
-142:             min_chunk_similarity=settings.min_chunk_similarity,
-143:             min_entity_similarity=settings.min_entity_similarity,
-144:             vector_weight=settings.vector_weight,
-145:             graph_weight=settings.graph_weight,
-146:             keyword_weight=settings.keyword_weight,
-147:             apply_recency_bias=settings.apply_recency_bias,
-148:             recency_weight=settings.recency_weight,
-149:             recency_decay_days=settings.recency_decay_days,
-150:             # Query understanding
-151:             enable_query_understanding=settings.understanding.enabled,
-152:             enable_query_expansion=settings.understanding.expand_query,
-153:             enable_entity_extraction=settings.understanding.extract_entities,
-154:             enable_temporal_detection=settings.understanding.detect_temporal,
-155:             # Entity linking
-156:             enable_entity_linking=settings.entity_linking.enabled,
-157:             entity_linking_fuzzy_threshold=settings.entity_linking.fuzzy_threshold,
-158:             entity_linking_embedding_threshold=settings.entity_linking.embedding_threshold,
-159:             entity_linking_max_candidates=settings.entity_linking.max_candidates,
-160:             # Reranking
-161:             enable_reranking=settings.reranking.enabled,
-162:             reranking_method=settings.reranking.method,
-163:             reranking_top_n=settings.reranking.top_n,
-164:             reranking_final_k=settings.reranking.final_k,
-165:             # Keyword search
-166:             enable_keyword_search=settings.keyword_search.enabled,
-167:             keyword_search_method=settings.keyword_search.method,
-168:         )
-169: 
-170: 
-171: class HybridQueryEngine:
-172:     """Hybrid query engine combining multiple search methods.
-173: 
-174:     Supports:
-175:     - Vector similarity search on chunks and entities
-176:     - Graph traversal for related entities
-177:     - BM25 keyword search
-178:     - Reciprocal Rank Fusion for combining results
-179:     - Temporal filtering and recency bias
-180:     - LLM-based query understanding
-181:     - Entity linking
-182:     - Neural reranking
-183:     """
-184: 
-185:     def __init__(
-186:         self,
-187:         storage: StorageCoordinator,
-188:         embedder: Embedder | None = None,
-189:         config: QueryConfig | None = None,
-190:         llm_config: LiteLLMConfig | None = None,
-191:     ) -> None:
-192:         """Initialize the query engine.
-193: 
-194:         Args:
-195:             storage: StorageCoordinator for data access
-196:             embedder: Embedder for query embedding
-197:             config: Query configuration
-198:             llm_config: LLM configuration for understanding/reranking
-199:         """
-200:         self._storage = storage
-201:         self._embedder = embedder
-202:         self._config = config or QueryConfig()
-203:         self._llm_config = llm_config
-204: 
-205:         # Initialize query understanding
-206:         self._query_understanding = QueryUnderstanding(llm_config=llm_config)
-207: 
-208:         # Entity linker (created per-query with embedder)
-209:         self._entity_linker: EntityLinker | None = None
-210: 
-211:         # Keyword searcher (built per namespace)
-212:         self._keyword_searchers: dict[str, KeywordSearcher] = {}
-213: 
-214:     async def query(
-215:         self,
-216:         query_text: str,
-217:         namespace_id: UUID,
-218:         *,
-219:         config: QueryConfig | None = None,
-220:         temporal_filter: TemporalFilter | None = None,
-221:         context: ACLContext | None = None,
-222:     ) -> QueryResult:
-223:         """Execute a hybrid query with optional enhanced pipeline.
-224: 
-225:         The query pipeline:
-226:         1. Query Understanding (optional) - Extract intent, entities, temporal refs
-227:         2. Entity Linking (optional) - Link mentions to stored entities
-228:         3. Multi-source Search - Vector, graph, keyword (BM25)
-229:         4. RRF Fusion - Combine results
-230:         5. Temporal Filtering - Apply time constraints
-231:         6. Reranking (optional) - Neural re-ranking
-232:         7. Final Limiting - Return top results
-233: 
-234:         Args:
-235:             query_text: Query text
-236:             namespace_id: Namespace to search in
-237:             config: Optional query config override
-238:             temporal_filter: Optional temporal filter
-239:             context: Optional ACL context for permission filtering
-240: 
-241:         Returns:
-242:             QueryResult with matched chunks and entities
-243:         """
-244:         cfg = config or self._config
-245: 
-246:         logger.debug(f"Executing query: {query_text[:50]}... (mode={cfg.mode.name})")
-247: 
-248:         # Initialize metadata
-249:         metadata: dict[str, Any] = {
-250:             "query": query_text,
-251:             "mode": cfg.mode.name,
-252:             "namespace_id": str(namespace_id),
-253:         }
-254: 
-255:         # Step 1: Query Understanding
-256:         understanding: UnderstandingResult | None = None
-257:         if cfg.enable_query_understanding:
-258:             try:
-259:                 understanding = await self._query_understanding.understand(
-260:                     query_text,
-261:                     expand_query=cfg.enable_query_expansion,
-262:                     extract_entities=cfg.enable_entity_extraction,
-263:                     detect_temporal=cfg.enable_temporal_detection,
-264:                 )
-265:                 metadata["understanding"] = {
-266:                     "intent": understanding.intent.name,
-267:                     "entities": [e.name for e in understanding.entities],
-268:                     "temporal": understanding.has_temporal,
-269:                     "expanded_queries": understanding.expanded_queries,
-270:                     "keywords": understanding.keywords,
-271:                 }
-272:                 logger.debug(
-273:                     f"Query understanding: intent={understanding.intent.name}, entities={len(understanding.entities)}"
-274:                 )
-275:             except Exception as e:
-276:                 logger.warning(f"Query understanding failed: {e}")
-277: 
-278:         # Step 2: Entity Linking
-279:         linking_result: LinkingResult | None = None
-280:         linked_entity_ids: list[UUID] = []
-281:         if cfg.enable_entity_linking and understanding and understanding.entities:
-282:             try:
-283:                 linker = EntityLinker(
-284:                     self._storage,
-285:                     self._embedder,
-286:                     fuzzy_threshold=cfg.entity_linking_fuzzy_threshold,
-287:                     embedding_threshold=cfg.entity_linking_embedding_threshold,
-288:                     max_candidates=cfg.entity_linking_max_candidates,
-289:                 )
-290:                 linking_result = await linker.link(understanding.entities, namespace_id)
-291:                 linked_entity_ids = linking_result.get_linked_entity_ids()
-292:                 metadata["entity_linking"] = {
-293:                     "total_mentions": linking_result.total_mentions,
-294:                     "linked_count": linking_result.linked_count,
-295:                     "success_rate": linking_result.success_rate,
-296:                 }
-297:                 logger.debug(f"Entity linking: {linking_result.linked_count}/{linking_result.total_mentions} linked")
-298:             except Exception as e:
-299:                 logger.warning(f"Entity linking failed: {e}")
-300: 
-301:         # Determine queries to search (original + expansions)
-302:         queries_to_search = [query_text]
-303:         if understanding and cfg.enable_query_expansion:
-304:             queries_to_search.extend(understanding.expanded_queries[:2])  # Limit expansions
+140:     def get_full_metadata(self) -> dict[str, Any]:
+141:         """Get complete metadata including search method contributions."""
+142:         result = dict(self.metadata)
+143:         if self.search_contributions:
+144:             result["search_methods"] = self.search_contributions.to_dict()
+145:         if self.graph_info:
+146:             result["graph_traversal"] = self.graph_info.to_dict()
+147:         if self.temporal_info:
+148:             result["temporal"] = self.temporal_info.to_dict()
+149:         return result
+150: 
+151: 
+152: @dataclass
+153: class QueryConfig:
+154:     """Configuration for query execution."""
+155: 
+156:     # Search mode
+157:     mode: SearchMode = SearchMode.HYBRID
+158: 
+159:     # Result limits
+160:     max_chunks: int = 10
+161:     max_entities: int = 10
+162:     max_graph_depth: int = 2
+163: 
+164:     # Similarity thresholds
+165:     min_chunk_similarity: float = 0.3
+166:     min_entity_similarity: float = 0.3
+167: 
+168:     # Fusion weights
+169:     vector_weight: float = 0.5
+170:     graph_weight: float = 0.3
+171:     keyword_weight: float = 0.2
+172: 
+173:     # RRF parameter
+174:     rrf_k: int = 60
+175: 
+176:     # Temporal settings
+177:     apply_recency_bias: bool = False
+178:     recency_weight: float = 0.2
+179:     recency_decay_days: float = 30.0
+180: 
+181:     # Query understanding settings
+182:     enable_query_understanding: bool = True
+183:     enable_query_expansion: bool = True
+184:     enable_entity_extraction: bool = True
+185:     enable_temporal_detection: bool = True
+186: 
+187:     # Entity linking settings
+188:     enable_entity_linking: bool = True
+189:     entity_linking_fuzzy_threshold: float = 0.8
+190:     entity_linking_embedding_threshold: float = 0.7
+191:     entity_linking_max_candidates: int = 5
+192: 
+193:     # Reranking settings
+194:     enable_reranking: bool = False
+195:     reranking_method: str = "cross_encoder"
+196:     reranking_top_n: int = 50
+197:     reranking_final_k: int = 10
+198: 
+199:     # Keyword search settings
+200:     enable_keyword_search: bool = True
+201:     keyword_search_method: str = "bm25"
+202: 
+203:     @classmethod
+204:     def from_settings(cls, settings: Any) -> QueryConfig:
+205:         """Create QueryConfig from QuerySettings.
+206: 
+207:         Args:
+208:             settings: QuerySettings from KhoraConfig
+209: 
+210:         Returns:
+211:             QueryConfig instance
+212:         """
+213:         mode_map = {
+214:             "vector": SearchMode.VECTOR,
+215:             "graph": SearchMode.GRAPH,
+216:             "hybrid": SearchMode.HYBRID,
+217:             "all": SearchMode.ALL,
+218:         }
+219: 
+220:         return cls(
+221:             mode=mode_map.get(settings.default_mode.lower(), SearchMode.HYBRID),
+222:             min_chunk_similarity=settings.min_chunk_similarity,
+223:             min_entity_similarity=settings.min_entity_similarity,
+224:             vector_weight=settings.vector_weight,
+225:             graph_weight=settings.graph_weight,
+226:             keyword_weight=settings.keyword_weight,
+227:             apply_recency_bias=settings.apply_recency_bias,
+228:             recency_weight=settings.recency_weight,
+229:             recency_decay_days=settings.recency_decay_days,
+230:             # Query understanding
+231:             enable_query_understanding=settings.understanding.enabled,
+232:             enable_query_expansion=settings.understanding.expand_query,
+233:             enable_entity_extraction=settings.understanding.extract_entities,
+234:             enable_temporal_detection=settings.understanding.detect_temporal,
+235:             # Entity linking
+236:             enable_entity_linking=settings.entity_linking.enabled,
+237:             entity_linking_fuzzy_threshold=settings.entity_linking.fuzzy_threshold,
+238:             entity_linking_embedding_threshold=settings.entity_linking.embedding_threshold,
+239:             entity_linking_max_candidates=settings.entity_linking.max_candidates,
+240:             # Reranking
+241:             enable_reranking=settings.reranking.enabled,
+242:             reranking_method=settings.reranking.method,
+243:             reranking_top_n=settings.reranking.top_n,
+244:             reranking_final_k=settings.reranking.final_k,
+245:             # Keyword search
+246:             enable_keyword_search=settings.keyword_search.enabled,
+247:             keyword_search_method=settings.keyword_search.method,
+248:         )
+249: 
+250: 
+251: class HybridQueryEngine:
+252:     """Hybrid query engine combining multiple search methods.
+253: 
+254:     Supports:
+255:     - Vector similarity search on chunks and entities
+256:     - Graph traversal for related entities
+257:     - BM25 keyword search
+258:     - Reciprocal Rank Fusion for combining results
+259:     - Temporal filtering and recency bias
+260:     - LLM-based query understanding
+261:     - Entity linking
+262:     - Neural reranking
+263:     """
+264: 
+265:     def __init__(
+266:         self,
+267:         storage: StorageCoordinator,
+268:         embedder: Embedder | None = None,
+269:         config: QueryConfig | None = None,
+270:         llm_config: LiteLLMConfig | None = None,
+271:     ) -> None:
+272:         """Initialize the query engine.
+273: 
+274:         Args:
+275:             storage: StorageCoordinator for data access
+276:             embedder: Embedder for query embedding
+277:             config: Query configuration
+278:             llm_config: LLM configuration for understanding/reranking
+279:         """
+280:         self._storage = storage
+281:         self._embedder = embedder
+282:         self._config = config or QueryConfig()
+283:         self._llm_config = llm_config
+284: 
+285:         # Initialize query understanding
+286:         self._query_understanding = QueryUnderstanding(llm_config=llm_config)
+287: 
+288:         # Entity linker (created per-query with embedder)
+289:         self._entity_linker: EntityLinker | None = None
+290: 
+291:         # Keyword searcher (built per namespace)
+292:         self._keyword_searchers: dict[str, KeywordSearcher] = {}
+293: 
+294:     async def query(
+295:         self,
+296:         query_text: str,
+297:         namespace_id: UUID,
+298:         *,
+299:         config: QueryConfig | None = None,
+300:         temporal_filter: TemporalFilter | None = None,
+301:         context: ACLContext | None = None,
+302:         agentic: bool = False,
+303:     ) -> QueryResult:
+304:         """Execute a hybrid query with optional enhanced pipeline.
 305: 
-306:         # Step 3: Execute searches
-307:         all_chunk_results: dict[str, list[tuple[Any, float]]] = {}
-308:         all_entity_results: dict[str, list[tuple[Any, float]]] = {}
-309:         graph_context: dict[str, Any] = {}
-310: 
-311:         for i, q in enumerate(queries_to_search):
-312:             suffix = "" if i == 0 else f"_exp{i}"
-313: 
-314:             # Get query embedding
-315:             query_embedding = None
-316:             if self._embedder and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
-317:                 query_embedding = await self._embedder.embed(q)
-318: 
-319:             # Execute searches in parallel based on mode
-320:             tasks = []
-321: 
-322:             if cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
-323:                 tasks.append(self._vector_search(namespace_id, query_embedding, cfg))
-324: 
-325:             if cfg.mode in (SearchMode.GRAPH, SearchMode.HYBRID, SearchMode.ALL):
-326:                 tasks.append(self._graph_search(namespace_id, q, query_embedding, cfg, linked_entity_ids))
-327: 
-328:             if cfg.mode == SearchMode.ALL and cfg.enable_keyword_search:
-329:                 # Use BM25 keyword search with extracted keywords if available
-330:                 keywords = understanding.keywords if understanding else None
-331:                 tasks.append(self._keyword_search_bm25(namespace_id, q, cfg, keywords))
+306:         The query pipeline:
+307:         1. Query Understanding (optional) - Extract intent, entities, temporal refs
+308:         2. Entity Linking (optional) - Link mentions to stored entities
+309:         3. Multi-source Search - Vector, graph, keyword (BM25)
+310:         4. RRF Fusion - Combine results
+311:         5. Temporal Filtering - Apply time constraints
+312:         6. Reranking (optional) - Neural re-ranking
+313:         7. Final Limiting - Return top results
+314: 
+315:         Args:
+316:             query_text: Query text
+317:             namespace_id: Namespace to search in
+318:             config: Optional query config override
+319:             temporal_filter: Optional temporal filter
+320:             context: Optional ACL context for permission filtering
+321:             agentic: If True, use agentic two-step exploration
+322: 
+323:         Returns:
+324:             QueryResult with matched chunks and entities
+325:         """
+326:         # Agentic mode - use two-step exploration agent
+327:         if agentic:
+328:             from .agentic import AgenticSearchAgent
+329: 
+330:             agent = AgenticSearchAgent(self, self._llm_config)
+331:             agentic_result = await agent.search(query_text, namespace_id, config)
 332: 
-333:             # Execute in parallel
-334:             results = await asyncio.gather(*tasks, return_exceptions=True)
-335: 
-336:             # Process results
-337:             for j, result in enumerate(results):
-338:                 if isinstance(result, Exception):
-339:                     logger.error(f"Search {j} failed: {result}")
-340:                     continue
-341: 
-342:                 if isinstance(result, dict):
-343:                     if "chunks" in result:
-344:                         source = result.get("source", f"search_{j}") + suffix
-345:                         all_chunk_results[source] = result["chunks"]
-346:                     if "entities" in result:
-347:                         source = result.get("source", f"search_{j}") + suffix
-348:                         all_entity_results[source] = result["entities"]
-349:                     if "graph_context" in result:
-350:                         graph_context.update(result["graph_context"])
-351: 
-352:         # Step 4: Apply RRF fusion
-353:         fused_chunks = []
-354:         if all_chunk_results:
-355:             weights = {
-356:                 "vector": cfg.vector_weight,
-357:                 "graph": cfg.graph_weight,
-358:                 "keyword": cfg.keyword_weight,
-359:             }
-360:             # Add weights for expanded query results
-361:             for key in all_chunk_results:
-362:                 if "_exp" in key:
-363:                     base_source = key.split("_exp")[0]
-364:                     weights[key] = weights.get(base_source, cfg.vector_weight) * 0.7  # Discount expansions
-365: 
-366:             fused_chunks = reciprocal_rank_fusion(
-367:                 all_chunk_results,
-368:                 k=cfg.rrf_k,
-369:                 weights=weights,
-370:                 id_extractor=lambda c: str(c.id),
-371:             )
-372: 
-373:         fused_entities = []
-374:         if all_entity_results:
-375:             weights = {
-376:                 "vector": cfg.vector_weight,
-377:                 "graph": cfg.graph_weight,
-378:             }
-379:             fused_entities = reciprocal_rank_fusion(
-380:                 all_entity_results,
-381:                 k=cfg.rrf_k,
-382:                 weights=weights,
-383:                 id_extractor=lambda e: str(e.id),
-384:             )
-385: 
-386:         # Boost linked entities
-387:         if linked_entity_ids:
-388:             boosted_entities = []
-389:             for entity, score in fused_entities:
-390:                 if entity.id in linked_entity_ids:
-391:                     boosted_entities.append((entity, score * 1.5))  # 50% boost
-392:                 else:
-393:                     boosted_entities.append((entity, score))
-394:             fused_entities = sorted(boosted_entities, key=lambda x: x[1], reverse=True)
-395: 
-396:         # Step 5: Apply temporal filter
-397:         if temporal_filter:
-398:             fused_chunks = [(c, s) for c, s in fused_chunks if temporal_filter.matches(c.created_at)]
-399: 
-400:         # Apply recency bias
-401:         if cfg.apply_recency_bias:
-402:             temporal_query = TemporalQuery(query_text).with_recency_bias(
-403:                 cfg.recency_weight,
-404:                 cfg.recency_decay_days,
-405:             )
-406:             fused_chunks = [(c, s * temporal_query.calculate_recency_score(c.created_at)) for c, s in fused_chunks]
-407:             fused_chunks.sort(key=lambda x: x[1], reverse=True)
-408: 
-409:         # Step 6: Reranking (optional)
-410:         if cfg.enable_reranking and fused_chunks:
-411:             try:
-412:                 reranker = create_reranker(
-413:                     method=cfg.reranking_method,
-414:                     llm_config=self._llm_config,
-415:                 )
-416:                 candidates = [
-417:                     RerankCandidate(
-418:                         item=chunk,
-419:                         original_score=score,
-420:                         content=chunk.content,
-421:                         metadata=chunk.metadata,
-422:                     )
-423:                     for chunk, score in fused_chunks[: cfg.reranking_top_n]
-424:                 ]
-425:                 reranked = await reranker.rerank(query_text, candidates, top_k=cfg.reranking_final_k)
-426:                 fused_chunks = [(r.item, r.final_score) for r in reranked]
-427:                 metadata["reranking"] = {"method": cfg.reranking_method, "reranked_count": len(fused_chunks)}
-428:                 logger.debug(f"Reranked {len(candidates)} candidates to {len(fused_chunks)} results")
-429:             except Exception as e:
-430:                 logger.warning(f"Reranking failed: {e}")
-431: 
-432:         # Step 7: Limit results
-433:         fused_chunks = fused_chunks[: cfg.max_chunks]
-434:         fused_entities = fused_entities[: cfg.max_entities]
-435: 
-436:         return QueryResult(
-437:             chunks=fused_chunks,
-438:             entities=fused_entities,
-439:             graph_context=graph_context,
-440:             metadata=metadata,
-441:         )
-442: 
-443:     async def _vector_search(
-444:         self,
-445:         namespace_id: UUID,
-446:         query_embedding: list[float],
-447:         config: QueryConfig,
-448:     ) -> dict[str, Any]:
-449:         """Perform vector similarity search."""
-450:         # Search chunks
-451:         chunk_results = await self._storage.search_similar_chunks(
-452:             namespace_id,
-453:             query_embedding,
-454:             limit=config.max_chunks * 2,  # Get extra for fusion
-455:             min_similarity=config.min_chunk_similarity,
-456:         )
+333:             # Convert to QueryResult
+334:             return QueryResult(
+335:                 chunks=[(c, s) for c, s, _ in agentic_result.chunks],
+336:                 entities=agentic_result.entities,
+337:                 metadata={
+338:                     "agentic": True,
+339:                     "summary": agentic_result.summary,
+340:                     "trace": agentic_result.trace.to_dict() if agentic_result.trace else None,
+341:                     **agentic_result.metadata,
+342:                 },
+343:             )
+344: 
+345:         cfg = config or self._config
+346: 
+347:         logger.debug(f"Executing query: {query_text[:50]}... (mode={cfg.mode.name})")
+348: 
+349:         # Initialize tracking objects
+350:         search_contributions = SearchMethodContribution()
+351:         graph_info = GraphTraversalInfo()
+352:         temporal_info = TemporalInfo()
+353: 
+354:         # Initialize metadata
+355:         metadata: dict[str, Any] = {
+356:             "query": query_text,
+357:             "mode": cfg.mode.name,
+358:             "namespace_id": str(namespace_id),
+359:         }
+360: 
+361:         # Step 1: Query Understanding
+362:         understanding: UnderstandingResult | None = None
+363:         if cfg.enable_query_understanding:
+364:             try:
+365:                 understanding = await self._query_understanding.understand(
+366:                     query_text,
+367:                     expand_query=cfg.enable_query_expansion,
+368:                     extract_entities=cfg.enable_entity_extraction,
+369:                     detect_temporal=cfg.enable_temporal_detection,
+370:                 )
+371:                 metadata["understanding"] = {
+372:                     "intent": understanding.intent.name,
+373:                     "answer_type": understanding.answer_type.name,
+374:                     "entities": [e.name for e in understanding.entities],
+375:                     "entity_aliases": {e.name: e.aliases for e in understanding.entities if e.aliases},
+376:                     "relationships": [
+377:                         {"from": r.from_entity, "type": r.relationship_type, "to": r.to_entity}
+378:                         for r in understanding.relationships
+379:                     ],
+380:                     "temporal": understanding.has_temporal,
+381:                     "expanded_queries": understanding.expanded_queries,
+382:                     "keywords": understanding.keywords,
+383:                     "source_priority": {
+384:                         "slack": understanding.source_priority.slack,
+385:                         "linear": understanding.source_priority.linear,
+386:                         "notion": understanding.source_priority.notion,
+387:                         "attio": understanding.source_priority.attio,
+388:                         "gong": understanding.source_priority.gong,
+389:                         "github": understanding.source_priority.github,
+390:                         "bamboohr": understanding.source_priority.bamboohr,
+391:                     },
+392:                     "search_strategy": {
+393:                         "vector_weight": understanding.search_strategy.vector_weight,
+394:                         "graph_weight": understanding.search_strategy.graph_weight,
+395:                         "keyword_weight": understanding.search_strategy.keyword_weight,
+396:                         "reasoning": understanding.search_strategy.strategy_reasoning,
+397:                     },
+398:                     "complexity_score": understanding.complexity_score,
+399:                     "requires_multi_step": understanding.requires_multi_step,
+400:                     "follow_up_queries": [fq.query for fq in understanding.follow_up_queries],
+401:                     "reasoning": understanding.reasoning,
+402:                 }
+403: 
+404:                 # Apply LLM-recommended search strategy weights
+405:                 if understanding.search_strategy:
+406:                     cfg.vector_weight = understanding.search_strategy.vector_weight
+407:                     cfg.graph_weight = understanding.search_strategy.graph_weight
+408:                     cfg.keyword_weight = understanding.search_strategy.keyword_weight
+409:                     cfg.max_graph_depth = understanding.search_strategy.graph_depth
+410: 
+411:                 logger.debug(
+412:                     f"Query understanding: intent={understanding.intent.name}, "
+413:                     f"entities={len(understanding.entities)}, complexity={understanding.complexity_score:.2f}"
+414:                 )
+415: 
+416:                 # Extract temporal information and create filter if detected
+417:                 if understanding.has_temporal and understanding.temporal_references:
+418:                     temporal_info.detected = True
+419:                     for temp_ref in understanding.temporal_references:
+420:                         temporal_info.reference_text = temp_ref.text
+421:                         if temp_ref.start_date:
+422:                             temporal_info.time_start = temp_ref.start_date
+423:                         if temp_ref.end_date:
+424:                             temporal_info.time_end = temp_ref.end_date
+425: 
+426:                     # Create temporal filter if not already provided
+427:                     if not temporal_filter and (temporal_info.time_start or temporal_info.time_end):
+428:                         temporal_filter = TemporalFilter(
+429:                             start_date=temporal_info.time_start,
+430:                             end_date=temporal_info.time_end,
+431:                         )
+432:                         temporal_info.filter_applied = True
+433:                         logger.debug(f"Temporal filter applied: {temporal_info.time_start} to {temporal_info.time_end}")
+434: 
+435:             except Exception as e:
+436:                 logger.warning(f"Query understanding failed: {e}")
+437: 
+438:         # Step 2: Entity Linking
+439:         linking_result: LinkingResult | None = None
+440:         linked_entity_ids: list[UUID] = []
+441:         if cfg.enable_entity_linking and understanding and understanding.entities:
+442:             try:
+443:                 linker = EntityLinker(
+444:                     self._storage,
+445:                     self._embedder,
+446:                     fuzzy_threshold=cfg.entity_linking_fuzzy_threshold,
+447:                     embedding_threshold=cfg.entity_linking_embedding_threshold,
+448:                     max_candidates=cfg.entity_linking_max_candidates,
+449:                 )
+450:                 linking_result = await linker.link(understanding.entities, namespace_id)
+451:                 linked_entity_ids = linking_result.get_linked_entity_ids()
+452: 
+453:                 # Track linked entity names for graph info
+454:                 for linked in linking_result.linked_entities:
+455:                     if linked.entity:
+456:                         graph_info.entities_linked.append(linked.entity.name)
 457: 
-458:         # Search entities
-459:         entity_ids_scores = await self._storage.search_similar_entities(
-460:             namespace_id,
-461:             query_embedding,
-462:             limit=config.max_entities * 2,
-463:             min_similarity=config.min_entity_similarity,
-464:         )
-465: 
-466:         # Fetch full entities
-467:         entities = []
-468:         for entity_id, score in entity_ids_scores:
-469:             entity = await self._storage.get_entity(entity_id)
-470:             if entity:
-471:                 entities.append((entity, score))
+458:                 metadata["entity_linking"] = {
+459:                     "total_mentions": linking_result.total_mentions,
+460:                     "linked_count": linking_result.linked_count,
+461:                     "success_rate": linking_result.success_rate,
+462:                     "linked_entities": graph_info.entities_linked,
+463:                 }
+464:                 logger.debug(f"Entity linking: {linking_result.linked_count}/{linking_result.total_mentions} linked")
+465:             except Exception as e:
+466:                 logger.warning(f"Entity linking failed: {e}")
+467: 
+468:         # Determine queries to search (original + expansions)
+469:         queries_to_search = [query_text]
+470:         if understanding and cfg.enable_query_expansion:
+471:             queries_to_search.extend(understanding.expanded_queries[:2])  # Limit expansions
 472: 
-473:         return {
-474:             "source": "vector",
-475:             "chunks": chunk_results,
-476:             "entities": entities,
-477:         }
-478: 
-479:     async def _graph_search(
-480:         self,
-481:         namespace_id: UUID,
-482:         query_text: str,
-483:         query_embedding: list[float] | None,
-484:         config: QueryConfig,
-485:         linked_entity_ids: list[UUID] | None = None,
-486:     ) -> dict[str, Any]:
-487:         """Perform graph-based search.
+473:         # Step 3: Execute searches
+474:         all_chunk_results: dict[str, list[tuple[Any, float]]] = {}
+475:         all_entity_results: dict[str, list[tuple[Any, float]]] = {}
+476:         graph_context: dict[str, Any] = {}
+477: 
+478:         for i, q in enumerate(queries_to_search):
+479:             suffix = "" if i == 0 else f"_exp{i}"
+480: 
+481:             # Get query embedding
+482:             query_embedding = None
+483:             if self._embedder and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
+484:                 query_embedding = await self._embedder.embed(q)
+485: 
+486:             # Execute searches in parallel based on mode
+487:             tasks = []
 488: 
-489:         Args:
-490:             namespace_id: Namespace to search in
-491:             query_text: Query text
-492:             query_embedding: Query embedding (optional)
-493:             config: Query configuration
-494:             linked_entity_ids: Entity IDs from entity linking (optional)
-495: 
-496:         Returns:
-497:             Dict with chunks, entities, and graph context
-498:         """
-499:         entities = []
-500:         graph_context = {}
-501:         seen_entity_ids = set()
+489:             if cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
+490:                 tasks.append(self._vector_search(namespace_id, query_embedding, cfg))
+491: 
+492:             if cfg.mode in (SearchMode.GRAPH, SearchMode.HYBRID, SearchMode.ALL):
+493:                 tasks.append(self._graph_search(namespace_id, q, query_embedding, cfg, linked_entity_ids))
+494: 
+495:             if cfg.mode == SearchMode.ALL and cfg.enable_keyword_search:
+496:                 # Use BM25 keyword search with extracted keywords if available
+497:                 keywords = understanding.keywords if understanding else None
+498:                 tasks.append(self._keyword_search_bm25(namespace_id, q, cfg, keywords))
+499: 
+500:             # Execute in parallel
+501:             results = await asyncio.gather(*tasks, return_exceptions=True)
 502: 
-503:         # Start with linked entities if available (high priority)
-504:         if linked_entity_ids:
-505:             for entity_id in linked_entity_ids[:5]:
-506:                 if entity_id in seen_entity_ids:
+503:             # Process results and track contributions
+504:             for j, result in enumerate(results):
+505:                 if isinstance(result, Exception):
+506:                     logger.error(f"Search {j} failed: {result}")
 507:                     continue
-508:                 entity = await self._storage.get_entity(entity_id)
-509:                 if entity:
-510:                     entities.append((entity, 1.0))  # High confidence from linking
-511:                     seen_entity_ids.add(entity_id)
-512: 
-513:                     # Get neighborhood for linked entities
-514:                     try:
-515:                         neighborhood = await self._storage.get_neighborhood(
-516:                             entity_id,
-517:                             depth=config.max_graph_depth,
-518:                             limit=20,
-519:                         )
-520:                         graph_context[str(entity_id)] = neighborhood
-521:                     except Exception as e:
-522:                         logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
-523: 
-524:         # Also find similar entities via embedding
-525:         if query_embedding is not None:
-526:             entity_ids_scores = await self._storage.search_similar_entities(
-527:                 namespace_id,
-528:                 query_embedding,
-529:                 limit=5,
-530:                 min_similarity=config.min_entity_similarity,
-531:             )
-532: 
-533:             # Expand neighborhood for top entities
-534:             for entity_id, score in entity_ids_scores[:3]:
-535:                 if entity_id in seen_entity_ids:
-536:                     continue
-537:                 entity = await self._storage.get_entity(entity_id)
-538:                 if entity:
-539:                     entities.append((entity, score))
-540:                     seen_entity_ids.add(entity_id)
-541: 
-542:                     # Get neighborhood
-543:                     try:
-544:                         neighborhood = await self._storage.get_neighborhood(
-545:                             entity_id,
-546:                             depth=config.max_graph_depth,
-547:                             limit=20,
-548:                         )
-549:                         graph_context[str(entity_id)] = neighborhood
-550:                     except Exception as e:
-551:                         logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
-552: 
-553:         # Get related chunks through entities
-554:         chunks = []
-555:         seen_chunk_ids = set()
-556:         for entity, score in entities:
-557:             # Get chunks that mention this entity
-558:             for chunk_id in entity.source_chunk_ids[:5]:
-559:                 if chunk_id in seen_chunk_ids:
-560:                     continue
-561:                 chunk = await self._storage.get_chunk(chunk_id)
-562:                 if chunk:
-563:                     # Score based on entity score and mention count
-564:                     chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
-565:                     chunks.append((chunk, chunk_score))
-566:                     seen_chunk_ids.add(chunk_id)
-567: 
-568:         return {
-569:             "source": "graph",
-570:             "chunks": chunks,
-571:             "entities": entities,
-572:             "graph_context": graph_context,
-573:         }
-574: 
-575:     async def _keyword_search(
-576:         self,
-577:         namespace_id: UUID,
-578:         query_text: str,
-579:         config: QueryConfig,
-580:     ) -> dict[str, Any]:
-581:         """Perform keyword-based search (legacy, returns empty).
-582: 
-583:         Use _keyword_search_bm25 for actual BM25-based search.
-584:         """
-585:         return {
-586:             "source": "keyword",
-587:             "chunks": [],
-588:             "entities": [],
-589:         }
-590: 
-591:     async def _keyword_search_bm25(
-592:         self,
-593:         namespace_id: UUID,
-594:         query_text: str,
-595:         config: QueryConfig,
-596:         keywords: list[str] | None = None,
-597:     ) -> dict[str, Any]:
-598:         """Perform BM25-based keyword search.
-599: 
-600:         Args:
-601:             namespace_id: Namespace to search in
-602:             query_text: Query text
-603:             config: Query configuration
-604:             keywords: Optional pre-extracted keywords from query understanding
-605: 
-606:         Returns:
-607:             Dict with chunks and entities
-608:         """
-609:         ns_key = str(namespace_id)
-610: 
-611:         # Build or get keyword index for this namespace
-612:         if ns_key not in self._keyword_searchers:
-613:             try:
-614:                 # Fetch all chunks for the namespace (up to a limit)
-615:                 chunks = await self._storage.list_chunks(
-616:                     namespace_id,
-617:                     limit=10000,  # Reasonable limit for in-memory index
-618:                 )
-619:                 if chunks:
-620:                     searcher = KeywordSearcher(
-621:                         use_stemming=True,
-622:                         remove_stopwords=True,
-623:                     )
-624:                     searcher.index_chunks(chunks)
-625:                     self._keyword_searchers[ns_key] = searcher
-626:                     logger.debug(f"Built BM25 index with {len(chunks)} chunks")
-627:                 else:
-628:                     logger.debug("No chunks to index for keyword search")
-629:                     return {"source": "keyword", "chunks": [], "entities": []}
-630:             except Exception as e:
-631:                 logger.warning(f"Failed to build keyword index: {e}")
-632:                 return {"source": "keyword", "chunks": [], "entities": []}
-633: 
-634:         searcher = self._keyword_searchers.get(ns_key)
-635:         if not searcher:
-636:             return {"source": "keyword", "chunks": [], "entities": []}
-637: 
-638:         try:
-639:             # Use keywords if available, otherwise use query text
-640:             if keywords:
-641:                 results = searcher.search_with_keywords(
-642:                     keywords,
-643:                     limit=config.max_chunks * 2,
-644:                     min_score=0.1,
-645:                 )
-646:             else:
-647:                 results = searcher.search(
-648:                     query_text,
-649:                     limit=config.max_chunks * 2,
-650:                     min_score=0.1,
-651:                 )
-652: 
-653:             # Normalize BM25 scores to 0-1 range
-654:             normalized_results = [(chunk, normalize_bm25_score(score)) for chunk, score in results]
-655: 
-656:             return {
-657:                 "source": "keyword",
-658:                 "chunks": normalized_results,
-659:                 "entities": [],  # Keyword search doesn't directly find entities
-660:             }
-661:         except Exception as e:
-662:             logger.warning(f"Keyword search failed: {e}")
-663:             return {"source": "keyword", "chunks": [], "entities": []}
+508: 
+509:                 if isinstance(result, dict):
+510:                     source_type = result.get("source", f"search_{j}")
+511: 
+512:                     if "chunks" in result:
+513:                         source = source_type + suffix
+514:                         all_chunk_results[source] = result["chunks"]
+515: 
+516:                         # Track contributions by search method
+517:                         chunk_ids = [str(c.id) for c, _ in result["chunks"]]
+518:                         if source_type == "vector":
+519:                             search_contributions.vector += len(result["chunks"])
+520:                             search_contributions.vector_chunks.extend(chunk_ids)
+521:                         elif source_type == "graph":
+522:                             search_contributions.graph += len(result["chunks"])
+523:                             search_contributions.graph_chunks.extend(chunk_ids)
+524:                         elif source_type == "keyword":
+525:                             search_contributions.keyword += len(result["chunks"])
+526:                             search_contributions.keyword_chunks.extend(chunk_ids)
+527: 
+528:                     if "entities" in result:
+529:                         source = source_type + suffix
+530:                         all_entity_results[source] = result["entities"]
+531: 
+532:                         # Track entities searched via graph
+533:                         if source_type == "graph":
+534:                             for entity, _ in result["entities"]:
+535:                                 graph_info.entities_searched.append(entity.name)
+536: 
+537:                     if "graph_context" in result:
+538:                         graph_context.update(result["graph_context"])
+539: 
+540:                         # Track relationships from graph context
+541:                         if "relationships" in result.get("graph_context", {}):
+542:                             for rel in result["graph_context"]["relationships"]:
+543:                                 if isinstance(rel, dict):
+544:                                     graph_info.relationships_traversed.append(
+545:                                         (rel.get("from", ""), rel.get("type", ""), rel.get("to", ""))
+546:                                     )
+547: 
+548:         # Step 4: Apply RRF fusion
+549:         fused_chunks = []
+550:         if all_chunk_results:
+551:             weights = {
+552:                 "vector": cfg.vector_weight,
+553:                 "graph": cfg.graph_weight,
+554:                 "keyword": cfg.keyword_weight,
+555:             }
+556:             # Add weights for expanded query results
+557:             for key in all_chunk_results:
+558:                 if "_exp" in key:
+559:                     base_source = key.split("_exp")[0]
+560:                     weights[key] = weights.get(base_source, cfg.vector_weight) * 0.7  # Discount expansions
+561: 
+562:             fused_chunks = reciprocal_rank_fusion(
+563:                 all_chunk_results,
+564:                 k=cfg.rrf_k,
+565:                 weights=weights,
+566:                 id_extractor=lambda c: str(c.id),
+567:             )
+568: 
+569:         fused_entities = []
+570:         if all_entity_results:
+571:             weights = {
+572:                 "vector": cfg.vector_weight,
+573:                 "graph": cfg.graph_weight,
+574:             }
+575:             fused_entities = reciprocal_rank_fusion(
+576:                 all_entity_results,
+577:                 k=cfg.rrf_k,
+578:                 weights=weights,
+579:                 id_extractor=lambda e: str(e.id),
+580:             )
+581: 
+582:         # Boost linked entities
+583:         if linked_entity_ids:
+584:             boosted_entities = []
+585:             for entity, score in fused_entities:
+586:                 if entity.id in linked_entity_ids:
+587:                     boosted_entities.append((entity, score * 1.5))  # 50% boost
+588:                 else:
+589:                     boosted_entities.append((entity, score))
+590:             fused_entities = sorted(boosted_entities, key=lambda x: x[1], reverse=True)
+591: 
+592:         # Step 5: Apply temporal filter
+593:         if temporal_filter:
+594:             fused_chunks = [(c, s) for c, s in fused_chunks if temporal_filter.matches(c.created_at)]
+595: 
+596:         # Apply recency bias
+597:         if cfg.apply_recency_bias:
+598:             temporal_query = TemporalQuery(query_text).with_recency_bias(
+599:                 cfg.recency_weight,
+600:                 cfg.recency_decay_days,
+601:             )
+602:             fused_chunks = [(c, s * temporal_query.calculate_recency_score(c.created_at)) for c, s in fused_chunks]
+603:             fused_chunks.sort(key=lambda x: x[1], reverse=True)
+604: 
+605:         # Step 6: Reranking (optional)
+606:         if cfg.enable_reranking and fused_chunks:
+607:             try:
+608:                 reranker = create_reranker(
+609:                     method=cfg.reranking_method,
+610:                     llm_config=self._llm_config,
+611:                 )
+612:                 candidates = [
+613:                     RerankCandidate(
+614:                         item=chunk,
+615:                         original_score=score,
+616:                         content=chunk.content,
+617:                         metadata=chunk.metadata,
+618:                     )
+619:                     for chunk, score in fused_chunks[: cfg.reranking_top_n]
+620:                 ]
+621:                 reranked = await reranker.rerank(query_text, candidates, top_k=cfg.reranking_final_k)
+622:                 fused_chunks = [(r.item, r.final_score) for r in reranked]
+623:                 metadata["reranking"] = {"method": cfg.reranking_method, "reranked_count": len(fused_chunks)}
+624:                 logger.debug(f"Reranked {len(candidates)} candidates to {len(fused_chunks)} results")
+625:             except Exception as e:
+626:                 logger.warning(f"Reranking failed: {e}")
+627: 
+628:         # Step 7: Limit results
+629:         fused_chunks = fused_chunks[: cfg.max_chunks]
+630:         fused_entities = fused_entities[: cfg.max_entities]
+631: 
+632:         # Update graph info with depth used
+633:         graph_info.neighborhood_depth = cfg.max_graph_depth
+634: 
+635:         # Add search method info to metadata
+636:         metadata["search_methods"] = search_contributions.to_dict()
+637:         metadata["graph_traversal"] = graph_info.to_dict()
+638:         metadata["temporal"] = temporal_info.to_dict()
+639: 
+640:         return QueryResult(
+641:             chunks=fused_chunks,
+642:             entities=fused_entities,
+643:             graph_context=graph_context,
+644:             metadata=metadata,
+645:             search_contributions=search_contributions,
+646:             graph_info=graph_info,
+647:             temporal_info=temporal_info,
+648:         )
+649: 
+650:     async def _vector_search(
+651:         self,
+652:         namespace_id: UUID,
+653:         query_embedding: list[float],
+654:         config: QueryConfig,
+655:     ) -> dict[str, Any]:
+656:         """Perform vector similarity search."""
+657:         # Search chunks
+658:         chunk_results = await self._storage.search_similar_chunks(
+659:             namespace_id,
+660:             query_embedding,
+661:             limit=config.max_chunks * 2,  # Get extra for fusion
+662:             min_similarity=config.min_chunk_similarity,
+663:         )
 664: 
-665:     async def find_related_entities(
-666:         self,
-667:         entity_id: UUID,
-668:         namespace_id: UUID,
-669:         *,
-670:         max_depth: int = 2,
-671:         limit: int = 20,
-672:     ) -> list[tuple[Entity, float]]:
-673:         """Find entities related to a given entity through the graph.
-674: 
-675:         Args:
-676:             entity_id: Starting entity
-677:             namespace_id: Namespace to search in
-678:             max_depth: Maximum relationship depth
-679:             limit: Maximum entities to return
-680: 
-681:         Returns:
-682:             List of (entity, relevance_score) tuples
-683:         """
-684:         neighborhood = await self._storage.get_neighborhood(
-685:             entity_id,
-686:             depth=max_depth,
-687:             limit=limit,
-688:         )
-689: 
-690:         entities = []
-691:         for node in neighborhood.get("entities", []):
-692:             entity = await self._storage.get_entity(UUID(node["id"]))
-693:             if entity:
-694:                 # Score based on path length (shorter = higher score)
-695:                 # This is simplified - full impl would consider actual path lengths
-696:                 score = 1.0 / (1 + len(neighborhood.get("relationships", [])))
-697:                 entities.append((entity, score))
-698: 
-699:         return entities
-700: 
-701:     async def temporal_query(
-702:         self,
-703:         query: TemporalQuery,
-704:         namespace_id: UUID,
-705:         *,
-706:         config: QueryConfig | None = None,
-707:     ) -> QueryResult:
-708:         """Execute a query with temporal context.
+665:         # Search entities
+666:         entity_ids_scores = await self._storage.search_similar_entities(
+667:             namespace_id,
+668:             query_embedding,
+669:             limit=config.max_entities * 2,
+670:             min_similarity=config.min_entity_similarity,
+671:         )
+672: 
+673:         # Fetch full entities
+674:         entities = []
+675:         for entity_id, score in entity_ids_scores:
+676:             entity = await self._storage.get_entity(entity_id)
+677:             if entity:
+678:                 entities.append((entity, score))
+679: 
+680:         return {
+681:             "source": "vector",
+682:             "chunks": chunk_results,
+683:             "entities": entities,
+684:         }
+685: 
+686:     async def _graph_search(
+687:         self,
+688:         namespace_id: UUID,
+689:         query_text: str,
+690:         query_embedding: list[float] | None,
+691:         config: QueryConfig,
+692:         linked_entity_ids: list[UUID] | None = None,
+693:     ) -> dict[str, Any]:
+694:         """Perform graph-based search.
+695: 
+696:         Args:
+697:             namespace_id: Namespace to search in
+698:             query_text: Query text
+699:             query_embedding: Query embedding (optional)
+700:             config: Query configuration
+701:             linked_entity_ids: Entity IDs from entity linking (optional)
+702: 
+703:         Returns:
+704:             Dict with chunks, entities, and graph context
+705:         """
+706:         entities = []
+707:         graph_context = {}
+708:         seen_entity_ids = set()
 709: 
-710:         Args:
-711:             query: TemporalQuery with filters and settings
-712:             namespace_id: Namespace to search in
-713:             config: Optional query config override
-714: 
-715:         Returns:
-716:             QueryResult with temporal filtering applied
-717:         """
-718:         cfg = config or QueryConfig()
+710:         # Start with linked entities if available (high priority)
+711:         if linked_entity_ids:
+712:             for entity_id in linked_entity_ids[:5]:
+713:                 if entity_id in seen_entity_ids:
+714:                     continue
+715:                 entity = await self._storage.get_entity(entity_id)
+716:                 if entity:
+717:                     entities.append((entity, 1.0))  # High confidence from linking
+718:                     seen_entity_ids.add(entity_id)
 719: 
-720:         # Apply temporal settings to config
-721:         if query.recency_weight > 0:
-722:             cfg.apply_recency_bias = True
-723:             cfg.recency_weight = query.recency_weight
-724:             cfg.recency_decay_days = query.decay_days
-725: 
-726:         # Get context filter
-727:         temporal_filter = None
-728:         if query.filters:
-729:             temporal_filter = query.filters[0]  # Use first filter for now
-730:         elif query.context_window_days:
-731:             temporal_filter = query.get_context_filter()
-732: 
-733:         return await self.query(
-734:             query.query,
-735:             namespace_id,
-736:             config=cfg,
-737:             temporal_filter=temporal_filter,
-738:         )
+720:                     # Get neighborhood for linked entities
+721:                     try:
+722:                         neighborhood = await self._storage.get_neighborhood(
+723:                             entity_id,
+724:                             depth=config.max_graph_depth,
+725:                             limit=20,
+726:                         )
+727:                         graph_context[str(entity_id)] = neighborhood
+728:                     except Exception as e:
+729:                         logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
+730: 
+731:         # Also find similar entities via embedding
+732:         if query_embedding is not None:
+733:             entity_ids_scores = await self._storage.search_similar_entities(
+734:                 namespace_id,
+735:                 query_embedding,
+736:                 limit=5,
+737:                 min_similarity=config.min_entity_similarity,
+738:             )
+739: 
+740:             # Expand neighborhood for top entities
+741:             for entity_id, score in entity_ids_scores[:3]:
+742:                 if entity_id in seen_entity_ids:
+743:                     continue
+744:                 entity = await self._storage.get_entity(entity_id)
+745:                 if entity:
+746:                     entities.append((entity, score))
+747:                     seen_entity_ids.add(entity_id)
+748: 
+749:                     # Get neighborhood
+750:                     try:
+751:                         neighborhood = await self._storage.get_neighborhood(
+752:                             entity_id,
+753:                             depth=config.max_graph_depth,
+754:                             limit=20,
+755:                         )
+756:                         graph_context[str(entity_id)] = neighborhood
+757:                     except Exception as e:
+758:                         logger.debug(f"Failed to get neighborhood for {entity_id}: {e}")
+759: 
+760:         # Get related chunks through entities
+761:         chunks = []
+762:         seen_chunk_ids = set()
+763:         for entity, score in entities:
+764:             # Get chunks that mention this entity
+765:             for chunk_id in entity.source_chunk_ids[:5]:
+766:                 if chunk_id in seen_chunk_ids:
+767:                     continue
+768:                 chunk = await self._storage.get_chunk(chunk_id)
+769:                 if chunk:
+770:                     # Score based on entity score and mention count
+771:                     chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+772:                     chunks.append((chunk, chunk_score))
+773:                     seen_chunk_ids.add(chunk_id)
+774: 
+775:         return {
+776:             "source": "graph",
+777:             "chunks": chunks,
+778:             "entities": entities,
+779:             "graph_context": graph_context,
+780:         }
+781: 
+782:     async def _keyword_search(
+783:         self,
+784:         namespace_id: UUID,
+785:         query_text: str,
+786:         config: QueryConfig,
+787:     ) -> dict[str, Any]:
+788:         """Perform keyword-based search (legacy, returns empty).
+789: 
+790:         Use _keyword_search_bm25 for actual BM25-based search.
+791:         """
+792:         return {
+793:             "source": "keyword",
+794:             "chunks": [],
+795:             "entities": [],
+796:         }
+797: 
+798:     async def _keyword_search_bm25(
+799:         self,
+800:         namespace_id: UUID,
+801:         query_text: str,
+802:         config: QueryConfig,
+803:         keywords: list[str] | None = None,
+804:     ) -> dict[str, Any]:
+805:         """Perform BM25-based keyword search.
+806: 
+807:         Args:
+808:             namespace_id: Namespace to search in
+809:             query_text: Query text
+810:             config: Query configuration
+811:             keywords: Optional pre-extracted keywords from query understanding
+812: 
+813:         Returns:
+814:             Dict with chunks and entities
+815:         """
+816:         ns_key = str(namespace_id)
+817: 
+818:         # Build or get keyword index for this namespace
+819:         if ns_key not in self._keyword_searchers:
+820:             try:
+821:                 # Fetch all chunks for the namespace (up to a limit)
+822:                 chunks = await self._storage.list_chunks(
+823:                     namespace_id,
+824:                     limit=10000,  # Reasonable limit for in-memory index
+825:                 )
+826:                 if chunks:
+827:                     searcher = KeywordSearcher(
+828:                         use_stemming=True,
+829:                         remove_stopwords=True,
+830:                     )
+831:                     searcher.index_chunks(chunks)
+832:                     self._keyword_searchers[ns_key] = searcher
+833:                     logger.debug(f"Built BM25 index with {len(chunks)} chunks")
+834:                 else:
+835:                     logger.debug("No chunks to index for keyword search")
+836:                     return {"source": "keyword", "chunks": [], "entities": []}
+837:             except Exception as e:
+838:                 logger.warning(f"Failed to build keyword index: {e}")
+839:                 return {"source": "keyword", "chunks": [], "entities": []}
+840: 
+841:         searcher = self._keyword_searchers.get(ns_key)
+842:         if not searcher:
+843:             return {"source": "keyword", "chunks": [], "entities": []}
+844: 
+845:         try:
+846:             # Use keywords if available, otherwise use query text
+847:             if keywords:
+848:                 results = searcher.search_with_keywords(
+849:                     keywords,
+850:                     limit=config.max_chunks * 2,
+851:                     min_score=0.1,
+852:                 )
+853:             else:
+854:                 results = searcher.search(
+855:                     query_text,
+856:                     limit=config.max_chunks * 2,
+857:                     min_score=0.1,
+858:                 )
+859: 
+860:             # Normalize BM25 scores to 0-1 range
+861:             normalized_results = [(chunk, normalize_bm25_score(score)) for chunk, score in results]
+862: 
+863:             return {
+864:                 "source": "keyword",
+865:                 "chunks": normalized_results,
+866:                 "entities": [],  # Keyword search doesn't directly find entities
+867:             }
+868:         except Exception as e:
+869:             logger.warning(f"Keyword search failed: {e}")
+870:             return {"source": "keyword", "chunks": [], "entities": []}
+871: 
+872:     async def find_related_entities(
+873:         self,
+874:         entity_id: UUID,
+875:         namespace_id: UUID,
+876:         *,
+877:         max_depth: int = 2,
+878:         limit: int = 20,
+879:     ) -> list[tuple[Entity, float]]:
+880:         """Find entities related to a given entity through the graph.
+881: 
+882:         Args:
+883:             entity_id: Starting entity
+884:             namespace_id: Namespace to search in
+885:             max_depth: Maximum relationship depth
+886:             limit: Maximum entities to return
+887: 
+888:         Returns:
+889:             List of (entity, relevance_score) tuples
+890:         """
+891:         neighborhood = await self._storage.get_neighborhood(
+892:             entity_id,
+893:             depth=max_depth,
+894:             limit=limit,
+895:         )
+896: 
+897:         entities = []
+898:         for node in neighborhood.get("entities", []):
+899:             entity = await self._storage.get_entity(UUID(node["id"]))
+900:             if entity:
+901:                 # Score based on path length (shorter = higher score)
+902:                 # This is simplified - full impl would consider actual path lengths
+903:                 score = 1.0 / (1 + len(neighborhood.get("relationships", [])))
+904:                 entities.append((entity, score))
+905: 
+906:         return entities
+907: 
+908:     async def temporal_query(
+909:         self,
+910:         query: TemporalQuery,
+911:         namespace_id: UUID,
+912:         *,
+913:         config: QueryConfig | None = None,
+914:     ) -> QueryResult:
+915:         """Execute a query with temporal context.
+916: 
+917:         Args:
+918:             query: TemporalQuery with filters and settings
+919:             namespace_id: Namespace to search in
+920:             config: Optional query config override
+921: 
+922:         Returns:
+923:             QueryResult with temporal filtering applied
+924:         """
+925:         cfg = config or QueryConfig()
+926: 
+927:         # Apply temporal settings to config
+928:         if query.recency_weight > 0:
+929:             cfg.apply_recency_bias = True
+930:             cfg.recency_weight = query.recency_weight
+931:             cfg.recency_decay_days = query.decay_days
+932: 
+933:         # Get context filter
+934:         temporal_filter = None
+935:         if query.filters:
+936:             temporal_filter = query.filters[0]  # Use first filter for now
+937:         elif query.context_window_days:
+938:             temporal_filter = query.get_context_filter()
+939: 
+940:         return await self.query(
+941:             query.query,
+942:             namespace_id,
+943:             config=cfg,
+944:             temporal_filter=temporal_filter,
+945:         )
 ````
 
 ## File: src/khora/storage/backends/neo4j.py
@@ -13505,6 +14154,375 @@ README.md
 753:             )
 754:             records = await result.data()
 755:             return [self._record_to_entity(r["e"]) for r in records]
+````
+
+## File: src/khora/storage/backends/pgvector.py
+````python
+  1: """pgvector backend for vector embeddings storage.
+  2: 
+  3: Handles storage and retrieval of embeddings for semantic search
+  4: using pgvector extension in PostgreSQL.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from datetime import UTC, datetime
+ 10: from typing import TYPE_CHECKING
+ 11: from uuid import UUID
+ 12: 
+ 13: from loguru import logger
+ 14: from sqlalchemy import delete, func, select, text, update
+ 15: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+ 16: 
+ 17: from khora.core.models import Chunk, ChunkMetadata
+ 18: from khora.db.models import Base, ChunkModel, EntityModel
+ 19: 
+ 20: if TYPE_CHECKING:
+ 21:     pass
+ 22: 
+ 23: 
+ 24: class PgVectorBackend:
+ 25:     """pgvector backend for vector embeddings.
+ 26: 
+ 27:     Handles all vector operations including chunk storage,
+ 28:     similarity search, and entity embeddings.
+ 29:     """
+ 30: 
+ 31:     def __init__(
+ 32:         self,
+ 33:         database_url: str,
+ 34:         *,
+ 35:         embedding_dimension: int = 1536,
+ 36:         echo: bool = False,
+ 37:         pool_size: int = 5,
+ 38:         max_overflow: int = 10,
+ 39:     ) -> None:
+ 40:         """Initialize the pgvector backend.
+ 41: 
+ 42:         Args:
+ 43:             database_url: PostgreSQL connection URL (with pgvector extension)
+ 44:             embedding_dimension: Dimension of embedding vectors
+ 45:             echo: Enable SQL echo logging
+ 46:             pool_size: Connection pool size
+ 47:             max_overflow: Maximum overflow connections
+ 48:         """
+ 49:         # Convert to async URL if needed
+ 50:         if database_url.startswith("postgresql://"):
+ 51:             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+ 52:         elif database_url.startswith("postgres://"):
+ 53:             database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+ 54: 
+ 55:         self._database_url = database_url
+ 56:         self._embedding_dimension = embedding_dimension
+ 57:         self._echo = echo
+ 58:         self._pool_size = pool_size
+ 59:         self._max_overflow = max_overflow
+ 60:         self._engine: AsyncEngine | None = None
+ 61:         self._session_factory: async_sessionmaker[AsyncSession] | None = None
+ 62: 
+ 63:     async def connect(self) -> None:
+ 64:         """Establish connection to the database."""
+ 65:         if self._engine is not None:
+ 66:             return
+ 67: 
+ 68:         logger.info("Connecting to pgvector...")
+ 69:         self._engine = create_async_engine(
+ 70:             self._database_url,
+ 71:             echo=self._echo,
+ 72:             pool_size=self._pool_size,
+ 73:             max_overflow=self._max_overflow,
+ 74:         )
+ 75:         self._session_factory = async_sessionmaker(
+ 76:             self._engine,
+ 77:             class_=AsyncSession,
+ 78:             expire_on_commit=False,
+ 79:         )
+ 80: 
+ 81:         # Ensure pgvector extension is enabled
+ 82:         async with self._engine.begin() as conn:
+ 83:             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+ 84: 
+ 85:         logger.info("Connected to pgvector")
+ 86: 
+ 87:     async def disconnect(self) -> None:
+ 88:         """Close database connections."""
+ 89:         if self._engine is not None:
+ 90:             logger.info("Disconnecting from pgvector...")
+ 91:             await self._engine.dispose()
+ 92:             self._engine = None
+ 93:             self._session_factory = None
+ 94:             logger.info("Disconnected from pgvector")
+ 95: 
+ 96:     async def is_healthy(self) -> bool:
+ 97:         """Check if the backend is healthy and connected."""
+ 98:         if self._engine is None or self._session_factory is None:
+ 99:             return False
+100:         try:
+101:             async with self._session_factory() as session:
+102:                 await session.execute(select(1))
+103:             return True
+104:         except Exception as e:
+105:             logger.error(f"pgvector health check failed: {e}")
+106:             return False
+107: 
+108:     def _get_session(self) -> AsyncSession:
+109:         """Get a new database session."""
+110:         if self._session_factory is None:
+111:             raise RuntimeError("Backend not connected. Call connect() first.")
+112:         return self._session_factory()
+113: 
+114:     async def create_tables(self) -> None:
+115:         """Create all database tables (for testing/development)."""
+116:         if self._engine is None:
+117:             raise RuntimeError("Backend not connected. Call connect() first.")
+118:         async with self._engine.begin() as conn:
+119:             await conn.run_sync(Base.metadata.create_all)
+120: 
+121:     # =========================================================================
+122:     # Chunk operations
+123:     # =========================================================================
+124: 
+125:     async def create_chunk(self, chunk: Chunk) -> Chunk:
+126:         """Create a new chunk with its embedding."""
+127:         async with self._get_session() as session:
+128:             model = ChunkModel(
+129:                 id=str(chunk.id),
+130:                 namespace_id=str(chunk.namespace_id),
+131:                 document_id=str(chunk.document_id),
+132:                 content=chunk.content,
+133:                 chunk_index=chunk.metadata.chunk_index,
+134:                 start_char=chunk.metadata.start_char,
+135:                 end_char=chunk.metadata.end_char,
+136:                 token_count=chunk.metadata.token_count,
+137:                 metadata_=chunk.metadata.custom,
+138:                 embedding=chunk.embedding,
+139:                 embedding_model=chunk.embedding_model,
+140:                 created_at=chunk.created_at,
+141:             )
+142:             session.add(model)
+143:             await session.commit()
+144:             await session.refresh(model)
+145:             return self._chunk_model_to_domain(model)
+146: 
+147:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+148:         """Create multiple chunks in a batch."""
+149:         if not chunks:
+150:             return []
+151: 
+152:         async with self._get_session() as session:
+153:             models = [
+154:                 ChunkModel(
+155:                     id=str(chunk.id),
+156:                     namespace_id=str(chunk.namespace_id),
+157:                     document_id=str(chunk.document_id),
+158:                     content=chunk.content,
+159:                     chunk_index=chunk.metadata.chunk_index,
+160:                     start_char=chunk.metadata.start_char,
+161:                     end_char=chunk.metadata.end_char,
+162:                     token_count=chunk.metadata.token_count,
+163:                     metadata_=chunk.metadata.custom,
+164:                     embedding=chunk.embedding,
+165:                     embedding_model=chunk.embedding_model,
+166:                     created_at=chunk.created_at,
+167:                 )
+168:                 for chunk in chunks
+169:             ]
+170:             session.add_all(models)
+171:             await session.commit()
+172:             return chunks
+173: 
+174:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+175:         """Get a chunk by ID."""
+176:         async with self._get_session() as session:
+177:             result = await session.execute(select(ChunkModel).where(ChunkModel.id == str(chunk_id)))
+178:             model = result.scalar_one_or_none()
+179:             return self._chunk_model_to_domain(model) if model else None
+180: 
+181:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+182:         """Get all chunks for a document."""
+183:         async with self._get_session() as session:
+184:             result = await session.execute(
+185:                 select(ChunkModel).where(ChunkModel.document_id == str(document_id)).order_by(ChunkModel.chunk_index)
+186:             )
+187:             return [self._chunk_model_to_domain(m) for m in result.scalars().all()]
+188: 
+189:     async def delete_chunks_by_document(self, document_id: UUID) -> int:
+190:         """Delete all chunks for a document."""
+191:         async with self._get_session() as session:
+192:             result = await session.execute(delete(ChunkModel).where(ChunkModel.document_id == str(document_id)))
+193:             await session.commit()
+194:             return result.rowcount
+195: 
+196:     async def search_similar(
+197:         self,
+198:         namespace_id: UUID,
+199:         query_embedding: list[float],
+200:         *,
+201:         limit: int = 10,
+202:         min_similarity: float = 0.0,
+203:         filter_document_ids: list[UUID] | None = None,
+204:     ) -> list[tuple[Chunk, float]]:
+205:         """Search for similar chunks using vector similarity.
+206: 
+207:         Uses cosine similarity for matching. Returns list of (chunk, similarity_score) tuples.
+208:         """
+209:         async with self._get_session() as session:
+210:             # Build cosine similarity expression
+211:             # pgvector uses <=> for cosine distance, so similarity = 1 - distance
+212:             similarity = 1 - ChunkModel.embedding.cosine_distance(query_embedding)
+213: 
+214:             query = (
+215:                 select(ChunkModel, similarity.label("similarity"))
+216:                 .where(
+217:                     ChunkModel.namespace_id == str(namespace_id),
+218:                     ChunkModel.embedding.is_not(None),
+219:                 )
+220:                 .order_by(similarity.desc())
+221:                 .limit(limit)
+222:             )
+223: 
+224:             if filter_document_ids:
+225:                 query = query.where(ChunkModel.document_id.in_([str(d) for d in filter_document_ids]))
+226: 
+227:             if min_similarity > 0:
+228:                 query = query.where(similarity >= min_similarity)
+229: 
+230:             result = await session.execute(query)
+231:             rows = result.all()
+232: 
+233:             return [(self._chunk_model_to_domain(row.ChunkModel), row.similarity) for row in rows]
+234: 
+235:     def _chunk_model_to_domain(self, model: ChunkModel) -> Chunk:
+236:         """Convert ChunkModel to domain Chunk."""
+237:         return Chunk(
+238:             id=UUID(model.id),
+239:             namespace_id=UUID(model.namespace_id),
+240:             document_id=UUID(model.document_id),
+241:             content=model.content,
+242:             metadata=ChunkMetadata(
+243:                 document_id=UUID(model.document_id),
+244:                 chunk_index=model.chunk_index,
+245:                 start_char=model.start_char,
+246:                 end_char=model.end_char,
+247:                 token_count=model.token_count,
+248:                 custom=model.metadata_,
+249:             ),
+250:             embedding=list(model.embedding) if model.embedding is not None else None,
+251:             embedding_model=model.embedding_model,
+252:             created_at=model.created_at,
+253:         )
+254: 
+255:     # =========================================================================
+256:     # Entity embedding operations
+257:     # =========================================================================
+258: 
+259:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+260:         """Update the embedding for an entity."""
+261:         async with self._get_session() as session:
+262:             await session.execute(
+263:                 update(EntityModel)
+264:                 .where(EntityModel.id == str(entity_id))
+265:                 .values(
+266:                     embedding=embedding,
+267:                     embedding_model=model,
+268:                     updated_at=datetime.now(UTC),
+269:                 )
+270:             )
+271:             await session.commit()
+272: 
+273:     async def search_similar_entities(
+274:         self,
+275:         namespace_id: UUID,
+276:         query_embedding: list[float],
+277:         *,
+278:         limit: int = 10,
+279:         min_similarity: float = 0.0,
+280:     ) -> list[tuple[UUID, float]]:
+281:         """Search for similar entities by embedding.
+282: 
+283:         Returns list of (entity_id, similarity_score) tuples.
+284:         """
+285:         async with self._get_session() as session:
+286:             similarity = 1 - EntityModel.embedding.cosine_distance(query_embedding)
+287: 
+288:             query = (
+289:                 select(EntityModel.id, similarity.label("similarity"))
+290:                 .where(
+291:                     EntityModel.namespace_id == str(namespace_id),
+292:                     EntityModel.embedding.is_not(None),
+293:                 )
+294:                 .order_by(similarity.desc())
+295:                 .limit(limit)
+296:             )
+297: 
+298:             if min_similarity > 0:
+299:                 query = query.where(similarity >= min_similarity)
+300: 
+301:             result = await session.execute(query)
+302:             return [(UUID(row.id), row.similarity) for row in result.all()]
+303: 
+304:     # =========================================================================
+305:     # Utility operations
+306:     # =========================================================================
+307: 
+308:     async def count_chunks(self, namespace_id: UUID) -> int:
+309:         """Count total chunks in a namespace."""
+310:         async with self._get_session() as session:
+311:             result = await session.execute(
+312:                 select(func.count(ChunkModel.id)).where(ChunkModel.namespace_id == str(namespace_id))
+313:             )
+314:             return result.scalar_one()
+315: 
+316:     async def list_chunks(
+317:         self,
+318:         namespace_id: UUID,
+319:         *,
+320:         limit: int = 1000,
+321:         offset: int = 0,
+322:     ) -> list[Chunk]:
+323:         """List chunks in a namespace.
+324: 
+325:         Args:
+326:             namespace_id: Namespace ID
+327:             limit: Maximum chunks to return
+328:             offset: Offset for pagination
+329: 
+330:         Returns:
+331:             List of chunks
+332:         """
+333:         async with self._get_session() as session:
+334:             result = await session.execute(
+335:                 select(ChunkModel)
+336:                 .where(ChunkModel.namespace_id == str(namespace_id))
+337:                 .order_by(ChunkModel.created_at.desc())
+338:                 .limit(limit)
+339:                 .offset(offset)
+340:             )
+341:             rows = result.scalars().all()
+342:             return [self._chunk_from_model(row) for row in rows]
+343: 
+344:     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
+345:         """Get statistics about embeddings in a namespace."""
+346:         async with self._get_session() as session:
+347:             # Count chunks with embeddings
+348:             chunk_count = await session.execute(
+349:                 select(func.count(ChunkModel.id)).where(
+350:                     ChunkModel.namespace_id == str(namespace_id),
+351:                     ChunkModel.embedding.is_not(None),
+352:                 )
+353:             )
+354:             # Count entities with embeddings
+355:             entity_count = await session.execute(
+356:                 select(func.count(EntityModel.id)).where(
+357:                     EntityModel.namespace_id == str(namespace_id),
+358:                     EntityModel.embedding.is_not(None),
+359:                 )
+360:             )
+361: 
+362:             return {
+363:                 "chunk_embeddings": chunk_count.scalar_one(),
+364:                 "entity_embeddings": entity_count.scalar_one(),
+365:             }
 ````
 
 ## File: CLAUDE.md
@@ -15426,171 +16444,186 @@ README.md
 408:         limit: int = 10,
 409:         mode: SearchMode = SearchMode.HYBRID,
 410:         min_similarity: float = 0.5,
-411:     ) -> RecallResult:
-412:         """Recall memories relevant to a query.
-413: 
-414:         This is the primary method for retrieving memories. It:
-415:         1. Embeds the query
-416:         2. Searches across vector, graph, and keyword indexes
-417:         3. Fuses results using Reciprocal Rank Fusion
-418:         4. Returns ranked results
-419: 
-420:         Args:
-421:             query: Query text
-422:             namespace: Namespace name, ID, or None for default
-423:             limit: Maximum results to return
-424:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
-425:             min_similarity: Minimum similarity threshold
+411:         agentic: bool = False,
+412:     ) -> RecallResult:
+413:         """Recall memories relevant to a query.
+414: 
+415:         This is the primary method for retrieving memories. It:
+416:         1. Uses LLM to understand query (entities, temporal refs, etc.)
+417:         2. Searches across vector, graph, and keyword indexes
+418:         3. Fuses results using Reciprocal Rank Fusion
+419:         4. Returns ranked results
+420: 
+421:         When agentic=True, uses multi-step exploration:
+422:         1. Initial comprehensive search with query understanding
+423:         2. Executes pre-computed follow-up queries for deeper exploration
+424:         3. Explores under-represented sources
+425:         4. Returns combined results with full trace
 426: 
-427:         Returns:
-428:             RecallResult with matched memories
-429:         """
-430:         namespace_id = await self._resolve_namespace(namespace)
-431: 
-432:         config = QueryConfig(
-433:             mode=mode,
-434:             max_chunks=limit,
-435:             max_entities=limit,
-436:             min_chunk_similarity=min_similarity,
-437:             min_entity_similarity=min_similarity,
-438:         )
+427:         Args:
+428:             query: Query text
+429:             namespace: Namespace name, ID, or None for default
+430:             limit: Maximum results to return
+431:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
+432:             min_similarity: Minimum similarity threshold
+433:             agentic: If True, use multi-step agentic search (default: False)
+434: 
+435:         Returns:
+436:             RecallResult with matched memories
+437:         """
+438:         namespace_id = await self._resolve_namespace(namespace)
 439: 
-440:         result = await self.query_engine.query(query, namespace_id, config=config)
-441: 
-442:         return RecallResult(
-443:             query=query,
-444:             namespace_id=namespace_id,
-445:             chunks=result.chunks,
-446:             entities=result.entities,
-447:             context_text=result.get_context_text(max_chunks=limit),
-448:             metadata=result.metadata,
-449:         )
-450: 
-451:     async def forget(
-452:         self,
-453:         document_id: UUID,
-454:         *,
-455:         namespace: str | UUID | None = None,
-456:     ) -> bool:
-457:         """Remove a memory from the lake.
+440:         config = QueryConfig(
+441:             mode=mode,
+442:             max_chunks=limit,
+443:             max_entities=limit,
+444:             min_chunk_similarity=min_similarity,
+445:             min_entity_similarity=min_similarity,
+446:         )
+447: 
+448:         result = await self.query_engine.query(query, namespace_id, config=config, agentic=agentic)
+449: 
+450:         return RecallResult(
+451:             query=query,
+452:             namespace_id=namespace_id,
+453:             chunks=result.chunks,
+454:             entities=result.entities,
+455:             context_text=result.get_context_text(max_chunks=limit),
+456:             metadata=result.metadata,
+457:         )
 458: 
-459:         Args:
-460:             document_id: ID of the document to remove
-461:             namespace: Namespace for verification (optional)
-462: 
-463:         Returns:
-464:             True if deleted, False if not found
-465:         """
-466:         # Verify namespace if provided
-467:         if namespace:
-468:             namespace_id = await self._resolve_namespace(namespace)
-469:             document = await self.storage.get_document(document_id)
-470:             if document and document.namespace_id != namespace_id:
-471:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-472:                 return False
-473: 
-474:         return await self.storage.delete_document(document_id)
-475: 
-476:     # =========================================================================
-477:     # Entity Operations
-478:     # =========================================================================
-479: 
-480:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-481:         """Get an entity by ID."""
-482:         return await self.storage.get_entity(entity_id)
+459:     async def forget(
+460:         self,
+461:         document_id: UUID,
+462:         *,
+463:         namespace: str | UUID | None = None,
+464:     ) -> bool:
+465:         """Remove a memory from the lake.
+466: 
+467:         Args:
+468:             document_id: ID of the document to remove
+469:             namespace: Namespace for verification (optional)
+470: 
+471:         Returns:
+472:             True if deleted, False if not found
+473:         """
+474:         # Verify namespace if provided
+475:         if namespace:
+476:             namespace_id = await self._resolve_namespace(namespace)
+477:             document = await self.storage.get_document(document_id)
+478:             if document and document.namespace_id != namespace_id:
+479:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
+480:                 return False
+481: 
+482:         return await self.storage.delete_document(document_id)
 483: 
-484:     async def list_entities(
-485:         self,
-486:         *,
-487:         namespace: str | UUID | None = None,
-488:         entity_type: str | None = None,
-489:         limit: int = 100,
-490:     ) -> list[Entity]:
-491:         """List entities in a namespace."""
-492:         namespace_id = await self._resolve_namespace(namespace)
-493:         return await self.storage.list_entities(namespace_id, entity_type=entity_type, limit=limit)
-494: 
-495:     async def find_related_entities(
-496:         self,
-497:         entity_id: UUID,
-498:         *,
-499:         namespace: str | UUID | None = None,
-500:         max_depth: int = 2,
-501:         limit: int = 20,
-502:     ) -> list[tuple[Entity, float]]:
-503:         """Find entities related to a given entity."""
-504:         namespace_id = await self._resolve_namespace(namespace)
-505:         return await self.query_engine.find_related_entities(
-506:             entity_id,
-507:             namespace_id,
-508:             max_depth=max_depth,
-509:             limit=limit,
-510:         )
-511: 
-512:     # =========================================================================
-513:     # Helpers
-514:     # =========================================================================
-515: 
-516:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
-517:         """Resolve a namespace reference to a UUID."""
-518:         if namespace is None:
-519:             return await self.get_or_create_default_namespace()
-520: 
-521:         if isinstance(namespace, UUID):
-522:             return namespace
+484:     # =========================================================================
+485:     # Entity Operations
+486:     # =========================================================================
+487: 
+488:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+489:         """Get an entity by ID."""
+490:         return await self.storage.get_entity(entity_id)
+491: 
+492:     async def list_entities(
+493:         self,
+494:         *,
+495:         namespace: str | UUID | None = None,
+496:         entity_type: str | None = None,
+497:         limit: int = 100,
+498:     ) -> list[Entity]:
+499:         """List entities in a namespace."""
+500:         namespace_id = await self._resolve_namespace(namespace)
+501:         return await self.storage.list_entities(namespace_id, entity_type=entity_type, limit=limit)
+502: 
+503:     async def find_related_entities(
+504:         self,
+505:         entity_id: UUID,
+506:         *,
+507:         namespace: str | UUID | None = None,
+508:         max_depth: int = 2,
+509:         limit: int = 20,
+510:     ) -> list[tuple[Entity, float]]:
+511:         """Find entities related to a given entity."""
+512:         namespace_id = await self._resolve_namespace(namespace)
+513:         return await self.query_engine.find_related_entities(
+514:             entity_id,
+515:             namespace_id,
+516:             max_depth=max_depth,
+517:             limit=limit,
+518:         )
+519: 
+520:     # =========================================================================
+521:     # Helpers
+522:     # =========================================================================
 523: 
-524:         # Try to parse as UUID
-525:         try:
-526:             return UUID(namespace)
-527:         except ValueError:
-528:             pass
-529: 
-530:         # Look up by slug in default workspace
-531:         default_ns_id = await self.get_or_create_default_namespace()
-532:         default_ns = await self.storage.get_namespace(default_ns_id)
-533:         if default_ns:
-534:             ns = await self.storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
-535:             if ns:
-536:                 return ns.id
+524:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
+525:         """Resolve a namespace reference to a UUID."""
+526:         if namespace is None:
+527:             return await self.get_or_create_default_namespace()
+528: 
+529:         if isinstance(namespace, UUID):
+530:             return namespace
+531: 
+532:         # Try to parse as UUID
+533:         try:
+534:             return UUID(namespace)
+535:         except ValueError:
+536:             pass
 537: 
-538:         raise ValueError(f"Namespace not found: {namespace}")
-539: 
-540:     async def health_check(self) -> dict[str, Any]:
-541:         """Check health of all components."""
-542:         if not self._connected:
-543:             return {"status": "disconnected"}
-544: 
-545:         storage_health = await self.storage.health_check()
-546: 
-547:         return {
-548:             "status": "healthy" if storage_health.is_healthy else "degraded",
-549:             "storage": storage_health.summary,
-550:         }
-551: 
+538:         # Look up by slug in default workspace
+539:         default_ns_id = await self.get_or_create_default_namespace()
+540:         default_ns = await self.storage.get_namespace(default_ns_id)
+541:         if default_ns:
+542:             ns = await self.storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
+543:             if ns:
+544:                 return ns.id
+545: 
+546:         raise ValueError(f"Namespace not found: {namespace}")
+547: 
+548:     async def health_check(self) -> dict[str, Any]:
+549:         """Check health of all components."""
+550:         if not self._connected:
+551:             return {"status": "disconnected"}
 552: 
-553: # Convenience function for one-off usage
-554: @asynccontextmanager
-555: async def memory_lake(
-556:     config: KhoraConfig | None = None,
-557: ) -> AsyncGenerator[MemoryLake]:
-558:     """Context manager for one-off Memory Lake usage.
+553:         storage_health = await self.storage.health_check()
+554: 
+555:         return {
+556:             "status": "healthy" if storage_health.is_healthy else "degraded",
+557:             "storage": storage_health.summary,
+558:         }
 559: 
-560:     Usage:
-561:         async with memory_lake() as lake:
-562:             await lake.remember("Hello, world!")
-563:             result = await lake.recall("greeting")
-564:     """
-565:     lake = MemoryLake(config=config)
-566:     try:
-567:         await lake.connect()
-568:         yield lake
-569:     finally:
-570:         await lake.disconnect()
+560: 
+561: # Convenience function for one-off usage
+562: @asynccontextmanager
+563: async def memory_lake(
+564:     config: KhoraConfig | None = None,
+565: ) -> AsyncGenerator[MemoryLake]:
+566:     """Context manager for one-off Memory Lake usage.
+567: 
+568:     Usage:
+569:         async with memory_lake() as lake:
+570:             await lake.remember("Hello, world!")
+571:             result = await lake.recall("greeting")
+572:     """
+573:     lake = MemoryLake(config=config)
+574:     try:
+575:         await lake.connect()
+576:         yield lake
+577:     finally:
+578:         await lake.disconnect()
 ````
 
 
 
 # Git Logs
+
+## Commit: 2026-01-26 20:10:15 +0100
+**Message:** Fix numpy array boolean comparison in pgvector backend
+
+**Files:**
+- REPOMIX.md
+- src/khora/storage/backends/pgvector.py
 
 ## Commit: 2026-01-26 20:08:35 +0100
 **Message:** Fix numpy array boolean comparison in query engine

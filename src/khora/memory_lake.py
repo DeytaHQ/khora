@@ -408,14 +408,21 @@ class MemoryLake:
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
         min_similarity: float = 0.5,
+        agentic: bool = False,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
         This is the primary method for retrieving memories. It:
-        1. Embeds the query
+        1. Uses LLM to understand query (entities, temporal refs, etc.)
         2. Searches across vector, graph, and keyword indexes
         3. Fuses results using Reciprocal Rank Fusion
         4. Returns ranked results
+
+        When agentic=True, uses multi-step exploration:
+        1. Initial comprehensive search with query understanding
+        2. Executes pre-computed follow-up queries for deeper exploration
+        3. Explores under-represented sources
+        4. Returns combined results with full trace
 
         Args:
             query: Query text
@@ -423,6 +430,7 @@ class MemoryLake:
             limit: Maximum results to return
             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
             min_similarity: Minimum similarity threshold
+            agentic: If True, use multi-step agentic search (default: False)
 
         Returns:
             RecallResult with matched memories
@@ -437,7 +445,7 @@ class MemoryLake:
             min_entity_similarity=min_similarity,
         )
 
-        result = await self.query_engine.query(query, namespace_id, config=config)
+        result = await self.query_engine.query(query, namespace_id, config=config, agentic=agentic)
 
         return RecallResult(
             query=query,

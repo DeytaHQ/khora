@@ -43,13 +43,82 @@ class SearchMode(Enum):
 
 
 @dataclass
+class SearchMethodContribution:
+    """Tracks which search methods contributed to results."""
+
+    vector: int = 0  # Number of results from vector search
+    graph: int = 0  # Number of results from graph search
+    keyword: int = 0  # Number of results from keyword search
+
+    # Detailed breakdown
+    vector_chunks: list[str] = field(default_factory=list)  # Chunk IDs from vector
+    graph_chunks: list[str] = field(default_factory=list)  # Chunk IDs from graph
+    keyword_chunks: list[str] = field(default_factory=list)  # Chunk IDs from keyword
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "vector": {"count": self.vector, "chunk_ids": self.vector_chunks[:10]},
+            "graph": {"count": self.graph, "chunk_ids": self.graph_chunks[:10]},
+            "keyword": {"count": self.keyword, "chunk_ids": self.keyword_chunks[:10]},
+        }
+
+
+@dataclass
+class GraphTraversalInfo:
+    """Information about graph elements triggered during search."""
+
+    entities_searched: list[str] = field(default_factory=list)  # Entity names searched
+    entities_linked: list[str] = field(default_factory=list)  # Entities linked from query
+    relationships_traversed: list[tuple[str, str, str]] = field(default_factory=list)  # (from, rel, to)
+    neighborhood_depth: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "entities_searched": self.entities_searched[:20],
+            "entities_linked": self.entities_linked[:10],
+            "relationships_traversed": [
+                {"from": f, "relationship": r, "to": t} for f, r, t in self.relationships_traversed[:20]
+            ],
+            "neighborhood_depth": self.neighborhood_depth,
+        }
+
+
+@dataclass
+class TemporalInfo:
+    """Information about temporal filtering applied."""
+
+    detected: bool = False
+    filter_applied: bool = False
+    time_start: Any = None  # datetime or None
+    time_end: Any = None  # datetime or None
+    reference_text: str = ""  # Original temporal reference like "last 7 days"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "detected": self.detected,
+            "filter_applied": self.filter_applied,
+            "time_start": self.time_start.isoformat() if self.time_start else None,
+            "time_end": self.time_end.isoformat() if self.time_end else None,
+            "reference_text": self.reference_text,
+        }
+
+
+@dataclass
 class QueryResult:
-    """Result from a query."""
+    """Result from a query with enhanced metadata."""
 
     chunks: list[tuple[Chunk, float]] = field(default_factory=list)
     entities: list[tuple[Entity, float]] = field(default_factory=list)
     graph_context: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    # Enhanced tracking
+    search_contributions: SearchMethodContribution | None = None
+    graph_info: GraphTraversalInfo | None = None
+    temporal_info: TemporalInfo | None = None
 
     @property
     def top_chunks(self) -> list[Chunk]:
@@ -67,6 +136,17 @@ class QueryResult:
         for chunk, score in self.chunks[:max_chunks]:
             texts.append(chunk.content)
         return "\n\n---\n\n".join(texts)
+
+    def get_full_metadata(self) -> dict[str, Any]:
+        """Get complete metadata including search method contributions."""
+        result = dict(self.metadata)
+        if self.search_contributions:
+            result["search_methods"] = self.search_contributions.to_dict()
+        if self.graph_info:
+            result["graph_traversal"] = self.graph_info.to_dict()
+        if self.temporal_info:
+            result["temporal"] = self.temporal_info.to_dict()
+        return result
 
 
 @dataclass
@@ -219,6 +299,7 @@ class HybridQueryEngine:
         config: QueryConfig | None = None,
         temporal_filter: TemporalFilter | None = None,
         context: ACLContext | None = None,
+        agentic: bool = False,
     ) -> QueryResult:
         """Execute a hybrid query with optional enhanced pipeline.
 
@@ -237,13 +318,38 @@ class HybridQueryEngine:
             config: Optional query config override
             temporal_filter: Optional temporal filter
             context: Optional ACL context for permission filtering
+            agentic: If True, use agentic two-step exploration
 
         Returns:
             QueryResult with matched chunks and entities
         """
+        # Agentic mode - use two-step exploration agent
+        if agentic:
+            from .agentic import AgenticSearchAgent
+
+            agent = AgenticSearchAgent(self, self._llm_config)
+            agentic_result = await agent.search(query_text, namespace_id, config)
+
+            # Convert to QueryResult
+            return QueryResult(
+                chunks=[(c, s) for c, s, _ in agentic_result.chunks],
+                entities=agentic_result.entities,
+                metadata={
+                    "agentic": True,
+                    "summary": agentic_result.summary,
+                    "trace": agentic_result.trace.to_dict() if agentic_result.trace else None,
+                    **agentic_result.metadata,
+                },
+            )
+
         cfg = config or self._config
 
         logger.debug(f"Executing query: {query_text[:50]}... (mode={cfg.mode.name})")
+
+        # Initialize tracking objects
+        search_contributions = SearchMethodContribution()
+        graph_info = GraphTraversalInfo()
+        temporal_info = TemporalInfo()
 
         # Initialize metadata
         metadata: dict[str, Any] = {
@@ -264,14 +370,68 @@ class HybridQueryEngine:
                 )
                 metadata["understanding"] = {
                     "intent": understanding.intent.name,
+                    "answer_type": understanding.answer_type.name,
                     "entities": [e.name for e in understanding.entities],
+                    "entity_aliases": {e.name: e.aliases for e in understanding.entities if e.aliases},
+                    "relationships": [
+                        {"from": r.from_entity, "type": r.relationship_type, "to": r.to_entity}
+                        for r in understanding.relationships
+                    ],
                     "temporal": understanding.has_temporal,
                     "expanded_queries": understanding.expanded_queries,
                     "keywords": understanding.keywords,
+                    "source_priority": {
+                        "slack": understanding.source_priority.slack,
+                        "linear": understanding.source_priority.linear,
+                        "notion": understanding.source_priority.notion,
+                        "attio": understanding.source_priority.attio,
+                        "gong": understanding.source_priority.gong,
+                        "github": understanding.source_priority.github,
+                        "bamboohr": understanding.source_priority.bamboohr,
+                    },
+                    "search_strategy": {
+                        "vector_weight": understanding.search_strategy.vector_weight,
+                        "graph_weight": understanding.search_strategy.graph_weight,
+                        "keyword_weight": understanding.search_strategy.keyword_weight,
+                        "reasoning": understanding.search_strategy.strategy_reasoning,
+                    },
+                    "complexity_score": understanding.complexity_score,
+                    "requires_multi_step": understanding.requires_multi_step,
+                    "follow_up_queries": [fq.query for fq in understanding.follow_up_queries],
+                    "reasoning": understanding.reasoning,
                 }
+
+                # Apply LLM-recommended search strategy weights
+                if understanding.search_strategy:
+                    cfg.vector_weight = understanding.search_strategy.vector_weight
+                    cfg.graph_weight = understanding.search_strategy.graph_weight
+                    cfg.keyword_weight = understanding.search_strategy.keyword_weight
+                    cfg.max_graph_depth = understanding.search_strategy.graph_depth
+
                 logger.debug(
-                    f"Query understanding: intent={understanding.intent.name}, entities={len(understanding.entities)}"
+                    f"Query understanding: intent={understanding.intent.name}, "
+                    f"entities={len(understanding.entities)}, complexity={understanding.complexity_score:.2f}"
                 )
+
+                # Extract temporal information and create filter if detected
+                if understanding.has_temporal and understanding.temporal_references:
+                    temporal_info.detected = True
+                    for temp_ref in understanding.temporal_references:
+                        temporal_info.reference_text = temp_ref.text
+                        if temp_ref.start_date:
+                            temporal_info.time_start = temp_ref.start_date
+                        if temp_ref.end_date:
+                            temporal_info.time_end = temp_ref.end_date
+
+                    # Create temporal filter if not already provided
+                    if not temporal_filter and (temporal_info.time_start or temporal_info.time_end):
+                        temporal_filter = TemporalFilter(
+                            start_date=temporal_info.time_start,
+                            end_date=temporal_info.time_end,
+                        )
+                        temporal_info.filter_applied = True
+                        logger.debug(f"Temporal filter applied: {temporal_info.time_start} to {temporal_info.time_end}")
+
             except Exception as e:
                 logger.warning(f"Query understanding failed: {e}")
 
@@ -289,10 +449,17 @@ class HybridQueryEngine:
                 )
                 linking_result = await linker.link(understanding.entities, namespace_id)
                 linked_entity_ids = linking_result.get_linked_entity_ids()
+
+                # Track linked entity names for graph info
+                for linked in linking_result.linked_entities:
+                    if linked.entity:
+                        graph_info.entities_linked.append(linked.entity.name)
+
                 metadata["entity_linking"] = {
                     "total_mentions": linking_result.total_mentions,
                     "linked_count": linking_result.linked_count,
                     "success_rate": linking_result.success_rate,
+                    "linked_entities": graph_info.entities_linked,
                 }
                 logger.debug(f"Entity linking: {linking_result.linked_count}/{linking_result.total_mentions} linked")
             except Exception as e:
@@ -333,21 +500,50 @@ class HybridQueryEngine:
             # Execute in parallel
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Process results
+            # Process results and track contributions
             for j, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Search {j} failed: {result}")
                     continue
 
                 if isinstance(result, dict):
+                    source_type = result.get("source", f"search_{j}")
+
                     if "chunks" in result:
-                        source = result.get("source", f"search_{j}") + suffix
+                        source = source_type + suffix
                         all_chunk_results[source] = result["chunks"]
+
+                        # Track contributions by search method
+                        chunk_ids = [str(c.id) for c, _ in result["chunks"]]
+                        if source_type == "vector":
+                            search_contributions.vector += len(result["chunks"])
+                            search_contributions.vector_chunks.extend(chunk_ids)
+                        elif source_type == "graph":
+                            search_contributions.graph += len(result["chunks"])
+                            search_contributions.graph_chunks.extend(chunk_ids)
+                        elif source_type == "keyword":
+                            search_contributions.keyword += len(result["chunks"])
+                            search_contributions.keyword_chunks.extend(chunk_ids)
+
                     if "entities" in result:
-                        source = result.get("source", f"search_{j}") + suffix
+                        source = source_type + suffix
                         all_entity_results[source] = result["entities"]
+
+                        # Track entities searched via graph
+                        if source_type == "graph":
+                            for entity, _ in result["entities"]:
+                                graph_info.entities_searched.append(entity.name)
+
                     if "graph_context" in result:
                         graph_context.update(result["graph_context"])
+
+                        # Track relationships from graph context
+                        if "relationships" in result.get("graph_context", {}):
+                            for rel in result["graph_context"]["relationships"]:
+                                if isinstance(rel, dict):
+                                    graph_info.relationships_traversed.append(
+                                        (rel.get("from", ""), rel.get("type", ""), rel.get("to", ""))
+                                    )
 
         # Step 4: Apply RRF fusion
         fused_chunks = []
@@ -433,11 +629,22 @@ class HybridQueryEngine:
         fused_chunks = fused_chunks[: cfg.max_chunks]
         fused_entities = fused_entities[: cfg.max_entities]
 
+        # Update graph info with depth used
+        graph_info.neighborhood_depth = cfg.max_graph_depth
+
+        # Add search method info to metadata
+        metadata["search_methods"] = search_contributions.to_dict()
+        metadata["graph_traversal"] = graph_info.to_dict()
+        metadata["temporal"] = temporal_info.to_dict()
+
         return QueryResult(
             chunks=fused_chunks,
             entities=fused_entities,
             graph_context=graph_context,
             metadata=metadata,
+            search_contributions=search_contributions,
+            graph_info=graph_info,
+            temporal_info=temporal_info,
         )
 
     async def _vector_search(

@@ -29,6 +29,40 @@ class TemporalFilter:
     relative_days: int | None = None
     relative_hours: int | None = None
 
+    # Alias properties for consistency
+    @property
+    def start_date(self) -> datetime | None:
+        """Alias for start_time."""
+        return self.start_time
+
+    @property
+    def end_date(self) -> datetime | None:
+        """Alias for end_time."""
+        return self.end_time
+
+    def __init__(
+        self,
+        operator: TemporalOperator = TemporalOperator.AFTER,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        relative_days: int | None = None,
+        relative_hours: int | None = None,
+    ) -> None:
+        """Initialize with flexible date/time naming."""
+        self.operator = operator
+        self.start_time = start_time or start_date
+        self.end_time = end_time or end_date
+        self.relative_days = relative_days
+        self.relative_hours = relative_hours
+
+        # Auto-detect operator if not specified
+        if self.start_time and self.end_time:
+            self.operator = TemporalOperator.BETWEEN
+        elif self.end_time and not self.start_time:
+            self.operator = TemporalOperator.BEFORE
+
     @classmethod
     def last_days(cls, days: int) -> TemporalFilter:
         """Create a filter for the last N days."""
