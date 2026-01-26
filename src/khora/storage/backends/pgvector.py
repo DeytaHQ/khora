@@ -247,7 +247,7 @@ class PgVectorBackend:
                 token_count=model.token_count,
                 custom=model.metadata_,
             ),
-            embedding=list(model.embedding) if model.embedding else None,
+            embedding=list(model.embedding) if model.embedding is not None else None,
             embedding_model=model.embedding_model,
             created_at=model.created_at,
         )
