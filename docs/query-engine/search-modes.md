@@ -64,29 +64,41 @@ QueryConfig(
 
 ## Graph Search
 
-Entity and relationship traversal in Neo4j.
+Entity and relationship traversal combining embedding similarity and Neo4j graph.
 
 ### How It Works
 
-1. Extract entity mentions from query (via understanding or simple matching)
-2. Link mentions to stored entities
-3. Traverse the knowledge graph from linked entities
-4. Retrieve chunks associated with discovered entities
+1. Embed the query using the same embedding model as entities
+2. Search pgvector for similar entities (entity embedding similarity)
+3. Link query mentions to stored entities (exact and fuzzy matching)
+4. Traverse the knowledge graph from linked/similar entities
+5. Retrieve chunks associated with discovered entities
 
 ```python
-# Find query entities
+# Find similar entities via embedding search (pgvector)
+query_embedding = await embedder.embed(query)
+similar_entities = await storage.search_similar_entities(
+    namespace_id,
+    query_embedding,
+    limit=10,
+)
+
+# Also find entities via mention linking
 linked_entities = await link_query_entities(query, namespace_id)
 
-# Traverse graph
-neighborhood = await storage.get_neighborhood(
-    entity_id=linked_entity.id,
-    depth=graph_depth,
-    relationship_types=relationship_types,
-)
+# Combine and traverse graph (Neo4j)
+for entity_id, similarity in similar_entities:
+    neighborhood = await storage.get_neighborhood(
+        entity_id=entity_id,
+        depth=graph_depth,
+        relationship_types=relationship_types,
+    )
 
 # Get chunks from related entities
 chunks = await get_entity_chunks(neighborhood.entities)
 ```
+
+**Note:** Entity embeddings must be generated during ingestion for graph search to find entities via similarity. Use `backfill_entity_embeddings()` to generate embeddings for entities created before this feature was implemented.
 
 ### Best For
 

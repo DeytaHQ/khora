@@ -30,9 +30,10 @@ Documents
 │    3. Generate embeddings for all chunks (batched)                 │
 │    4. Extract entities and relationships (parallel LLM calls)      │
 │    5. Store chunks in pgvector                                     │
-│    6. Store entities in Neo4j (with deduplication)                 │
-│    7. Store relationships in Neo4j                                 │
-│    8. Mark document as COMPLETED                                   │
+│    6. Store entities (Neo4j + PostgreSQL with deduplication)       │
+│    7. Generate and store entity embeddings (for similarity search) │
+│    8. Store relationships in Neo4j                                 │
+│    9. Mark document as COMPLETED                                   │
 │                                                                    │
 │  Output: Processing statistics                                     │
 └───────────────────────────────────────────────────────────────────┘
@@ -165,7 +166,7 @@ Extraction runs in parallel across chunks with semaphore control.
 # Store chunks (batched)
 await storage.create_chunks_batch(chunks)
 
-# Store entities with deduplication
+# Store entities with deduplication (stored in both Neo4j and PostgreSQL)
 for entity in entities:
     existing = await storage.get_entity_by_name(
         namespace_id, entity.name, entity.entity_type
@@ -180,6 +181,32 @@ for entity in entities:
 for relationship in relationships:
     await storage.create_relationship(relationship)
 ```
+
+### Step 5: Entity Embedding Generation
+
+After entities are stored, embeddings are generated and stored in pgvector to enable entity similarity search:
+
+```python
+from khora.extraction.embedders import LiteLLMEmbedder
+
+# Create embedder (same model as chunk embeddings)
+embedder = LiteLLMEmbedder(model=embedding_model)
+
+# Create text representation for each entity
+entity_texts = [
+    f"{e.name}: {e.description}" if e.description else e.name
+    for e in entities_needing_embeddings
+]
+
+# Generate embeddings in batch
+entity_embeddings = await embedder.embed_batch(entity_texts)
+
+# Store embeddings in pgvector
+for entity, embedding in zip(entities_needing_embeddings, entity_embeddings):
+    await storage.update_entity_embedding(entity.id, embedding, embedding_model)
+```
+
+This enables graph search to find relevant entities via embedding similarity before traversing relationships.
 
 ### Entity ID Remapping
 
@@ -261,6 +288,30 @@ result = await run_batch_inference(
     max_relationships=50000,
 )
 ```
+
+### Backfilling Entity Embeddings
+
+For entities created before entity embedding generation was implemented, use the backfill function:
+
+```python
+from khora.pipelines.flows import backfill_entity_embeddings
+
+result = await backfill_entity_embeddings(
+    namespace_id=namespace_id,
+    storage=storage,
+    embedding_model="text-embedding-3-small",
+    batch_size=100,
+    max_entities=50000,
+)
+
+print(f"Updated {result['entities_updated']} entities with embeddings")
+```
+
+This function:
+1. Queries all entities from Neo4j
+2. Creates missing entity records in PostgreSQL (for backwards compatibility)
+3. Generates embeddings for entities that don't have them
+4. Stores embeddings in pgvector for similarity search
 
 ## Concurrency Control
 

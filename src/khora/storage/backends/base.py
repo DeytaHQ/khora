@@ -248,7 +248,22 @@ class VectorBackendProtocol(Protocol):
         """
         ...
 
-    # Entity embedding operations
+    # Entity operations (for vector search via PostgreSQL)
+    @abstractmethod
+    async def create_entity(self, entity: Entity) -> None:
+        """Create an entity record in PostgreSQL for vector search."""
+        ...
+
+    @abstractmethod
+    async def update_entity(self, entity: Entity) -> None:
+        """Update an entity record in PostgreSQL."""
+        ...
+
+    @abstractmethod
+    async def entity_exists(self, entity_id: UUID) -> bool:
+        """Check if an entity exists in PostgreSQL."""
+        ...
+
     @abstractmethod
     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
         """Update the embedding for an entity."""

@@ -2,6 +2,20 @@
 
 Khora extracts entities and relationships from documents to build a knowledge graph. This graph enables relationship-based queries, entity exploration, and contextual search enhancement.
 
+## Storage Architecture
+
+Entities are stored in **two backends** for different purposes:
+
+| Backend | Purpose | Data |
+|---------|---------|------|
+| **Neo4j** | Graph traversal, relationship queries | Entity nodes, relationship edges |
+| **PostgreSQL/pgvector** | Embedding similarity search | Entity records with vector embeddings |
+
+This dual storage enables:
+- **Graph queries**: Traverse relationships efficiently in Neo4j
+- **Entity similarity**: Find semantically related entities via embedding search
+- **Hybrid search**: Combine both methods for comprehensive retrieval
+
 ## Entity Model
 
 Located at `src/khora/core/models/entity.py`.
@@ -19,8 +33,9 @@ class Entity:
     attributes: dict[str, Any] = field(default_factory=dict)
     aliases: list[str] = field(default_factory=list)
 
-    # Embedding for similarity matching
+    # Embedding for similarity matching (stored in pgvector)
     embedding: list[float] | None = None
+    embedding_model: str = ""
 
     # Confidence and mentions
     confidence: float = 0.5
@@ -127,6 +142,37 @@ entity = Entity(
 ```
 
 This enables temporal queries like "Who was the CEO in 2022?"
+
+### Entity Embeddings
+
+Entities have vector embeddings for similarity search:
+
+```python
+entity = Entity(
+    name="Albert Einstein",
+    entity_type=EntityType.PERSON,
+    description="Theoretical physicist known for relativity",
+    embedding=[0.1, 0.2, ...],  # Generated from name + description
+    embedding_model="text-embedding-3-small",
+)
+```
+
+Embeddings are:
+- **Generated automatically** during ingestion from `{name}: {description}`
+- **Stored in pgvector** (PostgreSQL) for cosine similarity search
+- **Used by graph search** to find relevant entities before traversal
+
+To find similar entities:
+
+```python
+# Search for entities similar to query
+similar_entities = await storage.search_similar_entities(
+    namespace_id,
+    query_embedding,
+    limit=10,
+    min_similarity=0.3,
+)
+```
 
 ## Relationship Model
 

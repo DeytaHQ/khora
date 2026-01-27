@@ -23,7 +23,7 @@ from ..registry import pipeline
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from khora.core.models import Document
+    from khora.core.models import Document, Entity
     from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
 
@@ -275,7 +275,8 @@ async def process_document(
         # Track mapping from original entity IDs to stored entity IDs (for dedup)
         entity_id_mapping: dict[str, str] = {}
 
-        async def store_entity(entity):
+        async def store_entity(entity) -> tuple[Entity, bool]:
+            """Store entity and return (entity, needs_embedding)."""
             async with entity_semaphore:
                 original_id = str(entity.id)
                 existing = await storage.get_entity_by_name(
@@ -288,14 +289,37 @@ async def process_document(
                     await storage.update_entity(existing)
                     # Map original ID to existing entity's ID
                     entity_id_mapping[original_id] = str(existing.id)
-                    return existing
+                    # Only generate embedding if not already present
+                    needs_embedding = not existing.embedding
+                    return existing, needs_embedding
                 else:
                     await storage.create_entity(entity)
                     # ID stays the same for new entities
                     entity_id_mapping[original_id] = original_id
-                    return entity
+                    # New entities always need embeddings
+                    return entity, True
 
-        await asyncio.gather(*[store_entity(e) for e in entities])
+        store_results = await asyncio.gather(*[store_entity(e) for e in entities])
+        # Collect entities that need embeddings
+        entities_needing_embeddings = [e for e, needs in store_results if needs]
+
+        # Step 5b: Generate and store entity embeddings
+        if entities_needing_embeddings:
+            from khora.extraction.embedders import LiteLLMEmbedder
+
+            embedder = LiteLLMEmbedder(model=embedding_model)
+            # Create entity text representations for embedding
+            entity_texts = [
+                f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings
+            ]
+            # Generate embeddings in batch
+            entity_embeddings = await embedder.embed_batch(entity_texts)
+            # Update entities with embeddings
+            for entity, embedding in zip(entities_needing_embeddings, entity_embeddings):
+                await storage.update_entity_embedding(entity.id, embedding, embedding_model)
+            logger.debug(
+                f"Document {document.id}: generated embeddings for {len(entities_needing_embeddings)} entities"
+            )
 
         # Step 6: Store relationships concurrently
         # Update relationship entity IDs to use deduplicated entity IDs
@@ -549,4 +573,86 @@ async def run_batch_inference(
         "entities": len(entities),
         "relationships": len(relationships),
         "inferred_relationships": inferred_count,
+    }
+
+
+@task(name="backfill_entity_embeddings", cache_policy=NO_CACHE)
+async def backfill_entity_embeddings(
+    namespace_id: UUID,
+    storage: StorageCoordinator,
+    *,
+    embedding_model: str = "text-embedding-3-small",
+    batch_size: int = 100,
+    max_entities: int = 50000,
+) -> dict[str, Any]:
+    """Backfill embeddings for entities that don't have them.
+
+    This is useful for fixing entities created before entity embedding
+    generation was implemented. It queries entities from Neo4j via the
+    graph backend and generates embeddings for storage in PostgreSQL.
+
+    Args:
+        namespace_id: Namespace to process
+        storage: Storage coordinator
+        embedding_model: Model to use for embeddings
+        batch_size: Batch size for embedding generation
+        max_entities: Maximum entities to process
+
+    Returns:
+        Summary of backfill results
+    """
+    from khora.extraction.embedders import LiteLLMEmbedder
+
+    logger.info(f"Starting entity embedding backfill for namespace {namespace_id}")
+
+    # Get all entities from the namespace
+    entities = await storage.list_entities(namespace_id, limit=max_entities)
+    logger.info(f"Found {len(entities)} entities")
+
+    if not entities:
+        return {"total_entities": 0, "entities_updated": 0}
+
+    # Filter to entities without embeddings
+    # Note: We check the vector backend directly since graph doesn't store embeddings
+    entities_needing_embeddings = []
+    for entity in entities:
+        if not entity.embedding:
+            # Also ensure entity exists in PostgreSQL, create if not
+            if storage.vector:
+                exists = await storage.vector.entity_exists(entity.id)
+                if not exists:
+                    await storage.vector.create_entity(entity)
+            entities_needing_embeddings.append(entity)
+
+    logger.info(f"Found {len(entities_needing_embeddings)} entities needing embeddings")
+
+    if not entities_needing_embeddings:
+        return {"total_entities": len(entities), "entities_updated": 0}
+
+    # Create embedder
+    embedder = LiteLLMEmbedder(model=embedding_model, batch_size=batch_size)
+
+    # Process in batches
+    total_updated = 0
+    for i in range(0, len(entities_needing_embeddings), batch_size):
+        batch = entities_needing_embeddings[i : i + batch_size]
+
+        # Create text representations
+        texts = [f"{e.name}: {e.description}" if e.description else e.name for e in batch]
+
+        # Generate embeddings
+        embeddings = await embedder.embed_batch(texts)
+
+        # Update entities
+        for entity, embedding in zip(batch, embeddings):
+            await storage.update_entity_embedding(entity.id, embedding, embedding_model)
+            total_updated += 1
+
+        logger.debug(f"Updated {total_updated}/{len(entities_needing_embeddings)} entity embeddings")
+
+    logger.info(f"Entity embedding backfill complete: updated {total_updated} entities")
+
+    return {
+        "total_entities": len(entities),
+        "entities_updated": total_updated,
     }

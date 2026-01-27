@@ -370,10 +370,13 @@ class StorageCoordinator:
     # =========================================================================
 
     async def create_entity(self, entity: Entity) -> Entity:
-        """Create an entity in both graph and relational stores."""
+        """Create an entity in both graph and vector stores."""
         # Store in graph for relationships and traversal
         if self.graph:
             entity = await self.graph.create_entity(entity)
+        # Store in vector backend for embedding-based similarity search
+        if self.vector:
+            await self.vector.create_entity(entity)
         return entity
 
     async def get_entity(self, entity_id: UUID) -> Entity | None:
@@ -389,9 +392,12 @@ class StorageCoordinator:
         return None
 
     async def update_entity(self, entity: Entity) -> Entity:
-        """Update an entity."""
+        """Update an entity in both graph and vector stores."""
         if self.graph:
             entity = await self.graph.update_entity(entity)
+        # Also update in vector backend for embedding search
+        if self.vector:
+            await self.vector.update_entity(entity)
         return entity
 
     async def delete_entity(self, entity_id: UUID) -> bool:

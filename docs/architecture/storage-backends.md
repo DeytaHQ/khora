@@ -262,6 +262,27 @@ The event store provides an append-only log for all changes, enabling event sour
 
 See [Event Sourcing](event-sourcing.md) for detailed documentation.
 
+## Dual Entity Storage
+
+Entities are stored in **both** Neo4j (for graph traversal) and PostgreSQL/pgvector (for embedding similarity search). This enables:
+
+- **Graph queries**: Traverse relationships via Neo4j
+- **Entity similarity**: Find related entities via embedding search in pgvector
+
+When entities are created or updated via the `StorageCoordinator`, they are automatically stored in both backends:
+
+```python
+# StorageCoordinator.create_entity() stores to both:
+async def create_entity(self, entity: Entity) -> Entity:
+    # Store in Neo4j for graph traversal
+    if self.graph:
+        entity = await self.graph.create_entity(entity)
+    # Store in pgvector for embedding search
+    if self.vector:
+        await self.vector.create_entity(entity)
+    return entity
+```
+
 ## Protocol-Based Design
 
 All backends implement protocols defined in `src/khora/storage/backends/base.py`:
@@ -276,6 +297,7 @@ class VectorBackendProtocol(Protocol):
     async def disconnect(self) -> None: ...
     async def is_healthy(self) -> bool: ...
 
+    # Chunk operations
     async def create_chunk(self, chunk: Chunk) -> Chunk: ...
     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]: ...
     async def get_chunk(self, chunk_id: UUID) -> Chunk | None: ...
@@ -286,6 +308,21 @@ class VectorBackendProtocol(Protocol):
         limit: int = 10,
         min_similarity: float = 0.0,
     ) -> list[tuple[Chunk, float]]: ...
+
+    # Entity operations (for embedding search)
+    async def create_entity(self, entity: Entity) -> None: ...
+    async def update_entity(self, entity: Entity) -> None: ...
+    async def entity_exists(self, entity_id: UUID) -> bool: ...
+    async def update_entity_embedding(
+        self, entity_id: UUID, embedding: list[float], model: str
+    ) -> None: ...
+    async def search_similar_entities(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        limit: int = 10,
+        min_similarity: float = 0.0,
+    ) -> list[tuple[UUID, float]]: ...
 
 
 class GraphBackendProtocol(Protocol):

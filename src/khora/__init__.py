@@ -17,7 +17,7 @@ from .cli import main
 from .memory_lake import MemoryLake, RecallResult, RememberResult
 from .query import SearchMode
 
-__version__ = "0.0.7"
+__version__ = "0.0.8"
 
 __all__ = [
     "main",

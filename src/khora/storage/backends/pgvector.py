@@ -253,6 +253,135 @@ class PgVectorBackend:
         )
 
     # =========================================================================
+    # Entity operations (for vector search via PostgreSQL)
+    # =========================================================================
+
+    async def create_entity(self, entity) -> None:
+        """Create an entity record in PostgreSQL for vector search.
+
+        This stores the entity metadata and embedding in PostgreSQL,
+        complementing the Neo4j storage for graph traversal.
+        """
+        async with self._get_session() as session:
+            model = EntityModel(
+                id=str(entity.id),
+                namespace_id=str(entity.namespace_id),
+                name=entity.name,
+                entity_type=entity.entity_type,
+                description=entity.description,
+                attributes=entity.attributes,
+                source_document_ids=[str(d) for d in entity.source_document_ids],
+                source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+                mention_count=entity.mention_count,
+                embedding=entity.embedding,
+                embedding_model=entity.embedding_model,
+                valid_from=entity.valid_from,
+                valid_until=entity.valid_until,
+                confidence=entity.confidence,
+                metadata_=entity.metadata,
+                created_at=entity.created_at,
+                updated_at=entity.updated_at,
+            )
+            session.add(model)
+            await session.commit()
+
+    async def update_entity(self, entity) -> None:
+        """Update an entity record in PostgreSQL.
+
+        If the entity doesn't exist (created before dual-storage was implemented),
+        creates it instead.
+        """
+        async with self._get_session() as session:
+            # Check if entity exists
+            result = await session.execute(select(func.count(EntityModel.id)).where(EntityModel.id == str(entity.id)))
+            exists = result.scalar_one() > 0
+
+            if exists:
+                await session.execute(
+                    update(EntityModel)
+                    .where(EntityModel.id == str(entity.id))
+                    .values(
+                        name=entity.name,
+                        description=entity.description,
+                        attributes=entity.attributes,
+                        source_document_ids=[str(d) for d in entity.source_document_ids],
+                        source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+                        mention_count=entity.mention_count,
+                        embedding=entity.embedding,
+                        embedding_model=entity.embedding_model,
+                        valid_from=entity.valid_from,
+                        valid_until=entity.valid_until,
+                        confidence=entity.confidence,
+                        metadata_=entity.metadata,
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+            else:
+                # Entity doesn't exist in PostgreSQL - create it
+                model = EntityModel(
+                    id=str(entity.id),
+                    namespace_id=str(entity.namespace_id),
+                    name=entity.name,
+                    entity_type=entity.entity_type,
+                    description=entity.description,
+                    attributes=entity.attributes,
+                    source_document_ids=[str(d) for d in entity.source_document_ids],
+                    source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+                    mention_count=entity.mention_count,
+                    embedding=entity.embedding,
+                    embedding_model=entity.embedding_model,
+                    valid_from=entity.valid_from,
+                    valid_until=entity.valid_until,
+                    confidence=entity.confidence,
+                    metadata_=entity.metadata,
+                    created_at=entity.created_at,
+                    updated_at=entity.updated_at,
+                )
+                session.add(model)
+            await session.commit()
+
+    async def get_entity(self, entity_id: UUID):
+        """Get an entity by ID from PostgreSQL."""
+        async with self._get_session() as session:
+            result = await session.execute(select(EntityModel).where(EntityModel.id == str(entity_id)))
+            model = result.scalar_one_or_none()
+            if model is None:
+                return None
+            return self._entity_model_to_domain(model)
+
+    async def entity_exists(self, entity_id: UUID) -> bool:
+        """Check if an entity exists in PostgreSQL."""
+        async with self._get_session() as session:
+            result = await session.execute(select(func.count(EntityModel.id)).where(EntityModel.id == str(entity_id)))
+            return result.scalar_one() > 0
+
+    def _entity_model_to_domain(self, model: EntityModel):
+        """Convert EntityModel to domain Entity."""
+        from uuid import UUID as UUIDType
+
+        from khora.core.models import Entity
+
+        return Entity(
+            id=UUIDType(model.id),
+            namespace_id=UUIDType(model.namespace_id),
+            name=model.name,
+            entity_type=model.entity_type,
+            description=model.description,
+            attributes=model.attributes or {},
+            source_document_ids=[UUIDType(d) for d in (model.source_document_ids or [])],
+            source_chunk_ids=[UUIDType(c) for c in (model.source_chunk_ids or [])],
+            mention_count=model.mention_count,
+            embedding=list(model.embedding) if model.embedding is not None else None,
+            embedding_model=model.embedding_model or "",
+            valid_from=model.valid_from,
+            valid_until=model.valid_until,
+            confidence=model.confidence,
+            metadata=model.metadata_ or {},
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    # =========================================================================
     # Entity embedding operations
     # =========================================================================
 
