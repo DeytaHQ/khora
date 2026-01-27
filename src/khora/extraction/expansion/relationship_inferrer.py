@@ -115,7 +115,7 @@ class RelationshipInferrer:
 
             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
 
-        logger.info(f"Inferred {len(all_inferred)} relationships in {depth} pass(es)")
+        logger.debug(f"Inferred {len(all_inferred)} relationships in {depth} pass(es)")
         return all_inferred
 
     def infer_from_pattern(

@@ -175,7 +175,7 @@ class SemanticExpander:
             result.entity_mapping = unification_result.entity_mapping
             result.merged_entity_count = unification_result.entities_merged
 
-            logger.info(
+            logger.debug(
                 f"Unified {result.original_entity_count} entities into {len(current_entities)} "
                 f"({result.merged_entity_count} merged)"
             )
@@ -194,7 +194,7 @@ class SemanticExpander:
             inferred_relationships = [to_relationship(inf, namespace_id) for inf in inferred]
             result.inferred_relationship_count = len(inferred_relationships)
 
-            logger.info(f"Inferred {len(inferred_relationships)} new relationships")
+            logger.debug(f"Inferred {len(inferred_relationships)} new relationships")
 
         # Build final result
         result.entities = current_entities

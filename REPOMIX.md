@@ -195,1065 +195,6 @@ README.md
 
 # Files
 
-## File: tests/unit/test_chunkers.py
-````python
-  1: """Unit tests for text chunking functionality."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import pytest
-  6: 
-  7: from khora.extraction.chunkers import (
-  8:     Chunker,
-  9:     ChunkResult,
- 10:     FixedChunker,
- 11:     RecursiveChunker,
- 12:     create_chunker,
- 13: )
- 14: 
- 15: 
- 16: class TestChunkResult:
- 17:     """Tests for ChunkResult dataclass."""
- 18: 
- 19:     def test_create_chunk_result(self) -> None:
- 20:         """Test creating a chunk result."""
- 21:         result = ChunkResult(
- 22:             content="Test content",
- 23:             index=0,
- 24:             start_char=0,
- 25:             end_char=12,
- 26:             token_count=3,
- 27:         )
- 28:         assert result.content == "Test content"
- 29:         assert result.index == 0
- 30:         assert result.start_char == 0
- 31:         assert result.end_char == 12
- 32:         assert result.token_count == 3
- 33: 
- 34:     def test_chunk_result_with_metadata(self) -> None:
- 35:         """Test chunk result with metadata."""
- 36:         result = ChunkResult(
- 37:             content="Content",
- 38:             index=0,
- 39:             start_char=0,
- 40:             end_char=7,
- 41:             token_count=1,
- 42:             metadata={"key": "value"},
- 43:         )
- 44:         assert result.metadata["key"] == "value"
- 45: 
- 46: 
- 47: class TestFixedChunker:
- 48:     """Tests for FixedChunker."""
- 49: 
- 50:     def test_basic_chunking(self) -> None:
- 51:         """Test basic text chunking."""
- 52:         chunker = FixedChunker(chunk_size=50, chunk_overlap=10)
- 53:         text = "A" * 200  # 200 characters, ~50 tokens
- 54: 
- 55:         chunks = chunker.chunk(text)
- 56: 
- 57:         assert len(chunks) >= 1
- 58:         for chunk in chunks:
- 59:             assert isinstance(chunk, ChunkResult)
- 60:             assert len(chunk.content) > 0
- 61: 
- 62:     def test_short_text_single_chunk(self) -> None:
- 63:         """Test that short text produces single chunk."""
- 64:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
- 65:         text = "Short text"
- 66: 
- 67:         chunks = chunker.chunk(text)
- 68: 
- 69:         assert len(chunks) == 1
- 70:         assert chunks[0].content == "Short text"
- 71: 
- 72:     def test_empty_text(self) -> None:
- 73:         """Test empty text handling."""
- 74:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
- 75: 
- 76:         chunks = chunker.chunk("")
- 77: 
- 78:         assert chunks == []
- 79: 
- 80:     def test_whitespace_only(self) -> None:
- 81:         """Test whitespace-only text."""
- 82:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
- 83: 
- 84:         chunks = chunker.chunk("   \n\t  ")
- 85: 
- 86:         assert chunks == []
- 87: 
- 88:     def test_chunk_has_position_info(self) -> None:
- 89:         """Test that chunks have position information."""
- 90:         chunker = FixedChunker(chunk_size=50, chunk_overlap=10)
- 91:         text = "This is a test. " * 20  # Long enough for multiple chunks
- 92: 
- 93:         chunks = chunker.chunk(text)
- 94: 
- 95:         for i, chunk in enumerate(chunks):
- 96:             assert chunk.index == i
- 97:             assert chunk.start_char >= 0
- 98:             assert chunk.end_char > chunk.start_char
- 99: 
-100:     def test_token_count_populated(self) -> None:
-101:         """Test that token count is populated."""
-102:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
-103:         text = "Hello world, this is a test."
-104: 
-105:         chunks = chunker.chunk(text)
-106: 
-107:         assert len(chunks) == 1
-108:         assert chunks[0].token_count > 0
-109: 
-110:     def test_default_config(self) -> None:
-111:         """Test chunker with default config."""
-112:         chunker = FixedChunker()
-113:         assert chunker.chunk_size == 512
-114:         assert chunker.chunk_overlap == 50
-115: 
-116: 
-117: class TestRecursiveChunker:
-118:     """Tests for RecursiveChunker."""
-119: 
-120:     def test_basic_chunking(self) -> None:
-121:         """Test basic recursive chunking."""
-122:         chunker = RecursiveChunker(chunk_size=50, chunk_overlap=10)
-123:         text = "A" * 200
-124: 
-125:         chunks = chunker.chunk(text)
-126: 
-127:         assert len(chunks) >= 1
-128:         for chunk in chunks:
-129:             assert isinstance(chunk, ChunkResult)
-130: 
-131:     def test_respects_paragraph_boundaries(self) -> None:
-132:         """Test that chunker respects paragraph boundaries."""
-133:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
-134:         text = "First paragraph with some content.\n\nSecond paragraph here.\n\nThird paragraph."
-135: 
-136:         chunks = chunker.chunk(text)
-137: 
-138:         # Should chunk at paragraph boundaries when possible
-139:         assert len(chunks) >= 1
-140: 
-141:     def test_empty_text(self) -> None:
-142:         """Test empty text handling."""
-143:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
-144: 
-145:         chunks = chunker.chunk("")
-146: 
-147:         assert chunks == []
-148: 
-149:     def test_short_text(self) -> None:
-150:         """Test short text produces single chunk."""
-151:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
-152:         text = "Short text."
-153: 
-154:         chunks = chunker.chunk(text)
-155: 
-156:         assert len(chunks) == 1
-157:         assert chunks[0].content == "Short text."
-158: 
-159:     def test_chunk_indices_sequential(self) -> None:
-160:         """Test that chunk indices are sequential."""
-161:         chunker = RecursiveChunker(chunk_size=50, chunk_overlap=10)
-162:         text = "Word " * 100  # Long text
-163: 
-164:         chunks = chunker.chunk(text)
-165: 
-166:         for i, chunk in enumerate(chunks):
-167:             assert chunk.index == i
-168: 
-169: 
-170: class TestCreateChunker:
-171:     """Tests for chunker factory function."""
-172: 
-173:     def test_create_fixed_chunker(self) -> None:
-174:         """Test creating fixed chunker by name."""
-175:         chunker = create_chunker("fixed")
-176:         assert isinstance(chunker, FixedChunker)
-177: 
-178:     def test_create_recursive_chunker(self) -> None:
-179:         """Test creating recursive chunker by name."""
-180:         chunker = create_chunker("recursive")
-181:         assert isinstance(chunker, RecursiveChunker)
-182: 
-183:     def test_create_default_chunker(self) -> None:
-184:         """Test creating default chunker (semantic)."""
-185:         chunker = create_chunker()
-186:         # Default is semantic
-187:         assert isinstance(chunker, Chunker)
-188: 
-189:     def test_create_chunker_with_config(self) -> None:
-190:         """Test creating chunker with custom config."""
-191:         chunker = create_chunker("fixed", chunk_size=256, chunk_overlap=32)
-192:         assert isinstance(chunker, FixedChunker)
-193:         assert chunker.chunk_size == 256
-194:         assert chunker.chunk_overlap == 32
-195: 
-196:     def test_unknown_chunker_type(self) -> None:
-197:         """Test unknown chunker type raises error."""
-198:         with pytest.raises(ValueError):
-199:             create_chunker("unknown_type")
-200: 
-201: 
-202: class TestChunkerBase:
-203:     """Tests for Chunker abstract base class."""
-204: 
-205:     def test_chunker_is_abstract(self) -> None:
-206:         """Test that Chunker cannot be instantiated directly."""
-207:         with pytest.raises(TypeError):
-208:             Chunker()  # type: ignore
-209: 
-210:     def test_count_tokens_fallback(self) -> None:
-211:         """Test token counting fallback."""
-212:         # Create a concrete chunker to test the method
-213:         chunker = FixedChunker(chunk_size=100, chunk_overlap=10)
-214:         count = chunker.count_tokens("Hello world")
-215:         assert count > 0
-216: 
-217:     def test_subclass_must_implement_chunk(self) -> None:
-218:         """Test that subclass must implement chunk method."""
-219: 
-220:         class IncompleteChunker(Chunker):
-221:             pass
-222: 
-223:         with pytest.raises(TypeError):
-224:             IncompleteChunker()  # type: ignore
-````
-
-## File: tests/unit/test_models.py
-````python
-  1: """Unit tests for core domain models."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from datetime import datetime, timezone
-  6: from uuid import uuid4
-  7: 
-  8: from khora.core.models import Chunk, Document, Entity, Relationship
-  9: from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
- 10: from khora.core.models.entity import EntityType, Episode, RelationshipType
- 11: from khora.core.models.event import EventType, MemoryEvent
- 12: from khora.core.models.tenancy import MemoryNamespace, Organization, TenancyMode, Workspace
- 13: 
- 14: 
- 15: class TestDocument:
- 16:     """Tests for Document model."""
- 17: 
- 18:     def test_create_document(self) -> None:
- 19:         """Test basic document creation."""
- 20:         doc = Document(content="This is test content.")
- 21:         assert doc.content == "This is test content."
- 22:         assert doc.status == DocumentStatus.PENDING
- 23:         assert doc.id is not None
- 24: 
- 25:     def test_document_with_metadata(self) -> None:
- 26:         """Test document with metadata."""
- 27:         metadata = DocumentMetadata(source="test", author="user", title="Test Doc")
- 28:         doc = Document(content="Content", metadata=metadata)
- 29:         assert doc.metadata.source == "test"
- 30:         assert doc.metadata.author == "user"
- 31:         assert doc.metadata.title == "Test Doc"
- 32: 
- 33:     def test_document_timestamps(self) -> None:
- 34:         """Test document timestamp handling."""
- 35:         now = datetime.now(timezone.utc)
- 36:         doc = Document(content="Content", created_at=now, updated_at=now)
- 37:         assert doc.created_at == now
- 38:         assert doc.updated_at == now
- 39: 
- 40:     def test_document_mark_processing(self) -> None:
- 41:         """Test marking document as processing."""
- 42:         doc = Document(content="Content")
- 43:         doc.mark_processing()
- 44:         assert doc.status == DocumentStatus.PROCESSING
- 45: 
- 46:     def test_document_mark_completed(self) -> None:
- 47:         """Test marking document as completed."""
- 48:         doc = Document(content="Content")
- 49:         doc.mark_completed(chunk_count=5, entity_count=3)
- 50:         assert doc.status == DocumentStatus.COMPLETED
- 51:         assert doc.chunk_count == 5
- 52:         assert doc.entity_count == 3
- 53:         assert doc.is_processed
- 54: 
- 55:     def test_document_mark_failed(self) -> None:
- 56:         """Test marking document as failed."""
- 57:         doc = Document(content="Content")
- 58:         doc.mark_failed("Processing error")
- 59:         assert doc.status == DocumentStatus.FAILED
- 60:         assert doc.error_message == "Processing error"
- 61: 
- 62: 
- 63: class TestChunk:
- 64:     """Tests for Chunk model."""
- 65: 
- 66:     def test_create_chunk(self) -> None:
- 67:         """Test basic chunk creation."""
- 68:         chunk = Chunk(content="Chunk content")
- 69:         assert chunk.content == "Chunk content"
- 70:         assert chunk.id is not None
- 71: 
- 72:     def test_chunk_with_embedding(self) -> None:
- 73:         """Test chunk with embedding vector."""
- 74:         embedding = [0.1, 0.2, 0.3, 0.4, 0.5]
- 75:         chunk = Chunk(
- 76:             content="Content",
- 77:             embedding=embedding,
- 78:             embedding_model="text-embedding-3-small",
- 79:         )
- 80:         assert chunk.embedding == embedding
- 81:         assert chunk.embedding_model == "text-embedding-3-small"
- 82:         assert chunk.has_embedding
- 83: 
- 84:     def test_chunk_without_embedding(self) -> None:
- 85:         """Test chunk without embedding."""
- 86:         chunk = Chunk(content="Content")
- 87:         assert not chunk.has_embedding
- 88: 
- 89:     def test_chunk_with_metadata(self) -> None:
- 90:         """Test chunk with metadata."""
- 91:         doc_id = uuid4()
- 92:         metadata = ChunkMetadata(
- 93:             document_id=doc_id,
- 94:             chunk_index=1,
- 95:             start_char=100,
- 96:             end_char=200,
- 97:             token_count=25,
- 98:         )
- 99:         chunk = Chunk(content="Content", metadata=metadata)
-100:         assert chunk.metadata.document_id == doc_id
-101:         assert chunk.metadata.chunk_index == 1
-102:         assert chunk.metadata.start_char == 100
-103:         assert chunk.metadata.end_char == 200
-104:         assert chunk.metadata.token_count == 25
-105: 
-106: 
-107: class TestEntity:
-108:     """Tests for Entity model."""
-109: 
-110:     def test_create_entity(self) -> None:
-111:         """Test basic entity creation."""
-112:         entity = Entity(name="John Smith", entity_type=EntityType.PERSON)
-113:         assert entity.name == "John Smith"
-114:         assert entity.entity_type == EntityType.PERSON
-115: 
-116:     def test_entity_with_attributes(self) -> None:
-117:         """Test entity with attributes."""
-118:         entity = Entity(
-119:             name="Acme Corp",
-120:             entity_type=EntityType.ORGANIZATION,
-121:             attributes={"industry": "Technology", "employees": 500},
-122:         )
-123:         assert entity.attributes["industry"] == "Technology"
-124:         assert entity.attributes["employees"] == 500
-125: 
-126:     def test_entity_with_description(self) -> None:
-127:         """Test entity with description."""
-128:         entity = Entity(
-129:             name="Python",
-130:             entity_type=EntityType.TECHNOLOGY,
-131:             description="A programming language",
-132:         )
-133:         assert entity.description == "A programming language"
-134: 
-135:     def test_entity_confidence(self) -> None:
-136:         """Test entity confidence score."""
-137:         entity = Entity(
-138:             name="Test",
-139:             entity_type=EntityType.CONCEPT,
-140:             confidence=0.85,
-141:         )
-142:         assert entity.confidence == 0.85
-143: 
-144:     def test_entity_source_tracking(self) -> None:
-145:         """Test entity source document/chunk tracking."""
-146:         doc_id = uuid4()
-147:         chunk_id = uuid4()
-148:         entity = Entity(
-149:             name="Test",
-150:             entity_type=EntityType.CONCEPT,
-151:             source_document_ids=[doc_id],
-152:             source_chunk_ids=[chunk_id],
-153:         )
-154:         assert doc_id in entity.source_document_ids
-155:         assert chunk_id in entity.source_chunk_ids
-156: 
-157:     def test_entity_mention_count(self) -> None:
-158:         """Test entity mention counting."""
-159:         entity = Entity(
-160:             name="Test",
-161:             entity_type=EntityType.CONCEPT,
-162:             mention_count=5,
-163:         )
-164:         assert entity.mention_count == 5
-165: 
-166:     def test_entity_temporal_validity(self) -> None:
-167:         """Test entity temporal validity range."""
-168:         now = datetime.now(timezone.utc)
-169:         entity = Entity(
-170:             name="Test",
-171:             entity_type=EntityType.EVENT,
-172:             valid_from=now,
-173:             valid_until=now,
-174:         )
-175:         assert entity.valid_from == now
-176:         assert entity.valid_until == now
-177: 
-178:     def test_entity_merge(self) -> None:
-179:         """Test merging two entities."""
-180:         doc_id1 = uuid4()
-181:         doc_id2 = uuid4()
-182:         entity1 = Entity(
-183:             name="Test",
-184:             entity_type=EntityType.PERSON,
-185:             source_document_ids=[doc_id1],
-186:             mention_count=2,
-187:             confidence=0.8,
-188:         )
-189:         entity2 = Entity(
-190:             name="Test",
-191:             entity_type=EntityType.PERSON,
-192:             source_document_ids=[doc_id2],
-193:             mention_count=3,
-194:             confidence=0.9,
-195:             description="A person",
-196:         )
-197:         entity1.merge_with(entity2)
-198:         assert doc_id1 in entity1.source_document_ids
-199:         assert doc_id2 in entity1.source_document_ids
-200:         assert entity1.mention_count == 5
-201:         assert entity1.confidence == 0.9
-202:         assert entity1.description == "A person"
-203: 
-204: 
-205: class TestRelationship:
-206:     """Tests for Relationship model."""
-207: 
-208:     def test_create_relationship(self) -> None:
-209:         """Test basic relationship creation."""
-210:         source_id = uuid4()
-211:         target_id = uuid4()
-212:         rel = Relationship(
-213:             source_entity_id=source_id,
-214:             target_entity_id=target_id,
-215:             relationship_type=RelationshipType.WORKS_FOR,
-216:         )
-217:         assert rel.source_entity_id == source_id
-218:         assert rel.target_entity_id == target_id
-219:         assert rel.relationship_type == RelationshipType.WORKS_FOR
-220: 
-221:     def test_relationship_with_properties(self) -> None:
-222:         """Test relationship with properties."""
-223:         rel = Relationship(
-224:             source_entity_id=uuid4(),
-225:             target_entity_id=uuid4(),
-226:             relationship_type=RelationshipType.WORKS_FOR,
-227:             properties={"since": "2020", "role": "Engineer"},
-228:         )
-229:         assert rel.properties["since"] == "2020"
-230:         assert rel.properties["role"] == "Engineer"
-231: 
-232:     def test_relationship_confidence(self) -> None:
-233:         """Test relationship confidence score."""
-234:         rel = Relationship(
-235:             source_entity_id=uuid4(),
-236:             target_entity_id=uuid4(),
-237:             relationship_type=RelationshipType.KNOWS,
-238:             confidence=0.75,
-239:         )
-240:         assert rel.confidence == 0.75
-241: 
-242:     def test_relationship_description(self) -> None:
-243:         """Test relationship with description."""
-244:         rel = Relationship(
-245:             source_entity_id=uuid4(),
-246:             target_entity_id=uuid4(),
-247:             relationship_type=RelationshipType.COLLABORATES_WITH,
-248:             description="Worked together on Project X",
-249:         )
-250:         assert rel.description == "Worked together on Project X"
-251: 
-252:     def test_relationship_weight(self) -> None:
-253:         """Test relationship weight."""
-254:         rel = Relationship(
-255:             source_entity_id=uuid4(),
-256:             target_entity_id=uuid4(),
-257:             relationship_type=RelationshipType.RELATES_TO,
-258:             weight=0.5,
-259:         )
-260:         assert rel.weight == 0.5
-261: 
-262: 
-263: class TestEpisode:
-264:     """Tests for Episode model."""
-265: 
-266:     def test_create_episode(self) -> None:
-267:         """Test basic episode creation."""
-268:         episode = Episode(name="Meeting with client")
-269:         assert episode.name == "Meeting with client"
-270:         assert episode.id is not None
-271: 
-272:     def test_episode_with_entities(self) -> None:
-273:         """Test episode with associated entities."""
-274:         entity_ids = [uuid4(), uuid4()]
-275:         episode = Episode(name="Team standup", entity_ids=entity_ids)
-276:         assert len(episode.entity_ids) == 2
-277: 
-278:     def test_episode_temporal(self) -> None:
-279:         """Test episode with temporal information."""
-280:         now = datetime.now(timezone.utc)
-281:         episode = Episode(name="Conference", occurred_at=now)
-282:         assert episode.occurred_at == now
-283: 
-284:     def test_episode_duration(self) -> None:
-285:         """Test episode duration and end_time property."""
-286:         episode = Episode(name="Meeting", duration_seconds=3600)
-287:         assert episode.duration_seconds == 3600
-288:         assert episode.end_time is not None
-289: 
-290:     def test_episode_no_duration(self) -> None:
-291:         """Test episode without duration has no end_time."""
-292:         episode = Episode(name="Event")
-293:         assert episode.end_time is None
-294: 
-295: 
-296: class TestMemoryEvent:
-297:     """Tests for MemoryEvent model."""
-298: 
-299:     def test_create_event(self) -> None:
-300:         """Test basic event creation."""
-301:         event = MemoryEvent(
-302:             event_type=EventType.DOCUMENT_CREATED,
-303:             resource_id=uuid4(),
-304:             data={"title": "New doc"},
-305:         )
-306:         assert event.event_type == EventType.DOCUMENT_CREATED
-307:         assert event.data["title"] == "New doc"
-308:         assert event.resource_type == "document"
-309: 
-310:     def test_event_types(self) -> None:
-311:         """Test different event types."""
-312:         ns_id = uuid4()
-313:         resource_id = uuid4()
-314: 
-315:         created = MemoryEvent(
-316:             namespace_id=ns_id,
-317:             event_type=EventType.DOCUMENT_CREATED,
-318:             resource_id=resource_id,
-319:         )
-320:         assert created.event_type == EventType.DOCUMENT_CREATED
-321: 
-322:         updated = MemoryEvent(
-323:             namespace_id=ns_id,
-324:             event_type=EventType.DOCUMENT_UPDATED,
-325:             resource_id=resource_id,
-326:         )
-327:         assert updated.event_type == EventType.DOCUMENT_UPDATED
-328: 
-329:         deleted = MemoryEvent(
-330:             namespace_id=ns_id,
-331:             event_type=EventType.DOCUMENT_DELETED,
-332:             resource_id=resource_id,
-333:         )
-334:         assert deleted.event_type == EventType.DOCUMENT_DELETED
-335: 
-336:     def test_event_timestamp(self) -> None:
-337:         """Test event timestamp."""
-338:         event = MemoryEvent(event_type=EventType.ENTITY_CREATED)
-339:         assert event.timestamp is not None
-340: 
-341:     def test_event_factory_methods(self) -> None:
-342:         """Test event factory methods."""
-343:         ns_id = uuid4()
-344:         doc_id = uuid4()
-345: 
-346:         event = MemoryEvent.document_created(
-347:             namespace_id=ns_id,
-348:             document_id=doc_id,
-349:             data={"content": "test"},
-350:         )
-351:         assert event.event_type == EventType.DOCUMENT_CREATED
-352:         assert event.resource_id == doc_id
-353:         assert event.resource_type == "document"
-354: 
-355:     def test_event_entity_created_factory(self) -> None:
-356:         """Test entity_created factory method."""
-357:         ns_id = uuid4()
-358:         entity_id = uuid4()
-359: 
-360:         event = MemoryEvent.entity_created(
-361:             namespace_id=ns_id,
-362:             entity_id=entity_id,
-363:             data={"name": "Test"},
-364:         )
-365:         assert event.event_type == EventType.ENTITY_CREATED
-366:         assert event.resource_id == entity_id
-367: 
-368:     def test_event_resource_type_auto_extraction(self) -> None:
-369:         """Test that resource_type is auto-extracted from event_type."""
-370:         event = MemoryEvent(event_type=EventType.CHUNK_EMBEDDED)
-371:         assert event.resource_type == "chunk"
-372: 
-373:         event2 = MemoryEvent(event_type=EventType.RELATIONSHIP_CREATED)
-374:         assert event2.resource_type == "relationship"
-375: 
-376: 
-377: class TestTenancyModels:
-378:     """Tests for tenancy models (Organization, Workspace, MemoryNamespace)."""
-379: 
-380:     def test_create_organization(self) -> None:
-381:         """Test organization creation."""
-382:         org = Organization(name="Acme Inc", slug="acme")
-383:         assert org.name == "Acme Inc"
-384:         assert org.slug == "acme"
-385: 
-386:     def test_organization_auto_slug(self) -> None:
-387:         """Test organization auto-generates slug from name."""
-388:         org = Organization(name="Test Organization")
-389:         assert org.slug == "test-organization"
-390: 
-391:     def test_organization_tenancy_mode(self) -> None:
-392:         """Test organization tenancy mode."""
-393:         org = Organization(name="Test", tenancy_mode=TenancyMode.ISOLATED)
-394:         assert org.tenancy_mode == TenancyMode.ISOLATED
-395: 
-396:     def test_organization_with_metadata(self) -> None:
-397:         """Test organization with metadata."""
-398:         org = Organization(
-399:             name="Test Org",
-400:             slug="test",
-401:             metadata={"feature_x": True},
-402:         )
-403:         assert org.metadata["feature_x"] is True
-404: 
-405:     def test_create_workspace(self) -> None:
-406:         """Test workspace creation."""
-407:         org_id = uuid4()
-408:         ws = Workspace(organization_id=org_id, name="Engineering", slug="engineering")
-409:         assert ws.name == "Engineering"
-410:         assert ws.organization_id == org_id
-411: 
-412:     def test_workspace_auto_slug(self) -> None:
-413:         """Test workspace auto-generates slug from name."""
-414:         ws = Workspace(organization_id=uuid4(), name="My Workspace")
-415:         assert ws.slug == "my-workspace"
-416: 
-417:     def test_workspace_with_description(self) -> None:
-418:         """Test workspace with description."""
-419:         ws = Workspace(
-420:             organization_id=uuid4(),
-421:             name="Sales",
-422:             slug="sales",
-423:             description="Sales team workspace",
-424:         )
-425:         assert ws.description == "Sales team workspace"
-426: 
-427:     def test_create_namespace(self) -> None:
-428:         """Test namespace creation."""
-429:         ws_id = uuid4()
-430:         ns = MemoryNamespace(workspace_id=ws_id, name="Project Alpha", slug="project-alpha")
-431:         assert ns.name == "Project Alpha"
-432:         assert ns.workspace_id == ws_id
-433: 
-434:     def test_namespace_auto_slug(self) -> None:
-435:         """Test namespace auto-generates slug from name."""
-436:         ns = MemoryNamespace(workspace_id=uuid4(), name="My Project")
-437:         assert ns.slug == "my-project"
-438: 
-439:     def test_namespace_with_config(self) -> None:
-440:         """Test namespace with configuration overrides."""
-441:         ns = MemoryNamespace(
-442:             workspace_id=uuid4(),
-443:             name="Test",
-444:             slug="test",
-445:             config_overrides={"extraction_skill": "technical_docs"},
-446:         )
-447:         assert ns.config_overrides["extraction_skill"] == "technical_docs"
-448: 
-449:     def test_namespace_full_path(self) -> None:
-450:         """Test namespace full path property."""
-451:         ws_id = uuid4()
-452:         ns = MemoryNamespace(workspace_id=ws_id, name="Test", slug="test-ns")
-453:         assert ns.full_path == f"{ws_id}/test-ns"
-454: 
-455:     def test_namespace_sync_checkpoints(self) -> None:
-456:         """Test namespace sync checkpoints."""
-457:         ns = MemoryNamespace(
-458:             workspace_id=uuid4(),
-459:             name="Test",
-460:             sync_checkpoints={"source1": "checkpoint123"},
-461:         )
-462:         assert ns.sync_checkpoints["source1"] == "checkpoint123"
-````
-
-## File: tests/unit/test_skills_registry.py
-````python
-  1: """Unit tests for skill registry and composer."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import pytest
-  6: 
-  7: from khora.extraction.skills import (
-  8:     EntityTypeConfig,
-  9:     ExpertiseConfig,
- 10:     ExtractionSkill,
- 11:     RelationshipTypeConfig,
- 12:     SkillRegistry,
- 13:     get_default_registry,
- 14: )
- 15: from khora.extraction.skills.composer import ExpertiseComposer
- 16: from khora.extraction.skills.loader import ExpertiseLoader
- 17: 
- 18: 
- 19: class TestSkillRegistry:
- 20:     """Tests for SkillRegistry."""
- 21: 
- 22:     def test_create_registry(self) -> None:
- 23:         """Test creating a new registry."""
- 24:         registry = SkillRegistry()
- 25:         # Should have built-in skills
- 26:         skills = registry.list_skills()
- 27:         assert "general_entities" in skills
- 28: 
- 29:     def test_register_skill(self) -> None:
- 30:         """Test registering a custom skill."""
- 31:         registry = SkillRegistry()
- 32:         skill = ExtractionSkill(
- 33:             name="custom_skill",
- 34:             description="A custom skill",
- 35:             entity_types=["CUSTOM_TYPE"],
- 36:             relationship_types=["CUSTOM_REL"],
- 37:         )
- 38:         registry.register(skill)
- 39: 
- 40:         assert "custom_skill" in registry.list_skills()
- 41:         retrieved = registry.get("custom_skill")
- 42:         assert retrieved is not None
- 43:         assert retrieved.name == "custom_skill"
- 44: 
- 45:     def test_register_expertise_config(self) -> None:
- 46:         """Test registering an ExpertiseConfig."""
- 47:         registry = SkillRegistry()
- 48:         expertise = ExpertiseConfig(
- 49:             name="test_expertise",
- 50:             description="Test expertise",
- 51:             entity_types=[
- 52:                 EntityTypeConfig(name="TEST", description="Test entity"),
- 53:             ],
- 54:         )
- 55:         registry.register(expertise)
- 56: 
- 57:         # Should be available as both expertise and skill
- 58:         assert "test_expertise" in registry.list_expertise()
- 59:         assert "test_expertise" in registry.list_skills()
- 60: 
- 61:     def test_get_nonexistent_skill(self) -> None:
- 62:         """Test getting a skill that doesn't exist."""
- 63:         registry = SkillRegistry()
- 64:         result = registry.get("nonexistent")
- 65:         assert result is None
- 66: 
- 67:     def test_get_or_default(self) -> None:
- 68:         """Test get_or_default falls back to general_entities."""
- 69:         registry = SkillRegistry()
- 70:         result = registry.get_or_default("nonexistent")
- 71:         assert result.name == "general_entities"
- 72: 
- 73:     def test_unregister_skill(self) -> None:
- 74:         """Test unregistering a skill."""
- 75:         registry = SkillRegistry()
- 76:         skill = ExtractionSkill(name="to_remove", description="Will be removed")
- 77:         registry.register(skill)
- 78: 
- 79:         assert "to_remove" in registry.list_skills()
- 80: 
- 81:         removed = registry.unregister("to_remove")
- 82:         assert removed is True
- 83:         assert "to_remove" not in registry.list_skills()
- 84: 
- 85:     def test_unregister_nonexistent(self) -> None:
- 86:         """Test unregistering nonexistent skill returns False."""
- 87:         registry = SkillRegistry()
- 88:         removed = registry.unregister("nonexistent")
- 89:         assert removed is False
- 90: 
- 91:     def test_all_skills(self) -> None:
- 92:         """Test getting all skills."""
- 93:         registry = SkillRegistry()
- 94:         skills = registry.all_skills()
- 95:         assert len(skills) >= 4  # Built-in skills
- 96:         assert all(isinstance(s, ExtractionSkill) for s in skills)
- 97: 
- 98:     def test_get_expertise(self) -> None:
- 99:         """Test getting expertise by name."""
-100:         registry = SkillRegistry()
-101:         expertise = ExpertiseConfig(name="test_exp", description="Test")
-102:         registry.register(expertise)
-103: 
-104:         retrieved = registry.get_expertise("test_exp")
-105:         assert retrieved is not None
-106:         assert retrieved.name == "test_exp"
-107: 
-108:     def test_get_expertise_nonexistent(self) -> None:
-109:         """Test getting nonexistent expertise."""
-110:         registry = SkillRegistry()
-111:         result = registry.get_expertise("nonexistent")
-112:         assert result is None
-113: 
-114:     def test_get_expertise_or_default(self) -> None:
-115:         """Test get_expertise_or_default falls back to general."""
-116:         registry = SkillRegistry()
-117:         result = registry.get_expertise_or_default("nonexistent")
-118:         # Should return some default expertise
-119:         assert result is not None
-120:         assert result.name in ["general", "nonexistent"]
-121: 
-122:     def test_all_expertise(self) -> None:
-123:         """Test getting all expertise configs."""
-124:         registry = SkillRegistry()
-125:         expertise = ExpertiseConfig(name="exp1", description="First")
-126:         registry.register(expertise)
-127: 
-128:         all_exp = registry.all_expertise()
-129:         assert len(all_exp) >= 1
-130:         assert all(isinstance(e, ExpertiseConfig) for e in all_exp)
-131: 
-132:     def test_register_from_config(self) -> None:
-133:         """Test registering skills from config dictionaries."""
-134:         registry = SkillRegistry()
-135:         config = [
-136:             {
-137:                 "name": "from_config",
-138:                 "description": "Loaded from config",
-139:                 "entity_types": ["TYPE_A"],
-140:                 "relationship_types": ["REL_A"],
-141:             },
-142:         ]
-143:         registry.register_from_config(config)
-144: 
-145:         assert "from_config" in registry.list_skills()
-146: 
-147:     def test_to_dict(self) -> None:
-148:         """Test exporting registry to dictionary."""
-149:         registry = SkillRegistry()
-150:         data = registry.to_dict()
-151: 
-152:         assert "general_entities" in data
-153:         assert isinstance(data["general_entities"], dict)
-154: 
-155: 
-156: class TestDefaultRegistry:
-157:     """Tests for the default global registry."""
-158: 
-159:     def test_get_default_registry_singleton(self) -> None:
-160:         """Test that get_default_registry returns singleton."""
-161:         reg1 = get_default_registry()
-162:         reg2 = get_default_registry()
-163:         assert reg1 is reg2
-164: 
-165:     def test_default_registry_has_builtins(self) -> None:
-166:         """Test default registry has built-in skills."""
-167:         registry = get_default_registry()
-168:         skills = registry.list_skills()
-169: 
-170:         assert "general_entities" in skills
-171:         assert "technical_docs" in skills
-172:         assert "business_intel" in skills
-173:         assert "research_papers" in skills
-174: 
-175: 
-176: class TestExtractionSkill:
-177:     """Tests for ExtractionSkill dataclass."""
-178: 
-179:     def test_create_skill(self) -> None:
-180:         """Test creating an extraction skill."""
-181:         skill = ExtractionSkill(
-182:             name="test_skill",
-183:             description="A test skill",
-184:             entity_types=["PERSON", "ORG"],
-185:             relationship_types=["WORKS_FOR"],
-186:         )
-187:         assert skill.name == "test_skill"
-188:         assert "PERSON" in skill.entity_types
-189:         assert "WORKS_FOR" in skill.relationship_types
-190: 
-191:     def test_skill_to_dict(self) -> None:
-192:         """Test skill serialization."""
-193:         skill = ExtractionSkill(
-194:             name="test",
-195:             description="Test skill",
-196:             entity_types=["A", "B"],
-197:             relationship_types=["R"],
-198:         )
-199:         data = skill.to_dict()
-200: 
-201:         assert data["name"] == "test"
-202:         assert data["description"] == "Test skill"
-203:         assert "A" in data["entity_types"]
-204: 
-205:     def test_skill_from_dict(self) -> None:
-206:         """Test skill deserialization."""
-207:         data = {
-208:             "name": "loaded",
-209:             "description": "Loaded skill",
-210:             "entity_types": ["X", "Y"],
-211:             "relationship_types": ["Z"],
-212:         }
-213:         skill = ExtractionSkill.from_dict(data)
-214: 
-215:         assert skill.name == "loaded"
-216:         assert "X" in skill.entity_types
-217:         assert "Z" in skill.relationship_types
-218: 
-219:     def test_builtin_general_entities(self) -> None:
-220:         """Test built-in general_entities skill."""
-221:         skill = ExtractionSkill.general_entities()
-222:         assert skill.name == "general_entities"
-223:         assert len(skill.entity_types) > 0
-224: 
-225:     def test_builtin_technical_docs(self) -> None:
-226:         """Test built-in technical_docs skill."""
-227:         skill = ExtractionSkill.technical_docs()
-228:         assert skill.name == "technical_docs"
-229: 
-230:     def test_builtin_business_intel(self) -> None:
-231:         """Test built-in business_intel skill."""
-232:         skill = ExtractionSkill.business_intel()
-233:         assert skill.name == "business_intel"
-234: 
-235:     def test_builtin_research_papers(self) -> None:
-236:         """Test built-in research_papers skill."""
-237:         skill = ExtractionSkill.research_papers()
-238:         assert skill.name == "research_papers"
-239: 
-240: 
-241: class TestExpertiseComposer:
-242:     """Tests for ExpertiseComposer."""
-243: 
-244:     def test_create_composer(self) -> None:
-245:         """Test creating a composer."""
-246:         loader = ExpertiseLoader()
-247:         composer = ExpertiseComposer(loader)
-248:         assert composer is not None
-249: 
-250:     def test_merge_single_config(self) -> None:
-251:         """Test merging a single config returns it unchanged."""
-252:         loader = ExpertiseLoader()
-253:         composer = ExpertiseComposer(loader)
-254: 
-255:         config = ExpertiseConfig(
-256:             name="single",
-257:             entity_types=[EntityTypeConfig(name="A", description="Type A")],
-258:         )
-259: 
-260:         merged = composer.merge([config])
-261:         assert merged.name == "single"
-262:         assert len(merged.entity_types) == 1
-263: 
-264:     def test_merge_multiple_configs(self) -> None:
-265:         """Test merging multiple configs."""
-266:         loader = ExpertiseLoader()
-267:         composer = ExpertiseComposer(loader)
-268: 
-269:         config1 = ExpertiseConfig(
-270:             name="first",
-271:             entity_types=[EntityTypeConfig(name="A", description="Type A")],
-272:             relationship_types=[RelationshipTypeConfig(name="R1", description="Rel 1")],
-273:         )
-274: 
-275:         config2 = ExpertiseConfig(
-276:             name="second",
-277:             entity_types=[EntityTypeConfig(name="B", description="Type B")],
-278:             relationship_types=[RelationshipTypeConfig(name="R2", description="Rel 2")],
-279:         )
-280: 
-281:         merged = composer.merge([config1, config2])
-282: 
-283:         # Should have entity types from both
-284:         entity_names = [e.name for e in merged.entity_types]
-285:         assert "A" in entity_names
-286:         assert "B" in entity_names
-287: 
-288:         # Should have relationship types from both
-289:         rel_names = [r.name for r in merged.relationship_types]
-290:         assert "R1" in rel_names
-291:         assert "R2" in rel_names
-292: 
-293:     def test_merge_overwrites_same_name(self) -> None:
-294:         """Test that later config overwrites same-named items."""
-295:         loader = ExpertiseLoader()
-296:         composer = ExpertiseComposer(loader)
-297: 
-298:         config1 = ExpertiseConfig(
-299:             name="first",
-300:             entity_types=[EntityTypeConfig(name="A", description="Original A")],
-301:         )
-302: 
-303:         config2 = ExpertiseConfig(
-304:             name="second",
-305:             entity_types=[EntityTypeConfig(name="A", description="Updated A")],
-306:         )
-307: 
-308:         merged = composer.merge([config1, config2])
-309: 
-310:         # Should have updated description
-311:         a_type = next(e for e in merged.entity_types if e.name == "A")
-312:         assert a_type.description == "Updated A"
-313: 
-314:     def test_merge_system_prompts(self) -> None:
-315:         """Test merging system prompts."""
-316:         loader = ExpertiseLoader()
-317:         composer = ExpertiseComposer(loader)
-318: 
-319:         config1 = ExpertiseConfig(
-320:             name="first",
-321:             system_prompt="First prompt",
-322:         )
-323: 
-324:         config2 = ExpertiseConfig(
-325:             name="second",
-326:             system_prompt="Second prompt",
-327:         )
-328: 
-329:         merged = composer.merge([config1, config2])
-330: 
-331:         # Later prompt should win
-332:         assert merged.system_prompt == "Second prompt"
-333: 
-334:     def test_merge_empty_list(self) -> None:
-335:         """Test merging empty list raises error."""
-336:         loader = ExpertiseLoader()
-337:         composer = ExpertiseComposer(loader)
-338: 
-339:         with pytest.raises(ValueError):
-340:             composer.merge([])
-341: 
-342:     def test_merge_preserves_confidence_config(self) -> None:
-343:         """Test that merge preserves confidence config from last."""
-344:         from khora.extraction.skills import ConfidenceConfig
-345: 
-346:         loader = ExpertiseLoader()
-347:         composer = ExpertiseComposer(loader)
-348: 
-349:         config1 = ExpertiseConfig(
-350:             name="first",
-351:             confidence=ConfidenceConfig(min_entity=0.5),
-352:         )
-353: 
-354:         config2 = ExpertiseConfig(
-355:             name="second",
-356:             confidence=ConfidenceConfig(min_entity=0.7),
-357:         )
-358: 
-359:         merged = composer.merge([config1, config2])
-360: 
-361:         assert merged.confidence.min_entity == 0.7
-````
-
 ## File: alembic/env.py
 ````python
  1: """Alembic migration environment configuration."""
@@ -5615,7 +4556,7 @@ README.md
 175:             result.entity_mapping = unification_result.entity_mapping
 176:             result.merged_entity_count = unification_result.entities_merged
 177: 
-178:             logger.info(
+178:             logger.debug(
 179:                 f"Unified {result.original_entity_count} entities into {len(current_entities)} "
 180:                 f"({result.merged_entity_count} merged)"
 181:             )
@@ -5634,7 +4575,7 @@ README.md
 194:             inferred_relationships = [to_relationship(inf, namespace_id) for inf in inferred]
 195:             result.inferred_relationship_count = len(inferred_relationships)
 196: 
-197:             logger.info(f"Inferred {len(inferred_relationships)} new relationships")
+197:             logger.debug(f"Inferred {len(inferred_relationships)} new relationships")
 198: 
 199:         # Build final result
 200:         result.entities = current_entities
@@ -5812,7 +4753,7 @@ README.md
 115: 
 116:             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
 117: 
-118:         logger.info(f"Inferred {len(all_inferred)} relationships in {depth} pass(es)")
+118:         logger.debug(f"Inferred {len(all_inferred)} relationships in {depth} pass(es)")
 119:         return all_inferred
 120: 
 121:     def infer_from_pattern(
@@ -11540,6 +10481,234 @@ README.md
 1: """Unit tests for Khora."""
 ````
 
+## File: tests/unit/test_chunkers.py
+````python
+  1: """Unit tests for text chunking functionality."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import pytest
+  6: 
+  7: from khora.extraction.chunkers import (
+  8:     Chunker,
+  9:     ChunkResult,
+ 10:     FixedChunker,
+ 11:     RecursiveChunker,
+ 12:     create_chunker,
+ 13: )
+ 14: 
+ 15: 
+ 16: class TestChunkResult:
+ 17:     """Tests for ChunkResult dataclass."""
+ 18: 
+ 19:     def test_create_chunk_result(self) -> None:
+ 20:         """Test creating a chunk result."""
+ 21:         result = ChunkResult(
+ 22:             content="Test content",
+ 23:             index=0,
+ 24:             start_char=0,
+ 25:             end_char=12,
+ 26:             token_count=3,
+ 27:         )
+ 28:         assert result.content == "Test content"
+ 29:         assert result.index == 0
+ 30:         assert result.start_char == 0
+ 31:         assert result.end_char == 12
+ 32:         assert result.token_count == 3
+ 33: 
+ 34:     def test_chunk_result_with_metadata(self) -> None:
+ 35:         """Test chunk result with metadata."""
+ 36:         result = ChunkResult(
+ 37:             content="Content",
+ 38:             index=0,
+ 39:             start_char=0,
+ 40:             end_char=7,
+ 41:             token_count=1,
+ 42:             metadata={"key": "value"},
+ 43:         )
+ 44:         assert result.metadata["key"] == "value"
+ 45: 
+ 46: 
+ 47: class TestFixedChunker:
+ 48:     """Tests for FixedChunker."""
+ 49: 
+ 50:     def test_basic_chunking(self) -> None:
+ 51:         """Test basic text chunking."""
+ 52:         chunker = FixedChunker(chunk_size=50, chunk_overlap=10)
+ 53:         text = "A" * 200  # 200 characters, ~50 tokens
+ 54: 
+ 55:         chunks = chunker.chunk(text)
+ 56: 
+ 57:         assert len(chunks) >= 1
+ 58:         for chunk in chunks:
+ 59:             assert isinstance(chunk, ChunkResult)
+ 60:             assert len(chunk.content) > 0
+ 61: 
+ 62:     def test_short_text_single_chunk(self) -> None:
+ 63:         """Test that short text produces single chunk."""
+ 64:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+ 65:         text = "Short text"
+ 66: 
+ 67:         chunks = chunker.chunk(text)
+ 68: 
+ 69:         assert len(chunks) == 1
+ 70:         assert chunks[0].content == "Short text"
+ 71: 
+ 72:     def test_empty_text(self) -> None:
+ 73:         """Test empty text handling."""
+ 74:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+ 75: 
+ 76:         chunks = chunker.chunk("")
+ 77: 
+ 78:         assert chunks == []
+ 79: 
+ 80:     def test_whitespace_only(self) -> None:
+ 81:         """Test whitespace-only text."""
+ 82:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+ 83: 
+ 84:         chunks = chunker.chunk("   \n\t  ")
+ 85: 
+ 86:         assert chunks == []
+ 87: 
+ 88:     def test_chunk_has_position_info(self) -> None:
+ 89:         """Test that chunks have position information."""
+ 90:         chunker = FixedChunker(chunk_size=50, chunk_overlap=10)
+ 91:         text = "This is a test. " * 20  # Long enough for multiple chunks
+ 92: 
+ 93:         chunks = chunker.chunk(text)
+ 94: 
+ 95:         for i, chunk in enumerate(chunks):
+ 96:             assert chunk.index == i
+ 97:             assert chunk.start_char >= 0
+ 98:             assert chunk.end_char > chunk.start_char
+ 99: 
+100:     def test_token_count_populated(self) -> None:
+101:         """Test that token count is populated."""
+102:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+103:         text = "Hello world, this is a test."
+104: 
+105:         chunks = chunker.chunk(text)
+106: 
+107:         assert len(chunks) == 1
+108:         assert chunks[0].token_count > 0
+109: 
+110:     def test_default_config(self) -> None:
+111:         """Test chunker with default config."""
+112:         chunker = FixedChunker()
+113:         assert chunker.chunk_size == 512
+114:         assert chunker.chunk_overlap == 50
+115: 
+116: 
+117: class TestRecursiveChunker:
+118:     """Tests for RecursiveChunker."""
+119: 
+120:     def test_basic_chunking(self) -> None:
+121:         """Test basic recursive chunking."""
+122:         chunker = RecursiveChunker(chunk_size=50, chunk_overlap=10)
+123:         text = "A" * 200
+124: 
+125:         chunks = chunker.chunk(text)
+126: 
+127:         assert len(chunks) >= 1
+128:         for chunk in chunks:
+129:             assert isinstance(chunk, ChunkResult)
+130: 
+131:     def test_respects_paragraph_boundaries(self) -> None:
+132:         """Test that chunker respects paragraph boundaries."""
+133:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
+134:         text = "First paragraph with some content.\n\nSecond paragraph here.\n\nThird paragraph."
+135: 
+136:         chunks = chunker.chunk(text)
+137: 
+138:         # Should chunk at paragraph boundaries when possible
+139:         assert len(chunks) >= 1
+140: 
+141:     def test_empty_text(self) -> None:
+142:         """Test empty text handling."""
+143:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
+144: 
+145:         chunks = chunker.chunk("")
+146: 
+147:         assert chunks == []
+148: 
+149:     def test_short_text(self) -> None:
+150:         """Test short text produces single chunk."""
+151:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
+152:         text = "Short text."
+153: 
+154:         chunks = chunker.chunk(text)
+155: 
+156:         assert len(chunks) == 1
+157:         assert chunks[0].content == "Short text."
+158: 
+159:     def test_chunk_indices_sequential(self) -> None:
+160:         """Test that chunk indices are sequential."""
+161:         chunker = RecursiveChunker(chunk_size=50, chunk_overlap=10)
+162:         text = "Word " * 100  # Long text
+163: 
+164:         chunks = chunker.chunk(text)
+165: 
+166:         for i, chunk in enumerate(chunks):
+167:             assert chunk.index == i
+168: 
+169: 
+170: class TestCreateChunker:
+171:     """Tests for chunker factory function."""
+172: 
+173:     def test_create_fixed_chunker(self) -> None:
+174:         """Test creating fixed chunker by name."""
+175:         chunker = create_chunker("fixed")
+176:         assert isinstance(chunker, FixedChunker)
+177: 
+178:     def test_create_recursive_chunker(self) -> None:
+179:         """Test creating recursive chunker by name."""
+180:         chunker = create_chunker("recursive")
+181:         assert isinstance(chunker, RecursiveChunker)
+182: 
+183:     def test_create_default_chunker(self) -> None:
+184:         """Test creating default chunker (semantic)."""
+185:         chunker = create_chunker()
+186:         # Default is semantic
+187:         assert isinstance(chunker, Chunker)
+188: 
+189:     def test_create_chunker_with_config(self) -> None:
+190:         """Test creating chunker with custom config."""
+191:         chunker = create_chunker("fixed", chunk_size=256, chunk_overlap=32)
+192:         assert isinstance(chunker, FixedChunker)
+193:         assert chunker.chunk_size == 256
+194:         assert chunker.chunk_overlap == 32
+195: 
+196:     def test_unknown_chunker_type(self) -> None:
+197:         """Test unknown chunker type raises error."""
+198:         with pytest.raises(ValueError):
+199:             create_chunker("unknown_type")
+200: 
+201: 
+202: class TestChunkerBase:
+203:     """Tests for Chunker abstract base class."""
+204: 
+205:     def test_chunker_is_abstract(self) -> None:
+206:         """Test that Chunker cannot be instantiated directly."""
+207:         with pytest.raises(TypeError):
+208:             Chunker()  # type: ignore
+209: 
+210:     def test_count_tokens_fallback(self) -> None:
+211:         """Test token counting fallback."""
+212:         # Create a concrete chunker to test the method
+213:         chunker = FixedChunker(chunk_size=100, chunk_overlap=10)
+214:         count = chunker.count_tokens("Hello world")
+215:         assert count > 0
+216: 
+217:     def test_subclass_must_implement_chunk(self) -> None:
+218:         """Test that subclass must implement chunk method."""
+219: 
+220:         class IncompleteChunker(Chunker):
+221:             pass
+222: 
+223:         with pytest.raises(TypeError):
+224:             IncompleteChunker()  # type: ignore
+````
+
 ## File: tests/unit/test_expansion.py
 ````python
   1: """Unit tests for semantic expansion components."""
@@ -12789,6 +11958,837 @@ README.md
 484:         entity_names = [e.name for e in resolved.entity_types]
 485:         assert "PERSON" in entity_names  # from parent
 486:         assert "CUSTOM" in entity_names  # from child
+````
+
+## File: tests/unit/test_models.py
+````python
+  1: """Unit tests for core domain models."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from datetime import datetime, timezone
+  6: from uuid import uuid4
+  7: 
+  8: from khora.core.models import Chunk, Document, Entity, Relationship
+  9: from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
+ 10: from khora.core.models.entity import EntityType, Episode, RelationshipType
+ 11: from khora.core.models.event import EventType, MemoryEvent
+ 12: from khora.core.models.tenancy import MemoryNamespace, Organization, TenancyMode, Workspace
+ 13: 
+ 14: 
+ 15: class TestDocument:
+ 16:     """Tests for Document model."""
+ 17: 
+ 18:     def test_create_document(self) -> None:
+ 19:         """Test basic document creation."""
+ 20:         doc = Document(content="This is test content.")
+ 21:         assert doc.content == "This is test content."
+ 22:         assert doc.status == DocumentStatus.PENDING
+ 23:         assert doc.id is not None
+ 24: 
+ 25:     def test_document_with_metadata(self) -> None:
+ 26:         """Test document with metadata."""
+ 27:         metadata = DocumentMetadata(source="test", author="user", title="Test Doc")
+ 28:         doc = Document(content="Content", metadata=metadata)
+ 29:         assert doc.metadata.source == "test"
+ 30:         assert doc.metadata.author == "user"
+ 31:         assert doc.metadata.title == "Test Doc"
+ 32: 
+ 33:     def test_document_timestamps(self) -> None:
+ 34:         """Test document timestamp handling."""
+ 35:         now = datetime.now(timezone.utc)
+ 36:         doc = Document(content="Content", created_at=now, updated_at=now)
+ 37:         assert doc.created_at == now
+ 38:         assert doc.updated_at == now
+ 39: 
+ 40:     def test_document_mark_processing(self) -> None:
+ 41:         """Test marking document as processing."""
+ 42:         doc = Document(content="Content")
+ 43:         doc.mark_processing()
+ 44:         assert doc.status == DocumentStatus.PROCESSING
+ 45: 
+ 46:     def test_document_mark_completed(self) -> None:
+ 47:         """Test marking document as completed."""
+ 48:         doc = Document(content="Content")
+ 49:         doc.mark_completed(chunk_count=5, entity_count=3)
+ 50:         assert doc.status == DocumentStatus.COMPLETED
+ 51:         assert doc.chunk_count == 5
+ 52:         assert doc.entity_count == 3
+ 53:         assert doc.is_processed
+ 54: 
+ 55:     def test_document_mark_failed(self) -> None:
+ 56:         """Test marking document as failed."""
+ 57:         doc = Document(content="Content")
+ 58:         doc.mark_failed("Processing error")
+ 59:         assert doc.status == DocumentStatus.FAILED
+ 60:         assert doc.error_message == "Processing error"
+ 61: 
+ 62: 
+ 63: class TestChunk:
+ 64:     """Tests for Chunk model."""
+ 65: 
+ 66:     def test_create_chunk(self) -> None:
+ 67:         """Test basic chunk creation."""
+ 68:         chunk = Chunk(content="Chunk content")
+ 69:         assert chunk.content == "Chunk content"
+ 70:         assert chunk.id is not None
+ 71: 
+ 72:     def test_chunk_with_embedding(self) -> None:
+ 73:         """Test chunk with embedding vector."""
+ 74:         embedding = [0.1, 0.2, 0.3, 0.4, 0.5]
+ 75:         chunk = Chunk(
+ 76:             content="Content",
+ 77:             embedding=embedding,
+ 78:             embedding_model="text-embedding-3-small",
+ 79:         )
+ 80:         assert chunk.embedding == embedding
+ 81:         assert chunk.embedding_model == "text-embedding-3-small"
+ 82:         assert chunk.has_embedding
+ 83: 
+ 84:     def test_chunk_without_embedding(self) -> None:
+ 85:         """Test chunk without embedding."""
+ 86:         chunk = Chunk(content="Content")
+ 87:         assert not chunk.has_embedding
+ 88: 
+ 89:     def test_chunk_with_metadata(self) -> None:
+ 90:         """Test chunk with metadata."""
+ 91:         doc_id = uuid4()
+ 92:         metadata = ChunkMetadata(
+ 93:             document_id=doc_id,
+ 94:             chunk_index=1,
+ 95:             start_char=100,
+ 96:             end_char=200,
+ 97:             token_count=25,
+ 98:         )
+ 99:         chunk = Chunk(content="Content", metadata=metadata)
+100:         assert chunk.metadata.document_id == doc_id
+101:         assert chunk.metadata.chunk_index == 1
+102:         assert chunk.metadata.start_char == 100
+103:         assert chunk.metadata.end_char == 200
+104:         assert chunk.metadata.token_count == 25
+105: 
+106: 
+107: class TestEntity:
+108:     """Tests for Entity model."""
+109: 
+110:     def test_create_entity(self) -> None:
+111:         """Test basic entity creation."""
+112:         entity = Entity(name="John Smith", entity_type=EntityType.PERSON)
+113:         assert entity.name == "John Smith"
+114:         assert entity.entity_type == EntityType.PERSON
+115: 
+116:     def test_entity_with_attributes(self) -> None:
+117:         """Test entity with attributes."""
+118:         entity = Entity(
+119:             name="Acme Corp",
+120:             entity_type=EntityType.ORGANIZATION,
+121:             attributes={"industry": "Technology", "employees": 500},
+122:         )
+123:         assert entity.attributes["industry"] == "Technology"
+124:         assert entity.attributes["employees"] == 500
+125: 
+126:     def test_entity_with_description(self) -> None:
+127:         """Test entity with description."""
+128:         entity = Entity(
+129:             name="Python",
+130:             entity_type=EntityType.TECHNOLOGY,
+131:             description="A programming language",
+132:         )
+133:         assert entity.description == "A programming language"
+134: 
+135:     def test_entity_confidence(self) -> None:
+136:         """Test entity confidence score."""
+137:         entity = Entity(
+138:             name="Test",
+139:             entity_type=EntityType.CONCEPT,
+140:             confidence=0.85,
+141:         )
+142:         assert entity.confidence == 0.85
+143: 
+144:     def test_entity_source_tracking(self) -> None:
+145:         """Test entity source document/chunk tracking."""
+146:         doc_id = uuid4()
+147:         chunk_id = uuid4()
+148:         entity = Entity(
+149:             name="Test",
+150:             entity_type=EntityType.CONCEPT,
+151:             source_document_ids=[doc_id],
+152:             source_chunk_ids=[chunk_id],
+153:         )
+154:         assert doc_id in entity.source_document_ids
+155:         assert chunk_id in entity.source_chunk_ids
+156: 
+157:     def test_entity_mention_count(self) -> None:
+158:         """Test entity mention counting."""
+159:         entity = Entity(
+160:             name="Test",
+161:             entity_type=EntityType.CONCEPT,
+162:             mention_count=5,
+163:         )
+164:         assert entity.mention_count == 5
+165: 
+166:     def test_entity_temporal_validity(self) -> None:
+167:         """Test entity temporal validity range."""
+168:         now = datetime.now(timezone.utc)
+169:         entity = Entity(
+170:             name="Test",
+171:             entity_type=EntityType.EVENT,
+172:             valid_from=now,
+173:             valid_until=now,
+174:         )
+175:         assert entity.valid_from == now
+176:         assert entity.valid_until == now
+177: 
+178:     def test_entity_merge(self) -> None:
+179:         """Test merging two entities."""
+180:         doc_id1 = uuid4()
+181:         doc_id2 = uuid4()
+182:         entity1 = Entity(
+183:             name="Test",
+184:             entity_type=EntityType.PERSON,
+185:             source_document_ids=[doc_id1],
+186:             mention_count=2,
+187:             confidence=0.8,
+188:         )
+189:         entity2 = Entity(
+190:             name="Test",
+191:             entity_type=EntityType.PERSON,
+192:             source_document_ids=[doc_id2],
+193:             mention_count=3,
+194:             confidence=0.9,
+195:             description="A person",
+196:         )
+197:         entity1.merge_with(entity2)
+198:         assert doc_id1 in entity1.source_document_ids
+199:         assert doc_id2 in entity1.source_document_ids
+200:         assert entity1.mention_count == 5
+201:         assert entity1.confidence == 0.9
+202:         assert entity1.description == "A person"
+203: 
+204: 
+205: class TestRelationship:
+206:     """Tests for Relationship model."""
+207: 
+208:     def test_create_relationship(self) -> None:
+209:         """Test basic relationship creation."""
+210:         source_id = uuid4()
+211:         target_id = uuid4()
+212:         rel = Relationship(
+213:             source_entity_id=source_id,
+214:             target_entity_id=target_id,
+215:             relationship_type=RelationshipType.WORKS_FOR,
+216:         )
+217:         assert rel.source_entity_id == source_id
+218:         assert rel.target_entity_id == target_id
+219:         assert rel.relationship_type == RelationshipType.WORKS_FOR
+220: 
+221:     def test_relationship_with_properties(self) -> None:
+222:         """Test relationship with properties."""
+223:         rel = Relationship(
+224:             source_entity_id=uuid4(),
+225:             target_entity_id=uuid4(),
+226:             relationship_type=RelationshipType.WORKS_FOR,
+227:             properties={"since": "2020", "role": "Engineer"},
+228:         )
+229:         assert rel.properties["since"] == "2020"
+230:         assert rel.properties["role"] == "Engineer"
+231: 
+232:     def test_relationship_confidence(self) -> None:
+233:         """Test relationship confidence score."""
+234:         rel = Relationship(
+235:             source_entity_id=uuid4(),
+236:             target_entity_id=uuid4(),
+237:             relationship_type=RelationshipType.KNOWS,
+238:             confidence=0.75,
+239:         )
+240:         assert rel.confidence == 0.75
+241: 
+242:     def test_relationship_description(self) -> None:
+243:         """Test relationship with description."""
+244:         rel = Relationship(
+245:             source_entity_id=uuid4(),
+246:             target_entity_id=uuid4(),
+247:             relationship_type=RelationshipType.COLLABORATES_WITH,
+248:             description="Worked together on Project X",
+249:         )
+250:         assert rel.description == "Worked together on Project X"
+251: 
+252:     def test_relationship_weight(self) -> None:
+253:         """Test relationship weight."""
+254:         rel = Relationship(
+255:             source_entity_id=uuid4(),
+256:             target_entity_id=uuid4(),
+257:             relationship_type=RelationshipType.RELATES_TO,
+258:             weight=0.5,
+259:         )
+260:         assert rel.weight == 0.5
+261: 
+262: 
+263: class TestEpisode:
+264:     """Tests for Episode model."""
+265: 
+266:     def test_create_episode(self) -> None:
+267:         """Test basic episode creation."""
+268:         episode = Episode(name="Meeting with client")
+269:         assert episode.name == "Meeting with client"
+270:         assert episode.id is not None
+271: 
+272:     def test_episode_with_entities(self) -> None:
+273:         """Test episode with associated entities."""
+274:         entity_ids = [uuid4(), uuid4()]
+275:         episode = Episode(name="Team standup", entity_ids=entity_ids)
+276:         assert len(episode.entity_ids) == 2
+277: 
+278:     def test_episode_temporal(self) -> None:
+279:         """Test episode with temporal information."""
+280:         now = datetime.now(timezone.utc)
+281:         episode = Episode(name="Conference", occurred_at=now)
+282:         assert episode.occurred_at == now
+283: 
+284:     def test_episode_duration(self) -> None:
+285:         """Test episode duration and end_time property."""
+286:         episode = Episode(name="Meeting", duration_seconds=3600)
+287:         assert episode.duration_seconds == 3600
+288:         assert episode.end_time is not None
+289: 
+290:     def test_episode_no_duration(self) -> None:
+291:         """Test episode without duration has no end_time."""
+292:         episode = Episode(name="Event")
+293:         assert episode.end_time is None
+294: 
+295: 
+296: class TestMemoryEvent:
+297:     """Tests for MemoryEvent model."""
+298: 
+299:     def test_create_event(self) -> None:
+300:         """Test basic event creation."""
+301:         event = MemoryEvent(
+302:             event_type=EventType.DOCUMENT_CREATED,
+303:             resource_id=uuid4(),
+304:             data={"title": "New doc"},
+305:         )
+306:         assert event.event_type == EventType.DOCUMENT_CREATED
+307:         assert event.data["title"] == "New doc"
+308:         assert event.resource_type == "document"
+309: 
+310:     def test_event_types(self) -> None:
+311:         """Test different event types."""
+312:         ns_id = uuid4()
+313:         resource_id = uuid4()
+314: 
+315:         created = MemoryEvent(
+316:             namespace_id=ns_id,
+317:             event_type=EventType.DOCUMENT_CREATED,
+318:             resource_id=resource_id,
+319:         )
+320:         assert created.event_type == EventType.DOCUMENT_CREATED
+321: 
+322:         updated = MemoryEvent(
+323:             namespace_id=ns_id,
+324:             event_type=EventType.DOCUMENT_UPDATED,
+325:             resource_id=resource_id,
+326:         )
+327:         assert updated.event_type == EventType.DOCUMENT_UPDATED
+328: 
+329:         deleted = MemoryEvent(
+330:             namespace_id=ns_id,
+331:             event_type=EventType.DOCUMENT_DELETED,
+332:             resource_id=resource_id,
+333:         )
+334:         assert deleted.event_type == EventType.DOCUMENT_DELETED
+335: 
+336:     def test_event_timestamp(self) -> None:
+337:         """Test event timestamp."""
+338:         event = MemoryEvent(event_type=EventType.ENTITY_CREATED)
+339:         assert event.timestamp is not None
+340: 
+341:     def test_event_factory_methods(self) -> None:
+342:         """Test event factory methods."""
+343:         ns_id = uuid4()
+344:         doc_id = uuid4()
+345: 
+346:         event = MemoryEvent.document_created(
+347:             namespace_id=ns_id,
+348:             document_id=doc_id,
+349:             data={"content": "test"},
+350:         )
+351:         assert event.event_type == EventType.DOCUMENT_CREATED
+352:         assert event.resource_id == doc_id
+353:         assert event.resource_type == "document"
+354: 
+355:     def test_event_entity_created_factory(self) -> None:
+356:         """Test entity_created factory method."""
+357:         ns_id = uuid4()
+358:         entity_id = uuid4()
+359: 
+360:         event = MemoryEvent.entity_created(
+361:             namespace_id=ns_id,
+362:             entity_id=entity_id,
+363:             data={"name": "Test"},
+364:         )
+365:         assert event.event_type == EventType.ENTITY_CREATED
+366:         assert event.resource_id == entity_id
+367: 
+368:     def test_event_resource_type_auto_extraction(self) -> None:
+369:         """Test that resource_type is auto-extracted from event_type."""
+370:         event = MemoryEvent(event_type=EventType.CHUNK_EMBEDDED)
+371:         assert event.resource_type == "chunk"
+372: 
+373:         event2 = MemoryEvent(event_type=EventType.RELATIONSHIP_CREATED)
+374:         assert event2.resource_type == "relationship"
+375: 
+376: 
+377: class TestTenancyModels:
+378:     """Tests for tenancy models (Organization, Workspace, MemoryNamespace)."""
+379: 
+380:     def test_create_organization(self) -> None:
+381:         """Test organization creation."""
+382:         org = Organization(name="Acme Inc", slug="acme")
+383:         assert org.name == "Acme Inc"
+384:         assert org.slug == "acme"
+385: 
+386:     def test_organization_auto_slug(self) -> None:
+387:         """Test organization auto-generates slug from name."""
+388:         org = Organization(name="Test Organization")
+389:         assert org.slug == "test-organization"
+390: 
+391:     def test_organization_tenancy_mode(self) -> None:
+392:         """Test organization tenancy mode."""
+393:         org = Organization(name="Test", tenancy_mode=TenancyMode.ISOLATED)
+394:         assert org.tenancy_mode == TenancyMode.ISOLATED
+395: 
+396:     def test_organization_with_metadata(self) -> None:
+397:         """Test organization with metadata."""
+398:         org = Organization(
+399:             name="Test Org",
+400:             slug="test",
+401:             metadata={"feature_x": True},
+402:         )
+403:         assert org.metadata["feature_x"] is True
+404: 
+405:     def test_create_workspace(self) -> None:
+406:         """Test workspace creation."""
+407:         org_id = uuid4()
+408:         ws = Workspace(organization_id=org_id, name="Engineering", slug="engineering")
+409:         assert ws.name == "Engineering"
+410:         assert ws.organization_id == org_id
+411: 
+412:     def test_workspace_auto_slug(self) -> None:
+413:         """Test workspace auto-generates slug from name."""
+414:         ws = Workspace(organization_id=uuid4(), name="My Workspace")
+415:         assert ws.slug == "my-workspace"
+416: 
+417:     def test_workspace_with_description(self) -> None:
+418:         """Test workspace with description."""
+419:         ws = Workspace(
+420:             organization_id=uuid4(),
+421:             name="Sales",
+422:             slug="sales",
+423:             description="Sales team workspace",
+424:         )
+425:         assert ws.description == "Sales team workspace"
+426: 
+427:     def test_create_namespace(self) -> None:
+428:         """Test namespace creation."""
+429:         ws_id = uuid4()
+430:         ns = MemoryNamespace(workspace_id=ws_id, name="Project Alpha", slug="project-alpha")
+431:         assert ns.name == "Project Alpha"
+432:         assert ns.workspace_id == ws_id
+433: 
+434:     def test_namespace_auto_slug(self) -> None:
+435:         """Test namespace auto-generates slug from name."""
+436:         ns = MemoryNamespace(workspace_id=uuid4(), name="My Project")
+437:         assert ns.slug == "my-project"
+438: 
+439:     def test_namespace_with_config(self) -> None:
+440:         """Test namespace with configuration overrides."""
+441:         ns = MemoryNamespace(
+442:             workspace_id=uuid4(),
+443:             name="Test",
+444:             slug="test",
+445:             config_overrides={"extraction_skill": "technical_docs"},
+446:         )
+447:         assert ns.config_overrides["extraction_skill"] == "technical_docs"
+448: 
+449:     def test_namespace_full_path(self) -> None:
+450:         """Test namespace full path property."""
+451:         ws_id = uuid4()
+452:         ns = MemoryNamespace(workspace_id=ws_id, name="Test", slug="test-ns")
+453:         assert ns.full_path == f"{ws_id}/test-ns"
+454: 
+455:     def test_namespace_sync_checkpoints(self) -> None:
+456:         """Test namespace sync checkpoints."""
+457:         ns = MemoryNamespace(
+458:             workspace_id=uuid4(),
+459:             name="Test",
+460:             sync_checkpoints={"source1": "checkpoint123"},
+461:         )
+462:         assert ns.sync_checkpoints["source1"] == "checkpoint123"
+````
+
+## File: tests/unit/test_skills_registry.py
+````python
+  1: """Unit tests for skill registry and composer."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import pytest
+  6: 
+  7: from khora.extraction.skills import (
+  8:     EntityTypeConfig,
+  9:     ExpertiseConfig,
+ 10:     ExtractionSkill,
+ 11:     RelationshipTypeConfig,
+ 12:     SkillRegistry,
+ 13:     get_default_registry,
+ 14: )
+ 15: from khora.extraction.skills.composer import ExpertiseComposer
+ 16: from khora.extraction.skills.loader import ExpertiseLoader
+ 17: 
+ 18: 
+ 19: class TestSkillRegistry:
+ 20:     """Tests for SkillRegistry."""
+ 21: 
+ 22:     def test_create_registry(self) -> None:
+ 23:         """Test creating a new registry."""
+ 24:         registry = SkillRegistry()
+ 25:         # Should have built-in skills
+ 26:         skills = registry.list_skills()
+ 27:         assert "general_entities" in skills
+ 28: 
+ 29:     def test_register_skill(self) -> None:
+ 30:         """Test registering a custom skill."""
+ 31:         registry = SkillRegistry()
+ 32:         skill = ExtractionSkill(
+ 33:             name="custom_skill",
+ 34:             description="A custom skill",
+ 35:             entity_types=["CUSTOM_TYPE"],
+ 36:             relationship_types=["CUSTOM_REL"],
+ 37:         )
+ 38:         registry.register(skill)
+ 39: 
+ 40:         assert "custom_skill" in registry.list_skills()
+ 41:         retrieved = registry.get("custom_skill")
+ 42:         assert retrieved is not None
+ 43:         assert retrieved.name == "custom_skill"
+ 44: 
+ 45:     def test_register_expertise_config(self) -> None:
+ 46:         """Test registering an ExpertiseConfig."""
+ 47:         registry = SkillRegistry()
+ 48:         expertise = ExpertiseConfig(
+ 49:             name="test_expertise",
+ 50:             description="Test expertise",
+ 51:             entity_types=[
+ 52:                 EntityTypeConfig(name="TEST", description="Test entity"),
+ 53:             ],
+ 54:         )
+ 55:         registry.register(expertise)
+ 56: 
+ 57:         # Should be available as both expertise and skill
+ 58:         assert "test_expertise" in registry.list_expertise()
+ 59:         assert "test_expertise" in registry.list_skills()
+ 60: 
+ 61:     def test_get_nonexistent_skill(self) -> None:
+ 62:         """Test getting a skill that doesn't exist."""
+ 63:         registry = SkillRegistry()
+ 64:         result = registry.get("nonexistent")
+ 65:         assert result is None
+ 66: 
+ 67:     def test_get_or_default(self) -> None:
+ 68:         """Test get_or_default falls back to general_entities."""
+ 69:         registry = SkillRegistry()
+ 70:         result = registry.get_or_default("nonexistent")
+ 71:         assert result.name == "general_entities"
+ 72: 
+ 73:     def test_unregister_skill(self) -> None:
+ 74:         """Test unregistering a skill."""
+ 75:         registry = SkillRegistry()
+ 76:         skill = ExtractionSkill(name="to_remove", description="Will be removed")
+ 77:         registry.register(skill)
+ 78: 
+ 79:         assert "to_remove" in registry.list_skills()
+ 80: 
+ 81:         removed = registry.unregister("to_remove")
+ 82:         assert removed is True
+ 83:         assert "to_remove" not in registry.list_skills()
+ 84: 
+ 85:     def test_unregister_nonexistent(self) -> None:
+ 86:         """Test unregistering nonexistent skill returns False."""
+ 87:         registry = SkillRegistry()
+ 88:         removed = registry.unregister("nonexistent")
+ 89:         assert removed is False
+ 90: 
+ 91:     def test_all_skills(self) -> None:
+ 92:         """Test getting all skills."""
+ 93:         registry = SkillRegistry()
+ 94:         skills = registry.all_skills()
+ 95:         assert len(skills) >= 4  # Built-in skills
+ 96:         assert all(isinstance(s, ExtractionSkill) for s in skills)
+ 97: 
+ 98:     def test_get_expertise(self) -> None:
+ 99:         """Test getting expertise by name."""
+100:         registry = SkillRegistry()
+101:         expertise = ExpertiseConfig(name="test_exp", description="Test")
+102:         registry.register(expertise)
+103: 
+104:         retrieved = registry.get_expertise("test_exp")
+105:         assert retrieved is not None
+106:         assert retrieved.name == "test_exp"
+107: 
+108:     def test_get_expertise_nonexistent(self) -> None:
+109:         """Test getting nonexistent expertise."""
+110:         registry = SkillRegistry()
+111:         result = registry.get_expertise("nonexistent")
+112:         assert result is None
+113: 
+114:     def test_get_expertise_or_default(self) -> None:
+115:         """Test get_expertise_or_default falls back to general."""
+116:         registry = SkillRegistry()
+117:         result = registry.get_expertise_or_default("nonexistent")
+118:         # Should return some default expertise
+119:         assert result is not None
+120:         assert result.name in ["general", "nonexistent"]
+121: 
+122:     def test_all_expertise(self) -> None:
+123:         """Test getting all expertise configs."""
+124:         registry = SkillRegistry()
+125:         expertise = ExpertiseConfig(name="exp1", description="First")
+126:         registry.register(expertise)
+127: 
+128:         all_exp = registry.all_expertise()
+129:         assert len(all_exp) >= 1
+130:         assert all(isinstance(e, ExpertiseConfig) for e in all_exp)
+131: 
+132:     def test_register_from_config(self) -> None:
+133:         """Test registering skills from config dictionaries."""
+134:         registry = SkillRegistry()
+135:         config = [
+136:             {
+137:                 "name": "from_config",
+138:                 "description": "Loaded from config",
+139:                 "entity_types": ["TYPE_A"],
+140:                 "relationship_types": ["REL_A"],
+141:             },
+142:         ]
+143:         registry.register_from_config(config)
+144: 
+145:         assert "from_config" in registry.list_skills()
+146: 
+147:     def test_to_dict(self) -> None:
+148:         """Test exporting registry to dictionary."""
+149:         registry = SkillRegistry()
+150:         data = registry.to_dict()
+151: 
+152:         assert "general_entities" in data
+153:         assert isinstance(data["general_entities"], dict)
+154: 
+155: 
+156: class TestDefaultRegistry:
+157:     """Tests for the default global registry."""
+158: 
+159:     def test_get_default_registry_singleton(self) -> None:
+160:         """Test that get_default_registry returns singleton."""
+161:         reg1 = get_default_registry()
+162:         reg2 = get_default_registry()
+163:         assert reg1 is reg2
+164: 
+165:     def test_default_registry_has_builtins(self) -> None:
+166:         """Test default registry has built-in skills."""
+167:         registry = get_default_registry()
+168:         skills = registry.list_skills()
+169: 
+170:         assert "general_entities" in skills
+171:         assert "technical_docs" in skills
+172:         assert "business_intel" in skills
+173:         assert "research_papers" in skills
+174: 
+175: 
+176: class TestExtractionSkill:
+177:     """Tests for ExtractionSkill dataclass."""
+178: 
+179:     def test_create_skill(self) -> None:
+180:         """Test creating an extraction skill."""
+181:         skill = ExtractionSkill(
+182:             name="test_skill",
+183:             description="A test skill",
+184:             entity_types=["PERSON", "ORG"],
+185:             relationship_types=["WORKS_FOR"],
+186:         )
+187:         assert skill.name == "test_skill"
+188:         assert "PERSON" in skill.entity_types
+189:         assert "WORKS_FOR" in skill.relationship_types
+190: 
+191:     def test_skill_to_dict(self) -> None:
+192:         """Test skill serialization."""
+193:         skill = ExtractionSkill(
+194:             name="test",
+195:             description="Test skill",
+196:             entity_types=["A", "B"],
+197:             relationship_types=["R"],
+198:         )
+199:         data = skill.to_dict()
+200: 
+201:         assert data["name"] == "test"
+202:         assert data["description"] == "Test skill"
+203:         assert "A" in data["entity_types"]
+204: 
+205:     def test_skill_from_dict(self) -> None:
+206:         """Test skill deserialization."""
+207:         data = {
+208:             "name": "loaded",
+209:             "description": "Loaded skill",
+210:             "entity_types": ["X", "Y"],
+211:             "relationship_types": ["Z"],
+212:         }
+213:         skill = ExtractionSkill.from_dict(data)
+214: 
+215:         assert skill.name == "loaded"
+216:         assert "X" in skill.entity_types
+217:         assert "Z" in skill.relationship_types
+218: 
+219:     def test_builtin_general_entities(self) -> None:
+220:         """Test built-in general_entities skill."""
+221:         skill = ExtractionSkill.general_entities()
+222:         assert skill.name == "general_entities"
+223:         assert len(skill.entity_types) > 0
+224: 
+225:     def test_builtin_technical_docs(self) -> None:
+226:         """Test built-in technical_docs skill."""
+227:         skill = ExtractionSkill.technical_docs()
+228:         assert skill.name == "technical_docs"
+229: 
+230:     def test_builtin_business_intel(self) -> None:
+231:         """Test built-in business_intel skill."""
+232:         skill = ExtractionSkill.business_intel()
+233:         assert skill.name == "business_intel"
+234: 
+235:     def test_builtin_research_papers(self) -> None:
+236:         """Test built-in research_papers skill."""
+237:         skill = ExtractionSkill.research_papers()
+238:         assert skill.name == "research_papers"
+239: 
+240: 
+241: class TestExpertiseComposer:
+242:     """Tests for ExpertiseComposer."""
+243: 
+244:     def test_create_composer(self) -> None:
+245:         """Test creating a composer."""
+246:         loader = ExpertiseLoader()
+247:         composer = ExpertiseComposer(loader)
+248:         assert composer is not None
+249: 
+250:     def test_merge_single_config(self) -> None:
+251:         """Test merging a single config returns it unchanged."""
+252:         loader = ExpertiseLoader()
+253:         composer = ExpertiseComposer(loader)
+254: 
+255:         config = ExpertiseConfig(
+256:             name="single",
+257:             entity_types=[EntityTypeConfig(name="A", description="Type A")],
+258:         )
+259: 
+260:         merged = composer.merge([config])
+261:         assert merged.name == "single"
+262:         assert len(merged.entity_types) == 1
+263: 
+264:     def test_merge_multiple_configs(self) -> None:
+265:         """Test merging multiple configs."""
+266:         loader = ExpertiseLoader()
+267:         composer = ExpertiseComposer(loader)
+268: 
+269:         config1 = ExpertiseConfig(
+270:             name="first",
+271:             entity_types=[EntityTypeConfig(name="A", description="Type A")],
+272:             relationship_types=[RelationshipTypeConfig(name="R1", description="Rel 1")],
+273:         )
+274: 
+275:         config2 = ExpertiseConfig(
+276:             name="second",
+277:             entity_types=[EntityTypeConfig(name="B", description="Type B")],
+278:             relationship_types=[RelationshipTypeConfig(name="R2", description="Rel 2")],
+279:         )
+280: 
+281:         merged = composer.merge([config1, config2])
+282: 
+283:         # Should have entity types from both
+284:         entity_names = [e.name for e in merged.entity_types]
+285:         assert "A" in entity_names
+286:         assert "B" in entity_names
+287: 
+288:         # Should have relationship types from both
+289:         rel_names = [r.name for r in merged.relationship_types]
+290:         assert "R1" in rel_names
+291:         assert "R2" in rel_names
+292: 
+293:     def test_merge_overwrites_same_name(self) -> None:
+294:         """Test that later config overwrites same-named items."""
+295:         loader = ExpertiseLoader()
+296:         composer = ExpertiseComposer(loader)
+297: 
+298:         config1 = ExpertiseConfig(
+299:             name="first",
+300:             entity_types=[EntityTypeConfig(name="A", description="Original A")],
+301:         )
+302: 
+303:         config2 = ExpertiseConfig(
+304:             name="second",
+305:             entity_types=[EntityTypeConfig(name="A", description="Updated A")],
+306:         )
+307: 
+308:         merged = composer.merge([config1, config2])
+309: 
+310:         # Should have updated description
+311:         a_type = next(e for e in merged.entity_types if e.name == "A")
+312:         assert a_type.description == "Updated A"
+313: 
+314:     def test_merge_system_prompts(self) -> None:
+315:         """Test merging system prompts."""
+316:         loader = ExpertiseLoader()
+317:         composer = ExpertiseComposer(loader)
+318: 
+319:         config1 = ExpertiseConfig(
+320:             name="first",
+321:             system_prompt="First prompt",
+322:         )
+323: 
+324:         config2 = ExpertiseConfig(
+325:             name="second",
+326:             system_prompt="Second prompt",
+327:         )
+328: 
+329:         merged = composer.merge([config1, config2])
+330: 
+331:         # Later prompt should win
+332:         assert merged.system_prompt == "Second prompt"
+333: 
+334:     def test_merge_empty_list(self) -> None:
+335:         """Test merging empty list raises error."""
+336:         loader = ExpertiseLoader()
+337:         composer = ExpertiseComposer(loader)
+338: 
+339:         with pytest.raises(ValueError):
+340:             composer.merge([])
+341: 
+342:     def test_merge_preserves_confidence_config(self) -> None:
+343:         """Test that merge preserves confidence config from last."""
+344:         from khora.extraction.skills import ConfidenceConfig
+345: 
+346:         loader = ExpertiseLoader()
+347:         composer = ExpertiseComposer(loader)
+348: 
+349:         config1 = ExpertiseConfig(
+350:             name="first",
+351:             confidence=ConfidenceConfig(min_entity=0.5),
+352:         )
+353: 
+354:         config2 = ExpertiseConfig(
+355:             name="second",
+356:             confidence=ConfidenceConfig(min_entity=0.7),
+357:         )
+358: 
+359:         merged = composer.merge([config1, config2])
+360: 
+361:         assert merged.confidence.min_entity == 0.7
 ````
 
 ## File: tests/__init__.py
@@ -21084,11 +21084,11 @@ README.md
 146:             strategy=chunk_strategy,
 147:             chunk_size=chunk_size,
 148:         )
-149:         logger.info(f"Document {document.id}: created {len(chunks)} chunks")
+149:         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
 150: 
 151:         # Step 2: Embed (already batched internally)
 152:         chunks = await embed_chunks(chunks, model=embedding_model)
-153:         logger.info(f"Document {document.id}: generated embeddings")
+153:         logger.debug(f"Document {document.id}: generated embeddings")
 154: 
 155:         # Step 3: Extract entities (parallel extraction across chunks)
 156:         entities, relationships = await extract_entities(
@@ -21099,7 +21099,7 @@ README.md
 161:             max_concurrent=max_concurrent_extractions,
 162:             context=extraction_context,
 163:         )
-164:         logger.info(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
+164:         logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
 165: 
 166:         # Step 4 (Optional): Semantic expansion
 167:         inferred_relationships = []
@@ -21153,7 +21153,7 @@ README.md
 215:             relationships = expansion_result.relationships
 216:             inferred_relationships = expansion_result.inferred_relationships
 217: 
-218:             logger.info(
+218:             logger.debug(
 219:                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
 220:                 f"inferred {len(inferred_relationships)} relationships (mode={inference_mode})"
 221:             )
@@ -23262,6 +23262,15 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-01-27 09:09:42 +0100
+**Message:** Add comprehensive unit tests for models, chunkers, and skills registry
+
+**Files:**
+- REPOMIX.md
+- tests/unit/test_chunkers.py
+- tests/unit/test_models.py
+- tests/unit/test_skills_registry.py
+
 ## Commit: 2026-01-27 08:53:43 +0100
 **Message:** Add unit tests for expertise system and bump version to 0.0.4
 
@@ -23581,13 +23590,3 @@ README.md
 **Files:**
 - compose.full.yaml
 - compose.yaml
-
-## Commit: 2026-01-25 23:17:02 +0100
-**Message:** Add Docker Compose for local development
-
-**Files:**
-- .env.example
-- Makefile
-- compose.full.yaml
-- compose.yaml
-- docker/postgres/init/01_init.sql

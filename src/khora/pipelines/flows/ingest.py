@@ -146,11 +146,11 @@ async def process_document(
             strategy=chunk_strategy,
             chunk_size=chunk_size,
         )
-        logger.info(f"Document {document.id}: created {len(chunks)} chunks")
+        logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
 
         # Step 2: Embed (already batched internally)
         chunks = await embed_chunks(chunks, model=embedding_model)
-        logger.info(f"Document {document.id}: generated embeddings")
+        logger.debug(f"Document {document.id}: generated embeddings")
 
         # Step 3: Extract entities (parallel extraction across chunks)
         entities, relationships = await extract_entities(
@@ -161,7 +161,7 @@ async def process_document(
             max_concurrent=max_concurrent_extractions,
             context=extraction_context,
         )
-        logger.info(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
+        logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
 
         # Step 4 (Optional): Semantic expansion
         inferred_relationships = []
@@ -215,7 +215,7 @@ async def process_document(
             relationships = expansion_result.relationships
             inferred_relationships = expansion_result.inferred_relationships
 
-            logger.info(
+            logger.debug(
                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
                 f"inferred {len(inferred_relationships)} relationships (mode={inference_mode})"
             )
