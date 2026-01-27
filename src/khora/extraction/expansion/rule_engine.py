@@ -298,10 +298,20 @@ class RuleEngine:
         first_condition = rule.when[0]
         first_rels = context.relationship_index.get(first_condition.relationship, [])
 
+        # Diagnostic: Log how many relationships match before filtering
+        before_filter_count = len(first_rels)
+
         # Filter by source/target type if specified
         first_rels = self._filter_relationships_by_types(
             first_rels, first_condition.source_type, first_condition.target_type, context
         )
+
+        # Diagnostic: Log filtering results for debugging
+        if before_filter_count > 0 and len(first_rels) == 0:
+            logger.debug(
+                f"Rule '{rule.name}': {before_filter_count} {first_condition.relationship} rels "
+                f"all filtered out by type filter (need {first_condition.source_type}->{first_condition.target_type})"
+            )
 
         if len(rule.when) == 1:
             # Single condition rule

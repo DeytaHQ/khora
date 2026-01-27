@@ -100,6 +100,29 @@ class RelationshipInferrer:
         )
         logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
 
+        # Diagnostic: Log source/target entity types for each relationship type
+        # Build entity ID to type lookup
+        entity_type_lookup = {
+            e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
+        }
+
+        # For each relationship type, count source->target type combinations
+        rel_type_patterns: dict[str, Counter] = {}
+        for r in relationships:
+            rel_type = r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+            source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
+            target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
+            pattern = f"{source_type}->{target_type}"
+
+            if rel_type not in rel_type_patterns:
+                rel_type_patterns[rel_type] = Counter()
+            rel_type_patterns[rel_type][pattern] += 1
+
+        # Log top patterns for relationship types that rules expect
+        for rel_type, patterns in rel_type_patterns.items():
+            top_patterns = patterns.most_common(5)
+            logger.debug(f"  {rel_type} patterns: {dict(top_patterns)}")
+
         # Diagnostic: Log what inference rules expect
         expected_rels = set()
         expected_entities = set()
@@ -140,11 +163,11 @@ class RelationshipInferrer:
 
             # Evaluate inference rules
             matches = self._rule_engine.evaluate_inference_rules(context)
-            logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
+            logger.info(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
 
             # Log details of first few matches for debugging
             for i, match in enumerate(matches[:5]):
-                logger.debug(
+                logger.info(
                     f"  Match {i + 1}: rule={match.rule_name}, "
                     f"confidence={match.confidence:.2f}, "
                     f"metadata_keys={list(match.metadata.keys())}"
@@ -152,11 +175,11 @@ class RelationshipInferrer:
 
             # Convert matches to inferred relationships
             pass_inferred = self._matches_to_relationships(matches, context)
-            logger.debug(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
+            logger.info(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
 
             if not pass_inferred:
                 # No new inferences, stop early
-                logger.debug(f"Pass {pass_num + 1}: No new inferences, stopping early")
+                logger.info(f"Pass {pass_num + 1}: No new inferences, stopping early")
                 break
 
             # Filter out duplicates and already existing relationships
