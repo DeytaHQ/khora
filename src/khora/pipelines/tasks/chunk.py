@@ -39,6 +39,7 @@ async def chunk_document(
     chunk_results = chunker.chunk(document.content)
 
     # Convert to Chunk objects
+    # Inherit document timestamp so temporal filters work correctly
     chunks = []
     for result in chunk_results:
         chunk = Chunk(
@@ -53,6 +54,7 @@ async def chunk_document(
                 token_count=result.token_count,
                 custom=result.metadata,
             ),
+            created_at=document.created_at,  # Inherit source timestamp from document
         )
         chunks.append(chunk)
 
