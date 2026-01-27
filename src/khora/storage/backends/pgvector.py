@@ -261,9 +261,13 @@ class PgVectorBackend:
 
         This stores the entity metadata and embedding in PostgreSQL,
         complementing the Neo4j storage for graph traversal.
+
+        Uses upsert pattern: if entity already exists, updates it instead.
         """
+        from sqlalchemy.dialects.postgresql import insert
+
         async with self._get_session() as session:
-            model = EntityModel(
+            stmt = insert(EntityModel).values(
                 id=str(entity.id),
                 namespace_id=str(entity.namespace_id),
                 name=entity.name,
@@ -282,7 +286,26 @@ class PgVectorBackend:
                 created_at=entity.created_at,
                 updated_at=entity.updated_at,
             )
-            session.add(model)
+            # On conflict (entity already exists), update all fields
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["id"],
+                set_={
+                    "name": stmt.excluded.name,
+                    "description": stmt.excluded.description,
+                    "attributes": stmt.excluded.attributes,
+                    "source_document_ids": stmt.excluded.source_document_ids,
+                    "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                    "mention_count": stmt.excluded.mention_count,
+                    "embedding": stmt.excluded.embedding,
+                    "embedding_model": stmt.excluded.embedding_model,
+                    "valid_from": stmt.excluded.valid_from,
+                    "valid_until": stmt.excluded.valid_until,
+                    "confidence": stmt.excluded.confidence,
+                    "metadata_": stmt.excluded.metadata_,
+                    "updated_at": stmt.excluded.updated_at,
+                },
+            )
+            await session.execute(stmt)
             await session.commit()
 
     async def update_entity(self, entity) -> None:
