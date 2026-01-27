@@ -4352,404 +4352,459 @@ README.md
  74:         return ctx
  75: 
  76: 
- 77: class RuleEngine:
- 78:     """Engine for evaluating correlation and inference rules.
- 79: 
- 80:     Supports:
- 81:     - Pattern-based matching (regex)
- 82:     - Field-based matching
- 83:     - Multi-condition inference rules
- 84:     - Confidence scoring
- 85:     """
- 86: 
- 87:     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
- 88:         """Initialize the rule engine.
- 89: 
- 90:         Args:
- 91:             expertise: ExpertiseConfig with rules to evaluate
- 92:         """
- 93:         self._expertise = expertise
- 94:         self._compiled_patterns: dict[str, re.Pattern] = {}
+ 77: # Type hierarchy for flexible matching
+ 78: # Child types can match parent types in inference rules
+ 79: # e.g., EMPLOYEE matches rules expecting PERSON
+ 80: TYPE_HIERARCHY: dict[str, list[str]] = {
+ 81:     "EMPLOYEE": ["PERSON"],
+ 82:     "EXTERNAL_PERSON": ["PERSON"],
+ 83:     "COMPANY": ["ORGANIZATION"],
+ 84:     "DEPARTMENT": ["ORGANIZATION"],
+ 85:     "TEAM": ["ORGANIZATION"],
+ 86:     "MESSAGE": ["CONTENT"],
+ 87:     "PAGE": ["CONTENT", "DOCUMENT"],
+ 88:     "ISSUE": ["WORK_ITEM", "CONTENT"],
+ 89:     "SALES_NOTE": ["CONTENT", "NOTE"],
+ 90:     "CALL": ["EVENT", "MEETING"],
+ 91:     "DEAL": ["OPPORTUNITY"],
+ 92:     "PROJECT": ["WORK_ITEM"],
+ 93:     "CYCLE": ["WORK_ITEM", "SPRINT"],
+ 94: }
  95: 
- 96:     def evaluate_correlation_rules(
- 97:         self,
- 98:         text: str,
- 99:         context: RuleEvaluationContext,
-100:     ) -> list[RuleMatch]:
-101:         """Evaluate correlation rules against text and context.
-102: 
-103:         Args:
-104:             text: Text to search for patterns
-105:             context: Evaluation context with entities and relationships
-106: 
-107:         Returns:
-108:             List of rule matches
-109:         """
-110:         if not self._expertise:
-111:             return []
-112: 
-113:         matches = []
-114:         for rule in self._expertise.correlation_rules:
-115:             rule_matches = self._evaluate_correlation_rule(rule, text, context)
-116:             matches.extend(rule_matches)
-117: 
-118:         return matches
-119: 
-120:     def evaluate_inference_rules(
-121:         self,
-122:         context: RuleEvaluationContext,
-123:     ) -> list[RuleMatch]:
-124:         """Evaluate inference rules against the context.
-125: 
-126:         Inference rules create new relationships based on existing patterns.
+ 96: 
+ 97: def types_match(actual_type: str, expected_type: str) -> bool:
+ 98:     """Check if actual type matches expected, considering type hierarchy.
+ 99: 
+100:     Args:
+101:         actual_type: The actual entity type from the graph
+102:         expected_type: The expected type from the inference rule
+103: 
+104:     Returns:
+105:         True if types match directly or via hierarchy
+106:     """
+107:     # Direct match
+108:     if actual_type == expected_type:
+109:         return True
+110: 
+111:     # Check if actual is a subtype of expected (e.g., EMPLOYEE matches PERSON)
+112:     parents = TYPE_HIERARCHY.get(actual_type, [])
+113:     if expected_type in parents:
+114:         return True
+115: 
+116:     # Check reverse: if expected is a subtype of actual (e.g., PERSON matches EMPLOYEE)
+117:     # This allows rules written for specific types to match more generic extractions
+118:     parents_of_expected = TYPE_HIERARCHY.get(expected_type, [])
+119:     if actual_type in parents_of_expected:
+120:         return True
+121: 
+122:     return False
+123: 
+124: 
+125: class RuleEngine:
+126:     """Engine for evaluating correlation and inference rules.
 127: 
-128:         Args:
-129:             context: Evaluation context with entities and relationships
-130: 
-131:         Returns:
-132:             List of rule matches that would create new relationships
-133:         """
-134:         if not self._expertise:
-135:             return []
-136: 
-137:         matches = []
-138:         for rule in self._expertise.inference_rules:
-139:             rule_matches = self._evaluate_inference_rule(rule, context)
-140:             matches.extend(rule_matches)
-141: 
-142:         return matches
-143: 
-144:     def find_pattern_matches(
-145:         self,
-146:         pattern: str,
+128:     Supports:
+129:     - Pattern-based matching (regex)
+130:     - Field-based matching
+131:     - Multi-condition inference rules
+132:     - Confidence scoring
+133:     - Type hierarchy matching (EMPLOYEE matches rules expecting PERSON)
+134:     """
+135: 
+136:     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
+137:         """Initialize the rule engine.
+138: 
+139:         Args:
+140:             expertise: ExpertiseConfig with rules to evaluate
+141:         """
+142:         self._expertise = expertise
+143:         self._compiled_patterns: dict[str, re.Pattern] = {}
+144: 
+145:     def evaluate_correlation_rules(
+146:         self,
 147:         text: str,
-148:     ) -> list[tuple[str, int, int]]:
-149:         """Find all pattern matches in text.
-150: 
-151:         Args:
-152:             pattern: Regex pattern to match
-153:             text: Text to search
-154: 
-155:         Returns:
-156:             List of (matched_value, start, end) tuples
-157:         """
-158:         compiled = self._get_compiled_pattern(pattern)
-159:         if not compiled:
+148:         context: RuleEvaluationContext,
+149:     ) -> list[RuleMatch]:
+150:         """Evaluate correlation rules against text and context.
+151: 
+152:         Args:
+153:             text: Text to search for patterns
+154:             context: Evaluation context with entities and relationships
+155: 
+156:         Returns:
+157:             List of rule matches
+158:         """
+159:         if not self._expertise:
 160:             return []
 161: 
 162:         matches = []
-163:         for match in compiled.finditer(text):
-164:             matches.append((match.group(), match.start(), match.end()))
-165: 
-166:         return matches
-167: 
-168:     def match_entities_by_field(
-169:         self,
-170:         entities: list[Entity],
-171:         field_name: str,
-172:         field_value: Any,
-173:     ) -> list[Entity]:
-174:         """Find entities matching a field value.
-175: 
-176:         Args:
-177:             entities: Entities to search
-178:             field_name: Attribute field name
-179:             field_value: Value to match
-180: 
-181:         Returns:
-182:             Matching entities
-183:         """
-184:         matches = []
-185:         for entity in entities:
-186:             entity_value = entity.attributes.get(field_name)
-187:             if entity_value is None:
-188:                 continue
-189: 
-190:             # Normalize for comparison
-191:             if isinstance(entity_value, str) and isinstance(field_value, str):
-192:                 if entity_value.lower() == field_value.lower():
-193:                     matches.append(entity)
-194:             elif entity_value == field_value:
-195:                 matches.append(entity)
-196: 
-197:         return matches
-198: 
-199:     def _evaluate_correlation_rule(
-200:         self,
-201:         rule: CorrelationRule,
-202:         text: str,
-203:         context: RuleEvaluationContext,
-204:     ) -> list[RuleMatch]:
-205:         """Evaluate a single correlation rule."""
-206:         matches = []
-207: 
-208:         # Pattern-based matching
-209:         if rule.pattern:
-210:             pattern_matches = self.find_pattern_matches(rule.pattern, text)
-211:             for matched_value, start, end in pattern_matches:
-212:                 # Find entities that might match this value
-213:                 matched_entities = self._find_entities_for_pattern_match(matched_value, rule.entity_types, context)
+163:         for rule in self._expertise.correlation_rules:
+164:             rule_matches = self._evaluate_correlation_rule(rule, text, context)
+165:             matches.extend(rule_matches)
+166: 
+167:         return matches
+168: 
+169:     def evaluate_inference_rules(
+170:         self,
+171:         context: RuleEvaluationContext,
+172:     ) -> list[RuleMatch]:
+173:         """Evaluate inference rules against the context.
+174: 
+175:         Inference rules create new relationships based on existing patterns.
+176: 
+177:         Args:
+178:             context: Evaluation context with entities and relationships
+179: 
+180:         Returns:
+181:             List of rule matches that would create new relationships
+182:         """
+183:         if not self._expertise:
+184:             return []
+185: 
+186:         matches = []
+187:         for rule in self._expertise.inference_rules:
+188:             rule_matches = self._evaluate_inference_rule(rule, context)
+189:             matches.extend(rule_matches)
+190: 
+191:         return matches
+192: 
+193:     def find_pattern_matches(
+194:         self,
+195:         pattern: str,
+196:         text: str,
+197:     ) -> list[tuple[str, int, int]]:
+198:         """Find all pattern matches in text.
+199: 
+200:         Args:
+201:             pattern: Regex pattern to match
+202:             text: Text to search
+203: 
+204:         Returns:
+205:             List of (matched_value, start, end) tuples
+206:         """
+207:         compiled = self._get_compiled_pattern(pattern)
+208:         if not compiled:
+209:             return []
+210: 
+211:         matches = []
+212:         for match in compiled.finditer(text):
+213:             matches.append((match.group(), match.start(), match.end()))
 214: 
-215:                 matches.append(
-216:                     RuleMatch(
-217:                         rule_name=rule.name,
-218:                         matched_value=matched_value,
-219:                         matched_entities=matched_entities,
-220:                         confidence=rule.confidence,
-221:                         metadata={
-222:                             "start": start,
-223:                             "end": end,
-224:                             "creates_relationship": rule.creates_relationship,
-225:                         },
-226:                     )
-227:                 )
-228: 
-229:         # Field-based matching
-230:         if rule.match_fields:
-231:             # This requires comparing entities against each other
-232:             field_matches = self._find_field_matches(rule, context)
-233:             matches.extend(field_matches)
-234: 
-235:         return matches
-236: 
-237:     def _evaluate_inference_rule(
-238:         self,
-239:         rule: InferenceRule,
-240:         context: RuleEvaluationContext,
-241:     ) -> list[RuleMatch]:
-242:         """Evaluate a single inference rule."""
-243:         if not rule.when or len(rule.when) < 1:
-244:             return []
+215:         return matches
+216: 
+217:     def match_entities_by_field(
+218:         self,
+219:         entities: list[Entity],
+220:         field_name: str,
+221:         field_value: Any,
+222:     ) -> list[Entity]:
+223:         """Find entities matching a field value.
+224: 
+225:         Args:
+226:             entities: Entities to search
+227:             field_name: Attribute field name
+228:             field_value: Value to match
+229: 
+230:         Returns:
+231:             Matching entities
+232:         """
+233:         matches = []
+234:         for entity in entities:
+235:             entity_value = entity.attributes.get(field_name)
+236:             if entity_value is None:
+237:                 continue
+238: 
+239:             # Normalize for comparison
+240:             if isinstance(entity_value, str) and isinstance(field_value, str):
+241:                 if entity_value.lower() == field_value.lower():
+242:                     matches.append(entity)
+243:             elif entity_value == field_value:
+244:                 matches.append(entity)
 245: 
-246:         matches = []
+246:         return matches
 247: 
-248:         # Get relationships matching the first condition
-249:         first_condition = rule.when[0]
-250:         first_rels = context.relationship_index.get(first_condition.relationship, [])
-251: 
-252:         # Filter by source/target type if specified
-253:         first_rels = self._filter_relationships_by_types(
-254:             first_rels, first_condition.source_type, first_condition.target_type, context
-255:         )
+248:     def _evaluate_correlation_rule(
+249:         self,
+250:         rule: CorrelationRule,
+251:         text: str,
+252:         context: RuleEvaluationContext,
+253:     ) -> list[RuleMatch]:
+254:         """Evaluate a single correlation rule."""
+255:         matches = []
 256: 
-257:         if len(rule.when) == 1:
-258:             # Single condition rule
-259:             for rel in first_rels:
-260:                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
-261:                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
-262: 
-263:                 if source_entity and target_entity:
-264:                     matches.append(
-265:                         RuleMatch(
-266:                             rule_name=rule.name,
-267:                             matched_relationships=[rel],
-268:                             matched_entities=[source_entity, target_entity],
-269:                             confidence=rule.confidence,
-270:                             metadata={
-271:                                 "then_relationship": rule.then_relationship,
-272:                                 "then_source": rule.then_source,
-273:                                 "then_target": rule.then_target,
-274:                                 "first": {"source": source_entity, "target": target_entity},
-275:                             },
-276:                         )
-277:                     )
-278:         else:
-279:             # Multi-condition rule - need to find matching chains
-280:             for rel1 in first_rels:
-281:                 # For each first relationship, find matching second relationships
-282:                 second_condition = rule.when[1]
-283:                 second_rels = context.relationship_index.get(second_condition.relationship, [])
-284:                 second_rels = self._filter_relationships_by_types(
-285:                     second_rels, second_condition.source_type, second_condition.target_type, context
-286:                 )
-287: 
-288:                 # Find chains where relationships connect
-289:                 for rel2 in second_rels:
-290:                     if self._relationships_connect(rel1, rel2, context):
-291:                         source1 = self._find_entity_by_id(rel1.source_entity_id, context)
-292:                         target1 = self._find_entity_by_id(rel1.target_entity_id, context)
-293:                         source2 = self._find_entity_by_id(rel2.source_entity_id, context)
-294:                         target2 = self._find_entity_by_id(rel2.target_entity_id, context)
-295: 
-296:                         if all([source1, target1, source2, target2]):
-297:                             matches.append(
-298:                                 RuleMatch(
-299:                                     rule_name=rule.name,
-300:                                     matched_relationships=[rel1, rel2],
-301:                                     matched_entities=[source1, target1, source2, target2],
-302:                                     confidence=rule.confidence,
-303:                                     metadata={
-304:                                         "then_relationship": rule.then_relationship,
-305:                                         "then_source": rule.then_source,
-306:                                         "then_target": rule.then_target,
-307:                                         "first": {"source": source1, "target": target1},
-308:                                         "second": {"source": source2, "target": target2},
-309:                                     },
-310:                                 )
-311:                             )
-312: 
-313:         return matches
-314: 
-315:     def _find_entities_for_pattern_match(
-316:         self,
-317:         matched_value: str,
-318:         entity_types: list[str],
-319:         context: RuleEvaluationContext,
-320:     ) -> list[Entity]:
-321:         """Find entities that might match a pattern value."""
-322:         candidates = []
-323: 
-324:         # Check entity names
-325:         name_key = matched_value.lower()
-326:         if name_key in context.entity_index:
-327:             candidates.extend(context.entity_index[name_key])
-328: 
-329:         # Check entity attributes for the matched value
-330:         for entity in context.entities:
-331:             for attr_value in entity.attributes.values():
-332:                 if isinstance(attr_value, str) and matched_value in attr_value:
-333:                     if entity not in candidates:
-334:                         candidates.append(entity)
-335:                     break
+257:         # Pattern-based matching
+258:         if rule.pattern:
+259:             pattern_matches = self.find_pattern_matches(rule.pattern, text)
+260:             for matched_value, start, end in pattern_matches:
+261:                 # Find entities that might match this value
+262:                 matched_entities = self._find_entities_for_pattern_match(matched_value, rule.entity_types, context)
+263: 
+264:                 matches.append(
+265:                     RuleMatch(
+266:                         rule_name=rule.name,
+267:                         matched_value=matched_value,
+268:                         matched_entities=matched_entities,
+269:                         confidence=rule.confidence,
+270:                         metadata={
+271:                             "start": start,
+272:                             "end": end,
+273:                             "creates_relationship": rule.creates_relationship,
+274:                         },
+275:                     )
+276:                 )
+277: 
+278:         # Field-based matching
+279:         if rule.match_fields:
+280:             # This requires comparing entities against each other
+281:             field_matches = self._find_field_matches(rule, context)
+282:             matches.extend(field_matches)
+283: 
+284:         return matches
+285: 
+286:     def _evaluate_inference_rule(
+287:         self,
+288:         rule: InferenceRule,
+289:         context: RuleEvaluationContext,
+290:     ) -> list[RuleMatch]:
+291:         """Evaluate a single inference rule."""
+292:         if not rule.when or len(rule.when) < 1:
+293:             return []
+294: 
+295:         matches = []
+296: 
+297:         # Get relationships matching the first condition
+298:         first_condition = rule.when[0]
+299:         first_rels = context.relationship_index.get(first_condition.relationship, [])
+300: 
+301:         # Filter by source/target type if specified
+302:         first_rels = self._filter_relationships_by_types(
+303:             first_rels, first_condition.source_type, first_condition.target_type, context
+304:         )
+305: 
+306:         if len(rule.when) == 1:
+307:             # Single condition rule
+308:             for rel in first_rels:
+309:                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
+310:                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
+311: 
+312:                 if source_entity and target_entity:
+313:                     matches.append(
+314:                         RuleMatch(
+315:                             rule_name=rule.name,
+316:                             matched_relationships=[rel],
+317:                             matched_entities=[source_entity, target_entity],
+318:                             confidence=rule.confidence,
+319:                             metadata={
+320:                                 "then_relationship": rule.then_relationship,
+321:                                 "then_source": rule.then_source,
+322:                                 "then_target": rule.then_target,
+323:                                 "first": {"source": source_entity, "target": target_entity},
+324:                             },
+325:                         )
+326:                     )
+327:         else:
+328:             # Multi-condition rule - need to find matching chains
+329:             for rel1 in first_rels:
+330:                 # For each first relationship, find matching second relationships
+331:                 second_condition = rule.when[1]
+332:                 second_rels = context.relationship_index.get(second_condition.relationship, [])
+333:                 second_rels = self._filter_relationships_by_types(
+334:                     second_rels, second_condition.source_type, second_condition.target_type, context
+335:                 )
 336: 
-337:         # Filter by entity types if specified
-338:         if entity_types:
-339:             candidates = [
-340:                 e
-341:                 for e in candidates
-342:                 if str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) in entity_types
-343:             ]
+337:                 # Find chains where relationships connect
+338:                 for rel2 in second_rels:
+339:                     if self._relationships_connect(rel1, rel2, context):
+340:                         source1 = self._find_entity_by_id(rel1.source_entity_id, context)
+341:                         target1 = self._find_entity_by_id(rel1.target_entity_id, context)
+342:                         source2 = self._find_entity_by_id(rel2.source_entity_id, context)
+343:                         target2 = self._find_entity_by_id(rel2.target_entity_id, context)
 344: 
-345:         return candidates
-346: 
-347:     def _find_field_matches(
-348:         self,
-349:         rule: CorrelationRule,
-350:         context: RuleEvaluationContext,
-351:     ) -> list[RuleMatch]:
-352:         """Find entities that match on specified fields."""
-353:         matches = []
-354: 
-355:         # Filter entities by type
-356:         candidates = []
-357:         if rule.entity_types:
-358:             for entity_type in rule.entity_types:
-359:                 candidates.extend(context.type_index.get(entity_type, []))
-360:         else:
-361:             candidates = context.entities
-362: 
-363:         # Group entities by field values
-364:         for field_name in rule.match_fields:
-365:             field_groups: dict[Any, list[Entity]] = {}
-366:             for entity in candidates:
-367:                 field_value = entity.attributes.get(field_name)
-368:                 if field_value:
-369:                     # Normalize string values
-370:                     if isinstance(field_value, str):
-371:                         field_value = field_value.lower()
-372:                     if field_value not in field_groups:
-373:                         field_groups[field_value] = []
-374:                     field_groups[field_value].append(entity)
+345:                         if all([source1, target1, source2, target2]):
+346:                             matches.append(
+347:                                 RuleMatch(
+348:                                     rule_name=rule.name,
+349:                                     matched_relationships=[rel1, rel2],
+350:                                     matched_entities=[source1, target1, source2, target2],
+351:                                     confidence=rule.confidence,
+352:                                     metadata={
+353:                                         "then_relationship": rule.then_relationship,
+354:                                         "then_source": rule.then_source,
+355:                                         "then_target": rule.then_target,
+356:                                         "first": {"source": source1, "target": target1},
+357:                                         "second": {"source": source2, "target": target2},
+358:                                     },
+359:                                 )
+360:                             )
+361: 
+362:         return matches
+363: 
+364:     def _find_entities_for_pattern_match(
+365:         self,
+366:         matched_value: str,
+367:         entity_types: list[str],
+368:         context: RuleEvaluationContext,
+369:     ) -> list[Entity]:
+370:         """Find entities that might match a pattern value.
+371: 
+372:         Uses type hierarchy matching so EMPLOYEE matches expected type PERSON.
+373:         """
+374:         candidates = []
 375: 
-376:             # Create matches for groups with multiple entities
-377:             for field_value, entities in field_groups.items():
-378:                 if len(entities) > 1:
-379:                     matches.append(
-380:                         RuleMatch(
-381:                             rule_name=rule.name,
-382:                             matched_value=str(field_value),
-383:                             matched_entities=entities,
-384:                             confidence=rule.confidence,
-385:                             metadata={
-386:                                 "match_field": field_name,
-387:                                 "creates_relationship": rule.creates_relationship,
-388:                             },
-389:                         )
-390:                     )
-391: 
-392:         return matches
-393: 
-394:     def _filter_relationships_by_types(
-395:         self,
-396:         relationships: list[Relationship],
-397:         source_type: str | None,
-398:         target_type: str | None,
-399:         context: RuleEvaluationContext,
-400:     ) -> list[Relationship]:
-401:         """Filter relationships by source and target entity types."""
-402:         if not source_type and not target_type:
-403:             return relationships
-404: 
-405:         filtered = []
-406:         for rel in relationships:
-407:             source_entity = self._find_entity_by_id(rel.source_entity_id, context)
-408:             target_entity = self._find_entity_by_id(rel.target_entity_id, context)
-409: 
-410:             if not source_entity or not target_entity:
-411:                 continue
-412: 
-413:             source_matches = (
-414:                 not source_type
-415:                 or str(
-416:                     source_entity.entity_type.value
-417:                     if hasattr(source_entity.entity_type, "value")
-418:                     else source_entity.entity_type
-419:                 )
-420:                 == source_type
-421:             )
-422:             target_matches = (
-423:                 not target_type
-424:                 or str(
-425:                     target_entity.entity_type.value
-426:                     if hasattr(target_entity.entity_type, "value")
-427:                     else target_entity.entity_type
-428:                 )
-429:                 == target_type
-430:             )
-431: 
-432:             if source_matches and target_matches:
-433:                 filtered.append(rel)
-434: 
-435:         return filtered
-436: 
-437:     def _find_entity_by_id(
-438:         self,
-439:         entity_id: Any,
-440:         context: RuleEvaluationContext,
-441:     ) -> Entity | None:
-442:         """Find entity by ID in context."""
-443:         for entity in context.entities:
-444:             if entity.id == entity_id:
-445:                 return entity
-446:         return None
+376:         # Check entity names
+377:         name_key = matched_value.lower()
+378:         if name_key in context.entity_index:
+379:             candidates.extend(context.entity_index[name_key])
+380: 
+381:         # Check entity attributes for the matched value
+382:         for entity in context.entities:
+383:             for attr_value in entity.attributes.values():
+384:                 if isinstance(attr_value, str) and matched_value in attr_value:
+385:                     if entity not in candidates:
+386:                         candidates.append(entity)
+387:                     break
+388: 
+389:         # Filter by entity types if specified, using hierarchy matching
+390:         if entity_types:
+391:             filtered = []
+392:             for e in candidates:
+393:                 actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
+394:                 # Check if actual type matches any of the expected types via hierarchy
+395:                 if any(types_match(actual_type, expected_type) for expected_type in entity_types):
+396:                     filtered.append(e)
+397:             candidates = filtered
+398: 
+399:         return candidates
+400: 
+401:     def _find_field_matches(
+402:         self,
+403:         rule: CorrelationRule,
+404:         context: RuleEvaluationContext,
+405:     ) -> list[RuleMatch]:
+406:         """Find entities that match on specified fields."""
+407:         matches = []
+408: 
+409:         # Filter entities by type
+410:         candidates = []
+411:         if rule.entity_types:
+412:             for entity_type in rule.entity_types:
+413:                 candidates.extend(context.type_index.get(entity_type, []))
+414:         else:
+415:             candidates = context.entities
+416: 
+417:         # Group entities by field values
+418:         for field_name in rule.match_fields:
+419:             field_groups: dict[Any, list[Entity]] = {}
+420:             for entity in candidates:
+421:                 field_value = entity.attributes.get(field_name)
+422:                 if field_value:
+423:                     # Normalize string values
+424:                     if isinstance(field_value, str):
+425:                         field_value = field_value.lower()
+426:                     if field_value not in field_groups:
+427:                         field_groups[field_value] = []
+428:                     field_groups[field_value].append(entity)
+429: 
+430:             # Create matches for groups with multiple entities
+431:             for field_value, entities in field_groups.items():
+432:                 if len(entities) > 1:
+433:                     matches.append(
+434:                         RuleMatch(
+435:                             rule_name=rule.name,
+436:                             matched_value=str(field_value),
+437:                             matched_entities=entities,
+438:                             confidence=rule.confidence,
+439:                             metadata={
+440:                                 "match_field": field_name,
+441:                                 "creates_relationship": rule.creates_relationship,
+442:                             },
+443:                         )
+444:                     )
+445: 
+446:         return matches
 447: 
-448:     def _relationships_connect(
+448:     def _filter_relationships_by_types(
 449:         self,
-450:         rel1: Relationship,
-451:         rel2: Relationship,
-452:         context: RuleEvaluationContext,
-453:     ) -> bool:
-454:         """Check if two relationships connect (share an entity)."""
-455:         # Check if rel1's target is rel2's source (chain pattern)
-456:         if rel1.target_entity_id == rel2.source_entity_id:
-457:             return True
-458:         # Check if they share source or target
-459:         if rel1.source_entity_id == rel2.source_entity_id:
-460:             return True
-461:         if rel1.target_entity_id == rel2.target_entity_id:
-462:             return True
-463:         return False
-464: 
-465:     def _get_compiled_pattern(self, pattern: str) -> re.Pattern | None:
-466:         """Get or compile a regex pattern."""
-467:         if pattern not in self._compiled_patterns:
-468:             try:
-469:                 self._compiled_patterns[pattern] = re.compile(pattern, re.IGNORECASE)
-470:             except re.error as e:
-471:                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
-472:                 return None
-473: 
-474:         return self._compiled_patterns[pattern]
+450:         relationships: list[Relationship],
+451:         source_type: str | None,
+452:         target_type: str | None,
+453:         context: RuleEvaluationContext,
+454:     ) -> list[Relationship]:
+455:         """Filter relationships by source and target entity types.
+456: 
+457:         Uses type hierarchy matching so EMPLOYEE matches rules expecting PERSON,
+458:         and vice versa.
+459:         """
+460:         if not source_type and not target_type:
+461:             return relationships
+462: 
+463:         filtered = []
+464:         for rel in relationships:
+465:             source_entity = self._find_entity_by_id(rel.source_entity_id, context)
+466:             target_entity = self._find_entity_by_id(rel.target_entity_id, context)
+467: 
+468:             if not source_entity or not target_entity:
+469:                 continue
+470: 
+471:             # Get actual entity types
+472:             actual_source_type = str(
+473:                 source_entity.entity_type.value
+474:                 if hasattr(source_entity.entity_type, "value")
+475:                 else source_entity.entity_type
+476:             )
+477:             actual_target_type = str(
+478:                 target_entity.entity_type.value
+479:                 if hasattr(target_entity.entity_type, "value")
+480:                 else target_entity.entity_type
+481:             )
+482: 
+483:             # Use hierarchy-aware type matching
+484:             source_matches = not source_type or types_match(actual_source_type, source_type)
+485:             target_matches = not target_type or types_match(actual_target_type, target_type)
+486: 
+487:             if source_matches and target_matches:
+488:                 filtered.append(rel)
+489: 
+490:         return filtered
+491: 
+492:     def _find_entity_by_id(
+493:         self,
+494:         entity_id: Any,
+495:         context: RuleEvaluationContext,
+496:     ) -> Entity | None:
+497:         """Find entity by ID in context."""
+498:         for entity in context.entities:
+499:             if entity.id == entity_id:
+500:                 return entity
+501:         return None
+502: 
+503:     def _relationships_connect(
+504:         self,
+505:         rel1: Relationship,
+506:         rel2: Relationship,
+507:         context: RuleEvaluationContext,
+508:     ) -> bool:
+509:         """Check if two relationships connect (share an entity)."""
+510:         # Check if rel1's target is rel2's source (chain pattern)
+511:         if rel1.target_entity_id == rel2.source_entity_id:
+512:             return True
+513:         # Check if they share source or target
+514:         if rel1.source_entity_id == rel2.source_entity_id:
+515:             return True
+516:         if rel1.target_entity_id == rel2.target_entity_id:
+517:             return True
+518:         return False
+519: 
+520:     def _get_compiled_pattern(self, pattern: str) -> re.Pattern | None:
+521:         """Get or compile a regex pattern."""
+522:         if pattern not in self._compiled_patterns:
+523:             try:
+524:                 self._compiled_patterns[pattern] = re.compile(pattern, re.IGNORECASE)
+525:             except re.error as e:
+526:                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
+527:                 return None
+528: 
+529:         return self._compiled_patterns[pattern]
 ````
 
 ## File: src/khora/extraction/extractors/__init__.py
@@ -19275,149 +19330,6 @@ README.md
 576: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
-## File: src/khora/api/routes/status.py
-````python
- 1: """Status endpoints for Khora API."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: router = APIRouter()
-11: 
-12: 
-13: @router.get("/status")
-14: async def status_check(request: Request) -> dict[str, Any]:
-15:     """Basic status check endpoint.
-16: 
-17:     Returns:
-18:         Status with timestamp and version
-19:     """
-20:     return {
-21:         "status": "ok",
-22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.6",
-24:         "service": "khora",
-25:     }
-26: 
-27: 
-28: @router.get("/health")
-29: async def health_check(request: Request) -> dict[str, Any]:
-30:     """Health check endpoint for orchestration systems.
-31: 
-32:     Returns:
-33:         Health status with timestamp
-34:     """
-35:     return {
-36:         "status": "healthy",
-37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.6",
-39:     }
-40: 
-41: 
-42: @router.get("/health/ready")
-43: async def readiness_check(request: Request) -> dict[str, Any]:
-44:     """Readiness check for Kubernetes/orchestration.
-45: 
-46:     Checks that all required services are available.
-47: 
-48:     Returns:
-49:         Readiness status with component checks
-50:     """
-51:     config = request.app.state.config
-52:     checks: dict[str, bool] = {}
-53: 
-54:     # TODO: Add actual health checks for:
-55:     # - Database connections
-56:     # - External services
-57: 
-58:     # For now, return basic status
-59:     checks["config_loaded"] = config is not None
-60: 
-61:     all_healthy = all(checks.values())
-62: 
-63:     return {
-64:         "status": "ready" if all_healthy else "not_ready",
-65:         "timestamp": datetime.now(UTC).isoformat(),
-66:         "checks": checks,
-67:     }
-68: 
-69: 
-70: @router.get("/health/live")
-71: async def liveness_check() -> dict[str, Any]:
-72:     """Liveness check for Kubernetes/orchestration.
-73: 
-74:     Simple check that the application is running.
-75: 
-76:     Returns:
-77:         Liveness status
-78:     """
-79:     return {
-80:         "status": "alive",
-81:         "timestamp": datetime.now(UTC).isoformat(),
-82:     }
-````
-
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.0.6")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
-````
-
 ## File: src/khora/storage/coordinator.py
 ````python
   1: """Storage coordinator that orchestrates all backends.
@@ -20101,232 +20013,147 @@ README.md
 679:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
-## File: tests/unit/test_api.py
+## File: src/khora/api/routes/status.py
 ````python
- 1: """Tests for API module."""
+ 1: """Status endpoints for Khora API."""
  2: 
  3: from __future__ import annotations
  4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
  7: 
- 8: 
- 9: @pytest.mark.unit
-10: class TestStatusEndpoints:
-11:     """Tests for status check endpoints."""
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: router = APIRouter()
+11: 
 12: 
-13:     def test_status_check(self, test_client: TestClient) -> None:
-14:         """Test basic status check endpoint."""
-15:         response = test_client.get("/status")
+13: @router.get("/status")
+14: async def status_check(request: Request) -> dict[str, Any]:
+15:     """Basic status check endpoint.
 16: 
-17:         assert response.status_code == 200
-18:         data = response.json()
-19:         assert data["status"] == "ok"
-20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.6"
-22:         assert data["service"] == "khora"
-23: 
-24:     def test_health_check(self, test_client: TestClient) -> None:
-25:         """Test health check endpoint."""
-26:         response = test_client.get("/health")
+17:     Returns:
+18:         Status with timestamp and version
+19:     """
+20:     return {
+21:         "status": "ok",
+22:         "timestamp": datetime.now(UTC).isoformat(),
+23:         "version": "0.0.6",
+24:         "service": "khora",
+25:     }
+26: 
 27: 
-28:         assert response.status_code == 200
-29:         data = response.json()
-30:         assert data["status"] == "healthy"
-31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.6"
-33: 
-34:     def test_readiness_check(self, test_client: TestClient) -> None:
-35:         """Test readiness check endpoint."""
-36:         response = test_client.get("/health/ready")
-37: 
-38:         assert response.status_code == 200
-39:         data = response.json()
-40:         assert data["status"] in ["ready", "not_ready"]
-41:         assert "timestamp" in data
-42:         assert "checks" in data
-43: 
-44:     def test_liveness_check(self, test_client: TestClient) -> None:
-45:         """Test liveness check endpoint."""
-46:         response = test_client.get("/health/live")
+28: @router.get("/health")
+29: async def health_check(request: Request) -> dict[str, Any]:
+30:     """Health check endpoint for orchestration systems.
+31: 
+32:     Returns:
+33:         Health status with timestamp
+34:     """
+35:     return {
+36:         "status": "healthy",
+37:         "timestamp": datetime.now(UTC).isoformat(),
+38:         "version": "0.0.6",
+39:     }
+40: 
+41: 
+42: @router.get("/health/ready")
+43: async def readiness_check(request: Request) -> dict[str, Any]:
+44:     """Readiness check for Kubernetes/orchestration.
+45: 
+46:     Checks that all required services are available.
 47: 
-48:         assert response.status_code == 200
-49:         data = response.json()
-50:         assert data["status"] == "alive"
-51:         assert "timestamp" in data
-52: 
+48:     Returns:
+49:         Readiness status with component checks
+50:     """
+51:     config = request.app.state.config
+52:     checks: dict[str, bool] = {}
 53: 
-54: @pytest.mark.unit
-55: class TestConfig:
-56:     """Tests for configuration."""
+54:     # TODO: Add actual health checks for:
+55:     # - Database connections
+56:     # - External services
 57: 
-58:     def test_default_config(self) -> None:
-59:         """Test default configuration values."""
-60:         from khora.config import KhoraConfig
-61: 
-62:         config = KhoraConfig()
-63:         assert config.app_name == "khora"
-64:         assert config.environment == "development"
-65:         assert config.debug is False
-66:         assert config.api_host == "127.0.0.1"
-67:         assert config.api_port == 8000
-68:         assert config.auth_enabled is True
+58:     # For now, return basic status
+59:     checks["config_loaded"] = config is not None
+60: 
+61:     all_healthy = all(checks.values())
+62: 
+63:     return {
+64:         "status": "ready" if all_healthy else "not_ready",
+65:         "timestamp": datetime.now(UTC).isoformat(),
+66:         "checks": checks,
+67:     }
+68: 
 69: 
-70:     def test_config_from_env(self, monkeypatch) -> None:
-71:         """Test configuration from environment variables."""
-72:         from khora.config import KhoraConfig
+70: @router.get("/health/live")
+71: async def liveness_check() -> dict[str, Any]:
+72:     """Liveness check for Kubernetes/orchestration.
 73: 
-74:         monkeypatch.setenv("KHORA_DEBUG", "true")
-75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-77: 
-78:         config = KhoraConfig()
-79:         assert config.debug is True
-80:         assert config.api_port == 9000
-81:         assert config.environment == "staging"
+74:     Simple check that the application is running.
+75: 
+76:     Returns:
+77:         Liveness status
+78:     """
+79:     return {
+80:         "status": "alive",
+81:         "timestamp": datetime.now(UTC).isoformat(),
+82:     }
 ````
 
-## File: src/khora/api/app.py
+## File: src/khora/cli/__init__.py
 ````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     await close_db()
- 86: 
- 87: 
- 88: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 89:     """Create and configure the FastAPI application.
- 90: 
- 91:     Args:
- 92:         config: Optional application configuration
- 93: 
- 94:     Returns:
- 95:         Configured FastAPI application
- 96:     """
- 97:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
- 98:     from ..logging_config import setup_logging
- 99: 
-100:     setup_logging(level="INFO")
-101: 
-102:     if config is None:
-103:         from ..config import load_config
-104: 
-105:         config = load_config()
-106: 
-107:     app = FastAPI(
-108:         title="Khora",
-109:         description="Deyta's memory lake and materialization of knowledge",
-110:         version="0.0.6",
-111:         lifespan=lifespan,
-112:         debug=config.debug,
-113:     )
-114: 
-115:     # Store config in app state
-116:     app.state.config = config
-117: 
-118:     # Configure CORS
-119:     app.add_middleware(
-120:         CORSMiddleware,
-121:         allow_origins=["*"] if config.debug else [],
-122:         allow_credentials=True,
-123:         allow_methods=["*"],
-124:         allow_headers=["*"],
-125:     )
-126: 
-127:     # Add request logging
-128:     app.add_middleware(LoggingMiddleware)
-129: 
-130:     # Register routes
-131:     # Status endpoint is public (no auth)
-132:     app.include_router(status.router, tags=["status"])
-133: 
-134:     # Memory Lake API routes
-135:     app.include_router(memory.router)
-136:     app.include_router(namespaces.router)
-137:     app.include_router(sync.router)
-138: 
-139:     return app
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.0.6")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/query/engine.py
@@ -22342,38 +22169,6 @@ README.md
 874:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
-## File: src/khora/__init__.py
-````python
- 1: """Khora - Deyta's memory lake and materialization of knowledge.
- 2: 
- 3: Khora provides a unified interface for:
- 4: - Storing and retrieving knowledge artifacts
- 5: - Materializing data transformations
- 6: - Building memory graphs and relationships
- 7: 
- 8: Example usage:
- 9:     from khora import MemoryLake
-10: 
-11:     async with MemoryLake() as lake:
-12:         await lake.remember("Important information to store")
-13:         results = await lake.recall("query about information")
-14: """
-15: 
-16: from .cli import main
-17: from .memory_lake import MemoryLake, RecallResult, RememberResult
-18: from .query import SearchMode
-19: 
-20: __version__ = "0.0.6"
-21: 
-22: __all__ = [
-23:     "main",
-24:     "MemoryLake",
-25:     "RememberResult",
-26:     "RecallResult",
-27:     "SearchMode",
-28: ]
-````
-
 ## File: src/khora/memory_lake.py
 ````python
   1: """MemoryLake - Primary API for Khora Memory Lake.
@@ -22956,6 +22751,234 @@ README.md
 578:         await lake.disconnect()
 ````
 
+## File: tests/unit/test_api.py
+````python
+ 1: """Tests for API module."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
+ 7: 
+ 8: 
+ 9: @pytest.mark.unit
+10: class TestStatusEndpoints:
+11:     """Tests for status check endpoints."""
+12: 
+13:     def test_status_check(self, test_client: TestClient) -> None:
+14:         """Test basic status check endpoint."""
+15:         response = test_client.get("/status")
+16: 
+17:         assert response.status_code == 200
+18:         data = response.json()
+19:         assert data["status"] == "ok"
+20:         assert "timestamp" in data
+21:         assert data["version"] == "0.0.6"
+22:         assert data["service"] == "khora"
+23: 
+24:     def test_health_check(self, test_client: TestClient) -> None:
+25:         """Test health check endpoint."""
+26:         response = test_client.get("/health")
+27: 
+28:         assert response.status_code == 200
+29:         data = response.json()
+30:         assert data["status"] == "healthy"
+31:         assert "timestamp" in data
+32:         assert data["version"] == "0.0.6"
+33: 
+34:     def test_readiness_check(self, test_client: TestClient) -> None:
+35:         """Test readiness check endpoint."""
+36:         response = test_client.get("/health/ready")
+37: 
+38:         assert response.status_code == 200
+39:         data = response.json()
+40:         assert data["status"] in ["ready", "not_ready"]
+41:         assert "timestamp" in data
+42:         assert "checks" in data
+43: 
+44:     def test_liveness_check(self, test_client: TestClient) -> None:
+45:         """Test liveness check endpoint."""
+46:         response = test_client.get("/health/live")
+47: 
+48:         assert response.status_code == 200
+49:         data = response.json()
+50:         assert data["status"] == "alive"
+51:         assert "timestamp" in data
+52: 
+53: 
+54: @pytest.mark.unit
+55: class TestConfig:
+56:     """Tests for configuration."""
+57: 
+58:     def test_default_config(self) -> None:
+59:         """Test default configuration values."""
+60:         from khora.config import KhoraConfig
+61: 
+62:         config = KhoraConfig()
+63:         assert config.app_name == "khora"
+64:         assert config.environment == "development"
+65:         assert config.debug is False
+66:         assert config.api_host == "127.0.0.1"
+67:         assert config.api_port == 8000
+68:         assert config.auth_enabled is True
+69: 
+70:     def test_config_from_env(self, monkeypatch) -> None:
+71:         """Test configuration from environment variables."""
+72:         from khora.config import KhoraConfig
+73: 
+74:         monkeypatch.setenv("KHORA_DEBUG", "true")
+75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+77: 
+78:         config = KhoraConfig()
+79:         assert config.debug is True
+80:         assert config.api_port == 9000
+81:         assert config.environment == "staging"
+````
+
+## File: src/khora/api/app.py
+````python
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     await close_db()
+ 86: 
+ 87: 
+ 88: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 89:     """Create and configure the FastAPI application.
+ 90: 
+ 91:     Args:
+ 92:         config: Optional application configuration
+ 93: 
+ 94:     Returns:
+ 95:         Configured FastAPI application
+ 96:     """
+ 97:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+ 98:     from ..logging_config import setup_logging
+ 99: 
+100:     setup_logging(level="INFO")
+101: 
+102:     if config is None:
+103:         from ..config import load_config
+104: 
+105:         config = load_config()
+106: 
+107:     app = FastAPI(
+108:         title="Khora",
+109:         description="Deyta's memory lake and materialization of knowledge",
+110:         version="0.0.6",
+111:         lifespan=lifespan,
+112:         debug=config.debug,
+113:     )
+114: 
+115:     # Store config in app state
+116:     app.state.config = config
+117: 
+118:     # Configure CORS
+119:     app.add_middleware(
+120:         CORSMiddleware,
+121:         allow_origins=["*"] if config.debug else [],
+122:         allow_credentials=True,
+123:         allow_methods=["*"],
+124:         allow_headers=["*"],
+125:     )
+126: 
+127:     # Add request logging
+128:     app.add_middleware(LoggingMiddleware)
+129: 
+130:     # Register routes
+131:     # Status endpoint is public (no auth)
+132:     app.include_router(status.router, tags=["status"])
+133: 
+134:     # Memory Lake API routes
+135:     app.include_router(memory.router)
+136:     app.include_router(namespaces.router)
+137:     app.include_router(sync.router)
+138: 
+139:     return app
+````
+
 ## File: src/khora/pipelines/flows/ingest.py
 ````python
   1: """Two-phase ingestion flow for Khora Memory Lake.
@@ -23428,6 +23451,38 @@ README.md
 468:     }
 ````
 
+## File: src/khora/__init__.py
+````python
+ 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 2: 
+ 3: Khora provides a unified interface for:
+ 4: - Storing and retrieving knowledge artifacts
+ 5: - Materializing data transformations
+ 6: - Building memory graphs and relationships
+ 7: 
+ 8: Example usage:
+ 9:     from khora import MemoryLake
+10: 
+11:     async with MemoryLake() as lake:
+12:         await lake.remember("Important information to store")
+13:         results = await lake.recall("query about information")
+14: """
+15: 
+16: from .cli import main
+17: from .memory_lake import MemoryLake, RecallResult, RememberResult
+18: from .query import SearchMode
+19: 
+20: __version__ = "0.0.6"
+21: 
+22: __all__ = [
+23:     "main",
+24:     "MemoryLake",
+25:     "RememberResult",
+26:     "RecallResult",
+27:     "SearchMode",
+28: ]
+````
+
 ## File: pyproject.toml
 ````toml
   1: [project]
@@ -23566,6 +23621,19 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-27 13:15:08 +0100
+**Message:** Bump version to 0.0.6
+
+**Files:**
+- REPOMIX.md
+- pyproject.toml
+- src/khora/__init__.py
+- src/khora/api/app.py
+- src/khora/api/routes/status.py
+- src/khora/cli/__init__.py
+- tests/unit/test_api.py
+- uv.lock
 
 ## Commit: 2026-01-27 13:14:14 +0100
 **Message:** feat: add complete database migrations
@@ -23823,13 +23891,6 @@ README.md
 
 ## Commit: 2026-01-26 13:59:16 +0100
 **Message:** Serialize dict properties to JSON for Neo4j storage
-
-**Files:**
-- REPOMIX.md
-- src/khora/storage/backends/neo4j.py
-
-## Commit: 2026-01-26 13:57:44 +0100
-**Message:** Add JSON serialization helpers for Neo4j dict properties
 
 **Files:**
 - REPOMIX.md

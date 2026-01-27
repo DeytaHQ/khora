@@ -74,6 +74,54 @@ class RuleEvaluationContext:
         return ctx
 
 
+# Type hierarchy for flexible matching
+# Child types can match parent types in inference rules
+# e.g., EMPLOYEE matches rules expecting PERSON
+TYPE_HIERARCHY: dict[str, list[str]] = {
+    "EMPLOYEE": ["PERSON"],
+    "EXTERNAL_PERSON": ["PERSON"],
+    "COMPANY": ["ORGANIZATION"],
+    "DEPARTMENT": ["ORGANIZATION"],
+    "TEAM": ["ORGANIZATION"],
+    "MESSAGE": ["CONTENT"],
+    "PAGE": ["CONTENT", "DOCUMENT"],
+    "ISSUE": ["WORK_ITEM", "CONTENT"],
+    "SALES_NOTE": ["CONTENT", "NOTE"],
+    "CALL": ["EVENT", "MEETING"],
+    "DEAL": ["OPPORTUNITY"],
+    "PROJECT": ["WORK_ITEM"],
+    "CYCLE": ["WORK_ITEM", "SPRINT"],
+}
+
+
+def types_match(actual_type: str, expected_type: str) -> bool:
+    """Check if actual type matches expected, considering type hierarchy.
+
+    Args:
+        actual_type: The actual entity type from the graph
+        expected_type: The expected type from the inference rule
+
+    Returns:
+        True if types match directly or via hierarchy
+    """
+    # Direct match
+    if actual_type == expected_type:
+        return True
+
+    # Check if actual is a subtype of expected (e.g., EMPLOYEE matches PERSON)
+    parents = TYPE_HIERARCHY.get(actual_type, [])
+    if expected_type in parents:
+        return True
+
+    # Check reverse: if expected is a subtype of actual (e.g., PERSON matches EMPLOYEE)
+    # This allows rules written for specific types to match more generic extractions
+    parents_of_expected = TYPE_HIERARCHY.get(expected_type, [])
+    if actual_type in parents_of_expected:
+        return True
+
+    return False
+
+
 class RuleEngine:
     """Engine for evaluating correlation and inference rules.
 
@@ -82,6 +130,7 @@ class RuleEngine:
     - Field-based matching
     - Multi-condition inference rules
     - Confidence scoring
+    - Type hierarchy matching (EMPLOYEE matches rules expecting PERSON)
     """
 
     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
@@ -318,7 +367,10 @@ class RuleEngine:
         entity_types: list[str],
         context: RuleEvaluationContext,
     ) -> list[Entity]:
-        """Find entities that might match a pattern value."""
+        """Find entities that might match a pattern value.
+
+        Uses type hierarchy matching so EMPLOYEE matches expected type PERSON.
+        """
         candidates = []
 
         # Check entity names
@@ -334,13 +386,15 @@ class RuleEngine:
                         candidates.append(entity)
                     break
 
-        # Filter by entity types if specified
+        # Filter by entity types if specified, using hierarchy matching
         if entity_types:
-            candidates = [
-                e
-                for e in candidates
-                if str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) in entity_types
-            ]
+            filtered = []
+            for e in candidates:
+                actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
+                # Check if actual type matches any of the expected types via hierarchy
+                if any(types_match(actual_type, expected_type) for expected_type in entity_types):
+                    filtered.append(e)
+            candidates = filtered
 
         return candidates
 
@@ -398,7 +452,11 @@ class RuleEngine:
         target_type: str | None,
         context: RuleEvaluationContext,
     ) -> list[Relationship]:
-        """Filter relationships by source and target entity types."""
+        """Filter relationships by source and target entity types.
+
+        Uses type hierarchy matching so EMPLOYEE matches rules expecting PERSON,
+        and vice versa.
+        """
         if not source_type and not target_type:
             return relationships
 
@@ -410,24 +468,21 @@ class RuleEngine:
             if not source_entity or not target_entity:
                 continue
 
-            source_matches = (
-                not source_type
-                or str(
-                    source_entity.entity_type.value
-                    if hasattr(source_entity.entity_type, "value")
-                    else source_entity.entity_type
-                )
-                == source_type
+            # Get actual entity types
+            actual_source_type = str(
+                source_entity.entity_type.value
+                if hasattr(source_entity.entity_type, "value")
+                else source_entity.entity_type
             )
-            target_matches = (
-                not target_type
-                or str(
-                    target_entity.entity_type.value
-                    if hasattr(target_entity.entity_type, "value")
-                    else target_entity.entity_type
-                )
-                == target_type
+            actual_target_type = str(
+                target_entity.entity_type.value
+                if hasattr(target_entity.entity_type, "value")
+                else target_entity.entity_type
             )
+
+            # Use hierarchy-aware type matching
+            source_matches = not source_type or types_match(actual_source_type, source_type)
+            target_matches = not target_type or types_match(actual_target_type, target_type)
 
             if source_matches and target_matches:
                 filtered.append(rel)
