@@ -71,6 +71,11 @@ class MemoryNamespace:
     A namespace is the primary unit of memory isolation. All memories,
     entities, and relationships are scoped to a namespace.
     Every query is filtered by namespace_id for multi-tenancy.
+
+    Supports versioning for data replacement workflows:
+    - version: Incremental version number (starts at 1)
+    - is_active: Whether this is the current active version
+    - previous_version_id: Reference to the previous version (if any)
     """
 
     id: UUID = field(default_factory=uuid4)
@@ -78,6 +83,11 @@ class MemoryNamespace:
     name: str = ""
     slug: str = ""
     description: str = ""
+
+    # Versioning fields
+    version: int = 1
+    is_active: bool = True
+    previous_version_id: UUID | None = None
 
     # Configuration overrides for this namespace
     config_overrides: dict[str, Any] = field(default_factory=dict)

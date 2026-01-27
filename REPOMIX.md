@@ -2793,105 +2793,115 @@ README.md
 
 ## File: src/khora/core/models/tenancy.py
 ````python
- 1: """Multi-tenancy models for Khora Memory Lake.
- 2: 
- 3: Supports two modes:
- 4: - Shared: namespace_id filtering with row-level security
- 5: - Isolated: Separate database instances per tenant
- 6: """
- 7: 
- 8: from __future__ import annotations
- 9: 
-10: from dataclasses import dataclass, field
-11: from datetime import UTC, datetime
-12: from enum import Enum
-13: from typing import Any
-14: from uuid import UUID, uuid4
-15: 
-16: 
-17: class TenancyMode(str, Enum):
-18:     """Tenancy isolation mode."""
-19: 
-20:     SHARED = "shared"  # Shared database with namespace_id filtering + row-level security
-21:     ISOLATED = "isolated"  # Separate database instances per tenant
-22: 
-23: 
-24: @dataclass
-25: class Organization:
-26:     """Top-level tenant organization.
-27: 
-28:     An organization can have multiple workspaces and represents the billing
-29:     and administrative boundary for tenants.
-30:     """
-31: 
-32:     id: UUID = field(default_factory=uuid4)
-33:     name: str = ""
-34:     slug: str = ""  # URL-friendly identifier
-35:     tenancy_mode: TenancyMode = TenancyMode.SHARED
-36:     metadata: dict[str, Any] = field(default_factory=dict)
-37:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-38:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-39: 
-40:     def __post_init__(self) -> None:
-41:         if not self.slug and self.name:
-42:             self.slug = self.name.lower().replace(" ", "-")
-43: 
-44: 
-45: @dataclass
-46: class Workspace:
-47:     """Workspace within an organization.
-48: 
-49:     Workspaces provide logical separation of projects or teams within
-50:     an organization. Each workspace can have multiple memory namespaces.
-51:     """
-52: 
-53:     id: UUID = field(default_factory=uuid4)
-54:     organization_id: UUID = field(default_factory=uuid4)
-55:     name: str = ""
-56:     slug: str = ""
-57:     description: str = ""
-58:     metadata: dict[str, Any] = field(default_factory=dict)
-59:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-60:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-61: 
-62:     def __post_init__(self) -> None:
-63:         if not self.slug and self.name:
-64:             self.slug = self.name.lower().replace(" ", "-")
-65: 
-66: 
-67: @dataclass
-68: class MemoryNamespace:
-69:     """Memory namespace for isolating memories.
-70: 
-71:     A namespace is the primary unit of memory isolation. All memories,
-72:     entities, and relationships are scoped to a namespace.
-73:     Every query is filtered by namespace_id for multi-tenancy.
-74:     """
-75: 
-76:     id: UUID = field(default_factory=uuid4)
-77:     workspace_id: UUID = field(default_factory=uuid4)
-78:     name: str = ""
-79:     slug: str = ""
-80:     description: str = ""
-81: 
-82:     # Configuration overrides for this namespace
-83:     config_overrides: dict[str, Any] = field(default_factory=dict)
-84: 
-85:     # Sync checkpoints for incremental updates
-86:     sync_checkpoints: dict[str, str] = field(default_factory=dict)
-87: 
-88:     metadata: dict[str, Any] = field(default_factory=dict)
-89:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-90:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-91: 
-92:     def __post_init__(self) -> None:
-93:         if not self.slug and self.name:
-94:             self.slug = self.name.lower().replace(" ", "-")
-95: 
-96:     @property
-97:     def full_path(self) -> str:
-98:         """Get the full path identifier for this namespace."""
-99:         return f"{self.workspace_id}/{self.slug}"
+  1: """Multi-tenancy models for Khora Memory Lake.
+  2: 
+  3: Supports two modes:
+  4: - Shared: namespace_id filtering with row-level security
+  5: - Isolated: Separate database instances per tenant
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: from dataclasses import dataclass, field
+ 11: from datetime import UTC, datetime
+ 12: from enum import Enum
+ 13: from typing import Any
+ 14: from uuid import UUID, uuid4
+ 15: 
+ 16: 
+ 17: class TenancyMode(str, Enum):
+ 18:     """Tenancy isolation mode."""
+ 19: 
+ 20:     SHARED = "shared"  # Shared database with namespace_id filtering + row-level security
+ 21:     ISOLATED = "isolated"  # Separate database instances per tenant
+ 22: 
+ 23: 
+ 24: @dataclass
+ 25: class Organization:
+ 26:     """Top-level tenant organization.
+ 27: 
+ 28:     An organization can have multiple workspaces and represents the billing
+ 29:     and administrative boundary for tenants.
+ 30:     """
+ 31: 
+ 32:     id: UUID = field(default_factory=uuid4)
+ 33:     name: str = ""
+ 34:     slug: str = ""  # URL-friendly identifier
+ 35:     tenancy_mode: TenancyMode = TenancyMode.SHARED
+ 36:     metadata: dict[str, Any] = field(default_factory=dict)
+ 37:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 38:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 39: 
+ 40:     def __post_init__(self) -> None:
+ 41:         if not self.slug and self.name:
+ 42:             self.slug = self.name.lower().replace(" ", "-")
+ 43: 
+ 44: 
+ 45: @dataclass
+ 46: class Workspace:
+ 47:     """Workspace within an organization.
+ 48: 
+ 49:     Workspaces provide logical separation of projects or teams within
+ 50:     an organization. Each workspace can have multiple memory namespaces.
+ 51:     """
+ 52: 
+ 53:     id: UUID = field(default_factory=uuid4)
+ 54:     organization_id: UUID = field(default_factory=uuid4)
+ 55:     name: str = ""
+ 56:     slug: str = ""
+ 57:     description: str = ""
+ 58:     metadata: dict[str, Any] = field(default_factory=dict)
+ 59:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 60:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 61: 
+ 62:     def __post_init__(self) -> None:
+ 63:         if not self.slug and self.name:
+ 64:             self.slug = self.name.lower().replace(" ", "-")
+ 65: 
+ 66: 
+ 67: @dataclass
+ 68: class MemoryNamespace:
+ 69:     """Memory namespace for isolating memories.
+ 70: 
+ 71:     A namespace is the primary unit of memory isolation. All memories,
+ 72:     entities, and relationships are scoped to a namespace.
+ 73:     Every query is filtered by namespace_id for multi-tenancy.
+ 74: 
+ 75:     Supports versioning for data replacement workflows:
+ 76:     - version: Incremental version number (starts at 1)
+ 77:     - is_active: Whether this is the current active version
+ 78:     - previous_version_id: Reference to the previous version (if any)
+ 79:     """
+ 80: 
+ 81:     id: UUID = field(default_factory=uuid4)
+ 82:     workspace_id: UUID = field(default_factory=uuid4)
+ 83:     name: str = ""
+ 84:     slug: str = ""
+ 85:     description: str = ""
+ 86: 
+ 87:     # Versioning fields
+ 88:     version: int = 1
+ 89:     is_active: bool = True
+ 90:     previous_version_id: UUID | None = None
+ 91: 
+ 92:     # Configuration overrides for this namespace
+ 93:     config_overrides: dict[str, Any] = field(default_factory=dict)
+ 94: 
+ 95:     # Sync checkpoints for incremental updates
+ 96:     sync_checkpoints: dict[str, str] = field(default_factory=dict)
+ 97: 
+ 98:     metadata: dict[str, Any] = field(default_factory=dict)
+ 99:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+100:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+101: 
+102:     def __post_init__(self) -> None:
+103:         if not self.slug and self.name:
+104:             self.slug = self.name.lower().replace(" ", "-")
+105: 
+106:     @property
+107:     def full_path(self) -> str:
+108:         """Get the full path identifier for this namespace."""
+109:         return f"{self.workspace_id}/{self.slug}"
 ````
 
 ## File: src/khora/core/__init__.py
@@ -12457,330 +12467,387 @@ README.md
   6: 
   7: from __future__ import annotations
   8: 
-  9: from dataclasses import dataclass, field
- 10: from datetime import UTC, datetime
- 11: from typing import TYPE_CHECKING
- 12: from uuid import UUID, uuid4
- 13: 
- 14: from loguru import logger
- 15: 
- 16: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
- 17: 
- 18: if TYPE_CHECKING:
- 19:     from khora.core.models import Entity, Relationship
- 20:     from khora.extraction.skills import ExpertiseConfig
- 21: 
+  9: from collections import Counter
+ 10: from dataclasses import dataclass, field
+ 11: from datetime import UTC, datetime
+ 12: from typing import TYPE_CHECKING
+ 13: from uuid import UUID, uuid4
+ 14: 
+ 15: from loguru import logger
+ 16: 
+ 17: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
+ 18: 
+ 19: if TYPE_CHECKING:
+ 20:     from khora.core.models import Entity, Relationship
+ 21:     from khora.extraction.skills import ExpertiseConfig
  22: 
- 23: @dataclass
- 24: class InferredRelationship:
- 25:     """An inferred relationship from rule evaluation."""
- 26: 
- 27:     source_entity_id: UUID
- 28:     target_entity_id: UUID
- 29:     relationship_type: str
- 30:     description: str = ""
- 31:     confidence: float = 0.5
- 32:     rule_name: str = ""  # Name of inference rule that created this
- 33:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
- 34: 
+ 23: 
+ 24: @dataclass
+ 25: class InferredRelationship:
+ 26:     """An inferred relationship from rule evaluation."""
+ 27: 
+ 28:     source_entity_id: UUID
+ 29:     target_entity_id: UUID
+ 30:     relationship_type: str
+ 31:     description: str = ""
+ 32:     confidence: float = 0.5
+ 33:     rule_name: str = ""  # Name of inference rule that created this
+ 34:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
  35: 
- 36: class RelationshipInferrer:
- 37:     """Infers new relationships based on existing graph patterns.
- 38: 
- 39:     Uses inference rules from expertise configuration to deduce
- 40:     relationships that aren't explicitly stated but can be inferred
- 41:     from existing relationships.
- 42: 
- 43:     Example inference rules:
- 44:     - If A manages B and B works on project C, A is stakeholder of C
- 45:     - If person P is mentioned in channel for project X, P is involved in X
- 46:     - If PR author and reviewer work on same PR, they collaborate
- 47:     """
- 48: 
- 49:     def __init__(
- 50:         self,
- 51:         expertise: ExpertiseConfig | None = None,
- 52:         *,
- 53:         min_confidence: float = 0.3,
- 54:         max_inferences_per_rule: int = 100,
- 55:     ) -> None:
- 56:         """Initialize the relationship inferrer.
- 57: 
- 58:         Args:
- 59:             expertise: ExpertiseConfig with inference rules
- 60:             min_confidence: Minimum confidence for inferred relationships
- 61:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
- 62:         """
- 63:         self._expertise = expertise
- 64:         self._min_confidence = min_confidence
- 65:         self._max_inferences_per_rule = max_inferences_per_rule
- 66:         self._rule_engine = RuleEngine(expertise)
- 67: 
- 68:     def infer(
- 69:         self,
- 70:         entities: list[Entity],
- 71:         relationships: list[Relationship],
- 72:         *,
- 73:         depth: int = 1,
- 74:     ) -> list[InferredRelationship]:
- 75:         """Infer new relationships from existing graph.
- 76: 
- 77:         Args:
- 78:             entities: Existing entities
- 79:             relationships: Existing relationships
- 80:             depth: Number of inference passes (for transitive inference)
- 81: 
- 82:         Returns:
- 83:             List of inferred relationships
- 84:         """
- 85:         if not self._expertise or not self._expertise.inference_rules:
- 86:             return []
- 87: 
- 88:         all_inferred: list[InferredRelationship] = []
- 89:         current_relationships = list(relationships)
- 90: 
- 91:         for pass_num in range(depth):
- 92:             # Build context with current state
- 93:             context = RuleEvaluationContext.from_data(entities, current_relationships)
- 94: 
- 95:             # Evaluate inference rules
- 96:             matches = self._rule_engine.evaluate_inference_rules(context)
- 97: 
- 98:             # Convert matches to inferred relationships
- 99:             pass_inferred = self._matches_to_relationships(matches, context)
-100: 
-101:             if not pass_inferred:
-102:                 # No new inferences, stop early
-103:                 break
-104: 
-105:             # Filter out duplicates and already existing relationships
-106:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
-107: 
-108:             if not new_inferred:
-109:                 break
-110: 
-111:             all_inferred.extend(new_inferred)
-112: 
-113:             # Add inferred to current for next pass (as mock relationships)
-114:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
-115: 
-116:             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
-117: 
-118:         logger.debug(f"Inferred {len(all_inferred)} relationships in {depth} pass(es)")
-119:         return all_inferred
-120: 
-121:     def infer_from_pattern(
-122:         self,
-123:         entities: list[Entity],
-124:         relationships: list[Relationship],
-125:         pattern: str,
-126:     ) -> list[InferredRelationship]:
-127:         """Infer relationships matching a specific pattern.
-128: 
-129:         Args:
-130:             entities: Existing entities
-131:             relationships: Existing relationships
-132:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
+ 36: 
+ 37: class RelationshipInferrer:
+ 38:     """Infers new relationships based on existing graph patterns.
+ 39: 
+ 40:     Uses inference rules from expertise configuration to deduce
+ 41:     relationships that aren't explicitly stated but can be inferred
+ 42:     from existing relationships.
+ 43: 
+ 44:     Example inference rules:
+ 45:     - If A manages B and B works on project C, A is stakeholder of C
+ 46:     - If person P is mentioned in channel for project X, P is involved in X
+ 47:     - If PR author and reviewer work on same PR, they collaborate
+ 48:     """
+ 49: 
+ 50:     def __init__(
+ 51:         self,
+ 52:         expertise: ExpertiseConfig | None = None,
+ 53:         *,
+ 54:         min_confidence: float = 0.3,
+ 55:         max_inferences_per_rule: int = 100,
+ 56:     ) -> None:
+ 57:         """Initialize the relationship inferrer.
+ 58: 
+ 59:         Args:
+ 60:             expertise: ExpertiseConfig with inference rules
+ 61:             min_confidence: Minimum confidence for inferred relationships
+ 62:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
+ 63:         """
+ 64:         self._expertise = expertise
+ 65:         self._min_confidence = min_confidence
+ 66:         self._max_inferences_per_rule = max_inferences_per_rule
+ 67:         self._rule_engine = RuleEngine(expertise)
+ 68: 
+ 69:     def infer(
+ 70:         self,
+ 71:         entities: list[Entity],
+ 72:         relationships: list[Relationship],
+ 73:         *,
+ 74:         depth: int = 1,
+ 75:     ) -> list[InferredRelationship]:
+ 76:         """Infer new relationships from existing graph.
+ 77: 
+ 78:         Args:
+ 79:             entities: Existing entities
+ 80:             relationships: Existing relationships
+ 81:             depth: Number of inference passes (for transitive inference)
+ 82: 
+ 83:         Returns:
+ 84:             List of inferred relationships
+ 85:         """
+ 86:         if not self._expertise or not self._expertise.inference_rules:
+ 87:             logger.debug("No expertise or inference rules configured, skipping inference")
+ 88:             return []
+ 89: 
+ 90:         # Diagnostic: Log entity types in the graph
+ 91:         entity_types = Counter(
+ 92:             e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
+ 93:         )
+ 94:         logger.info(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
+ 95: 
+ 96:         # Diagnostic: Log relationship types in the graph
+ 97:         rel_types = Counter(
+ 98:             r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+ 99:             for r in relationships
+100:         )
+101:         logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
+102: 
+103:         # Diagnostic: Log what inference rules expect
+104:         expected_rels = set()
+105:         expected_entities = set()
+106:         for rule in self._expertise.inference_rules:
+107:             for cond in rule.when:
+108:                 if hasattr(cond, "relationship"):
+109:                     expected_rels.add(cond.relationship)
+110:                 if hasattr(cond, "source_type"):
+111:                     expected_entities.add(cond.source_type)
+112:                 if hasattr(cond, "target_type"):
+113:                     expected_entities.add(cond.target_type)
+114:         logger.info(f"Inference rules expect relationships: {expected_rels}")
+115:         logger.info(f"Inference rules expect entity types: {expected_entities}")
+116: 
+117:         # Diagnostic: Check for matches between actual and expected
+118:         actual_rel_types = set(rel_types.keys())
+119:         actual_entity_types = set(entity_types.keys())
+120:         matching_rels = actual_rel_types & expected_rels
+121:         matching_entities = actual_entity_types & expected_entities
+122:         logger.info(f"Matching relationship types: {matching_rels or 'NONE'}")
+123:         logger.info(f"Matching entity types: {matching_entities or 'NONE'}")
+124: 
+125:         if not matching_rels:
+126:             logger.warning(
+127:                 f"No relationship type matches! Rules expect {expected_rels} " f"but graph has {actual_rel_types}"
+128:             )
+129:         if not matching_entities:
+130:             logger.warning(
+131:                 f"No entity type matches! Rules expect {expected_entities} " f"but graph has {actual_entity_types}"
+132:             )
 133: 
-134:         Returns:
-135:             List of inferred relationships
-136:         """
-137:         # Parse pattern and find matches
-138:         # For now, delegate to rule engine
-139:         context = RuleEvaluationContext.from_data(entities, relationships)
-140:         matches = self._rule_engine.evaluate_inference_rules(context)
-141:         return self._matches_to_relationships(matches, context)
-142: 
-143:     def _matches_to_relationships(
-144:         self,
-145:         matches: list[RuleMatch],
-146:         context: RuleEvaluationContext,
-147:     ) -> list[InferredRelationship]:
-148:         """Convert rule matches to inferred relationships."""
-149:         inferred = []
-150:         rule_counts: dict[str, int] = {}
-151: 
-152:         for match in matches:
-153:             # Check rule limit
-154:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
-155:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
-156:                 continue
-157: 
-158:             # Check confidence threshold
-159:             if match.confidence < self._min_confidence:
-160:                 continue
+134:         all_inferred: list[InferredRelationship] = []
+135:         current_relationships = list(relationships)
+136: 
+137:         for pass_num in range(depth):
+138:             # Build context with current state
+139:             context = RuleEvaluationContext.from_data(entities, current_relationships)
+140: 
+141:             # Evaluate inference rules
+142:             matches = self._rule_engine.evaluate_inference_rules(context)
+143:             logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
+144: 
+145:             # Log details of first few matches for debugging
+146:             for i, match in enumerate(matches[:5]):
+147:                 logger.debug(
+148:                     f"  Match {i + 1}: rule={match.rule_name}, "
+149:                     f"confidence={match.confidence:.2f}, "
+150:                     f"metadata_keys={list(match.metadata.keys())}"
+151:                 )
+152: 
+153:             # Convert matches to inferred relationships
+154:             pass_inferred = self._matches_to_relationships(matches, context)
+155:             logger.debug(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
+156: 
+157:             if not pass_inferred:
+158:                 # No new inferences, stop early
+159:                 logger.debug(f"Pass {pass_num + 1}: No new inferences, stopping early")
+160:                 break
 161: 
-162:             # Resolve source and target from metadata
-163:             source_entity, target_entity = self._resolve_inference_entities(match, context)
+162:             # Filter out duplicates and already existing relationships
+163:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
 164: 
-165:             if not source_entity or not target_entity:
-166:                 continue
+165:             if not new_inferred:
+166:                 break
 167: 
-168:             # Skip self-referential
-169:             if source_entity.id == target_entity.id:
-170:                 continue
-171: 
-172:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
-173: 
-174:             inferred.append(
-175:                 InferredRelationship(
-176:                     source_entity_id=source_entity.id,
-177:                     target_entity_id=target_entity.id,
-178:                     relationship_type=relationship_type,
-179:                     description=f"Inferred by rule: {match.rule_name}",
-180:                     confidence=match.confidence,
-181:                     rule_name=match.rule_name,
-182:                     evidence=[r.id for r in match.matched_relationships],
-183:                 )
-184:             )
+168:             all_inferred.extend(new_inferred)
+169: 
+170:             # Add inferred to current for next pass (as mock relationships)
+171:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
+172: 
+173:             logger.info(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
+174: 
+175:         logger.info(f"Inference complete: {len(all_inferred)} total relationships inferred")
+176:         return all_inferred
+177: 
+178:     def infer_from_pattern(
+179:         self,
+180:         entities: list[Entity],
+181:         relationships: list[Relationship],
+182:         pattern: str,
+183:     ) -> list[InferredRelationship]:
+184:         """Infer relationships matching a specific pattern.
 185: 
-186:         return inferred
-187: 
-188:     def _resolve_inference_entities(
-189:         self,
-190:         match: RuleMatch,
-191:         context: RuleEvaluationContext,
-192:     ) -> tuple[Entity | None, Entity | None]:
-193:         """Resolve source and target entities from match metadata.
-194: 
-195:         The then_source and then_target specify which entity to use:
-196:         - "first.source": Source entity of first matched relationship
-197:         - "first.target": Target entity of first matched relationship
-198:         - "second.source": Source entity of second matched relationship
-199:         - "second.target": Target entity of second matched relationship
-200:         """
-201:         then_source = match.metadata.get("then_source", "first.source")
-202:         then_target = match.metadata.get("then_target", "second.target")
-203: 
-204:         first = match.metadata.get("first", {})
-205:         second = match.metadata.get("second", {})
-206: 
-207:         def resolve_ref(ref: str) -> Entity | None:
-208:             parts = ref.split(".")
-209:             if len(parts) != 2:
-210:                 return None
-211: 
-212:             group, position = parts
-213:             data = first if group == "first" else second
+186:         Args:
+187:             entities: Existing entities
+188:             relationships: Existing relationships
+189:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
+190: 
+191:         Returns:
+192:             List of inferred relationships
+193:         """
+194:         # Parse pattern and find matches
+195:         # For now, delegate to rule engine
+196:         context = RuleEvaluationContext.from_data(entities, relationships)
+197:         matches = self._rule_engine.evaluate_inference_rules(context)
+198:         return self._matches_to_relationships(matches, context)
+199: 
+200:     def _matches_to_relationships(
+201:         self,
+202:         matches: list[RuleMatch],
+203:         context: RuleEvaluationContext,
+204:     ) -> list[InferredRelationship]:
+205:         """Convert rule matches to inferred relationships."""
+206:         inferred = []
+207:         rule_counts: dict[str, int] = {}
+208: 
+209:         for match in matches:
+210:             # Check rule limit
+211:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
+212:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
+213:                 continue
 214: 
-215:             return data.get(position)
-216: 
-217:         source = resolve_ref(then_source)
-218:         target = resolve_ref(then_target)
-219: 
-220:         return source, target
+215:             # Check confidence threshold
+216:             if match.confidence < self._min_confidence:
+217:                 continue
+218: 
+219:             # Resolve source and target from metadata
+220:             source_entity, target_entity = self._resolve_inference_entities(match, context)
 221: 
-222:     def _filter_duplicates(
-223:         self,
-224:         new_inferred: list[InferredRelationship],
-225:         existing_relationships: list[Relationship],
-226:         already_inferred: list[InferredRelationship],
-227:     ) -> list[InferredRelationship]:
-228:         """Filter out duplicate inferences."""
-229:         # Build set of existing relationship keys
-230:         existing_keys: set[tuple[UUID, UUID, str]] = set()
-231: 
-232:         for rel in existing_relationships:
-233:             rel_type = str(
-234:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-235:             )
-236:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
-237: 
-238:         for inf in already_inferred:
-239:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
-240: 
-241:         # Filter new inferences
-242:         filtered = []
-243:         for inf in new_inferred:
-244:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
-245:             if key not in existing_keys:
-246:                 filtered.append(inf)
-247:                 existing_keys.add(key)
-248: 
-249:         return filtered
-250: 
-251:     def _to_mock_relationships(
-252:         self,
-253:         inferred: list[InferredRelationship],
-254:         entities: list[Entity],
-255:     ) -> list[Relationship]:
-256:         """Convert inferred relationships to mock Relationship objects for next pass."""
-257:         from khora.core.models import Relationship
-258:         from khora.core.models.entity import RelationshipType
-259: 
-260:         mock_rels = []
-261:         # Get namespace from first entity if available
-262:         namespace_id = entities[0].namespace_id if entities else uuid4()
+222:             if not source_entity or not target_entity:
+223:                 continue
+224: 
+225:             # Skip self-referential
+226:             if source_entity.id == target_entity.id:
+227:                 continue
+228: 
+229:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
+230: 
+231:             inferred.append(
+232:                 InferredRelationship(
+233:                     source_entity_id=source_entity.id,
+234:                     target_entity_id=target_entity.id,
+235:                     relationship_type=relationship_type,
+236:                     description=f"Inferred by rule: {match.rule_name}",
+237:                     confidence=match.confidence,
+238:                     rule_name=match.rule_name,
+239:                     evidence=[r.id for r in match.matched_relationships],
+240:                 )
+241:             )
+242: 
+243:         return inferred
+244: 
+245:     def _resolve_inference_entities(
+246:         self,
+247:         match: RuleMatch,
+248:         context: RuleEvaluationContext,
+249:     ) -> tuple[Entity | None, Entity | None]:
+250:         """Resolve source and target entities from match metadata.
+251: 
+252:         The then_source and then_target specify which entity to use:
+253:         - "first.source": Source entity of first matched relationship
+254:         - "first.target": Target entity of first matched relationship
+255:         - "second.source": Source entity of second matched relationship
+256:         - "second.target": Target entity of second matched relationship
+257:         """
+258:         then_source = match.metadata.get("then_source", "first.source")
+259:         then_target = match.metadata.get("then_target", "second.target")
+260: 
+261:         first = match.metadata.get("first", {})
+262:         second = match.metadata.get("second", {})
 263: 
-264:         for inf in inferred:
-265:             # Try to map relationship type to enum
-266:             try:
-267:                 rel_type = RelationshipType[inf.relationship_type]
-268:             except (KeyError, AttributeError):
-269:                 rel_type = RelationshipType.CUSTOM
-270: 
-271:             mock_rels.append(
-272:                 Relationship(
-273:                     id=uuid4(),
-274:                     namespace_id=namespace_id,
-275:                     source_entity_id=inf.source_entity_id,
-276:                     target_entity_id=inf.target_entity_id,
-277:                     relationship_type=rel_type,
-278:                     description=inf.description,
-279:                     properties={},
-280:                     source_document_ids=[],
-281:                     source_chunk_ids=[],
-282:                     confidence=inf.confidence,
-283:                     metadata={"inferred": True, "rule": inf.rule_name},
-284:                     created_at=datetime.now(UTC),
-285:                     updated_at=datetime.now(UTC),
-286:                 )
-287:             )
+264:         def resolve_ref(ref: str) -> Entity | None:
+265:             parts = ref.split(".")
+266:             if len(parts) != 2:
+267:                 return None
+268: 
+269:             group, position = parts
+270:             data = first if group == "first" else second
+271: 
+272:             return data.get(position)
+273: 
+274:         source = resolve_ref(then_source)
+275:         target = resolve_ref(then_target)
+276: 
+277:         return source, target
+278: 
+279:     def _filter_duplicates(
+280:         self,
+281:         new_inferred: list[InferredRelationship],
+282:         existing_relationships: list[Relationship],
+283:         already_inferred: list[InferredRelationship],
+284:     ) -> list[InferredRelationship]:
+285:         """Filter out duplicate inferences."""
+286:         # Build set of existing relationship keys
+287:         existing_keys: set[tuple[UUID, UUID, str]] = set()
 288: 
-289:         return mock_rels
-290: 
-291: 
-292: def to_relationship(
-293:     inferred: InferredRelationship,
-294:     namespace_id: UUID,
-295: ) -> Relationship:
-296:     """Convert an InferredRelationship to a domain Relationship model.
+289:         for rel in existing_relationships:
+290:             rel_type = str(
+291:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+292:             )
+293:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
+294: 
+295:         for inf in already_inferred:
+296:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
 297: 
-298:     Args:
-299:         inferred: The inferred relationship to convert
-300:         namespace_id: Namespace ID for the relationship
-301: 
-302:     Returns:
-303:         Domain Relationship model
-304:     """
-305:     from khora.core.models import Relationship
-306:     from khora.core.models.entity import RelationshipType
+298:         # Filter new inferences
+299:         filtered = []
+300:         for inf in new_inferred:
+301:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
+302:             if key not in existing_keys:
+303:                 filtered.append(inf)
+304:                 existing_keys.add(key)
+305: 
+306:         return filtered
 307: 
-308:     # Try to map relationship type to enum
-309:     try:
-310:         rel_type = RelationshipType[inferred.relationship_type]
-311:     except (KeyError, AttributeError):
-312:         rel_type = RelationshipType.CUSTOM
-313: 
-314:     return Relationship(
-315:         id=uuid4(),
-316:         namespace_id=namespace_id,
-317:         source_entity_id=inferred.source_entity_id,
-318:         target_entity_id=inferred.target_entity_id,
-319:         relationship_type=rel_type,
-320:         description=inferred.description,
-321:         properties={
-322:             "inferred": True,
-323:             "rule_name": inferred.rule_name,
-324:             "evidence": [str(e) for e in inferred.evidence],
-325:         },
-326:         source_document_ids=[],
-327:         source_chunk_ids=[],
-328:         confidence=inferred.confidence,
-329:         metadata={"inferred": True},
-330:         created_at=datetime.now(UTC),
-331:         updated_at=datetime.now(UTC),
-332:     )
+308:     def _to_mock_relationships(
+309:         self,
+310:         inferred: list[InferredRelationship],
+311:         entities: list[Entity],
+312:     ) -> list[Relationship]:
+313:         """Convert inferred relationships to mock Relationship objects for next pass."""
+314:         from khora.core.models import Relationship
+315:         from khora.core.models.entity import RelationshipType
+316: 
+317:         mock_rels = []
+318:         # Get namespace from first entity if available
+319:         namespace_id = entities[0].namespace_id if entities else uuid4()
+320: 
+321:         for inf in inferred:
+322:             # Try to map relationship type to enum
+323:             try:
+324:                 rel_type = RelationshipType[inf.relationship_type]
+325:             except (KeyError, AttributeError):
+326:                 rel_type = RelationshipType.CUSTOM
+327: 
+328:             mock_rels.append(
+329:                 Relationship(
+330:                     id=uuid4(),
+331:                     namespace_id=namespace_id,
+332:                     source_entity_id=inf.source_entity_id,
+333:                     target_entity_id=inf.target_entity_id,
+334:                     relationship_type=rel_type,
+335:                     description=inf.description,
+336:                     properties={},
+337:                     source_document_ids=[],
+338:                     source_chunk_ids=[],
+339:                     confidence=inf.confidence,
+340:                     metadata={"inferred": True, "rule": inf.rule_name},
+341:                     created_at=datetime.now(UTC),
+342:                     updated_at=datetime.now(UTC),
+343:                 )
+344:             )
+345: 
+346:         return mock_rels
+347: 
+348: 
+349: def to_relationship(
+350:     inferred: InferredRelationship,
+351:     namespace_id: UUID,
+352: ) -> Relationship:
+353:     """Convert an InferredRelationship to a domain Relationship model.
+354: 
+355:     Args:
+356:         inferred: The inferred relationship to convert
+357:         namespace_id: Namespace ID for the relationship
+358: 
+359:     Returns:
+360:         Domain Relationship model
+361:     """
+362:     from khora.core.models import Relationship
+363:     from khora.core.models.entity import RelationshipType
+364: 
+365:     # Try to map relationship type to enum
+366:     try:
+367:         rel_type = RelationshipType[inferred.relationship_type]
+368:     except (KeyError, AttributeError):
+369:         rel_type = RelationshipType.CUSTOM
+370: 
+371:     return Relationship(
+372:         id=uuid4(),
+373:         namespace_id=namespace_id,
+374:         source_entity_id=inferred.source_entity_id,
+375:         target_entity_id=inferred.target_entity_id,
+376:         relationship_type=rel_type,
+377:         description=inferred.description,
+378:         properties={
+379:             "inferred": True,
+380:             "rule_name": inferred.rule_name,
+381:             "evidence": [str(e) for e in inferred.evidence],
+382:         },
+383:         source_document_ids=[],
+384:         source_chunk_ids=[],
+385:         confidence=inferred.confidence,
+386:         metadata={"inferred": True},
+387:         created_at=datetime.now(UTC),
+388:         updated_at=datetime.now(UTC),
+389:     )
 ````
 
 ## File: src/khora/extraction/skills/__init__.py
@@ -14599,379 +14666,408 @@ README.md
 105:         """Update a namespace."""
 106:         ...
 107: 
-108:     # Document operations
-109:     @abstractmethod
-110:     async def create_document(self, document: Document) -> Document:
-111:         """Create a new document."""
-112:         ...
-113: 
-114:     @abstractmethod
-115:     async def get_document(self, document_id: UUID) -> Document | None:
-116:         """Get a document by ID."""
-117:         ...
-118: 
-119:     @abstractmethod
-120:     async def list_documents(
-121:         self,
-122:         namespace_id: UUID,
-123:         *,
-124:         status: str | None = None,
-125:         limit: int = 100,
-126:         offset: int = 0,
-127:     ) -> list[Document]:
-128:         """List documents in a namespace."""
-129:         ...
-130: 
-131:     @abstractmethod
-132:     async def update_document(self, document: Document) -> Document:
-133:         """Update a document."""
-134:         ...
-135: 
-136:     @abstractmethod
-137:     async def delete_document(self, document_id: UUID) -> bool:
-138:         """Delete a document."""
-139:         ...
-140: 
-141:     @abstractmethod
-142:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-143:         """Get a document by its content checksum (for deduplication)."""
-144:         ...
-145: 
-146:     # Sync checkpoint operations
-147:     @abstractmethod
-148:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-149:         """Get the last sync checkpoint for a source."""
-150:         ...
-151: 
-152:     @abstractmethod
-153:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-154:         """Set the sync checkpoint for a source."""
-155:         ...
-156: 
-157: 
-158: @runtime_checkable
-159: class VectorBackendProtocol(Protocol):
-160:     """Protocol for vector database backends (pgvector).
-161: 
-162:     Handles storage and retrieval of embeddings for semantic search.
-163:     """
+108:     @abstractmethod
+109:     async def create_namespace_version(
+110:         self,
+111:         workspace_id: UUID,
+112:         slug: str,
+113:         *,
+114:         previous_version: MemoryNamespace | None = None,
+115:     ) -> MemoryNamespace:
+116:         """Create a new version of a namespace.
+117: 
+118:         Args:
+119:             workspace_id: Workspace ID
+120:             slug: Namespace slug
+121:             previous_version: The previous version to supersede (if any)
+122: 
+123:         Returns:
+124:             New namespace version
+125:         """
+126:         ...
+127: 
+128:     @abstractmethod
+129:     async def deactivate_namespace(self, namespace_id: UUID) -> None:
+130:         """Mark a namespace version as inactive.
+131: 
+132:         Args:
+133:             namespace_id: ID of the namespace to deactivate
+134:         """
+135:         ...
+136: 
+137:     # Document operations
+138:     @abstractmethod
+139:     async def create_document(self, document: Document) -> Document:
+140:         """Create a new document."""
+141:         ...
+142: 
+143:     @abstractmethod
+144:     async def get_document(self, document_id: UUID) -> Document | None:
+145:         """Get a document by ID."""
+146:         ...
+147: 
+148:     @abstractmethod
+149:     async def list_documents(
+150:         self,
+151:         namespace_id: UUID,
+152:         *,
+153:         status: str | None = None,
+154:         limit: int = 100,
+155:         offset: int = 0,
+156:     ) -> list[Document]:
+157:         """List documents in a namespace."""
+158:         ...
+159: 
+160:     @abstractmethod
+161:     async def update_document(self, document: Document) -> Document:
+162:         """Update a document."""
+163:         ...
 164: 
 165:     @abstractmethod
-166:     async def connect(self) -> None:
-167:         """Establish connection to the database."""
+166:     async def delete_document(self, document_id: UUID) -> bool:
+167:         """Delete a document."""
 168:         ...
 169: 
 170:     @abstractmethod
-171:     async def disconnect(self) -> None:
-172:         """Close database connections."""
+171:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+172:         """Get a document by its content checksum (for deduplication)."""
 173:         ...
 174: 
-175:     @abstractmethod
-176:     async def is_healthy(self) -> bool:
-177:         """Check if the backend is healthy and connected."""
-178:         ...
-179: 
-180:     # Chunk operations
+175:     # Sync checkpoint operations
+176:     @abstractmethod
+177:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+178:         """Get the last sync checkpoint for a source."""
+179:         ...
+180: 
 181:     @abstractmethod
-182:     async def create_chunk(self, chunk: Chunk) -> Chunk:
-183:         """Create a new chunk with its embedding."""
+182:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+183:         """Set the sync checkpoint for a source."""
 184:         ...
 185: 
-186:     @abstractmethod
-187:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
-188:         """Create multiple chunks in a batch."""
-189:         ...
+186: 
+187: @runtime_checkable
+188: class VectorBackendProtocol(Protocol):
+189:     """Protocol for vector database backends (pgvector).
 190: 
-191:     @abstractmethod
-192:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-193:         """Get a chunk by ID."""
-194:         ...
-195: 
-196:     @abstractmethod
-197:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-198:         """Get all chunks for a document."""
-199:         ...
-200: 
-201:     @abstractmethod
-202:     async def delete_chunks_by_document(self, document_id: UUID) -> int:
-203:         """Delete all chunks for a document."""
-204:         ...
-205: 
-206:     @abstractmethod
-207:     async def search_similar(
-208:         self,
-209:         namespace_id: UUID,
-210:         query_embedding: list[float],
-211:         *,
-212:         limit: int = 10,
-213:         min_similarity: float = 0.0,
-214:         filter_document_ids: list[UUID] | None = None,
-215:     ) -> list[tuple[Chunk, float]]:
-216:         """Search for similar chunks using vector similarity.
-217: 
-218:         Returns list of (chunk, similarity_score) tuples.
-219:         """
-220:         ...
-221: 
-222:     # Entity embedding operations
-223:     @abstractmethod
-224:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-225:         """Update the embedding for an entity."""
-226:         ...
-227: 
-228:     @abstractmethod
-229:     async def search_similar_entities(
-230:         self,
-231:         namespace_id: UUID,
-232:         query_embedding: list[float],
-233:         *,
-234:         limit: int = 10,
-235:         min_similarity: float = 0.0,
-236:     ) -> list[tuple[UUID, float]]:
-237:         """Search for similar entities by embedding."""
-238:         ...
-239: 
-240: 
-241: @runtime_checkable
-242: class GraphBackendProtocol(Protocol):
-243:     """Protocol for graph database backends (Neo4j).
-244: 
-245:     Handles storage and traversal of the knowledge graph.
-246:     """
-247: 
-248:     @abstractmethod
-249:     async def connect(self) -> None:
-250:         """Establish connection to the database."""
-251:         ...
-252: 
-253:     @abstractmethod
-254:     async def disconnect(self) -> None:
-255:         """Close database connections."""
-256:         ...
-257: 
-258:     @abstractmethod
-259:     async def is_healthy(self) -> bool:
-260:         """Check if the backend is healthy and connected."""
-261:         ...
-262: 
-263:     # Entity operations
-264:     @abstractmethod
-265:     async def create_entity(self, entity: Entity) -> Entity:
-266:         """Create an entity node in the graph."""
+191:     Handles storage and retrieval of embeddings for semantic search.
+192:     """
+193: 
+194:     @abstractmethod
+195:     async def connect(self) -> None:
+196:         """Establish connection to the database."""
+197:         ...
+198: 
+199:     @abstractmethod
+200:     async def disconnect(self) -> None:
+201:         """Close database connections."""
+202:         ...
+203: 
+204:     @abstractmethod
+205:     async def is_healthy(self) -> bool:
+206:         """Check if the backend is healthy and connected."""
+207:         ...
+208: 
+209:     # Chunk operations
+210:     @abstractmethod
+211:     async def create_chunk(self, chunk: Chunk) -> Chunk:
+212:         """Create a new chunk with its embedding."""
+213:         ...
+214: 
+215:     @abstractmethod
+216:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+217:         """Create multiple chunks in a batch."""
+218:         ...
+219: 
+220:     @abstractmethod
+221:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+222:         """Get a chunk by ID."""
+223:         ...
+224: 
+225:     @abstractmethod
+226:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+227:         """Get all chunks for a document."""
+228:         ...
+229: 
+230:     @abstractmethod
+231:     async def delete_chunks_by_document(self, document_id: UUID) -> int:
+232:         """Delete all chunks for a document."""
+233:         ...
+234: 
+235:     @abstractmethod
+236:     async def search_similar(
+237:         self,
+238:         namespace_id: UUID,
+239:         query_embedding: list[float],
+240:         *,
+241:         limit: int = 10,
+242:         min_similarity: float = 0.0,
+243:         filter_document_ids: list[UUID] | None = None,
+244:     ) -> list[tuple[Chunk, float]]:
+245:         """Search for similar chunks using vector similarity.
+246: 
+247:         Returns list of (chunk, similarity_score) tuples.
+248:         """
+249:         ...
+250: 
+251:     # Entity embedding operations
+252:     @abstractmethod
+253:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+254:         """Update the embedding for an entity."""
+255:         ...
+256: 
+257:     @abstractmethod
+258:     async def search_similar_entities(
+259:         self,
+260:         namespace_id: UUID,
+261:         query_embedding: list[float],
+262:         *,
+263:         limit: int = 10,
+264:         min_similarity: float = 0.0,
+265:     ) -> list[tuple[UUID, float]]:
+266:         """Search for similar entities by embedding."""
 267:         ...
 268: 
-269:     @abstractmethod
-270:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-271:         """Get an entity by ID."""
-272:         ...
+269: 
+270: @runtime_checkable
+271: class GraphBackendProtocol(Protocol):
+272:     """Protocol for graph database backends (Neo4j).
 273: 
-274:     @abstractmethod
-275:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
-276:         """Get an entity by name and type (for deduplication)."""
-277:         ...
-278: 
-279:     @abstractmethod
-280:     async def update_entity(self, entity: Entity) -> Entity:
-281:         """Update an entity."""
-282:         ...
-283: 
-284:     @abstractmethod
-285:     async def delete_entity(self, entity_id: UUID) -> bool:
-286:         """Delete an entity and its relationships."""
-287:         ...
-288: 
-289:     @abstractmethod
-290:     async def list_entities(
-291:         self,
-292:         namespace_id: UUID,
-293:         *,
-294:         entity_type: str | None = None,
-295:         limit: int = 100,
-296:         offset: int = 0,
-297:     ) -> list[Entity]:
-298:         """List entities in a namespace."""
-299:         ...
-300: 
-301:     # Relationship operations
-302:     @abstractmethod
-303:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-304:         """Create a relationship between entities."""
-305:         ...
-306: 
-307:     @abstractmethod
-308:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-309:         """Get a relationship by ID."""
-310:         ...
-311: 
-312:     @abstractmethod
-313:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-314:         """Delete a relationship."""
-315:         ...
-316: 
-317:     @abstractmethod
-318:     async def get_entity_relationships(
-319:         self,
-320:         entity_id: UUID,
-321:         *,
-322:         direction: str = "both",  # "outgoing", "incoming", "both"
-323:         relationship_types: list[str] | None = None,
+274:     Handles storage and traversal of the knowledge graph.
+275:     """
+276: 
+277:     @abstractmethod
+278:     async def connect(self) -> None:
+279:         """Establish connection to the database."""
+280:         ...
+281: 
+282:     @abstractmethod
+283:     async def disconnect(self) -> None:
+284:         """Close database connections."""
+285:         ...
+286: 
+287:     @abstractmethod
+288:     async def is_healthy(self) -> bool:
+289:         """Check if the backend is healthy and connected."""
+290:         ...
+291: 
+292:     # Entity operations
+293:     @abstractmethod
+294:     async def create_entity(self, entity: Entity) -> Entity:
+295:         """Create an entity node in the graph."""
+296:         ...
+297: 
+298:     @abstractmethod
+299:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+300:         """Get an entity by ID."""
+301:         ...
+302: 
+303:     @abstractmethod
+304:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+305:         """Get an entity by name and type (for deduplication)."""
+306:         ...
+307: 
+308:     @abstractmethod
+309:     async def update_entity(self, entity: Entity) -> Entity:
+310:         """Update an entity."""
+311:         ...
+312: 
+313:     @abstractmethod
+314:     async def delete_entity(self, entity_id: UUID) -> bool:
+315:         """Delete an entity and its relationships."""
+316:         ...
+317: 
+318:     @abstractmethod
+319:     async def list_entities(
+320:         self,
+321:         namespace_id: UUID,
+322:         *,
+323:         entity_type: str | None = None,
 324:         limit: int = 100,
-325:     ) -> list[Relationship]:
-326:         """Get relationships for an entity."""
-327:         ...
-328: 
-329:     @abstractmethod
-330:     async def list_relationships(
-331:         self,
-332:         namespace_id: UUID,
-333:         *,
-334:         relationship_type: str | None = None,
-335:         limit: int = 1000,
-336:         offset: int = 0,
-337:     ) -> list[Relationship]:
-338:         """List all relationships in a namespace."""
+325:         offset: int = 0,
+326:     ) -> list[Entity]:
+327:         """List entities in a namespace."""
+328:         ...
+329: 
+330:     # Relationship operations
+331:     @abstractmethod
+332:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+333:         """Create a relationship between entities."""
+334:         ...
+335: 
+336:     @abstractmethod
+337:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+338:         """Get a relationship by ID."""
 339:         ...
 340: 
-341:     # Episode operations
-342:     @abstractmethod
-343:     async def create_episode(self, episode: Episode) -> Episode:
-344:         """Create an episode node."""
-345:         ...
-346: 
-347:     @abstractmethod
-348:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-349:         """Get an episode by ID."""
-350:         ...
-351: 
-352:     @abstractmethod
-353:     async def list_episodes(
-354:         self,
-355:         namespace_id: UUID,
-356:         *,
-357:         start_time: datetime | None = None,
-358:         end_time: datetime | None = None,
-359:         limit: int = 100,
-360:     ) -> list[Episode]:
-361:         """List episodes in a time range."""
-362:         ...
-363: 
-364:     # Graph traversal
-365:     @abstractmethod
-366:     async def find_paths(
-367:         self,
-368:         namespace_id: UUID,
-369:         source_entity_id: UUID,
-370:         target_entity_id: UUID,
-371:         *,
-372:         max_depth: int = 3,
-373:         relationship_types: list[str] | None = None,
-374:     ) -> list[list[dict[str, Any]]]:
-375:         """Find paths between two entities."""
-376:         ...
-377: 
-378:     @abstractmethod
-379:     async def get_neighborhood(
-380:         self,
-381:         entity_id: UUID,
-382:         *,
-383:         depth: int = 1,
-384:         relationship_types: list[str] | None = None,
-385:         limit: int = 50,
-386:     ) -> dict[str, Any]:
-387:         """Get the neighborhood of an entity up to a certain depth."""
-388:         ...
-389: 
-390:     @abstractmethod
-391:     async def search_entities_by_attribute(
-392:         self,
-393:         namespace_id: UUID,
-394:         attribute_name: str,
-395:         attribute_value: Any,
-396:         *,
-397:         limit: int = 100,
-398:     ) -> list[Entity]:
-399:         """Search entities by attribute value."""
-400:         ...
-401: 
-402: 
-403: @runtime_checkable
-404: class EventStoreProtocol(Protocol):
-405:     """Protocol for event store backends.
+341:     @abstractmethod
+342:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+343:         """Delete a relationship."""
+344:         ...
+345: 
+346:     @abstractmethod
+347:     async def get_entity_relationships(
+348:         self,
+349:         entity_id: UUID,
+350:         *,
+351:         direction: str = "both",  # "outgoing", "incoming", "both"
+352:         relationship_types: list[str] | None = None,
+353:         limit: int = 100,
+354:     ) -> list[Relationship]:
+355:         """Get relationships for an entity."""
+356:         ...
+357: 
+358:     @abstractmethod
+359:     async def list_relationships(
+360:         self,
+361:         namespace_id: UUID,
+362:         *,
+363:         relationship_type: str | None = None,
+364:         limit: int = 1000,
+365:         offset: int = 0,
+366:     ) -> list[Relationship]:
+367:         """List all relationships in a namespace."""
+368:         ...
+369: 
+370:     # Episode operations
+371:     @abstractmethod
+372:     async def create_episode(self, episode: Episode) -> Episode:
+373:         """Create an episode node."""
+374:         ...
+375: 
+376:     @abstractmethod
+377:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+378:         """Get an episode by ID."""
+379:         ...
+380: 
+381:     @abstractmethod
+382:     async def list_episodes(
+383:         self,
+384:         namespace_id: UUID,
+385:         *,
+386:         start_time: datetime | None = None,
+387:         end_time: datetime | None = None,
+388:         limit: int = 100,
+389:     ) -> list[Episode]:
+390:         """List episodes in a time range."""
+391:         ...
+392: 
+393:     # Graph traversal
+394:     @abstractmethod
+395:     async def find_paths(
+396:         self,
+397:         namespace_id: UUID,
+398:         source_entity_id: UUID,
+399:         target_entity_id: UUID,
+400:         *,
+401:         max_depth: int = 3,
+402:         relationship_types: list[str] | None = None,
+403:     ) -> list[list[dict[str, Any]]]:
+404:         """Find paths between two entities."""
+405:         ...
 406: 
-407:     Handles the append-only event log for event sourcing.
-408:     """
-409: 
-410:     @abstractmethod
-411:     async def connect(self) -> None:
-412:         """Establish connection to the store."""
-413:         ...
-414: 
-415:     @abstractmethod
-416:     async def disconnect(self) -> None:
-417:         """Close connections."""
-418:         ...
-419: 
-420:     @abstractmethod
-421:     async def is_healthy(self) -> bool:
-422:         """Check if the store is healthy."""
-423:         ...
-424: 
-425:     @abstractmethod
-426:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-427:         """Append an event to the log."""
-428:         ...
-429: 
-430:     @abstractmethod
-431:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-432:         """Append multiple events in a batch."""
-433:         ...
-434: 
-435:     @abstractmethod
-436:     async def get_events(
-437:         self,
-438:         namespace_id: UUID,
-439:         *,
-440:         event_types: list[str] | None = None,
-441:         resource_type: str | None = None,
-442:         resource_id: UUID | None = None,
-443:         after: datetime | None = None,
-444:         before: datetime | None = None,
-445:         limit: int = 100,
-446:         offset: int = 0,
-447:     ) -> list[MemoryEvent]:
-448:         """Query events from the log."""
-449:         ...
-450: 
-451:     @abstractmethod
-452:     async def get_events_for_resource(
-453:         self,
-454:         resource_type: str,
-455:         resource_id: UUID,
-456:         *,
-457:         limit: int = 100,
-458:     ) -> list[MemoryEvent]:
-459:         """Get all events for a specific resource."""
-460:         ...
-461: 
-462:     @abstractmethod
-463:     async def get_latest_event(
-464:         self,
-465:         resource_type: str,
-466:         resource_id: UUID,
-467:     ) -> MemoryEvent | None:
-468:         """Get the latest event for a resource."""
-469:         ...
-470: 
-471:     @abstractmethod
-472:     async def count_events(
-473:         self,
-474:         namespace_id: UUID,
-475:         *,
-476:         event_types: list[str] | None = None,
-477:         after: datetime | None = None,
-478:     ) -> int:
-479:         """Count events matching criteria."""
-480:         ...
+407:     @abstractmethod
+408:     async def get_neighborhood(
+409:         self,
+410:         entity_id: UUID,
+411:         *,
+412:         depth: int = 1,
+413:         relationship_types: list[str] | None = None,
+414:         limit: int = 50,
+415:     ) -> dict[str, Any]:
+416:         """Get the neighborhood of an entity up to a certain depth."""
+417:         ...
+418: 
+419:     @abstractmethod
+420:     async def search_entities_by_attribute(
+421:         self,
+422:         namespace_id: UUID,
+423:         attribute_name: str,
+424:         attribute_value: Any,
+425:         *,
+426:         limit: int = 100,
+427:     ) -> list[Entity]:
+428:         """Search entities by attribute value."""
+429:         ...
+430: 
+431: 
+432: @runtime_checkable
+433: class EventStoreProtocol(Protocol):
+434:     """Protocol for event store backends.
+435: 
+436:     Handles the append-only event log for event sourcing.
+437:     """
+438: 
+439:     @abstractmethod
+440:     async def connect(self) -> None:
+441:         """Establish connection to the store."""
+442:         ...
+443: 
+444:     @abstractmethod
+445:     async def disconnect(self) -> None:
+446:         """Close connections."""
+447:         ...
+448: 
+449:     @abstractmethod
+450:     async def is_healthy(self) -> bool:
+451:         """Check if the store is healthy."""
+452:         ...
+453: 
+454:     @abstractmethod
+455:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+456:         """Append an event to the log."""
+457:         ...
+458: 
+459:     @abstractmethod
+460:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+461:         """Append multiple events in a batch."""
+462:         ...
+463: 
+464:     @abstractmethod
+465:     async def get_events(
+466:         self,
+467:         namespace_id: UUID,
+468:         *,
+469:         event_types: list[str] | None = None,
+470:         resource_type: str | None = None,
+471:         resource_id: UUID | None = None,
+472:         after: datetime | None = None,
+473:         before: datetime | None = None,
+474:         limit: int = 100,
+475:         offset: int = 0,
+476:     ) -> list[MemoryEvent]:
+477:         """Query events from the log."""
+478:         ...
+479: 
+480:     @abstractmethod
+481:     async def get_events_for_resource(
+482:         self,
+483:         resource_type: str,
+484:         resource_id: UUID,
+485:         *,
+486:         limit: int = 100,
+487:     ) -> list[MemoryEvent]:
+488:         """Get all events for a specific resource."""
+489:         ...
+490: 
+491:     @abstractmethod
+492:     async def get_latest_event(
+493:         self,
+494:         resource_type: str,
+495:         resource_id: UUID,
+496:     ) -> MemoryEvent | None:
+497:         """Get the latest event for a resource."""
+498:         ...
+499: 
+500:     @abstractmethod
+501:     async def count_events(
+502:         self,
+503:         namespace_id: UUID,
+504:         *,
+505:         event_types: list[str] | None = None,
+506:         after: datetime | None = None,
+507:     ) -> int:
+508:         """Count events matching criteria."""
+509:         ...
 ````
 
 ## File: src/khora/storage/__init__.py
@@ -15109,7 +15205,7 @@ README.md
  15: from uuid import uuid4
  16: 
  17: from pgvector.sqlalchemy import Vector
- 18: from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+ 18: from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
  19: from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
  20: from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
  21: 
@@ -15187,478 +15283,497 @@ README.md
  93: 
  94: 
  95: class MemoryNamespaceModel(Base):
- 96:     """Memory namespace for isolating memories."""
+ 96:     """Memory namespace for isolating memories.
  97: 
- 98:     __tablename__ = "memory_namespaces"
- 99: 
-100:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-101:     workspace_id: Mapped[str] = mapped_column(
-102:         UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
-103:     )
-104:     name: Mapped[str] = mapped_column(String(255), nullable=False)
-105:     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-106:     description: Mapped[str] = mapped_column(Text, default="")
-107:     config_overrides: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-108:     sync_checkpoints: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-109:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-110:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-111:     updated_at: Mapped[datetime] = mapped_column(
-112:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-113:     )
-114: 
-115:     # Relationships
-116:     workspace: Mapped[WorkspaceModel] = relationship("WorkspaceModel", back_populates="namespaces")
-117:     documents: Mapped[list[DocumentModel]] = relationship("DocumentModel", back_populates="namespace")
-118:     chunks: Mapped[list[ChunkModel]] = relationship("ChunkModel", back_populates="namespace")
-119:     entities: Mapped[list[EntityModel]] = relationship("EntityModel", back_populates="namespace")
-120:     relationships: Mapped[list[RelationshipModel]] = relationship("RelationshipModel", back_populates="namespace")
-121:     episodes: Mapped[list[EpisodeModel]] = relationship("EpisodeModel", back_populates="namespace")
-122:     events: Mapped[list[MemoryEventModel]] = relationship("MemoryEventModel", back_populates="namespace")
-123:     expertise_definitions: Mapped[list[ExpertiseDefinitionModel]] = relationship(
-124:         "ExpertiseDefinitionModel", back_populates="namespace"
-125:     )
-126: 
-127:     __table_args__ = (UniqueConstraint("workspace_id", "slug", name="uq_namespace_workspace_slug"),)
+ 98:     Supports versioning for data replacement workflows:
+ 99:     - version: Incremental version number (starts at 1)
+100:     - is_active: Whether this is the current active version
+101:     - previous_version_id: Reference to the previous version (if any)
+102:     """
+103: 
+104:     __tablename__ = "memory_namespaces"
+105: 
+106:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+107:     workspace_id: Mapped[str] = mapped_column(
+108:         UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+109:     )
+110:     name: Mapped[str] = mapped_column(String(255), nullable=False)
+111:     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+112:     description: Mapped[str] = mapped_column(Text, default="")
+113: 
+114:     # Versioning fields
+115:     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+116:     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+117:     previous_version_id: Mapped[str | None] = mapped_column(
+118:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="SET NULL"), nullable=True
+119:     )
+120: 
+121:     config_overrides: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+122:     sync_checkpoints: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+123:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+124:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+125:     updated_at: Mapped[datetime] = mapped_column(
+126:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+127:     )
 128: 
-129:     def __repr__(self) -> str:
-130:         return f"<MemoryNamespace(id={self.id!r}, name={self.name!r})>"
-131: 
-132: 
-133: # =============================================================================
-134: # Document Models
-135: # =============================================================================
-136: 
-137: 
-138: class DocumentModel(Base):
-139:     """Document to be processed and stored."""
+129:     # Relationships
+130:     workspace: Mapped[WorkspaceModel] = relationship("WorkspaceModel", back_populates="namespaces")
+131:     documents: Mapped[list[DocumentModel]] = relationship("DocumentModel", back_populates="namespace")
+132:     chunks: Mapped[list[ChunkModel]] = relationship("ChunkModel", back_populates="namespace")
+133:     entities: Mapped[list[EntityModel]] = relationship("EntityModel", back_populates="namespace")
+134:     relationships: Mapped[list[RelationshipModel]] = relationship("RelationshipModel", back_populates="namespace")
+135:     episodes: Mapped[list[EpisodeModel]] = relationship("EpisodeModel", back_populates="namespace")
+136:     events: Mapped[list[MemoryEventModel]] = relationship("MemoryEventModel", back_populates="namespace")
+137:     expertise_definitions: Mapped[list[ExpertiseDefinitionModel]] = relationship(
+138:         "ExpertiseDefinitionModel", back_populates="namespace"
+139:     )
 140: 
-141:     __tablename__ = "documents"
-142: 
-143:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-144:     namespace_id: Mapped[str] = mapped_column(
-145:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+141:     __table_args__ = (
+142:         # Only one active namespace per workspace/slug combination
+143:         UniqueConstraint("workspace_id", "slug", "version", name="uq_namespace_workspace_slug_version"),
+144:         # Partial index for efficient active namespace queries
+145:         Index("idx_namespace_active", "workspace_id", "slug", postgresql_where="is_active = true"),
 146:     )
-147:     content: Mapped[str] = mapped_column(Text, nullable=False)
-148:     status: Mapped[str] = mapped_column(
-149:         Enum(DocumentStatus, name="document_status", create_constraint=True),
-150:         default=DocumentStatus.PENDING,
-151:         index=True,
-152:     )
-153: 
-154:     # Metadata
-155:     source: Mapped[str] = mapped_column(String(1024), default="")
-156:     source_type: Mapped[str] = mapped_column(String(64), default="")
-157:     content_type: Mapped[str] = mapped_column(String(128), default="")
-158:     title: Mapped[str] = mapped_column(String(512), default="")
-159:     author: Mapped[str] = mapped_column(String(255), default="")
-160:     language: Mapped[str] = mapped_column(String(10), default="en")
-161:     checksum: Mapped[str] = mapped_column(String(64), default="", index=True)
-162:     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
-163:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-164: 
-165:     # Processing info
-166:     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
-167:     entity_count: Mapped[int] = mapped_column(Integer, default=0)
-168:     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-169: 
-170:     # Timestamps
-171:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-172:     updated_at: Mapped[datetime] = mapped_column(
-173:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-174:     )
-175:     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-176: 
-177:     # Relationships
-178:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="documents")
-179:     chunks: Mapped[list[ChunkModel]] = relationship(
-180:         "ChunkModel", back_populates="document", cascade="all, delete-orphan"
-181:     )
-182: 
-183:     __table_args__ = (Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),)
-184: 
-185:     def __repr__(self) -> str:
-186:         return f"<Document(id={self.id!r}, title={self.title!r})>"
-187: 
+147: 
+148:     def __repr__(self) -> str:
+149:         return f"<MemoryNamespace(id={self.id!r}, name={self.name!r})>"
+150: 
+151: 
+152: # =============================================================================
+153: # Document Models
+154: # =============================================================================
+155: 
+156: 
+157: class DocumentModel(Base):
+158:     """Document to be processed and stored."""
+159: 
+160:     __tablename__ = "documents"
+161: 
+162:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+163:     namespace_id: Mapped[str] = mapped_column(
+164:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+165:     )
+166:     content: Mapped[str] = mapped_column(Text, nullable=False)
+167:     status: Mapped[str] = mapped_column(
+168:         Enum(DocumentStatus, name="document_status", create_constraint=True),
+169:         default=DocumentStatus.PENDING,
+170:         index=True,
+171:     )
+172: 
+173:     # Metadata
+174:     source: Mapped[str] = mapped_column(String(1024), default="")
+175:     source_type: Mapped[str] = mapped_column(String(64), default="")
+176:     content_type: Mapped[str] = mapped_column(String(128), default="")
+177:     title: Mapped[str] = mapped_column(String(512), default="")
+178:     author: Mapped[str] = mapped_column(String(255), default="")
+179:     language: Mapped[str] = mapped_column(String(10), default="en")
+180:     checksum: Mapped[str] = mapped_column(String(64), default="", index=True)
+181:     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+182:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+183: 
+184:     # Processing info
+185:     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+186:     entity_count: Mapped[int] = mapped_column(Integer, default=0)
+187:     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 188: 
-189: class ChunkModel(Base):
-190:     """Chunk of text from a document with embedding."""
-191: 
-192:     __tablename__ = "chunks"
-193: 
-194:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-195:     namespace_id: Mapped[str] = mapped_column(
-196:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-197:     )
-198:     document_id: Mapped[str] = mapped_column(
-199:         UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+189:     # Timestamps
+190:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+191:     updated_at: Mapped[datetime] = mapped_column(
+192:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+193:     )
+194:     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+195: 
+196:     # Relationships
+197:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="documents")
+198:     chunks: Mapped[list[ChunkModel]] = relationship(
+199:         "ChunkModel", back_populates="document", cascade="all, delete-orphan"
 200:     )
-201:     content: Mapped[str] = mapped_column(Text, nullable=False)
-202: 
-203:     # Chunk metadata
-204:     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
-205:     start_char: Mapped[int] = mapped_column(Integer, default=0)
-206:     end_char: Mapped[int] = mapped_column(Integer, default=0)
-207:     token_count: Mapped[int] = mapped_column(Integer, default=0)
-208:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-209: 
-210:     # Embedding (pgvector)
-211:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-212:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
-213: 
-214:     # Timestamps
-215:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-216: 
-217:     # Relationships
-218:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="chunks")
-219:     document: Mapped[DocumentModel] = relationship("DocumentModel", back_populates="chunks")
-220: 
-221:     __table_args__ = (
-222:         Index("ix_chunks_document_index", "document_id", "chunk_index"),
-223:         # Vector similarity index (using IVFFlat for approximate nearest neighbor)
-224:         Index(
-225:             "ix_chunks_embedding",
-226:             "embedding",
-227:             postgresql_using="ivfflat",
-228:             postgresql_with={"lists": 100},
-229:             postgresql_ops={"embedding": "vector_cosine_ops"},
-230:         ),
-231:     )
+201: 
+202:     __table_args__ = (Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),)
+203: 
+204:     def __repr__(self) -> str:
+205:         return f"<Document(id={self.id!r}, title={self.title!r})>"
+206: 
+207: 
+208: class ChunkModel(Base):
+209:     """Chunk of text from a document with embedding."""
+210: 
+211:     __tablename__ = "chunks"
+212: 
+213:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+214:     namespace_id: Mapped[str] = mapped_column(
+215:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+216:     )
+217:     document_id: Mapped[str] = mapped_column(
+218:         UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+219:     )
+220:     content: Mapped[str] = mapped_column(Text, nullable=False)
+221: 
+222:     # Chunk metadata
+223:     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+224:     start_char: Mapped[int] = mapped_column(Integer, default=0)
+225:     end_char: Mapped[int] = mapped_column(Integer, default=0)
+226:     token_count: Mapped[int] = mapped_column(Integer, default=0)
+227:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+228: 
+229:     # Embedding (pgvector)
+230:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+231:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
 232: 
-233:     def __repr__(self) -> str:
-234:         return f"<Chunk(id={self.id!r}, document_id={self.document_id!r}, index={self.chunk_index})>"
+233:     # Timestamps
+234:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 235: 
-236: 
-237: # =============================================================================
-238: # Entity Models
-239: # =============================================================================
-240: 
-241: 
-242: class EntityModel(Base):
-243:     """Entity extracted from documents (stored in both PostgreSQL and Neo4j)."""
-244: 
-245:     __tablename__ = "entities"
-246: 
-247:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-248:     namespace_id: Mapped[str] = mapped_column(
-249:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+236:     # Relationships
+237:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="chunks")
+238:     document: Mapped[DocumentModel] = relationship("DocumentModel", back_populates="chunks")
+239: 
+240:     __table_args__ = (
+241:         Index("ix_chunks_document_index", "document_id", "chunk_index"),
+242:         # Vector similarity index (using IVFFlat for approximate nearest neighbor)
+243:         Index(
+244:             "ix_chunks_embedding",
+245:             "embedding",
+246:             postgresql_using="ivfflat",
+247:             postgresql_with={"lists": 100},
+248:             postgresql_ops={"embedding": "vector_cosine_ops"},
+249:         ),
 250:     )
-251:     name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
-252:     entity_type: Mapped[str] = mapped_column(
-253:         Enum(EntityType, name="entity_type", create_constraint=True),
-254:         default=EntityType.CONCEPT,
-255:         index=True,
-256:     )
-257:     description: Mapped[str] = mapped_column(Text, default="")
-258: 
-259:     # Attributes and sources
-260:     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-261:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-262:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-263:     mention_count: Mapped[int] = mapped_column(Integer, default=1)
-264: 
-265:     # Embedding for entity similarity
-266:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-267:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
-268: 
-269:     # Temporal validity
-270:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-271:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-272: 
-273:     # Confidence
-274:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
-275: 
-276:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-277:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-278:     updated_at: Mapped[datetime] = mapped_column(
-279:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-280:     )
-281: 
-282:     # Relationships
-283:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="entities")
-284: 
-285:     __table_args__ = (
-286:         Index("ix_entities_namespace_name_type", "namespace_id", "name", "entity_type"),
-287:         Index(
-288:             "ix_entities_embedding",
-289:             "embedding",
-290:             postgresql_using="ivfflat",
-291:             postgresql_with={"lists": 100},
-292:             postgresql_ops={"embedding": "vector_cosine_ops"},
-293:         ),
-294:     )
-295: 
-296:     def __repr__(self) -> str:
-297:         return f"<Entity(id={self.id!r}, name={self.name!r}, type={self.entity_type})>"
-298: 
-299: 
-300: class RelationshipModel(Base):
-301:     """Relationship between entities (stored in both PostgreSQL and Neo4j)."""
-302: 
-303:     __tablename__ = "relationships"
-304: 
-305:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-306:     namespace_id: Mapped[str] = mapped_column(
-307:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-308:     )
-309:     source_entity_id: Mapped[str] = mapped_column(
-310:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
-311:     )
-312:     target_entity_id: Mapped[str] = mapped_column(
-313:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
-314:     )
-315:     relationship_type: Mapped[str] = mapped_column(
-316:         Enum(RelationshipType, name="relationship_type", create_constraint=True),
-317:         default=RelationshipType.RELATES_TO,
-318:         index=True,
-319:     )
-320:     description: Mapped[str] = mapped_column(Text, default="")
+251: 
+252:     def __repr__(self) -> str:
+253:         return f"<Chunk(id={self.id!r}, document_id={self.document_id!r}, index={self.chunk_index})>"
+254: 
+255: 
+256: # =============================================================================
+257: # Entity Models
+258: # =============================================================================
+259: 
+260: 
+261: class EntityModel(Base):
+262:     """Entity extracted from documents (stored in both PostgreSQL and Neo4j)."""
+263: 
+264:     __tablename__ = "entities"
+265: 
+266:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+267:     namespace_id: Mapped[str] = mapped_column(
+268:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+269:     )
+270:     name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+271:     entity_type: Mapped[str] = mapped_column(
+272:         Enum(EntityType, name="entity_type", create_constraint=True),
+273:         default=EntityType.CONCEPT,
+274:         index=True,
+275:     )
+276:     description: Mapped[str] = mapped_column(Text, default="")
+277: 
+278:     # Attributes and sources
+279:     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+280:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+281:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+282:     mention_count: Mapped[int] = mapped_column(Integer, default=1)
+283: 
+284:     # Embedding for entity similarity
+285:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+286:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+287: 
+288:     # Temporal validity
+289:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+290:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+291: 
+292:     # Confidence
+293:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+294: 
+295:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+296:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+297:     updated_at: Mapped[datetime] = mapped_column(
+298:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+299:     )
+300: 
+301:     # Relationships
+302:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="entities")
+303: 
+304:     __table_args__ = (
+305:         Index("ix_entities_namespace_name_type", "namespace_id", "name", "entity_type"),
+306:         Index(
+307:             "ix_entities_embedding",
+308:             "embedding",
+309:             postgresql_using="ivfflat",
+310:             postgresql_with={"lists": 100},
+311:             postgresql_ops={"embedding": "vector_cosine_ops"},
+312:         ),
+313:     )
+314: 
+315:     def __repr__(self) -> str:
+316:         return f"<Entity(id={self.id!r}, name={self.name!r}, type={self.entity_type})>"
+317: 
+318: 
+319: class RelationshipModel(Base):
+320:     """Relationship between entities (stored in both PostgreSQL and Neo4j)."""
 321: 
-322:     # Properties and sources
-323:     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-324:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-325:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-326: 
-327:     # Temporal validity
-328:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-329:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-330: 
-331:     # Confidence and weight
-332:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
-333:     weight: Mapped[float] = mapped_column(Float, default=1.0)
-334: 
-335:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-336:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-337:     updated_at: Mapped[datetime] = mapped_column(
-338:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-339:     )
+322:     __tablename__ = "relationships"
+323: 
+324:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+325:     namespace_id: Mapped[str] = mapped_column(
+326:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+327:     )
+328:     source_entity_id: Mapped[str] = mapped_column(
+329:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+330:     )
+331:     target_entity_id: Mapped[str] = mapped_column(
+332:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+333:     )
+334:     relationship_type: Mapped[str] = mapped_column(
+335:         Enum(RelationshipType, name="relationship_type", create_constraint=True),
+336:         default=RelationshipType.RELATES_TO,
+337:         index=True,
+338:     )
+339:     description: Mapped[str] = mapped_column(Text, default="")
 340: 
-341:     # Relationships
-342:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="relationships")
-343: 
-344:     __table_args__ = (Index("ix_relationships_entities", "source_entity_id", "target_entity_id"),)
+341:     # Properties and sources
+342:     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+343:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+344:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
 345: 
-346:     def __repr__(self) -> str:
-347:         return f"<Relationship(id={self.id!r}, type={self.relationship_type})>"
-348: 
+346:     # Temporal validity
+347:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+348:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 349: 
-350: class EpisodeModel(Base):
-351:     """Episodic memory representing a temporal event."""
-352: 
-353:     __tablename__ = "episodes"
-354: 
-355:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-356:     namespace_id: Mapped[str] = mapped_column(
-357:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+350:     # Confidence and weight
+351:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+352:     weight: Mapped[float] = mapped_column(Float, default=1.0)
+353: 
+354:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+355:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+356:     updated_at: Mapped[datetime] = mapped_column(
+357:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
 358:     )
-359:     name: Mapped[str] = mapped_column(String(512), nullable=False)
-360:     description: Mapped[str] = mapped_column(Text, default="")
-361: 
-362:     # Temporal bounds
-363:     occurred_at: Mapped[datetime] = mapped_column(
-364:         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
-365:     )
-366:     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+359: 
+360:     # Relationships
+361:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="relationships")
+362: 
+363:     __table_args__ = (Index("ix_relationships_entities", "source_entity_id", "target_entity_id"),)
+364: 
+365:     def __repr__(self) -> str:
+366:         return f"<Relationship(id={self.id!r}, type={self.relationship_type})>"
 367: 
-368:     # Associated entities
-369:     entity_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-370: 
-371:     # Sources
-372:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-373:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-374: 
-375:     # Embedding
-376:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-377:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
-378: 
-379:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-380:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-381:     updated_at: Mapped[datetime] = mapped_column(
-382:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-383:     )
-384: 
-385:     # Relationships
-386:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="episodes")
-387: 
-388:     def __repr__(self) -> str:
-389:         return f"<Episode(id={self.id!r}, name={self.name!r})>"
-390: 
-391: 
-392: # =============================================================================
-393: # Event Sourcing Model
-394: # =============================================================================
-395: 
-396: 
-397: class MemoryEventModel(Base):
-398:     """Immutable event log for event sourcing."""
-399: 
-400:     __tablename__ = "memory_events"
-401: 
-402:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-403:     namespace_id: Mapped[str] = mapped_column(
-404:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-405:     )
-406:     event_type: Mapped[str] = mapped_column(
-407:         Enum(EventType, name="event_type", create_constraint=True),
-408:         nullable=False,
-409:         index=True,
-410:     )
-411:     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
-412: 
-413:     # Resource reference
-414:     resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-415:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
-416: 
-417:     # Event data
-418:     data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-419:     previous_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+368: 
+369: class EpisodeModel(Base):
+370:     """Episodic memory representing a temporal event."""
+371: 
+372:     __tablename__ = "episodes"
+373: 
+374:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+375:     namespace_id: Mapped[str] = mapped_column(
+376:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+377:     )
+378:     name: Mapped[str] = mapped_column(String(512), nullable=False)
+379:     description: Mapped[str] = mapped_column(Text, default="")
+380: 
+381:     # Temporal bounds
+382:     occurred_at: Mapped[datetime] = mapped_column(
+383:         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+384:     )
+385:     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+386: 
+387:     # Associated entities
+388:     entity_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+389: 
+390:     # Sources
+391:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+392:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+393: 
+394:     # Embedding
+395:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+396:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+397: 
+398:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+399:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+400:     updated_at: Mapped[datetime] = mapped_column(
+401:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+402:     )
+403: 
+404:     # Relationships
+405:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="episodes")
+406: 
+407:     def __repr__(self) -> str:
+408:         return f"<Episode(id={self.id!r}, name={self.name!r})>"
+409: 
+410: 
+411: # =============================================================================
+412: # Event Sourcing Model
+413: # =============================================================================
+414: 
+415: 
+416: class MemoryEventModel(Base):
+417:     """Immutable event log for event sourcing."""
+418: 
+419:     __tablename__ = "memory_events"
 420: 
-421:     # Actor info
-422:     actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-423:     actor_type: Mapped[str] = mapped_column(String(64), default="system")
-424: 
-425:     # Correlation
-426:     correlation_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
-427: 
-428:     # Version
-429:     version: Mapped[int] = mapped_column(Integer, default=1)
-430: 
-431:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-432: 
-433:     # Relationships
-434:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="events")
+421:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+422:     namespace_id: Mapped[str] = mapped_column(
+423:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+424:     )
+425:     event_type: Mapped[str] = mapped_column(
+426:         Enum(EventType, name="event_type", create_constraint=True),
+427:         nullable=False,
+428:         index=True,
+429:     )
+430:     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+431: 
+432:     # Resource reference
+433:     resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+434:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
 435: 
-436:     __table_args__ = (
-437:         Index("ix_events_resource", "resource_type", "resource_id"),
-438:         Index("ix_events_namespace_timestamp", "namespace_id", "timestamp"),
-439:     )
-440: 
-441:     def __repr__(self) -> str:
-442:         return f"<MemoryEvent(id={self.id!r}, type={self.event_type})>"
+436:     # Event data
+437:     data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+438:     previous_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+439: 
+440:     # Actor info
+441:     actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+442:     actor_type: Mapped[str] = mapped_column(String(64), default="system")
 443: 
-444: 
-445: # =============================================================================
-446: # ACL / Permissions Model
-447: # =============================================================================
-448: 
+444:     # Correlation
+445:     correlation_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
+446: 
+447:     # Version
+448:     version: Mapped[int] = mapped_column(Integer, default=1)
 449: 
-450: class PermissionModel(Base):
-451:     """Permission entry for ACL-based access control."""
-452: 
-453:     __tablename__ = "permissions"
+450:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+451: 
+452:     # Relationships
+453:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="events")
 454: 
-455:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-456: 
-457:     # The principal (who has the permission)
-458:     principal_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # user, role, api_key
-459:     principal_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-460: 
-461:     # The resource (what the permission applies to)
-462:     resource_type: Mapped[str] = mapped_column(
-463:         String(64), nullable=False, index=True
-464:     )  # organization, workspace, namespace
-465:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
-466: 
-467:     # The permission level
-468:     permission: Mapped[str] = mapped_column(String(64), nullable=False)  # read, write, admin, owner
-469: 
-470:     # Inheritance
-471:     inherited_from_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-472:     inherited_from_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+455:     __table_args__ = (
+456:         Index("ix_events_resource", "resource_type", "resource_id"),
+457:         Index("ix_events_namespace_timestamp", "namespace_id", "timestamp"),
+458:     )
+459: 
+460:     def __repr__(self) -> str:
+461:         return f"<MemoryEvent(id={self.id!r}, type={self.event_type})>"
+462: 
+463: 
+464: # =============================================================================
+465: # ACL / Permissions Model
+466: # =============================================================================
+467: 
+468: 
+469: class PermissionModel(Base):
+470:     """Permission entry for ACL-based access control."""
+471: 
+472:     __tablename__ = "permissions"
 473: 
-474:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-475:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-476:     updated_at: Mapped[datetime] = mapped_column(
-477:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-478:     )
+474:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+475: 
+476:     # The principal (who has the permission)
+477:     principal_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # user, role, api_key
+478:     principal_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 479: 
-480:     __table_args__ = (
-481:         UniqueConstraint(
-482:             "principal_type", "principal_id", "resource_type", "resource_id", "permission", name="uq_permission"
-483:         ),
-484:         Index("ix_permissions_principal", "principal_type", "principal_id"),
-485:         Index("ix_permissions_resource", "resource_type", "resource_id"),
-486:     )
-487: 
-488:     def __repr__(self) -> str:
-489:         return f"<Permission({self.principal_type}:{self.principal_id} -> {self.resource_type}:{self.resource_id} = {self.permission})>"
-490: 
-491: 
-492: # =============================================================================
-493: # Sync Checkpoint Model (for incremental updates)
-494: # =============================================================================
-495: 
-496: 
-497: class SyncCheckpointModel(Base):
-498:     """Sync checkpoint for tracking incremental updates from external sources."""
-499: 
-500:     __tablename__ = "sync_checkpoints"
-501: 
-502:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-503:     namespace_id: Mapped[str] = mapped_column(
-504:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+480:     # The resource (what the permission applies to)
+481:     resource_type: Mapped[str] = mapped_column(
+482:         String(64), nullable=False, index=True
+483:     )  # organization, workspace, namespace
+484:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
+485: 
+486:     # The permission level
+487:     permission: Mapped[str] = mapped_column(String(64), nullable=False)  # read, write, admin, owner
+488: 
+489:     # Inheritance
+490:     inherited_from_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+491:     inherited_from_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+492: 
+493:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+494:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+495:     updated_at: Mapped[datetime] = mapped_column(
+496:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+497:     )
+498: 
+499:     __table_args__ = (
+500:         UniqueConstraint(
+501:             "principal_type", "principal_id", "resource_type", "resource_id", "permission", name="uq_permission"
+502:         ),
+503:         Index("ix_permissions_principal", "principal_type", "principal_id"),
+504:         Index("ix_permissions_resource", "resource_type", "resource_id"),
 505:     )
-506:     source: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # e.g., "github", "notion", "slack"
-507:     checkpoint: Mapped[str] = mapped_column(Text, nullable=False)  # Source-specific checkpoint value
-508:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-509:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-510:     updated_at: Mapped[datetime] = mapped_column(
-511:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-512:     )
-513: 
-514:     __table_args__ = (UniqueConstraint("namespace_id", "source", name="uq_sync_checkpoint_namespace_source"),)
+506: 
+507:     def __repr__(self) -> str:
+508:         return f"<Permission({self.principal_type}:{self.principal_id} -> {self.resource_type}:{self.resource_id} = {self.permission})>"
+509: 
+510: 
+511: # =============================================================================
+512: # Sync Checkpoint Model (for incremental updates)
+513: # =============================================================================
+514: 
 515: 
-516:     def __repr__(self) -> str:
-517:         return f"<SyncCheckpoint(namespace_id={self.namespace_id!r}, source={self.source!r})>"
+516: class SyncCheckpointModel(Base):
+517:     """Sync checkpoint for tracking incremental updates from external sources."""
 518: 
-519: 
-520: # =============================================================================
-521: # Expertise Definition Model
-522: # =============================================================================
-523: 
-524: 
-525: class ExpertiseDefinitionModel(Base):
-526:     """Stored expertise configuration for a namespace.
-527: 
-528:     Allows namespaces to have custom expertise definitions that control
-529:     entity extraction, relationship types, correlation rules, and inference rules.
-530:     """
-531: 
-532:     __tablename__ = "expertise_definitions"
-533: 
-534:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-535:     namespace_id: Mapped[str] = mapped_column(
-536:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-537:     )
-538:     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-539:     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
-540:     description: Mapped[str] = mapped_column(Text, default="")
-541: 
-542:     # The full expertise configuration as JSONB
-543:     # Contains: entity_types, relationship_types, tool_schemas, correlation_rules,
-544:     # inference_rules, confidence, expansion, system_prompt, extraction_prompt
-545:     config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+519:     __tablename__ = "sync_checkpoints"
+520: 
+521:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+522:     namespace_id: Mapped[str] = mapped_column(
+523:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+524:     )
+525:     source: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # e.g., "github", "notion", "slack"
+526:     checkpoint: Mapped[str] = mapped_column(Text, nullable=False)  # Source-specific checkpoint value
+527:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+528:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+529:     updated_at: Mapped[datetime] = mapped_column(
+530:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+531:     )
+532: 
+533:     __table_args__ = (UniqueConstraint("namespace_id", "source", name="uq_sync_checkpoint_namespace_source"),)
+534: 
+535:     def __repr__(self) -> str:
+536:         return f"<SyncCheckpoint(namespace_id={self.namespace_id!r}, source={self.source!r})>"
+537: 
+538: 
+539: # =============================================================================
+540: # Expertise Definition Model
+541: # =============================================================================
+542: 
+543: 
+544: class ExpertiseDefinitionModel(Base):
+545:     """Stored expertise configuration for a namespace.
 546: 
-547:     # Status
-548:     is_active: Mapped[bool] = mapped_column(default=True, index=True)
-549: 
-550:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-551:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-552:     updated_at: Mapped[datetime] = mapped_column(
-553:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-554:     )
-555: 
-556:     # Relationships
-557:     namespace: Mapped[MemoryNamespaceModel] = relationship(
-558:         "MemoryNamespaceModel", back_populates="expertise_definitions"
-559:     )
+547:     Allows namespaces to have custom expertise definitions that control
+548:     entity extraction, relationship types, correlation rules, and inference rules.
+549:     """
+550: 
+551:     __tablename__ = "expertise_definitions"
+552: 
+553:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+554:     namespace_id: Mapped[str] = mapped_column(
+555:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+556:     )
+557:     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+558:     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
+559:     description: Mapped[str] = mapped_column(Text, default="")
 560: 
-561:     __table_args__ = (
-562:         UniqueConstraint("namespace_id", "name", name="uq_expertise_namespace_name"),
-563:         Index("ix_expertise_namespace_active", "namespace_id", "is_active"),
-564:     )
+561:     # The full expertise configuration as JSONB
+562:     # Contains: entity_types, relationship_types, tool_schemas, correlation_rules,
+563:     # inference_rules, confidence, expansion, system_prompt, extraction_prompt
+564:     config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
 565: 
-566:     def __repr__(self) -> str:
-567:         return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"
+566:     # Status
+567:     is_active: Mapped[bool] = mapped_column(default=True, index=True)
+568: 
+569:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+570:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+571:     updated_at: Mapped[datetime] = mapped_column(
+572:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+573:     )
+574: 
+575:     # Relationships
+576:     namespace: Mapped[MemoryNamespaceModel] = relationship(
+577:         "MemoryNamespaceModel", back_populates="expertise_definitions"
+578:     )
+579: 
+580:     __table_args__ = (
+581:         UniqueConstraint("namespace_id", "name", name="uq_expertise_namespace_name"),
+582:         Index("ix_expertise_namespace_active", "namespace_id", "is_active"),
+583:     )
+584: 
+585:     def __repr__(self) -> str:
+586:         return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"
 ````
 
 ## File: src/khora/extraction/extractors/base.py
@@ -17311,269 +17426,362 @@ README.md
 221:                 name=namespace.name,
 222:                 slug=namespace.slug,
 223:                 description=namespace.description,
-224:                 config_overrides=namespace.config_overrides,
-225:                 sync_checkpoints=namespace.sync_checkpoints,
-226:                 metadata_=namespace.metadata,
-227:                 created_at=namespace.created_at,
-228:                 updated_at=namespace.updated_at,
-229:             )
-230:             session.add(model)
-231:             await session.commit()
-232:             await session.refresh(model)
-233:             return self._namespace_model_to_domain(model)
-234: 
-235:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-236:         """Get a namespace by ID."""
-237:         async with self._get_session() as session:
-238:             result = await session.execute(
-239:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == str(namespace_id))
-240:             )
-241:             model = result.scalar_one_or_none()
-242:             return self._namespace_model_to_domain(model) if model else None
-243: 
-244:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
-245:         """Get a namespace by workspace ID and slug."""
-246:         async with self._get_session() as session:
-247:             result = await session.execute(
-248:                 select(MemoryNamespaceModel).where(
-249:                     MemoryNamespaceModel.workspace_id == str(workspace_id), MemoryNamespaceModel.slug == slug
-250:                 )
-251:             )
-252:             model = result.scalar_one_or_none()
-253:             return self._namespace_model_to_domain(model) if model else None
-254: 
-255:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
-256:         """List all namespaces in a workspace."""
-257:         async with self._get_session() as session:
-258:             result = await session.execute(
-259:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
-260:             )
-261:             return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
-262: 
-263:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-264:         """Update a namespace."""
-265:         async with self._get_session() as session:
-266:             await session.execute(
-267:                 update(MemoryNamespaceModel)
-268:                 .where(MemoryNamespaceModel.id == str(namespace.id))
-269:                 .values(
-270:                     name=namespace.name,
-271:                     slug=namespace.slug,
-272:                     description=namespace.description,
-273:                     config_overrides=namespace.config_overrides,
-274:                     sync_checkpoints=namespace.sync_checkpoints,
-275:                     metadata_=namespace.metadata,
-276:                     updated_at=datetime.now(UTC),
-277:                 )
-278:             )
-279:             await session.commit()
-280:             return namespace
-281: 
-282:     def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
-283:         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
-284:         return MemoryNamespace(
-285:             id=UUID(model.id),
-286:             workspace_id=UUID(model.workspace_id),
-287:             name=model.name,
-288:             slug=model.slug,
-289:             description=model.description,
-290:             config_overrides=model.config_overrides,
-291:             sync_checkpoints=model.sync_checkpoints,
-292:             metadata=model.metadata_,
-293:             created_at=model.created_at,
-294:             updated_at=model.updated_at,
-295:         )
-296: 
-297:     # =========================================================================
-298:     # Document operations
-299:     # =========================================================================
-300: 
-301:     async def create_document(self, document: Document) -> Document:
-302:         """Create a new document."""
-303:         async with self._get_session() as session:
-304:             model = DocumentModel(
-305:                 id=str(document.id),
-306:                 namespace_id=str(document.namespace_id),
-307:                 content=document.content,
-308:                 status=document.status,
-309:                 source=document.metadata.source,
-310:                 source_type=document.metadata.source_type,
-311:                 content_type=document.metadata.content_type,
-312:                 title=document.metadata.title,
-313:                 author=document.metadata.author,
-314:                 language=document.metadata.language,
-315:                 checksum=document.metadata.checksum,
-316:                 size_bytes=document.metadata.size_bytes,
-317:                 metadata_=document.metadata.custom,
-318:                 chunk_count=document.chunk_count,
-319:                 entity_count=document.entity_count,
-320:                 error_message=document.error_message,
-321:                 created_at=document.created_at,
-322:                 updated_at=document.updated_at,
-323:                 processed_at=document.processed_at,
-324:             )
-325:             session.add(model)
-326:             await session.commit()
-327:             await session.refresh(model)
-328:             return self._document_model_to_domain(model)
-329: 
-330:     async def get_document(self, document_id: UUID) -> Document | None:
-331:         """Get a document by ID."""
-332:         async with self._get_session() as session:
-333:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
-334:             model = result.scalar_one_or_none()
-335:             return self._document_model_to_domain(model) if model else None
+224:                 version=namespace.version,
+225:                 is_active=namespace.is_active,
+226:                 previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
+227:                 config_overrides=namespace.config_overrides,
+228:                 sync_checkpoints=namespace.sync_checkpoints,
+229:                 metadata_=namespace.metadata,
+230:                 created_at=namespace.created_at,
+231:                 updated_at=namespace.updated_at,
+232:             )
+233:             session.add(model)
+234:             await session.commit()
+235:             await session.refresh(model)
+236:             return self._namespace_model_to_domain(model)
+237: 
+238:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+239:         """Get a namespace by ID."""
+240:         async with self._get_session() as session:
+241:             result = await session.execute(
+242:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == str(namespace_id))
+243:             )
+244:             model = result.scalar_one_or_none()
+245:             return self._namespace_model_to_domain(model) if model else None
+246: 
+247:     async def get_namespace_by_slug(
+248:         self, workspace_id: UUID, slug: str, *, active_only: bool = True
+249:     ) -> MemoryNamespace | None:
+250:         """Get a namespace by workspace ID and slug.
+251: 
+252:         Args:
+253:             workspace_id: Workspace ID
+254:             slug: Namespace slug
+255:             active_only: If True, only return active namespace (default)
+256: 
+257:         Returns:
+258:             MemoryNamespace or None if not found
+259:         """
+260:         async with self._get_session() as session:
+261:             query = select(MemoryNamespaceModel).where(
+262:                 MemoryNamespaceModel.workspace_id == str(workspace_id),
+263:                 MemoryNamespaceModel.slug == slug,
+264:             )
+265:             if active_only:
+266:                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+267:             result = await session.execute(query)
+268:             model = result.scalar_one_or_none()
+269:             return self._namespace_model_to_domain(model) if model else None
+270: 
+271:     async def list_namespaces(self, workspace_id: UUID, *, active_only: bool = True) -> list[MemoryNamespace]:
+272:         """List all namespaces in a workspace.
+273: 
+274:         Args:
+275:             workspace_id: Workspace ID
+276:             active_only: If True, only return active namespaces (default)
+277: 
+278:         Returns:
+279:             List of MemoryNamespace objects
+280:         """
+281:         async with self._get_session() as session:
+282:             query = select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
+283:             if active_only:
+284:                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+285:             result = await session.execute(query)
+286:             return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
+287: 
+288:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+289:         """Update a namespace."""
+290:         async with self._get_session() as session:
+291:             await session.execute(
+292:                 update(MemoryNamespaceModel)
+293:                 .where(MemoryNamespaceModel.id == str(namespace.id))
+294:                 .values(
+295:                     name=namespace.name,
+296:                     slug=namespace.slug,
+297:                     description=namespace.description,
+298:                     version=namespace.version,
+299:                     is_active=namespace.is_active,
+300:                     previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
+301:                     config_overrides=namespace.config_overrides,
+302:                     sync_checkpoints=namespace.sync_checkpoints,
+303:                     metadata_=namespace.metadata,
+304:                     updated_at=datetime.now(UTC),
+305:                 )
+306:             )
+307:             await session.commit()
+308:             return namespace
+309: 
+310:     def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
+311:         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
+312:         return MemoryNamespace(
+313:             id=UUID(model.id),
+314:             workspace_id=UUID(model.workspace_id),
+315:             name=model.name,
+316:             slug=model.slug,
+317:             description=model.description,
+318:             version=model.version,
+319:             is_active=model.is_active,
+320:             previous_version_id=UUID(model.previous_version_id) if model.previous_version_id else None,
+321:             config_overrides=model.config_overrides,
+322:             sync_checkpoints=model.sync_checkpoints,
+323:             metadata=model.metadata_,
+324:             created_at=model.created_at,
+325:             updated_at=model.updated_at,
+326:         )
+327: 
+328:     async def create_namespace_version(
+329:         self,
+330:         workspace_id: UUID,
+331:         slug: str,
+332:         *,
+333:         previous_version: MemoryNamespace | None = None,
+334:     ) -> MemoryNamespace:
+335:         """Create a new version of a namespace.
 336: 
-337:     async def list_documents(
-338:         self,
-339:         namespace_id: UUID,
-340:         *,
-341:         status: str | None = None,
-342:         limit: int = 100,
-343:         offset: int = 0,
-344:     ) -> list[Document]:
-345:         """List documents in a namespace."""
-346:         async with self._get_session() as session:
-347:             query = select(DocumentModel).where(DocumentModel.namespace_id == str(namespace_id))
-348:             if status:
-349:                 query = query.where(DocumentModel.status == status)
-350:             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
-351:             result = await session.execute(query)
-352:             return [self._document_model_to_domain(m) for m in result.scalars().all()]
-353: 
-354:     async def update_document(self, document: Document) -> Document:
-355:         """Update a document."""
-356:         async with self._get_session() as session:
-357:             await session.execute(
-358:                 update(DocumentModel)
-359:                 .where(DocumentModel.id == str(document.id))
-360:                 .values(
-361:                     content=document.content,
-362:                     status=document.status,
-363:                     source=document.metadata.source,
-364:                     source_type=document.metadata.source_type,
-365:                     content_type=document.metadata.content_type,
-366:                     title=document.metadata.title,
-367:                     author=document.metadata.author,
-368:                     language=document.metadata.language,
-369:                     checksum=document.metadata.checksum,
-370:                     size_bytes=document.metadata.size_bytes,
-371:                     metadata_=document.metadata.custom,
-372:                     chunk_count=document.chunk_count,
-373:                     entity_count=document.entity_count,
-374:                     error_message=document.error_message,
-375:                     updated_at=datetime.now(UTC),
-376:                     processed_at=document.processed_at,
-377:                 )
-378:             )
-379:             await session.commit()
-380:             return document
-381: 
-382:     async def delete_document(self, document_id: UUID) -> bool:
-383:         """Delete a document."""
-384:         async with self._get_session() as session:
-385:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
-386:             model = result.scalar_one_or_none()
-387:             if model:
-388:                 await session.delete(model)
-389:                 await session.commit()
-390:                 return True
-391:             return False
-392: 
-393:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-394:         """Get a document by its content checksum (for deduplication).
-395: 
-396:         Returns the first matching document if multiple exist with the same checksum.
-397:         """
-398:         async with self._get_session() as session:
-399:             result = await session.execute(
-400:                 select(DocumentModel).where(
-401:                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
-402:                 )
-403:             )
-404:             model = result.scalars().first()
-405:             return self._document_model_to_domain(model) if model else None
-406: 
-407:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-408:         """Fetch multiple documents in a single query.
-409: 
-410:         Args:
-411:             document_ids: List of document IDs to fetch
-412: 
-413:         Returns:
-414:             Dictionary mapping document ID to Document object
-415:         """
-416:         if not document_ids:
-417:             return {}
-418: 
-419:         async with self._get_session() as session:
-420:             result = await session.execute(
-421:                 select(DocumentModel).where(DocumentModel.id.in_([str(did) for did in document_ids]))
-422:             )
-423:             models = result.scalars().all()
-424:             return {UUID(m.id): self._document_model_to_domain(m) for m in models}
-425: 
-426:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
-427:         """Convert DocumentModel to domain Document."""
-428:         return Document(
-429:             id=UUID(model.id),
-430:             namespace_id=UUID(model.namespace_id),
-431:             content=model.content,
-432:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
-433:             metadata=DocumentMetadata(
-434:                 source=model.source,
-435:                 source_type=model.source_type,
-436:                 content_type=model.content_type,
-437:                 title=model.title,
-438:                 author=model.author,
-439:                 language=model.language,
-440:                 checksum=model.checksum,
-441:                 size_bytes=model.size_bytes,
-442:                 custom=model.metadata_,
-443:             ),
-444:             chunk_count=model.chunk_count,
-445:             entity_count=model.entity_count,
-446:             error_message=model.error_message,
-447:             created_at=model.created_at,
-448:             updated_at=model.updated_at,
-449:             processed_at=model.processed_at,
-450:         )
-451: 
-452:     # =========================================================================
-453:     # Sync checkpoint operations
-454:     # =========================================================================
-455: 
-456:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-457:         """Get the last sync checkpoint for a source."""
-458:         async with self._get_session() as session:
-459:             result = await session.execute(
-460:                 select(SyncCheckpointModel).where(
-461:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-462:                 )
-463:             )
-464:             model = result.scalar_one_or_none()
-465:             return model.checkpoint if model else None
-466: 
-467:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-468:         """Set the sync checkpoint for a source."""
-469:         async with self._get_session() as session:
-470:             result = await session.execute(
-471:                 select(SyncCheckpointModel).where(
-472:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-473:                 )
-474:             )
-475:             model = result.scalar_one_or_none()
-476:             if model:
-477:                 model.checkpoint = checkpoint
-478:                 model.updated_at = datetime.now(UTC)
-479:             else:
-480:                 model = SyncCheckpointModel(
-481:                     namespace_id=str(namespace_id),
-482:                     source=source,
-483:                     checkpoint=checkpoint,
-484:                 )
-485:                 session.add(model)
-486:             await session.commit()
+337:         If previous_version is provided, increments its version number and links to it.
+338:         The previous version is marked as inactive.
+339: 
+340:         Args:
+341:             workspace_id: Workspace ID
+342:             slug: Namespace slug
+343:             previous_version: The previous version to supersede (if any)
+344: 
+345:         Returns:
+346:             New namespace version
+347:         """
+348:         from uuid import uuid4
+349: 
+350:         new_version = 1
+351:         previous_id = None
+352: 
+353:         if previous_version:
+354:             new_version = previous_version.version + 1
+355:             previous_id = previous_version.id
+356:             # Deactivate the old version
+357:             await self.deactivate_namespace(previous_version.id)
+358: 
+359:         # Create new namespace with incremented version
+360:         namespace = MemoryNamespace(
+361:             id=uuid4(),
+362:             workspace_id=workspace_id,
+363:             name=previous_version.name if previous_version else f"Namespace {slug}",
+364:             slug=slug,
+365:             description=previous_version.description if previous_version else "",
+366:             version=new_version,
+367:             is_active=True,
+368:             previous_version_id=previous_id,
+369:             config_overrides=previous_version.config_overrides if previous_version else {},
+370:             metadata=previous_version.metadata if previous_version else {},
+371:         )
+372: 
+373:         return await self.create_namespace(namespace)
+374: 
+375:     async def deactivate_namespace(self, namespace_id: UUID) -> None:
+376:         """Mark a namespace version as inactive.
+377: 
+378:         Args:
+379:             namespace_id: ID of the namespace to deactivate
+380:         """
+381:         async with self._get_session() as session:
+382:             await session.execute(
+383:                 update(MemoryNamespaceModel)
+384:                 .where(MemoryNamespaceModel.id == str(namespace_id))
+385:                 .values(is_active=False, updated_at=datetime.now(UTC))
+386:             )
+387:             await session.commit()
+388:             logger.info(f"Deactivated namespace {namespace_id}")
+389: 
+390:     # =========================================================================
+391:     # Document operations
+392:     # =========================================================================
+393: 
+394:     async def create_document(self, document: Document) -> Document:
+395:         """Create a new document."""
+396:         async with self._get_session() as session:
+397:             model = DocumentModel(
+398:                 id=str(document.id),
+399:                 namespace_id=str(document.namespace_id),
+400:                 content=document.content,
+401:                 status=document.status,
+402:                 source=document.metadata.source,
+403:                 source_type=document.metadata.source_type,
+404:                 content_type=document.metadata.content_type,
+405:                 title=document.metadata.title,
+406:                 author=document.metadata.author,
+407:                 language=document.metadata.language,
+408:                 checksum=document.metadata.checksum,
+409:                 size_bytes=document.metadata.size_bytes,
+410:                 metadata_=document.metadata.custom,
+411:                 chunk_count=document.chunk_count,
+412:                 entity_count=document.entity_count,
+413:                 error_message=document.error_message,
+414:                 created_at=document.created_at,
+415:                 updated_at=document.updated_at,
+416:                 processed_at=document.processed_at,
+417:             )
+418:             session.add(model)
+419:             await session.commit()
+420:             await session.refresh(model)
+421:             return self._document_model_to_domain(model)
+422: 
+423:     async def get_document(self, document_id: UUID) -> Document | None:
+424:         """Get a document by ID."""
+425:         async with self._get_session() as session:
+426:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+427:             model = result.scalar_one_or_none()
+428:             return self._document_model_to_domain(model) if model else None
+429: 
+430:     async def list_documents(
+431:         self,
+432:         namespace_id: UUID,
+433:         *,
+434:         status: str | None = None,
+435:         limit: int = 100,
+436:         offset: int = 0,
+437:     ) -> list[Document]:
+438:         """List documents in a namespace."""
+439:         async with self._get_session() as session:
+440:             query = select(DocumentModel).where(DocumentModel.namespace_id == str(namespace_id))
+441:             if status:
+442:                 query = query.where(DocumentModel.status == status)
+443:             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
+444:             result = await session.execute(query)
+445:             return [self._document_model_to_domain(m) for m in result.scalars().all()]
+446: 
+447:     async def update_document(self, document: Document) -> Document:
+448:         """Update a document."""
+449:         async with self._get_session() as session:
+450:             await session.execute(
+451:                 update(DocumentModel)
+452:                 .where(DocumentModel.id == str(document.id))
+453:                 .values(
+454:                     content=document.content,
+455:                     status=document.status,
+456:                     source=document.metadata.source,
+457:                     source_type=document.metadata.source_type,
+458:                     content_type=document.metadata.content_type,
+459:                     title=document.metadata.title,
+460:                     author=document.metadata.author,
+461:                     language=document.metadata.language,
+462:                     checksum=document.metadata.checksum,
+463:                     size_bytes=document.metadata.size_bytes,
+464:                     metadata_=document.metadata.custom,
+465:                     chunk_count=document.chunk_count,
+466:                     entity_count=document.entity_count,
+467:                     error_message=document.error_message,
+468:                     updated_at=datetime.now(UTC),
+469:                     processed_at=document.processed_at,
+470:                 )
+471:             )
+472:             await session.commit()
+473:             return document
+474: 
+475:     async def delete_document(self, document_id: UUID) -> bool:
+476:         """Delete a document."""
+477:         async with self._get_session() as session:
+478:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+479:             model = result.scalar_one_or_none()
+480:             if model:
+481:                 await session.delete(model)
+482:                 await session.commit()
+483:                 return True
+484:             return False
+485: 
+486:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+487:         """Get a document by its content checksum (for deduplication).
+488: 
+489:         Returns the first matching document if multiple exist with the same checksum.
+490:         """
+491:         async with self._get_session() as session:
+492:             result = await session.execute(
+493:                 select(DocumentModel).where(
+494:                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
+495:                 )
+496:             )
+497:             model = result.scalars().first()
+498:             return self._document_model_to_domain(model) if model else None
+499: 
+500:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+501:         """Fetch multiple documents in a single query.
+502: 
+503:         Args:
+504:             document_ids: List of document IDs to fetch
+505: 
+506:         Returns:
+507:             Dictionary mapping document ID to Document object
+508:         """
+509:         if not document_ids:
+510:             return {}
+511: 
+512:         async with self._get_session() as session:
+513:             result = await session.execute(
+514:                 select(DocumentModel).where(DocumentModel.id.in_([str(did) for did in document_ids]))
+515:             )
+516:             models = result.scalars().all()
+517:             return {UUID(m.id): self._document_model_to_domain(m) for m in models}
+518: 
+519:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
+520:         """Convert DocumentModel to domain Document."""
+521:         return Document(
+522:             id=UUID(model.id),
+523:             namespace_id=UUID(model.namespace_id),
+524:             content=model.content,
+525:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
+526:             metadata=DocumentMetadata(
+527:                 source=model.source,
+528:                 source_type=model.source_type,
+529:                 content_type=model.content_type,
+530:                 title=model.title,
+531:                 author=model.author,
+532:                 language=model.language,
+533:                 checksum=model.checksum,
+534:                 size_bytes=model.size_bytes,
+535:                 custom=model.metadata_,
+536:             ),
+537:             chunk_count=model.chunk_count,
+538:             entity_count=model.entity_count,
+539:             error_message=model.error_message,
+540:             created_at=model.created_at,
+541:             updated_at=model.updated_at,
+542:             processed_at=model.processed_at,
+543:         )
+544: 
+545:     # =========================================================================
+546:     # Sync checkpoint operations
+547:     # =========================================================================
+548: 
+549:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+550:         """Get the last sync checkpoint for a source."""
+551:         async with self._get_session() as session:
+552:             result = await session.execute(
+553:                 select(SyncCheckpointModel).where(
+554:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+555:                 )
+556:             )
+557:             model = result.scalar_one_or_none()
+558:             return model.checkpoint if model else None
+559: 
+560:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+561:         """Set the sync checkpoint for a source."""
+562:         async with self._get_session() as session:
+563:             result = await session.execute(
+564:                 select(SyncCheckpointModel).where(
+565:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+566:                 )
+567:             )
+568:             model = result.scalar_one_or_none()
+569:             if model:
+570:                 model.checkpoint = checkpoint
+571:                 model.updated_at = datetime.now(UTC)
+572:             else:
+573:                 model = SyncCheckpointModel(
+574:                     namespace_id=str(namespace_id),
+575:                     source=source,
+576:                     checkpoint=checkpoint,
+577:                 )
+578:                 session.add(model)
+579:             await session.commit()
 ````
 
 ## File: CLAUDE.md
@@ -18689,451 +18897,485 @@ README.md
 198:             raise RuntimeError("Relational backend not configured")
 199:         return await self.relational.update_namespace(namespace)
 200: 
-201:     # =========================================================================
-202:     # Document operations (delegated to relational)
-203:     # =========================================================================
-204: 
-205:     async def create_document(self, document: Document) -> Document:
-206:         """Create a new document."""
-207:         if not self.relational:
-208:             raise RuntimeError("Relational backend not configured")
-209:         return await self.relational.create_document(document)
-210: 
-211:     async def get_document(self, document_id: UUID) -> Document | None:
-212:         """Get a document by ID."""
-213:         if not self.relational:
-214:             raise RuntimeError("Relational backend not configured")
-215:         return await self.relational.get_document(document_id)
-216: 
-217:     async def list_documents(
-218:         self,
-219:         namespace_id: UUID,
-220:         *,
-221:         status: str | None = None,
-222:         limit: int = 100,
-223:         offset: int = 0,
-224:     ) -> list[Document]:
-225:         """List documents in a namespace."""
-226:         if not self.relational:
-227:             raise RuntimeError("Relational backend not configured")
-228:         return await self.relational.list_documents(namespace_id, status=status, limit=limit, offset=offset)
-229: 
-230:     async def update_document(self, document: Document) -> Document:
-231:         """Update a document."""
-232:         if not self.relational:
-233:             raise RuntimeError("Relational backend not configured")
-234:         return await self.relational.update_document(document)
-235: 
-236:     async def delete_document(self, document_id: UUID) -> bool:
-237:         """Delete a document and its chunks."""
-238:         if not self.relational:
-239:             raise RuntimeError("Relational backend not configured")
-240: 
-241:         # Delete chunks first
-242:         if self.vector:
-243:             await self.vector.delete_chunks_by_document(document_id)
+201:     async def create_namespace_version(
+202:         self,
+203:         workspace_id: UUID,
+204:         slug: str,
+205:         *,
+206:         previous_version: MemoryNamespace | None = None,
+207:     ) -> MemoryNamespace:
+208:         """Create a new version of a namespace.
+209: 
+210:         If previous_version is provided, increments its version number and links to it.
+211:         The previous version is marked as inactive.
+212: 
+213:         Args:
+214:             workspace_id: Workspace ID
+215:             slug: Namespace slug
+216:             previous_version: The previous version to supersede (if any)
+217: 
+218:         Returns:
+219:             New namespace version
+220:         """
+221:         if not self.relational:
+222:             raise RuntimeError("Relational backend not configured")
+223:         return await self.relational.create_namespace_version(workspace_id, slug, previous_version=previous_version)
+224: 
+225:     async def deactivate_namespace(self, namespace_id: UUID) -> None:
+226:         """Mark a namespace version as inactive.
+227: 
+228:         Args:
+229:             namespace_id: ID of the namespace to deactivate
+230:         """
+231:         if not self.relational:
+232:             raise RuntimeError("Relational backend not configured")
+233:         await self.relational.deactivate_namespace(namespace_id)
+234: 
+235:     # =========================================================================
+236:     # Document operations (delegated to relational)
+237:     # =========================================================================
+238: 
+239:     async def create_document(self, document: Document) -> Document:
+240:         """Create a new document."""
+241:         if not self.relational:
+242:             raise RuntimeError("Relational backend not configured")
+243:         return await self.relational.create_document(document)
 244: 
-245:         return await self.relational.delete_document(document_id)
-246: 
-247:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-248:         """Get a document by its content checksum."""
-249:         if not self.relational:
-250:             raise RuntimeError("Relational backend not configured")
-251:         return await self.relational.get_document_by_checksum(namespace_id, checksum)
-252: 
-253:     # =========================================================================
-254:     # Chunk operations (delegated to vector)
-255:     # =========================================================================
-256: 
-257:     async def create_chunk(self, chunk: Chunk) -> Chunk:
-258:         """Create a new chunk with embedding."""
-259:         if not self.vector:
-260:             raise RuntimeError("Vector backend not configured")
-261:         return await self.vector.create_chunk(chunk)
-262: 
-263:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
-264:         """Create multiple chunks in a batch."""
-265:         if not self.vector:
-266:             raise RuntimeError("Vector backend not configured")
-267:         return await self.vector.create_chunks_batch(chunks)
-268: 
-269:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-270:         """Get a chunk by ID."""
-271:         if not self.vector:
-272:             raise RuntimeError("Vector backend not configured")
-273:         return await self.vector.get_chunk(chunk_id)
+245:     async def get_document(self, document_id: UUID) -> Document | None:
+246:         """Get a document by ID."""
+247:         if not self.relational:
+248:             raise RuntimeError("Relational backend not configured")
+249:         return await self.relational.get_document(document_id)
+250: 
+251:     async def list_documents(
+252:         self,
+253:         namespace_id: UUID,
+254:         *,
+255:         status: str | None = None,
+256:         limit: int = 100,
+257:         offset: int = 0,
+258:     ) -> list[Document]:
+259:         """List documents in a namespace."""
+260:         if not self.relational:
+261:             raise RuntimeError("Relational backend not configured")
+262:         return await self.relational.list_documents(namespace_id, status=status, limit=limit, offset=offset)
+263: 
+264:     async def update_document(self, document: Document) -> Document:
+265:         """Update a document."""
+266:         if not self.relational:
+267:             raise RuntimeError("Relational backend not configured")
+268:         return await self.relational.update_document(document)
+269: 
+270:     async def delete_document(self, document_id: UUID) -> bool:
+271:         """Delete a document and its chunks."""
+272:         if not self.relational:
+273:             raise RuntimeError("Relational backend not configured")
 274: 
-275:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-276:         """Get all chunks for a document."""
-277:         if not self.vector:
-278:             raise RuntimeError("Vector backend not configured")
-279:         return await self.vector.get_chunks_by_document(document_id)
+275:         # Delete chunks first
+276:         if self.vector:
+277:             await self.vector.delete_chunks_by_document(document_id)
+278: 
+279:         return await self.relational.delete_document(document_id)
 280: 
-281:     async def search_similar_chunks(
-282:         self,
-283:         namespace_id: UUID,
-284:         query_embedding: list[float],
-285:         *,
-286:         limit: int = 10,
-287:         min_similarity: float = 0.0,
-288:         filter_document_ids: list[UUID] | None = None,
-289:     ) -> list[tuple[Chunk, float]]:
-290:         """Search for similar chunks."""
-291:         if not self.vector:
-292:             raise RuntimeError("Vector backend not configured")
-293:         return await self.vector.search_similar(
-294:             namespace_id,
-295:             query_embedding,
-296:             limit=limit,
-297:             min_similarity=min_similarity,
-298:             filter_document_ids=filter_document_ids,
-299:         )
-300: 
-301:     async def count_chunks(self, namespace_id: UUID) -> int:
-302:         """Count chunks in a namespace."""
-303:         if not self.vector:
-304:             raise RuntimeError("Vector backend not configured")
-305:         return await self.vector.count_chunks(namespace_id)
-306: 
-307:     async def list_chunks(
-308:         self,
-309:         namespace_id: UUID,
-310:         *,
-311:         limit: int = 1000,
-312:         offset: int = 0,
-313:     ) -> list[Chunk]:
-314:         """List chunks in a namespace.
-315: 
-316:         Args:
-317:             namespace_id: Namespace ID
-318:             limit: Maximum chunks to return
-319:             offset: Offset for pagination
-320: 
-321:         Returns:
-322:             List of chunks
-323:         """
-324:         if not self.vector:
-325:             raise RuntimeError("Vector backend not configured")
-326:         return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
-327: 
-328:     async def count_entities(self, namespace_id: UUID) -> int:
-329:         """Count entities in a namespace."""
-330:         if self.graph:
-331:             return await self.graph.count_entities(namespace_id)
-332:         return 0
-333: 
-334:     # =========================================================================
-335:     # Entity operations (cross-backend)
-336:     # =========================================================================
-337: 
-338:     async def create_entity(self, entity: Entity) -> Entity:
-339:         """Create an entity in both graph and relational stores."""
-340:         # Store in graph for relationships and traversal
-341:         if self.graph:
-342:             entity = await self.graph.create_entity(entity)
-343:         return entity
-344: 
-345:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-346:         """Get an entity by ID."""
-347:         if self.graph:
-348:             return await self.graph.get_entity(entity_id)
-349:         return None
-350: 
-351:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
-352:         """Get an entity by name and type."""
-353:         if self.graph:
-354:             return await self.graph.get_entity_by_name(namespace_id, name, entity_type)
-355:         return None
-356: 
-357:     async def update_entity(self, entity: Entity) -> Entity:
-358:         """Update an entity."""
-359:         if self.graph:
-360:             entity = await self.graph.update_entity(entity)
-361:         return entity
-362: 
-363:     async def delete_entity(self, entity_id: UUID) -> bool:
-364:         """Delete an entity."""
-365:         if self.graph:
-366:             return await self.graph.delete_entity(entity_id)
-367:         return False
-368: 
-369:     async def list_entities(
-370:         self,
-371:         namespace_id: UUID,
-372:         *,
-373:         entity_type: str | None = None,
-374:         limit: int = 100,
-375:         offset: int = 0,
-376:     ) -> list[Entity]:
-377:         """List entities in a namespace."""
-378:         if self.graph:
-379:             return await self.graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
-380:         return []
-381: 
-382:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-383:         """Update the embedding for an entity."""
-384:         if self.vector:
-385:             await self.vector.update_entity_embedding(entity_id, embedding, model)
-386: 
-387:     async def search_similar_entities(
-388:         self,
-389:         namespace_id: UUID,
-390:         query_embedding: list[float],
-391:         *,
-392:         limit: int = 10,
-393:         min_similarity: float = 0.0,
-394:     ) -> list[tuple[UUID, float]]:
-395:         """Search for similar entities."""
-396:         if not self.vector:
-397:             raise RuntimeError("Vector backend not configured")
-398:         return await self.vector.search_similar_entities(
-399:             namespace_id,
-400:             query_embedding,
-401:             limit=limit,
-402:             min_similarity=min_similarity,
-403:         )
-404: 
-405:     # =========================================================================
-406:     # Relationship operations (delegated to graph)
-407:     # =========================================================================
-408: 
-409:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-410:         """Create a relationship between entities."""
-411:         if not self.graph:
-412:             raise RuntimeError("Graph backend not configured")
-413:         return await self.graph.create_relationship(relationship)
-414: 
-415:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-416:         """Get a relationship by ID."""
-417:         if self.graph:
-418:             return await self.graph.get_relationship(relationship_id)
-419:         return None
+281:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+282:         """Get a document by its content checksum."""
+283:         if not self.relational:
+284:             raise RuntimeError("Relational backend not configured")
+285:         return await self.relational.get_document_by_checksum(namespace_id, checksum)
+286: 
+287:     # =========================================================================
+288:     # Chunk operations (delegated to vector)
+289:     # =========================================================================
+290: 
+291:     async def create_chunk(self, chunk: Chunk) -> Chunk:
+292:         """Create a new chunk with embedding."""
+293:         if not self.vector:
+294:             raise RuntimeError("Vector backend not configured")
+295:         return await self.vector.create_chunk(chunk)
+296: 
+297:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+298:         """Create multiple chunks in a batch."""
+299:         if not self.vector:
+300:             raise RuntimeError("Vector backend not configured")
+301:         return await self.vector.create_chunks_batch(chunks)
+302: 
+303:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+304:         """Get a chunk by ID."""
+305:         if not self.vector:
+306:             raise RuntimeError("Vector backend not configured")
+307:         return await self.vector.get_chunk(chunk_id)
+308: 
+309:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+310:         """Get all chunks for a document."""
+311:         if not self.vector:
+312:             raise RuntimeError("Vector backend not configured")
+313:         return await self.vector.get_chunks_by_document(document_id)
+314: 
+315:     async def search_similar_chunks(
+316:         self,
+317:         namespace_id: UUID,
+318:         query_embedding: list[float],
+319:         *,
+320:         limit: int = 10,
+321:         min_similarity: float = 0.0,
+322:         filter_document_ids: list[UUID] | None = None,
+323:     ) -> list[tuple[Chunk, float]]:
+324:         """Search for similar chunks."""
+325:         if not self.vector:
+326:             raise RuntimeError("Vector backend not configured")
+327:         return await self.vector.search_similar(
+328:             namespace_id,
+329:             query_embedding,
+330:             limit=limit,
+331:             min_similarity=min_similarity,
+332:             filter_document_ids=filter_document_ids,
+333:         )
+334: 
+335:     async def count_chunks(self, namespace_id: UUID) -> int:
+336:         """Count chunks in a namespace."""
+337:         if not self.vector:
+338:             raise RuntimeError("Vector backend not configured")
+339:         return await self.vector.count_chunks(namespace_id)
+340: 
+341:     async def list_chunks(
+342:         self,
+343:         namespace_id: UUID,
+344:         *,
+345:         limit: int = 1000,
+346:         offset: int = 0,
+347:     ) -> list[Chunk]:
+348:         """List chunks in a namespace.
+349: 
+350:         Args:
+351:             namespace_id: Namespace ID
+352:             limit: Maximum chunks to return
+353:             offset: Offset for pagination
+354: 
+355:         Returns:
+356:             List of chunks
+357:         """
+358:         if not self.vector:
+359:             raise RuntimeError("Vector backend not configured")
+360:         return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
+361: 
+362:     async def count_entities(self, namespace_id: UUID) -> int:
+363:         """Count entities in a namespace."""
+364:         if self.graph:
+365:             return await self.graph.count_entities(namespace_id)
+366:         return 0
+367: 
+368:     # =========================================================================
+369:     # Entity operations (cross-backend)
+370:     # =========================================================================
+371: 
+372:     async def create_entity(self, entity: Entity) -> Entity:
+373:         """Create an entity in both graph and relational stores."""
+374:         # Store in graph for relationships and traversal
+375:         if self.graph:
+376:             entity = await self.graph.create_entity(entity)
+377:         return entity
+378: 
+379:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+380:         """Get an entity by ID."""
+381:         if self.graph:
+382:             return await self.graph.get_entity(entity_id)
+383:         return None
+384: 
+385:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+386:         """Get an entity by name and type."""
+387:         if self.graph:
+388:             return await self.graph.get_entity_by_name(namespace_id, name, entity_type)
+389:         return None
+390: 
+391:     async def update_entity(self, entity: Entity) -> Entity:
+392:         """Update an entity."""
+393:         if self.graph:
+394:             entity = await self.graph.update_entity(entity)
+395:         return entity
+396: 
+397:     async def delete_entity(self, entity_id: UUID) -> bool:
+398:         """Delete an entity."""
+399:         if self.graph:
+400:             return await self.graph.delete_entity(entity_id)
+401:         return False
+402: 
+403:     async def list_entities(
+404:         self,
+405:         namespace_id: UUID,
+406:         *,
+407:         entity_type: str | None = None,
+408:         limit: int = 100,
+409:         offset: int = 0,
+410:     ) -> list[Entity]:
+411:         """List entities in a namespace."""
+412:         if self.graph:
+413:             return await self.graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
+414:         return []
+415: 
+416:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+417:         """Update the embedding for an entity."""
+418:         if self.vector:
+419:             await self.vector.update_entity_embedding(entity_id, embedding, model)
 420: 
-421:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-422:         """Delete a relationship."""
-423:         if self.graph:
-424:             return await self.graph.delete_relationship(relationship_id)
-425:         return False
-426: 
-427:     async def get_entity_relationships(
-428:         self,
-429:         entity_id: UUID,
-430:         *,
-431:         direction: str = "both",
-432:         relationship_types: list[str] | None = None,
-433:         limit: int = 100,
-434:     ) -> list[Relationship]:
-435:         """Get relationships for an entity."""
-436:         if self.graph:
-437:             return await self.graph.get_entity_relationships(
-438:                 entity_id, direction=direction, relationship_types=relationship_types, limit=limit
-439:             )
-440:         return []
-441: 
-442:     async def list_relationships(
-443:         self,
-444:         namespace_id: UUID,
-445:         *,
-446:         relationship_type: str | None = None,
-447:         limit: int = 1000,
-448:         offset: int = 0,
-449:     ) -> list[Relationship]:
-450:         """List all relationships in a namespace."""
+421:     async def search_similar_entities(
+422:         self,
+423:         namespace_id: UUID,
+424:         query_embedding: list[float],
+425:         *,
+426:         limit: int = 10,
+427:         min_similarity: float = 0.0,
+428:     ) -> list[tuple[UUID, float]]:
+429:         """Search for similar entities."""
+430:         if not self.vector:
+431:             raise RuntimeError("Vector backend not configured")
+432:         return await self.vector.search_similar_entities(
+433:             namespace_id,
+434:             query_embedding,
+435:             limit=limit,
+436:             min_similarity=min_similarity,
+437:         )
+438: 
+439:     # =========================================================================
+440:     # Relationship operations (delegated to graph)
+441:     # =========================================================================
+442: 
+443:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+444:         """Create a relationship between entities."""
+445:         if not self.graph:
+446:             raise RuntimeError("Graph backend not configured")
+447:         return await self.graph.create_relationship(relationship)
+448: 
+449:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+450:         """Get a relationship by ID."""
 451:         if self.graph:
-452:             return await self.graph.list_relationships(
-453:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
-454:             )
-455:         return []
-456: 
-457:     # =========================================================================
-458:     # Episode operations (delegated to graph)
-459:     # =========================================================================
+452:             return await self.graph.get_relationship(relationship_id)
+453:         return None
+454: 
+455:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+456:         """Delete a relationship."""
+457:         if self.graph:
+458:             return await self.graph.delete_relationship(relationship_id)
+459:         return False
 460: 
-461:     async def create_episode(self, episode: Episode) -> Episode:
-462:         """Create an episode."""
-463:         if not self.graph:
-464:             raise RuntimeError("Graph backend not configured")
-465:         return await self.graph.create_episode(episode)
-466: 
-467:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-468:         """Get an episode by ID."""
-469:         if self.graph:
-470:             return await self.graph.get_episode(episode_id)
-471:         return None
-472: 
-473:     async def list_episodes(
-474:         self,
-475:         namespace_id: UUID,
-476:         *,
-477:         start_time: datetime | None = None,
-478:         end_time: datetime | None = None,
-479:         limit: int = 100,
-480:     ) -> list[Episode]:
-481:         """List episodes in a time range."""
-482:         if self.graph:
-483:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
-484:         return []
-485: 
-486:     # =========================================================================
-487:     # Graph traversal (delegated to graph)
-488:     # =========================================================================
-489: 
-490:     async def find_paths(
-491:         self,
-492:         namespace_id: UUID,
-493:         source_entity_id: UUID,
-494:         target_entity_id: UUID,
-495:         *,
-496:         max_depth: int = 3,
-497:         relationship_types: list[str] | None = None,
-498:     ) -> list[list[dict[str, Any]]]:
-499:         """Find paths between two entities."""
-500:         if self.graph:
-501:             return await self.graph.find_paths(
-502:                 namespace_id,
-503:                 source_entity_id,
-504:                 target_entity_id,
-505:                 max_depth=max_depth,
-506:                 relationship_types=relationship_types,
-507:             )
-508:         return []
-509: 
-510:     async def get_neighborhood(
-511:         self,
-512:         entity_id: UUID,
-513:         *,
-514:         depth: int = 1,
-515:         relationship_types: list[str] | None = None,
-516:         limit: int = 50,
-517:     ) -> dict[str, Any]:
-518:         """Get the neighborhood of an entity."""
-519:         if self.graph:
-520:             return await self.graph.get_neighborhood(
-521:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
-522:             )
-523:         return {"entities": [], "relationships": []}
-524: 
-525:     # =========================================================================
-526:     # Batch operations (optimized for parallel fetching)
-527:     # =========================================================================
-528: 
-529:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-530:         """Fetch multiple entities in a single query.
-531: 
-532:         Args:
-533:             entity_ids: List of entity IDs to fetch
-534: 
-535:         Returns:
-536:             Dictionary mapping entity ID to Entity object
-537:         """
-538:         if not entity_ids:
-539:             return {}
-540:         if self.graph:
-541:             return await self.graph.get_entities_batch(entity_ids)
-542:         return {}
+461:     async def get_entity_relationships(
+462:         self,
+463:         entity_id: UUID,
+464:         *,
+465:         direction: str = "both",
+466:         relationship_types: list[str] | None = None,
+467:         limit: int = 100,
+468:     ) -> list[Relationship]:
+469:         """Get relationships for an entity."""
+470:         if self.graph:
+471:             return await self.graph.get_entity_relationships(
+472:                 entity_id, direction=direction, relationship_types=relationship_types, limit=limit
+473:             )
+474:         return []
+475: 
+476:     async def list_relationships(
+477:         self,
+478:         namespace_id: UUID,
+479:         *,
+480:         relationship_type: str | None = None,
+481:         limit: int = 1000,
+482:         offset: int = 0,
+483:     ) -> list[Relationship]:
+484:         """List all relationships in a namespace."""
+485:         if self.graph:
+486:             return await self.graph.list_relationships(
+487:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+488:             )
+489:         return []
+490: 
+491:     # =========================================================================
+492:     # Episode operations (delegated to graph)
+493:     # =========================================================================
+494: 
+495:     async def create_episode(self, episode: Episode) -> Episode:
+496:         """Create an episode."""
+497:         if not self.graph:
+498:             raise RuntimeError("Graph backend not configured")
+499:         return await self.graph.create_episode(episode)
+500: 
+501:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+502:         """Get an episode by ID."""
+503:         if self.graph:
+504:             return await self.graph.get_episode(episode_id)
+505:         return None
+506: 
+507:     async def list_episodes(
+508:         self,
+509:         namespace_id: UUID,
+510:         *,
+511:         start_time: datetime | None = None,
+512:         end_time: datetime | None = None,
+513:         limit: int = 100,
+514:     ) -> list[Episode]:
+515:         """List episodes in a time range."""
+516:         if self.graph:
+517:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
+518:         return []
+519: 
+520:     # =========================================================================
+521:     # Graph traversal (delegated to graph)
+522:     # =========================================================================
+523: 
+524:     async def find_paths(
+525:         self,
+526:         namespace_id: UUID,
+527:         source_entity_id: UUID,
+528:         target_entity_id: UUID,
+529:         *,
+530:         max_depth: int = 3,
+531:         relationship_types: list[str] | None = None,
+532:     ) -> list[list[dict[str, Any]]]:
+533:         """Find paths between two entities."""
+534:         if self.graph:
+535:             return await self.graph.find_paths(
+536:                 namespace_id,
+537:                 source_entity_id,
+538:                 target_entity_id,
+539:                 max_depth=max_depth,
+540:                 relationship_types=relationship_types,
+541:             )
+542:         return []
 543: 
-544:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-545:         """Fetch multiple documents in a single query.
-546: 
-547:         Args:
-548:             document_ids: List of document IDs to fetch
-549: 
-550:         Returns:
-551:             Dictionary mapping document ID to Document object
-552:         """
-553:         if not document_ids:
-554:             return {}
-555:         if self.relational:
-556:             return await self.relational.get_documents_batch(document_ids)
-557:         return {}
+544:     async def get_neighborhood(
+545:         self,
+546:         entity_id: UUID,
+547:         *,
+548:         depth: int = 1,
+549:         relationship_types: list[str] | None = None,
+550:         limit: int = 50,
+551:     ) -> dict[str, Any]:
+552:         """Get the neighborhood of an entity."""
+553:         if self.graph:
+554:             return await self.graph.get_neighborhood(
+555:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
+556:             )
+557:         return {"entities": [], "relationships": []}
 558: 
-559:     async def get_neighborhoods_batch(
-560:         self,
-561:         entity_ids: list[UUID],
-562:         *,
-563:         depth: int = 1,
-564:         relationship_types: list[str] | None = None,
-565:         limit_per_entity: int = 20,
-566:     ) -> dict[UUID, dict[str, Any]]:
-567:         """Get neighborhoods for multiple entities in a single query.
+559:     # =========================================================================
+560:     # Batch operations (optimized for parallel fetching)
+561:     # =========================================================================
+562: 
+563:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+564:         """Fetch multiple entities in a single query.
+565: 
+566:         Args:
+567:             entity_ids: List of entity IDs to fetch
 568: 
-569:         Args:
-570:             entity_ids: List of entity IDs
-571:             depth: Max traversal depth
-572:             relationship_types: Optional relationship type filter
-573:             limit_per_entity: Max nodes per entity neighborhood
-574: 
-575:         Returns:
-576:             Dictionary mapping entity ID to neighborhood data
-577:         """
-578:         if not entity_ids:
-579:             return {}
-580:         if self.graph:
-581:             return await self.graph.get_neighborhoods_batch(
-582:                 entity_ids,
-583:                 depth=depth,
-584:                 relationship_types=relationship_types,
-585:                 limit_per_entity=limit_per_entity,
-586:             )
-587:         return {}
-588: 
-589:     # =========================================================================
-590:     # Event operations (delegated to event store)
-591:     # =========================================================================
+569:         Returns:
+570:             Dictionary mapping entity ID to Entity object
+571:         """
+572:         if not entity_ids:
+573:             return {}
+574:         if self.graph:
+575:             return await self.graph.get_entities_batch(entity_ids)
+576:         return {}
+577: 
+578:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+579:         """Fetch multiple documents in a single query.
+580: 
+581:         Args:
+582:             document_ids: List of document IDs to fetch
+583: 
+584:         Returns:
+585:             Dictionary mapping document ID to Document object
+586:         """
+587:         if not document_ids:
+588:             return {}
+589:         if self.relational:
+590:             return await self.relational.get_documents_batch(document_ids)
+591:         return {}
 592: 
-593:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-594:         """Append an event to the log."""
-595:         if not self.event_store:
-596:             raise RuntimeError("Event store not configured")
-597:         return await self.event_store.append_event(event)
-598: 
-599:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-600:         """Append multiple events in a batch."""
-601:         if not self.event_store:
-602:             raise RuntimeError("Event store not configured")
-603:         return await self.event_store.append_events_batch(events)
-604: 
-605:     async def get_events(
-606:         self,
-607:         namespace_id: UUID,
-608:         *,
-609:         event_types: list[str] | None = None,
-610:         resource_type: str | None = None,
-611:         resource_id: UUID | None = None,
-612:         after: datetime | None = None,
-613:         before: datetime | None = None,
-614:         limit: int = 100,
-615:         offset: int = 0,
-616:     ) -> list[MemoryEvent]:
-617:         """Query events from the log."""
-618:         if not self.event_store:
-619:             raise RuntimeError("Event store not configured")
-620:         return await self.event_store.get_events(
-621:             namespace_id,
-622:             event_types=event_types,
-623:             resource_type=resource_type,
-624:             resource_id=resource_id,
-625:             after=after,
-626:             before=before,
-627:             limit=limit,
-628:             offset=offset,
-629:         )
-630: 
-631:     # =========================================================================
-632:     # Sync checkpoint operations (delegated to relational)
-633:     # =========================================================================
-634: 
-635:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-636:         """Get the last sync checkpoint for a source."""
-637:         if not self.relational:
-638:             raise RuntimeError("Relational backend not configured")
-639:         return await self.relational.get_sync_checkpoint(namespace_id, source)
-640: 
-641:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-642:         """Set the sync checkpoint for a source."""
-643:         if not self.relational:
-644:             raise RuntimeError("Relational backend not configured")
-645:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
+593:     async def get_neighborhoods_batch(
+594:         self,
+595:         entity_ids: list[UUID],
+596:         *,
+597:         depth: int = 1,
+598:         relationship_types: list[str] | None = None,
+599:         limit_per_entity: int = 20,
+600:     ) -> dict[UUID, dict[str, Any]]:
+601:         """Get neighborhoods for multiple entities in a single query.
+602: 
+603:         Args:
+604:             entity_ids: List of entity IDs
+605:             depth: Max traversal depth
+606:             relationship_types: Optional relationship type filter
+607:             limit_per_entity: Max nodes per entity neighborhood
+608: 
+609:         Returns:
+610:             Dictionary mapping entity ID to neighborhood data
+611:         """
+612:         if not entity_ids:
+613:             return {}
+614:         if self.graph:
+615:             return await self.graph.get_neighborhoods_batch(
+616:                 entity_ids,
+617:                 depth=depth,
+618:                 relationship_types=relationship_types,
+619:                 limit_per_entity=limit_per_entity,
+620:             )
+621:         return {}
+622: 
+623:     # =========================================================================
+624:     # Event operations (delegated to event store)
+625:     # =========================================================================
+626: 
+627:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+628:         """Append an event to the log."""
+629:         if not self.event_store:
+630:             raise RuntimeError("Event store not configured")
+631:         return await self.event_store.append_event(event)
+632: 
+633:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+634:         """Append multiple events in a batch."""
+635:         if not self.event_store:
+636:             raise RuntimeError("Event store not configured")
+637:         return await self.event_store.append_events_batch(events)
+638: 
+639:     async def get_events(
+640:         self,
+641:         namespace_id: UUID,
+642:         *,
+643:         event_types: list[str] | None = None,
+644:         resource_type: str | None = None,
+645:         resource_id: UUID | None = None,
+646:         after: datetime | None = None,
+647:         before: datetime | None = None,
+648:         limit: int = 100,
+649:         offset: int = 0,
+650:     ) -> list[MemoryEvent]:
+651:         """Query events from the log."""
+652:         if not self.event_store:
+653:             raise RuntimeError("Event store not configured")
+654:         return await self.event_store.get_events(
+655:             namespace_id,
+656:             event_types=event_types,
+657:             resource_type=resource_type,
+658:             resource_id=resource_id,
+659:             after=after,
+660:             before=before,
+661:             limit=limit,
+662:             offset=offset,
+663:         )
+664: 
+665:     # =========================================================================
+666:     # Sync checkpoint operations (delegated to relational)
+667:     # =========================================================================
+668: 
+669:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+670:         """Get the last sync checkpoint for a source."""
+671:         if not self.relational:
+672:             raise RuntimeError("Relational backend not configured")
+673:         return await self.relational.get_sync_checkpoint(namespace_id, source)
+674: 
+675:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+676:         """Set the sync checkpoint for a source."""
+677:         if not self.relational:
+678:             raise RuntimeError("Relational backend not configured")
+679:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
 ## File: README.md
@@ -19857,884 +20099,6 @@ README.md
 51: 
 52: 
 53: __all__ = ["cli", "main"]
-````
-
-## File: src/khora/storage/backends/neo4j.py
-````python
-  1: """Neo4j backend for knowledge graph storage.
-  2: 
-  3: Handles storage and traversal of entities, relationships, and episodes
-  4: in Neo4j graph database.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import json
- 10: from datetime import datetime
- 11: from typing import Any
- 12: from uuid import UUID
- 13: 
- 14: from loguru import logger
- 15: from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
- 16: 
- 17: from khora.core.models import Entity, Episode, Relationship
- 18: from khora.core.models.entity import EntityType, RelationshipType
- 19: 
- 20: 
- 21: def _serialize_dict(value: dict[str, Any] | None) -> str | None:
- 22:     """Serialize a dict to JSON string for Neo4j storage.
- 23: 
- 24:     Neo4j property values can only be primitive types or arrays thereof,
- 25:     not nested objects. We serialize dicts to JSON strings.
- 26:     """
- 27:     if value is None:
- 28:         return None
- 29:     return json.dumps(value)
- 30: 
- 31: 
- 32: def _deserialize_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
- 33:     """Deserialize a JSON string back to dict.
- 34: 
- 35:     Handles both string (new format) and dict (legacy) values.
- 36:     """
- 37:     if value is None:
- 38:         return {}
- 39:     if isinstance(value, dict):
- 40:         return value
- 41:     try:
- 42:         return json.loads(value)
- 43:     except (json.JSONDecodeError, TypeError):
- 44:         return {}
- 45: 
- 46: 
- 47: class Neo4jBackend:
- 48:     """Neo4j backend for knowledge graph operations.
- 49: 
- 50:     Stores entities as nodes and relationships as edges in Neo4j,
- 51:     enabling efficient graph traversal and pattern matching.
- 52:     """
- 53: 
- 54:     def __init__(
- 55:         self,
- 56:         url: str,
- 57:         *,
- 58:         user: str = "neo4j",
- 59:         password: str = "",
- 60:         database: str = "neo4j",
- 61:         max_connection_pool_size: int = 50,
- 62:     ) -> None:
- 63:         """Initialize the Neo4j backend.
- 64: 
- 65:         Args:
- 66:             url: Neo4j connection URL (bolt:// or neo4j://)
- 67:             user: Database user
- 68:             password: Database password
- 69:             database: Database name
- 70:             max_connection_pool_size: Maximum connection pool size
- 71:         """
- 72:         self._url = url
- 73:         self._user = user
- 74:         self._password = password
- 75:         self._database = database
- 76:         self._max_connection_pool_size = max_connection_pool_size
- 77:         self._driver: AsyncDriver | None = None
- 78: 
- 79:     async def connect(self) -> None:
- 80:         """Establish connection to Neo4j."""
- 81:         if self._driver is not None:
- 82:             return
- 83: 
- 84:         logger.info(f"Connecting to Neo4j at {self._url}...")
- 85:         self._driver = AsyncGraphDatabase.driver(
- 86:             self._url,
- 87:             auth=(self._user, self._password),
- 88:             max_connection_pool_size=self._max_connection_pool_size,
- 89:         )
- 90:         # Verify connectivity
- 91:         await self._driver.verify_connectivity()
- 92: 
- 93:         # Create indexes for performance
- 94:         await self._create_indexes()
- 95:         logger.info("Connected to Neo4j")
- 96: 
- 97:     async def disconnect(self) -> None:
- 98:         """Close Neo4j connections."""
- 99:         if self._driver is not None:
-100:             logger.info("Disconnecting from Neo4j...")
-101:             await self._driver.close()
-102:             self._driver = None
-103:             logger.info("Disconnected from Neo4j")
-104: 
-105:     async def is_healthy(self) -> bool:
-106:         """Check if the backend is healthy and connected."""
-107:         if self._driver is None:
-108:             return False
-109:         try:
-110:             await self._driver.verify_connectivity()
-111:             return True
-112:         except Exception as e:
-113:             logger.error(f"Neo4j health check failed: {e}")
-114:             return False
-115: 
-116:     async def _create_indexes(self) -> None:
-117:         """Create indexes for common queries."""
-118:         if self._driver is None:
-119:             return
-120: 
-121:         indexes = [
-122:             # Entity indexes
-123:             "CREATE INDEX entity_id IF NOT EXISTS FOR (e:Entity) ON (e.id)",
-124:             "CREATE INDEX entity_namespace IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id)",
-125:             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
-126:             "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
-127:             # Episode indexes
-128:             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
-129:             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
-130:             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
-131:         ]
-132: 
-133:         async with self._driver.session(database=self._database) as session:
-134:             for index in indexes:
-135:                 try:
-136:                     await session.run(index)
-137:                 except Exception as e:
-138:                     logger.debug(f"Index creation: {e}")
-139: 
-140:     def _get_driver(self) -> AsyncDriver:
-141:         """Get the Neo4j driver."""
-142:         if self._driver is None:
-143:             raise RuntimeError("Backend not connected. Call connect() first.")
-144:         return self._driver
-145: 
-146:     # =========================================================================
-147:     # Entity operations
-148:     # =========================================================================
-149: 
-150:     async def create_entity(self, entity: Entity) -> Entity:
-151:         """Create an entity node in the graph."""
-152:         driver = self._get_driver()
-153: 
-154:         async def _create(tx: AsyncManagedTransaction) -> None:
-155:             query = """
-156:             CREATE (e:Entity {
-157:                 id: $id,
-158:                 namespace_id: $namespace_id,
-159:                 name: $name,
-160:                 entity_type: $entity_type,
-161:                 description: $description,
-162:                 attributes: $attributes,
-163:                 source_document_ids: $source_document_ids,
-164:                 source_chunk_ids: $source_chunk_ids,
-165:                 mention_count: $mention_count,
-166:                 valid_from: $valid_from,
-167:                 valid_until: $valid_until,
-168:                 confidence: $confidence,
-169:                 metadata: $metadata,
-170:                 created_at: $created_at,
-171:                 updated_at: $updated_at
-172:             })
-173:             """
-174:             await tx.run(
-175:                 query,
-176:                 id=str(entity.id),
-177:                 namespace_id=str(entity.namespace_id),
-178:                 name=entity.name,
-179:                 entity_type=(
-180:                     entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
-181:                 ),
-182:                 description=entity.description,
-183:                 attributes=_serialize_dict(entity.attributes),
-184:                 source_document_ids=[str(d) for d in entity.source_document_ids],
-185:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-186:                 mention_count=entity.mention_count,
-187:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
-188:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
-189:                 confidence=entity.confidence,
-190:                 metadata=_serialize_dict(entity.metadata),
-191:                 created_at=entity.created_at.isoformat(),
-192:                 updated_at=entity.updated_at.isoformat(),
-193:             )
-194: 
-195:         async with driver.session(database=self._database) as session:
-196:             await session.execute_write(_create)
-197: 
-198:         return entity
-199: 
-200:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-201:         """Get an entity by ID."""
-202:         driver = self._get_driver()
-203: 
-204:         async with driver.session(database=self._database) as session:
-205:             result = await session.run(
-206:                 "MATCH (e:Entity {id: $id}) RETURN e",
-207:                 id=str(entity_id),
-208:             )
-209:             record = await result.single()
-210:             if record:
-211:                 return self._record_to_entity(record["e"])
-212:             return None
-213: 
-214:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
-215:         """Get an entity by name and type (for deduplication)."""
-216:         driver = self._get_driver()
-217: 
-218:         async with driver.session(database=self._database) as session:
-219:             result = await session.run(
-220:                 """
-221:                 MATCH (e:Entity {namespace_id: $namespace_id, name: $name, entity_type: $entity_type})
-222:                 RETURN e
-223:                 LIMIT 1
-224:                 """,
-225:                 namespace_id=str(namespace_id),
-226:                 name=name,
-227:                 entity_type=entity_type,
-228:             )
-229:             record = await result.single()
-230:             if record:
-231:                 return self._record_to_entity(record["e"])
-232:             return None
-233: 
-234:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-235:         """Fetch multiple entities in a single query.
-236: 
-237:         Args:
-238:             entity_ids: List of entity IDs to fetch
-239: 
-240:         Returns:
-241:             Dictionary mapping entity ID to Entity object
-242:         """
-243:         if not entity_ids:
-244:             return {}
-245: 
-246:         driver = self._get_driver()
-247:         id_strings = [str(eid) for eid in entity_ids]
-248: 
-249:         async with driver.session(database=self._database) as session:
-250:             result = await session.run(
-251:                 """
-252:                 MATCH (e:Entity)
-253:                 WHERE e.id IN $ids
-254:                 RETURN e
-255:                 """,
-256:                 ids=id_strings,
-257:             )
-258:             records = await result.data()
-259:             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
-260: 
-261:     async def update_entity(self, entity: Entity) -> Entity:
-262:         """Update an entity."""
-263:         driver = self._get_driver()
-264: 
-265:         async def _update(tx: AsyncManagedTransaction) -> None:
-266:             query = """
-267:             MATCH (e:Entity {id: $id})
-268:             SET e.name = $name,
-269:                 e.description = $description,
-270:                 e.attributes = $attributes,
-271:                 e.source_document_ids = $source_document_ids,
-272:                 e.source_chunk_ids = $source_chunk_ids,
-273:                 e.mention_count = $mention_count,
-274:                 e.valid_from = $valid_from,
-275:                 e.valid_until = $valid_until,
-276:                 e.confidence = $confidence,
-277:                 e.metadata = $metadata,
-278:                 e.updated_at = $updated_at
-279:             """
-280:             await tx.run(
-281:                 query,
-282:                 id=str(entity.id),
-283:                 name=entity.name,
-284:                 description=entity.description,
-285:                 attributes=_serialize_dict(entity.attributes),
-286:                 source_document_ids=[str(d) for d in entity.source_document_ids],
-287:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-288:                 mention_count=entity.mention_count,
-289:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
-290:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
-291:                 confidence=entity.confidence,
-292:                 metadata=_serialize_dict(entity.metadata),
-293:                 updated_at=entity.updated_at.isoformat(),
-294:             )
-295: 
-296:         async with driver.session(database=self._database) as session:
-297:             await session.execute_write(_update)
-298: 
-299:         return entity
-300: 
-301:     async def delete_entity(self, entity_id: UUID) -> bool:
-302:         """Delete an entity and its relationships."""
-303:         driver = self._get_driver()
-304: 
-305:         async def _delete(tx: AsyncManagedTransaction) -> int:
-306:             result = await tx.run(
-307:                 """
-308:                 MATCH (e:Entity {id: $id})
-309:                 DETACH DELETE e
-310:                 RETURN count(e) as deleted
-311:                 """,
-312:                 id=str(entity_id),
-313:             )
-314:             record = await result.single()
-315:             return record["deleted"] if record else 0
-316: 
-317:         async with driver.session(database=self._database) as session:
-318:             deleted = await session.execute_write(_delete)
-319:             return deleted > 0
-320: 
-321:     async def list_entities(
-322:         self,
-323:         namespace_id: UUID,
-324:         *,
-325:         entity_type: str | None = None,
-326:         limit: int = 100,
-327:         offset: int = 0,
-328:     ) -> list[Entity]:
-329:         """List entities in a namespace."""
-330:         driver = self._get_driver()
-331: 
-332:         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
-333:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
-334: 
-335:         if entity_type:
-336:             query += " WHERE e.entity_type = $entity_type"
-337:             params["entity_type"] = entity_type
-338: 
-339:         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
-340:         params["offset"] = offset
-341:         params["limit"] = limit
-342: 
-343:         async with driver.session(database=self._database) as session:
-344:             result = await session.run(query, **params)
-345:             records = await result.data()
-346:             return [self._record_to_entity(r["e"]) for r in records]
-347: 
-348:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
-349:         """Convert a Neo4j node to a domain Entity."""
-350:         return Entity(
-351:             id=UUID(node["id"]),
-352:             namespace_id=UUID(node["namespace_id"]),
-353:             name=node["name"],
-354:             entity_type=EntityType(node["entity_type"]),
-355:             description=node.get("description", ""),
-356:             attributes=_deserialize_dict(node.get("attributes")),
-357:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-358:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
-359:             mention_count=node.get("mention_count", 1),
-360:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
-361:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
-362:             confidence=node.get("confidence", 1.0),
-363:             metadata=_deserialize_dict(node.get("metadata")),
-364:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
-365:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
-366:         )
-367: 
-368:     # =========================================================================
-369:     # Relationship operations
-370:     # =========================================================================
-371: 
-372:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-373:         """Create a relationship between entities."""
-374:         driver = self._get_driver()
-375: 
-376:         rel_type = (
-377:             relationship.relationship_type.value
-378:             if isinstance(relationship.relationship_type, RelationshipType)
-379:             else relationship.relationship_type
-380:         )
-381: 
-382:         async def _create(tx: AsyncManagedTransaction) -> None:
-383:             # Use dynamic relationship type
-384:             query = f"""
-385:             MATCH (source:Entity {{id: $source_id}})
-386:             MATCH (target:Entity {{id: $target_id}})
-387:             CREATE (source)-[r:{rel_type} {{
-388:                 id: $id,
-389:                 namespace_id: $namespace_id,
-390:                 description: $description,
-391:                 properties: $properties,
-392:                 source_document_ids: $source_document_ids,
-393:                 source_chunk_ids: $source_chunk_ids,
-394:                 valid_from: $valid_from,
-395:                 valid_until: $valid_until,
-396:                 confidence: $confidence,
-397:                 weight: $weight,
-398:                 metadata: $metadata,
-399:                 created_at: $created_at,
-400:                 updated_at: $updated_at
-401:             }}]->(target)
-402:             """
-403:             await tx.run(
-404:                 query,
-405:                 source_id=str(relationship.source_entity_id),
-406:                 target_id=str(relationship.target_entity_id),
-407:                 id=str(relationship.id),
-408:                 namespace_id=str(relationship.namespace_id),
-409:                 description=relationship.description,
-410:                 properties=_serialize_dict(relationship.properties),
-411:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
-412:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
-413:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
-414:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
-415:                 confidence=relationship.confidence,
-416:                 weight=relationship.weight,
-417:                 metadata=_serialize_dict(relationship.metadata),
-418:                 created_at=relationship.created_at.isoformat(),
-419:                 updated_at=relationship.updated_at.isoformat(),
-420:             )
-421: 
-422:         async with driver.session(database=self._database) as session:
-423:             await session.execute_write(_create)
-424: 
-425:         return relationship
-426: 
-427:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-428:         """Get a relationship by ID."""
-429:         driver = self._get_driver()
-430: 
-431:         async with driver.session(database=self._database) as session:
-432:             result = await session.run(
-433:                 """
-434:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
-435:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
-436:                 """,
-437:                 id=str(relationship_id),
-438:             )
-439:             record = await result.single()
-440:             if record:
-441:                 return self._record_to_relationship(
-442:                     record["r"],
-443:                     record["source_id"],
-444:                     record["target_id"],
-445:                     record["rel_type"],
-446:                 )
-447:             return None
-448: 
-449:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-450:         """Delete a relationship."""
-451:         driver = self._get_driver()
-452: 
-453:         async def _delete(tx: AsyncManagedTransaction) -> int:
-454:             result = await tx.run(
-455:                 """
-456:                 MATCH ()-[r {id: $id}]->()
-457:                 DELETE r
-458:                 RETURN count(r) as deleted
-459:                 """,
-460:                 id=str(relationship_id),
-461:             )
-462:             record = await result.single()
-463:             return record["deleted"] if record else 0
-464: 
-465:         async with driver.session(database=self._database) as session:
-466:             deleted = await session.execute_write(_delete)
-467:             return deleted > 0
-468: 
-469:     async def get_entity_relationships(
-470:         self,
-471:         entity_id: UUID,
-472:         *,
-473:         direction: str = "both",
-474:         relationship_types: list[str] | None = None,
-475:         limit: int = 100,
-476:     ) -> list[Relationship]:
-477:         """Get relationships for an entity."""
-478:         driver = self._get_driver()
-479: 
-480:         # Build relationship type filter
-481:         rel_filter = ""
-482:         if relationship_types:
-483:             rel_filter = ":" + "|".join(relationship_types)
-484: 
-485:         # Build direction query
-486:         if direction == "outgoing":
-487:             pattern = f"(e)-[r{rel_filter}]->(other)"
-488:         elif direction == "incoming":
-489:             pattern = f"(other)-[r{rel_filter}]->(e)"
-490:         else:  # both
-491:             pattern = f"(e)-[r{rel_filter}]-(other)"
-492: 
-493:         query = f"""
-494:         MATCH {pattern}
-495:         WHERE e.id = $entity_id
-496:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
-497:         LIMIT $limit
-498:         """
-499: 
-500:         async with driver.session(database=self._database) as session:
-501:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
-502:             records = await result.data()
-503:             return [
-504:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
-505:             ]
-506: 
-507:     def _record_to_relationship(
-508:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
-509:     ) -> Relationship:
-510:         """Convert a Neo4j relationship to a domain Relationship."""
-511:         return Relationship(
-512:             id=UUID(rel["id"]),
-513:             namespace_id=UUID(rel["namespace_id"]),
-514:             source_entity_id=UUID(source_id),
-515:             target_entity_id=UUID(target_id),
-516:             relationship_type=(
-517:                 RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else RelationshipType.CUSTOM
-518:             ),
-519:             description=rel.get("description", ""),
-520:             properties=_deserialize_dict(rel.get("properties")),
-521:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
-522:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
-523:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
-524:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
-525:             confidence=rel.get("confidence", 1.0),
-526:             weight=rel.get("weight", 1.0),
-527:             metadata=_deserialize_dict(rel.get("metadata")),
-528:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
-529:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
-530:         )
-531: 
-532:     async def list_relationships(
-533:         self,
-534:         namespace_id: UUID,
-535:         *,
-536:         relationship_type: str | None = None,
-537:         limit: int = 1000,
-538:         offset: int = 0,
-539:     ) -> list[Relationship]:
-540:         """List all relationships in a namespace."""
-541:         driver = self._get_driver()
-542: 
-543:         # Build relationship type filter
-544:         rel_filter = f":{relationship_type}" if relationship_type else ""
-545: 
-546:         query = f"""
-547:         MATCH (source)-[r{rel_filter}]->(target)
-548:         WHERE r.namespace_id = $namespace_id
-549:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
-550:         ORDER BY r.created_at DESC
-551:         SKIP $offset
-552:         LIMIT $limit
-553:         """
-554: 
-555:         async with driver.session(database=self._database) as session:
-556:             result = await session.run(
-557:                 query,
-558:                 namespace_id=str(namespace_id),
-559:                 offset=offset,
-560:                 limit=limit,
-561:             )
-562:             records = await result.data()
-563:             return [
-564:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
-565:                 for r in records
-566:             ]
-567: 
-568:     # =========================================================================
-569:     # Episode operations
-570:     # =========================================================================
-571: 
-572:     async def create_episode(self, episode: Episode) -> Episode:
-573:         """Create an episode node."""
-574:         driver = self._get_driver()
-575: 
-576:         async def _create(tx: AsyncManagedTransaction) -> None:
-577:             query = """
-578:             CREATE (ep:Episode {
-579:                 id: $id,
-580:                 namespace_id: $namespace_id,
-581:                 name: $name,
-582:                 description: $description,
-583:                 occurred_at: $occurred_at,
-584:                 duration_seconds: $duration_seconds,
-585:                 entity_ids: $entity_ids,
-586:                 source_document_ids: $source_document_ids,
-587:                 source_chunk_ids: $source_chunk_ids,
-588:                 metadata: $metadata,
-589:                 created_at: $created_at,
-590:                 updated_at: $updated_at
-591:             })
-592:             """
-593:             await tx.run(
-594:                 query,
-595:                 id=str(episode.id),
-596:                 namespace_id=str(episode.namespace_id),
-597:                 name=episode.name,
-598:                 description=episode.description,
-599:                 occurred_at=episode.occurred_at.isoformat(),
-600:                 duration_seconds=episode.duration_seconds,
-601:                 entity_ids=[str(e) for e in episode.entity_ids],
-602:                 source_document_ids=[str(d) for d in episode.source_document_ids],
-603:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
-604:                 metadata=_serialize_dict(episode.metadata),
-605:                 created_at=episode.created_at.isoformat(),
-606:                 updated_at=episode.updated_at.isoformat(),
-607:             )
-608: 
-609:             # Create links to entities
-610:             if episode.entity_ids:
-611:                 link_query = """
-612:                 MATCH (ep:Episode {id: $episode_id})
-613:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
-614:                 CREATE (ep)-[:INVOLVES]->(e)
-615:                 """
-616:                 await tx.run(
-617:                     link_query,
-618:                     episode_id=str(episode.id),
-619:                     entity_ids=[str(e) for e in episode.entity_ids],
-620:                 )
-621: 
-622:         async with driver.session(database=self._database) as session:
-623:             await session.execute_write(_create)
-624: 
-625:         return episode
-626: 
-627:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-628:         """Get an episode by ID."""
-629:         driver = self._get_driver()
-630: 
-631:         async with driver.session(database=self._database) as session:
-632:             result = await session.run(
-633:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
-634:                 id=str(episode_id),
-635:             )
-636:             record = await result.single()
-637:             if record:
-638:                 return self._record_to_episode(record["ep"])
-639:             return None
-640: 
-641:     async def list_episodes(
-642:         self,
-643:         namespace_id: UUID,
-644:         *,
-645:         start_time: datetime | None = None,
-646:         end_time: datetime | None = None,
-647:         limit: int = 100,
-648:     ) -> list[Episode]:
-649:         """List episodes in a time range."""
-650:         driver = self._get_driver()
-651: 
-652:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
-653:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
-654:         conditions = []
-655: 
-656:         if start_time:
-657:             conditions.append("ep.occurred_at >= $start_time")
-658:             params["start_time"] = start_time.isoformat()
-659:         if end_time:
-660:             conditions.append("ep.occurred_at <= $end_time")
-661:             params["end_time"] = end_time.isoformat()
-662: 
-663:         if conditions:
-664:             query += " WHERE " + " AND ".join(conditions)
-665: 
-666:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
-667:         params["limit"] = limit
-668: 
-669:         async with driver.session(database=self._database) as session:
-670:             result = await session.run(query, **params)
-671:             records = await result.data()
-672:             return [self._record_to_episode(r["ep"]) for r in records]
-673: 
-674:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
-675:         """Convert a Neo4j node to a domain Episode."""
-676:         return Episode(
-677:             id=UUID(node["id"]),
-678:             namespace_id=UUID(node["namespace_id"]),
-679:             name=node["name"],
-680:             description=node.get("description", ""),
-681:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
-682:             duration_seconds=node.get("duration_seconds"),
-683:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
-684:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-685:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
-686:             metadata=_deserialize_dict(node.get("metadata")),
-687:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
-688:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
-689:         )
-690: 
-691:     # =========================================================================
-692:     # Graph traversal
-693:     # =========================================================================
-694: 
-695:     async def find_paths(
-696:         self,
-697:         namespace_id: UUID,
-698:         source_entity_id: UUID,
-699:         target_entity_id: UUID,
-700:         *,
-701:         max_depth: int = 3,
-702:         relationship_types: list[str] | None = None,
-703:     ) -> list[list[dict[str, Any]]]:
-704:         """Find paths between two entities."""
-705:         driver = self._get_driver()
-706: 
-707:         rel_filter = ""
-708:         if relationship_types:
-709:             rel_filter = ":" + "|".join(relationship_types)
-710: 
-711:         query = f"""
-712:         MATCH path = shortestPath(
-713:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
-714:         )
-715:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
-716:         RETURN path
-717:         LIMIT 10
-718:         """
-719: 
-720:         async with driver.session(database=self._database) as session:
-721:             result = await session.run(
-722:                 query,
-723:                 source_id=str(source_entity_id),
-724:                 target_id=str(target_entity_id),
-725:                 namespace_id=str(namespace_id),
-726:             )
-727:             records = await result.data()
-728: 
-729:             paths = []
-730:             for record in records:
-731:                 path = record["path"]
-732:                 path_elements = []
-733:                 for element in path:
-734:                     if hasattr(element, "items"):  # Node
-735:                         path_elements.append({"type": "node", "data": dict(element)})
-736:                     else:  # Relationship
-737:                         path_elements.append({"type": "relationship", "data": dict(element)})
-738:                 paths.append(path_elements)
-739: 
-740:             return paths
-741: 
-742:     async def get_neighborhood(
-743:         self,
-744:         entity_id: UUID,
-745:         *,
-746:         depth: int = 1,
-747:         relationship_types: list[str] | None = None,
-748:         limit: int = 50,
-749:     ) -> dict[str, Any]:
-750:         """Get the neighborhood of an entity up to a certain depth."""
-751:         driver = self._get_driver()
-752: 
-753:         rel_filter = ""
-754:         if relationship_types:
-755:             rel_filter = ":" + "|".join(relationship_types)
-756: 
-757:         query = f"""
-758:         MATCH (center:Entity {{id: $entity_id}})
-759:         CALL apoc.path.subgraphAll(center, {{
-760:             maxLevel: {depth},
-761:             relationshipFilter: '{rel_filter.lstrip(":")}',
-762:             limit: $limit
-763:         }})
-764:         YIELD nodes, relationships
-765:         RETURN nodes, relationships
-766:         """
-767: 
-768:         # Fallback query if APOC is not available
-769:         fallback_query = f"""
-770:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
-771:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
-772:         LIMIT $limit
-773:         """
-774: 
-775:         async with driver.session(database=self._database) as session:
-776:             try:
-777:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
-778:                 record = await result.single()
-779:             except Exception:
-780:                 # Fallback if APOC not available
-781:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
-782:                 record = await result.single()
-783: 
-784:             if record:
-785:                 nodes = [dict(n) for n in record.get("nodes", [])]
-786:                 relationships = [dict(r) for r in record.get("relationships", [])]
-787:                 return {"entities": nodes, "relationships": relationships}
-788: 
-789:             return {"entities": [], "relationships": []}
-790: 
-791:     async def get_neighborhoods_batch(
-792:         self,
-793:         entity_ids: list[UUID],
-794:         *,
-795:         depth: int = 1,
-796:         relationship_types: list[str] | None = None,
-797:         limit_per_entity: int = 20,
-798:     ) -> dict[UUID, dict[str, Any]]:
-799:         """Get neighborhoods for multiple entities in parallel.
-800: 
-801:         Args:
-802:             entity_ids: List of entity IDs
-803:             depth: Max traversal depth
-804:             relationship_types: Optional relationship type filter
-805:             limit_per_entity: Max nodes per entity neighborhood
-806: 
-807:         Returns:
-808:             Dictionary mapping entity ID to neighborhood data
-809:         """
-810:         if not entity_ids:
-811:             return {}
-812: 
-813:         driver = self._get_driver()
-814:         id_strings = [str(eid) for eid in entity_ids]
-815: 
-816:         rel_filter = ""
-817:         if relationship_types:
-818:             rel_filter = ":" + "|".join(relationship_types)
-819: 
-820:         # Use UNWIND to process all entities in a single query
-821:         query = f"""
-822:         UNWIND $entity_ids AS eid
-823:         MATCH (center:Entity {{id: eid}})
-824:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-825:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
-826:         RETURN eid, neighbors, rels
-827:         """
-828: 
-829:         async with driver.session(database=self._database) as session:
-830:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
-831:             records = await result.data()
-832: 
-833:             neighborhoods = {}
-834:             for record in records:
-835:                 eid = UUID(record["eid"])
-836:                 nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
-837:                 relationships = []
-838:                 for rel_list in record.get("rels") or []:
-839:                     if rel_list:
-840:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
-841:                             if r:
-842:                                 relationships.append(dict(r))
-843:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
-844: 
-845:             return neighborhoods
-846: 
-847:     async def search_entities_by_attribute(
-848:         self,
-849:         namespace_id: UUID,
-850:         attribute_name: str,
-851:         attribute_value: Any,
-852:         *,
-853:         limit: int = 100,
-854:     ) -> list[Entity]:
-855:         """Search entities by attribute value."""
-856:         driver = self._get_driver()
-857: 
-858:         query = """
-859:         MATCH (e:Entity {namespace_id: $namespace_id})
-860:         WHERE e.attributes[$attribute_name] = $attribute_value
-861:         RETURN e
-862:         LIMIT $limit
-863:         """
-864: 
-865:         async with driver.session(database=self._database) as session:
-866:             result = await session.run(
-867:                 query,
-868:                 namespace_id=str(namespace_id),
-869:                 attribute_name=attribute_name,
-870:                 attribute_value=attribute_value,
-871:                 limit=limit,
-872:             )
-873:             records = await result.data()
-874:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
 ## File: tests/unit/test_api.py
@@ -22100,6 +21464,884 @@ README.md
 1131:         )
 ````
 
+## File: src/khora/storage/backends/neo4j.py
+````python
+  1: """Neo4j backend for knowledge graph storage.
+  2: 
+  3: Handles storage and traversal of entities, relationships, and episodes
+  4: in Neo4j graph database.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: import json
+ 10: from datetime import datetime
+ 11: from typing import Any
+ 12: from uuid import UUID
+ 13: 
+ 14: from loguru import logger
+ 15: from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
+ 16: 
+ 17: from khora.core.models import Entity, Episode, Relationship
+ 18: from khora.core.models.entity import EntityType, RelationshipType
+ 19: 
+ 20: 
+ 21: def _serialize_dict(value: dict[str, Any] | None) -> str | None:
+ 22:     """Serialize a dict to JSON string for Neo4j storage.
+ 23: 
+ 24:     Neo4j property values can only be primitive types or arrays thereof,
+ 25:     not nested objects. We serialize dicts to JSON strings.
+ 26:     """
+ 27:     if value is None:
+ 28:         return None
+ 29:     return json.dumps(value)
+ 30: 
+ 31: 
+ 32: def _deserialize_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
+ 33:     """Deserialize a JSON string back to dict.
+ 34: 
+ 35:     Handles both string (new format) and dict (legacy) values.
+ 36:     """
+ 37:     if value is None:
+ 38:         return {}
+ 39:     if isinstance(value, dict):
+ 40:         return value
+ 41:     try:
+ 42:         return json.loads(value)
+ 43:     except (json.JSONDecodeError, TypeError):
+ 44:         return {}
+ 45: 
+ 46: 
+ 47: class Neo4jBackend:
+ 48:     """Neo4j backend for knowledge graph operations.
+ 49: 
+ 50:     Stores entities as nodes and relationships as edges in Neo4j,
+ 51:     enabling efficient graph traversal and pattern matching.
+ 52:     """
+ 53: 
+ 54:     def __init__(
+ 55:         self,
+ 56:         url: str,
+ 57:         *,
+ 58:         user: str = "neo4j",
+ 59:         password: str = "",
+ 60:         database: str = "neo4j",
+ 61:         max_connection_pool_size: int = 50,
+ 62:     ) -> None:
+ 63:         """Initialize the Neo4j backend.
+ 64: 
+ 65:         Args:
+ 66:             url: Neo4j connection URL (bolt:// or neo4j://)
+ 67:             user: Database user
+ 68:             password: Database password
+ 69:             database: Database name
+ 70:             max_connection_pool_size: Maximum connection pool size
+ 71:         """
+ 72:         self._url = url
+ 73:         self._user = user
+ 74:         self._password = password
+ 75:         self._database = database
+ 76:         self._max_connection_pool_size = max_connection_pool_size
+ 77:         self._driver: AsyncDriver | None = None
+ 78: 
+ 79:     async def connect(self) -> None:
+ 80:         """Establish connection to Neo4j."""
+ 81:         if self._driver is not None:
+ 82:             return
+ 83: 
+ 84:         logger.info(f"Connecting to Neo4j at {self._url}...")
+ 85:         self._driver = AsyncGraphDatabase.driver(
+ 86:             self._url,
+ 87:             auth=(self._user, self._password),
+ 88:             max_connection_pool_size=self._max_connection_pool_size,
+ 89:         )
+ 90:         # Verify connectivity
+ 91:         await self._driver.verify_connectivity()
+ 92: 
+ 93:         # Create indexes for performance
+ 94:         await self._create_indexes()
+ 95:         logger.info("Connected to Neo4j")
+ 96: 
+ 97:     async def disconnect(self) -> None:
+ 98:         """Close Neo4j connections."""
+ 99:         if self._driver is not None:
+100:             logger.info("Disconnecting from Neo4j...")
+101:             await self._driver.close()
+102:             self._driver = None
+103:             logger.info("Disconnected from Neo4j")
+104: 
+105:     async def is_healthy(self) -> bool:
+106:         """Check if the backend is healthy and connected."""
+107:         if self._driver is None:
+108:             return False
+109:         try:
+110:             await self._driver.verify_connectivity()
+111:             return True
+112:         except Exception as e:
+113:             logger.error(f"Neo4j health check failed: {e}")
+114:             return False
+115: 
+116:     async def _create_indexes(self) -> None:
+117:         """Create indexes for common queries."""
+118:         if self._driver is None:
+119:             return
+120: 
+121:         indexes = [
+122:             # Entity indexes
+123:             "CREATE INDEX entity_id IF NOT EXISTS FOR (e:Entity) ON (e.id)",
+124:             "CREATE INDEX entity_namespace IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id)",
+125:             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
+126:             "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
+127:             # Episode indexes
+128:             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
+129:             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
+130:             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
+131:         ]
+132: 
+133:         async with self._driver.session(database=self._database) as session:
+134:             for index in indexes:
+135:                 try:
+136:                     await session.run(index)
+137:                 except Exception as e:
+138:                     logger.debug(f"Index creation: {e}")
+139: 
+140:     def _get_driver(self) -> AsyncDriver:
+141:         """Get the Neo4j driver."""
+142:         if self._driver is None:
+143:             raise RuntimeError("Backend not connected. Call connect() first.")
+144:         return self._driver
+145: 
+146:     # =========================================================================
+147:     # Entity operations
+148:     # =========================================================================
+149: 
+150:     async def create_entity(self, entity: Entity) -> Entity:
+151:         """Create an entity node in the graph."""
+152:         driver = self._get_driver()
+153: 
+154:         async def _create(tx: AsyncManagedTransaction) -> None:
+155:             query = """
+156:             CREATE (e:Entity {
+157:                 id: $id,
+158:                 namespace_id: $namespace_id,
+159:                 name: $name,
+160:                 entity_type: $entity_type,
+161:                 description: $description,
+162:                 attributes: $attributes,
+163:                 source_document_ids: $source_document_ids,
+164:                 source_chunk_ids: $source_chunk_ids,
+165:                 mention_count: $mention_count,
+166:                 valid_from: $valid_from,
+167:                 valid_until: $valid_until,
+168:                 confidence: $confidence,
+169:                 metadata: $metadata,
+170:                 created_at: $created_at,
+171:                 updated_at: $updated_at
+172:             })
+173:             """
+174:             await tx.run(
+175:                 query,
+176:                 id=str(entity.id),
+177:                 namespace_id=str(entity.namespace_id),
+178:                 name=entity.name,
+179:                 entity_type=(
+180:                     entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
+181:                 ),
+182:                 description=entity.description,
+183:                 attributes=_serialize_dict(entity.attributes),
+184:                 source_document_ids=[str(d) for d in entity.source_document_ids],
+185:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+186:                 mention_count=entity.mention_count,
+187:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
+188:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
+189:                 confidence=entity.confidence,
+190:                 metadata=_serialize_dict(entity.metadata),
+191:                 created_at=entity.created_at.isoformat(),
+192:                 updated_at=entity.updated_at.isoformat(),
+193:             )
+194: 
+195:         async with driver.session(database=self._database) as session:
+196:             await session.execute_write(_create)
+197: 
+198:         return entity
+199: 
+200:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+201:         """Get an entity by ID."""
+202:         driver = self._get_driver()
+203: 
+204:         async with driver.session(database=self._database) as session:
+205:             result = await session.run(
+206:                 "MATCH (e:Entity {id: $id}) RETURN e",
+207:                 id=str(entity_id),
+208:             )
+209:             record = await result.single()
+210:             if record:
+211:                 return self._record_to_entity(record["e"])
+212:             return None
+213: 
+214:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+215:         """Get an entity by name and type (for deduplication)."""
+216:         driver = self._get_driver()
+217: 
+218:         async with driver.session(database=self._database) as session:
+219:             result = await session.run(
+220:                 """
+221:                 MATCH (e:Entity {namespace_id: $namespace_id, name: $name, entity_type: $entity_type})
+222:                 RETURN e
+223:                 LIMIT 1
+224:                 """,
+225:                 namespace_id=str(namespace_id),
+226:                 name=name,
+227:                 entity_type=entity_type,
+228:             )
+229:             record = await result.single()
+230:             if record:
+231:                 return self._record_to_entity(record["e"])
+232:             return None
+233: 
+234:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+235:         """Fetch multiple entities in a single query.
+236: 
+237:         Args:
+238:             entity_ids: List of entity IDs to fetch
+239: 
+240:         Returns:
+241:             Dictionary mapping entity ID to Entity object
+242:         """
+243:         if not entity_ids:
+244:             return {}
+245: 
+246:         driver = self._get_driver()
+247:         id_strings = [str(eid) for eid in entity_ids]
+248: 
+249:         async with driver.session(database=self._database) as session:
+250:             result = await session.run(
+251:                 """
+252:                 MATCH (e:Entity)
+253:                 WHERE e.id IN $ids
+254:                 RETURN e
+255:                 """,
+256:                 ids=id_strings,
+257:             )
+258:             records = await result.data()
+259:             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
+260: 
+261:     async def update_entity(self, entity: Entity) -> Entity:
+262:         """Update an entity."""
+263:         driver = self._get_driver()
+264: 
+265:         async def _update(tx: AsyncManagedTransaction) -> None:
+266:             query = """
+267:             MATCH (e:Entity {id: $id})
+268:             SET e.name = $name,
+269:                 e.description = $description,
+270:                 e.attributes = $attributes,
+271:                 e.source_document_ids = $source_document_ids,
+272:                 e.source_chunk_ids = $source_chunk_ids,
+273:                 e.mention_count = $mention_count,
+274:                 e.valid_from = $valid_from,
+275:                 e.valid_until = $valid_until,
+276:                 e.confidence = $confidence,
+277:                 e.metadata = $metadata,
+278:                 e.updated_at = $updated_at
+279:             """
+280:             await tx.run(
+281:                 query,
+282:                 id=str(entity.id),
+283:                 name=entity.name,
+284:                 description=entity.description,
+285:                 attributes=_serialize_dict(entity.attributes),
+286:                 source_document_ids=[str(d) for d in entity.source_document_ids],
+287:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+288:                 mention_count=entity.mention_count,
+289:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
+290:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
+291:                 confidence=entity.confidence,
+292:                 metadata=_serialize_dict(entity.metadata),
+293:                 updated_at=entity.updated_at.isoformat(),
+294:             )
+295: 
+296:         async with driver.session(database=self._database) as session:
+297:             await session.execute_write(_update)
+298: 
+299:         return entity
+300: 
+301:     async def delete_entity(self, entity_id: UUID) -> bool:
+302:         """Delete an entity and its relationships."""
+303:         driver = self._get_driver()
+304: 
+305:         async def _delete(tx: AsyncManagedTransaction) -> int:
+306:             result = await tx.run(
+307:                 """
+308:                 MATCH (e:Entity {id: $id})
+309:                 DETACH DELETE e
+310:                 RETURN count(e) as deleted
+311:                 """,
+312:                 id=str(entity_id),
+313:             )
+314:             record = await result.single()
+315:             return record["deleted"] if record else 0
+316: 
+317:         async with driver.session(database=self._database) as session:
+318:             deleted = await session.execute_write(_delete)
+319:             return deleted > 0
+320: 
+321:     async def list_entities(
+322:         self,
+323:         namespace_id: UUID,
+324:         *,
+325:         entity_type: str | None = None,
+326:         limit: int = 100,
+327:         offset: int = 0,
+328:     ) -> list[Entity]:
+329:         """List entities in a namespace."""
+330:         driver = self._get_driver()
+331: 
+332:         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
+333:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+334: 
+335:         if entity_type:
+336:             query += " WHERE e.entity_type = $entity_type"
+337:             params["entity_type"] = entity_type
+338: 
+339:         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
+340:         params["offset"] = offset
+341:         params["limit"] = limit
+342: 
+343:         async with driver.session(database=self._database) as session:
+344:             result = await session.run(query, **params)
+345:             records = await result.data()
+346:             return [self._record_to_entity(r["e"]) for r in records]
+347: 
+348:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
+349:         """Convert a Neo4j node to a domain Entity."""
+350:         return Entity(
+351:             id=UUID(node["id"]),
+352:             namespace_id=UUID(node["namespace_id"]),
+353:             name=node["name"],
+354:             entity_type=EntityType(node["entity_type"]),
+355:             description=node.get("description", ""),
+356:             attributes=_deserialize_dict(node.get("attributes")),
+357:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+358:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+359:             mention_count=node.get("mention_count", 1),
+360:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
+361:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
+362:             confidence=node.get("confidence", 1.0),
+363:             metadata=_deserialize_dict(node.get("metadata")),
+364:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+365:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+366:         )
+367: 
+368:     # =========================================================================
+369:     # Relationship operations
+370:     # =========================================================================
+371: 
+372:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+373:         """Create a relationship between entities."""
+374:         driver = self._get_driver()
+375: 
+376:         rel_type = (
+377:             relationship.relationship_type.value
+378:             if isinstance(relationship.relationship_type, RelationshipType)
+379:             else relationship.relationship_type
+380:         )
+381: 
+382:         async def _create(tx: AsyncManagedTransaction) -> None:
+383:             # Use dynamic relationship type
+384:             query = f"""
+385:             MATCH (source:Entity {{id: $source_id}})
+386:             MATCH (target:Entity {{id: $target_id}})
+387:             CREATE (source)-[r:{rel_type} {{
+388:                 id: $id,
+389:                 namespace_id: $namespace_id,
+390:                 description: $description,
+391:                 properties: $properties,
+392:                 source_document_ids: $source_document_ids,
+393:                 source_chunk_ids: $source_chunk_ids,
+394:                 valid_from: $valid_from,
+395:                 valid_until: $valid_until,
+396:                 confidence: $confidence,
+397:                 weight: $weight,
+398:                 metadata: $metadata,
+399:                 created_at: $created_at,
+400:                 updated_at: $updated_at
+401:             }}]->(target)
+402:             """
+403:             await tx.run(
+404:                 query,
+405:                 source_id=str(relationship.source_entity_id),
+406:                 target_id=str(relationship.target_entity_id),
+407:                 id=str(relationship.id),
+408:                 namespace_id=str(relationship.namespace_id),
+409:                 description=relationship.description,
+410:                 properties=_serialize_dict(relationship.properties),
+411:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
+412:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
+413:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
+414:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
+415:                 confidence=relationship.confidence,
+416:                 weight=relationship.weight,
+417:                 metadata=_serialize_dict(relationship.metadata),
+418:                 created_at=relationship.created_at.isoformat(),
+419:                 updated_at=relationship.updated_at.isoformat(),
+420:             )
+421: 
+422:         async with driver.session(database=self._database) as session:
+423:             await session.execute_write(_create)
+424: 
+425:         return relationship
+426: 
+427:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+428:         """Get a relationship by ID."""
+429:         driver = self._get_driver()
+430: 
+431:         async with driver.session(database=self._database) as session:
+432:             result = await session.run(
+433:                 """
+434:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
+435:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+436:                 """,
+437:                 id=str(relationship_id),
+438:             )
+439:             record = await result.single()
+440:             if record:
+441:                 return self._record_to_relationship(
+442:                     record["r"],
+443:                     record["source_id"],
+444:                     record["target_id"],
+445:                     record["rel_type"],
+446:                 )
+447:             return None
+448: 
+449:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+450:         """Delete a relationship."""
+451:         driver = self._get_driver()
+452: 
+453:         async def _delete(tx: AsyncManagedTransaction) -> int:
+454:             result = await tx.run(
+455:                 """
+456:                 MATCH ()-[r {id: $id}]->()
+457:                 DELETE r
+458:                 RETURN count(r) as deleted
+459:                 """,
+460:                 id=str(relationship_id),
+461:             )
+462:             record = await result.single()
+463:             return record["deleted"] if record else 0
+464: 
+465:         async with driver.session(database=self._database) as session:
+466:             deleted = await session.execute_write(_delete)
+467:             return deleted > 0
+468: 
+469:     async def get_entity_relationships(
+470:         self,
+471:         entity_id: UUID,
+472:         *,
+473:         direction: str = "both",
+474:         relationship_types: list[str] | None = None,
+475:         limit: int = 100,
+476:     ) -> list[Relationship]:
+477:         """Get relationships for an entity."""
+478:         driver = self._get_driver()
+479: 
+480:         # Build relationship type filter
+481:         rel_filter = ""
+482:         if relationship_types:
+483:             rel_filter = ":" + "|".join(relationship_types)
+484: 
+485:         # Build direction query
+486:         if direction == "outgoing":
+487:             pattern = f"(e)-[r{rel_filter}]->(other)"
+488:         elif direction == "incoming":
+489:             pattern = f"(other)-[r{rel_filter}]->(e)"
+490:         else:  # both
+491:             pattern = f"(e)-[r{rel_filter}]-(other)"
+492: 
+493:         query = f"""
+494:         MATCH {pattern}
+495:         WHERE e.id = $entity_id
+496:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
+497:         LIMIT $limit
+498:         """
+499: 
+500:         async with driver.session(database=self._database) as session:
+501:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
+502:             records = await result.data()
+503:             return [
+504:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+505:             ]
+506: 
+507:     def _record_to_relationship(
+508:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
+509:     ) -> Relationship:
+510:         """Convert a Neo4j relationship to a domain Relationship."""
+511:         return Relationship(
+512:             id=UUID(rel["id"]),
+513:             namespace_id=UUID(rel["namespace_id"]),
+514:             source_entity_id=UUID(source_id),
+515:             target_entity_id=UUID(target_id),
+516:             relationship_type=(
+517:                 RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else RelationshipType.CUSTOM
+518:             ),
+519:             description=rel.get("description", ""),
+520:             properties=_deserialize_dict(rel.get("properties")),
+521:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
+522:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
+523:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
+524:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
+525:             confidence=rel.get("confidence", 1.0),
+526:             weight=rel.get("weight", 1.0),
+527:             metadata=_deserialize_dict(rel.get("metadata")),
+528:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
+529:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
+530:         )
+531: 
+532:     async def list_relationships(
+533:         self,
+534:         namespace_id: UUID,
+535:         *,
+536:         relationship_type: str | None = None,
+537:         limit: int = 1000,
+538:         offset: int = 0,
+539:     ) -> list[Relationship]:
+540:         """List all relationships in a namespace."""
+541:         driver = self._get_driver()
+542: 
+543:         # Build relationship type filter
+544:         rel_filter = f":{relationship_type}" if relationship_type else ""
+545: 
+546:         query = f"""
+547:         MATCH (source)-[r{rel_filter}]->(target)
+548:         WHERE r.namespace_id = $namespace_id
+549:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
+550:         ORDER BY r.created_at DESC
+551:         SKIP $offset
+552:         LIMIT $limit
+553:         """
+554: 
+555:         async with driver.session(database=self._database) as session:
+556:             result = await session.run(
+557:                 query,
+558:                 namespace_id=str(namespace_id),
+559:                 offset=offset,
+560:                 limit=limit,
+561:             )
+562:             records = await result.data()
+563:             return [
+564:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
+565:                 for r in records
+566:             ]
+567: 
+568:     # =========================================================================
+569:     # Episode operations
+570:     # =========================================================================
+571: 
+572:     async def create_episode(self, episode: Episode) -> Episode:
+573:         """Create an episode node."""
+574:         driver = self._get_driver()
+575: 
+576:         async def _create(tx: AsyncManagedTransaction) -> None:
+577:             query = """
+578:             CREATE (ep:Episode {
+579:                 id: $id,
+580:                 namespace_id: $namespace_id,
+581:                 name: $name,
+582:                 description: $description,
+583:                 occurred_at: $occurred_at,
+584:                 duration_seconds: $duration_seconds,
+585:                 entity_ids: $entity_ids,
+586:                 source_document_ids: $source_document_ids,
+587:                 source_chunk_ids: $source_chunk_ids,
+588:                 metadata: $metadata,
+589:                 created_at: $created_at,
+590:                 updated_at: $updated_at
+591:             })
+592:             """
+593:             await tx.run(
+594:                 query,
+595:                 id=str(episode.id),
+596:                 namespace_id=str(episode.namespace_id),
+597:                 name=episode.name,
+598:                 description=episode.description,
+599:                 occurred_at=episode.occurred_at.isoformat(),
+600:                 duration_seconds=episode.duration_seconds,
+601:                 entity_ids=[str(e) for e in episode.entity_ids],
+602:                 source_document_ids=[str(d) for d in episode.source_document_ids],
+603:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
+604:                 metadata=_serialize_dict(episode.metadata),
+605:                 created_at=episode.created_at.isoformat(),
+606:                 updated_at=episode.updated_at.isoformat(),
+607:             )
+608: 
+609:             # Create links to entities
+610:             if episode.entity_ids:
+611:                 link_query = """
+612:                 MATCH (ep:Episode {id: $episode_id})
+613:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
+614:                 CREATE (ep)-[:INVOLVES]->(e)
+615:                 """
+616:                 await tx.run(
+617:                     link_query,
+618:                     episode_id=str(episode.id),
+619:                     entity_ids=[str(e) for e in episode.entity_ids],
+620:                 )
+621: 
+622:         async with driver.session(database=self._database) as session:
+623:             await session.execute_write(_create)
+624: 
+625:         return episode
+626: 
+627:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+628:         """Get an episode by ID."""
+629:         driver = self._get_driver()
+630: 
+631:         async with driver.session(database=self._database) as session:
+632:             result = await session.run(
+633:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
+634:                 id=str(episode_id),
+635:             )
+636:             record = await result.single()
+637:             if record:
+638:                 return self._record_to_episode(record["ep"])
+639:             return None
+640: 
+641:     async def list_episodes(
+642:         self,
+643:         namespace_id: UUID,
+644:         *,
+645:         start_time: datetime | None = None,
+646:         end_time: datetime | None = None,
+647:         limit: int = 100,
+648:     ) -> list[Episode]:
+649:         """List episodes in a time range."""
+650:         driver = self._get_driver()
+651: 
+652:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
+653:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+654:         conditions = []
+655: 
+656:         if start_time:
+657:             conditions.append("ep.occurred_at >= $start_time")
+658:             params["start_time"] = start_time.isoformat()
+659:         if end_time:
+660:             conditions.append("ep.occurred_at <= $end_time")
+661:             params["end_time"] = end_time.isoformat()
+662: 
+663:         if conditions:
+664:             query += " WHERE " + " AND ".join(conditions)
+665: 
+666:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
+667:         params["limit"] = limit
+668: 
+669:         async with driver.session(database=self._database) as session:
+670:             result = await session.run(query, **params)
+671:             records = await result.data()
+672:             return [self._record_to_episode(r["ep"]) for r in records]
+673: 
+674:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
+675:         """Convert a Neo4j node to a domain Episode."""
+676:         return Episode(
+677:             id=UUID(node["id"]),
+678:             namespace_id=UUID(node["namespace_id"]),
+679:             name=node["name"],
+680:             description=node.get("description", ""),
+681:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
+682:             duration_seconds=node.get("duration_seconds"),
+683:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
+684:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+685:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+686:             metadata=_deserialize_dict(node.get("metadata")),
+687:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+688:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+689:         )
+690: 
+691:     # =========================================================================
+692:     # Graph traversal
+693:     # =========================================================================
+694: 
+695:     async def find_paths(
+696:         self,
+697:         namespace_id: UUID,
+698:         source_entity_id: UUID,
+699:         target_entity_id: UUID,
+700:         *,
+701:         max_depth: int = 3,
+702:         relationship_types: list[str] | None = None,
+703:     ) -> list[list[dict[str, Any]]]:
+704:         """Find paths between two entities."""
+705:         driver = self._get_driver()
+706: 
+707:         rel_filter = ""
+708:         if relationship_types:
+709:             rel_filter = ":" + "|".join(relationship_types)
+710: 
+711:         query = f"""
+712:         MATCH path = shortestPath(
+713:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+714:         )
+715:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+716:         RETURN path
+717:         LIMIT 10
+718:         """
+719: 
+720:         async with driver.session(database=self._database) as session:
+721:             result = await session.run(
+722:                 query,
+723:                 source_id=str(source_entity_id),
+724:                 target_id=str(target_entity_id),
+725:                 namespace_id=str(namespace_id),
+726:             )
+727:             records = await result.data()
+728: 
+729:             paths = []
+730:             for record in records:
+731:                 path = record["path"]
+732:                 path_elements = []
+733:                 for element in path:
+734:                     if hasattr(element, "items"):  # Node
+735:                         path_elements.append({"type": "node", "data": dict(element)})
+736:                     else:  # Relationship
+737:                         path_elements.append({"type": "relationship", "data": dict(element)})
+738:                 paths.append(path_elements)
+739: 
+740:             return paths
+741: 
+742:     async def get_neighborhood(
+743:         self,
+744:         entity_id: UUID,
+745:         *,
+746:         depth: int = 1,
+747:         relationship_types: list[str] | None = None,
+748:         limit: int = 50,
+749:     ) -> dict[str, Any]:
+750:         """Get the neighborhood of an entity up to a certain depth."""
+751:         driver = self._get_driver()
+752: 
+753:         rel_filter = ""
+754:         if relationship_types:
+755:             rel_filter = ":" + "|".join(relationship_types)
+756: 
+757:         query = f"""
+758:         MATCH (center:Entity {{id: $entity_id}})
+759:         CALL apoc.path.subgraphAll(center, {{
+760:             maxLevel: {depth},
+761:             relationshipFilter: '{rel_filter.lstrip(":")}',
+762:             limit: $limit
+763:         }})
+764:         YIELD nodes, relationships
+765:         RETURN nodes, relationships
+766:         """
+767: 
+768:         # Fallback query if APOC is not available
+769:         fallback_query = f"""
+770:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+771:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+772:         LIMIT $limit
+773:         """
+774: 
+775:         async with driver.session(database=self._database) as session:
+776:             try:
+777:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
+778:                 record = await result.single()
+779:             except Exception:
+780:                 # Fallback if APOC not available
+781:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
+782:                 record = await result.single()
+783: 
+784:             if record:
+785:                 nodes = [dict(n) for n in record.get("nodes", [])]
+786:                 relationships = [dict(r) for r in record.get("relationships", [])]
+787:                 return {"entities": nodes, "relationships": relationships}
+788: 
+789:             return {"entities": [], "relationships": []}
+790: 
+791:     async def get_neighborhoods_batch(
+792:         self,
+793:         entity_ids: list[UUID],
+794:         *,
+795:         depth: int = 1,
+796:         relationship_types: list[str] | None = None,
+797:         limit_per_entity: int = 20,
+798:     ) -> dict[UUID, dict[str, Any]]:
+799:         """Get neighborhoods for multiple entities in parallel.
+800: 
+801:         Args:
+802:             entity_ids: List of entity IDs
+803:             depth: Max traversal depth
+804:             relationship_types: Optional relationship type filter
+805:             limit_per_entity: Max nodes per entity neighborhood
+806: 
+807:         Returns:
+808:             Dictionary mapping entity ID to neighborhood data
+809:         """
+810:         if not entity_ids:
+811:             return {}
+812: 
+813:         driver = self._get_driver()
+814:         id_strings = [str(eid) for eid in entity_ids]
+815: 
+816:         rel_filter = ""
+817:         if relationship_types:
+818:             rel_filter = ":" + "|".join(relationship_types)
+819: 
+820:         # Use UNWIND to process all entities in a single query
+821:         query = f"""
+822:         UNWIND $entity_ids AS eid
+823:         MATCH (center:Entity {{id: eid}})
+824:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+825:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+826:         RETURN eid, neighbors, rels
+827:         """
+828: 
+829:         async with driver.session(database=self._database) as session:
+830:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+831:             records = await result.data()
+832: 
+833:             neighborhoods = {}
+834:             for record in records:
+835:                 eid = UUID(record["eid"])
+836:                 nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
+837:                 relationships = []
+838:                 for rel_list in record.get("rels") or []:
+839:                     if rel_list:
+840:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+841:                             if r:
+842:                                 relationships.append(dict(r))
+843:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+844: 
+845:             return neighborhoods
+846: 
+847:     async def search_entities_by_attribute(
+848:         self,
+849:         namespace_id: UUID,
+850:         attribute_name: str,
+851:         attribute_value: Any,
+852:         *,
+853:         limit: int = 100,
+854:     ) -> list[Entity]:
+855:         """Search entities by attribute value."""
+856:         driver = self._get_driver()
+857: 
+858:         query = """
+859:         MATCH (e:Entity {namespace_id: $namespace_id})
+860:         WHERE e.attributes[$attribute_name] = $attribute_value
+861:         RETURN e
+862:         LIMIT $limit
+863:         """
+864: 
+865:         async with driver.session(database=self._database) as session:
+866:             result = await session.run(
+867:                 query,
+868:                 namespace_id=str(namespace_id),
+869:                 attribute_name=attribute_name,
+870:                 attribute_value=attribute_value,
+871:                 limit=limit,
+872:             )
+873:             records = await result.data()
+874:             return [self._record_to_entity(r["e"]) for r in records]
+````
+
 ## File: src/khora/__init__.py
 ````python
  1: """Khora - Deyta's memory lake and materialization of knowledge.
@@ -23325,6 +23567,13 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-01-27 11:48:52 +0100
+**Message:** fix: use properties(r) in list_relationships query
+
+**Files:**
+- REPOMIX.md
+- src/khora/storage/backends/neo4j.py
+
 ## Commit: 2026-01-27 09:38:41 +0100
 **Message:** Bump version to 0.0.5
 
@@ -23584,14 +23833,3 @@ README.md
 - REPOMIX.md
 - src/khora/config/schema.py
 - src/khora/memory_lake.py
-
-## Commit: 2026-01-26 08:31:24 +0100
-**Message:** Add comprehensive documentation and repomix integration
-
-**Files:**
-- .pre-commit-config.yaml
-- CLAUDE.md
-- README.md
-- REPOMIX.md
-- repomix.config.json
-- scripts/update_repomix.py

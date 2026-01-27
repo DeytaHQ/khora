@@ -198,6 +198,40 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.update_namespace(namespace)
 
+    async def create_namespace_version(
+        self,
+        workspace_id: UUID,
+        slug: str,
+        *,
+        previous_version: MemoryNamespace | None = None,
+    ) -> MemoryNamespace:
+        """Create a new version of a namespace.
+
+        If previous_version is provided, increments its version number and links to it.
+        The previous version is marked as inactive.
+
+        Args:
+            workspace_id: Workspace ID
+            slug: Namespace slug
+            previous_version: The previous version to supersede (if any)
+
+        Returns:
+            New namespace version
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.create_namespace_version(workspace_id, slug, previous_version=previous_version)
+
+    async def deactivate_namespace(self, namespace_id: UUID) -> None:
+        """Mark a namespace version as inactive.
+
+        Args:
+            namespace_id: ID of the namespace to deactivate
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        await self.relational.deactivate_namespace(namespace_id)
+
     # =========================================================================
     # Document operations (delegated to relational)
     # =========================================================================

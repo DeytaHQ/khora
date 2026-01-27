@@ -221,6 +221,9 @@ class PostgreSQLBackend:
                 name=namespace.name,
                 slug=namespace.slug,
                 description=namespace.description,
+                version=namespace.version,
+                is_active=namespace.is_active,
+                previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
                 config_overrides=namespace.config_overrides,
                 sync_checkpoints=namespace.sync_checkpoints,
                 metadata_=namespace.metadata,
@@ -241,23 +244,45 @@ class PostgreSQLBackend:
             model = result.scalar_one_or_none()
             return self._namespace_model_to_domain(model) if model else None
 
-    async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
-        """Get a namespace by workspace ID and slug."""
+    async def get_namespace_by_slug(
+        self, workspace_id: UUID, slug: str, *, active_only: bool = True
+    ) -> MemoryNamespace | None:
+        """Get a namespace by workspace ID and slug.
+
+        Args:
+            workspace_id: Workspace ID
+            slug: Namespace slug
+            active_only: If True, only return active namespace (default)
+
+        Returns:
+            MemoryNamespace or None if not found
+        """
         async with self._get_session() as session:
-            result = await session.execute(
-                select(MemoryNamespaceModel).where(
-                    MemoryNamespaceModel.workspace_id == str(workspace_id), MemoryNamespaceModel.slug == slug
-                )
+            query = select(MemoryNamespaceModel).where(
+                MemoryNamespaceModel.workspace_id == str(workspace_id),
+                MemoryNamespaceModel.slug == slug,
             )
+            if active_only:
+                query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+            result = await session.execute(query)
             model = result.scalar_one_or_none()
             return self._namespace_model_to_domain(model) if model else None
 
-    async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
-        """List all namespaces in a workspace."""
+    async def list_namespaces(self, workspace_id: UUID, *, active_only: bool = True) -> list[MemoryNamespace]:
+        """List all namespaces in a workspace.
+
+        Args:
+            workspace_id: Workspace ID
+            active_only: If True, only return active namespaces (default)
+
+        Returns:
+            List of MemoryNamespace objects
+        """
         async with self._get_session() as session:
-            result = await session.execute(
-                select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
-            )
+            query = select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
+            if active_only:
+                query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+            result = await session.execute(query)
             return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
 
     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
@@ -270,6 +295,9 @@ class PostgreSQLBackend:
                     name=namespace.name,
                     slug=namespace.slug,
                     description=namespace.description,
+                    version=namespace.version,
+                    is_active=namespace.is_active,
+                    previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
                     config_overrides=namespace.config_overrides,
                     sync_checkpoints=namespace.sync_checkpoints,
                     metadata_=namespace.metadata,
@@ -287,12 +315,77 @@ class PostgreSQLBackend:
             name=model.name,
             slug=model.slug,
             description=model.description,
+            version=model.version,
+            is_active=model.is_active,
+            previous_version_id=UUID(model.previous_version_id) if model.previous_version_id else None,
             config_overrides=model.config_overrides,
             sync_checkpoints=model.sync_checkpoints,
             metadata=model.metadata_,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
+
+    async def create_namespace_version(
+        self,
+        workspace_id: UUID,
+        slug: str,
+        *,
+        previous_version: MemoryNamespace | None = None,
+    ) -> MemoryNamespace:
+        """Create a new version of a namespace.
+
+        If previous_version is provided, increments its version number and links to it.
+        The previous version is marked as inactive.
+
+        Args:
+            workspace_id: Workspace ID
+            slug: Namespace slug
+            previous_version: The previous version to supersede (if any)
+
+        Returns:
+            New namespace version
+        """
+        from uuid import uuid4
+
+        new_version = 1
+        previous_id = None
+
+        if previous_version:
+            new_version = previous_version.version + 1
+            previous_id = previous_version.id
+            # Deactivate the old version
+            await self.deactivate_namespace(previous_version.id)
+
+        # Create new namespace with incremented version
+        namespace = MemoryNamespace(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            name=previous_version.name if previous_version else f"Namespace {slug}",
+            slug=slug,
+            description=previous_version.description if previous_version else "",
+            version=new_version,
+            is_active=True,
+            previous_version_id=previous_id,
+            config_overrides=previous_version.config_overrides if previous_version else {},
+            metadata=previous_version.metadata if previous_version else {},
+        )
+
+        return await self.create_namespace(namespace)
+
+    async def deactivate_namespace(self, namespace_id: UUID) -> None:
+        """Mark a namespace version as inactive.
+
+        Args:
+            namespace_id: ID of the namespace to deactivate
+        """
+        async with self._get_session() as session:
+            await session.execute(
+                update(MemoryNamespaceModel)
+                .where(MemoryNamespaceModel.id == str(namespace_id))
+                .values(is_active=False, updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+            logger.info(f"Deactivated namespace {namespace_id}")
 
     # =========================================================================
     # Document operations

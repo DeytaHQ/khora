@@ -105,6 +105,35 @@ class RelationalBackendProtocol(Protocol):
         """Update a namespace."""
         ...
 
+    @abstractmethod
+    async def create_namespace_version(
+        self,
+        workspace_id: UUID,
+        slug: str,
+        *,
+        previous_version: MemoryNamespace | None = None,
+    ) -> MemoryNamespace:
+        """Create a new version of a namespace.
+
+        Args:
+            workspace_id: Workspace ID
+            slug: Namespace slug
+            previous_version: The previous version to supersede (if any)
+
+        Returns:
+            New namespace version
+        """
+        ...
+
+    @abstractmethod
+    async def deactivate_namespace(self, namespace_id: UUID) -> None:
+        """Mark a namespace version as inactive.
+
+        Args:
+            namespace_id: ID of the namespace to deactivate
+        """
+        ...
+
     # Document operations
     @abstractmethod
     async def create_document(self, document: Document) -> Document:

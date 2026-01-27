@@ -6,6 +6,7 @@ defined in expertise configuration.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -83,7 +84,52 @@ class RelationshipInferrer:
             List of inferred relationships
         """
         if not self._expertise or not self._expertise.inference_rules:
+            logger.debug("No expertise or inference rules configured, skipping inference")
             return []
+
+        # Diagnostic: Log entity types in the graph
+        entity_types = Counter(
+            e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
+        )
+        logger.info(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
+
+        # Diagnostic: Log relationship types in the graph
+        rel_types = Counter(
+            r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+            for r in relationships
+        )
+        logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
+
+        # Diagnostic: Log what inference rules expect
+        expected_rels = set()
+        expected_entities = set()
+        for rule in self._expertise.inference_rules:
+            for cond in rule.when:
+                if hasattr(cond, "relationship"):
+                    expected_rels.add(cond.relationship)
+                if hasattr(cond, "source_type"):
+                    expected_entities.add(cond.source_type)
+                if hasattr(cond, "target_type"):
+                    expected_entities.add(cond.target_type)
+        logger.info(f"Inference rules expect relationships: {expected_rels}")
+        logger.info(f"Inference rules expect entity types: {expected_entities}")
+
+        # Diagnostic: Check for matches between actual and expected
+        actual_rel_types = set(rel_types.keys())
+        actual_entity_types = set(entity_types.keys())
+        matching_rels = actual_rel_types & expected_rels
+        matching_entities = actual_entity_types & expected_entities
+        logger.info(f"Matching relationship types: {matching_rels or 'NONE'}")
+        logger.info(f"Matching entity types: {matching_entities or 'NONE'}")
+
+        if not matching_rels:
+            logger.warning(
+                f"No relationship type matches! Rules expect {expected_rels} " f"but graph has {actual_rel_types}"
+            )
+        if not matching_entities:
+            logger.warning(
+                f"No entity type matches! Rules expect {expected_entities} " f"but graph has {actual_entity_types}"
+            )
 
         all_inferred: list[InferredRelationship] = []
         current_relationships = list(relationships)
@@ -94,12 +140,23 @@ class RelationshipInferrer:
 
             # Evaluate inference rules
             matches = self._rule_engine.evaluate_inference_rules(context)
+            logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
+
+            # Log details of first few matches for debugging
+            for i, match in enumerate(matches[:5]):
+                logger.debug(
+                    f"  Match {i + 1}: rule={match.rule_name}, "
+                    f"confidence={match.confidence:.2f}, "
+                    f"metadata_keys={list(match.metadata.keys())}"
+                )
 
             # Convert matches to inferred relationships
             pass_inferred = self._matches_to_relationships(matches, context)
+            logger.debug(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
 
             if not pass_inferred:
                 # No new inferences, stop early
+                logger.debug(f"Pass {pass_num + 1}: No new inferences, stopping early")
                 break
 
             # Filter out duplicates and already existing relationships
@@ -113,9 +170,9 @@ class RelationshipInferrer:
             # Add inferred to current for next pass (as mock relationships)
             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
 
-            logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
+            logger.info(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
 
-        logger.debug(f"Inferred {len(all_inferred)} relationships in {depth} pass(es)")
+        logger.info(f"Inference complete: {len(all_inferred)} total relationships inferred")
         return all_inferred
 
     def infer_from_pattern(

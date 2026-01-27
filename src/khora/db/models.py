@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -93,7 +93,13 @@ class WorkspaceModel(Base):
 
 
 class MemoryNamespaceModel(Base):
-    """Memory namespace for isolating memories."""
+    """Memory namespace for isolating memories.
+
+    Supports versioning for data replacement workflows:
+    - version: Incremental version number (starts at 1)
+    - is_active: Whether this is the current active version
+    - previous_version_id: Reference to the previous version (if any)
+    """
 
     __tablename__ = "memory_namespaces"
 
@@ -104,6 +110,14 @@ class MemoryNamespaceModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
+
+    # Versioning fields
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    previous_version_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="SET NULL"), nullable=True
+    )
+
     config_overrides: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     sync_checkpoints: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
@@ -124,7 +138,12 @@ class MemoryNamespaceModel(Base):
         "ExpertiseDefinitionModel", back_populates="namespace"
     )
 
-    __table_args__ = (UniqueConstraint("workspace_id", "slug", name="uq_namespace_workspace_slug"),)
+    __table_args__ = (
+        # Only one active namespace per workspace/slug combination
+        UniqueConstraint("workspace_id", "slug", "version", name="uq_namespace_workspace_slug_version"),
+        # Partial index for efficient active namespace queries
+        Index("idx_namespace_active", "workspace_id", "slug", postgresql_where="is_active = true"),
+    )
 
     def __repr__(self) -> str:
         return f"<MemoryNamespace(id={self.id!r}, name={self.name!r})>"
