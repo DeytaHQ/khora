@@ -8517,490 +8517,6 @@ README.md
 25: ]
 ````
 
-## File: src/khora/storage/backends/base.py
-````python
-  1: """Abstract protocols for storage backends.
-  2: 
-  3: These protocols define the interface that all storage backends must implement,
-  4: enabling dependency injection and easy testing with mocks.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from abc import abstractmethod
- 10: from datetime import datetime
- 11: from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
- 12: from uuid import UUID
- 13: 
- 14: if TYPE_CHECKING:
- 15:     from khora.core.models import (
- 16:         Chunk,
- 17:         Document,
- 18:         Entity,
- 19:         Episode,
- 20:         MemoryEvent,
- 21:         MemoryNamespace,
- 22:         Organization,
- 23:         Relationship,
- 24:         Workspace,
- 25:     )
- 26: 
- 27: 
- 28: @runtime_checkable
- 29: class RelationalBackendProtocol(Protocol):
- 30:     """Protocol for relational database backends (PostgreSQL).
- 31: 
- 32:     Handles storage of documents, tenancy data, ACLs, and sync checkpoints.
- 33:     """
- 34: 
- 35:     @abstractmethod
- 36:     async def connect(self) -> None:
- 37:         """Establish connection to the database."""
- 38:         ...
- 39: 
- 40:     @abstractmethod
- 41:     async def disconnect(self) -> None:
- 42:         """Close database connections."""
- 43:         ...
- 44: 
- 45:     @abstractmethod
- 46:     async def is_healthy(self) -> bool:
- 47:         """Check if the backend is healthy and connected."""
- 48:         ...
- 49: 
- 50:     # Organization operations
- 51:     @abstractmethod
- 52:     async def create_organization(self, org: Organization) -> Organization:
- 53:         """Create a new organization."""
- 54:         ...
- 55: 
- 56:     @abstractmethod
- 57:     async def get_organization(self, org_id: UUID) -> Organization | None:
- 58:         """Get an organization by ID."""
- 59:         ...
- 60: 
- 61:     @abstractmethod
- 62:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
- 63:         """Get an organization by slug."""
- 64:         ...
- 65: 
- 66:     # Workspace operations
- 67:     @abstractmethod
- 68:     async def create_workspace(self, workspace: Workspace) -> Workspace:
- 69:         """Create a new workspace."""
- 70:         ...
- 71: 
- 72:     @abstractmethod
- 73:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
- 74:         """Get a workspace by ID."""
- 75:         ...
- 76: 
- 77:     @abstractmethod
- 78:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
- 79:         """List all workspaces in an organization."""
- 80:         ...
- 81: 
- 82:     # Namespace operations
- 83:     @abstractmethod
- 84:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
- 85:         """Create a new memory namespace."""
- 86:         ...
- 87: 
- 88:     @abstractmethod
- 89:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
- 90:         """Get a namespace by ID."""
- 91:         ...
- 92: 
- 93:     @abstractmethod
- 94:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
- 95:         """Get a namespace by workspace ID and slug."""
- 96:         ...
- 97: 
- 98:     @abstractmethod
- 99:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
-100:         """List all namespaces in a workspace."""
-101:         ...
-102: 
-103:     @abstractmethod
-104:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-105:         """Update a namespace."""
-106:         ...
-107: 
-108:     # Document operations
-109:     @abstractmethod
-110:     async def create_document(self, document: Document) -> Document:
-111:         """Create a new document."""
-112:         ...
-113: 
-114:     @abstractmethod
-115:     async def get_document(self, document_id: UUID) -> Document | None:
-116:         """Get a document by ID."""
-117:         ...
-118: 
-119:     @abstractmethod
-120:     async def list_documents(
-121:         self,
-122:         namespace_id: UUID,
-123:         *,
-124:         status: str | None = None,
-125:         limit: int = 100,
-126:         offset: int = 0,
-127:     ) -> list[Document]:
-128:         """List documents in a namespace."""
-129:         ...
-130: 
-131:     @abstractmethod
-132:     async def update_document(self, document: Document) -> Document:
-133:         """Update a document."""
-134:         ...
-135: 
-136:     @abstractmethod
-137:     async def delete_document(self, document_id: UUID) -> bool:
-138:         """Delete a document."""
-139:         ...
-140: 
-141:     @abstractmethod
-142:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-143:         """Get a document by its content checksum (for deduplication)."""
-144:         ...
-145: 
-146:     # Sync checkpoint operations
-147:     @abstractmethod
-148:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-149:         """Get the last sync checkpoint for a source."""
-150:         ...
-151: 
-152:     @abstractmethod
-153:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-154:         """Set the sync checkpoint for a source."""
-155:         ...
-156: 
-157: 
-158: @runtime_checkable
-159: class VectorBackendProtocol(Protocol):
-160:     """Protocol for vector database backends (pgvector).
-161: 
-162:     Handles storage and retrieval of embeddings for semantic search.
-163:     """
-164: 
-165:     @abstractmethod
-166:     async def connect(self) -> None:
-167:         """Establish connection to the database."""
-168:         ...
-169: 
-170:     @abstractmethod
-171:     async def disconnect(self) -> None:
-172:         """Close database connections."""
-173:         ...
-174: 
-175:     @abstractmethod
-176:     async def is_healthy(self) -> bool:
-177:         """Check if the backend is healthy and connected."""
-178:         ...
-179: 
-180:     # Chunk operations
-181:     @abstractmethod
-182:     async def create_chunk(self, chunk: Chunk) -> Chunk:
-183:         """Create a new chunk with its embedding."""
-184:         ...
-185: 
-186:     @abstractmethod
-187:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
-188:         """Create multiple chunks in a batch."""
-189:         ...
-190: 
-191:     @abstractmethod
-192:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-193:         """Get a chunk by ID."""
-194:         ...
-195: 
-196:     @abstractmethod
-197:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-198:         """Get all chunks for a document."""
-199:         ...
-200: 
-201:     @abstractmethod
-202:     async def delete_chunks_by_document(self, document_id: UUID) -> int:
-203:         """Delete all chunks for a document."""
-204:         ...
-205: 
-206:     @abstractmethod
-207:     async def search_similar(
-208:         self,
-209:         namespace_id: UUID,
-210:         query_embedding: list[float],
-211:         *,
-212:         limit: int = 10,
-213:         min_similarity: float = 0.0,
-214:         filter_document_ids: list[UUID] | None = None,
-215:     ) -> list[tuple[Chunk, float]]:
-216:         """Search for similar chunks using vector similarity.
-217: 
-218:         Returns list of (chunk, similarity_score) tuples.
-219:         """
-220:         ...
-221: 
-222:     # Entity embedding operations
-223:     @abstractmethod
-224:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-225:         """Update the embedding for an entity."""
-226:         ...
-227: 
-228:     @abstractmethod
-229:     async def search_similar_entities(
-230:         self,
-231:         namespace_id: UUID,
-232:         query_embedding: list[float],
-233:         *,
-234:         limit: int = 10,
-235:         min_similarity: float = 0.0,
-236:     ) -> list[tuple[UUID, float]]:
-237:         """Search for similar entities by embedding."""
-238:         ...
-239: 
-240: 
-241: @runtime_checkable
-242: class GraphBackendProtocol(Protocol):
-243:     """Protocol for graph database backends (Neo4j).
-244: 
-245:     Handles storage and traversal of the knowledge graph.
-246:     """
-247: 
-248:     @abstractmethod
-249:     async def connect(self) -> None:
-250:         """Establish connection to the database."""
-251:         ...
-252: 
-253:     @abstractmethod
-254:     async def disconnect(self) -> None:
-255:         """Close database connections."""
-256:         ...
-257: 
-258:     @abstractmethod
-259:     async def is_healthy(self) -> bool:
-260:         """Check if the backend is healthy and connected."""
-261:         ...
-262: 
-263:     # Entity operations
-264:     @abstractmethod
-265:     async def create_entity(self, entity: Entity) -> Entity:
-266:         """Create an entity node in the graph."""
-267:         ...
-268: 
-269:     @abstractmethod
-270:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-271:         """Get an entity by ID."""
-272:         ...
-273: 
-274:     @abstractmethod
-275:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
-276:         """Get an entity by name and type (for deduplication)."""
-277:         ...
-278: 
-279:     @abstractmethod
-280:     async def update_entity(self, entity: Entity) -> Entity:
-281:         """Update an entity."""
-282:         ...
-283: 
-284:     @abstractmethod
-285:     async def delete_entity(self, entity_id: UUID) -> bool:
-286:         """Delete an entity and its relationships."""
-287:         ...
-288: 
-289:     @abstractmethod
-290:     async def list_entities(
-291:         self,
-292:         namespace_id: UUID,
-293:         *,
-294:         entity_type: str | None = None,
-295:         limit: int = 100,
-296:         offset: int = 0,
-297:     ) -> list[Entity]:
-298:         """List entities in a namespace."""
-299:         ...
-300: 
-301:     # Relationship operations
-302:     @abstractmethod
-303:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-304:         """Create a relationship between entities."""
-305:         ...
-306: 
-307:     @abstractmethod
-308:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-309:         """Get a relationship by ID."""
-310:         ...
-311: 
-312:     @abstractmethod
-313:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-314:         """Delete a relationship."""
-315:         ...
-316: 
-317:     @abstractmethod
-318:     async def get_entity_relationships(
-319:         self,
-320:         entity_id: UUID,
-321:         *,
-322:         direction: str = "both",  # "outgoing", "incoming", "both"
-323:         relationship_types: list[str] | None = None,
-324:         limit: int = 100,
-325:     ) -> list[Relationship]:
-326:         """Get relationships for an entity."""
-327:         ...
-328: 
-329:     @abstractmethod
-330:     async def list_relationships(
-331:         self,
-332:         namespace_id: UUID,
-333:         *,
-334:         relationship_type: str | None = None,
-335:         limit: int = 1000,
-336:         offset: int = 0,
-337:     ) -> list[Relationship]:
-338:         """List all relationships in a namespace."""
-339:         ...
-340: 
-341:     # Episode operations
-342:     @abstractmethod
-343:     async def create_episode(self, episode: Episode) -> Episode:
-344:         """Create an episode node."""
-345:         ...
-346: 
-347:     @abstractmethod
-348:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-349:         """Get an episode by ID."""
-350:         ...
-351: 
-352:     @abstractmethod
-353:     async def list_episodes(
-354:         self,
-355:         namespace_id: UUID,
-356:         *,
-357:         start_time: datetime | None = None,
-358:         end_time: datetime | None = None,
-359:         limit: int = 100,
-360:     ) -> list[Episode]:
-361:         """List episodes in a time range."""
-362:         ...
-363: 
-364:     # Graph traversal
-365:     @abstractmethod
-366:     async def find_paths(
-367:         self,
-368:         namespace_id: UUID,
-369:         source_entity_id: UUID,
-370:         target_entity_id: UUID,
-371:         *,
-372:         max_depth: int = 3,
-373:         relationship_types: list[str] | None = None,
-374:     ) -> list[list[dict[str, Any]]]:
-375:         """Find paths between two entities."""
-376:         ...
-377: 
-378:     @abstractmethod
-379:     async def get_neighborhood(
-380:         self,
-381:         entity_id: UUID,
-382:         *,
-383:         depth: int = 1,
-384:         relationship_types: list[str] | None = None,
-385:         limit: int = 50,
-386:     ) -> dict[str, Any]:
-387:         """Get the neighborhood of an entity up to a certain depth."""
-388:         ...
-389: 
-390:     @abstractmethod
-391:     async def search_entities_by_attribute(
-392:         self,
-393:         namespace_id: UUID,
-394:         attribute_name: str,
-395:         attribute_value: Any,
-396:         *,
-397:         limit: int = 100,
-398:     ) -> list[Entity]:
-399:         """Search entities by attribute value."""
-400:         ...
-401: 
-402: 
-403: @runtime_checkable
-404: class EventStoreProtocol(Protocol):
-405:     """Protocol for event store backends.
-406: 
-407:     Handles the append-only event log for event sourcing.
-408:     """
-409: 
-410:     @abstractmethod
-411:     async def connect(self) -> None:
-412:         """Establish connection to the store."""
-413:         ...
-414: 
-415:     @abstractmethod
-416:     async def disconnect(self) -> None:
-417:         """Close connections."""
-418:         ...
-419: 
-420:     @abstractmethod
-421:     async def is_healthy(self) -> bool:
-422:         """Check if the store is healthy."""
-423:         ...
-424: 
-425:     @abstractmethod
-426:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-427:         """Append an event to the log."""
-428:         ...
-429: 
-430:     @abstractmethod
-431:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-432:         """Append multiple events in a batch."""
-433:         ...
-434: 
-435:     @abstractmethod
-436:     async def get_events(
-437:         self,
-438:         namespace_id: UUID,
-439:         *,
-440:         event_types: list[str] | None = None,
-441:         resource_type: str | None = None,
-442:         resource_id: UUID | None = None,
-443:         after: datetime | None = None,
-444:         before: datetime | None = None,
-445:         limit: int = 100,
-446:         offset: int = 0,
-447:     ) -> list[MemoryEvent]:
-448:         """Query events from the log."""
-449:         ...
-450: 
-451:     @abstractmethod
-452:     async def get_events_for_resource(
-453:         self,
-454:         resource_type: str,
-455:         resource_id: UUID,
-456:         *,
-457:         limit: int = 100,
-458:     ) -> list[MemoryEvent]:
-459:         """Get all events for a specific resource."""
-460:         ...
-461: 
-462:     @abstractmethod
-463:     async def get_latest_event(
-464:         self,
-465:         resource_type: str,
-466:         resource_id: UUID,
-467:     ) -> MemoryEvent | None:
-468:         """Get the latest event for a resource."""
-469:         ...
-470: 
-471:     @abstractmethod
-472:     async def count_events(
-473:         self,
-474:         namespace_id: UUID,
-475:         *,
-476:         event_types: list[str] | None = None,
-477:         after: datetime | None = None,
-478:     ) -> int:
-479:         """Count events matching criteria."""
-480:         ...
-````
-
 ## File: src/khora/storage/event_store.py
 ````python
   1: """PostgreSQL-based event store for event sourcing.
@@ -14974,6 +14490,490 @@ README.md
 752:         return keywords
 ````
 
+## File: src/khora/storage/backends/base.py
+````python
+  1: """Abstract protocols for storage backends.
+  2: 
+  3: These protocols define the interface that all storage backends must implement,
+  4: enabling dependency injection and easy testing with mocks.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from abc import abstractmethod
+ 10: from datetime import datetime
+ 11: from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+ 12: from uuid import UUID
+ 13: 
+ 14: if TYPE_CHECKING:
+ 15:     from khora.core.models import (
+ 16:         Chunk,
+ 17:         Document,
+ 18:         Entity,
+ 19:         Episode,
+ 20:         MemoryEvent,
+ 21:         MemoryNamespace,
+ 22:         Organization,
+ 23:         Relationship,
+ 24:         Workspace,
+ 25:     )
+ 26: 
+ 27: 
+ 28: @runtime_checkable
+ 29: class RelationalBackendProtocol(Protocol):
+ 30:     """Protocol for relational database backends (PostgreSQL).
+ 31: 
+ 32:     Handles storage of documents, tenancy data, ACLs, and sync checkpoints.
+ 33:     """
+ 34: 
+ 35:     @abstractmethod
+ 36:     async def connect(self) -> None:
+ 37:         """Establish connection to the database."""
+ 38:         ...
+ 39: 
+ 40:     @abstractmethod
+ 41:     async def disconnect(self) -> None:
+ 42:         """Close database connections."""
+ 43:         ...
+ 44: 
+ 45:     @abstractmethod
+ 46:     async def is_healthy(self) -> bool:
+ 47:         """Check if the backend is healthy and connected."""
+ 48:         ...
+ 49: 
+ 50:     # Organization operations
+ 51:     @abstractmethod
+ 52:     async def create_organization(self, org: Organization) -> Organization:
+ 53:         """Create a new organization."""
+ 54:         ...
+ 55: 
+ 56:     @abstractmethod
+ 57:     async def get_organization(self, org_id: UUID) -> Organization | None:
+ 58:         """Get an organization by ID."""
+ 59:         ...
+ 60: 
+ 61:     @abstractmethod
+ 62:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
+ 63:         """Get an organization by slug."""
+ 64:         ...
+ 65: 
+ 66:     # Workspace operations
+ 67:     @abstractmethod
+ 68:     async def create_workspace(self, workspace: Workspace) -> Workspace:
+ 69:         """Create a new workspace."""
+ 70:         ...
+ 71: 
+ 72:     @abstractmethod
+ 73:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+ 74:         """Get a workspace by ID."""
+ 75:         ...
+ 76: 
+ 77:     @abstractmethod
+ 78:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
+ 79:         """List all workspaces in an organization."""
+ 80:         ...
+ 81: 
+ 82:     # Namespace operations
+ 83:     @abstractmethod
+ 84:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+ 85:         """Create a new memory namespace."""
+ 86:         ...
+ 87: 
+ 88:     @abstractmethod
+ 89:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+ 90:         """Get a namespace by ID."""
+ 91:         ...
+ 92: 
+ 93:     @abstractmethod
+ 94:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
+ 95:         """Get a namespace by workspace ID and slug."""
+ 96:         ...
+ 97: 
+ 98:     @abstractmethod
+ 99:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
+100:         """List all namespaces in a workspace."""
+101:         ...
+102: 
+103:     @abstractmethod
+104:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+105:         """Update a namespace."""
+106:         ...
+107: 
+108:     # Document operations
+109:     @abstractmethod
+110:     async def create_document(self, document: Document) -> Document:
+111:         """Create a new document."""
+112:         ...
+113: 
+114:     @abstractmethod
+115:     async def get_document(self, document_id: UUID) -> Document | None:
+116:         """Get a document by ID."""
+117:         ...
+118: 
+119:     @abstractmethod
+120:     async def list_documents(
+121:         self,
+122:         namespace_id: UUID,
+123:         *,
+124:         status: str | None = None,
+125:         limit: int = 100,
+126:         offset: int = 0,
+127:     ) -> list[Document]:
+128:         """List documents in a namespace."""
+129:         ...
+130: 
+131:     @abstractmethod
+132:     async def update_document(self, document: Document) -> Document:
+133:         """Update a document."""
+134:         ...
+135: 
+136:     @abstractmethod
+137:     async def delete_document(self, document_id: UUID) -> bool:
+138:         """Delete a document."""
+139:         ...
+140: 
+141:     @abstractmethod
+142:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+143:         """Get a document by its content checksum (for deduplication)."""
+144:         ...
+145: 
+146:     # Sync checkpoint operations
+147:     @abstractmethod
+148:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+149:         """Get the last sync checkpoint for a source."""
+150:         ...
+151: 
+152:     @abstractmethod
+153:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+154:         """Set the sync checkpoint for a source."""
+155:         ...
+156: 
+157: 
+158: @runtime_checkable
+159: class VectorBackendProtocol(Protocol):
+160:     """Protocol for vector database backends (pgvector).
+161: 
+162:     Handles storage and retrieval of embeddings for semantic search.
+163:     """
+164: 
+165:     @abstractmethod
+166:     async def connect(self) -> None:
+167:         """Establish connection to the database."""
+168:         ...
+169: 
+170:     @abstractmethod
+171:     async def disconnect(self) -> None:
+172:         """Close database connections."""
+173:         ...
+174: 
+175:     @abstractmethod
+176:     async def is_healthy(self) -> bool:
+177:         """Check if the backend is healthy and connected."""
+178:         ...
+179: 
+180:     # Chunk operations
+181:     @abstractmethod
+182:     async def create_chunk(self, chunk: Chunk) -> Chunk:
+183:         """Create a new chunk with its embedding."""
+184:         ...
+185: 
+186:     @abstractmethod
+187:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+188:         """Create multiple chunks in a batch."""
+189:         ...
+190: 
+191:     @abstractmethod
+192:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+193:         """Get a chunk by ID."""
+194:         ...
+195: 
+196:     @abstractmethod
+197:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+198:         """Get all chunks for a document."""
+199:         ...
+200: 
+201:     @abstractmethod
+202:     async def delete_chunks_by_document(self, document_id: UUID) -> int:
+203:         """Delete all chunks for a document."""
+204:         ...
+205: 
+206:     @abstractmethod
+207:     async def search_similar(
+208:         self,
+209:         namespace_id: UUID,
+210:         query_embedding: list[float],
+211:         *,
+212:         limit: int = 10,
+213:         min_similarity: float = 0.0,
+214:         filter_document_ids: list[UUID] | None = None,
+215:     ) -> list[tuple[Chunk, float]]:
+216:         """Search for similar chunks using vector similarity.
+217: 
+218:         Returns list of (chunk, similarity_score) tuples.
+219:         """
+220:         ...
+221: 
+222:     # Entity embedding operations
+223:     @abstractmethod
+224:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+225:         """Update the embedding for an entity."""
+226:         ...
+227: 
+228:     @abstractmethod
+229:     async def search_similar_entities(
+230:         self,
+231:         namespace_id: UUID,
+232:         query_embedding: list[float],
+233:         *,
+234:         limit: int = 10,
+235:         min_similarity: float = 0.0,
+236:     ) -> list[tuple[UUID, float]]:
+237:         """Search for similar entities by embedding."""
+238:         ...
+239: 
+240: 
+241: @runtime_checkable
+242: class GraphBackendProtocol(Protocol):
+243:     """Protocol for graph database backends (Neo4j).
+244: 
+245:     Handles storage and traversal of the knowledge graph.
+246:     """
+247: 
+248:     @abstractmethod
+249:     async def connect(self) -> None:
+250:         """Establish connection to the database."""
+251:         ...
+252: 
+253:     @abstractmethod
+254:     async def disconnect(self) -> None:
+255:         """Close database connections."""
+256:         ...
+257: 
+258:     @abstractmethod
+259:     async def is_healthy(self) -> bool:
+260:         """Check if the backend is healthy and connected."""
+261:         ...
+262: 
+263:     # Entity operations
+264:     @abstractmethod
+265:     async def create_entity(self, entity: Entity) -> Entity:
+266:         """Create an entity node in the graph."""
+267:         ...
+268: 
+269:     @abstractmethod
+270:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+271:         """Get an entity by ID."""
+272:         ...
+273: 
+274:     @abstractmethod
+275:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+276:         """Get an entity by name and type (for deduplication)."""
+277:         ...
+278: 
+279:     @abstractmethod
+280:     async def update_entity(self, entity: Entity) -> Entity:
+281:         """Update an entity."""
+282:         ...
+283: 
+284:     @abstractmethod
+285:     async def delete_entity(self, entity_id: UUID) -> bool:
+286:         """Delete an entity and its relationships."""
+287:         ...
+288: 
+289:     @abstractmethod
+290:     async def list_entities(
+291:         self,
+292:         namespace_id: UUID,
+293:         *,
+294:         entity_type: str | None = None,
+295:         limit: int = 100,
+296:         offset: int = 0,
+297:     ) -> list[Entity]:
+298:         """List entities in a namespace."""
+299:         ...
+300: 
+301:     # Relationship operations
+302:     @abstractmethod
+303:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+304:         """Create a relationship between entities."""
+305:         ...
+306: 
+307:     @abstractmethod
+308:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+309:         """Get a relationship by ID."""
+310:         ...
+311: 
+312:     @abstractmethod
+313:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+314:         """Delete a relationship."""
+315:         ...
+316: 
+317:     @abstractmethod
+318:     async def get_entity_relationships(
+319:         self,
+320:         entity_id: UUID,
+321:         *,
+322:         direction: str = "both",  # "outgoing", "incoming", "both"
+323:         relationship_types: list[str] | None = None,
+324:         limit: int = 100,
+325:     ) -> list[Relationship]:
+326:         """Get relationships for an entity."""
+327:         ...
+328: 
+329:     @abstractmethod
+330:     async def list_relationships(
+331:         self,
+332:         namespace_id: UUID,
+333:         *,
+334:         relationship_type: str | None = None,
+335:         limit: int = 1000,
+336:         offset: int = 0,
+337:     ) -> list[Relationship]:
+338:         """List all relationships in a namespace."""
+339:         ...
+340: 
+341:     # Episode operations
+342:     @abstractmethod
+343:     async def create_episode(self, episode: Episode) -> Episode:
+344:         """Create an episode node."""
+345:         ...
+346: 
+347:     @abstractmethod
+348:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+349:         """Get an episode by ID."""
+350:         ...
+351: 
+352:     @abstractmethod
+353:     async def list_episodes(
+354:         self,
+355:         namespace_id: UUID,
+356:         *,
+357:         start_time: datetime | None = None,
+358:         end_time: datetime | None = None,
+359:         limit: int = 100,
+360:     ) -> list[Episode]:
+361:         """List episodes in a time range."""
+362:         ...
+363: 
+364:     # Graph traversal
+365:     @abstractmethod
+366:     async def find_paths(
+367:         self,
+368:         namespace_id: UUID,
+369:         source_entity_id: UUID,
+370:         target_entity_id: UUID,
+371:         *,
+372:         max_depth: int = 3,
+373:         relationship_types: list[str] | None = None,
+374:     ) -> list[list[dict[str, Any]]]:
+375:         """Find paths between two entities."""
+376:         ...
+377: 
+378:     @abstractmethod
+379:     async def get_neighborhood(
+380:         self,
+381:         entity_id: UUID,
+382:         *,
+383:         depth: int = 1,
+384:         relationship_types: list[str] | None = None,
+385:         limit: int = 50,
+386:     ) -> dict[str, Any]:
+387:         """Get the neighborhood of an entity up to a certain depth."""
+388:         ...
+389: 
+390:     @abstractmethod
+391:     async def search_entities_by_attribute(
+392:         self,
+393:         namespace_id: UUID,
+394:         attribute_name: str,
+395:         attribute_value: Any,
+396:         *,
+397:         limit: int = 100,
+398:     ) -> list[Entity]:
+399:         """Search entities by attribute value."""
+400:         ...
+401: 
+402: 
+403: @runtime_checkable
+404: class EventStoreProtocol(Protocol):
+405:     """Protocol for event store backends.
+406: 
+407:     Handles the append-only event log for event sourcing.
+408:     """
+409: 
+410:     @abstractmethod
+411:     async def connect(self) -> None:
+412:         """Establish connection to the store."""
+413:         ...
+414: 
+415:     @abstractmethod
+416:     async def disconnect(self) -> None:
+417:         """Close connections."""
+418:         ...
+419: 
+420:     @abstractmethod
+421:     async def is_healthy(self) -> bool:
+422:         """Check if the store is healthy."""
+423:         ...
+424: 
+425:     @abstractmethod
+426:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+427:         """Append an event to the log."""
+428:         ...
+429: 
+430:     @abstractmethod
+431:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+432:         """Append multiple events in a batch."""
+433:         ...
+434: 
+435:     @abstractmethod
+436:     async def get_events(
+437:         self,
+438:         namespace_id: UUID,
+439:         *,
+440:         event_types: list[str] | None = None,
+441:         resource_type: str | None = None,
+442:         resource_id: UUID | None = None,
+443:         after: datetime | None = None,
+444:         before: datetime | None = None,
+445:         limit: int = 100,
+446:         offset: int = 0,
+447:     ) -> list[MemoryEvent]:
+448:         """Query events from the log."""
+449:         ...
+450: 
+451:     @abstractmethod
+452:     async def get_events_for_resource(
+453:         self,
+454:         resource_type: str,
+455:         resource_id: UUID,
+456:         *,
+457:         limit: int = 100,
+458:     ) -> list[MemoryEvent]:
+459:         """Get all events for a specific resource."""
+460:         ...
+461: 
+462:     @abstractmethod
+463:     async def get_latest_event(
+464:         self,
+465:         resource_type: str,
+466:         resource_id: UUID,
+467:     ) -> MemoryEvent | None:
+468:         """Get the latest event for a resource."""
+469:         ...
+470: 
+471:     @abstractmethod
+472:     async def count_events(
+473:         self,
+474:         namespace_id: UUID,
+475:         *,
+476:         event_types: list[str] | None = None,
+477:         after: datetime | None = None,
+478:     ) -> int:
+479:         """Count events matching criteria."""
+480:         ...
+````
+
 ## File: src/khora/storage/__init__.py
 ````python
  1: """Storage layer for Khora Memory Lake.
@@ -17576,655 +17576,6 @@ README.md
 486:             await session.commit()
 ````
 
-## File: src/khora/storage/coordinator.py
-````python
-  1: """Storage coordinator that orchestrates all backends.
-  2: 
-  3: The coordinator provides a unified interface to all storage backends
-  4: (PostgreSQL, pgvector, Neo4j) and handles cross-cutting concerns like
-  5: transaction coordination and consistency.
-  6: """
-  7: 
-  8: from __future__ import annotations
-  9: 
- 10: from dataclasses import dataclass, field
- 11: from datetime import datetime
- 12: from typing import TYPE_CHECKING, Any
- 13: from uuid import UUID
- 14: 
- 15: from loguru import logger
- 16: 
- 17: from khora.core.models import (
- 18:     Chunk,
- 19:     Document,
- 20:     Entity,
- 21:     Episode,
- 22:     MemoryEvent,
- 23:     MemoryNamespace,
- 24:     Organization,
- 25:     Relationship,
- 26:     Workspace,
- 27: )
- 28: 
- 29: if TYPE_CHECKING:
- 30:     from .backends.base import (
- 31:         EventStoreProtocol,
- 32:         GraphBackendProtocol,
- 33:         RelationalBackendProtocol,
- 34:         VectorBackendProtocol,
- 35:     )
- 36: 
- 37: 
- 38: @dataclass
- 39: class StorageHealth:
- 40:     """Health status of all storage backends."""
- 41: 
- 42:     relational: bool = False
- 43:     vector: bool = False
- 44:     graph: bool = False
- 45:     event_store: bool = False
- 46: 
- 47:     @property
- 48:     def is_healthy(self) -> bool:
- 49:         """Check if all backends are healthy."""
- 50:         return self.relational and self.vector
- 51: 
- 52:     @property
- 53:     def summary(self) -> dict[str, bool]:
- 54:         """Get health summary as a dictionary."""
- 55:         return {
- 56:             "relational": self.relational,
- 57:             "vector": self.vector,
- 58:             "graph": self.graph,
- 59:             "event_store": self.event_store,
- 60:         }
- 61: 
- 62: 
- 63: @dataclass
- 64: class StorageCoordinator:
- 65:     """Coordinates operations across all storage backends.
- 66: 
- 67:     Provides a unified interface for storage operations and handles
- 68:     cross-cutting concerns like transaction management and consistency.
- 69:     """
- 70: 
- 71:     relational: RelationalBackendProtocol | None = None
- 72:     vector: VectorBackendProtocol | None = None
- 73:     graph: GraphBackendProtocol | None = None
- 74:     event_store: EventStoreProtocol | None = None
- 75: 
- 76:     _connected: bool = field(default=False, init=False)
- 77: 
- 78:     async def connect(self) -> None:
- 79:         """Connect all configured backends."""
- 80:         if self._connected:
- 81:             return
- 82: 
- 83:         logger.info("Connecting storage backends...")
- 84: 
- 85:         if self.relational:
- 86:             await self.relational.connect()
- 87:         if self.vector:
- 88:             await self.vector.connect()
- 89:         if self.graph:
- 90:             await self.graph.connect()
- 91:         if self.event_store:
- 92:             await self.event_store.connect()
- 93: 
- 94:         self._connected = True
- 95:         logger.info("Storage backends connected")
- 96: 
- 97:     async def disconnect(self) -> None:
- 98:         """Disconnect all backends."""
- 99:         if not self._connected:
-100:             return
-101: 
-102:         logger.info("Disconnecting storage backends...")
-103: 
-104:         if self.event_store:
-105:             await self.event_store.disconnect()
-106:         if self.graph:
-107:             await self.graph.disconnect()
-108:         if self.vector:
-109:             await self.vector.disconnect()
-110:         if self.relational:
-111:             await self.relational.disconnect()
-112: 
-113:         self._connected = False
-114:         logger.info("Storage backends disconnected")
-115: 
-116:     async def health_check(self) -> StorageHealth:
-117:         """Check health of all backends."""
-118:         health = StorageHealth()
-119: 
-120:         if self.relational:
-121:             health.relational = await self.relational.is_healthy()
-122:         if self.vector:
-123:             health.vector = await self.vector.is_healthy()
-124:         if self.graph:
-125:             health.graph = await self.graph.is_healthy()
-126:         if self.event_store:
-127:             health.event_store = await self.event_store.is_healthy()
-128: 
-129:         return health
-130: 
-131:     # =========================================================================
-132:     # Tenancy operations (delegated to relational)
-133:     # =========================================================================
-134: 
-135:     async def create_organization(self, org: Organization) -> Organization:
-136:         """Create a new organization."""
-137:         if not self.relational:
-138:             raise RuntimeError("Relational backend not configured")
-139:         return await self.relational.create_organization(org)
-140: 
-141:     async def get_organization(self, org_id: UUID) -> Organization | None:
-142:         """Get an organization by ID."""
-143:         if not self.relational:
-144:             raise RuntimeError("Relational backend not configured")
-145:         return await self.relational.get_organization(org_id)
-146: 
-147:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
-148:         """Get an organization by slug."""
-149:         if not self.relational:
-150:             raise RuntimeError("Relational backend not configured")
-151:         return await self.relational.get_organization_by_slug(slug)
-152: 
-153:     async def create_workspace(self, workspace: Workspace) -> Workspace:
-154:         """Create a new workspace."""
-155:         if not self.relational:
-156:             raise RuntimeError("Relational backend not configured")
-157:         return await self.relational.create_workspace(workspace)
-158: 
-159:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
-160:         """Get a workspace by ID."""
-161:         if not self.relational:
-162:             raise RuntimeError("Relational backend not configured")
-163:         return await self.relational.get_workspace(workspace_id)
-164: 
-165:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
-166:         """List all workspaces in an organization."""
-167:         if not self.relational:
-168:             raise RuntimeError("Relational backend not configured")
-169:         return await self.relational.list_workspaces(organization_id)
-170: 
-171:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-172:         """Create a new memory namespace."""
-173:         if not self.relational:
-174:             raise RuntimeError("Relational backend not configured")
-175:         return await self.relational.create_namespace(namespace)
-176: 
-177:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-178:         """Get a namespace by ID."""
-179:         if not self.relational:
-180:             raise RuntimeError("Relational backend not configured")
-181:         return await self.relational.get_namespace(namespace_id)
-182: 
-183:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
-184:         """Get a namespace by workspace ID and slug."""
-185:         if not self.relational:
-186:             raise RuntimeError("Relational backend not configured")
-187:         return await self.relational.get_namespace_by_slug(workspace_id, slug)
-188: 
-189:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
-190:         """List all namespaces in a workspace."""
-191:         if not self.relational:
-192:             raise RuntimeError("Relational backend not configured")
-193:         return await self.relational.list_namespaces(workspace_id)
-194: 
-195:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-196:         """Update a namespace."""
-197:         if not self.relational:
-198:             raise RuntimeError("Relational backend not configured")
-199:         return await self.relational.update_namespace(namespace)
-200: 
-201:     # =========================================================================
-202:     # Document operations (delegated to relational)
-203:     # =========================================================================
-204: 
-205:     async def create_document(self, document: Document) -> Document:
-206:         """Create a new document."""
-207:         if not self.relational:
-208:             raise RuntimeError("Relational backend not configured")
-209:         return await self.relational.create_document(document)
-210: 
-211:     async def get_document(self, document_id: UUID) -> Document | None:
-212:         """Get a document by ID."""
-213:         if not self.relational:
-214:             raise RuntimeError("Relational backend not configured")
-215:         return await self.relational.get_document(document_id)
-216: 
-217:     async def list_documents(
-218:         self,
-219:         namespace_id: UUID,
-220:         *,
-221:         status: str | None = None,
-222:         limit: int = 100,
-223:         offset: int = 0,
-224:     ) -> list[Document]:
-225:         """List documents in a namespace."""
-226:         if not self.relational:
-227:             raise RuntimeError("Relational backend not configured")
-228:         return await self.relational.list_documents(namespace_id, status=status, limit=limit, offset=offset)
-229: 
-230:     async def update_document(self, document: Document) -> Document:
-231:         """Update a document."""
-232:         if not self.relational:
-233:             raise RuntimeError("Relational backend not configured")
-234:         return await self.relational.update_document(document)
-235: 
-236:     async def delete_document(self, document_id: UUID) -> bool:
-237:         """Delete a document and its chunks."""
-238:         if not self.relational:
-239:             raise RuntimeError("Relational backend not configured")
-240: 
-241:         # Delete chunks first
-242:         if self.vector:
-243:             await self.vector.delete_chunks_by_document(document_id)
-244: 
-245:         return await self.relational.delete_document(document_id)
-246: 
-247:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-248:         """Get a document by its content checksum."""
-249:         if not self.relational:
-250:             raise RuntimeError("Relational backend not configured")
-251:         return await self.relational.get_document_by_checksum(namespace_id, checksum)
-252: 
-253:     # =========================================================================
-254:     # Chunk operations (delegated to vector)
-255:     # =========================================================================
-256: 
-257:     async def create_chunk(self, chunk: Chunk) -> Chunk:
-258:         """Create a new chunk with embedding."""
-259:         if not self.vector:
-260:             raise RuntimeError("Vector backend not configured")
-261:         return await self.vector.create_chunk(chunk)
-262: 
-263:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
-264:         """Create multiple chunks in a batch."""
-265:         if not self.vector:
-266:             raise RuntimeError("Vector backend not configured")
-267:         return await self.vector.create_chunks_batch(chunks)
-268: 
-269:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-270:         """Get a chunk by ID."""
-271:         if not self.vector:
-272:             raise RuntimeError("Vector backend not configured")
-273:         return await self.vector.get_chunk(chunk_id)
-274: 
-275:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-276:         """Get all chunks for a document."""
-277:         if not self.vector:
-278:             raise RuntimeError("Vector backend not configured")
-279:         return await self.vector.get_chunks_by_document(document_id)
-280: 
-281:     async def search_similar_chunks(
-282:         self,
-283:         namespace_id: UUID,
-284:         query_embedding: list[float],
-285:         *,
-286:         limit: int = 10,
-287:         min_similarity: float = 0.0,
-288:         filter_document_ids: list[UUID] | None = None,
-289:     ) -> list[tuple[Chunk, float]]:
-290:         """Search for similar chunks."""
-291:         if not self.vector:
-292:             raise RuntimeError("Vector backend not configured")
-293:         return await self.vector.search_similar(
-294:             namespace_id,
-295:             query_embedding,
-296:             limit=limit,
-297:             min_similarity=min_similarity,
-298:             filter_document_ids=filter_document_ids,
-299:         )
-300: 
-301:     async def count_chunks(self, namespace_id: UUID) -> int:
-302:         """Count chunks in a namespace."""
-303:         if not self.vector:
-304:             raise RuntimeError("Vector backend not configured")
-305:         return await self.vector.count_chunks(namespace_id)
-306: 
-307:     async def list_chunks(
-308:         self,
-309:         namespace_id: UUID,
-310:         *,
-311:         limit: int = 1000,
-312:         offset: int = 0,
-313:     ) -> list[Chunk]:
-314:         """List chunks in a namespace.
-315: 
-316:         Args:
-317:             namespace_id: Namespace ID
-318:             limit: Maximum chunks to return
-319:             offset: Offset for pagination
-320: 
-321:         Returns:
-322:             List of chunks
-323:         """
-324:         if not self.vector:
-325:             raise RuntimeError("Vector backend not configured")
-326:         return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
-327: 
-328:     async def count_entities(self, namespace_id: UUID) -> int:
-329:         """Count entities in a namespace."""
-330:         if self.graph:
-331:             return await self.graph.count_entities(namespace_id)
-332:         return 0
-333: 
-334:     # =========================================================================
-335:     # Entity operations (cross-backend)
-336:     # =========================================================================
-337: 
-338:     async def create_entity(self, entity: Entity) -> Entity:
-339:         """Create an entity in both graph and relational stores."""
-340:         # Store in graph for relationships and traversal
-341:         if self.graph:
-342:             entity = await self.graph.create_entity(entity)
-343:         return entity
-344: 
-345:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-346:         """Get an entity by ID."""
-347:         if self.graph:
-348:             return await self.graph.get_entity(entity_id)
-349:         return None
-350: 
-351:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
-352:         """Get an entity by name and type."""
-353:         if self.graph:
-354:             return await self.graph.get_entity_by_name(namespace_id, name, entity_type)
-355:         return None
-356: 
-357:     async def update_entity(self, entity: Entity) -> Entity:
-358:         """Update an entity."""
-359:         if self.graph:
-360:             entity = await self.graph.update_entity(entity)
-361:         return entity
-362: 
-363:     async def delete_entity(self, entity_id: UUID) -> bool:
-364:         """Delete an entity."""
-365:         if self.graph:
-366:             return await self.graph.delete_entity(entity_id)
-367:         return False
-368: 
-369:     async def list_entities(
-370:         self,
-371:         namespace_id: UUID,
-372:         *,
-373:         entity_type: str | None = None,
-374:         limit: int = 100,
-375:         offset: int = 0,
-376:     ) -> list[Entity]:
-377:         """List entities in a namespace."""
-378:         if self.graph:
-379:             return await self.graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
-380:         return []
-381: 
-382:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-383:         """Update the embedding for an entity."""
-384:         if self.vector:
-385:             await self.vector.update_entity_embedding(entity_id, embedding, model)
-386: 
-387:     async def search_similar_entities(
-388:         self,
-389:         namespace_id: UUID,
-390:         query_embedding: list[float],
-391:         *,
-392:         limit: int = 10,
-393:         min_similarity: float = 0.0,
-394:     ) -> list[tuple[UUID, float]]:
-395:         """Search for similar entities."""
-396:         if not self.vector:
-397:             raise RuntimeError("Vector backend not configured")
-398:         return await self.vector.search_similar_entities(
-399:             namespace_id,
-400:             query_embedding,
-401:             limit=limit,
-402:             min_similarity=min_similarity,
-403:         )
-404: 
-405:     # =========================================================================
-406:     # Relationship operations (delegated to graph)
-407:     # =========================================================================
-408: 
-409:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-410:         """Create a relationship between entities."""
-411:         if not self.graph:
-412:             raise RuntimeError("Graph backend not configured")
-413:         return await self.graph.create_relationship(relationship)
-414: 
-415:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-416:         """Get a relationship by ID."""
-417:         if self.graph:
-418:             return await self.graph.get_relationship(relationship_id)
-419:         return None
-420: 
-421:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-422:         """Delete a relationship."""
-423:         if self.graph:
-424:             return await self.graph.delete_relationship(relationship_id)
-425:         return False
-426: 
-427:     async def get_entity_relationships(
-428:         self,
-429:         entity_id: UUID,
-430:         *,
-431:         direction: str = "both",
-432:         relationship_types: list[str] | None = None,
-433:         limit: int = 100,
-434:     ) -> list[Relationship]:
-435:         """Get relationships for an entity."""
-436:         if self.graph:
-437:             return await self.graph.get_entity_relationships(
-438:                 entity_id, direction=direction, relationship_types=relationship_types, limit=limit
-439:             )
-440:         return []
-441: 
-442:     async def list_relationships(
-443:         self,
-444:         namespace_id: UUID,
-445:         *,
-446:         relationship_type: str | None = None,
-447:         limit: int = 1000,
-448:         offset: int = 0,
-449:     ) -> list[Relationship]:
-450:         """List all relationships in a namespace."""
-451:         if self.graph:
-452:             return await self.graph.list_relationships(
-453:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
-454:             )
-455:         return []
-456: 
-457:     # =========================================================================
-458:     # Episode operations (delegated to graph)
-459:     # =========================================================================
-460: 
-461:     async def create_episode(self, episode: Episode) -> Episode:
-462:         """Create an episode."""
-463:         if not self.graph:
-464:             raise RuntimeError("Graph backend not configured")
-465:         return await self.graph.create_episode(episode)
-466: 
-467:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-468:         """Get an episode by ID."""
-469:         if self.graph:
-470:             return await self.graph.get_episode(episode_id)
-471:         return None
-472: 
-473:     async def list_episodes(
-474:         self,
-475:         namespace_id: UUID,
-476:         *,
-477:         start_time: datetime | None = None,
-478:         end_time: datetime | None = None,
-479:         limit: int = 100,
-480:     ) -> list[Episode]:
-481:         """List episodes in a time range."""
-482:         if self.graph:
-483:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
-484:         return []
-485: 
-486:     # =========================================================================
-487:     # Graph traversal (delegated to graph)
-488:     # =========================================================================
-489: 
-490:     async def find_paths(
-491:         self,
-492:         namespace_id: UUID,
-493:         source_entity_id: UUID,
-494:         target_entity_id: UUID,
-495:         *,
-496:         max_depth: int = 3,
-497:         relationship_types: list[str] | None = None,
-498:     ) -> list[list[dict[str, Any]]]:
-499:         """Find paths between two entities."""
-500:         if self.graph:
-501:             return await self.graph.find_paths(
-502:                 namespace_id,
-503:                 source_entity_id,
-504:                 target_entity_id,
-505:                 max_depth=max_depth,
-506:                 relationship_types=relationship_types,
-507:             )
-508:         return []
-509: 
-510:     async def get_neighborhood(
-511:         self,
-512:         entity_id: UUID,
-513:         *,
-514:         depth: int = 1,
-515:         relationship_types: list[str] | None = None,
-516:         limit: int = 50,
-517:     ) -> dict[str, Any]:
-518:         """Get the neighborhood of an entity."""
-519:         if self.graph:
-520:             return await self.graph.get_neighborhood(
-521:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
-522:             )
-523:         return {"entities": [], "relationships": []}
-524: 
-525:     # =========================================================================
-526:     # Batch operations (optimized for parallel fetching)
-527:     # =========================================================================
-528: 
-529:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-530:         """Fetch multiple entities in a single query.
-531: 
-532:         Args:
-533:             entity_ids: List of entity IDs to fetch
-534: 
-535:         Returns:
-536:             Dictionary mapping entity ID to Entity object
-537:         """
-538:         if not entity_ids:
-539:             return {}
-540:         if self.graph:
-541:             return await self.graph.get_entities_batch(entity_ids)
-542:         return {}
-543: 
-544:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-545:         """Fetch multiple documents in a single query.
-546: 
-547:         Args:
-548:             document_ids: List of document IDs to fetch
-549: 
-550:         Returns:
-551:             Dictionary mapping document ID to Document object
-552:         """
-553:         if not document_ids:
-554:             return {}
-555:         if self.relational:
-556:             return await self.relational.get_documents_batch(document_ids)
-557:         return {}
-558: 
-559:     async def get_neighborhoods_batch(
-560:         self,
-561:         entity_ids: list[UUID],
-562:         *,
-563:         depth: int = 1,
-564:         relationship_types: list[str] | None = None,
-565:         limit_per_entity: int = 20,
-566:     ) -> dict[UUID, dict[str, Any]]:
-567:         """Get neighborhoods for multiple entities in a single query.
-568: 
-569:         Args:
-570:             entity_ids: List of entity IDs
-571:             depth: Max traversal depth
-572:             relationship_types: Optional relationship type filter
-573:             limit_per_entity: Max nodes per entity neighborhood
-574: 
-575:         Returns:
-576:             Dictionary mapping entity ID to neighborhood data
-577:         """
-578:         if not entity_ids:
-579:             return {}
-580:         if self.graph:
-581:             return await self.graph.get_neighborhoods_batch(
-582:                 entity_ids,
-583:                 depth=depth,
-584:                 relationship_types=relationship_types,
-585:                 limit_per_entity=limit_per_entity,
-586:             )
-587:         return {}
-588: 
-589:     # =========================================================================
-590:     # Event operations (delegated to event store)
-591:     # =========================================================================
-592: 
-593:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-594:         """Append an event to the log."""
-595:         if not self.event_store:
-596:             raise RuntimeError("Event store not configured")
-597:         return await self.event_store.append_event(event)
-598: 
-599:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-600:         """Append multiple events in a batch."""
-601:         if not self.event_store:
-602:             raise RuntimeError("Event store not configured")
-603:         return await self.event_store.append_events_batch(events)
-604: 
-605:     async def get_events(
-606:         self,
-607:         namespace_id: UUID,
-608:         *,
-609:         event_types: list[str] | None = None,
-610:         resource_type: str | None = None,
-611:         resource_id: UUID | None = None,
-612:         after: datetime | None = None,
-613:         before: datetime | None = None,
-614:         limit: int = 100,
-615:         offset: int = 0,
-616:     ) -> list[MemoryEvent]:
-617:         """Query events from the log."""
-618:         if not self.event_store:
-619:             raise RuntimeError("Event store not configured")
-620:         return await self.event_store.get_events(
-621:             namespace_id,
-622:             event_types=event_types,
-623:             resource_type=resource_type,
-624:             resource_id=resource_id,
-625:             after=after,
-626:             before=before,
-627:             limit=limit,
-628:             offset=offset,
-629:         )
-630: 
-631:     # =========================================================================
-632:     # Sync checkpoint operations (delegated to relational)
-633:     # =========================================================================
-634: 
-635:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-636:         """Get the last sync checkpoint for a source."""
-637:         if not self.relational:
-638:             raise RuntimeError("Relational backend not configured")
-639:         return await self.relational.get_sync_checkpoint(namespace_id, source)
-640: 
-641:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-642:         """Set the sync checkpoint for a source."""
-643:         if not self.relational:
-644:             raise RuntimeError("Relational backend not configured")
-645:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
-````
-
 ## File: CLAUDE.md
 ````markdown
   1: # Khora - Development Guide
@@ -18444,7 +17795,7 @@ README.md
 20:     return {
 21:         "status": "ok",
 22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.4",
+23:         "version": "0.0.5",
 24:         "service": "khora",
 25:     }
 26: 
@@ -18459,7 +17810,7 @@ README.md
 35:     return {
 36:         "status": "healthy",
 37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.4",
+38:         "version": "0.0.5",
 39:     }
 40: 
 41: 
@@ -18521,7 +17872,7 @@ README.md
 11: 
 12: 
 13: @click.group()
-14: @click.version_option(version="0.0.4")
+14: @click.version_option(version="0.0.5")
 15: @click.option(
 16:     "--log-level",
 17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
@@ -19277,6 +18628,1463 @@ README.md
 400: 
 401:         logger.warning("Could not extract valid JSON from response")
 402:         return ExtractionResult(metadata={"raw_response": text[:500]})
+````
+
+## File: src/khora/storage/coordinator.py
+````python
+  1: """Storage coordinator that orchestrates all backends.
+  2: 
+  3: The coordinator provides a unified interface to all storage backends
+  4: (PostgreSQL, pgvector, Neo4j) and handles cross-cutting concerns like
+  5: transaction coordination and consistency.
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: from dataclasses import dataclass, field
+ 11: from datetime import datetime
+ 12: from typing import TYPE_CHECKING, Any
+ 13: from uuid import UUID
+ 14: 
+ 15: from loguru import logger
+ 16: 
+ 17: from khora.core.models import (
+ 18:     Chunk,
+ 19:     Document,
+ 20:     Entity,
+ 21:     Episode,
+ 22:     MemoryEvent,
+ 23:     MemoryNamespace,
+ 24:     Organization,
+ 25:     Relationship,
+ 26:     Workspace,
+ 27: )
+ 28: 
+ 29: if TYPE_CHECKING:
+ 30:     from .backends.base import (
+ 31:         EventStoreProtocol,
+ 32:         GraphBackendProtocol,
+ 33:         RelationalBackendProtocol,
+ 34:         VectorBackendProtocol,
+ 35:     )
+ 36: 
+ 37: 
+ 38: @dataclass
+ 39: class StorageHealth:
+ 40:     """Health status of all storage backends."""
+ 41: 
+ 42:     relational: bool = False
+ 43:     vector: bool = False
+ 44:     graph: bool = False
+ 45:     event_store: bool = False
+ 46: 
+ 47:     @property
+ 48:     def is_healthy(self) -> bool:
+ 49:         """Check if all backends are healthy."""
+ 50:         return self.relational and self.vector
+ 51: 
+ 52:     @property
+ 53:     def summary(self) -> dict[str, bool]:
+ 54:         """Get health summary as a dictionary."""
+ 55:         return {
+ 56:             "relational": self.relational,
+ 57:             "vector": self.vector,
+ 58:             "graph": self.graph,
+ 59:             "event_store": self.event_store,
+ 60:         }
+ 61: 
+ 62: 
+ 63: @dataclass
+ 64: class StorageCoordinator:
+ 65:     """Coordinates operations across all storage backends.
+ 66: 
+ 67:     Provides a unified interface for storage operations and handles
+ 68:     cross-cutting concerns like transaction management and consistency.
+ 69:     """
+ 70: 
+ 71:     relational: RelationalBackendProtocol | None = None
+ 72:     vector: VectorBackendProtocol | None = None
+ 73:     graph: GraphBackendProtocol | None = None
+ 74:     event_store: EventStoreProtocol | None = None
+ 75: 
+ 76:     _connected: bool = field(default=False, init=False)
+ 77: 
+ 78:     async def connect(self) -> None:
+ 79:         """Connect all configured backends."""
+ 80:         if self._connected:
+ 81:             return
+ 82: 
+ 83:         logger.info("Connecting storage backends...")
+ 84: 
+ 85:         if self.relational:
+ 86:             await self.relational.connect()
+ 87:         if self.vector:
+ 88:             await self.vector.connect()
+ 89:         if self.graph:
+ 90:             await self.graph.connect()
+ 91:         if self.event_store:
+ 92:             await self.event_store.connect()
+ 93: 
+ 94:         self._connected = True
+ 95:         logger.info("Storage backends connected")
+ 96: 
+ 97:     async def disconnect(self) -> None:
+ 98:         """Disconnect all backends."""
+ 99:         if not self._connected:
+100:             return
+101: 
+102:         logger.info("Disconnecting storage backends...")
+103: 
+104:         if self.event_store:
+105:             await self.event_store.disconnect()
+106:         if self.graph:
+107:             await self.graph.disconnect()
+108:         if self.vector:
+109:             await self.vector.disconnect()
+110:         if self.relational:
+111:             await self.relational.disconnect()
+112: 
+113:         self._connected = False
+114:         logger.info("Storage backends disconnected")
+115: 
+116:     async def health_check(self) -> StorageHealth:
+117:         """Check health of all backends."""
+118:         health = StorageHealth()
+119: 
+120:         if self.relational:
+121:             health.relational = await self.relational.is_healthy()
+122:         if self.vector:
+123:             health.vector = await self.vector.is_healthy()
+124:         if self.graph:
+125:             health.graph = await self.graph.is_healthy()
+126:         if self.event_store:
+127:             health.event_store = await self.event_store.is_healthy()
+128: 
+129:         return health
+130: 
+131:     # =========================================================================
+132:     # Tenancy operations (delegated to relational)
+133:     # =========================================================================
+134: 
+135:     async def create_organization(self, org: Organization) -> Organization:
+136:         """Create a new organization."""
+137:         if not self.relational:
+138:             raise RuntimeError("Relational backend not configured")
+139:         return await self.relational.create_organization(org)
+140: 
+141:     async def get_organization(self, org_id: UUID) -> Organization | None:
+142:         """Get an organization by ID."""
+143:         if not self.relational:
+144:             raise RuntimeError("Relational backend not configured")
+145:         return await self.relational.get_organization(org_id)
+146: 
+147:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
+148:         """Get an organization by slug."""
+149:         if not self.relational:
+150:             raise RuntimeError("Relational backend not configured")
+151:         return await self.relational.get_organization_by_slug(slug)
+152: 
+153:     async def create_workspace(self, workspace: Workspace) -> Workspace:
+154:         """Create a new workspace."""
+155:         if not self.relational:
+156:             raise RuntimeError("Relational backend not configured")
+157:         return await self.relational.create_workspace(workspace)
+158: 
+159:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+160:         """Get a workspace by ID."""
+161:         if not self.relational:
+162:             raise RuntimeError("Relational backend not configured")
+163:         return await self.relational.get_workspace(workspace_id)
+164: 
+165:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
+166:         """List all workspaces in an organization."""
+167:         if not self.relational:
+168:             raise RuntimeError("Relational backend not configured")
+169:         return await self.relational.list_workspaces(organization_id)
+170: 
+171:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+172:         """Create a new memory namespace."""
+173:         if not self.relational:
+174:             raise RuntimeError("Relational backend not configured")
+175:         return await self.relational.create_namespace(namespace)
+176: 
+177:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+178:         """Get a namespace by ID."""
+179:         if not self.relational:
+180:             raise RuntimeError("Relational backend not configured")
+181:         return await self.relational.get_namespace(namespace_id)
+182: 
+183:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
+184:         """Get a namespace by workspace ID and slug."""
+185:         if not self.relational:
+186:             raise RuntimeError("Relational backend not configured")
+187:         return await self.relational.get_namespace_by_slug(workspace_id, slug)
+188: 
+189:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
+190:         """List all namespaces in a workspace."""
+191:         if not self.relational:
+192:             raise RuntimeError("Relational backend not configured")
+193:         return await self.relational.list_namespaces(workspace_id)
+194: 
+195:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+196:         """Update a namespace."""
+197:         if not self.relational:
+198:             raise RuntimeError("Relational backend not configured")
+199:         return await self.relational.update_namespace(namespace)
+200: 
+201:     # =========================================================================
+202:     # Document operations (delegated to relational)
+203:     # =========================================================================
+204: 
+205:     async def create_document(self, document: Document) -> Document:
+206:         """Create a new document."""
+207:         if not self.relational:
+208:             raise RuntimeError("Relational backend not configured")
+209:         return await self.relational.create_document(document)
+210: 
+211:     async def get_document(self, document_id: UUID) -> Document | None:
+212:         """Get a document by ID."""
+213:         if not self.relational:
+214:             raise RuntimeError("Relational backend not configured")
+215:         return await self.relational.get_document(document_id)
+216: 
+217:     async def list_documents(
+218:         self,
+219:         namespace_id: UUID,
+220:         *,
+221:         status: str | None = None,
+222:         limit: int = 100,
+223:         offset: int = 0,
+224:     ) -> list[Document]:
+225:         """List documents in a namespace."""
+226:         if not self.relational:
+227:             raise RuntimeError("Relational backend not configured")
+228:         return await self.relational.list_documents(namespace_id, status=status, limit=limit, offset=offset)
+229: 
+230:     async def update_document(self, document: Document) -> Document:
+231:         """Update a document."""
+232:         if not self.relational:
+233:             raise RuntimeError("Relational backend not configured")
+234:         return await self.relational.update_document(document)
+235: 
+236:     async def delete_document(self, document_id: UUID) -> bool:
+237:         """Delete a document and its chunks."""
+238:         if not self.relational:
+239:             raise RuntimeError("Relational backend not configured")
+240: 
+241:         # Delete chunks first
+242:         if self.vector:
+243:             await self.vector.delete_chunks_by_document(document_id)
+244: 
+245:         return await self.relational.delete_document(document_id)
+246: 
+247:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+248:         """Get a document by its content checksum."""
+249:         if not self.relational:
+250:             raise RuntimeError("Relational backend not configured")
+251:         return await self.relational.get_document_by_checksum(namespace_id, checksum)
+252: 
+253:     # =========================================================================
+254:     # Chunk operations (delegated to vector)
+255:     # =========================================================================
+256: 
+257:     async def create_chunk(self, chunk: Chunk) -> Chunk:
+258:         """Create a new chunk with embedding."""
+259:         if not self.vector:
+260:             raise RuntimeError("Vector backend not configured")
+261:         return await self.vector.create_chunk(chunk)
+262: 
+263:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+264:         """Create multiple chunks in a batch."""
+265:         if not self.vector:
+266:             raise RuntimeError("Vector backend not configured")
+267:         return await self.vector.create_chunks_batch(chunks)
+268: 
+269:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+270:         """Get a chunk by ID."""
+271:         if not self.vector:
+272:             raise RuntimeError("Vector backend not configured")
+273:         return await self.vector.get_chunk(chunk_id)
+274: 
+275:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+276:         """Get all chunks for a document."""
+277:         if not self.vector:
+278:             raise RuntimeError("Vector backend not configured")
+279:         return await self.vector.get_chunks_by_document(document_id)
+280: 
+281:     async def search_similar_chunks(
+282:         self,
+283:         namespace_id: UUID,
+284:         query_embedding: list[float],
+285:         *,
+286:         limit: int = 10,
+287:         min_similarity: float = 0.0,
+288:         filter_document_ids: list[UUID] | None = None,
+289:     ) -> list[tuple[Chunk, float]]:
+290:         """Search for similar chunks."""
+291:         if not self.vector:
+292:             raise RuntimeError("Vector backend not configured")
+293:         return await self.vector.search_similar(
+294:             namespace_id,
+295:             query_embedding,
+296:             limit=limit,
+297:             min_similarity=min_similarity,
+298:             filter_document_ids=filter_document_ids,
+299:         )
+300: 
+301:     async def count_chunks(self, namespace_id: UUID) -> int:
+302:         """Count chunks in a namespace."""
+303:         if not self.vector:
+304:             raise RuntimeError("Vector backend not configured")
+305:         return await self.vector.count_chunks(namespace_id)
+306: 
+307:     async def list_chunks(
+308:         self,
+309:         namespace_id: UUID,
+310:         *,
+311:         limit: int = 1000,
+312:         offset: int = 0,
+313:     ) -> list[Chunk]:
+314:         """List chunks in a namespace.
+315: 
+316:         Args:
+317:             namespace_id: Namespace ID
+318:             limit: Maximum chunks to return
+319:             offset: Offset for pagination
+320: 
+321:         Returns:
+322:             List of chunks
+323:         """
+324:         if not self.vector:
+325:             raise RuntimeError("Vector backend not configured")
+326:         return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
+327: 
+328:     async def count_entities(self, namespace_id: UUID) -> int:
+329:         """Count entities in a namespace."""
+330:         if self.graph:
+331:             return await self.graph.count_entities(namespace_id)
+332:         return 0
+333: 
+334:     # =========================================================================
+335:     # Entity operations (cross-backend)
+336:     # =========================================================================
+337: 
+338:     async def create_entity(self, entity: Entity) -> Entity:
+339:         """Create an entity in both graph and relational stores."""
+340:         # Store in graph for relationships and traversal
+341:         if self.graph:
+342:             entity = await self.graph.create_entity(entity)
+343:         return entity
+344: 
+345:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+346:         """Get an entity by ID."""
+347:         if self.graph:
+348:             return await self.graph.get_entity(entity_id)
+349:         return None
+350: 
+351:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+352:         """Get an entity by name and type."""
+353:         if self.graph:
+354:             return await self.graph.get_entity_by_name(namespace_id, name, entity_type)
+355:         return None
+356: 
+357:     async def update_entity(self, entity: Entity) -> Entity:
+358:         """Update an entity."""
+359:         if self.graph:
+360:             entity = await self.graph.update_entity(entity)
+361:         return entity
+362: 
+363:     async def delete_entity(self, entity_id: UUID) -> bool:
+364:         """Delete an entity."""
+365:         if self.graph:
+366:             return await self.graph.delete_entity(entity_id)
+367:         return False
+368: 
+369:     async def list_entities(
+370:         self,
+371:         namespace_id: UUID,
+372:         *,
+373:         entity_type: str | None = None,
+374:         limit: int = 100,
+375:         offset: int = 0,
+376:     ) -> list[Entity]:
+377:         """List entities in a namespace."""
+378:         if self.graph:
+379:             return await self.graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
+380:         return []
+381: 
+382:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+383:         """Update the embedding for an entity."""
+384:         if self.vector:
+385:             await self.vector.update_entity_embedding(entity_id, embedding, model)
+386: 
+387:     async def search_similar_entities(
+388:         self,
+389:         namespace_id: UUID,
+390:         query_embedding: list[float],
+391:         *,
+392:         limit: int = 10,
+393:         min_similarity: float = 0.0,
+394:     ) -> list[tuple[UUID, float]]:
+395:         """Search for similar entities."""
+396:         if not self.vector:
+397:             raise RuntimeError("Vector backend not configured")
+398:         return await self.vector.search_similar_entities(
+399:             namespace_id,
+400:             query_embedding,
+401:             limit=limit,
+402:             min_similarity=min_similarity,
+403:         )
+404: 
+405:     # =========================================================================
+406:     # Relationship operations (delegated to graph)
+407:     # =========================================================================
+408: 
+409:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+410:         """Create a relationship between entities."""
+411:         if not self.graph:
+412:             raise RuntimeError("Graph backend not configured")
+413:         return await self.graph.create_relationship(relationship)
+414: 
+415:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+416:         """Get a relationship by ID."""
+417:         if self.graph:
+418:             return await self.graph.get_relationship(relationship_id)
+419:         return None
+420: 
+421:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+422:         """Delete a relationship."""
+423:         if self.graph:
+424:             return await self.graph.delete_relationship(relationship_id)
+425:         return False
+426: 
+427:     async def get_entity_relationships(
+428:         self,
+429:         entity_id: UUID,
+430:         *,
+431:         direction: str = "both",
+432:         relationship_types: list[str] | None = None,
+433:         limit: int = 100,
+434:     ) -> list[Relationship]:
+435:         """Get relationships for an entity."""
+436:         if self.graph:
+437:             return await self.graph.get_entity_relationships(
+438:                 entity_id, direction=direction, relationship_types=relationship_types, limit=limit
+439:             )
+440:         return []
+441: 
+442:     async def list_relationships(
+443:         self,
+444:         namespace_id: UUID,
+445:         *,
+446:         relationship_type: str | None = None,
+447:         limit: int = 1000,
+448:         offset: int = 0,
+449:     ) -> list[Relationship]:
+450:         """List all relationships in a namespace."""
+451:         if self.graph:
+452:             return await self.graph.list_relationships(
+453:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+454:             )
+455:         return []
+456: 
+457:     # =========================================================================
+458:     # Episode operations (delegated to graph)
+459:     # =========================================================================
+460: 
+461:     async def create_episode(self, episode: Episode) -> Episode:
+462:         """Create an episode."""
+463:         if not self.graph:
+464:             raise RuntimeError("Graph backend not configured")
+465:         return await self.graph.create_episode(episode)
+466: 
+467:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+468:         """Get an episode by ID."""
+469:         if self.graph:
+470:             return await self.graph.get_episode(episode_id)
+471:         return None
+472: 
+473:     async def list_episodes(
+474:         self,
+475:         namespace_id: UUID,
+476:         *,
+477:         start_time: datetime | None = None,
+478:         end_time: datetime | None = None,
+479:         limit: int = 100,
+480:     ) -> list[Episode]:
+481:         """List episodes in a time range."""
+482:         if self.graph:
+483:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
+484:         return []
+485: 
+486:     # =========================================================================
+487:     # Graph traversal (delegated to graph)
+488:     # =========================================================================
+489: 
+490:     async def find_paths(
+491:         self,
+492:         namespace_id: UUID,
+493:         source_entity_id: UUID,
+494:         target_entity_id: UUID,
+495:         *,
+496:         max_depth: int = 3,
+497:         relationship_types: list[str] | None = None,
+498:     ) -> list[list[dict[str, Any]]]:
+499:         """Find paths between two entities."""
+500:         if self.graph:
+501:             return await self.graph.find_paths(
+502:                 namespace_id,
+503:                 source_entity_id,
+504:                 target_entity_id,
+505:                 max_depth=max_depth,
+506:                 relationship_types=relationship_types,
+507:             )
+508:         return []
+509: 
+510:     async def get_neighborhood(
+511:         self,
+512:         entity_id: UUID,
+513:         *,
+514:         depth: int = 1,
+515:         relationship_types: list[str] | None = None,
+516:         limit: int = 50,
+517:     ) -> dict[str, Any]:
+518:         """Get the neighborhood of an entity."""
+519:         if self.graph:
+520:             return await self.graph.get_neighborhood(
+521:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
+522:             )
+523:         return {"entities": [], "relationships": []}
+524: 
+525:     # =========================================================================
+526:     # Batch operations (optimized for parallel fetching)
+527:     # =========================================================================
+528: 
+529:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+530:         """Fetch multiple entities in a single query.
+531: 
+532:         Args:
+533:             entity_ids: List of entity IDs to fetch
+534: 
+535:         Returns:
+536:             Dictionary mapping entity ID to Entity object
+537:         """
+538:         if not entity_ids:
+539:             return {}
+540:         if self.graph:
+541:             return await self.graph.get_entities_batch(entity_ids)
+542:         return {}
+543: 
+544:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+545:         """Fetch multiple documents in a single query.
+546: 
+547:         Args:
+548:             document_ids: List of document IDs to fetch
+549: 
+550:         Returns:
+551:             Dictionary mapping document ID to Document object
+552:         """
+553:         if not document_ids:
+554:             return {}
+555:         if self.relational:
+556:             return await self.relational.get_documents_batch(document_ids)
+557:         return {}
+558: 
+559:     async def get_neighborhoods_batch(
+560:         self,
+561:         entity_ids: list[UUID],
+562:         *,
+563:         depth: int = 1,
+564:         relationship_types: list[str] | None = None,
+565:         limit_per_entity: int = 20,
+566:     ) -> dict[UUID, dict[str, Any]]:
+567:         """Get neighborhoods for multiple entities in a single query.
+568: 
+569:         Args:
+570:             entity_ids: List of entity IDs
+571:             depth: Max traversal depth
+572:             relationship_types: Optional relationship type filter
+573:             limit_per_entity: Max nodes per entity neighborhood
+574: 
+575:         Returns:
+576:             Dictionary mapping entity ID to neighborhood data
+577:         """
+578:         if not entity_ids:
+579:             return {}
+580:         if self.graph:
+581:             return await self.graph.get_neighborhoods_batch(
+582:                 entity_ids,
+583:                 depth=depth,
+584:                 relationship_types=relationship_types,
+585:                 limit_per_entity=limit_per_entity,
+586:             )
+587:         return {}
+588: 
+589:     # =========================================================================
+590:     # Event operations (delegated to event store)
+591:     # =========================================================================
+592: 
+593:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+594:         """Append an event to the log."""
+595:         if not self.event_store:
+596:             raise RuntimeError("Event store not configured")
+597:         return await self.event_store.append_event(event)
+598: 
+599:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+600:         """Append multiple events in a batch."""
+601:         if not self.event_store:
+602:             raise RuntimeError("Event store not configured")
+603:         return await self.event_store.append_events_batch(events)
+604: 
+605:     async def get_events(
+606:         self,
+607:         namespace_id: UUID,
+608:         *,
+609:         event_types: list[str] | None = None,
+610:         resource_type: str | None = None,
+611:         resource_id: UUID | None = None,
+612:         after: datetime | None = None,
+613:         before: datetime | None = None,
+614:         limit: int = 100,
+615:         offset: int = 0,
+616:     ) -> list[MemoryEvent]:
+617:         """Query events from the log."""
+618:         if not self.event_store:
+619:             raise RuntimeError("Event store not configured")
+620:         return await self.event_store.get_events(
+621:             namespace_id,
+622:             event_types=event_types,
+623:             resource_type=resource_type,
+624:             resource_id=resource_id,
+625:             after=after,
+626:             before=before,
+627:             limit=limit,
+628:             offset=offset,
+629:         )
+630: 
+631:     # =========================================================================
+632:     # Sync checkpoint operations (delegated to relational)
+633:     # =========================================================================
+634: 
+635:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+636:         """Get the last sync checkpoint for a source."""
+637:         if not self.relational:
+638:             raise RuntimeError("Relational backend not configured")
+639:         return await self.relational.get_sync_checkpoint(namespace_id, source)
+640: 
+641:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+642:         """Set the sync checkpoint for a source."""
+643:         if not self.relational:
+644:             raise RuntimeError("Relational backend not configured")
+645:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
+````
+
+## File: tests/unit/test_api.py
+````python
+ 1: """Tests for API module."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
+ 7: 
+ 8: 
+ 9: @pytest.mark.unit
+10: class TestStatusEndpoints:
+11:     """Tests for status check endpoints."""
+12: 
+13:     def test_status_check(self, test_client: TestClient) -> None:
+14:         """Test basic status check endpoint."""
+15:         response = test_client.get("/status")
+16: 
+17:         assert response.status_code == 200
+18:         data = response.json()
+19:         assert data["status"] == "ok"
+20:         assert "timestamp" in data
+21:         assert data["version"] == "0.0.5"
+22:         assert data["service"] == "khora"
+23: 
+24:     def test_health_check(self, test_client: TestClient) -> None:
+25:         """Test health check endpoint."""
+26:         response = test_client.get("/health")
+27: 
+28:         assert response.status_code == 200
+29:         data = response.json()
+30:         assert data["status"] == "healthy"
+31:         assert "timestamp" in data
+32:         assert data["version"] == "0.0.5"
+33: 
+34:     def test_readiness_check(self, test_client: TestClient) -> None:
+35:         """Test readiness check endpoint."""
+36:         response = test_client.get("/health/ready")
+37: 
+38:         assert response.status_code == 200
+39:         data = response.json()
+40:         assert data["status"] in ["ready", "not_ready"]
+41:         assert "timestamp" in data
+42:         assert "checks" in data
+43: 
+44:     def test_liveness_check(self, test_client: TestClient) -> None:
+45:         """Test liveness check endpoint."""
+46:         response = test_client.get("/health/live")
+47: 
+48:         assert response.status_code == 200
+49:         data = response.json()
+50:         assert data["status"] == "alive"
+51:         assert "timestamp" in data
+52: 
+53: 
+54: @pytest.mark.unit
+55: class TestConfig:
+56:     """Tests for configuration."""
+57: 
+58:     def test_default_config(self) -> None:
+59:         """Test default configuration values."""
+60:         from khora.config import KhoraConfig
+61: 
+62:         config = KhoraConfig()
+63:         assert config.app_name == "khora"
+64:         assert config.environment == "development"
+65:         assert config.debug is False
+66:         assert config.api_host == "127.0.0.1"
+67:         assert config.api_port == 8000
+68:         assert config.auth_enabled is True
+69: 
+70:     def test_config_from_env(self, monkeypatch) -> None:
+71:         """Test configuration from environment variables."""
+72:         from khora.config import KhoraConfig
+73: 
+74:         monkeypatch.setenv("KHORA_DEBUG", "true")
+75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+77: 
+78:         config = KhoraConfig()
+79:         assert config.debug is True
+80:         assert config.api_port == 9000
+81:         assert config.environment == "staging"
+````
+
+## File: README.md
+````markdown
+  1: # Khora
+  2: 
+  3: > *"Khora is the receptacle, the space, the matrix in which all things come to be."*
+  4: > *— Plato, Timaeus*
+  5: 
+  6: In Plato's cosmology, **Khora** (χώρα) is the primordial receptacle—neither being nor non-being, but the space that receives all forms and gives them place. It is the nurse of becoming, the womb of the cosmos where the eternal Forms find material expression. Khora does not impose form; it receives, holds, and makes manifestation possible.
+  7: 
+  8: This project embodies that philosophy: **Khora is a memory lake**—a receptacle for knowledge that receives information from disparate sources, holds it in structured form, and enables its retrieval through multiple paths of inquiry. Just as Plato's Khora mediates between the intelligible and sensible worlds, this Memory Lake bridges raw data and meaningful knowledge through semantic extraction, graph relationships, and temporal context.
+  9: 
+ 10: ---
+ 11: 
+ 12: ## Overview
+ 13: 
+ 14: Khora is a **Memory Lake** system that combines three storage paradigms:
+ 15: 
+ 16: - **Knowledge Graph** (Neo4j) — Entities and their relationships
+ 17: - **Vector Database** (pgvector) — Semantic embeddings for similarity search
+ 18: - **Relational Database** (PostgreSQL) — Documents, events, and metadata
+ 19: 
+ 20: It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
+ 21: 
+ 22: ### Key Features
+ 23: 
+ 24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
+ 25: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
+ 26: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
+ 27: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
+ 28: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
+ 29: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
+ 30: - **Semantic Extraction**: LLM-powered entity and relationship extraction
+ 31: 
+ 32: ---
+ 33: 
+ 34: ## Installation
+ 35: 
+ 36: ### Prerequisites
+ 37: 
+ 38: - Python 3.13+
+ 39: - [uv](https://github.com/astral-sh/uv) for package management
+ 40: - PostgreSQL with pgvector extension
+ 41: - Neo4j (optional, for graph features)
+ 42: 
+ 43: ### Quick Install
+ 44: 
+ 45: ```bash
+ 46: # Clone and install
+ 47: git clone https://github.com/DeytaHQ/khora.git
+ 48: cd khora
+ 49: uv sync --all-extras
+ 50: 
+ 51: # Install pre-commit hooks
+ 52: uv run prek install
+ 53: ```
+ 54: 
+ 55: ### Start Development Databases
+ 56: 
+ 57: ```bash
+ 58: # Start PostgreSQL and Neo4j via Docker
+ 59: make dev
+ 60: 
+ 61: # Run database migrations
+ 62: uv run alembic upgrade head
+ 63: ```
+ 64: 
+ 65: ---
+ 66: 
+ 67: ## Usage
+ 68: 
+ 69: ### As a Library
+ 70: 
+ 71: The primary interface is the `MemoryLake` class:
+ 72: 
+ 73: ```python
+ 74: from khora import MemoryLake
+ 75: 
+ 76: async def main():
+ 77:     async with MemoryLake() as lake:
+ 78:         # Store a memory
+ 79:         result = await lake.remember(
+ 80:             "Albert Einstein developed the theory of relativity in 1905.",
+ 81:             title="Einstein Biography",
+ 82:             source="wikipedia",
+ 83:         )
+ 84:         print(f"Stored document: {result.document_id}")
+ 85:         print(f"Extracted {result.entities_extracted} entities")
+ 86: 
+ 87:         # Recall relevant memories
+ 88:         memories = await lake.recall(
+ 89:             "Who developed relativity?",
+ 90:             limit=5,
+ 91:             mode="hybrid",  # vector + graph + keyword
+ 92:         )
+ 93:         print(f"Found {len(memories.chunks)} relevant chunks")
+ 94:         print(f"Context: {memories.context_text}")
+ 95: 
+ 96:         # Explore entity relationships
+ 97:         entities = await lake.list_entities(entity_type="PERSON")
+ 98:         for entity in entities:
+ 99:             related = await lake.find_related_entities(entity.id, max_depth=2)
+100:             print(f"{entity.name} is related to {len(related)} entities")
+101: 
+102:         # Forget a memory
+103:         await lake.forget(result.document_id)
+104: 
+105: import asyncio
+106: asyncio.run(main())
+107: ```
+108: 
+109: ### Search Modes
+110: 
+111: ```python
+112: from khora import MemoryLake, SearchMode
+113: 
+114: async with MemoryLake() as lake:
+115:     # Vector-only search (semantic similarity)
+116:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
+117: 
+118:     # Graph-only search (entity relationships)
+119:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
+120: 
+121:     # Hybrid search (combines all sources with RRF)
+122:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
+123: 
+124:     # All sources (returns results from each separately)
+125:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
+126: ```
+127: 
+128: ### Multi-Tenancy
+129: 
+130: ```python
+131: from khora import MemoryLake
+132: 
+133: async with MemoryLake() as lake:
+134:     # Create organizational hierarchy
+135:     org = await lake.storage.create_organization(
+136:         Organization(name="Acme Corp", slug="acme")
+137:     )
+138:     workspace = await lake.storage.create_workspace(
+139:         Workspace(organization_id=org.id, name="Research", slug="research")
+140:     )
+141:     namespace = await lake.storage.create_namespace(
+142:         MemoryNamespace(workspace_id=workspace.id, name="Physics", slug="physics")
+143:     )
+144: 
+145:     # Store memories in specific namespace
+146:     await lake.remember(
+147:         "Important research findings...",
+148:         namespace=namespace.id,
+149:     )
+150: 
+151:     # Query within namespace (isolated from other namespaces)
+152:     results = await lake.recall("findings", namespace=namespace.id)
+153: ```
+154: 
+155: ### As a Service
+156: 
+157: ```bash
+158: # Start the API server
+159: uv run khora serve --reload
+160: 
+161: # Or with Docker
+162: docker compose up
+163: ```
+164: 
+165: #### API Endpoints
+166: 
+167: **Memory Operations:**
+168: ```bash
+169: # Store a memory
+170: curl -X POST http://localhost:8100/memory/remember \
+171:   -H "Content-Type: application/json" \
+172:   -d '{
+173:     "content": "Einstein developed relativity in 1905.",
+174:     "title": "Physics History",
+175:     "skill_name": "general_entities"
+176:   }'
+177: 
+178: # Recall memories
+179: curl -X POST http://localhost:8100/memory/recall \
+180:   -H "Content-Type: application/json" \
+181:   -d '{
+182:     "query": "Who developed relativity?",
+183:     "limit": 10,
+184:     "mode": "hybrid"
+185:   }'
+186: 
+187: # Get a document
+188: curl http://localhost:8100/memory/documents/{document_id}
+189: 
+190: # List entities
+191: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
+192: 
+193: # Get related entities
+194: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
+195: 
+196: # Forget a memory
+197: curl -X DELETE http://localhost:8100/memory/forget \
+198:   -H "Content-Type: application/json" \
+199:   -d '{"document_id": "uuid-here"}'
+200: ```
+201: 
+202: **Namespace Management:**
+203: ```bash
+204: # Create organization
+205: curl -X POST http://localhost:8100/namespaces/organizations \
+206:   -H "Content-Type: application/json" \
+207:   -d '{"name": "Acme Corp", "slug": "acme"}'
+208: 
+209: # Create workspace
+210: curl -X POST http://localhost:8100/namespaces/workspaces \
+211:   -H "Content-Type: application/json" \
+212:   -d '{"organization_id": "org-uuid", "name": "Research"}'
+213: 
+214: # Create namespace
+215: curl -X POST http://localhost:8100/namespaces/ \
+216:   -H "Content-Type: application/json" \
+217:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
+218: ```
+219: 
+220: **Sync & Pipelines:**
+221: ```bash
+222: # Ingest documents
+223: curl -X POST http://localhost:8100/sync/ingest \
+224:   -H "Content-Type: application/json" \
+225:   -d '{
+226:     "namespace_id": "ns-uuid",
+227:     "documents": [{"content": "Document text..."}],
+228:     "skill_name": "general_entities"
+229:   }'
+230: 
+231: # List available pipelines
+232: curl http://localhost:8100/sync/pipelines
+233: ```
+234: 
+235: **Health Checks:**
+236: ```bash
+237: curl http://localhost:8100/status        # Service status
+238: curl http://localhost:8100/health        # Health check
+239: curl http://localhost:8100/health/ready  # Readiness probe
+240: curl http://localhost:8100/health/live   # Liveness probe
+241: ```
+242: 
+243: ---
+244: 
+245: ## Architecture
+246: 
+247: ```
+248: ┌─────────────────────────────────────────────────────────────────────────────┐
+249: │                              MemoryLake API                                  │
+250: │                         (Library + FastAPI Service)                          │
+251: ├─────────────────────────────────────────────────────────────────────────────┤
+252: │                                                                              │
+253: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
+254: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
+255: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
+256: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
+257: │         │                  │                  │                  │          │
+258: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
+259: │                          Storage Coordinator                                 │
+260: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
+261: │         │                   │                   │                            │
+262: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
+263: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
+264: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
+265: │  │ Documents)  │     │             │     │            │     │            │ │
+266: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
+267: │                                                                              │
+268: └──────────────────────────────────────────────────────────────────────────────┘
+269: ```
+270: 
+271: ### Core Components
+272: 
+273: | Component | Purpose |
+274: |-----------|---------|
+275: | `MemoryLake` | Primary API for remember/recall/forget operations |
+276: | `StorageCoordinator` | Orchestrates all storage backends |
+277: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
+278: | `PipelineManager` | Manages Prefect ingestion flows |
+279: | `ACLEnforcer` | Cross-layer permission enforcement |
+280: 
+281: ### Storage Backends
+282: 
+283: | Backend | Technology | Purpose |
+284: |---------|------------|---------|
+285: | Relational | PostgreSQL | Documents, events, permissions, metadata |
+286: | Vector | pgvector | Embeddings for semantic similarity search |
+287: | Graph | Neo4j | Entity nodes and relationship edges |
+288: | Event Store | PostgreSQL | Immutable event log for sourcing |
+289: 
+290: ### Data Flow
+291: 
+292: 1. **Ingestion** (Two-Phase Pipeline)
+293:    - Phase 1: Stage documents, compute checksums, detect changes
+294:    - Phase 2: Chunk text, generate embeddings, extract entities
+295: 
+296: 2. **Query** (Hybrid Search)
+297:    - Execute vector, graph, and keyword searches in parallel
+298:    - Apply Reciprocal Rank Fusion to combine results
+299:    - Filter by ACL and temporal context
+300: 
+301: 3. **Event Sourcing**
+302:    - All changes recorded as immutable events
+303:    - Enables temporal queries ("state as of date X")
+304:    - Complete audit trail for compliance
+305: 
+306: ---
+307: 
+308: ## Configuration
+309: 
+310: ### Environment Variables
+311: 
+312: | Variable | Description | Default |
+313: |----------|-------------|---------|
+314: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
+315: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
+316: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
+317: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
+318: | `KHORA_DEBUG` | Enable debug mode | `false` |
+319: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
+320: | `KHORA_API_PORT` | API server port | `8100` |
+321: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
+322: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
+323: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
+324: 
+325: ### LiteLLM Configuration
+326: 
+327: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
+328: 
+329: ```yaml
+330: # examples/config/litellm/openai.yaml
+331: model: "gpt-4o-mini"
+332: api_key_env: "OPENAI_API_KEY"
+333: temperature: 0.7
+334: max_tokens: 8192
+335: embedding_model: "text-embedding-3-small"
+336: ```
+337: 
+338: ```yaml
+339: # examples/config/litellm/claude.yaml
+340: model: "claude-sonnet-4-20250514"
+341: api_key_env: "ANTHROPIC_API_KEY"
+342: temperature: 0.7
+343: max_tokens: 8192
+344: 
+345: # Router with fallbacks
+346: model_list:
+347:   - model_name: claude-sonnet-4
+348:     litellm_params:
+349:       model: claude-sonnet-4-20250514
+350:       api_key: os.environ/ANTHROPIC_API_KEY
+351:   - model_name: claude-sonnet-4
+352:     litellm_params:
+353:       model: claude-3-5-sonnet-20241022
+354:       api_key: os.environ/ANTHROPIC_API_KEY
+355: ```
+356: 
+357: ### Extraction Skills
+358: 
+359: Configure entity extraction in your code:
+360: 
+361: ```python
+362: from khora.extraction.skills import ExtractionSkill
+363: 
+364: skill = ExtractionSkill(
+365:     name="custom_entities",
+366:     description="Extract domain-specific entities",
+367:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
+368:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
+369: )
+370: 
+371: await lake.remember(content, skill_name="custom_entities")
+372: ```
+373: 
+374: ---
+375: 
+376: ## Project Structure
+377: 
+378: ```
+379: khora/
+380: ├── src/khora/
+381: │   ├── __init__.py              # Package exports
+382: │   ├── memory_lake.py           # Primary MemoryLake class
+383: │   ├── api/                     # FastAPI application
+384: │   │   ├── app.py               # App factory with lifespan
+385: │   │   ├── deps.py              # Dependency injection
+386: │   │   └── routes/              # API endpoints
+387: │   │       ├── memory.py        # Remember/recall/forget
+388: │   │       ├── namespaces.py    # Multi-tenancy management
+389: │   │       ├── sync.py          # Ingestion pipelines
+390: │   │       └── status.py        # Health checks
+391: │   ├── acl/                     # Access control
+392: │   │   ├── checker.py           # Permission checking
+393: │   │   └── enforcer.py          # Cross-layer enforcement
+394: │   ├── cli/                     # Command-line interface
+395: │   ├── config/                  # Configuration
+396: │   │   ├── schema.py            # Pydantic settings
+397: │   │   ├── llm.py               # LiteLLM configuration
+398: │   │   └── resolver.py          # Hierarchical config
+399: │   ├── core/models/             # Domain models
+400: │   │   ├── document.py          # Document, Chunk
+401: │   │   ├── entity.py            # Entity, Relationship
+402: │   │   ├── event.py             # MemoryEvent (sourcing)
+403: │   │   └── tenancy.py           # Org, Workspace, Namespace
+404: │   ├── db/                      # Database layer
+405: │   │   ├── models.py            # SQLAlchemy ORM
+406: │   │   └── session.py           # Async session management
+407: │   ├── extraction/              # Content processing
+408: │   │   ├── chunkers/            # Text chunking strategies
+409: │   │   ├── embedders/           # Embedding generation
+410: │   │   ├── extractors/          # Entity extraction
+411: │   │   └── skills/              # Extraction configurations
+412: │   ├── pipelines/               # Prefect workflows
+413: │   │   ├── flows/               # Ingestion and sync flows
+414: │   │   ├── tasks/               # Individual pipeline tasks
+415: │   │   ├── manager.py           # Pipeline orchestration
+416: │   │   └── registry.py          # Pipeline registration
+417: │   ├── query/                   # Search engine
+418: │   │   ├── engine.py            # HybridQueryEngine
+419: │   │   ├── fusion.py            # Reciprocal Rank Fusion
+420: │   │   └── temporal.py          # Time-based queries
+421: │   └── storage/                 # Storage backends
+422: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
+423: │       ├── coordinator.py       # Backend orchestration
+424: │       ├── event_store.py       # Event sourcing
+425: │       └── factory.py           # Storage initialization
+426: ├── tests/                       # Test suite
+427: ├── alembic/                     # Database migrations
+428: ├── examples/config/             # Example configurations
+429: ├── docker-compose.yml           # Development services
+430: └── pyproject.toml               # Project configuration
+431: ```
+432: 
+433: ---
+434: 
+435: ## Development
+436: 
+437: ### Commands
+438: 
+439: ```bash
+440: # Start development server
+441: uv run khora serve --reload --no-auth
+442: 
+443: # Run tests with coverage
+444: make test
+445: 
+446: # Format code
+447: make format
+448: 
+449: # Run linting
+450: make lint
+451: 
+452: # Run all pre-commit hooks
+453: make prek
+454: 
+455: # Start development databases
+456: make dev
+457: 
+458: # Stop development databases
+459: make down
+460: ```
+461: 
+462: ### Database Migrations
+463: 
+464: ```bash
+465: # Run all migrations
+466: uv run alembic upgrade head
+467: 
+468: # Create a new migration
+469: uv run alembic revision --autogenerate -m "Add new table"
+470: 
+471: # Rollback one migration
+472: uv run alembic downgrade -1
+473: ```
+474: 
+475: ### Testing
+476: 
+477: ```bash
+478: # Run all tests
+479: make test
+480: 
+481: # Run specific test file
+482: uv run pytest tests/unit/test_api.py -v
+483: 
+484: # Run with markers
+485: uv run pytest -m unit        # Unit tests only
+486: uv run pytest -m integration # Integration tests
+487: uv run pytest -m e2e         # End-to-end tests
+488: ```
+489: 
+490: ---
+491: 
+492: ## API Reference
+493: 
+494: ### MemoryLake Class
+495: 
+496: ```python
+497: class MemoryLake:
+498:     async def remember(
+499:         self,
+500:         content: str,
+501:         *,
+502:         namespace: UUID | None = None,
+503:         title: str = "",
+504:         source: str = "",
+505:         metadata: dict = {},
+506:         skill_name: str = "general_entities",
+507:     ) -> RememberResult:
+508:         """Store content in the memory lake."""
+509: 
+510:     async def recall(
+511:         self,
+512:         query: str,
+513:         *,
+514:         namespace: UUID | None = None,
+515:         limit: int = 10,
+516:         mode: SearchMode = SearchMode.HYBRID,
+517:         min_similarity: float = 0.5,
+518:     ) -> RecallResult:
+519:         """Recall memories relevant to a query."""
+520: 
+521:     async def forget(
+522:         self,
+523:         document_id: UUID,
+524:         *,
+525:         namespace: UUID | None = None,
+526:     ) -> bool:
+527:         """Remove a memory from the lake."""
+528: 
+529:     async def list_entities(
+530:         self,
+531:         *,
+532:         namespace: UUID | None = None,
+533:         entity_type: str | None = None,
+534:         limit: int = 100,
+535:     ) -> list[Entity]:
+536:         """List entities in a namespace."""
+537: 
+538:     async def find_related_entities(
+539:         self,
+540:         entity_id: UUID,
+541:         *,
+542:         max_depth: int = 2,
+543:         limit: int = 20,
+544:     ) -> list[tuple[Entity, float]]:
+545:         """Find entities related to a given entity."""
+546: ```
+547: 
+548: ### Search Modes
+549: 
+550: | Mode | Description |
+551: |------|-------------|
+552: | `VECTOR` | Semantic similarity search using embeddings |
+553: | `GRAPH` | Entity and relationship traversal |
+554: | `KEYWORD` | Full-text keyword search |
+555: | `HYBRID` | Combined search with RRF fusion |
+556: | `ALL` | Returns results from all sources separately |
+557: 
+558: ### Entity Types
+559: 
+560: | Type | Description |
+561: |------|-------------|
+562: | `PERSON` | Individual people |
+563: | `ORGANIZATION` | Companies, institutions |
+564: | `LOCATION` | Places, addresses |
+565: | `CONCEPT` | Abstract ideas, theories |
+566: | `EVENT` | Occurrences, incidents |
+567: | `TECHNOLOGY` | Tools, platforms, languages |
+568: | `PRODUCT` | Goods, services |
+569: | `DOCUMENT` | Referenced documents |
+570: | `OTHER` | Uncategorized entities |
+571: 
+572: ---
+573: 
+574: ## License
+575: 
+576: Copyright (c) 2024-2025 Deyta. All rights reserved.
+````
+
+## File: src/khora/api/app.py
+````python
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     await close_db()
+ 86: 
+ 87: 
+ 88: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 89:     """Create and configure the FastAPI application.
+ 90: 
+ 91:     Args:
+ 92:         config: Optional application configuration
+ 93: 
+ 94:     Returns:
+ 95:         Configured FastAPI application
+ 96:     """
+ 97:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+ 98:     from ..logging_config import setup_logging
+ 99: 
+100:     setup_logging(level="INFO")
+101: 
+102:     if config is None:
+103:         from ..config import load_config
+104: 
+105:         config = load_config()
+106: 
+107:     app = FastAPI(
+108:         title="Khora",
+109:         description="Deyta's memory lake and materialization of knowledge",
+110:         version="0.0.5",
+111:         lifespan=lifespan,
+112:         debug=config.debug,
+113:     )
+114: 
+115:     # Store config in app state
+116:     app.state.config = config
+117: 
+118:     # Configure CORS
+119:     app.add_middleware(
+120:         CORSMiddleware,
+121:         allow_origins=["*"] if config.debug else [],
+122:         allow_credentials=True,
+123:         allow_methods=["*"],
+124:         allow_headers=["*"],
+125:     )
+126: 
+127:     # Add request logging
+128:     app.add_middleware(LoggingMiddleware)
+129: 
+130:     # Register routes
+131:     # Status endpoint is public (no auth)
+132:     app.include_router(status.router, tags=["status"])
+133: 
+134:     # Memory Lake API routes
+135:     app.include_router(memory.router)
+136:     app.include_router(namespaces.router)
+137:     app.include_router(sync.router)
+138: 
+139:     return app
 ````
 
 ## File: src/khora/storage/backends/neo4j.py
@@ -20156,814 +20964,6 @@ README.md
 873:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
-## File: tests/unit/test_api.py
-````python
- 1: """Tests for API module."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
- 7: 
- 8: 
- 9: @pytest.mark.unit
-10: class TestStatusEndpoints:
-11:     """Tests for status check endpoints."""
-12: 
-13:     def test_status_check(self, test_client: TestClient) -> None:
-14:         """Test basic status check endpoint."""
-15:         response = test_client.get("/status")
-16: 
-17:         assert response.status_code == 200
-18:         data = response.json()
-19:         assert data["status"] == "ok"
-20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.4"
-22:         assert data["service"] == "khora"
-23: 
-24:     def test_health_check(self, test_client: TestClient) -> None:
-25:         """Test health check endpoint."""
-26:         response = test_client.get("/health")
-27: 
-28:         assert response.status_code == 200
-29:         data = response.json()
-30:         assert data["status"] == "healthy"
-31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.4"
-33: 
-34:     def test_readiness_check(self, test_client: TestClient) -> None:
-35:         """Test readiness check endpoint."""
-36:         response = test_client.get("/health/ready")
-37: 
-38:         assert response.status_code == 200
-39:         data = response.json()
-40:         assert data["status"] in ["ready", "not_ready"]
-41:         assert "timestamp" in data
-42:         assert "checks" in data
-43: 
-44:     def test_liveness_check(self, test_client: TestClient) -> None:
-45:         """Test liveness check endpoint."""
-46:         response = test_client.get("/health/live")
-47: 
-48:         assert response.status_code == 200
-49:         data = response.json()
-50:         assert data["status"] == "alive"
-51:         assert "timestamp" in data
-52: 
-53: 
-54: @pytest.mark.unit
-55: class TestConfig:
-56:     """Tests for configuration."""
-57: 
-58:     def test_default_config(self) -> None:
-59:         """Test default configuration values."""
-60:         from khora.config import KhoraConfig
-61: 
-62:         config = KhoraConfig()
-63:         assert config.app_name == "khora"
-64:         assert config.environment == "development"
-65:         assert config.debug is False
-66:         assert config.api_host == "127.0.0.1"
-67:         assert config.api_port == 8000
-68:         assert config.auth_enabled is True
-69: 
-70:     def test_config_from_env(self, monkeypatch) -> None:
-71:         """Test configuration from environment variables."""
-72:         from khora.config import KhoraConfig
-73: 
-74:         monkeypatch.setenv("KHORA_DEBUG", "true")
-75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-77: 
-78:         config = KhoraConfig()
-79:         assert config.debug is True
-80:         assert config.api_port == 9000
-81:         assert config.environment == "staging"
-````
-
-## File: README.md
-````markdown
-  1: # Khora
-  2: 
-  3: > *"Khora is the receptacle, the space, the matrix in which all things come to be."*
-  4: > *— Plato, Timaeus*
-  5: 
-  6: In Plato's cosmology, **Khora** (χώρα) is the primordial receptacle—neither being nor non-being, but the space that receives all forms and gives them place. It is the nurse of becoming, the womb of the cosmos where the eternal Forms find material expression. Khora does not impose form; it receives, holds, and makes manifestation possible.
-  7: 
-  8: This project embodies that philosophy: **Khora is a memory lake**—a receptacle for knowledge that receives information from disparate sources, holds it in structured form, and enables its retrieval through multiple paths of inquiry. Just as Plato's Khora mediates between the intelligible and sensible worlds, this Memory Lake bridges raw data and meaningful knowledge through semantic extraction, graph relationships, and temporal context.
-  9: 
- 10: ---
- 11: 
- 12: ## Overview
- 13: 
- 14: Khora is a **Memory Lake** system that combines three storage paradigms:
- 15: 
- 16: - **Knowledge Graph** (Neo4j) — Entities and their relationships
- 17: - **Vector Database** (pgvector) — Semantic embeddings for similarity search
- 18: - **Relational Database** (PostgreSQL) — Documents, events, and metadata
- 19: 
- 20: It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
- 21: 
- 22: ### Key Features
- 23: 
- 24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
- 25: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
- 26: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
- 27: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
- 28: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
- 29: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
- 30: - **Semantic Extraction**: LLM-powered entity and relationship extraction
- 31: 
- 32: ---
- 33: 
- 34: ## Installation
- 35: 
- 36: ### Prerequisites
- 37: 
- 38: - Python 3.13+
- 39: - [uv](https://github.com/astral-sh/uv) for package management
- 40: - PostgreSQL with pgvector extension
- 41: - Neo4j (optional, for graph features)
- 42: 
- 43: ### Quick Install
- 44: 
- 45: ```bash
- 46: # Clone and install
- 47: git clone https://github.com/DeytaHQ/khora.git
- 48: cd khora
- 49: uv sync --all-extras
- 50: 
- 51: # Install pre-commit hooks
- 52: uv run prek install
- 53: ```
- 54: 
- 55: ### Start Development Databases
- 56: 
- 57: ```bash
- 58: # Start PostgreSQL and Neo4j via Docker
- 59: make dev
- 60: 
- 61: # Run database migrations
- 62: uv run alembic upgrade head
- 63: ```
- 64: 
- 65: ---
- 66: 
- 67: ## Usage
- 68: 
- 69: ### As a Library
- 70: 
- 71: The primary interface is the `MemoryLake` class:
- 72: 
- 73: ```python
- 74: from khora import MemoryLake
- 75: 
- 76: async def main():
- 77:     async with MemoryLake() as lake:
- 78:         # Store a memory
- 79:         result = await lake.remember(
- 80:             "Albert Einstein developed the theory of relativity in 1905.",
- 81:             title="Einstein Biography",
- 82:             source="wikipedia",
- 83:         )
- 84:         print(f"Stored document: {result.document_id}")
- 85:         print(f"Extracted {result.entities_extracted} entities")
- 86: 
- 87:         # Recall relevant memories
- 88:         memories = await lake.recall(
- 89:             "Who developed relativity?",
- 90:             limit=5,
- 91:             mode="hybrid",  # vector + graph + keyword
- 92:         )
- 93:         print(f"Found {len(memories.chunks)} relevant chunks")
- 94:         print(f"Context: {memories.context_text}")
- 95: 
- 96:         # Explore entity relationships
- 97:         entities = await lake.list_entities(entity_type="PERSON")
- 98:         for entity in entities:
- 99:             related = await lake.find_related_entities(entity.id, max_depth=2)
-100:             print(f"{entity.name} is related to {len(related)} entities")
-101: 
-102:         # Forget a memory
-103:         await lake.forget(result.document_id)
-104: 
-105: import asyncio
-106: asyncio.run(main())
-107: ```
-108: 
-109: ### Search Modes
-110: 
-111: ```python
-112: from khora import MemoryLake, SearchMode
-113: 
-114: async with MemoryLake() as lake:
-115:     # Vector-only search (semantic similarity)
-116:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
-117: 
-118:     # Graph-only search (entity relationships)
-119:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
-120: 
-121:     # Hybrid search (combines all sources with RRF)
-122:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
-123: 
-124:     # All sources (returns results from each separately)
-125:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
-126: ```
-127: 
-128: ### Multi-Tenancy
-129: 
-130: ```python
-131: from khora import MemoryLake
-132: 
-133: async with MemoryLake() as lake:
-134:     # Create organizational hierarchy
-135:     org = await lake.storage.create_organization(
-136:         Organization(name="Acme Corp", slug="acme")
-137:     )
-138:     workspace = await lake.storage.create_workspace(
-139:         Workspace(organization_id=org.id, name="Research", slug="research")
-140:     )
-141:     namespace = await lake.storage.create_namespace(
-142:         MemoryNamespace(workspace_id=workspace.id, name="Physics", slug="physics")
-143:     )
-144: 
-145:     # Store memories in specific namespace
-146:     await lake.remember(
-147:         "Important research findings...",
-148:         namespace=namespace.id,
-149:     )
-150: 
-151:     # Query within namespace (isolated from other namespaces)
-152:     results = await lake.recall("findings", namespace=namespace.id)
-153: ```
-154: 
-155: ### As a Service
-156: 
-157: ```bash
-158: # Start the API server
-159: uv run khora serve --reload
-160: 
-161: # Or with Docker
-162: docker compose up
-163: ```
-164: 
-165: #### API Endpoints
-166: 
-167: **Memory Operations:**
-168: ```bash
-169: # Store a memory
-170: curl -X POST http://localhost:8100/memory/remember \
-171:   -H "Content-Type: application/json" \
-172:   -d '{
-173:     "content": "Einstein developed relativity in 1905.",
-174:     "title": "Physics History",
-175:     "skill_name": "general_entities"
-176:   }'
-177: 
-178: # Recall memories
-179: curl -X POST http://localhost:8100/memory/recall \
-180:   -H "Content-Type: application/json" \
-181:   -d '{
-182:     "query": "Who developed relativity?",
-183:     "limit": 10,
-184:     "mode": "hybrid"
-185:   }'
-186: 
-187: # Get a document
-188: curl http://localhost:8100/memory/documents/{document_id}
-189: 
-190: # List entities
-191: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
-192: 
-193: # Get related entities
-194: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
-195: 
-196: # Forget a memory
-197: curl -X DELETE http://localhost:8100/memory/forget \
-198:   -H "Content-Type: application/json" \
-199:   -d '{"document_id": "uuid-here"}'
-200: ```
-201: 
-202: **Namespace Management:**
-203: ```bash
-204: # Create organization
-205: curl -X POST http://localhost:8100/namespaces/organizations \
-206:   -H "Content-Type: application/json" \
-207:   -d '{"name": "Acme Corp", "slug": "acme"}'
-208: 
-209: # Create workspace
-210: curl -X POST http://localhost:8100/namespaces/workspaces \
-211:   -H "Content-Type: application/json" \
-212:   -d '{"organization_id": "org-uuid", "name": "Research"}'
-213: 
-214: # Create namespace
-215: curl -X POST http://localhost:8100/namespaces/ \
-216:   -H "Content-Type: application/json" \
-217:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
-218: ```
-219: 
-220: **Sync & Pipelines:**
-221: ```bash
-222: # Ingest documents
-223: curl -X POST http://localhost:8100/sync/ingest \
-224:   -H "Content-Type: application/json" \
-225:   -d '{
-226:     "namespace_id": "ns-uuid",
-227:     "documents": [{"content": "Document text..."}],
-228:     "skill_name": "general_entities"
-229:   }'
-230: 
-231: # List available pipelines
-232: curl http://localhost:8100/sync/pipelines
-233: ```
-234: 
-235: **Health Checks:**
-236: ```bash
-237: curl http://localhost:8100/status        # Service status
-238: curl http://localhost:8100/health        # Health check
-239: curl http://localhost:8100/health/ready  # Readiness probe
-240: curl http://localhost:8100/health/live   # Liveness probe
-241: ```
-242: 
-243: ---
-244: 
-245: ## Architecture
-246: 
-247: ```
-248: ┌─────────────────────────────────────────────────────────────────────────────┐
-249: │                              MemoryLake API                                  │
-250: │                         (Library + FastAPI Service)                          │
-251: ├─────────────────────────────────────────────────────────────────────────────┤
-252: │                                                                              │
-253: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
-254: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
-255: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
-256: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
-257: │         │                  │                  │                  │          │
-258: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
-259: │                          Storage Coordinator                                 │
-260: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
-261: │         │                   │                   │                            │
-262: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
-263: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
-264: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
-265: │  │ Documents)  │     │             │     │            │     │            │ │
-266: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
-267: │                                                                              │
-268: └──────────────────────────────────────────────────────────────────────────────┘
-269: ```
-270: 
-271: ### Core Components
-272: 
-273: | Component | Purpose |
-274: |-----------|---------|
-275: | `MemoryLake` | Primary API for remember/recall/forget operations |
-276: | `StorageCoordinator` | Orchestrates all storage backends |
-277: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
-278: | `PipelineManager` | Manages Prefect ingestion flows |
-279: | `ACLEnforcer` | Cross-layer permission enforcement |
-280: 
-281: ### Storage Backends
-282: 
-283: | Backend | Technology | Purpose |
-284: |---------|------------|---------|
-285: | Relational | PostgreSQL | Documents, events, permissions, metadata |
-286: | Vector | pgvector | Embeddings for semantic similarity search |
-287: | Graph | Neo4j | Entity nodes and relationship edges |
-288: | Event Store | PostgreSQL | Immutable event log for sourcing |
-289: 
-290: ### Data Flow
-291: 
-292: 1. **Ingestion** (Two-Phase Pipeline)
-293:    - Phase 1: Stage documents, compute checksums, detect changes
-294:    - Phase 2: Chunk text, generate embeddings, extract entities
-295: 
-296: 2. **Query** (Hybrid Search)
-297:    - Execute vector, graph, and keyword searches in parallel
-298:    - Apply Reciprocal Rank Fusion to combine results
-299:    - Filter by ACL and temporal context
-300: 
-301: 3. **Event Sourcing**
-302:    - All changes recorded as immutable events
-303:    - Enables temporal queries ("state as of date X")
-304:    - Complete audit trail for compliance
-305: 
-306: ---
-307: 
-308: ## Configuration
-309: 
-310: ### Environment Variables
-311: 
-312: | Variable | Description | Default |
-313: |----------|-------------|---------|
-314: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
-315: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
-316: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
-317: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
-318: | `KHORA_DEBUG` | Enable debug mode | `false` |
-319: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
-320: | `KHORA_API_PORT` | API server port | `8100` |
-321: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
-322: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
-323: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
-324: 
-325: ### LiteLLM Configuration
-326: 
-327: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
-328: 
-329: ```yaml
-330: # examples/config/litellm/openai.yaml
-331: model: "gpt-4o-mini"
-332: api_key_env: "OPENAI_API_KEY"
-333: temperature: 0.7
-334: max_tokens: 8192
-335: embedding_model: "text-embedding-3-small"
-336: ```
-337: 
-338: ```yaml
-339: # examples/config/litellm/claude.yaml
-340: model: "claude-sonnet-4-20250514"
-341: api_key_env: "ANTHROPIC_API_KEY"
-342: temperature: 0.7
-343: max_tokens: 8192
-344: 
-345: # Router with fallbacks
-346: model_list:
-347:   - model_name: claude-sonnet-4
-348:     litellm_params:
-349:       model: claude-sonnet-4-20250514
-350:       api_key: os.environ/ANTHROPIC_API_KEY
-351:   - model_name: claude-sonnet-4
-352:     litellm_params:
-353:       model: claude-3-5-sonnet-20241022
-354:       api_key: os.environ/ANTHROPIC_API_KEY
-355: ```
-356: 
-357: ### Extraction Skills
-358: 
-359: Configure entity extraction in your code:
-360: 
-361: ```python
-362: from khora.extraction.skills import ExtractionSkill
-363: 
-364: skill = ExtractionSkill(
-365:     name="custom_entities",
-366:     description="Extract domain-specific entities",
-367:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
-368:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
-369: )
-370: 
-371: await lake.remember(content, skill_name="custom_entities")
-372: ```
-373: 
-374: ---
-375: 
-376: ## Project Structure
-377: 
-378: ```
-379: khora/
-380: ├── src/khora/
-381: │   ├── __init__.py              # Package exports
-382: │   ├── memory_lake.py           # Primary MemoryLake class
-383: │   ├── api/                     # FastAPI application
-384: │   │   ├── app.py               # App factory with lifespan
-385: │   │   ├── deps.py              # Dependency injection
-386: │   │   └── routes/              # API endpoints
-387: │   │       ├── memory.py        # Remember/recall/forget
-388: │   │       ├── namespaces.py    # Multi-tenancy management
-389: │   │       ├── sync.py          # Ingestion pipelines
-390: │   │       └── status.py        # Health checks
-391: │   ├── acl/                     # Access control
-392: │   │   ├── checker.py           # Permission checking
-393: │   │   └── enforcer.py          # Cross-layer enforcement
-394: │   ├── cli/                     # Command-line interface
-395: │   ├── config/                  # Configuration
-396: │   │   ├── schema.py            # Pydantic settings
-397: │   │   ├── llm.py               # LiteLLM configuration
-398: │   │   └── resolver.py          # Hierarchical config
-399: │   ├── core/models/             # Domain models
-400: │   │   ├── document.py          # Document, Chunk
-401: │   │   ├── entity.py            # Entity, Relationship
-402: │   │   ├── event.py             # MemoryEvent (sourcing)
-403: │   │   └── tenancy.py           # Org, Workspace, Namespace
-404: │   ├── db/                      # Database layer
-405: │   │   ├── models.py            # SQLAlchemy ORM
-406: │   │   └── session.py           # Async session management
-407: │   ├── extraction/              # Content processing
-408: │   │   ├── chunkers/            # Text chunking strategies
-409: │   │   ├── embedders/           # Embedding generation
-410: │   │   ├── extractors/          # Entity extraction
-411: │   │   └── skills/              # Extraction configurations
-412: │   ├── pipelines/               # Prefect workflows
-413: │   │   ├── flows/               # Ingestion and sync flows
-414: │   │   ├── tasks/               # Individual pipeline tasks
-415: │   │   ├── manager.py           # Pipeline orchestration
-416: │   │   └── registry.py          # Pipeline registration
-417: │   ├── query/                   # Search engine
-418: │   │   ├── engine.py            # HybridQueryEngine
-419: │   │   ├── fusion.py            # Reciprocal Rank Fusion
-420: │   │   └── temporal.py          # Time-based queries
-421: │   └── storage/                 # Storage backends
-422: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
-423: │       ├── coordinator.py       # Backend orchestration
-424: │       ├── event_store.py       # Event sourcing
-425: │       └── factory.py           # Storage initialization
-426: ├── tests/                       # Test suite
-427: ├── alembic/                     # Database migrations
-428: ├── examples/config/             # Example configurations
-429: ├── docker-compose.yml           # Development services
-430: └── pyproject.toml               # Project configuration
-431: ```
-432: 
-433: ---
-434: 
-435: ## Development
-436: 
-437: ### Commands
-438: 
-439: ```bash
-440: # Start development server
-441: uv run khora serve --reload --no-auth
-442: 
-443: # Run tests with coverage
-444: make test
-445: 
-446: # Format code
-447: make format
-448: 
-449: # Run linting
-450: make lint
-451: 
-452: # Run all pre-commit hooks
-453: make prek
-454: 
-455: # Start development databases
-456: make dev
-457: 
-458: # Stop development databases
-459: make down
-460: ```
-461: 
-462: ### Database Migrations
-463: 
-464: ```bash
-465: # Run all migrations
-466: uv run alembic upgrade head
-467: 
-468: # Create a new migration
-469: uv run alembic revision --autogenerate -m "Add new table"
-470: 
-471: # Rollback one migration
-472: uv run alembic downgrade -1
-473: ```
-474: 
-475: ### Testing
-476: 
-477: ```bash
-478: # Run all tests
-479: make test
-480: 
-481: # Run specific test file
-482: uv run pytest tests/unit/test_api.py -v
-483: 
-484: # Run with markers
-485: uv run pytest -m unit        # Unit tests only
-486: uv run pytest -m integration # Integration tests
-487: uv run pytest -m e2e         # End-to-end tests
-488: ```
-489: 
-490: ---
-491: 
-492: ## API Reference
-493: 
-494: ### MemoryLake Class
-495: 
-496: ```python
-497: class MemoryLake:
-498:     async def remember(
-499:         self,
-500:         content: str,
-501:         *,
-502:         namespace: UUID | None = None,
-503:         title: str = "",
-504:         source: str = "",
-505:         metadata: dict = {},
-506:         skill_name: str = "general_entities",
-507:     ) -> RememberResult:
-508:         """Store content in the memory lake."""
-509: 
-510:     async def recall(
-511:         self,
-512:         query: str,
-513:         *,
-514:         namespace: UUID | None = None,
-515:         limit: int = 10,
-516:         mode: SearchMode = SearchMode.HYBRID,
-517:         min_similarity: float = 0.5,
-518:     ) -> RecallResult:
-519:         """Recall memories relevant to a query."""
-520: 
-521:     async def forget(
-522:         self,
-523:         document_id: UUID,
-524:         *,
-525:         namespace: UUID | None = None,
-526:     ) -> bool:
-527:         """Remove a memory from the lake."""
-528: 
-529:     async def list_entities(
-530:         self,
-531:         *,
-532:         namespace: UUID | None = None,
-533:         entity_type: str | None = None,
-534:         limit: int = 100,
-535:     ) -> list[Entity]:
-536:         """List entities in a namespace."""
-537: 
-538:     async def find_related_entities(
-539:         self,
-540:         entity_id: UUID,
-541:         *,
-542:         max_depth: int = 2,
-543:         limit: int = 20,
-544:     ) -> list[tuple[Entity, float]]:
-545:         """Find entities related to a given entity."""
-546: ```
-547: 
-548: ### Search Modes
-549: 
-550: | Mode | Description |
-551: |------|-------------|
-552: | `VECTOR` | Semantic similarity search using embeddings |
-553: | `GRAPH` | Entity and relationship traversal |
-554: | `KEYWORD` | Full-text keyword search |
-555: | `HYBRID` | Combined search with RRF fusion |
-556: | `ALL` | Returns results from all sources separately |
-557: 
-558: ### Entity Types
-559: 
-560: | Type | Description |
-561: |------|-------------|
-562: | `PERSON` | Individual people |
-563: | `ORGANIZATION` | Companies, institutions |
-564: | `LOCATION` | Places, addresses |
-565: | `CONCEPT` | Abstract ideas, theories |
-566: | `EVENT` | Occurrences, incidents |
-567: | `TECHNOLOGY` | Tools, platforms, languages |
-568: | `PRODUCT` | Goods, services |
-569: | `DOCUMENT` | Referenced documents |
-570: | `OTHER` | Uncategorized entities |
-571: 
-572: ---
-573: 
-574: ## License
-575: 
-576: Copyright (c) 2024-2025 Deyta. All rights reserved.
-````
-
-## File: src/khora/api/app.py
-````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     await close_db()
- 86: 
- 87: 
- 88: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 89:     """Create and configure the FastAPI application.
- 90: 
- 91:     Args:
- 92:         config: Optional application configuration
- 93: 
- 94:     Returns:
- 95:         Configured FastAPI application
- 96:     """
- 97:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
- 98:     from ..logging_config import setup_logging
- 99: 
-100:     setup_logging(level="INFO")
-101: 
-102:     if config is None:
-103:         from ..config import load_config
-104: 
-105:         config = load_config()
-106: 
-107:     app = FastAPI(
-108:         title="Khora",
-109:         description="Deyta's memory lake and materialization of knowledge",
-110:         version="0.0.4",
-111:         lifespan=lifespan,
-112:         debug=config.debug,
-113:     )
-114: 
-115:     # Store config in app state
-116:     app.state.config = config
-117: 
-118:     # Configure CORS
-119:     app.add_middleware(
-120:         CORSMiddleware,
-121:         allow_origins=["*"] if config.debug else [],
-122:         allow_credentials=True,
-123:         allow_methods=["*"],
-124:         allow_headers=["*"],
-125:     )
-126: 
-127:     # Add request logging
-128:     app.add_middleware(LoggingMiddleware)
-129: 
-130:     # Register routes
-131:     # Status endpoint is public (no auth)
-132:     app.include_router(status.router, tags=["status"])
-133: 
-134:     # Memory Lake API routes
-135:     app.include_router(memory.router)
-136:     app.include_router(namespaces.router)
-137:     app.include_router(sync.router)
-138: 
-139:     return app
-````
-
 ## File: src/khora/__init__.py
 ````python
  1: """Khora - Deyta's memory lake and materialization of knowledge.
@@ -20985,7 +20985,7 @@ README.md
 17: from .memory_lake import MemoryLake, RecallResult, RememberResult
 18: from .query import SearchMode
 19: 
-20: __version__ = "0.0.4"
+20: __version__ = "0.0.5"
 21: 
 22: __all__ = [
 23:     "main",
@@ -22717,7 +22717,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.0.4"
+  3: version = "0.0.5"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -23324,6 +23324,15 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-01-27 09:32:30 +0100
+**Message:** feat: add list_relationships method to storage layer
+
+**Files:**
+- REPOMIX.md
+- src/khora/storage/backends/base.py
+- src/khora/storage/backends/neo4j.py
+- src/khora/storage/coordinator.py
+
 ## Commit: 2026-01-27 09:15:13 +0100
 **Message:** chore: reduce log verbosity for large ingestion runs
 
@@ -23645,12 +23654,3 @@ README.md
 - src/khora/storage/event_store.py
 - src/khora/storage/factory.py
 - uv.lock
-
-## Commit: 2026-01-25 23:23:55 +0100
-**Message:** Use non-standard ports to avoid conflicts with other projects
-
-**Files:**
-- .env.example
-- Makefile
-- compose.full.yaml
-- compose.yaml
