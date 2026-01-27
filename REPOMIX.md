@@ -178,6 +178,8 @@ tests/
   unit/
     __init__.py
     test_api.py
+    test_expansion.py
+    test_expertise.py
   __init__.py
   conftest.py
 CLAUDE.md
@@ -189,6 +191,1257 @@ README.md
 ```
 
 # Files
+
+## File: tests/unit/test_expansion.py
+````python
+  1: """Unit tests for semantic expansion components."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from uuid import uuid4
+  6: 
+  7: import pytest
+  8: 
+  9: from khora.core.models import Entity, Relationship
+ 10: from khora.extraction.expansion import (
+ 11:     CrossToolUnifier,
+ 12:     RelationshipInferrer,
+ 13:     SemanticExpander,
+ 14: )
+ 15: from khora.extraction.expansion.rule_engine import (
+ 16:     RuleEngine,
+ 17:     RuleEvaluationContext,
+ 18: )
+ 19: from khora.extraction.skills import (
+ 20:     CorrelationRule,
+ 21:     ExpertiseConfig,
+ 22:     InferenceCondition,
+ 23:     InferenceRule,
+ 24: )
+ 25: 
+ 26: 
+ 27: class TestRuleEvaluationContext:
+ 28:     """Tests for RuleEvaluationContext."""
+ 29: 
+ 30:     def test_empty_context(self) -> None:
+ 31:         """Test creating empty context."""
+ 32:         ctx = RuleEvaluationContext()
+ 33:         assert ctx.entities == []
+ 34:         assert ctx.relationships == []
+ 35:         assert ctx.entity_index == {}
+ 36:         assert ctx.type_index == {}
+ 37: 
+ 38:     def test_from_data_builds_indices(self) -> None:
+ 39:         """Test context builds indices from data."""
+ 40:         namespace_id = uuid4()
+ 41:         entities = [
+ 42:             Entity(
+ 43:                 id=uuid4(),
+ 44:                 name="John Smith",
+ 45:                 entity_type="PERSON",
+ 46:                 namespace_id=namespace_id,
+ 47:             ),
+ 48:             Entity(
+ 49:                 id=uuid4(),
+ 50:                 name="Acme Corp",
+ 51:                 entity_type="ORGANIZATION",
+ 52:                 namespace_id=namespace_id,
+ 53:             ),
+ 54:             Entity(
+ 55:                 id=uuid4(),
+ 56:                 name="Jane Doe",
+ 57:                 entity_type="PERSON",
+ 58:                 namespace_id=namespace_id,
+ 59:             ),
+ 60:         ]
+ 61: 
+ 62:         ctx = RuleEvaluationContext.from_data(entities, [])
+ 63: 
+ 64:         # Check entity index (by name, lowercase)
+ 65:         assert "john smith" in ctx.entity_index
+ 66:         assert "acme corp" in ctx.entity_index
+ 67:         assert len(ctx.entity_index["john smith"]) == 1
+ 68: 
+ 69:         # Check type index
+ 70:         assert "PERSON" in ctx.type_index
+ 71:         assert "ORGANIZATION" in ctx.type_index
+ 72:         assert len(ctx.type_index["PERSON"]) == 2
+ 73:         assert len(ctx.type_index["ORGANIZATION"]) == 1
+ 74: 
+ 75:     def test_from_data_builds_relationship_index(self) -> None:
+ 76:         """Test context builds relationship index."""
+ 77:         namespace_id = uuid4()
+ 78:         e1_id = uuid4()
+ 79:         e2_id = uuid4()
+ 80: 
+ 81:         relationships = [
+ 82:             Relationship(
+ 83:                 id=uuid4(),
+ 84:                 source_entity_id=e1_id,
+ 85:                 target_entity_id=e2_id,
+ 86:                 relationship_type="WORKS_FOR",
+ 87:                 namespace_id=namespace_id,
+ 88:             ),
+ 89:             Relationship(
+ 90:                 id=uuid4(),
+ 91:                 source_entity_id=e2_id,
+ 92:                 target_entity_id=e1_id,
+ 93:                 relationship_type="EMPLOYS",
+ 94:                 namespace_id=namespace_id,
+ 95:             ),
+ 96:         ]
+ 97: 
+ 98:         ctx = RuleEvaluationContext.from_data([], relationships)
+ 99: 
+100:         assert "WORKS_FOR" in ctx.relationship_index
+101:         assert "EMPLOYS" in ctx.relationship_index
+102:         assert len(ctx.relationship_index["WORKS_FOR"]) == 1
+103: 
+104: 
+105: class TestRuleEngine:
+106:     """Tests for RuleEngine."""
+107: 
+108:     def test_engine_without_expertise(self) -> None:
+109:         """Test engine without expertise returns empty matches."""
+110:         engine = RuleEngine()
+111:         ctx = RuleEvaluationContext()
+112: 
+113:         correlation_matches = engine.evaluate_correlation_rules("test text", ctx)
+114:         inference_matches = engine.evaluate_inference_rules(ctx)
+115: 
+116:         assert correlation_matches == []
+117:         assert inference_matches == []
+118: 
+119:     def test_find_pattern_matches(self) -> None:
+120:         """Test finding regex pattern matches."""
+121:         engine = RuleEngine()
+122: 
+123:         text = "Working on PROJ-123 and TEAM-456 today"
+124:         matches = engine.find_pattern_matches(r"[A-Z]+-\d+", text)
+125: 
+126:         assert len(matches) == 2
+127:         assert matches[0][0] == "PROJ-123"
+128:         assert matches[1][0] == "TEAM-456"
+129: 
+130:     def test_find_pattern_matches_with_positions(self) -> None:
+131:         """Test pattern matches include positions."""
+132:         engine = RuleEngine()
+133: 
+134:         text = "Issue ABC-1"
+135:         matches = engine.find_pattern_matches(r"[A-Z]+-\d+", text)
+136: 
+137:         assert len(matches) == 1
+138:         matched_value, start, end = matches[0]
+139:         assert matched_value == "ABC-1"
+140:         assert text[start:end] == "ABC-1"
+141: 
+142:     def test_find_pattern_matches_invalid_regex(self) -> None:
+143:         """Test invalid regex returns empty list."""
+144:         engine = RuleEngine()
+145: 
+146:         matches = engine.find_pattern_matches(r"[invalid", "test")
+147:         assert matches == []
+148: 
+149:     def test_match_entities_by_field(self) -> None:
+150:         """Test matching entities by field value."""
+151:         namespace_id = uuid4()
+152:         entities = [
+153:             Entity(
+154:                 id=uuid4(),
+155:                 name="John",
+156:                 entity_type="PERSON",
+157:                 namespace_id=namespace_id,
+158:                 attributes={"email": "john@example.com"},
+159:             ),
+160:             Entity(
+161:                 id=uuid4(),
+162:                 name="Jane",
+163:                 entity_type="PERSON",
+164:                 namespace_id=namespace_id,
+165:                 attributes={"email": "jane@example.com"},
+166:             ),
+167:             Entity(
+168:                 id=uuid4(),
+169:                 name="John Copy",
+170:                 entity_type="PERSON",
+171:                 namespace_id=namespace_id,
+172:                 attributes={"email": "john@example.com"},
+173:             ),
+174:         ]
+175: 
+176:         engine = RuleEngine()
+177:         matches = engine.match_entities_by_field(entities, "email", "john@example.com")
+178: 
+179:         assert len(matches) == 2
+180: 
+181:     def test_match_entities_case_insensitive(self) -> None:
+182:         """Test field matching is case insensitive for strings."""
+183:         namespace_id = uuid4()
+184:         entities = [
+185:             Entity(
+186:                 id=uuid4(),
+187:                 name="Test",
+188:                 entity_type="PERSON",
+189:                 namespace_id=namespace_id,
+190:                 attributes={"domain": "EXAMPLE.COM"},
+191:             ),
+192:         ]
+193: 
+194:         engine = RuleEngine()
+195:         matches = engine.match_entities_by_field(entities, "domain", "example.com")
+196: 
+197:         assert len(matches) == 1
+198: 
+199:     def test_evaluate_correlation_rules_pattern(self) -> None:
+200:         """Test evaluating correlation rules with patterns."""
+201:         expertise = ExpertiseConfig(
+202:             name="test",
+203:             correlation_rules=[
+204:                 CorrelationRule(
+205:                     name="issue_ref",
+206:                     pattern=r"[A-Z]+-\d+",
+207:                     creates_relationship="REFERENCES",
+208:                     confidence=0.9,
+209:                 ),
+210:             ],
+211:         )
+212: 
+213:         engine = RuleEngine(expertise=expertise)
+214:         ctx = RuleEvaluationContext()
+215: 
+216:         matches = engine.evaluate_correlation_rules("See PROJ-123 for details", ctx)
+217: 
+218:         assert len(matches) == 1
+219:         assert matches[0].rule_name == "issue_ref"
+220:         assert matches[0].matched_value == "PROJ-123"
+221:         assert matches[0].confidence == 0.9
+222: 
+223:     def test_evaluate_correlation_rules_field_matching(self) -> None:
+224:         """Test evaluating correlation rules with field matching."""
+225:         namespace_id = uuid4()
+226:         entities = [
+227:             Entity(
+228:                 id=uuid4(),
+229:                 name="Person A",
+230:                 entity_type="PERSON",
+231:                 namespace_id=namespace_id,
+232:                 attributes={"email": "shared@example.com"},
+233:             ),
+234:             Entity(
+235:                 id=uuid4(),
+236:                 name="Person B",
+237:                 entity_type="PERSON",
+238:                 namespace_id=namespace_id,
+239:                 attributes={"email": "shared@example.com"},
+240:             ),
+241:         ]
+242: 
+243:         expertise = ExpertiseConfig(
+244:             name="test",
+245:             correlation_rules=[
+246:                 CorrelationRule(
+247:                     name="email_match",
+248:                     match_fields=["email"],
+249:                     entity_types=["PERSON"],
+250:                     creates_relationship="SAME_AS",
+251:                 ),
+252:             ],
+253:         )
+254: 
+255:         engine = RuleEngine(expertise=expertise)
+256:         ctx = RuleEvaluationContext.from_data(entities, [])
+257: 
+258:         matches = engine.evaluate_correlation_rules("", ctx)
+259: 
+260:         assert len(matches) == 1
+261:         assert matches[0].rule_name == "email_match"
+262:         assert len(matches[0].matched_entities) == 2
+263: 
+264: 
+265: class TestCrossToolUnifier:
+266:     """Tests for CrossToolUnifier."""
+267: 
+268:     def test_unifier_without_expertise(self) -> None:
+269:         """Test unifier works without expertise."""
+270:         unifier = CrossToolUnifier()
+271:         namespace_id = uuid4()
+272: 
+273:         entities = [
+274:             Entity(
+275:                 id=uuid4(),
+276:                 name="Test",
+277:                 entity_type="PERSON",
+278:                 namespace_id=namespace_id,
+279:             ),
+280:         ]
+281: 
+282:         result = unifier.unify(entities, [], use_embeddings=False, use_fuzzy=False)
+283: 
+284:         assert len(result.unified_entities) == 1
+285:         assert result.entities_merged == 0
+286: 
+287:     def test_unify_by_email(self) -> None:
+288:         """Test unifying entities by email with correlation rule."""
+289:         # Expertise with email matching rule
+290:         expertise = ExpertiseConfig(
+291:             name="test",
+292:             correlation_rules=[
+293:                 CorrelationRule(
+294:                     name="email_match",
+295:                     match_fields=["email"],
+296:                     entity_types=["PERSON"],
+297:                 ),
+298:             ],
+299:         )
+300:         unifier = CrossToolUnifier(expertise=expertise)
+301:         namespace_id = uuid4()
+302: 
+303:         e1 = Entity(
+304:             id=uuid4(),
+305:             name="John Smith",
+306:             entity_type="PERSON",
+307:             namespace_id=namespace_id,
+308:             attributes={"email": "john@example.com", "source": "slack"},
+309:         )
+310:         e2 = Entity(
+311:             id=uuid4(),
+312:             name="J. Smith",
+313:             entity_type="PERSON",
+314:             namespace_id=namespace_id,
+315:             attributes={"email": "john@example.com", "source": "jira"},
+316:         )
+317:         e3 = Entity(
+318:             id=uuid4(),
+319:             name="Jane Doe",
+320:             entity_type="PERSON",
+321:             namespace_id=namespace_id,
+322:             attributes={"email": "jane@example.com"},
+323:         )
+324: 
+325:         result = unifier.unify([e1, e2, e3], [], use_embeddings=False, use_fuzzy=False)
+326: 
+327:         # e1 and e2 should be merged, e3 separate
+328:         assert len(result.unified_entities) == 2
+329:         assert result.entities_merged == 1
+330:         assert len(result.entity_mapping) == 3
+331: 
+332:     def test_unify_by_domain(self) -> None:
+333:         """Test unifying entities by domain with correlation rule."""
+334:         # Expertise with domain matching rule
+335:         expertise = ExpertiseConfig(
+336:             name="test",
+337:             correlation_rules=[
+338:                 CorrelationRule(
+339:                     name="domain_match",
+340:                     match_fields=["domain"],
+341:                     entity_types=["CUSTOMER"],
+342:                 ),
+343:             ],
+344:         )
+345:         unifier = CrossToolUnifier(expertise=expertise)
+346:         namespace_id = uuid4()
+347: 
+348:         e1 = Entity(
+349:             id=uuid4(),
+350:             name="Acme Corp",
+351:             entity_type="CUSTOMER",
+352:             namespace_id=namespace_id,
+353:             attributes={"domain": "acme.com"},
+354:         )
+355:         e2 = Entity(
+356:             id=uuid4(),
+357:             name="Acme Corporation",
+358:             entity_type="CUSTOMER",
+359:             namespace_id=namespace_id,
+360:             attributes={"domain": "acme.com"},
+361:         )
+362: 
+363:         result = unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=False)
+364: 
+365:         assert len(result.unified_entities) == 1
+366:         assert result.entities_merged == 1
+367: 
+368:     def test_unify_updates_relationships(self) -> None:
+369:         """Test that unification updates relationship entity IDs."""
+370:         # Expertise with email matching rule
+371:         expertise = ExpertiseConfig(
+372:             name="test",
+373:             correlation_rules=[
+374:                 CorrelationRule(
+375:                     name="email_match",
+376:                     match_fields=["email"],
+377:                     entity_types=["PERSON"],
+378:                 ),
+379:             ],
+380:         )
+381:         unifier = CrossToolUnifier(expertise=expertise)
+382:         namespace_id = uuid4()
+383: 
+384:         e1 = Entity(
+385:             id=uuid4(),
+386:             name="John",
+387:             entity_type="PERSON",
+388:             namespace_id=namespace_id,
+389:             attributes={"email": "john@example.com"},
+390:         )
+391:         e2 = Entity(
+392:             id=uuid4(),
+393:             name="John Smith",
+394:             entity_type="PERSON",
+395:             namespace_id=namespace_id,
+396:             attributes={"email": "john@example.com"},
+397:         )
+398:         e3 = Entity(
+399:             id=uuid4(),
+400:             name="Acme",
+401:             entity_type="ORGANIZATION",
+402:             namespace_id=namespace_id,
+403:         )
+404: 
+405:         # Relationship from e2 to e3
+406:         rel = Relationship(
+407:             id=uuid4(),
+408:             source_entity_id=e2.id,
+409:             target_entity_id=e3.id,
+410:             relationship_type="WORKS_FOR",
+411:             namespace_id=namespace_id,
+412:         )
+413: 
+414:         result = unifier.unify([e1, e2, e3], [rel], use_embeddings=False, use_fuzzy=False)
+415: 
+416:         # e1 and e2 merged, relationship should be updated
+417:         assert len(result.unified_entities) == 2
+418:         assert len(result.updated_relationships) == 1
+419: 
+420:         # Relationship source should now point to canonical entity
+421:         updated_rel = result.updated_relationships[0]
+422:         canonical_id = result.entity_mapping[e2.id]
+423:         assert updated_rel.source_entity_id == canonical_id
+424: 
+425:     def test_unify_with_fuzzy_matching(self) -> None:
+426:         """Test unifying with fuzzy string matching."""
+427:         unifier = CrossToolUnifier(fuzzy_threshold=0.8)
+428:         namespace_id = uuid4()
+429: 
+430:         e1 = Entity(
+431:             id=uuid4(),
+432:             name="John Smith",
+433:             entity_type="PERSON",
+434:             namespace_id=namespace_id,
+435:         )
+436:         e2 = Entity(
+437:             id=uuid4(),
+438:             name="Jon Smith",  # Typo
+439:             entity_type="PERSON",
+440:             namespace_id=namespace_id,
+441:         )
+442: 
+443:         result = unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=True)
+444: 
+445:         # Names are similar enough to merge
+446:         assert len(result.unified_entities) == 1
+447:         assert result.entities_merged == 1
+448: 
+449: 
+450: class TestRelationshipInferrer:
+451:     """Tests for RelationshipInferrer."""
+452: 
+453:     def test_inferrer_without_expertise(self) -> None:
+454:         """Test inferrer without expertise returns empty."""
+455:         inferrer = RelationshipInferrer()
+456:         result = inferrer.infer([], [])
+457:         assert result == []
+458: 
+459:     def test_inferrer_with_empty_rules(self) -> None:
+460:         """Test inferrer with expertise but no rules."""
+461:         expertise = ExpertiseConfig(name="test")
+462:         inferrer = RelationshipInferrer(expertise=expertise)
+463:         result = inferrer.infer([], [])
+464:         assert result == []
+465: 
+466:     def test_single_condition_inference(self) -> None:
+467:         """Test inference with single condition rule."""
+468:         namespace_id = uuid4()
+469: 
+470:         person = Entity(
+471:             id=uuid4(),
+472:             name="John",
+473:             entity_type="PERSON",
+474:             namespace_id=namespace_id,
+475:         )
+476:         project = Entity(
+477:             id=uuid4(),
+478:             name="Project Alpha",
+479:             entity_type="PROJECT",
+480:             namespace_id=namespace_id,
+481:         )
+482: 
+483:         owns_rel = Relationship(
+484:             id=uuid4(),
+485:             source_entity_id=person.id,
+486:             target_entity_id=project.id,
+487:             relationship_type="OWNS",
+488:             namespace_id=namespace_id,
+489:         )
+490: 
+491:         expertise = ExpertiseConfig(
+492:             name="test",
+493:             inference_rules=[
+494:                 InferenceRule(
+495:                     name="owner_is_stakeholder",
+496:                     when=[
+497:                         InferenceCondition(
+498:                             relationship="OWNS",
+499:                             source_type="PERSON",
+500:                             target_type="PROJECT",
+501:                         ),
+502:                     ],
+503:                     then_relationship="STAKEHOLDER_OF",
+504:                     then_source="first.source",
+505:                     then_target="first.target",
+506:                     confidence=0.8,
+507:                 ),
+508:             ],
+509:         )
+510: 
+511:         inferrer = RelationshipInferrer(expertise=expertise, min_confidence=0.5)
+512:         inferred = inferrer.infer([person, project], [owns_rel], depth=1)
+513: 
+514:         assert len(inferred) == 1
+515:         assert inferred[0].relationship_type == "STAKEHOLDER_OF"
+516:         assert inferred[0].source_entity_id == person.id
+517:         assert inferred[0].target_entity_id == project.id
+518:         assert inferred[0].confidence == 0.8
+519: 
+520:     def test_confidence_filtering(self) -> None:
+521:         """Test that low confidence inferences are filtered."""
+522:         namespace_id = uuid4()
+523: 
+524:         e1 = Entity(id=uuid4(), name="A", entity_type="TYPE", namespace_id=namespace_id)
+525:         e2 = Entity(id=uuid4(), name="B", entity_type="TYPE", namespace_id=namespace_id)
+526: 
+527:         rel = Relationship(
+528:             id=uuid4(),
+529:             source_entity_id=e1.id,
+530:             target_entity_id=e2.id,
+531:             relationship_type="REL",
+532:             namespace_id=namespace_id,
+533:         )
+534: 
+535:         expertise = ExpertiseConfig(
+536:             name="test",
+537:             inference_rules=[
+538:                 InferenceRule(
+539:                     name="low_confidence",
+540:                     when=[InferenceCondition(relationship="REL")],
+541:                     then_relationship="INFERRED",
+542:                     confidence=0.2,  # Below threshold
+543:                 ),
+544:             ],
+545:         )
+546: 
+547:         inferrer = RelationshipInferrer(expertise=expertise, min_confidence=0.5)
+548:         inferred = inferrer.infer([e1, e2], [rel])
+549: 
+550:         assert len(inferred) == 0
+551: 
+552:     def test_no_duplicate_inference(self) -> None:
+553:         """Test that existing relationships aren't re-inferred."""
+554:         namespace_id = uuid4()
+555: 
+556:         e1 = Entity(id=uuid4(), name="A", entity_type="TYPE", namespace_id=namespace_id)
+557:         e2 = Entity(id=uuid4(), name="B", entity_type="TYPE", namespace_id=namespace_id)
+558: 
+559:         # Original relationship
+560:         rel = Relationship(
+561:             id=uuid4(),
+562:             source_entity_id=e1.id,
+563:             target_entity_id=e2.id,
+564:             relationship_type="OWNS",
+565:             namespace_id=namespace_id,
+566:         )
+567: 
+568:         # Relationship that would be inferred (already exists)
+569:         existing = Relationship(
+570:             id=uuid4(),
+571:             source_entity_id=e1.id,
+572:             target_entity_id=e2.id,
+573:             relationship_type="STAKEHOLDER_OF",
+574:             namespace_id=namespace_id,
+575:         )
+576: 
+577:         expertise = ExpertiseConfig(
+578:             name="test",
+579:             inference_rules=[
+580:                 InferenceRule(
+581:                     name="test",
+582:                     when=[InferenceCondition(relationship="OWNS")],
+583:                     then_relationship="STAKEHOLDER_OF",
+584:                     confidence=0.8,
+585:                 ),
+586:             ],
+587:         )
+588: 
+589:         inferrer = RelationshipInferrer(expertise=expertise)
+590:         inferred = inferrer.infer([e1, e2], [rel, existing])
+591: 
+592:         # Should not create duplicate
+593:         assert len(inferred) == 0
+594: 
+595: 
+596: class TestSemanticExpander:
+597:     """Tests for SemanticExpander."""
+598: 
+599:     @pytest.mark.asyncio
+600:     async def test_expander_no_entities(self) -> None:
+601:         """Test expander with no entities."""
+602:         expander = SemanticExpander()
+603:         result = await expander.expand([], [])
+604: 
+605:         assert result.total_entities == 0
+606:         assert result.total_relationships == 0
+607:         assert result.original_entity_count == 0
+608: 
+609:     @pytest.mark.asyncio
+610:     async def test_expander_passthrough(self) -> None:
+611:         """Test expander passes through entities when disabled."""
+612:         namespace_id = uuid4()
+613:         entities = [
+614:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
+615:         ]
+616: 
+617:         expander = SemanticExpander(
+618:             enable_unification=False,
+619:             enable_inference=False,
+620:         )
+621:         result = await expander.expand(entities, [])
+622: 
+623:         assert result.total_entities == 1
+624:         assert result.original_entity_count == 1
+625:         assert result.merged_entity_count == 0
+626: 
+627:     @pytest.mark.asyncio
+628:     async def test_expander_with_unification(self) -> None:
+629:         """Test expander performs unification with expertise."""
+630:         namespace_id = uuid4()
+631: 
+632:         e1 = Entity(
+633:             id=uuid4(),
+634:             name="John",
+635:             entity_type="PERSON",
+636:             namespace_id=namespace_id,
+637:             attributes={"email": "john@test.com"},
+638:         )
+639:         e2 = Entity(
+640:             id=uuid4(),
+641:             name="John Smith",
+642:             entity_type="PERSON",
+643:             namespace_id=namespace_id,
+644:             attributes={"email": "john@test.com"},
+645:         )
+646: 
+647:         # Need expertise with correlation rules for email matching
+648:         expertise = ExpertiseConfig(
+649:             name="test",
+650:             correlation_rules=[
+651:                 CorrelationRule(name="email_match", match_fields=["email"], entity_types=["PERSON"]),
+652:             ],
+653:         )
+654: 
+655:         expander = SemanticExpander(
+656:             expertise=expertise,
+657:             enable_unification=True,
+658:             enable_inference=False,
+659:         )
+660:         result = await expander.expand([e1, e2], [])
+661: 
+662:         assert result.original_entity_count == 2
+663:         assert result.total_entities == 1
+664:         assert result.merged_entity_count == 1
+665: 
+666:     @pytest.mark.asyncio
+667:     async def test_expander_with_expertise(self) -> None:
+668:         """Test expander uses expertise configuration."""
+669:         from khora.extraction.skills import ExpansionConfig
+670: 
+671:         expertise = ExpertiseConfig(
+672:             name="test",
+673:             expansion=ExpansionConfig(
+674:                 enabled=True,
+675:                 cross_tool_unification=True,
+676:                 relationship_inference=False,
+677:                 depth=1,
+678:             ),
+679:         )
+680: 
+681:         namespace_id = uuid4()
+682:         entities = [
+683:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
+684:         ]
+685: 
+686:         expander = SemanticExpander(expertise=expertise)
+687:         result = await expander.expand(entities, [])
+688: 
+689:         assert result.total_entities == 1
+690: 
+691:     @pytest.mark.asyncio
+692:     async def test_expander_sync_alternative(self) -> None:
+693:         """Test expand method directly instead of deprecated sync version."""
+694:         namespace_id = uuid4()
+695:         entities = [
+696:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
+697:         ]
+698: 
+699:         expander = SemanticExpander(
+700:             enable_unification=False,
+701:             enable_inference=False,
+702:         )
+703:         result = await expander.expand(entities, [])
+704: 
+705:         assert result.total_entities == 1
+706: 
+707:     def test_from_expertise(self) -> None:
+708:         """Test creating expander from expertise config."""
+709:         from khora.extraction.skills import ExpansionConfig
+710: 
+711:         expertise = ExpertiseConfig(
+712:             name="test",
+713:             expansion=ExpansionConfig(
+714:                 enabled=True,
+715:                 depth=3,
+716:                 cross_tool_unification=True,
+717:                 relationship_inference=True,
+718:             ),
+719:         )
+720: 
+721:         expander = SemanticExpander.from_expertise(expertise)
+722: 
+723:         assert expander._enable_unification is True
+724:         assert expander._enable_inference is True
+725:         assert expander._inference_depth == 3
+726: 
+727:     def test_from_expertise_name(self) -> None:
+728:         """Test creating expander from expertise name."""
+729:         expander = SemanticExpander.from_expertise_name("general")
+730:         assert expander._expertise is not None
+731:         assert expander._expertise.name == "general"
+732: 
+733:     @pytest.mark.asyncio
+734:     async def test_expansion_result_properties(self) -> None:
+735:         """Test ExpansionResult computed properties."""
+736:         namespace_id = uuid4()
+737: 
+738:         e1 = Entity(id=uuid4(), name="A", entity_type="PERSON", namespace_id=namespace_id)
+739:         e2 = Entity(id=uuid4(), name="B", entity_type="PERSON", namespace_id=namespace_id)
+740: 
+741:         rel = Relationship(
+742:             id=uuid4(),
+743:             source_entity_id=e1.id,
+744:             target_entity_id=e2.id,
+745:             relationship_type="KNOWS",
+746:             namespace_id=namespace_id,
+747:         )
+748: 
+749:         expander = SemanticExpander(
+750:             enable_unification=False,
+751:             enable_inference=False,
+752:         )
+753:         result = await expander.expand([e1, e2], [rel])
+754: 
+755:         assert result.total_entities == 2
+756:         assert result.total_relationships == 1
+757:         assert len(result.all_relationships) == 1
+````
+
+## File: tests/unit/test_expertise.py
+````python
+  1: """Unit tests for expertise configuration system."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import pytest
+  6: 
+  7: from khora.extraction.skills import (
+  8:     ConfidenceConfig,
+  9:     CorrelationRule,
+ 10:     EntityTypeConfig,
+ 11:     ExpansionConfig,
+ 12:     ExpertiseConfig,
+ 13:     ExpertiseLoader,
+ 14:     InferenceCondition,
+ 15:     InferenceRule,
+ 16:     RelationshipTypeConfig,
+ 17:     get_default_loader,
+ 18: )
+ 19: 
+ 20: 
+ 21: class TestEntityTypeConfig:
+ 22:     """Tests for EntityTypeConfig dataclass."""
+ 23: 
+ 24:     def test_basic_creation(self) -> None:
+ 25:         """Test basic EntityTypeConfig creation."""
+ 26:         entity_type = EntityTypeConfig(
+ 27:             name="PERSON",
+ 28:             description="A human individual",
+ 29:         )
+ 30:         assert entity_type.name == "PERSON"
+ 31:         assert entity_type.description == "A human individual"
+ 32:         assert entity_type.attributes == {}
+ 33:         assert entity_type.identifiers == []
+ 34:         assert entity_type.aliases == []
+ 35: 
+ 36:     def test_with_attributes(self) -> None:
+ 37:         """Test EntityTypeConfig with attributes."""
+ 38:         entity_type = EntityTypeConfig(
+ 39:             name="TICKET",
+ 40:             description="Issue tracker ticket",
+ 41:             attributes={"required": ["key", "status"], "optional": ["assignee"]},
+ 42:             identifiers=["key"],
+ 43:             aliases=["issue", "bug", "story"],
+ 44:         )
+ 45:         assert entity_type.attributes["required"] == ["key", "status"]
+ 46:         assert entity_type.identifiers == ["key"]
+ 47:         assert "issue" in entity_type.aliases
+ 48: 
+ 49:     def test_to_dict(self) -> None:
+ 50:         """Test EntityTypeConfig serialization."""
+ 51:         entity_type = EntityTypeConfig(
+ 52:             name="CUSTOMER",
+ 53:             description="Customer account",
+ 54:             identifiers=["domain"],
+ 55:         )
+ 56:         data = entity_type.to_dict()
+ 57:         assert data["name"] == "CUSTOMER"
+ 58:         assert data["description"] == "Customer account"
+ 59:         assert data["identifiers"] == ["domain"]
+ 60: 
+ 61:     def test_from_dict(self) -> None:
+ 62:         """Test EntityTypeConfig deserialization."""
+ 63:         data = {
+ 64:             "name": "PROJECT",
+ 65:             "description": "A project",
+ 66:             "attributes": {"required": ["name"]},
+ 67:         }
+ 68:         entity_type = EntityTypeConfig.from_dict(data)
+ 69:         assert entity_type.name == "PROJECT"
+ 70:         assert entity_type.attributes["required"] == ["name"]
+ 71: 
+ 72: 
+ 73: class TestRelationshipTypeConfig:
+ 74:     """Tests for RelationshipTypeConfig dataclass."""
+ 75: 
+ 76:     def test_basic_creation(self) -> None:
+ 77:         """Test basic RelationshipTypeConfig creation."""
+ 78:         rel_type = RelationshipTypeConfig(
+ 79:             name="WORKS_FOR",
+ 80:             description="Employment relationship",
+ 81:         )
+ 82:         assert rel_type.name == "WORKS_FOR"
+ 83:         assert rel_type.source_types == []
+ 84:         assert rel_type.target_types == []
+ 85: 
+ 86:     def test_with_constraints(self) -> None:
+ 87:         """Test RelationshipTypeConfig with type constraints."""
+ 88:         rel_type = RelationshipTypeConfig(
+ 89:             name="ASSIGNED_TO",
+ 90:             description="Task assignment",
+ 91:             source_types=["TICKET", "TASK"],
+ 92:             target_types=["PERSON", "TEAM"],
+ 93:         )
+ 94:         assert "TICKET" in rel_type.source_types
+ 95:         assert "PERSON" in rel_type.target_types
+ 96: 
+ 97:     def test_serialization(self) -> None:
+ 98:         """Test RelationshipTypeConfig round-trip serialization."""
+ 99:         original = RelationshipTypeConfig(
+100:             name="OWNS",
+101:             description="Ownership",
+102:             source_types=["PERSON"],
+103:             target_types=["PROJECT"],
+104:         )
+105:         data = original.to_dict()
+106:         restored = RelationshipTypeConfig.from_dict(data)
+107:         assert restored.name == original.name
+108:         assert restored.source_types == original.source_types
+109: 
+110: 
+111: class TestCorrelationRule:
+112:     """Tests for CorrelationRule dataclass."""
+113: 
+114:     def test_pattern_rule(self) -> None:
+115:         """Test correlation rule with regex pattern."""
+116:         rule = CorrelationRule(
+117:             name="issue_reference",
+118:             description="Match issue keys",
+119:             pattern=r"[A-Z]+-\d+",
+120:             creates_relationship="REFERENCES",
+121:         )
+122:         assert rule.pattern == r"[A-Z]+-\d+"
+123:         assert rule.creates_relationship == "REFERENCES"
+124:         assert rule.confidence == 0.9  # default
+125: 
+126:     def test_field_matching_rule(self) -> None:
+127:         """Test correlation rule with field matching."""
+128:         rule = CorrelationRule(
+129:             name="email_match",
+130:             description="Match by email",
+131:             match_fields=["email"],
+132:             entity_types=["PERSON", "CONTACT"],
+133:             confidence=0.95,
+134:         )
+135:         assert rule.match_fields == ["email"]
+136:         assert rule.entity_types == ["PERSON", "CONTACT"]
+137:         assert rule.confidence == 0.95
+138: 
+139:     def test_serialization(self) -> None:
+140:         """Test CorrelationRule round-trip serialization."""
+141:         original = CorrelationRule(
+142:             name="test",
+143:             pattern=r"\d+",
+144:             confidence=0.7,
+145:         )
+146:         data = original.to_dict()
+147:         restored = CorrelationRule.from_dict(data)
+148:         assert restored.name == original.name
+149:         assert restored.pattern == original.pattern
+150:         assert restored.confidence == original.confidence
+151: 
+152: 
+153: class TestInferenceRule:
+154:     """Tests for InferenceRule dataclass."""
+155: 
+156:     def test_basic_rule(self) -> None:
+157:         """Test basic inference rule creation."""
+158:         rule = InferenceRule(
+159:             name="project_stakeholder",
+160:             description="Infer stakeholder relationship",
+161:             when=[
+162:                 InferenceCondition(relationship="OWNS", source_type="PERSON", target_type="PROJECT"),
+163:             ],
+164:             then_relationship="STAKEHOLDER_OF",
+165:             then_source="first.source",
+166:             then_target="first.target",
+167:             confidence=0.7,
+168:         )
+169:         assert rule.name == "project_stakeholder"
+170:         assert len(rule.when) == 1
+171:         assert rule.then_relationship == "STAKEHOLDER_OF"
+172:         assert rule.confidence == 0.7
+173: 
+174:     def test_multi_condition_rule(self) -> None:
+175:         """Test inference rule with multiple conditions."""
+176:         rule = InferenceRule(
+177:             name="transitive_membership",
+178:             when=[
+179:                 InferenceCondition(relationship="MEMBER_OF", source_type="PERSON", target_type="TEAM"),
+180:                 InferenceCondition(relationship="PART_OF", source_type="TEAM", target_type="DEPARTMENT"),
+181:             ],
+182:             then_relationship="BELONGS_TO",
+183:             confidence=0.6,
+184:         )
+185:         assert len(rule.when) == 2
+186: 
+187:     def test_serialization(self) -> None:
+188:         """Test InferenceRule round-trip serialization."""
+189:         original = InferenceRule(
+190:             name="test_rule",
+191:             when=[InferenceCondition(relationship="KNOWS")],
+192:             then_relationship="CONNECTED_TO",
+193:         )
+194:         data = original.to_dict()
+195:         restored = InferenceRule.from_dict(data)
+196:         assert restored.name == original.name
+197:         assert restored.then_relationship == original.then_relationship
+198: 
+199: 
+200: class TestConfidenceConfig:
+201:     """Tests for ConfidenceConfig dataclass."""
+202: 
+203:     def test_defaults(self) -> None:
+204:         """Test default confidence thresholds."""
+205:         config = ConfidenceConfig()
+206:         assert config.min_entity == 0.5
+207:         assert config.min_relationship == 0.5
+208:         assert config.min_inferred == 0.3
+209: 
+210:     def test_custom_thresholds(self) -> None:
+211:         """Test custom confidence thresholds."""
+212:         config = ConfidenceConfig(
+213:             min_entity=0.7,
+214:             min_relationship=0.6,
+215:             min_inferred=0.4,
+216:         )
+217:         assert config.min_entity == 0.7
+218:         assert config.min_relationship == 0.6
+219:         assert config.min_inferred == 0.4
+220: 
+221: 
+222: class TestExpansionConfig:
+223:     """Tests for ExpansionConfig dataclass."""
+224: 
+225:     def test_defaults(self) -> None:
+226:         """Test default expansion settings."""
+227:         config = ExpansionConfig()
+228:         assert config.enabled is True
+229:         assert config.depth == 2
+230:         assert config.cross_tool_unification is True
+231:         assert config.relationship_inference is True
+232: 
+233:     def test_disabled(self) -> None:
+234:         """Test disabled expansion."""
+235:         config = ExpansionConfig(
+236:             enabled=False,
+237:             cross_tool_unification=False,
+238:             relationship_inference=False,
+239:         )
+240:         assert config.enabled is False
+241: 
+242: 
+243: class TestExpertiseConfig:
+244:     """Tests for ExpertiseConfig dataclass."""
+245: 
+246:     def test_minimal_config(self) -> None:
+247:         """Test minimal expertise configuration."""
+248:         config = ExpertiseConfig(name="test")
+249:         assert config.name == "test"
+250:         assert config.version == "1.0.0"
+251:         assert config.entity_types == []
+252:         assert config.relationship_types == []
+253: 
+254:     def test_full_config(self) -> None:
+255:         """Test full expertise configuration."""
+256:         config = ExpertiseConfig(
+257:             name="saas_expert",
+258:             version="2.0.0",
+259:             description="SaaS tools expertise",
+260:             extends=["general"],
+261:             system_prompt="You are an expert...",
+262:             extraction_prompt="Extract entities from: {{ text }}",
+263:             entity_types=[
+264:                 EntityTypeConfig(name="TICKET", description="Issue ticket"),
+265:                 EntityTypeConfig(name="CUSTOMER", description="Customer account"),
+266:             ],
+267:             relationship_types=[
+268:                 RelationshipTypeConfig(name="ASSIGNED_TO", description="Assignment"),
+269:             ],
+270:             correlation_rules=[
+271:                 CorrelationRule(name="email_match", match_fields=["email"]),
+272:             ],
+273:             inference_rules=[
+274:                 InferenceRule(
+275:                     name="test",
+276:                     when=[InferenceCondition(relationship="OWNS")],
+277:                     then_relationship="STAKEHOLDER_OF",
+278:                 ),
+279:             ],
+280:             confidence=ConfidenceConfig(min_entity=0.6),
+281:             expansion=ExpansionConfig(depth=3),
+282:         )
+283:         assert config.name == "saas_expert"
+284:         assert len(config.entity_types) == 2
+285:         assert len(config.relationship_types) == 1
+286:         assert len(config.correlation_rules) == 1
+287:         assert len(config.inference_rules) == 1
+288:         assert config.confidence.min_entity == 0.6
+289:         assert config.expansion.depth == 3
+290: 
+291:     def test_to_dict(self) -> None:
+292:         """Test ExpertiseConfig serialization."""
+293:         config = ExpertiseConfig(
+294:             name="test",
+295:             entity_types=[EntityTypeConfig(name="PERSON", description="A person")],
+296:         )
+297:         data = config.to_dict()
+298:         assert data["name"] == "test"
+299:         assert len(data["entity_types"]) == 1
+300:         assert data["entity_types"][0]["name"] == "PERSON"
+301: 
+302:     def test_from_dict(self) -> None:
+303:         """Test ExpertiseConfig deserialization."""
+304:         data = {
+305:             "name": "restored",
+306:             "version": "1.0.0",
+307:             "entity_types": [{"name": "ORG", "description": "Organization"}],
+308:             "relationship_types": [{"name": "OWNS", "description": "Ownership"}],
+309:         }
+310:         config = ExpertiseConfig.from_dict(data)
+311:         assert config.name == "restored"
+312:         assert len(config.entity_types) == 1
+313:         assert config.entity_types[0].name == "ORG"
+314: 
+315:     def test_round_trip_serialization(self) -> None:
+316:         """Test full round-trip serialization."""
+317:         original = ExpertiseConfig(
+318:             name="roundtrip_test",
+319:             version="1.2.3",
+320:             description="Test config",
+321:             entity_types=[
+322:                 EntityTypeConfig(name="A", description="Type A", identifiers=["id"]),
+323:             ],
+324:             relationship_types=[
+325:                 RelationshipTypeConfig(name="R", source_types=["A"], target_types=["A"]),
+326:             ],
+327:             correlation_rules=[
+328:                 CorrelationRule(name="c1", pattern=r"\d+"),
+329:             ],
+330:             inference_rules=[
+331:                 InferenceRule(
+332:                     name="i1",
+333:                     when=[InferenceCondition(relationship="R")],
+334:                     then_relationship="R2",
+335:                 ),
+336:             ],
+337:         )
+338:         data = original.to_dict()
+339:         restored = ExpertiseConfig.from_dict(data)
+340: 
+341:         assert restored.name == original.name
+342:         assert restored.version == original.version
+343:         assert len(restored.entity_types) == len(original.entity_types)
+344:         assert len(restored.relationship_types) == len(original.relationship_types)
+345:         assert len(restored.correlation_rules) == len(original.correlation_rules)
+346:         assert len(restored.inference_rules) == len(original.inference_rules)
+347: 
+348:     def test_to_extraction_skill(self) -> None:
+349:         """Test conversion to ExtractionSkill."""
+350:         config = ExpertiseConfig(
+351:             name="skill_test",
+352:             description="Test skill",
+353:             entity_types=[
+354:                 EntityTypeConfig(name="PERSON", description="A person"),
+355:                 EntityTypeConfig(name="ORG", description="An organization"),
+356:             ],
+357:             relationship_types=[
+358:                 RelationshipTypeConfig(name="WORKS_FOR", description="Employment"),
+359:             ],
+360:         )
+361:         skill = config.to_extraction_skill()
+362: 
+363:         assert skill.name == "skill_test"
+364:         assert skill.description == "Test skill"
+365:         assert "PERSON" in skill.entity_types
+366:         assert "ORG" in skill.entity_types
+367:         assert "WORKS_FOR" in skill.relationship_types
+368: 
+369: 
+370: class TestExpertiseLoader:
+371:     """Tests for ExpertiseLoader."""
+372: 
+373:     def test_get_default_loader(self) -> None:
+374:         """Test getting the default loader singleton."""
+375:         loader1 = get_default_loader()
+376:         loader2 = get_default_loader()
+377:         assert loader1 is loader2
+378: 
+379:     def test_load_builtin_general(self) -> None:
+380:         """Test loading built-in general expertise."""
+381:         loader = ExpertiseLoader()
+382:         config = loader.load_builtin("general")
+383: 
+384:         assert config.name == "general"
+385:         assert len(config.entity_types) > 0
+386:         assert len(config.relationship_types) > 0
+387: 
+388:         # Check for expected entity types
+389:         entity_names = [e.name for e in config.entity_types]
+390:         assert "PERSON" in entity_names
+391:         assert "ORGANIZATION" in entity_names
+392: 
+393:     def test_load_source_builtin_prefix(self) -> None:
+394:         """Test loading with builtin: prefix."""
+395:         loader = ExpertiseLoader()
+396:         config = loader.load_source("builtin:general")
+397:         assert config.name == "general"
+398: 
+399:     def test_load_file(self) -> None:
+400:         """Test loading from YAML file."""
+401:         loader = ExpertiseLoader()
+402:         config = loader.load_file("examples/config/expertise/saas_expert.yaml")
+403: 
+404:         assert config.name == "saas_expert"
+405:         assert config.version == "1.0.0"
+406:         assert len(config.entity_types) > 20  # SaaS has many entity types
+407:         assert len(config.correlation_rules) > 0
+408:         assert len(config.inference_rules) > 0
+409: 
+410:     def test_load_source_file_prefix(self) -> None:
+411:         """Test loading with file: prefix."""
+412:         loader = ExpertiseLoader()
+413:         config = loader.load_source("file:examples/config/expertise/technical_docs.yaml")
+414:         assert config.name == "technical_docs"
+415: 
+416:     def test_load_source_direct_path(self) -> None:
+417:         """Test loading with direct file path."""
+418:         loader = ExpertiseLoader()
+419:         config = loader.load_source("examples/config/expertise/business_intel.yaml")
+420:         assert config.name == "business_intel"
+421: 
+422:     def test_cache_behavior(self) -> None:
+423:         """Test that caching works correctly."""
+424:         loader = ExpertiseLoader()
+425: 
+426:         # First load
+427:         config1 = loader.load_builtin("general", use_cache=True)
+428: 
+429:         # Second load should return cached
+430:         config2 = loader.load_builtin("general", use_cache=True)
+431:         assert config1 is config2
+432: 
+433:         # Clear cache and reload
+434:         loader.clear_cache()
+435:         config3 = loader.load_builtin("general", use_cache=True)
+436:         assert config3 is not config1
+437: 
+438:     def test_load_nonexistent_file(self) -> None:
+439:         """Test loading nonexistent file raises error."""
+440:         from khora.extraction.skills.loader import ExpertiseLoadError
+441: 
+442:         loader = ExpertiseLoader()
+443:         with pytest.raises(ExpertiseLoadError):
+444:             loader.load_file("/nonexistent/path.yaml")
+445: 
+446:     def test_load_nonexistent_builtin(self) -> None:
+447:         """Test loading nonexistent builtin raises error."""
+448:         from khora.extraction.skills.loader import ExpertiseLoadError
+449: 
+450:         loader = ExpertiseLoader()
+451:         with pytest.raises(ExpertiseLoadError):
+452:             loader.load_builtin("nonexistent_builtin_xyz")
+453: 
+454:     def test_load_merged(self) -> None:
+455:         """Test merging multiple expertise configs."""
+456:         loader = ExpertiseLoader()
+457:         merged = loader.load_merged(
+458:             [
+459:                 "builtin:general",
+460:                 "file:examples/config/expertise/technical_docs.yaml",
+461:             ]
+462:         )
+463: 
+464:         # Should have entity types from both
+465:         entity_names = [e.name for e in merged.entity_types]
+466:         assert "PERSON" in entity_names  # from general
+467:         assert "API" in entity_names  # from technical_docs
+468: 
+469:     def test_resolve_extends(self) -> None:
+470:         """Test resolving extends inheritance."""
+471:         loader = ExpertiseLoader()
+472: 
+473:         child = ExpertiseConfig(
+474:             name="child",
+475:             extends=["builtin:general"],
+476:             entity_types=[
+477:                 EntityTypeConfig(name="CUSTOM", description="Custom type"),
+478:             ],
+479:         )
+480: 
+481:         resolved = loader.resolve_extends(child)
+482: 
+483:         # Should have entities from both parent and child
+484:         entity_names = [e.name for e in resolved.entity_types]
+485:         assert "PERSON" in entity_names  # from parent
+486:         assert "CUSTOM" in entity_names  # from child
+````
 
 ## File: alembic/env.py
 ````python
@@ -11023,543 +12276,6 @@ README.md
 79: ]
 ````
 
-## File: src/khora/extraction/skills/base.py
-````python
-  1: """Base extraction skill definition and expertise configuration."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from dataclasses import dataclass, field
-  6: from enum import Enum
-  7: from typing import Any
-  8: 
-  9: 
- 10: class ConfidenceLevel(str, Enum):
- 11:     """Confidence level thresholds for extraction."""
- 12: 
- 13:     HIGH = "high"  # 0.8+
- 14:     MEDIUM = "medium"  # 0.5-0.8
- 15:     LOW = "low"  # 0.3-0.5
- 16: 
- 17: 
- 18: @dataclass
- 19: class EntityTypeConfig:
- 20:     """Configurable entity type definition.
- 21: 
- 22:     Defines an entity type that the expertise system recognizes,
- 23:     including its attributes and identifiers for cross-tool matching.
- 24:     """
- 25: 
- 26:     name: str
- 27:     description: str = ""
- 28:     attributes: dict[str, list[str]] = field(default_factory=dict)  # required, optional
- 29:     identifiers: list[str] = field(default_factory=list)  # For cross-tool matching
- 30:     aliases: list[str] = field(default_factory=list)  # Alternative names for this type
- 31: 
- 32:     def to_dict(self) -> dict[str, Any]:
- 33:         """Convert to dictionary representation."""
- 34:         return {
- 35:             "name": self.name,
- 36:             "description": self.description,
- 37:             "attributes": self.attributes,
- 38:             "identifiers": self.identifiers,
- 39:             "aliases": self.aliases,
- 40:         }
- 41: 
- 42:     @classmethod
- 43:     def from_dict(cls, data: dict[str, Any]) -> EntityTypeConfig:
- 44:         """Create from dictionary."""
- 45:         return cls(
- 46:             name=data.get("name", ""),
- 47:             description=data.get("description", ""),
- 48:             attributes=data.get("attributes", {}),
- 49:             identifiers=data.get("identifiers", []),
- 50:             aliases=data.get("aliases", []),
- 51:         )
- 52: 
- 53: 
- 54: @dataclass
- 55: class RelationshipTypeConfig:
- 56:     """Configurable relationship type definition.
- 57: 
- 58:     Defines a relationship type with source and target entity constraints.
- 59:     """
- 60: 
- 61:     name: str
- 62:     description: str = ""
- 63:     source_types: list[str] = field(default_factory=list)  # "*" means any
- 64:     target_types: list[str] = field(default_factory=list)  # "*" means any
- 65:     bidirectional: bool = False
- 66:     properties: list[str] = field(default_factory=list)  # Expected properties
- 67: 
- 68:     def to_dict(self) -> dict[str, Any]:
- 69:         """Convert to dictionary representation."""
- 70:         return {
- 71:             "name": self.name,
- 72:             "description": self.description,
- 73:             "source_types": self.source_types,
- 74:             "target_types": self.target_types,
- 75:             "bidirectional": self.bidirectional,
- 76:             "properties": self.properties,
- 77:         }
- 78: 
- 79:     @classmethod
- 80:     def from_dict(cls, data: dict[str, Any]) -> RelationshipTypeConfig:
- 81:         """Create from dictionary."""
- 82:         return cls(
- 83:             name=data.get("name", ""),
- 84:             description=data.get("description", ""),
- 85:             source_types=data.get("source_types", []),
- 86:             target_types=data.get("target_types", []),
- 87:             bidirectional=data.get("bidirectional", False),
- 88:             properties=data.get("properties", []),
- 89:         )
- 90: 
- 91: 
- 92: @dataclass
- 93: class CorrelationRule:
- 94:     """Rule for cross-tool entity correlation.
- 95: 
- 96:     Defines how entities from different tools should be matched and unified.
- 97:     """
- 98: 
- 99:     name: str
-100:     description: str = ""
-101:     pattern: str | None = None  # Regex pattern for matching references
-102:     match_fields: list[str] = field(default_factory=list)  # Fields to match on (e.g., email)
-103:     entity_types: list[str] = field(default_factory=list)  # Entity types this rule applies to
-104:     creates_relationship: str | None = None  # Relationship type created when matched
-105:     confidence: float = 0.9  # Confidence of matches from this rule
-106: 
-107:     def to_dict(self) -> dict[str, Any]:
-108:         """Convert to dictionary representation."""
-109:         return {
-110:             "name": self.name,
-111:             "description": self.description,
-112:             "pattern": self.pattern,
-113:             "match_fields": self.match_fields,
-114:             "entity_types": self.entity_types,
-115:             "creates_relationship": self.creates_relationship,
-116:             "confidence": self.confidence,
-117:         }
-118: 
-119:     @classmethod
-120:     def from_dict(cls, data: dict[str, Any]) -> CorrelationRule:
-121:         """Create from dictionary."""
-122:         return cls(
-123:             name=data.get("name", ""),
-124:             description=data.get("description", ""),
-125:             pattern=data.get("pattern"),
-126:             match_fields=data.get("match_fields", []),
-127:             entity_types=data.get("entity_types", []),
-128:             creates_relationship=data.get("creates_relationship"),
-129:             confidence=data.get("confidence", 0.9),
-130:         )
-131: 
-132: 
-133: @dataclass
-134: class InferenceCondition:
-135:     """Condition for relationship inference rule."""
-136: 
-137:     relationship: str  # Relationship type to match
-138:     source_type: str | None = None  # Source entity type (optional filter)
-139:     target_type: str | None = None  # Target entity type (optional filter)
-140: 
-141:     def to_dict(self) -> dict[str, Any]:
-142:         """Convert to dictionary representation."""
-143:         return {
-144:             "relationship": self.relationship,
-145:             "source_type": self.source_type,
-146:             "target_type": self.target_type,
-147:         }
-148: 
-149:     @classmethod
-150:     def from_dict(cls, data: dict[str, Any]) -> InferenceCondition:
-151:         """Create from dictionary."""
-152:         return cls(
-153:             relationship=data.get("relationship", ""),
-154:             source_type=data.get("source_type"),
-155:             target_type=data.get("target_type"),
-156:         )
-157: 
-158: 
-159: @dataclass
-160: class InferenceRule:
-161:     """Rule for relationship inference.
-162: 
-163:     Defines logical rules for inferring new relationships from existing ones.
-164:     """
-165: 
-166:     name: str
-167:     description: str = ""
-168:     when: list[InferenceCondition] = field(default_factory=list)  # Conditions that must be met
-169:     then_relationship: str = ""  # Relationship type to create
-170:     then_source: str = "first.source"  # Source entity reference (first.source, first.target, etc.)
-171:     then_target: str = "second.target"  # Target entity reference
-172:     confidence: float = 0.5  # Confidence of inferred relationships
-173: 
-174:     def to_dict(self) -> dict[str, Any]:
-175:         """Convert to dictionary representation."""
-176:         return {
-177:             "name": self.name,
-178:             "description": self.description,
-179:             "when": [c.to_dict() for c in self.when],
-180:             "then": {
-181:                 "relationship": self.then_relationship,
-182:                 "source": self.then_source,
-183:                 "target": self.then_target,
-184:             },
-185:             "confidence": self.confidence,
-186:         }
-187: 
-188:     @classmethod
-189:     def from_dict(cls, data: dict[str, Any]) -> InferenceRule:
-190:         """Create from dictionary."""
-191:         when_data = data.get("when", [])
-192:         when = [InferenceCondition.from_dict(c) if isinstance(c, dict) else c for c in when_data]
-193: 
-194:         then = data.get("then", {})
-195:         return cls(
-196:             name=data.get("name", ""),
-197:             description=data.get("description", ""),
-198:             when=when,
-199:             then_relationship=then.get("relationship", ""),
-200:             then_source=then.get("source", "first.source"),
-201:             then_target=then.get("target", "second.target"),
-202:             confidence=data.get("confidence", 0.5),
-203:         )
-204: 
-205: 
-206: @dataclass
-207: class ConfidenceConfig:
-208:     """Confidence threshold configuration."""
-209: 
-210:     min_entity: float = 0.5
-211:     min_relationship: float = 0.5
-212:     min_inferred: float = 0.3
-213: 
-214:     def to_dict(self) -> dict[str, float]:
-215:         """Convert to dictionary representation."""
-216:         return {
-217:             "min_entity": self.min_entity,
-218:             "min_relationship": self.min_relationship,
-219:             "min_inferred": self.min_inferred,
-220:         }
-221: 
-222:     @classmethod
-223:     def from_dict(cls, data: dict[str, Any]) -> ConfidenceConfig:
-224:         """Create from dictionary."""
-225:         return cls(
-226:             min_entity=data.get("min_entity", 0.5),
-227:             min_relationship=data.get("min_relationship", 0.5),
-228:             min_inferred=data.get("min_inferred", 0.3),
-229:         )
-230: 
-231: 
-232: @dataclass
-233: class ExpansionConfig:
-234:     """Configuration for semantic expansion."""
-235: 
-236:     enabled: bool = True
-237:     depth: int = 2
-238:     cross_tool_unification: bool = True
-239:     relationship_inference: bool = True
-240:     max_entities_per_expansion: int = 100
-241:     # Inference mode: "batch" (after all docs), "incremental" (per doc with graph query), "none"
-242:     inference_mode: str = "incremental"
-243: 
-244:     def to_dict(self) -> dict[str, Any]:
-245:         """Convert to dictionary representation."""
-246:         return {
-247:             "enabled": self.enabled,
-248:             "depth": self.depth,
-249:             "cross_tool_unification": self.cross_tool_unification,
-250:             "relationship_inference": self.relationship_inference,
-251:             "max_entities_per_expansion": self.max_entities_per_expansion,
-252:             "inference_mode": self.inference_mode,
-253:         }
-254: 
-255:     @classmethod
-256:     def from_dict(cls, data: dict[str, Any]) -> ExpansionConfig:
-257:         """Create from dictionary."""
-258:         return cls(
-259:             enabled=data.get("enabled", True),
-260:             depth=data.get("depth", 2),
-261:             cross_tool_unification=data.get("cross_tool_unification", True),
-262:             relationship_inference=data.get("relationship_inference", True),
-263:             max_entities_per_expansion=data.get("max_entities_per_expansion", 100),
-264:             inference_mode=data.get("inference_mode", "incremental"),
-265:         )
-266: 
-267: 
-268: @dataclass
-269: class ExpertiseConfig:
-270:     """Complete configurable expertise definition.
-271: 
-272:     Expertise configurations define domain-specific knowledge for entity
-273:     extraction, including entity types, relationship types, correlation rules,
-274:     and inference rules. All expertise is loaded from configuration (YAML/JSON)
-275:     or defined programmatically - no hard-coded domain knowledge.
-276: 
-277:     Example usage:
-278:         # Load from file
-279:         loader = ExpertiseLoader()
-280:         expertise = loader.load_file("saas_expert.yaml")
-281: 
-282:         # Use with MemoryLake
-283:         async with MemoryLake() as lake:
-284:             result = await lake.remember(content, expertise=expertise)
-285: 
-286:         # Or define programmatically
-287:         expertise = ExpertiseConfig(
-288:             name="custom",
-289:             system_prompt="You are an expert in...",
-290:             entity_types=[EntityTypeConfig(name="CUSTOM", description="...")],
-291:         )
-292:     """
-293: 
-294:     name: str
-295:     version: str = "1.0.0"
-296:     description: str = ""
-297:     extends: list[str] = field(default_factory=list)  # Inherit from other configs
-298: 
-299:     # LLM prompts (Jinja2 templates supported)
-300:     system_prompt: str | None = None
-301:     extraction_prompt: str | None = None
-302: 
-303:     # Type definitions
-304:     entity_types: list[EntityTypeConfig] = field(default_factory=list)
-305:     relationship_types: list[RelationshipTypeConfig] = field(default_factory=list)
-306: 
-307:     # Tool-specific knowledge (arbitrary dict for schema info)
-308:     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
-309: 
-310:     # Cross-tool correlation rules
-311:     correlation_rules: list[CorrelationRule] = field(default_factory=list)
-312: 
-313:     # Inference rules for semantic expansion
-314:     inference_rules: list[InferenceRule] = field(default_factory=list)
-315: 
-316:     # Confidence thresholds
-317:     confidence: ConfidenceConfig = field(default_factory=ConfidenceConfig)
-318: 
-319:     # Expansion settings
-320:     expansion: ExpansionConfig = field(default_factory=ExpansionConfig)
-321: 
-322:     # Additional metadata
-323:     metadata: dict[str, Any] = field(default_factory=dict)
-324: 
-325:     def get_entity_type_names(self) -> list[str]:
-326:         """Get list of entity type names."""
-327:         return [et.name for et in self.entity_types]
-328: 
-329:     def get_relationship_type_names(self) -> list[str]:
-330:         """Get list of relationship type names."""
-331:         return [rt.name for rt in self.relationship_types]
-332: 
-333:     def get_entity_type(self, name: str) -> EntityTypeConfig | None:
-334:         """Get entity type config by name."""
-335:         for et in self.entity_types:
-336:             if et.name == name:
-337:                 return et
-338:         return None
-339: 
-340:     def get_relationship_type(self, name: str) -> RelationshipTypeConfig | None:
-341:         """Get relationship type config by name."""
-342:         for rt in self.relationship_types:
-343:             if rt.name == name:
-344:                 return rt
-345:         return None
-346: 
-347:     def to_dict(self) -> dict[str, Any]:
-348:         """Convert to dictionary representation."""
-349:         return {
-350:             "name": self.name,
-351:             "version": self.version,
-352:             "description": self.description,
-353:             "extends": self.extends,
-354:             "system_prompt": self.system_prompt,
-355:             "extraction_prompt": self.extraction_prompt,
-356:             "entity_types": [et.to_dict() for et in self.entity_types],
-357:             "relationship_types": [rt.to_dict() for rt in self.relationship_types],
-358:             "tool_schemas": self.tool_schemas,
-359:             "correlation_rules": [cr.to_dict() for cr in self.correlation_rules],
-360:             "inference_rules": [ir.to_dict() for ir in self.inference_rules],
-361:             "confidence": self.confidence.to_dict(),
-362:             "expansion": self.expansion.to_dict(),
-363:             "metadata": self.metadata,
-364:         }
-365: 
-366:     @classmethod
-367:     def from_dict(cls, data: dict[str, Any]) -> ExpertiseConfig:
-368:         """Create expertise config from dictionary."""
-369:         entity_types = [
-370:             EntityTypeConfig.from_dict(et) if isinstance(et, dict) else et for et in data.get("entity_types", [])
-371:         ]
-372:         relationship_types = [
-373:             RelationshipTypeConfig.from_dict(rt) if isinstance(rt, dict) else rt
-374:             for rt in data.get("relationship_types", [])
-375:         ]
-376:         correlation_rules = [
-377:             CorrelationRule.from_dict(cr) if isinstance(cr, dict) else cr for cr in data.get("correlation_rules", [])
-378:         ]
-379:         inference_rules = [
-380:             InferenceRule.from_dict(ir) if isinstance(ir, dict) else ir for ir in data.get("inference_rules", [])
-381:         ]
-382: 
-383:         confidence_data = data.get("confidence", {})
-384:         confidence = (
-385:             ConfidenceConfig.from_dict(confidence_data) if isinstance(confidence_data, dict) else confidence_data
-386:         )
-387: 
-388:         expansion_data = data.get("expansion", {})
-389:         expansion = ExpansionConfig.from_dict(expansion_data) if isinstance(expansion_data, dict) else expansion_data
-390: 
-391:         return cls(
-392:             name=data.get("name", "custom"),
-393:             version=data.get("version", "1.0.0"),
-394:             description=data.get("description", ""),
-395:             extends=data.get("extends", []),
-396:             system_prompt=data.get("system_prompt"),
-397:             extraction_prompt=data.get("extraction_prompt"),
-398:             entity_types=entity_types,
-399:             relationship_types=relationship_types,
-400:             tool_schemas=data.get("tool_schemas", {}),
-401:             correlation_rules=correlation_rules,
-402:             inference_rules=inference_rules,
-403:             confidence=confidence if isinstance(confidence, ConfidenceConfig) else ConfidenceConfig(),
-404:             expansion=expansion if isinstance(expansion, ExpansionConfig) else ExpansionConfig(),
-405:             metadata=data.get("metadata", {}),
-406:         )
-407: 
-408:     def to_extraction_skill(self) -> ExtractionSkill:
-409:         """Convert to a legacy ExtractionSkill for backward compatibility."""
-410:         return ExtractionSkill(
-411:             name=self.name,
-412:             description=self.description,
-413:             entity_types=self.get_entity_type_names(),
-414:             relationship_types=self.get_relationship_type_names(),
-415:             custom_prompt=self.extraction_prompt,
-416:             min_entity_confidence=self.confidence.min_entity,
-417:             min_relationship_confidence=self.confidence.min_relationship,
-418:             metadata=self.metadata,
-419:         )
-420: 
-421: 
-422: @dataclass
-423: class ExtractionSkill:
-424:     """Configurable extraction skill definition.
-425: 
-426:     Skills define what types of entities and relationships to extract
-427:     from documents. They can be customized per namespace or document type.
-428:     """
-429: 
-430:     name: str
-431:     description: str = ""
-432: 
-433:     # Entity extraction configuration
-434:     entity_types: list[str] = field(default_factory=list)
-435:     relationship_types: list[str] = field(default_factory=list)
-436: 
-437:     # Custom extraction prompt (optional)
-438:     custom_prompt: str | None = None
-439: 
-440:     # Processing configuration
-441:     extract_entities: bool = True
-442:     extract_relationships: bool = True
-443: 
-444:     # Confidence thresholds
-445:     min_entity_confidence: float = 0.5
-446:     min_relationship_confidence: float = 0.5
-447: 
-448:     # Additional metadata
-449:     metadata: dict[str, Any] = field(default_factory=dict)
-450: 
-451:     @classmethod
-452:     def general_entities(cls) -> ExtractionSkill:
-453:         """Create a general entity extraction skill."""
-454:         return cls(
-455:             name="general_entities",
-456:             description="Extract general entities like people, organizations, and concepts",
-457:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
-458:             relationship_types=["WORKS_FOR", "KNOWS", "RELATES_TO", "LOCATED_IN"],
-459:         )
-460: 
-461:     @classmethod
-462:     def technical_docs(cls) -> ExtractionSkill:
-463:         """Create a skill for technical documentation."""
-464:         return cls(
-465:             name="technical_docs",
-466:             description="Extract technical entities from documentation",
-467:             entity_types=["TECHNOLOGY", "CONCEPT", "PRODUCT", "ORGANIZATION"],
-468:             relationship_types=["DEPENDS_ON", "IMPLEMENTS", "PART_OF", "RELATES_TO"],
-469:         )
-470: 
-471:     @classmethod
-472:     def business_intel(cls) -> ExtractionSkill:
-473:         """Create a skill for business intelligence."""
-474:         return cls(
-475:             name="business_intel",
-476:             description="Extract business entities and relationships",
-477:             entity_types=["PERSON", "ORGANIZATION", "PRODUCT", "EVENT", "LOCATION"],
-478:             relationship_types=[
-479:                 "WORKS_FOR",
-480:                 "MANAGES",
-481:                 "OWNS",
-482:                 "COMPETES_WITH",
-483:                 "PARTNERS_WITH",
-484:                 "HEADQUARTERED_IN",
-485:             ],
-486:         )
-487: 
-488:     @classmethod
-489:     def research_papers(cls) -> ExtractionSkill:
-490:         """Create a skill for research papers."""
-491:         return cls(
-492:             name="research_papers",
-493:             description="Extract entities from academic research",
-494:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "TECHNOLOGY", "EVENT"],
-495:             relationship_types=[
-496:                 "COLLABORATES_WITH",
-497:                 "DERIVED_FROM",
-498:                 "IMPLEMENTS",
-499:                 "RELATES_TO",
-500:                 "PRECEDES",
-501:             ],
-502:         )
-503: 
-504:     def to_dict(self) -> dict[str, Any]:
-505:         """Convert skill to dictionary."""
-506:         return {
-507:             "name": self.name,
-508:             "description": self.description,
-509:             "entity_types": self.entity_types,
-510:             "relationship_types": self.relationship_types,
-511:             "custom_prompt": self.custom_prompt,
-512:             "extract_entities": self.extract_entities,
-513:             "extract_relationships": self.extract_relationships,
-514:             "min_entity_confidence": self.min_entity_confidence,
-515:             "min_relationship_confidence": self.min_relationship_confidence,
-516:             "metadata": self.metadata,
-517:         }
-518: 
-519:     @classmethod
-520:     def from_dict(cls, data: dict[str, Any]) -> ExtractionSkill:
-521:         """Create skill from dictionary."""
-522:         return cls(
-523:             name=data.get("name", "custom"),
-524:             description=data.get("description", ""),
-525:             entity_types=data.get("entity_types", []),
-526:             relationship_types=data.get("relationship_types", []),
-527:             custom_prompt=data.get("custom_prompt"),
-528:             extract_entities=data.get("extract_entities", True),
-529:             extract_relationships=data.get("extract_relationships", True),
-530:             min_entity_confidence=data.get("min_entity_confidence", 0.5),
-531:             min_relationship_confidence=data.get("min_relationship_confidence", 0.5),
-532:             metadata=data.get("metadata", {}),
-533:         )
-````
-
 ## File: src/khora/extraction/skills/registry.py
 ````python
   1: """Skill registry for managing extraction skills and expertise configurations."""
@@ -13255,7 +13971,7 @@ README.md
 20:     return {
 21:         "status": "ok",
 22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.3",
+23:         "version": "0.0.4",
 24:         "service": "khora",
 25:     }
 26: 
@@ -13270,7 +13986,7 @@ README.md
 35:     return {
 36:         "status": "healthy",
 37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.3",
+38:         "version": "0.0.4",
 39:     }
 40: 
 41: 
@@ -13332,7 +14048,7 @@ README.md
 11: 
 12: 
 13: @click.group()
-14: @click.version_option(version="0.0.3")
+14: @click.version_option(version="0.0.4")
 15: @click.option(
 16:     "--log-level",
 17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
@@ -14142,6 +14858,543 @@ README.md
 124:             List of ExtractionResult objects
 125:         """
 126:         ...
+````
+
+## File: src/khora/extraction/skills/base.py
+````python
+  1: """Base extraction skill definition and expertise configuration."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from dataclasses import dataclass, field
+  6: from enum import Enum
+  7: from typing import Any
+  8: 
+  9: 
+ 10: class ConfidenceLevel(str, Enum):
+ 11:     """Confidence level thresholds for extraction."""
+ 12: 
+ 13:     HIGH = "high"  # 0.8+
+ 14:     MEDIUM = "medium"  # 0.5-0.8
+ 15:     LOW = "low"  # 0.3-0.5
+ 16: 
+ 17: 
+ 18: @dataclass
+ 19: class EntityTypeConfig:
+ 20:     """Configurable entity type definition.
+ 21: 
+ 22:     Defines an entity type that the expertise system recognizes,
+ 23:     including its attributes and identifiers for cross-tool matching.
+ 24:     """
+ 25: 
+ 26:     name: str
+ 27:     description: str = ""
+ 28:     attributes: dict[str, list[str]] = field(default_factory=dict)  # required, optional
+ 29:     identifiers: list[str] = field(default_factory=list)  # For cross-tool matching
+ 30:     aliases: list[str] = field(default_factory=list)  # Alternative names for this type
+ 31: 
+ 32:     def to_dict(self) -> dict[str, Any]:
+ 33:         """Convert to dictionary representation."""
+ 34:         return {
+ 35:             "name": self.name,
+ 36:             "description": self.description,
+ 37:             "attributes": self.attributes,
+ 38:             "identifiers": self.identifiers,
+ 39:             "aliases": self.aliases,
+ 40:         }
+ 41: 
+ 42:     @classmethod
+ 43:     def from_dict(cls, data: dict[str, Any]) -> EntityTypeConfig:
+ 44:         """Create from dictionary."""
+ 45:         return cls(
+ 46:             name=data.get("name", ""),
+ 47:             description=data.get("description", ""),
+ 48:             attributes=data.get("attributes", {}),
+ 49:             identifiers=data.get("identifiers", []),
+ 50:             aliases=data.get("aliases", []),
+ 51:         )
+ 52: 
+ 53: 
+ 54: @dataclass
+ 55: class RelationshipTypeConfig:
+ 56:     """Configurable relationship type definition.
+ 57: 
+ 58:     Defines a relationship type with source and target entity constraints.
+ 59:     """
+ 60: 
+ 61:     name: str
+ 62:     description: str = ""
+ 63:     source_types: list[str] = field(default_factory=list)  # "*" means any
+ 64:     target_types: list[str] = field(default_factory=list)  # "*" means any
+ 65:     bidirectional: bool = False
+ 66:     properties: list[str] = field(default_factory=list)  # Expected properties
+ 67: 
+ 68:     def to_dict(self) -> dict[str, Any]:
+ 69:         """Convert to dictionary representation."""
+ 70:         return {
+ 71:             "name": self.name,
+ 72:             "description": self.description,
+ 73:             "source_types": self.source_types,
+ 74:             "target_types": self.target_types,
+ 75:             "bidirectional": self.bidirectional,
+ 76:             "properties": self.properties,
+ 77:         }
+ 78: 
+ 79:     @classmethod
+ 80:     def from_dict(cls, data: dict[str, Any]) -> RelationshipTypeConfig:
+ 81:         """Create from dictionary."""
+ 82:         return cls(
+ 83:             name=data.get("name", ""),
+ 84:             description=data.get("description", ""),
+ 85:             source_types=data.get("source_types", []),
+ 86:             target_types=data.get("target_types", []),
+ 87:             bidirectional=data.get("bidirectional", False),
+ 88:             properties=data.get("properties", []),
+ 89:         )
+ 90: 
+ 91: 
+ 92: @dataclass
+ 93: class CorrelationRule:
+ 94:     """Rule for cross-tool entity correlation.
+ 95: 
+ 96:     Defines how entities from different tools should be matched and unified.
+ 97:     """
+ 98: 
+ 99:     name: str
+100:     description: str = ""
+101:     pattern: str | None = None  # Regex pattern for matching references
+102:     match_fields: list[str] = field(default_factory=list)  # Fields to match on (e.g., email)
+103:     entity_types: list[str] = field(default_factory=list)  # Entity types this rule applies to
+104:     creates_relationship: str | None = None  # Relationship type created when matched
+105:     confidence: float = 0.9  # Confidence of matches from this rule
+106: 
+107:     def to_dict(self) -> dict[str, Any]:
+108:         """Convert to dictionary representation."""
+109:         return {
+110:             "name": self.name,
+111:             "description": self.description,
+112:             "pattern": self.pattern,
+113:             "match_fields": self.match_fields,
+114:             "entity_types": self.entity_types,
+115:             "creates_relationship": self.creates_relationship,
+116:             "confidence": self.confidence,
+117:         }
+118: 
+119:     @classmethod
+120:     def from_dict(cls, data: dict[str, Any]) -> CorrelationRule:
+121:         """Create from dictionary."""
+122:         return cls(
+123:             name=data.get("name", ""),
+124:             description=data.get("description", ""),
+125:             pattern=data.get("pattern"),
+126:             match_fields=data.get("match_fields", []),
+127:             entity_types=data.get("entity_types", []),
+128:             creates_relationship=data.get("creates_relationship"),
+129:             confidence=data.get("confidence", 0.9),
+130:         )
+131: 
+132: 
+133: @dataclass
+134: class InferenceCondition:
+135:     """Condition for relationship inference rule."""
+136: 
+137:     relationship: str  # Relationship type to match
+138:     source_type: str | None = None  # Source entity type (optional filter)
+139:     target_type: str | None = None  # Target entity type (optional filter)
+140: 
+141:     def to_dict(self) -> dict[str, Any]:
+142:         """Convert to dictionary representation."""
+143:         return {
+144:             "relationship": self.relationship,
+145:             "source_type": self.source_type,
+146:             "target_type": self.target_type,
+147:         }
+148: 
+149:     @classmethod
+150:     def from_dict(cls, data: dict[str, Any]) -> InferenceCondition:
+151:         """Create from dictionary."""
+152:         return cls(
+153:             relationship=data.get("relationship", ""),
+154:             source_type=data.get("source_type"),
+155:             target_type=data.get("target_type"),
+156:         )
+157: 
+158: 
+159: @dataclass
+160: class InferenceRule:
+161:     """Rule for relationship inference.
+162: 
+163:     Defines logical rules for inferring new relationships from existing ones.
+164:     """
+165: 
+166:     name: str
+167:     description: str = ""
+168:     when: list[InferenceCondition] = field(default_factory=list)  # Conditions that must be met
+169:     then_relationship: str = ""  # Relationship type to create
+170:     then_source: str = "first.source"  # Source entity reference (first.source, first.target, etc.)
+171:     then_target: str = "second.target"  # Target entity reference
+172:     confidence: float = 0.5  # Confidence of inferred relationships
+173: 
+174:     def to_dict(self) -> dict[str, Any]:
+175:         """Convert to dictionary representation."""
+176:         return {
+177:             "name": self.name,
+178:             "description": self.description,
+179:             "when": [c.to_dict() for c in self.when],
+180:             "then": {
+181:                 "relationship": self.then_relationship,
+182:                 "source": self.then_source,
+183:                 "target": self.then_target,
+184:             },
+185:             "confidence": self.confidence,
+186:         }
+187: 
+188:     @classmethod
+189:     def from_dict(cls, data: dict[str, Any]) -> InferenceRule:
+190:         """Create from dictionary."""
+191:         when_data = data.get("when", [])
+192:         when = [InferenceCondition.from_dict(c) if isinstance(c, dict) else c for c in when_data]
+193: 
+194:         then = data.get("then", {})
+195:         return cls(
+196:             name=data.get("name", ""),
+197:             description=data.get("description", ""),
+198:             when=when,
+199:             then_relationship=then.get("relationship", ""),
+200:             then_source=then.get("source", "first.source"),
+201:             then_target=then.get("target", "second.target"),
+202:             confidence=data.get("confidence", 0.5),
+203:         )
+204: 
+205: 
+206: @dataclass
+207: class ConfidenceConfig:
+208:     """Confidence threshold configuration."""
+209: 
+210:     min_entity: float = 0.5
+211:     min_relationship: float = 0.5
+212:     min_inferred: float = 0.3
+213: 
+214:     def to_dict(self) -> dict[str, float]:
+215:         """Convert to dictionary representation."""
+216:         return {
+217:             "min_entity": self.min_entity,
+218:             "min_relationship": self.min_relationship,
+219:             "min_inferred": self.min_inferred,
+220:         }
+221: 
+222:     @classmethod
+223:     def from_dict(cls, data: dict[str, Any]) -> ConfidenceConfig:
+224:         """Create from dictionary."""
+225:         return cls(
+226:             min_entity=data.get("min_entity", 0.5),
+227:             min_relationship=data.get("min_relationship", 0.5),
+228:             min_inferred=data.get("min_inferred", 0.3),
+229:         )
+230: 
+231: 
+232: @dataclass
+233: class ExpansionConfig:
+234:     """Configuration for semantic expansion."""
+235: 
+236:     enabled: bool = True
+237:     depth: int = 2
+238:     cross_tool_unification: bool = True
+239:     relationship_inference: bool = True
+240:     max_entities_per_expansion: int = 100
+241:     # Inference mode: "batch" (after all docs), "incremental" (per doc with graph query), "none"
+242:     inference_mode: str = "incremental"
+243: 
+244:     def to_dict(self) -> dict[str, Any]:
+245:         """Convert to dictionary representation."""
+246:         return {
+247:             "enabled": self.enabled,
+248:             "depth": self.depth,
+249:             "cross_tool_unification": self.cross_tool_unification,
+250:             "relationship_inference": self.relationship_inference,
+251:             "max_entities_per_expansion": self.max_entities_per_expansion,
+252:             "inference_mode": self.inference_mode,
+253:         }
+254: 
+255:     @classmethod
+256:     def from_dict(cls, data: dict[str, Any]) -> ExpansionConfig:
+257:         """Create from dictionary."""
+258:         return cls(
+259:             enabled=data.get("enabled", True),
+260:             depth=data.get("depth", 2),
+261:             cross_tool_unification=data.get("cross_tool_unification", True),
+262:             relationship_inference=data.get("relationship_inference", True),
+263:             max_entities_per_expansion=data.get("max_entities_per_expansion", 100),
+264:             inference_mode=data.get("inference_mode", "incremental"),
+265:         )
+266: 
+267: 
+268: @dataclass
+269: class ExpertiseConfig:
+270:     """Complete configurable expertise definition.
+271: 
+272:     Expertise configurations define domain-specific knowledge for entity
+273:     extraction, including entity types, relationship types, correlation rules,
+274:     and inference rules. All expertise is loaded from configuration (YAML/JSON)
+275:     or defined programmatically - no hard-coded domain knowledge.
+276: 
+277:     Example usage:
+278:         # Load from file
+279:         loader = ExpertiseLoader()
+280:         expertise = loader.load_file("saas_expert.yaml")
+281: 
+282:         # Use with MemoryLake
+283:         async with MemoryLake() as lake:
+284:             result = await lake.remember(content, expertise=expertise)
+285: 
+286:         # Or define programmatically
+287:         expertise = ExpertiseConfig(
+288:             name="custom",
+289:             system_prompt="You are an expert in...",
+290:             entity_types=[EntityTypeConfig(name="CUSTOM", description="...")],
+291:         )
+292:     """
+293: 
+294:     name: str
+295:     version: str = "1.0.0"
+296:     description: str = ""
+297:     extends: list[str] = field(default_factory=list)  # Inherit from other configs
+298: 
+299:     # LLM prompts (Jinja2 templates supported)
+300:     system_prompt: str | None = None
+301:     extraction_prompt: str | None = None
+302: 
+303:     # Type definitions
+304:     entity_types: list[EntityTypeConfig] = field(default_factory=list)
+305:     relationship_types: list[RelationshipTypeConfig] = field(default_factory=list)
+306: 
+307:     # Tool-specific knowledge (arbitrary dict for schema info)
+308:     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+309: 
+310:     # Cross-tool correlation rules
+311:     correlation_rules: list[CorrelationRule] = field(default_factory=list)
+312: 
+313:     # Inference rules for semantic expansion
+314:     inference_rules: list[InferenceRule] = field(default_factory=list)
+315: 
+316:     # Confidence thresholds
+317:     confidence: ConfidenceConfig = field(default_factory=ConfidenceConfig)
+318: 
+319:     # Expansion settings
+320:     expansion: ExpansionConfig = field(default_factory=ExpansionConfig)
+321: 
+322:     # Additional metadata
+323:     metadata: dict[str, Any] = field(default_factory=dict)
+324: 
+325:     def get_entity_type_names(self) -> list[str]:
+326:         """Get list of entity type names."""
+327:         return [et.name for et in self.entity_types]
+328: 
+329:     def get_relationship_type_names(self) -> list[str]:
+330:         """Get list of relationship type names."""
+331:         return [rt.name for rt in self.relationship_types]
+332: 
+333:     def get_entity_type(self, name: str) -> EntityTypeConfig | None:
+334:         """Get entity type config by name."""
+335:         for et in self.entity_types:
+336:             if et.name == name:
+337:                 return et
+338:         return None
+339: 
+340:     def get_relationship_type(self, name: str) -> RelationshipTypeConfig | None:
+341:         """Get relationship type config by name."""
+342:         for rt in self.relationship_types:
+343:             if rt.name == name:
+344:                 return rt
+345:         return None
+346: 
+347:     def to_dict(self) -> dict[str, Any]:
+348:         """Convert to dictionary representation."""
+349:         return {
+350:             "name": self.name,
+351:             "version": self.version,
+352:             "description": self.description,
+353:             "extends": self.extends,
+354:             "system_prompt": self.system_prompt,
+355:             "extraction_prompt": self.extraction_prompt,
+356:             "entity_types": [et.to_dict() for et in self.entity_types],
+357:             "relationship_types": [rt.to_dict() for rt in self.relationship_types],
+358:             "tool_schemas": self.tool_schemas,
+359:             "correlation_rules": [cr.to_dict() for cr in self.correlation_rules],
+360:             "inference_rules": [ir.to_dict() for ir in self.inference_rules],
+361:             "confidence": self.confidence.to_dict(),
+362:             "expansion": self.expansion.to_dict(),
+363:             "metadata": self.metadata,
+364:         }
+365: 
+366:     @classmethod
+367:     def from_dict(cls, data: dict[str, Any]) -> ExpertiseConfig:
+368:         """Create expertise config from dictionary."""
+369:         entity_types = [
+370:             EntityTypeConfig.from_dict(et) if isinstance(et, dict) else et for et in data.get("entity_types", [])
+371:         ]
+372:         relationship_types = [
+373:             RelationshipTypeConfig.from_dict(rt) if isinstance(rt, dict) else rt
+374:             for rt in data.get("relationship_types", [])
+375:         ]
+376:         correlation_rules = [
+377:             CorrelationRule.from_dict(cr) if isinstance(cr, dict) else cr for cr in data.get("correlation_rules", [])
+378:         ]
+379:         inference_rules = [
+380:             InferenceRule.from_dict(ir) if isinstance(ir, dict) else ir for ir in data.get("inference_rules", [])
+381:         ]
+382: 
+383:         confidence_data = data.get("confidence", {})
+384:         confidence = (
+385:             ConfidenceConfig.from_dict(confidence_data) if isinstance(confidence_data, dict) else confidence_data
+386:         )
+387: 
+388:         expansion_data = data.get("expansion", {})
+389:         expansion = ExpansionConfig.from_dict(expansion_data) if isinstance(expansion_data, dict) else expansion_data
+390: 
+391:         return cls(
+392:             name=data.get("name", "custom"),
+393:             version=data.get("version", "1.0.0"),
+394:             description=data.get("description", ""),
+395:             extends=data.get("extends", []),
+396:             system_prompt=data.get("system_prompt"),
+397:             extraction_prompt=data.get("extraction_prompt"),
+398:             entity_types=entity_types,
+399:             relationship_types=relationship_types,
+400:             tool_schemas=data.get("tool_schemas", {}),
+401:             correlation_rules=correlation_rules,
+402:             inference_rules=inference_rules,
+403:             confidence=confidence if isinstance(confidence, ConfidenceConfig) else ConfidenceConfig(),
+404:             expansion=expansion if isinstance(expansion, ExpansionConfig) else ExpansionConfig(),
+405:             metadata=data.get("metadata", {}),
+406:         )
+407: 
+408:     def to_extraction_skill(self) -> ExtractionSkill:
+409:         """Convert to a legacy ExtractionSkill for backward compatibility."""
+410:         return ExtractionSkill(
+411:             name=self.name,
+412:             description=self.description,
+413:             entity_types=self.get_entity_type_names(),
+414:             relationship_types=self.get_relationship_type_names(),
+415:             custom_prompt=self.extraction_prompt,
+416:             min_entity_confidence=self.confidence.min_entity,
+417:             min_relationship_confidence=self.confidence.min_relationship,
+418:             metadata=self.metadata,
+419:         )
+420: 
+421: 
+422: @dataclass
+423: class ExtractionSkill:
+424:     """Configurable extraction skill definition.
+425: 
+426:     Skills define what types of entities and relationships to extract
+427:     from documents. They can be customized per namespace or document type.
+428:     """
+429: 
+430:     name: str
+431:     description: str = ""
+432: 
+433:     # Entity extraction configuration
+434:     entity_types: list[str] = field(default_factory=list)
+435:     relationship_types: list[str] = field(default_factory=list)
+436: 
+437:     # Custom extraction prompt (optional)
+438:     custom_prompt: str | None = None
+439: 
+440:     # Processing configuration
+441:     extract_entities: bool = True
+442:     extract_relationships: bool = True
+443: 
+444:     # Confidence thresholds
+445:     min_entity_confidence: float = 0.5
+446:     min_relationship_confidence: float = 0.5
+447: 
+448:     # Additional metadata
+449:     metadata: dict[str, Any] = field(default_factory=dict)
+450: 
+451:     @classmethod
+452:     def general_entities(cls) -> ExtractionSkill:
+453:         """Create a general entity extraction skill."""
+454:         return cls(
+455:             name="general_entities",
+456:             description="Extract general entities like people, organizations, and concepts",
+457:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
+458:             relationship_types=["WORKS_FOR", "KNOWS", "RELATES_TO", "LOCATED_IN"],
+459:         )
+460: 
+461:     @classmethod
+462:     def technical_docs(cls) -> ExtractionSkill:
+463:         """Create a skill for technical documentation."""
+464:         return cls(
+465:             name="technical_docs",
+466:             description="Extract technical entities from documentation",
+467:             entity_types=["TECHNOLOGY", "CONCEPT", "PRODUCT", "ORGANIZATION"],
+468:             relationship_types=["DEPENDS_ON", "IMPLEMENTS", "PART_OF", "RELATES_TO"],
+469:         )
+470: 
+471:     @classmethod
+472:     def business_intel(cls) -> ExtractionSkill:
+473:         """Create a skill for business intelligence."""
+474:         return cls(
+475:             name="business_intel",
+476:             description="Extract business entities and relationships",
+477:             entity_types=["PERSON", "ORGANIZATION", "PRODUCT", "EVENT", "LOCATION"],
+478:             relationship_types=[
+479:                 "WORKS_FOR",
+480:                 "MANAGES",
+481:                 "OWNS",
+482:                 "COMPETES_WITH",
+483:                 "PARTNERS_WITH",
+484:                 "HEADQUARTERED_IN",
+485:             ],
+486:         )
+487: 
+488:     @classmethod
+489:     def research_papers(cls) -> ExtractionSkill:
+490:         """Create a skill for research papers."""
+491:         return cls(
+492:             name="research_papers",
+493:             description="Extract entities from academic research",
+494:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "TECHNOLOGY", "EVENT"],
+495:             relationship_types=[
+496:                 "COLLABORATES_WITH",
+497:                 "DERIVED_FROM",
+498:                 "IMPLEMENTS",
+499:                 "RELATES_TO",
+500:                 "PRECEDES",
+501:             ],
+502:         )
+503: 
+504:     def to_dict(self) -> dict[str, Any]:
+505:         """Convert skill to dictionary."""
+506:         return {
+507:             "name": self.name,
+508:             "description": self.description,
+509:             "entity_types": self.entity_types,
+510:             "relationship_types": self.relationship_types,
+511:             "custom_prompt": self.custom_prompt,
+512:             "extract_entities": self.extract_entities,
+513:             "extract_relationships": self.extract_relationships,
+514:             "min_entity_confidence": self.min_entity_confidence,
+515:             "min_relationship_confidence": self.min_relationship_confidence,
+516:             "metadata": self.metadata,
+517:         }
+518: 
+519:     @classmethod
+520:     def from_dict(cls, data: dict[str, Any]) -> ExtractionSkill:
+521:         """Create skill from dictionary."""
+522:         return cls(
+523:             name=data.get("name", "custom"),
+524:             description=data.get("description", ""),
+525:             entity_types=data.get("entity_types", []),
+526:             relationship_types=data.get("relationship_types", []),
+527:             custom_prompt=data.get("custom_prompt"),
+528:             extract_entities=data.get("extract_entities", True),
+529:             extract_relationships=data.get("extract_relationships", True),
+530:             min_entity_confidence=data.get("min_entity_confidence", 0.5),
+531:             min_relationship_confidence=data.get("min_relationship_confidence", 0.5),
+532:             metadata=data.get("metadata", {}),
+533:         )
 ````
 
 ## File: src/khora/pipelines/tasks/extract.py
@@ -16048,7 +17301,7 @@ README.md
 18:         data = response.json()
 19:         assert data["status"] == "ok"
 20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.3"
+21:         assert data["version"] == "0.0.4"
 22:         assert data["service"] == "khora"
 23: 
 24:     def test_health_check(self, test_client: TestClient) -> None:
@@ -16059,7 +17312,7 @@ README.md
 29:         data = response.json()
 30:         assert data["status"] == "healthy"
 31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.3"
+32:         assert data["version"] == "0.0.4"
 33: 
 34:     def test_readiness_check(self, test_client: TestClient) -> None:
 35:         """Test readiness check endpoint."""
@@ -16417,7 +17670,7 @@ README.md
 107:     app = FastAPI(
 108:         title="Khora",
 109:         description="Deyta's memory lake and materialization of knowledge",
-110:         version="0.0.3",
+110:         version="0.0.4",
 111:         lifespan=lifespan,
 112:         debug=config.debug,
 113:     )
@@ -18028,7 +19281,7 @@ README.md
 17: from .memory_lake import MemoryLake, RecallResult, RememberResult
 18: from .query import SearchMode
 19: 
-20: __version__ = "0.0.3"
+20: __version__ = "0.0.4"
 21: 
 22: __all__ = [
 23:     "main",
@@ -18619,6 +19872,141 @@ README.md
 576: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
+## File: pyproject.toml
+````toml
+  1: [project]
+  2: name = "khora"
+  3: version = "0.0.4"
+  4: description = "Khora is Memory Lake"
+  5: readme = "README.md"
+  6: authors = [
+  7:     { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
+  8: ]
+  9: requires-python = ">=3.13"
+ 10: dependencies = [
+ 11:     # Configuration
+ 12:     "pydantic-settings>=2.12.0",
+ 13:     "pyyaml>=6.0.3",
+ 14:     # FastAPI service
+ 15:     "fastapi>=0.128.0",
+ 16:     "uvicorn[standard]>=0.40.0",
+ 17:     "httpx>=0.28.1",
+ 18:     # CLI
+ 19:     "click>=8.3.0",
+ 20:     # Async support
+ 21:     "asyncpg>=0.31.0",
+ 22:     # Database
+ 23:     "sqlalchemy[asyncio]>=2.0.46",
+ 24:     "alembic>=1.18.0",
+ 25:     # Terminal UI
+ 26:     "rich>=14.0.0",
+ 27:     "loguru>=0.7.3",
+ 28:     # LLM Access (unified interface)
+ 29:     "litellm>=1.81.0",
+ 30:     # Graph database
+ 31:     "neo4j>=6.1.0",
+ 32:     # Vector database
+ 33:     "pgvector>=0.4.2",
+ 34:     # Pipeline orchestration
+ 35:     "prefect>=3.6.13",
+ 36:     # Token counting
+ 37:     "tiktoken>=0.12.0",
+ 38: ]
+ 39: 
+ 40: [project.optional-dependencies]
+ 41: dev = [
+ 42:     "pytest>=9.0.2",
+ 43:     "pytest-cov>=7.0.0",
+ 44:     "pytest-mock>=3.15.0",
+ 45:     "pytest-asyncio>=1.3.0",
+ 46:     "coverage>=7.13.2",
+ 47:     "black>=26.0.0",
+ 48:     "ruff>=0.14.14",
+ 49:     "isort>=7.0.0",
+ 50:     "prek>=0.3.0",
+ 51:     "faker>=40.0.0",
+ 52: ]
+ 53: # Data storage backends
+ 54: postgres = [
+ 55:     "asyncpg>=0.31.0",
+ 56:     "pgvector>=0.4.2",
+ 57: ]
+ 58: 
+ 59: [project.scripts]
+ 60: khora = "khora:main"
+ 61: 
+ 62: [build-system]
+ 63: requires = ["uv_build>=0.8.17,<0.9.0"]
+ 64: build-backend = "uv_build"
+ 65: 
+ 66: [tool.pytest.ini_options]
+ 67: testpaths = ["tests"]
+ 68: python_files = ["test_*.py"]
+ 69: python_classes = ["Test*"]
+ 70: python_functions = ["test_*"]
+ 71: addopts = [
+ 72:     "--strict-markers",
+ 73:     "--strict-config",
+ 74:     "--cov=khora",
+ 75:     "--cov-branch",
+ 76:     "--cov-report=term-missing",
+ 77:     "--cov-fail-under=30",
+ 78: ]
+ 79: markers = [
+ 80:     "unit: Unit tests",
+ 81:     "integration: Integration tests",
+ 82:     "e2e: End-to-end tests",
+ 83: ]
+ 84: asyncio_mode = "auto"
+ 85: 
+ 86: [tool.coverage.run]
+ 87: source = ["src"]
+ 88: omit = [
+ 89:     "tests/*",
+ 90:     "*/test_*.py",
+ 91:     "*/__pycache__/*",
+ 92: ]
+ 93: 
+ 94: [tool.coverage.report]
+ 95: exclude_lines = [
+ 96:     "pragma: no cover",
+ 97:     "def __repr__",
+ 98:     "raise AssertionError",
+ 99:     "raise NotImplementedError",
+100:     "if __name__ == .__main__.:",
+101:     "if TYPE_CHECKING:",
+102: ]
+103: 
+104: [tool.black]
+105: target-version = ["py313"]
+106: line-length = 120
+107: 
+108: [tool.isort]
+109: profile = "black"
+110: line_length = 120
+111: known_first_party = ["khora"]
+112: skip_gitignore = true
+113: 
+114: [tool.ruff]
+115: target-version = "py313"
+116: line-length = 120
+117: 
+118: [tool.ruff.lint]
+119: select = ["E", "F", "W"]
+120: ignore = ["E501"]  # Line too long - handled by black
+121: 
+122: [dependency-groups]
+123: dev = [
+124:     "prek>=0.3.0",
+125:     "pytest>=9.0.2",
+126:     "pytest-asyncio>=1.3.0",
+127:     "pytest-cov>=7.0.0",
+128:     "black>=26.0.0",
+129:     "ruff>=0.14.14",
+130:     "isort>=7.0.0",
+131: ]
+````
+
 ## File: src/khora/pipelines/flows/ingest.py
 ````python
   1: """Two-phase ingestion flow for Khora Memory Lake.
@@ -19089,141 +20477,6 @@ README.md
 466:         "relationships": len(relationships),
 467:         "inferred_relationships": inferred_count,
 468:     }
-````
-
-## File: pyproject.toml
-````toml
-  1: [project]
-  2: name = "khora"
-  3: version = "0.0.3"
-  4: description = "Khora is Memory Lake"
-  5: readme = "README.md"
-  6: authors = [
-  7:     { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
-  8: ]
-  9: requires-python = ">=3.13"
- 10: dependencies = [
- 11:     # Configuration
- 12:     "pydantic-settings>=2.12.0",
- 13:     "pyyaml>=6.0.3",
- 14:     # FastAPI service
- 15:     "fastapi>=0.128.0",
- 16:     "uvicorn[standard]>=0.40.0",
- 17:     "httpx>=0.28.1",
- 18:     # CLI
- 19:     "click>=8.3.0",
- 20:     # Async support
- 21:     "asyncpg>=0.31.0",
- 22:     # Database
- 23:     "sqlalchemy[asyncio]>=2.0.46",
- 24:     "alembic>=1.18.0",
- 25:     # Terminal UI
- 26:     "rich>=14.0.0",
- 27:     "loguru>=0.7.3",
- 28:     # LLM Access (unified interface)
- 29:     "litellm>=1.81.0",
- 30:     # Graph database
- 31:     "neo4j>=6.1.0",
- 32:     # Vector database
- 33:     "pgvector>=0.4.2",
- 34:     # Pipeline orchestration
- 35:     "prefect>=3.6.13",
- 36:     # Token counting
- 37:     "tiktoken>=0.12.0",
- 38: ]
- 39: 
- 40: [project.optional-dependencies]
- 41: dev = [
- 42:     "pytest>=9.0.2",
- 43:     "pytest-cov>=7.0.0",
- 44:     "pytest-mock>=3.15.0",
- 45:     "pytest-asyncio>=1.3.0",
- 46:     "coverage>=7.13.2",
- 47:     "black>=26.0.0",
- 48:     "ruff>=0.14.14",
- 49:     "isort>=7.0.0",
- 50:     "prek>=0.3.0",
- 51:     "faker>=40.0.0",
- 52: ]
- 53: # Data storage backends
- 54: postgres = [
- 55:     "asyncpg>=0.31.0",
- 56:     "pgvector>=0.4.2",
- 57: ]
- 58: 
- 59: [project.scripts]
- 60: khora = "khora:main"
- 61: 
- 62: [build-system]
- 63: requires = ["uv_build>=0.8.17,<0.9.0"]
- 64: build-backend = "uv_build"
- 65: 
- 66: [tool.pytest.ini_options]
- 67: testpaths = ["tests"]
- 68: python_files = ["test_*.py"]
- 69: python_classes = ["Test*"]
- 70: python_functions = ["test_*"]
- 71: addopts = [
- 72:     "--strict-markers",
- 73:     "--strict-config",
- 74:     "--cov=khora",
- 75:     "--cov-branch",
- 76:     "--cov-report=term-missing",
- 77:     "--cov-fail-under=30",
- 78: ]
- 79: markers = [
- 80:     "unit: Unit tests",
- 81:     "integration: Integration tests",
- 82:     "e2e: End-to-end tests",
- 83: ]
- 84: asyncio_mode = "auto"
- 85: 
- 86: [tool.coverage.run]
- 87: source = ["src"]
- 88: omit = [
- 89:     "tests/*",
- 90:     "*/test_*.py",
- 91:     "*/__pycache__/*",
- 92: ]
- 93: 
- 94: [tool.coverage.report]
- 95: exclude_lines = [
- 96:     "pragma: no cover",
- 97:     "def __repr__",
- 98:     "raise AssertionError",
- 99:     "raise NotImplementedError",
-100:     "if __name__ == .__main__.:",
-101:     "if TYPE_CHECKING:",
-102: ]
-103: 
-104: [tool.black]
-105: target-version = ["py313"]
-106: line-length = 120
-107: 
-108: [tool.isort]
-109: profile = "black"
-110: line_length = 120
-111: known_first_party = ["khora"]
-112: skip_gitignore = true
-113: 
-114: [tool.ruff]
-115: target-version = "py313"
-116: line-length = 120
-117: 
-118: [tool.ruff.lint]
-119: select = ["E", "F", "W"]
-120: ignore = ["E501"]  # Line too long - handled by black
-121: 
-122: [dependency-groups]
-123: dev = [
-124:     "prek>=0.3.0",
-125:     "pytest>=9.0.2",
-126:     "pytest-asyncio>=1.3.0",
-127:     "pytest-cov>=7.0.0",
-128:     "black>=26.0.0",
-129:     "ruff>=0.14.14",
-130:     "isort>=7.0.0",
-131: ]
 ````
 
 ## File: src/khora/query/engine.py
@@ -20947,6 +22200,14 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-01-27 08:39:53 +0100
+**Message:** feat: add inference_mode support (batch/incremental/none)
+
+**Files:**
+- REPOMIX.md
+- src/khora/extraction/skills/base.py
+- src/khora/pipelines/flows/ingest.py
+
 ## Commit: 2026-01-27 00:30:31 +0100
 **Message:** fix: handle attributes as list instead of dict
 
@@ -21261,40 +22522,3 @@ README.md
 - Dockerfile
 - docker-entrypoint.sh
 - fly.toml
-
-## Commit: 2026-01-25 22:58:55 +0100
-**Message:** Set up project structure with FastAPI async service
-
-**Files:**
-- .env.example
-- .github/workflows/ci.yml
-- .gitignore
-- .pre-commit-config.yaml
-- CLAUDE.md
-- Makefile
-- README.md
-- alembic.ini
-- alembic/env.py
-- alembic/script.py.mako
-- config/khora.example.yaml
-- mise.toml
-- pyproject.toml
-- src/khora/__init__.py
-- src/khora/__main__.py
-- src/khora/api/__init__.py
-- src/khora/api/app.py
-- src/khora/api/routes/__init__.py
-- src/khora/api/routes/status.py
-- src/khora/cli/__init__.py
-- src/khora/cli/server.py
-- src/khora/config/__init__.py
-- src/khora/config/schema.py
-- src/khora/db/__init__.py
-- src/khora/db/models.py
-- src/khora/db/session.py
-- src/khora/logging_config.py
-- tests/__init__.py
-- tests/conftest.py
-- tests/unit/__init__.py
-- tests/unit/test_api.py
-- uv.lock

@@ -11,7 +11,7 @@ from .server import serve
 
 
 @click.group()
-@click.version_option(version="0.0.3")
+@click.version_option(version="0.0.4")
 @click.option(
     "--log-level",
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),

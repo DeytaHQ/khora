@@ -107,7 +107,7 @@ def create_app(config: KhoraConfig | None = None) -> FastAPI:
     app = FastAPI(
         title="Khora",
         description="Deyta's memory lake and materialization of knowledge",
-        version="0.0.3",
+        version="0.0.4",
         lifespan=lifespan,
         debug=config.debug,
     )
