@@ -19299,7 +19299,7 @@ README.md
 20:     return {
 21:         "status": "ok",
 22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.5",
+23:         "version": "0.0.6",
 24:         "service": "khora",
 25:     }
 26: 
@@ -19314,7 +19314,7 @@ README.md
 35:     return {
 36:         "status": "healthy",
 37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.5",
+38:         "version": "0.0.6",
 39:     }
 40: 
 41: 
@@ -19376,7 +19376,7 @@ README.md
 11: 
 12: 
 13: @click.group()
-14: @click.version_option(version="0.0.5")
+14: @click.version_option(version="0.0.6")
 15: @click.option(
 16:     "--log-level",
 17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
@@ -20123,7 +20123,7 @@ README.md
 18:         data = response.json()
 19:         assert data["status"] == "ok"
 20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.5"
+21:         assert data["version"] == "0.0.6"
 22:         assert data["service"] == "khora"
 23: 
 24:     def test_health_check(self, test_client: TestClient) -> None:
@@ -20134,7 +20134,7 @@ README.md
 29:         data = response.json()
 30:         assert data["status"] == "healthy"
 31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.5"
+32:         assert data["version"] == "0.0.6"
 33: 
 34:     def test_readiness_check(self, test_client: TestClient) -> None:
 35:         """Test readiness check endpoint."""
@@ -20297,7 +20297,7 @@ README.md
 107:     app = FastAPI(
 108:         title="Khora",
 109:         description="Deyta's memory lake and materialization of knowledge",
-110:         version="0.0.5",
+110:         version="0.0.6",
 111:         lifespan=lifespan,
 112:         debug=config.debug,
 113:     )
@@ -22363,7 +22363,7 @@ README.md
 17: from .memory_lake import MemoryLake, RecallResult, RememberResult
 18: from .query import SearchMode
 19: 
-20: __version__ = "0.0.5"
+20: __version__ = "0.0.6"
 21: 
 22: __all__ = [
 23:     "main",
@@ -23432,7 +23432,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.0.5"
+  3: version = "0.0.6"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -23566,6 +23566,14 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-27 13:14:14 +0100
+**Message:** feat: add complete database migrations
+
+**Files:**
+- REPOMIX.md
+- alembic/versions/000_initial_schema.py
+- alembic/versions/001_add_namespace_versioning.py
 
 ## Commit: 2026-01-27 13:11:26 +0100
 **Message:** chore: add migration for namespace versioning columns
@@ -23826,11 +23834,3 @@ README.md
 **Files:**
 - REPOMIX.md
 - src/khora/storage/backends/neo4j.py
-
-## Commit: 2026-01-26 13:51:06 +0100
-**Message:** Fix vector backend and Prefect cache serialization issues
-
-**Files:**
-- REPOMIX.md
-- src/khora/memory_lake.py
-- src/khora/pipelines/flows/ingest.py
