@@ -40,10 +40,13 @@ class SearchStep:
     total_entities: int = 0
     sources_hit: dict[str, int] = field(default_factory=dict)
 
-    # Search method contributions
+    # Search method contributions (counts for display)
     vector_hits: int = 0
     graph_hits: int = 0
     keyword_hits: int = 0
+
+    # Full search method data with chunk IDs (for attribution)
+    search_methods_data: dict[str, Any] = field(default_factory=dict)
 
     # Graph elements triggered
     entities_linked: list[str] = field(default_factory=list)
@@ -298,6 +301,9 @@ class AgenticSearchAgent:
         sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
         sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
 
+        # Aggregate search_methods from all steps for attribution
+        aggregated_search_methods = self._aggregate_search_methods(trace.steps)
+
         return AgenticSearchResult(
             chunks=sorted_chunks,
             entities=sorted_entities,
@@ -309,6 +315,7 @@ class AgenticSearchAgent:
                 "total_steps": len(trace.steps),
                 "sources_explored": trace.sources_explored,
                 "complexity_score": trace.complexity_score,
+                "search_methods": aggregated_search_methods,
             },
         )
 
@@ -331,9 +338,11 @@ class AgenticSearchAgent:
 
         # Extract search method contributions
         if result.search_contributions:
-            step.vector_hits = result.search_contributions.vector
-            step.graph_hits = result.search_contributions.graph
-            step.keyword_hits = result.search_contributions.keyword
+            step.vector_hits = result.search_contributions.vector.chunk_count
+            step.graph_hits = result.search_contributions.graph.chunk_count
+            step.keyword_hits = result.search_contributions.keyword.chunk_count
+            # Store full search methods data for attribution
+            step.search_methods_data = result.search_contributions.to_dict()
 
         # Extract graph info
         if result.graph_info:
@@ -434,6 +443,71 @@ class AgenticSearchAgent:
                 sources[str(chunk.id)] = "unknown"
 
         return sources
+
+    def _aggregate_search_methods(self, steps: list[SearchStep]) -> dict[str, Any]:
+        """Aggregate search methods data from all steps for attribution.
+
+        Combines the chunk/entity IDs from all steps so results can be
+        attributed to their source search method(s).
+        """
+        # Aggregate all chunk and entity IDs by method
+        all_vector_chunks: set[str] = set()
+        all_graph_chunks: set[str] = set()
+        all_keyword_chunks: set[str] = set()
+        all_vector_entities: set[str] = set()
+        all_graph_entities: set[str] = set()
+
+        for step in steps:
+            if not step.search_methods_data:
+                continue
+
+            by_method = step.search_methods_data.get("by_method", {})
+
+            # Collect chunk IDs from each method
+            vector_data = by_method.get("vector", {})
+            all_vector_chunks.update(vector_data.get("chunks", {}).get("ids", []))
+            all_vector_entities.update(vector_data.get("entities", {}).get("ids", []))
+
+            graph_data = by_method.get("graph", {})
+            all_graph_chunks.update(graph_data.get("chunks", {}).get("ids", []))
+            all_graph_entities.update(graph_data.get("entities", {}).get("ids", []))
+
+            keyword_data = by_method.get("keyword", {})
+            all_keyword_chunks.update(keyword_data.get("chunks", {}).get("ids", []))
+
+        # Compute overlaps
+        vector_graph_overlap = all_vector_chunks & all_graph_chunks
+        vector_keyword_overlap = all_vector_chunks & all_keyword_chunks
+        graph_keyword_overlap = all_graph_chunks & all_keyword_chunks
+        all_methods_overlap = all_vector_chunks & all_graph_chunks & all_keyword_chunks
+
+        vector_only = all_vector_chunks - all_graph_chunks - all_keyword_chunks
+        graph_only = all_graph_chunks - all_vector_chunks - all_keyword_chunks
+        keyword_only = all_keyword_chunks - all_vector_chunks - all_graph_chunks
+
+        vector_graph_entity_overlap = all_vector_entities & all_graph_entities
+        vector_only_entities = all_vector_entities - all_graph_entities
+        graph_only_entities = all_graph_entities - all_vector_entities
+
+        return {
+            "chunk_overlap": {
+                "vector_only": {"count": len(vector_only), "ids": list(vector_only)},
+                "graph_only": {"count": len(graph_only), "ids": list(graph_only)},
+                "keyword_only": {"count": len(keyword_only), "ids": list(keyword_only)},
+                "vector_and_graph": {"count": len(vector_graph_overlap), "ids": list(vector_graph_overlap)},
+                "vector_and_keyword": {"count": len(vector_keyword_overlap), "ids": list(vector_keyword_overlap)},
+                "graph_and_keyword": {"count": len(graph_keyword_overlap), "ids": list(graph_keyword_overlap)},
+                "all_three_methods": {"count": len(all_methods_overlap), "ids": list(all_methods_overlap)},
+            },
+            "entity_overlap": {
+                "vector_only": {"count": len(vector_only_entities), "ids": list(vector_only_entities)},
+                "graph_only": {"count": len(graph_only_entities), "ids": list(graph_only_entities)},
+                "vector_and_graph": {
+                    "count": len(vector_graph_entity_overlap),
+                    "ids": list(vector_graph_entity_overlap),
+                },
+            },
+        }
 
     def _generate_summary_fast(
         self,
