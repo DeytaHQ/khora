@@ -546,7 +546,7 @@ class Neo4jBackend:
         query = f"""
         MATCH (source)-[r{rel_filter}]->(target)
         WHERE r.namespace_id = $namespace_id
-        RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+        RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
         ORDER BY r.created_at DESC
         SKIP $offset
         LIMIT $limit
@@ -561,7 +561,8 @@ class Neo4jBackend:
             )
             records = await result.data()
             return [
-                self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+                self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
+                for r in records
             ]
 
     # =========================================================================

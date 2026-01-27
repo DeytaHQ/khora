@@ -17771,149 +17771,6 @@ README.md
 191: - `GET /health/live` - Liveness probe
 ````
 
-## File: src/khora/api/routes/status.py
-````python
- 1: """Status endpoints for Khora API."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: router = APIRouter()
-11: 
-12: 
-13: @router.get("/status")
-14: async def status_check(request: Request) -> dict[str, Any]:
-15:     """Basic status check endpoint.
-16: 
-17:     Returns:
-18:         Status with timestamp and version
-19:     """
-20:     return {
-21:         "status": "ok",
-22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.5",
-24:         "service": "khora",
-25:     }
-26: 
-27: 
-28: @router.get("/health")
-29: async def health_check(request: Request) -> dict[str, Any]:
-30:     """Health check endpoint for orchestration systems.
-31: 
-32:     Returns:
-33:         Health status with timestamp
-34:     """
-35:     return {
-36:         "status": "healthy",
-37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.5",
-39:     }
-40: 
-41: 
-42: @router.get("/health/ready")
-43: async def readiness_check(request: Request) -> dict[str, Any]:
-44:     """Readiness check for Kubernetes/orchestration.
-45: 
-46:     Checks that all required services are available.
-47: 
-48:     Returns:
-49:         Readiness status with component checks
-50:     """
-51:     config = request.app.state.config
-52:     checks: dict[str, bool] = {}
-53: 
-54:     # TODO: Add actual health checks for:
-55:     # - Database connections
-56:     # - External services
-57: 
-58:     # For now, return basic status
-59:     checks["config_loaded"] = config is not None
-60: 
-61:     all_healthy = all(checks.values())
-62: 
-63:     return {
-64:         "status": "ready" if all_healthy else "not_ready",
-65:         "timestamp": datetime.now(UTC).isoformat(),
-66:         "checks": checks,
-67:     }
-68: 
-69: 
-70: @router.get("/health/live")
-71: async def liveness_check() -> dict[str, Any]:
-72:     """Liveness check for Kubernetes/orchestration.
-73: 
-74:     Simple check that the application is running.
-75: 
-76:     Returns:
-77:         Liveness status
-78:     """
-79:     return {
-80:         "status": "alive",
-81:         "timestamp": datetime.now(UTC).isoformat(),
-82:     }
-````
-
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.0.5")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
-````
-
 ## File: src/khora/config/schema.py
 ````python
   1: """Pydantic configuration models for Khora."""
@@ -19279,91 +19136,6 @@ README.md
 645:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
-## File: tests/unit/test_api.py
-````python
- 1: """Tests for API module."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
- 7: 
- 8: 
- 9: @pytest.mark.unit
-10: class TestStatusEndpoints:
-11:     """Tests for status check endpoints."""
-12: 
-13:     def test_status_check(self, test_client: TestClient) -> None:
-14:         """Test basic status check endpoint."""
-15:         response = test_client.get("/status")
-16: 
-17:         assert response.status_code == 200
-18:         data = response.json()
-19:         assert data["status"] == "ok"
-20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.5"
-22:         assert data["service"] == "khora"
-23: 
-24:     def test_health_check(self, test_client: TestClient) -> None:
-25:         """Test health check endpoint."""
-26:         response = test_client.get("/health")
-27: 
-28:         assert response.status_code == 200
-29:         data = response.json()
-30:         assert data["status"] == "healthy"
-31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.5"
-33: 
-34:     def test_readiness_check(self, test_client: TestClient) -> None:
-35:         """Test readiness check endpoint."""
-36:         response = test_client.get("/health/ready")
-37: 
-38:         assert response.status_code == 200
-39:         data = response.json()
-40:         assert data["status"] in ["ready", "not_ready"]
-41:         assert "timestamp" in data
-42:         assert "checks" in data
-43: 
-44:     def test_liveness_check(self, test_client: TestClient) -> None:
-45:         """Test liveness check endpoint."""
-46:         response = test_client.get("/health/live")
-47: 
-48:         assert response.status_code == 200
-49:         data = response.json()
-50:         assert data["status"] == "alive"
-51:         assert "timestamp" in data
-52: 
-53: 
-54: @pytest.mark.unit
-55: class TestConfig:
-56:     """Tests for configuration."""
-57: 
-58:     def test_default_config(self) -> None:
-59:         """Test default configuration values."""
-60:         from khora.config import KhoraConfig
-61: 
-62:         config = KhoraConfig()
-63:         assert config.app_name == "khora"
-64:         assert config.environment == "development"
-65:         assert config.debug is False
-66:         assert config.api_host == "127.0.0.1"
-67:         assert config.api_port == 8000
-68:         assert config.auth_enabled is True
-69: 
-70:     def test_config_from_env(self, monkeypatch) -> None:
-71:         """Test configuration from environment variables."""
-72:         from khora.config import KhoraConfig
-73: 
-74:         monkeypatch.setenv("KHORA_DEBUG", "true")
-75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-77: 
-78:         config = KhoraConfig()
-79:         assert config.debug is True
-80:         assert config.api_port == 9000
-81:         assert config.environment == "staging"
-````
-
 ## File: README.md
 ````markdown
   1: # Khora
@@ -19944,147 +19716,147 @@ README.md
 576: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
-## File: src/khora/api/app.py
+## File: src/khora/api/routes/status.py
 ````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     await close_db()
- 86: 
- 87: 
- 88: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 89:     """Create and configure the FastAPI application.
- 90: 
- 91:     Args:
- 92:         config: Optional application configuration
- 93: 
- 94:     Returns:
- 95:         Configured FastAPI application
- 96:     """
- 97:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
- 98:     from ..logging_config import setup_logging
- 99: 
-100:     setup_logging(level="INFO")
-101: 
-102:     if config is None:
-103:         from ..config import load_config
-104: 
-105:         config = load_config()
-106: 
-107:     app = FastAPI(
-108:         title="Khora",
-109:         description="Deyta's memory lake and materialization of knowledge",
-110:         version="0.0.5",
-111:         lifespan=lifespan,
-112:         debug=config.debug,
-113:     )
-114: 
-115:     # Store config in app state
-116:     app.state.config = config
-117: 
-118:     # Configure CORS
-119:     app.add_middleware(
-120:         CORSMiddleware,
-121:         allow_origins=["*"] if config.debug else [],
-122:         allow_credentials=True,
-123:         allow_methods=["*"],
-124:         allow_headers=["*"],
-125:     )
-126: 
-127:     # Add request logging
-128:     app.add_middleware(LoggingMiddleware)
-129: 
-130:     # Register routes
-131:     # Status endpoint is public (no auth)
-132:     app.include_router(status.router, tags=["status"])
-133: 
-134:     # Memory Lake API routes
-135:     app.include_router(memory.router)
-136:     app.include_router(namespaces.router)
-137:     app.include_router(sync.router)
-138: 
-139:     return app
+ 1: """Status endpoints for Khora API."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
+ 7: 
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: router = APIRouter()
+11: 
+12: 
+13: @router.get("/status")
+14: async def status_check(request: Request) -> dict[str, Any]:
+15:     """Basic status check endpoint.
+16: 
+17:     Returns:
+18:         Status with timestamp and version
+19:     """
+20:     return {
+21:         "status": "ok",
+22:         "timestamp": datetime.now(UTC).isoformat(),
+23:         "version": "0.0.5",
+24:         "service": "khora",
+25:     }
+26: 
+27: 
+28: @router.get("/health")
+29: async def health_check(request: Request) -> dict[str, Any]:
+30:     """Health check endpoint for orchestration systems.
+31: 
+32:     Returns:
+33:         Health status with timestamp
+34:     """
+35:     return {
+36:         "status": "healthy",
+37:         "timestamp": datetime.now(UTC).isoformat(),
+38:         "version": "0.0.5",
+39:     }
+40: 
+41: 
+42: @router.get("/health/ready")
+43: async def readiness_check(request: Request) -> dict[str, Any]:
+44:     """Readiness check for Kubernetes/orchestration.
+45: 
+46:     Checks that all required services are available.
+47: 
+48:     Returns:
+49:         Readiness status with component checks
+50:     """
+51:     config = request.app.state.config
+52:     checks: dict[str, bool] = {}
+53: 
+54:     # TODO: Add actual health checks for:
+55:     # - Database connections
+56:     # - External services
+57: 
+58:     # For now, return basic status
+59:     checks["config_loaded"] = config is not None
+60: 
+61:     all_healthy = all(checks.values())
+62: 
+63:     return {
+64:         "status": "ready" if all_healthy else "not_ready",
+65:         "timestamp": datetime.now(UTC).isoformat(),
+66:         "checks": checks,
+67:     }
+68: 
+69: 
+70: @router.get("/health/live")
+71: async def liveness_check() -> dict[str, Any]:
+72:     """Liveness check for Kubernetes/orchestration.
+73: 
+74:     Simple check that the application is running.
+75: 
+76:     Returns:
+77:         Liveness status
+78:     """
+79:     return {
+80:         "status": "alive",
+81:         "timestamp": datetime.now(UTC).isoformat(),
+82:     }
+````
+
+## File: src/khora/cli/__init__.py
+````python
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.0.5")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/storage/backends/neo4j.py
@@ -20637,7 +20409,7 @@ README.md
 546:         query = f"""
 547:         MATCH (source)-[r{rel_filter}]->(target)
 548:         WHERE r.namespace_id = $namespace_id
-549:         RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+549:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
 550:         ORDER BY r.created_at DESC
 551:         SKIP $offset
 552:         LIMIT $limit
@@ -20652,348 +20424,545 @@ README.md
 561:             )
 562:             records = await result.data()
 563:             return [
-564:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
-565:             ]
-566: 
-567:     # =========================================================================
-568:     # Episode operations
-569:     # =========================================================================
-570: 
-571:     async def create_episode(self, episode: Episode) -> Episode:
-572:         """Create an episode node."""
-573:         driver = self._get_driver()
-574: 
-575:         async def _create(tx: AsyncManagedTransaction) -> None:
-576:             query = """
-577:             CREATE (ep:Episode {
-578:                 id: $id,
-579:                 namespace_id: $namespace_id,
-580:                 name: $name,
-581:                 description: $description,
-582:                 occurred_at: $occurred_at,
-583:                 duration_seconds: $duration_seconds,
-584:                 entity_ids: $entity_ids,
-585:                 source_document_ids: $source_document_ids,
-586:                 source_chunk_ids: $source_chunk_ids,
-587:                 metadata: $metadata,
-588:                 created_at: $created_at,
-589:                 updated_at: $updated_at
-590:             })
-591:             """
-592:             await tx.run(
-593:                 query,
-594:                 id=str(episode.id),
-595:                 namespace_id=str(episode.namespace_id),
-596:                 name=episode.name,
-597:                 description=episode.description,
-598:                 occurred_at=episode.occurred_at.isoformat(),
-599:                 duration_seconds=episode.duration_seconds,
-600:                 entity_ids=[str(e) for e in episode.entity_ids],
-601:                 source_document_ids=[str(d) for d in episode.source_document_ids],
-602:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
-603:                 metadata=_serialize_dict(episode.metadata),
-604:                 created_at=episode.created_at.isoformat(),
-605:                 updated_at=episode.updated_at.isoformat(),
-606:             )
-607: 
-608:             # Create links to entities
-609:             if episode.entity_ids:
-610:                 link_query = """
-611:                 MATCH (ep:Episode {id: $episode_id})
-612:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
-613:                 CREATE (ep)-[:INVOLVES]->(e)
-614:                 """
-615:                 await tx.run(
-616:                     link_query,
-617:                     episode_id=str(episode.id),
-618:                     entity_ids=[str(e) for e in episode.entity_ids],
-619:                 )
-620: 
-621:         async with driver.session(database=self._database) as session:
-622:             await session.execute_write(_create)
-623: 
-624:         return episode
-625: 
-626:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-627:         """Get an episode by ID."""
-628:         driver = self._get_driver()
-629: 
-630:         async with driver.session(database=self._database) as session:
-631:             result = await session.run(
-632:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
-633:                 id=str(episode_id),
-634:             )
-635:             record = await result.single()
-636:             if record:
-637:                 return self._record_to_episode(record["ep"])
-638:             return None
-639: 
-640:     async def list_episodes(
-641:         self,
-642:         namespace_id: UUID,
-643:         *,
-644:         start_time: datetime | None = None,
-645:         end_time: datetime | None = None,
-646:         limit: int = 100,
-647:     ) -> list[Episode]:
-648:         """List episodes in a time range."""
-649:         driver = self._get_driver()
-650: 
-651:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
-652:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
-653:         conditions = []
-654: 
-655:         if start_time:
-656:             conditions.append("ep.occurred_at >= $start_time")
-657:             params["start_time"] = start_time.isoformat()
-658:         if end_time:
-659:             conditions.append("ep.occurred_at <= $end_time")
-660:             params["end_time"] = end_time.isoformat()
-661: 
-662:         if conditions:
-663:             query += " WHERE " + " AND ".join(conditions)
-664: 
-665:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
-666:         params["limit"] = limit
-667: 
-668:         async with driver.session(database=self._database) as session:
-669:             result = await session.run(query, **params)
-670:             records = await result.data()
-671:             return [self._record_to_episode(r["ep"]) for r in records]
-672: 
-673:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
-674:         """Convert a Neo4j node to a domain Episode."""
-675:         return Episode(
-676:             id=UUID(node["id"]),
-677:             namespace_id=UUID(node["namespace_id"]),
-678:             name=node["name"],
-679:             description=node.get("description", ""),
-680:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
-681:             duration_seconds=node.get("duration_seconds"),
-682:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
-683:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-684:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
-685:             metadata=_deserialize_dict(node.get("metadata")),
-686:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
-687:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
-688:         )
-689: 
-690:     # =========================================================================
-691:     # Graph traversal
-692:     # =========================================================================
-693: 
-694:     async def find_paths(
-695:         self,
-696:         namespace_id: UUID,
-697:         source_entity_id: UUID,
-698:         target_entity_id: UUID,
-699:         *,
-700:         max_depth: int = 3,
-701:         relationship_types: list[str] | None = None,
-702:     ) -> list[list[dict[str, Any]]]:
-703:         """Find paths between two entities."""
-704:         driver = self._get_driver()
-705: 
-706:         rel_filter = ""
-707:         if relationship_types:
-708:             rel_filter = ":" + "|".join(relationship_types)
-709: 
-710:         query = f"""
-711:         MATCH path = shortestPath(
-712:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
-713:         )
-714:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
-715:         RETURN path
-716:         LIMIT 10
-717:         """
-718: 
-719:         async with driver.session(database=self._database) as session:
-720:             result = await session.run(
-721:                 query,
-722:                 source_id=str(source_entity_id),
-723:                 target_id=str(target_entity_id),
-724:                 namespace_id=str(namespace_id),
-725:             )
-726:             records = await result.data()
-727: 
-728:             paths = []
-729:             for record in records:
-730:                 path = record["path"]
-731:                 path_elements = []
-732:                 for element in path:
-733:                     if hasattr(element, "items"):  # Node
-734:                         path_elements.append({"type": "node", "data": dict(element)})
-735:                     else:  # Relationship
-736:                         path_elements.append({"type": "relationship", "data": dict(element)})
-737:                 paths.append(path_elements)
-738: 
-739:             return paths
-740: 
-741:     async def get_neighborhood(
-742:         self,
-743:         entity_id: UUID,
-744:         *,
-745:         depth: int = 1,
-746:         relationship_types: list[str] | None = None,
-747:         limit: int = 50,
-748:     ) -> dict[str, Any]:
-749:         """Get the neighborhood of an entity up to a certain depth."""
-750:         driver = self._get_driver()
-751: 
-752:         rel_filter = ""
-753:         if relationship_types:
-754:             rel_filter = ":" + "|".join(relationship_types)
-755: 
-756:         query = f"""
-757:         MATCH (center:Entity {{id: $entity_id}})
-758:         CALL apoc.path.subgraphAll(center, {{
-759:             maxLevel: {depth},
-760:             relationshipFilter: '{rel_filter.lstrip(":")}',
-761:             limit: $limit
-762:         }})
-763:         YIELD nodes, relationships
-764:         RETURN nodes, relationships
-765:         """
-766: 
-767:         # Fallback query if APOC is not available
-768:         fallback_query = f"""
-769:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
-770:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
-771:         LIMIT $limit
-772:         """
-773: 
-774:         async with driver.session(database=self._database) as session:
-775:             try:
-776:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
-777:                 record = await result.single()
-778:             except Exception:
-779:                 # Fallback if APOC not available
-780:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
-781:                 record = await result.single()
-782: 
-783:             if record:
-784:                 nodes = [dict(n) for n in record.get("nodes", [])]
-785:                 relationships = [dict(r) for r in record.get("relationships", [])]
-786:                 return {"entities": nodes, "relationships": relationships}
-787: 
-788:             return {"entities": [], "relationships": []}
-789: 
-790:     async def get_neighborhoods_batch(
-791:         self,
-792:         entity_ids: list[UUID],
-793:         *,
-794:         depth: int = 1,
-795:         relationship_types: list[str] | None = None,
-796:         limit_per_entity: int = 20,
-797:     ) -> dict[UUID, dict[str, Any]]:
-798:         """Get neighborhoods for multiple entities in parallel.
-799: 
-800:         Args:
-801:             entity_ids: List of entity IDs
-802:             depth: Max traversal depth
-803:             relationship_types: Optional relationship type filter
-804:             limit_per_entity: Max nodes per entity neighborhood
-805: 
-806:         Returns:
-807:             Dictionary mapping entity ID to neighborhood data
-808:         """
-809:         if not entity_ids:
-810:             return {}
-811: 
-812:         driver = self._get_driver()
-813:         id_strings = [str(eid) for eid in entity_ids]
-814: 
-815:         rel_filter = ""
-816:         if relationship_types:
-817:             rel_filter = ":" + "|".join(relationship_types)
-818: 
-819:         # Use UNWIND to process all entities in a single query
-820:         query = f"""
-821:         UNWIND $entity_ids AS eid
-822:         MATCH (center:Entity {{id: eid}})
-823:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-824:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
-825:         RETURN eid, neighbors, rels
-826:         """
-827: 
-828:         async with driver.session(database=self._database) as session:
-829:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
-830:             records = await result.data()
-831: 
-832:             neighborhoods = {}
-833:             for record in records:
-834:                 eid = UUID(record["eid"])
-835:                 nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
-836:                 relationships = []
-837:                 for rel_list in record.get("rels") or []:
-838:                     if rel_list:
-839:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
-840:                             if r:
-841:                                 relationships.append(dict(r))
-842:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
-843: 
-844:             return neighborhoods
-845: 
-846:     async def search_entities_by_attribute(
-847:         self,
-848:         namespace_id: UUID,
-849:         attribute_name: str,
-850:         attribute_value: Any,
-851:         *,
-852:         limit: int = 100,
-853:     ) -> list[Entity]:
-854:         """Search entities by attribute value."""
-855:         driver = self._get_driver()
-856: 
-857:         query = """
-858:         MATCH (e:Entity {namespace_id: $namespace_id})
-859:         WHERE e.attributes[$attribute_name] = $attribute_value
-860:         RETURN e
-861:         LIMIT $limit
-862:         """
-863: 
-864:         async with driver.session(database=self._database) as session:
-865:             result = await session.run(
-866:                 query,
-867:                 namespace_id=str(namespace_id),
-868:                 attribute_name=attribute_name,
-869:                 attribute_value=attribute_value,
-870:                 limit=limit,
-871:             )
-872:             records = await result.data()
-873:             return [self._record_to_entity(r["e"]) for r in records]
+564:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
+565:                 for r in records
+566:             ]
+567: 
+568:     # =========================================================================
+569:     # Episode operations
+570:     # =========================================================================
+571: 
+572:     async def create_episode(self, episode: Episode) -> Episode:
+573:         """Create an episode node."""
+574:         driver = self._get_driver()
+575: 
+576:         async def _create(tx: AsyncManagedTransaction) -> None:
+577:             query = """
+578:             CREATE (ep:Episode {
+579:                 id: $id,
+580:                 namespace_id: $namespace_id,
+581:                 name: $name,
+582:                 description: $description,
+583:                 occurred_at: $occurred_at,
+584:                 duration_seconds: $duration_seconds,
+585:                 entity_ids: $entity_ids,
+586:                 source_document_ids: $source_document_ids,
+587:                 source_chunk_ids: $source_chunk_ids,
+588:                 metadata: $metadata,
+589:                 created_at: $created_at,
+590:                 updated_at: $updated_at
+591:             })
+592:             """
+593:             await tx.run(
+594:                 query,
+595:                 id=str(episode.id),
+596:                 namespace_id=str(episode.namespace_id),
+597:                 name=episode.name,
+598:                 description=episode.description,
+599:                 occurred_at=episode.occurred_at.isoformat(),
+600:                 duration_seconds=episode.duration_seconds,
+601:                 entity_ids=[str(e) for e in episode.entity_ids],
+602:                 source_document_ids=[str(d) for d in episode.source_document_ids],
+603:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
+604:                 metadata=_serialize_dict(episode.metadata),
+605:                 created_at=episode.created_at.isoformat(),
+606:                 updated_at=episode.updated_at.isoformat(),
+607:             )
+608: 
+609:             # Create links to entities
+610:             if episode.entity_ids:
+611:                 link_query = """
+612:                 MATCH (ep:Episode {id: $episode_id})
+613:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
+614:                 CREATE (ep)-[:INVOLVES]->(e)
+615:                 """
+616:                 await tx.run(
+617:                     link_query,
+618:                     episode_id=str(episode.id),
+619:                     entity_ids=[str(e) for e in episode.entity_ids],
+620:                 )
+621: 
+622:         async with driver.session(database=self._database) as session:
+623:             await session.execute_write(_create)
+624: 
+625:         return episode
+626: 
+627:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+628:         """Get an episode by ID."""
+629:         driver = self._get_driver()
+630: 
+631:         async with driver.session(database=self._database) as session:
+632:             result = await session.run(
+633:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
+634:                 id=str(episode_id),
+635:             )
+636:             record = await result.single()
+637:             if record:
+638:                 return self._record_to_episode(record["ep"])
+639:             return None
+640: 
+641:     async def list_episodes(
+642:         self,
+643:         namespace_id: UUID,
+644:         *,
+645:         start_time: datetime | None = None,
+646:         end_time: datetime | None = None,
+647:         limit: int = 100,
+648:     ) -> list[Episode]:
+649:         """List episodes in a time range."""
+650:         driver = self._get_driver()
+651: 
+652:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
+653:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+654:         conditions = []
+655: 
+656:         if start_time:
+657:             conditions.append("ep.occurred_at >= $start_time")
+658:             params["start_time"] = start_time.isoformat()
+659:         if end_time:
+660:             conditions.append("ep.occurred_at <= $end_time")
+661:             params["end_time"] = end_time.isoformat()
+662: 
+663:         if conditions:
+664:             query += " WHERE " + " AND ".join(conditions)
+665: 
+666:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
+667:         params["limit"] = limit
+668: 
+669:         async with driver.session(database=self._database) as session:
+670:             result = await session.run(query, **params)
+671:             records = await result.data()
+672:             return [self._record_to_episode(r["ep"]) for r in records]
+673: 
+674:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
+675:         """Convert a Neo4j node to a domain Episode."""
+676:         return Episode(
+677:             id=UUID(node["id"]),
+678:             namespace_id=UUID(node["namespace_id"]),
+679:             name=node["name"],
+680:             description=node.get("description", ""),
+681:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
+682:             duration_seconds=node.get("duration_seconds"),
+683:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
+684:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+685:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+686:             metadata=_deserialize_dict(node.get("metadata")),
+687:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+688:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+689:         )
+690: 
+691:     # =========================================================================
+692:     # Graph traversal
+693:     # =========================================================================
+694: 
+695:     async def find_paths(
+696:         self,
+697:         namespace_id: UUID,
+698:         source_entity_id: UUID,
+699:         target_entity_id: UUID,
+700:         *,
+701:         max_depth: int = 3,
+702:         relationship_types: list[str] | None = None,
+703:     ) -> list[list[dict[str, Any]]]:
+704:         """Find paths between two entities."""
+705:         driver = self._get_driver()
+706: 
+707:         rel_filter = ""
+708:         if relationship_types:
+709:             rel_filter = ":" + "|".join(relationship_types)
+710: 
+711:         query = f"""
+712:         MATCH path = shortestPath(
+713:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+714:         )
+715:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+716:         RETURN path
+717:         LIMIT 10
+718:         """
+719: 
+720:         async with driver.session(database=self._database) as session:
+721:             result = await session.run(
+722:                 query,
+723:                 source_id=str(source_entity_id),
+724:                 target_id=str(target_entity_id),
+725:                 namespace_id=str(namespace_id),
+726:             )
+727:             records = await result.data()
+728: 
+729:             paths = []
+730:             for record in records:
+731:                 path = record["path"]
+732:                 path_elements = []
+733:                 for element in path:
+734:                     if hasattr(element, "items"):  # Node
+735:                         path_elements.append({"type": "node", "data": dict(element)})
+736:                     else:  # Relationship
+737:                         path_elements.append({"type": "relationship", "data": dict(element)})
+738:                 paths.append(path_elements)
+739: 
+740:             return paths
+741: 
+742:     async def get_neighborhood(
+743:         self,
+744:         entity_id: UUID,
+745:         *,
+746:         depth: int = 1,
+747:         relationship_types: list[str] | None = None,
+748:         limit: int = 50,
+749:     ) -> dict[str, Any]:
+750:         """Get the neighborhood of an entity up to a certain depth."""
+751:         driver = self._get_driver()
+752: 
+753:         rel_filter = ""
+754:         if relationship_types:
+755:             rel_filter = ":" + "|".join(relationship_types)
+756: 
+757:         query = f"""
+758:         MATCH (center:Entity {{id: $entity_id}})
+759:         CALL apoc.path.subgraphAll(center, {{
+760:             maxLevel: {depth},
+761:             relationshipFilter: '{rel_filter.lstrip(":")}',
+762:             limit: $limit
+763:         }})
+764:         YIELD nodes, relationships
+765:         RETURN nodes, relationships
+766:         """
+767: 
+768:         # Fallback query if APOC is not available
+769:         fallback_query = f"""
+770:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+771:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+772:         LIMIT $limit
+773:         """
+774: 
+775:         async with driver.session(database=self._database) as session:
+776:             try:
+777:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
+778:                 record = await result.single()
+779:             except Exception:
+780:                 # Fallback if APOC not available
+781:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
+782:                 record = await result.single()
+783: 
+784:             if record:
+785:                 nodes = [dict(n) for n in record.get("nodes", [])]
+786:                 relationships = [dict(r) for r in record.get("relationships", [])]
+787:                 return {"entities": nodes, "relationships": relationships}
+788: 
+789:             return {"entities": [], "relationships": []}
+790: 
+791:     async def get_neighborhoods_batch(
+792:         self,
+793:         entity_ids: list[UUID],
+794:         *,
+795:         depth: int = 1,
+796:         relationship_types: list[str] | None = None,
+797:         limit_per_entity: int = 20,
+798:     ) -> dict[UUID, dict[str, Any]]:
+799:         """Get neighborhoods for multiple entities in parallel.
+800: 
+801:         Args:
+802:             entity_ids: List of entity IDs
+803:             depth: Max traversal depth
+804:             relationship_types: Optional relationship type filter
+805:             limit_per_entity: Max nodes per entity neighborhood
+806: 
+807:         Returns:
+808:             Dictionary mapping entity ID to neighborhood data
+809:         """
+810:         if not entity_ids:
+811:             return {}
+812: 
+813:         driver = self._get_driver()
+814:         id_strings = [str(eid) for eid in entity_ids]
+815: 
+816:         rel_filter = ""
+817:         if relationship_types:
+818:             rel_filter = ":" + "|".join(relationship_types)
+819: 
+820:         # Use UNWIND to process all entities in a single query
+821:         query = f"""
+822:         UNWIND $entity_ids AS eid
+823:         MATCH (center:Entity {{id: eid}})
+824:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+825:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+826:         RETURN eid, neighbors, rels
+827:         """
+828: 
+829:         async with driver.session(database=self._database) as session:
+830:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+831:             records = await result.data()
+832: 
+833:             neighborhoods = {}
+834:             for record in records:
+835:                 eid = UUID(record["eid"])
+836:                 nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
+837:                 relationships = []
+838:                 for rel_list in record.get("rels") or []:
+839:                     if rel_list:
+840:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+841:                             if r:
+842:                                 relationships.append(dict(r))
+843:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+844: 
+845:             return neighborhoods
+846: 
+847:     async def search_entities_by_attribute(
+848:         self,
+849:         namespace_id: UUID,
+850:         attribute_name: str,
+851:         attribute_value: Any,
+852:         *,
+853:         limit: int = 100,
+854:     ) -> list[Entity]:
+855:         """Search entities by attribute value."""
+856:         driver = self._get_driver()
+857: 
+858:         query = """
+859:         MATCH (e:Entity {namespace_id: $namespace_id})
+860:         WHERE e.attributes[$attribute_name] = $attribute_value
+861:         RETURN e
+862:         LIMIT $limit
+863:         """
+864: 
+865:         async with driver.session(database=self._database) as session:
+866:             result = await session.run(
+867:                 query,
+868:                 namespace_id=str(namespace_id),
+869:                 attribute_name=attribute_name,
+870:                 attribute_value=attribute_value,
+871:                 limit=limit,
+872:             )
+873:             records = await result.data()
+874:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
-## File: src/khora/__init__.py
+## File: tests/unit/test_api.py
 ````python
- 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 1: """Tests for API module."""
  2: 
- 3: Khora provides a unified interface for:
- 4: - Storing and retrieving knowledge artifacts
- 5: - Materializing data transformations
- 6: - Building memory graphs and relationships
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
  7: 
- 8: Example usage:
- 9:     from khora import MemoryLake
-10: 
-11:     async with MemoryLake() as lake:
-12:         await lake.remember("Important information to store")
-13:         results = await lake.recall("query about information")
-14: """
-15: 
-16: from .cli import main
-17: from .memory_lake import MemoryLake, RecallResult, RememberResult
-18: from .query import SearchMode
-19: 
-20: __version__ = "0.0.5"
-21: 
-22: __all__ = [
-23:     "main",
-24:     "MemoryLake",
-25:     "RememberResult",
-26:     "RecallResult",
-27:     "SearchMode",
-28: ]
+ 8: 
+ 9: @pytest.mark.unit
+10: class TestStatusEndpoints:
+11:     """Tests for status check endpoints."""
+12: 
+13:     def test_status_check(self, test_client: TestClient) -> None:
+14:         """Test basic status check endpoint."""
+15:         response = test_client.get("/status")
+16: 
+17:         assert response.status_code == 200
+18:         data = response.json()
+19:         assert data["status"] == "ok"
+20:         assert "timestamp" in data
+21:         assert data["version"] == "0.0.5"
+22:         assert data["service"] == "khora"
+23: 
+24:     def test_health_check(self, test_client: TestClient) -> None:
+25:         """Test health check endpoint."""
+26:         response = test_client.get("/health")
+27: 
+28:         assert response.status_code == 200
+29:         data = response.json()
+30:         assert data["status"] == "healthy"
+31:         assert "timestamp" in data
+32:         assert data["version"] == "0.0.5"
+33: 
+34:     def test_readiness_check(self, test_client: TestClient) -> None:
+35:         """Test readiness check endpoint."""
+36:         response = test_client.get("/health/ready")
+37: 
+38:         assert response.status_code == 200
+39:         data = response.json()
+40:         assert data["status"] in ["ready", "not_ready"]
+41:         assert "timestamp" in data
+42:         assert "checks" in data
+43: 
+44:     def test_liveness_check(self, test_client: TestClient) -> None:
+45:         """Test liveness check endpoint."""
+46:         response = test_client.get("/health/live")
+47: 
+48:         assert response.status_code == 200
+49:         data = response.json()
+50:         assert data["status"] == "alive"
+51:         assert "timestamp" in data
+52: 
+53: 
+54: @pytest.mark.unit
+55: class TestConfig:
+56:     """Tests for configuration."""
+57: 
+58:     def test_default_config(self) -> None:
+59:         """Test default configuration values."""
+60:         from khora.config import KhoraConfig
+61: 
+62:         config = KhoraConfig()
+63:         assert config.app_name == "khora"
+64:         assert config.environment == "development"
+65:         assert config.debug is False
+66:         assert config.api_host == "127.0.0.1"
+67:         assert config.api_port == 8000
+68:         assert config.auth_enabled is True
+69: 
+70:     def test_config_from_env(self, monkeypatch) -> None:
+71:         """Test configuration from environment variables."""
+72:         from khora.config import KhoraConfig
+73: 
+74:         monkeypatch.setenv("KHORA_DEBUG", "true")
+75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+77: 
+78:         config = KhoraConfig()
+79:         assert config.debug is True
+80:         assert config.api_port == 9000
+81:         assert config.environment == "staging"
+````
+
+## File: src/khora/api/app.py
+````python
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     await close_db()
+ 86: 
+ 87: 
+ 88: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 89:     """Create and configure the FastAPI application.
+ 90: 
+ 91:     Args:
+ 92:         config: Optional application configuration
+ 93: 
+ 94:     Returns:
+ 95:         Configured FastAPI application
+ 96:     """
+ 97:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+ 98:     from ..logging_config import setup_logging
+ 99: 
+100:     setup_logging(level="INFO")
+101: 
+102:     if config is None:
+103:         from ..config import load_config
+104: 
+105:         config = load_config()
+106: 
+107:     app = FastAPI(
+108:         title="Khora",
+109:         description="Deyta's memory lake and materialization of knowledge",
+110:         version="0.0.5",
+111:         lifespan=lifespan,
+112:         debug=config.debug,
+113:     )
+114: 
+115:     # Store config in app state
+116:     app.state.config = config
+117: 
+118:     # Configure CORS
+119:     app.add_middleware(
+120:         CORSMiddleware,
+121:         allow_origins=["*"] if config.debug else [],
+122:         allow_credentials=True,
+123:         allow_methods=["*"],
+124:         allow_headers=["*"],
+125:     )
+126: 
+127:     # Add request logging
+128:     app.add_middleware(LoggingMiddleware)
+129: 
+130:     # Register routes
+131:     # Status endpoint is public (no auth)
+132:     app.include_router(status.router, tags=["status"])
+133: 
+134:     # Memory Lake API routes
+135:     app.include_router(memory.router)
+136:     app.include_router(namespaces.router)
+137:     app.include_router(sync.router)
+138: 
+139:     return app
 ````
 
 ## File: src/khora/query/engine.py
@@ -22131,6 +22100,38 @@ README.md
 1131:         )
 ````
 
+## File: src/khora/__init__.py
+````python
+ 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 2: 
+ 3: Khora provides a unified interface for:
+ 4: - Storing and retrieving knowledge artifacts
+ 5: - Materializing data transformations
+ 6: - Building memory graphs and relationships
+ 7: 
+ 8: Example usage:
+ 9:     from khora import MemoryLake
+10: 
+11:     async with MemoryLake() as lake:
+12:         await lake.remember("Important information to store")
+13:         results = await lake.recall("query about information")
+14: """
+15: 
+16: from .cli import main
+17: from .memory_lake import MemoryLake, RecallResult, RememberResult
+18: from .query import SearchMode
+19: 
+20: __version__ = "0.0.5"
+21: 
+22: __all__ = [
+23:     "main",
+24:     "MemoryLake",
+25:     "RememberResult",
+26:     "RecallResult",
+27:     "SearchMode",
+28: ]
+````
+
 ## File: src/khora/memory_lake.py
 ````python
   1: """MemoryLake - Primary API for Khora Memory Lake.
@@ -22713,141 +22714,6 @@ README.md
 578:         await lake.disconnect()
 ````
 
-## File: pyproject.toml
-````toml
-  1: [project]
-  2: name = "khora"
-  3: version = "0.0.5"
-  4: description = "Khora is Memory Lake"
-  5: readme = "README.md"
-  6: authors = [
-  7:     { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
-  8: ]
-  9: requires-python = ">=3.13"
- 10: dependencies = [
- 11:     # Configuration
- 12:     "pydantic-settings>=2.12.0",
- 13:     "pyyaml>=6.0.3",
- 14:     # FastAPI service
- 15:     "fastapi>=0.128.0",
- 16:     "uvicorn[standard]>=0.40.0",
- 17:     "httpx>=0.28.1",
- 18:     # CLI
- 19:     "click>=8.3.0",
- 20:     # Async support
- 21:     "asyncpg>=0.31.0",
- 22:     # Database
- 23:     "sqlalchemy[asyncio]>=2.0.46",
- 24:     "alembic>=1.18.0",
- 25:     # Terminal UI
- 26:     "rich>=14.0.0",
- 27:     "loguru>=0.7.3",
- 28:     # LLM Access (unified interface)
- 29:     "litellm>=1.81.0",
- 30:     # Graph database
- 31:     "neo4j>=6.1.0",
- 32:     # Vector database
- 33:     "pgvector>=0.4.2",
- 34:     # Pipeline orchestration
- 35:     "prefect>=3.6.13",
- 36:     # Token counting
- 37:     "tiktoken>=0.12.0",
- 38: ]
- 39: 
- 40: [project.optional-dependencies]
- 41: dev = [
- 42:     "pytest>=9.0.2",
- 43:     "pytest-cov>=7.0.0",
- 44:     "pytest-mock>=3.15.0",
- 45:     "pytest-asyncio>=1.3.0",
- 46:     "coverage>=7.13.2",
- 47:     "black>=26.0.0",
- 48:     "ruff>=0.14.14",
- 49:     "isort>=7.0.0",
- 50:     "prek>=0.3.0",
- 51:     "faker>=40.0.0",
- 52: ]
- 53: # Data storage backends
- 54: postgres = [
- 55:     "asyncpg>=0.31.0",
- 56:     "pgvector>=0.4.2",
- 57: ]
- 58: 
- 59: [project.scripts]
- 60: khora = "khora:main"
- 61: 
- 62: [build-system]
- 63: requires = ["uv_build>=0.8.17,<0.9.0"]
- 64: build-backend = "uv_build"
- 65: 
- 66: [tool.pytest.ini_options]
- 67: testpaths = ["tests"]
- 68: python_files = ["test_*.py"]
- 69: python_classes = ["Test*"]
- 70: python_functions = ["test_*"]
- 71: addopts = [
- 72:     "--strict-markers",
- 73:     "--strict-config",
- 74:     "--cov=khora",
- 75:     "--cov-branch",
- 76:     "--cov-report=term-missing",
- 77:     "--cov-fail-under=30",
- 78: ]
- 79: markers = [
- 80:     "unit: Unit tests",
- 81:     "integration: Integration tests",
- 82:     "e2e: End-to-end tests",
- 83: ]
- 84: asyncio_mode = "auto"
- 85: 
- 86: [tool.coverage.run]
- 87: source = ["src"]
- 88: omit = [
- 89:     "tests/*",
- 90:     "*/test_*.py",
- 91:     "*/__pycache__/*",
- 92: ]
- 93: 
- 94: [tool.coverage.report]
- 95: exclude_lines = [
- 96:     "pragma: no cover",
- 97:     "def __repr__",
- 98:     "raise AssertionError",
- 99:     "raise NotImplementedError",
-100:     "if __name__ == .__main__.:",
-101:     "if TYPE_CHECKING:",
-102: ]
-103: 
-104: [tool.black]
-105: target-version = ["py313"]
-106: line-length = 120
-107: 
-108: [tool.isort]
-109: profile = "black"
-110: line_length = 120
-111: known_first_party = ["khora"]
-112: skip_gitignore = true
-113: 
-114: [tool.ruff]
-115: target-version = "py313"
-116: line-length = 120
-117: 
-118: [tool.ruff.lint]
-119: select = ["E", "F", "W"]
-120: ignore = ["E501"]  # Line too long - handled by black
-121: 
-122: [dependency-groups]
-123: dev = [
-124:     "prek>=0.3.0",
-125:     "pytest>=9.0.2",
-126:     "pytest-asyncio>=1.3.0",
-127:     "pytest-cov>=7.0.0",
-128:     "black>=26.0.0",
-129:     "ruff>=0.14.14",
-130:     "isort>=7.0.0",
-131: ]
-````
-
 ## File: src/khora/pipelines/flows/ingest.py
 ````python
   1: """Two-phase ingestion flow for Khora Memory Lake.
@@ -23320,9 +23186,157 @@ README.md
 468:     }
 ````
 
+## File: pyproject.toml
+````toml
+  1: [project]
+  2: name = "khora"
+  3: version = "0.0.5"
+  4: description = "Khora is Memory Lake"
+  5: readme = "README.md"
+  6: authors = [
+  7:     { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
+  8: ]
+  9: requires-python = ">=3.13"
+ 10: dependencies = [
+ 11:     # Configuration
+ 12:     "pydantic-settings>=2.12.0",
+ 13:     "pyyaml>=6.0.3",
+ 14:     # FastAPI service
+ 15:     "fastapi>=0.128.0",
+ 16:     "uvicorn[standard]>=0.40.0",
+ 17:     "httpx>=0.28.1",
+ 18:     # CLI
+ 19:     "click>=8.3.0",
+ 20:     # Async support
+ 21:     "asyncpg>=0.31.0",
+ 22:     # Database
+ 23:     "sqlalchemy[asyncio]>=2.0.46",
+ 24:     "alembic>=1.18.0",
+ 25:     # Terminal UI
+ 26:     "rich>=14.0.0",
+ 27:     "loguru>=0.7.3",
+ 28:     # LLM Access (unified interface)
+ 29:     "litellm>=1.81.0",
+ 30:     # Graph database
+ 31:     "neo4j>=6.1.0",
+ 32:     # Vector database
+ 33:     "pgvector>=0.4.2",
+ 34:     # Pipeline orchestration
+ 35:     "prefect>=3.6.13",
+ 36:     # Token counting
+ 37:     "tiktoken>=0.12.0",
+ 38: ]
+ 39: 
+ 40: [project.optional-dependencies]
+ 41: dev = [
+ 42:     "pytest>=9.0.2",
+ 43:     "pytest-cov>=7.0.0",
+ 44:     "pytest-mock>=3.15.0",
+ 45:     "pytest-asyncio>=1.3.0",
+ 46:     "coverage>=7.13.2",
+ 47:     "black>=26.0.0",
+ 48:     "ruff>=0.14.14",
+ 49:     "isort>=7.0.0",
+ 50:     "prek>=0.3.0",
+ 51:     "faker>=40.0.0",
+ 52: ]
+ 53: # Data storage backends
+ 54: postgres = [
+ 55:     "asyncpg>=0.31.0",
+ 56:     "pgvector>=0.4.2",
+ 57: ]
+ 58: 
+ 59: [project.scripts]
+ 60: khora = "khora:main"
+ 61: 
+ 62: [build-system]
+ 63: requires = ["uv_build>=0.8.17,<0.9.0"]
+ 64: build-backend = "uv_build"
+ 65: 
+ 66: [tool.pytest.ini_options]
+ 67: testpaths = ["tests"]
+ 68: python_files = ["test_*.py"]
+ 69: python_classes = ["Test*"]
+ 70: python_functions = ["test_*"]
+ 71: addopts = [
+ 72:     "--strict-markers",
+ 73:     "--strict-config",
+ 74:     "--cov=khora",
+ 75:     "--cov-branch",
+ 76:     "--cov-report=term-missing",
+ 77:     "--cov-fail-under=30",
+ 78: ]
+ 79: markers = [
+ 80:     "unit: Unit tests",
+ 81:     "integration: Integration tests",
+ 82:     "e2e: End-to-end tests",
+ 83: ]
+ 84: asyncio_mode = "auto"
+ 85: 
+ 86: [tool.coverage.run]
+ 87: source = ["src"]
+ 88: omit = [
+ 89:     "tests/*",
+ 90:     "*/test_*.py",
+ 91:     "*/__pycache__/*",
+ 92: ]
+ 93: 
+ 94: [tool.coverage.report]
+ 95: exclude_lines = [
+ 96:     "pragma: no cover",
+ 97:     "def __repr__",
+ 98:     "raise AssertionError",
+ 99:     "raise NotImplementedError",
+100:     "if __name__ == .__main__.:",
+101:     "if TYPE_CHECKING:",
+102: ]
+103: 
+104: [tool.black]
+105: target-version = ["py313"]
+106: line-length = 120
+107: 
+108: [tool.isort]
+109: profile = "black"
+110: line_length = 120
+111: known_first_party = ["khora"]
+112: skip_gitignore = true
+113: 
+114: [tool.ruff]
+115: target-version = "py313"
+116: line-length = 120
+117: 
+118: [tool.ruff.lint]
+119: select = ["E", "F", "W"]
+120: ignore = ["E501"]  # Line too long - handled by black
+121: 
+122: [dependency-groups]
+123: dev = [
+124:     "prek>=0.3.0",
+125:     "pytest>=9.0.2",
+126:     "pytest-asyncio>=1.3.0",
+127:     "pytest-cov>=7.0.0",
+128:     "black>=26.0.0",
+129:     "ruff>=0.14.14",
+130:     "isort>=7.0.0",
+131: ]
+````
+
 
 
 # Git Logs
+
+## Commit: 2026-01-27 09:38:41 +0100
+**Message:** Bump version to 0.0.5
+
+**Files:**
+- REPOMIX.md
+- pyproject.toml
+- src/khora/__init__.py
+- src/khora/api/app.py
+- src/khora/api/routes/status.py
+- src/khora/cli/__init__.py
+- tests/unit/test_api.py
+- uv.lock
 
 ## Commit: 2026-01-27 09:32:30 +0100
 **Message:** feat: add list_relationships method to storage layer
@@ -23581,76 +23595,3 @@ README.md
 - REPOMIX.md
 - repomix.config.json
 - scripts/update_repomix.py
-
-## Commit: 2026-01-26 00:26:58 +0100
-**Message:** Implement Memory Lake system with hybrid search and multi-tenancy
-
-**Files:**
-- examples/config/litellm/claude.yaml
-- examples/config/litellm/gemini.yaml
-- examples/config/litellm/openai.yaml
-- examples/config/litellm/router.yaml
-- pyproject.toml
-- src/khora/__init__.py
-- src/khora/acl/__init__.py
-- src/khora/acl/checker.py
-- src/khora/acl/enforcer.py
-- src/khora/api/app.py
-- src/khora/api/deps.py
-- src/khora/api/routes/__init__.py
-- src/khora/api/routes/memory.py
-- src/khora/api/routes/namespaces.py
-- src/khora/api/routes/sync.py
-- src/khora/config/__init__.py
-- src/khora/config/llm.py
-- src/khora/config/resolver.py
-- src/khora/config/schema.py
-- src/khora/core/__init__.py
-- src/khora/core/models/__init__.py
-- src/khora/core/models/document.py
-- src/khora/core/models/entity.py
-- src/khora/core/models/event.py
-- src/khora/core/models/tenancy.py
-- src/khora/db/__init__.py
-- src/khora/db/models.py
-- src/khora/extraction/__init__.py
-- src/khora/extraction/chunkers/__init__.py
-- src/khora/extraction/chunkers/base.py
-- src/khora/extraction/chunkers/fixed.py
-- src/khora/extraction/chunkers/recursive.py
-- src/khora/extraction/chunkers/semantic.py
-- src/khora/extraction/embedders/__init__.py
-- src/khora/extraction/embedders/base.py
-- src/khora/extraction/embedders/litellm.py
-- src/khora/extraction/extractors/__init__.py
-- src/khora/extraction/extractors/base.py
-- src/khora/extraction/extractors/llm.py
-- src/khora/extraction/skills/__init__.py
-- src/khora/extraction/skills/base.py
-- src/khora/extraction/skills/registry.py
-- src/khora/memory_lake.py
-- src/khora/pipelines/__init__.py
-- src/khora/pipelines/flows/__init__.py
-- src/khora/pipelines/flows/ingest.py
-- src/khora/pipelines/flows/sync.py
-- src/khora/pipelines/incremental.py
-- src/khora/pipelines/manager.py
-- src/khora/pipelines/registry.py
-- src/khora/pipelines/tasks/__init__.py
-- src/khora/pipelines/tasks/chunk.py
-- src/khora/pipelines/tasks/embed.py
-- src/khora/pipelines/tasks/extract.py
-- src/khora/query/__init__.py
-- src/khora/query/engine.py
-- src/khora/query/fusion.py
-- src/khora/query/temporal.py
-- src/khora/storage/__init__.py
-- src/khora/storage/backends/__init__.py
-- src/khora/storage/backends/base.py
-- src/khora/storage/backends/neo4j.py
-- src/khora/storage/backends/pgvector.py
-- src/khora/storage/backends/postgresql.py
-- src/khora/storage/coordinator.py
-- src/khora/storage/event_store.py
-- src/khora/storage/factory.py
-- uv.lock
