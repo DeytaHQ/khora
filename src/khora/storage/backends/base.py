@@ -326,6 +326,18 @@ class GraphBackendProtocol(Protocol):
         """Get relationships for an entity."""
         ...
 
+    @abstractmethod
+    async def list_relationships(
+        self,
+        namespace_id: UUID,
+        *,
+        relationship_type: str | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[Relationship]:
+        """List all relationships in a namespace."""
+        ...
+
     # Episode operations
     @abstractmethod
     async def create_episode(self, episode: Episode) -> Episode:

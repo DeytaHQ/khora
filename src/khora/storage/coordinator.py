@@ -439,6 +439,21 @@ class StorageCoordinator:
             )
         return []
 
+    async def list_relationships(
+        self,
+        namespace_id: UUID,
+        *,
+        relationship_type: str | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[Relationship]:
+        """List all relationships in a namespace."""
+        if self.graph:
+            return await self.graph.list_relationships(
+                namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+            )
+        return []
+
     # =========================================================================
     # Episode operations (delegated to graph)
     # =========================================================================

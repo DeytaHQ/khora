@@ -529,6 +529,41 @@ class Neo4jBackend:
             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
         )
 
+    async def list_relationships(
+        self,
+        namespace_id: UUID,
+        *,
+        relationship_type: str | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[Relationship]:
+        """List all relationships in a namespace."""
+        driver = self._get_driver()
+
+        # Build relationship type filter
+        rel_filter = f":{relationship_type}" if relationship_type else ""
+
+        query = f"""
+        MATCH (source)-[r{rel_filter}]->(target)
+        WHERE r.namespace_id = $namespace_id
+        RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+        ORDER BY r.created_at DESC
+        SKIP $offset
+        LIMIT $limit
+        """
+
+        async with driver.session(database=self._database) as session:
+            result = await session.run(
+                query,
+                namespace_id=str(namespace_id),
+                offset=offset,
+                limit=limit,
+            )
+            records = await result.data()
+            return [
+                self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+            ]
+
     # =========================================================================
     # Episode operations
     # =========================================================================

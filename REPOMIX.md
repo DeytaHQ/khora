@@ -4377,599 +4377,6 @@ README.md
 441:         return 1.0 - (distance / max_len)
 ````
 
-## File: src/khora/extraction/expansion/expander.py
-````python
-  1: """Semantic expander for knowledge graph enhancement.
-  2: 
-  3: Orchestrates cross-tool entity unification and relationship inference
-  4: to enrich extracted knowledge graphs.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from dataclasses import dataclass, field
- 10: from typing import TYPE_CHECKING
- 11: from uuid import UUID
- 12: 
- 13: from loguru import logger
- 14: 
- 15: from .cross_tool_unifier import CrossToolUnifier
- 16: from .relationship_inferrer import RelationshipInferrer, to_relationship
- 17: 
- 18: if TYPE_CHECKING:
- 19:     from khora.core.models import Entity, Relationship
- 20:     from khora.extraction.skills import ExpertiseConfig
- 21: 
- 22: 
- 23: @dataclass
- 24: class ExpansionResult:
- 25:     """Result of semantic expansion."""
- 26: 
- 27:     # Unified entities (after deduplication)
- 28:     entities: list[Entity] = field(default_factory=list)
- 29: 
- 30:     # Updated existing relationships
- 31:     relationships: list[Relationship] = field(default_factory=list)
- 32: 
- 33:     # New inferred relationships
- 34:     inferred_relationships: list[Relationship] = field(default_factory=list)
- 35: 
- 36:     # Statistics
- 37:     original_entity_count: int = 0
- 38:     merged_entity_count: int = 0
- 39:     original_relationship_count: int = 0
- 40:     inferred_relationship_count: int = 0
- 41: 
- 42:     # Mapping for provenance tracking
- 43:     entity_mapping: dict[UUID, UUID] = field(default_factory=dict)
- 44: 
- 45:     @property
- 46:     def total_entities(self) -> int:
- 47:         """Total entities after expansion."""
- 48:         return len(self.entities)
- 49: 
- 50:     @property
- 51:     def total_relationships(self) -> int:
- 52:         """Total relationships after expansion."""
- 53:         return len(self.relationships) + len(self.inferred_relationships)
- 54: 
- 55:     @property
- 56:     def all_relationships(self) -> list[Relationship]:
- 57:         """All relationships (existing + inferred)."""
- 58:         return self.relationships + self.inferred_relationships
- 59: 
- 60: 
- 61: class SemanticExpander:
- 62:     """Orchestrates semantic expansion of knowledge graphs.
- 63: 
- 64:     Combines:
- 65:     - Cross-tool entity unification
- 66:     - Relationship inference
- 67:     - LLM-powered expansion (future)
- 68: 
- 69:     Example usage:
- 70:         from khora.extraction.expansion import SemanticExpander
- 71:         from khora.extraction.skills import load_expertise
- 72: 
- 73:         expertise = load_expertise("saas_expert")
- 74:         expander = SemanticExpander(expertise=expertise)
- 75: 
- 76:         result = await expander.expand(
- 77:             entities=extracted_entities,
- 78:             relationships=extracted_relationships,
- 79:         )
- 80:     """
- 81: 
- 82:     def __init__(
- 83:         self,
- 84:         expertise: ExpertiseConfig | None = None,
- 85:         *,
- 86:         enable_unification: bool = True,
- 87:         enable_inference: bool = True,
- 88:         inference_depth: int = 2,
- 89:         embedding_threshold: float = 0.85,
- 90:         fuzzy_threshold: float = 0.85,
- 91:         min_inference_confidence: float = 0.3,
- 92:     ) -> None:
- 93:         """Initialize the semantic expander.
- 94: 
- 95:         Args:
- 96:             expertise: ExpertiseConfig with expansion rules
- 97:             enable_unification: Whether to run cross-tool unification
- 98:             enable_inference: Whether to run relationship inference
- 99:             inference_depth: Number of inference passes
-100:             embedding_threshold: Similarity threshold for embedding matching
-101:             fuzzy_threshold: Threshold for fuzzy string matching
-102:             min_inference_confidence: Minimum confidence for inferred relationships
-103:         """
-104:         self._expertise = expertise
-105:         self._enable_unification = enable_unification
-106:         self._enable_inference = enable_inference
-107:         self._inference_depth = inference_depth
-108: 
-109:         # Apply expertise settings if available
-110:         if expertise and expertise.expansion:
-111:             self._enable_unification = expertise.expansion.cross_tool_unification
-112:             self._enable_inference = expertise.expansion.relationship_inference
-113:             self._inference_depth = expertise.expansion.depth
-114: 
-115:         if expertise and expertise.confidence:
-116:             min_inference_confidence = expertise.confidence.min_inferred
-117: 
-118:         # Initialize components
-119:         self._unifier = CrossToolUnifier(
-120:             expertise=expertise,
-121:             embedding_threshold=embedding_threshold,
-122:             fuzzy_threshold=fuzzy_threshold,
-123:         )
-124:         self._inferrer = RelationshipInferrer(
-125:             expertise=expertise,
-126:             min_confidence=min_inference_confidence,
-127:         )
-128: 
-129:     async def expand(
-130:         self,
-131:         entities: list[Entity],
-132:         relationships: list[Relationship],
-133:         *,
-134:         namespace_id: UUID | None = None,
-135:     ) -> ExpansionResult:
-136:         """Expand the knowledge graph.
-137: 
-138:         Runs unification and inference phases based on configuration.
-139: 
-140:         Args:
-141:             entities: Entities to expand
-142:             relationships: Relationships to expand
-143:             namespace_id: Namespace ID for new relationships
-144: 
-145:         Returns:
-146:             ExpansionResult with expanded graph
-147:         """
-148:         result = ExpansionResult(
-149:             original_entity_count=len(entities),
-150:             original_relationship_count=len(relationships),
-151:         )
-152: 
-153:         if not entities:
-154:             return result
-155: 
-156:         # Determine namespace
-157:         if namespace_id is None and entities:
-158:             namespace_id = entities[0].namespace_id
-159: 
-160:         current_entities = list(entities)
-161:         current_relationships = list(relationships)
-162: 
-163:         # Phase 1: Cross-tool entity unification
-164:         if self._enable_unification:
-165:             logger.debug("Running cross-tool entity unification...")
-166:             unification_result = self._unifier.unify(
-167:                 current_entities,
-168:                 current_relationships,
-169:                 use_embeddings=True,
-170:                 use_fuzzy=True,
-171:             )
-172: 
-173:             current_entities = unification_result.unified_entities
-174:             current_relationships = unification_result.updated_relationships
-175:             result.entity_mapping = unification_result.entity_mapping
-176:             result.merged_entity_count = unification_result.entities_merged
-177: 
-178:             logger.debug(
-179:                 f"Unified {result.original_entity_count} entities into {len(current_entities)} "
-180:                 f"({result.merged_entity_count} merged)"
-181:             )
-182: 
-183:         # Phase 2: Relationship inference
-184:         inferred_relationships: list[Relationship] = []
-185:         if self._enable_inference and self._expertise:
-186:             logger.debug(f"Running relationship inference (depth={self._inference_depth})...")
-187:             inferred = self._inferrer.infer(
-188:                 current_entities,
-189:                 current_relationships,
-190:                 depth=self._inference_depth,
-191:             )
-192: 
-193:             # Convert to domain relationships
-194:             inferred_relationships = [to_relationship(inf, namespace_id) for inf in inferred]
-195:             result.inferred_relationship_count = len(inferred_relationships)
-196: 
-197:             logger.debug(f"Inferred {len(inferred_relationships)} new relationships")
-198: 
-199:         # Build final result
-200:         result.entities = current_entities
-201:         result.relationships = current_relationships
-202:         result.inferred_relationships = inferred_relationships
-203: 
-204:         return result
-205: 
-206:     def expand_sync(
-207:         self,
-208:         entities: list[Entity],
-209:         relationships: list[Relationship],
-210:         *,
-211:         namespace_id: UUID | None = None,
-212:     ) -> ExpansionResult:
-213:         """Synchronous version of expand.
-214: 
-215:         Useful for non-async contexts or when LLM expansion is not needed.
-216:         """
-217:         import asyncio
-218: 
-219:         return asyncio.get_event_loop().run_until_complete(
-220:             self.expand(entities, relationships, namespace_id=namespace_id)
-221:         )
-222: 
-223:     @classmethod
-224:     def from_expertise(cls, expertise: ExpertiseConfig) -> SemanticExpander:
-225:         """Create expander from expertise configuration.
-226: 
-227:         Args:
-228:             expertise: ExpertiseConfig to use
-229: 
-230:         Returns:
-231:             Configured SemanticExpander
-232:         """
-233:         return cls(
-234:             expertise=expertise,
-235:             enable_unification=expertise.expansion.cross_tool_unification,
-236:             enable_inference=expertise.expansion.relationship_inference,
-237:             inference_depth=expertise.expansion.depth,
-238:         )
-239: 
-240:     @classmethod
-241:     def from_expertise_name(cls, name: str) -> SemanticExpander:
-242:         """Create expander from expertise name.
-243: 
-244:         Args:
-245:             name: Name of expertise to load
-246: 
-247:         Returns:
-248:             Configured SemanticExpander
-249:         """
-250:         from khora.extraction.skills import load_expertise
-251: 
-252:         expertise = load_expertise(f"builtin:{name}")
-253:         return cls.from_expertise(expertise)
-````
-
-## File: src/khora/extraction/expansion/relationship_inferrer.py
-````python
-  1: """Relationship inference from existing graph patterns.
-  2: 
-  3: Infers new relationships based on configurable inference rules
-  4: defined in expertise configuration.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from dataclasses import dataclass, field
- 10: from datetime import UTC, datetime
- 11: from typing import TYPE_CHECKING
- 12: from uuid import UUID, uuid4
- 13: 
- 14: from loguru import logger
- 15: 
- 16: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
- 17: 
- 18: if TYPE_CHECKING:
- 19:     from khora.core.models import Entity, Relationship
- 20:     from khora.extraction.skills import ExpertiseConfig
- 21: 
- 22: 
- 23: @dataclass
- 24: class InferredRelationship:
- 25:     """An inferred relationship from rule evaluation."""
- 26: 
- 27:     source_entity_id: UUID
- 28:     target_entity_id: UUID
- 29:     relationship_type: str
- 30:     description: str = ""
- 31:     confidence: float = 0.5
- 32:     rule_name: str = ""  # Name of inference rule that created this
- 33:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
- 34: 
- 35: 
- 36: class RelationshipInferrer:
- 37:     """Infers new relationships based on existing graph patterns.
- 38: 
- 39:     Uses inference rules from expertise configuration to deduce
- 40:     relationships that aren't explicitly stated but can be inferred
- 41:     from existing relationships.
- 42: 
- 43:     Example inference rules:
- 44:     - If A manages B and B works on project C, A is stakeholder of C
- 45:     - If person P is mentioned in channel for project X, P is involved in X
- 46:     - If PR author and reviewer work on same PR, they collaborate
- 47:     """
- 48: 
- 49:     def __init__(
- 50:         self,
- 51:         expertise: ExpertiseConfig | None = None,
- 52:         *,
- 53:         min_confidence: float = 0.3,
- 54:         max_inferences_per_rule: int = 100,
- 55:     ) -> None:
- 56:         """Initialize the relationship inferrer.
- 57: 
- 58:         Args:
- 59:             expertise: ExpertiseConfig with inference rules
- 60:             min_confidence: Minimum confidence for inferred relationships
- 61:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
- 62:         """
- 63:         self._expertise = expertise
- 64:         self._min_confidence = min_confidence
- 65:         self._max_inferences_per_rule = max_inferences_per_rule
- 66:         self._rule_engine = RuleEngine(expertise)
- 67: 
- 68:     def infer(
- 69:         self,
- 70:         entities: list[Entity],
- 71:         relationships: list[Relationship],
- 72:         *,
- 73:         depth: int = 1,
- 74:     ) -> list[InferredRelationship]:
- 75:         """Infer new relationships from existing graph.
- 76: 
- 77:         Args:
- 78:             entities: Existing entities
- 79:             relationships: Existing relationships
- 80:             depth: Number of inference passes (for transitive inference)
- 81: 
- 82:         Returns:
- 83:             List of inferred relationships
- 84:         """
- 85:         if not self._expertise or not self._expertise.inference_rules:
- 86:             return []
- 87: 
- 88:         all_inferred: list[InferredRelationship] = []
- 89:         current_relationships = list(relationships)
- 90: 
- 91:         for pass_num in range(depth):
- 92:             # Build context with current state
- 93:             context = RuleEvaluationContext.from_data(entities, current_relationships)
- 94: 
- 95:             # Evaluate inference rules
- 96:             matches = self._rule_engine.evaluate_inference_rules(context)
- 97: 
- 98:             # Convert matches to inferred relationships
- 99:             pass_inferred = self._matches_to_relationships(matches, context)
-100: 
-101:             if not pass_inferred:
-102:                 # No new inferences, stop early
-103:                 break
-104: 
-105:             # Filter out duplicates and already existing relationships
-106:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
-107: 
-108:             if not new_inferred:
-109:                 break
-110: 
-111:             all_inferred.extend(new_inferred)
-112: 
-113:             # Add inferred to current for next pass (as mock relationships)
-114:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
-115: 
-116:             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
-117: 
-118:         logger.debug(f"Inferred {len(all_inferred)} relationships in {depth} pass(es)")
-119:         return all_inferred
-120: 
-121:     def infer_from_pattern(
-122:         self,
-123:         entities: list[Entity],
-124:         relationships: list[Relationship],
-125:         pattern: str,
-126:     ) -> list[InferredRelationship]:
-127:         """Infer relationships matching a specific pattern.
-128: 
-129:         Args:
-130:             entities: Existing entities
-131:             relationships: Existing relationships
-132:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
-133: 
-134:         Returns:
-135:             List of inferred relationships
-136:         """
-137:         # Parse pattern and find matches
-138:         # For now, delegate to rule engine
-139:         context = RuleEvaluationContext.from_data(entities, relationships)
-140:         matches = self._rule_engine.evaluate_inference_rules(context)
-141:         return self._matches_to_relationships(matches, context)
-142: 
-143:     def _matches_to_relationships(
-144:         self,
-145:         matches: list[RuleMatch],
-146:         context: RuleEvaluationContext,
-147:     ) -> list[InferredRelationship]:
-148:         """Convert rule matches to inferred relationships."""
-149:         inferred = []
-150:         rule_counts: dict[str, int] = {}
-151: 
-152:         for match in matches:
-153:             # Check rule limit
-154:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
-155:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
-156:                 continue
-157: 
-158:             # Check confidence threshold
-159:             if match.confidence < self._min_confidence:
-160:                 continue
-161: 
-162:             # Resolve source and target from metadata
-163:             source_entity, target_entity = self._resolve_inference_entities(match, context)
-164: 
-165:             if not source_entity or not target_entity:
-166:                 continue
-167: 
-168:             # Skip self-referential
-169:             if source_entity.id == target_entity.id:
-170:                 continue
-171: 
-172:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
-173: 
-174:             inferred.append(
-175:                 InferredRelationship(
-176:                     source_entity_id=source_entity.id,
-177:                     target_entity_id=target_entity.id,
-178:                     relationship_type=relationship_type,
-179:                     description=f"Inferred by rule: {match.rule_name}",
-180:                     confidence=match.confidence,
-181:                     rule_name=match.rule_name,
-182:                     evidence=[r.id for r in match.matched_relationships],
-183:                 )
-184:             )
-185: 
-186:         return inferred
-187: 
-188:     def _resolve_inference_entities(
-189:         self,
-190:         match: RuleMatch,
-191:         context: RuleEvaluationContext,
-192:     ) -> tuple[Entity | None, Entity | None]:
-193:         """Resolve source and target entities from match metadata.
-194: 
-195:         The then_source and then_target specify which entity to use:
-196:         - "first.source": Source entity of first matched relationship
-197:         - "first.target": Target entity of first matched relationship
-198:         - "second.source": Source entity of second matched relationship
-199:         - "second.target": Target entity of second matched relationship
-200:         """
-201:         then_source = match.metadata.get("then_source", "first.source")
-202:         then_target = match.metadata.get("then_target", "second.target")
-203: 
-204:         first = match.metadata.get("first", {})
-205:         second = match.metadata.get("second", {})
-206: 
-207:         def resolve_ref(ref: str) -> Entity | None:
-208:             parts = ref.split(".")
-209:             if len(parts) != 2:
-210:                 return None
-211: 
-212:             group, position = parts
-213:             data = first if group == "first" else second
-214: 
-215:             return data.get(position)
-216: 
-217:         source = resolve_ref(then_source)
-218:         target = resolve_ref(then_target)
-219: 
-220:         return source, target
-221: 
-222:     def _filter_duplicates(
-223:         self,
-224:         new_inferred: list[InferredRelationship],
-225:         existing_relationships: list[Relationship],
-226:         already_inferred: list[InferredRelationship],
-227:     ) -> list[InferredRelationship]:
-228:         """Filter out duplicate inferences."""
-229:         # Build set of existing relationship keys
-230:         existing_keys: set[tuple[UUID, UUID, str]] = set()
-231: 
-232:         for rel in existing_relationships:
-233:             rel_type = str(
-234:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-235:             )
-236:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
-237: 
-238:         for inf in already_inferred:
-239:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
-240: 
-241:         # Filter new inferences
-242:         filtered = []
-243:         for inf in new_inferred:
-244:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
-245:             if key not in existing_keys:
-246:                 filtered.append(inf)
-247:                 existing_keys.add(key)
-248: 
-249:         return filtered
-250: 
-251:     def _to_mock_relationships(
-252:         self,
-253:         inferred: list[InferredRelationship],
-254:         entities: list[Entity],
-255:     ) -> list[Relationship]:
-256:         """Convert inferred relationships to mock Relationship objects for next pass."""
-257:         from khora.core.models import Relationship
-258:         from khora.core.models.entity import RelationshipType
-259: 
-260:         mock_rels = []
-261:         # Get namespace from first entity if available
-262:         namespace_id = entities[0].namespace_id if entities else uuid4()
-263: 
-264:         for inf in inferred:
-265:             # Try to map relationship type to enum
-266:             try:
-267:                 rel_type = RelationshipType[inf.relationship_type]
-268:             except (KeyError, AttributeError):
-269:                 rel_type = RelationshipType.CUSTOM
-270: 
-271:             mock_rels.append(
-272:                 Relationship(
-273:                     id=uuid4(),
-274:                     namespace_id=namespace_id,
-275:                     source_entity_id=inf.source_entity_id,
-276:                     target_entity_id=inf.target_entity_id,
-277:                     relationship_type=rel_type,
-278:                     description=inf.description,
-279:                     properties={},
-280:                     source_document_ids=[],
-281:                     source_chunk_ids=[],
-282:                     confidence=inf.confidence,
-283:                     metadata={"inferred": True, "rule": inf.rule_name},
-284:                     created_at=datetime.now(UTC),
-285:                     updated_at=datetime.now(UTC),
-286:                 )
-287:             )
-288: 
-289:         return mock_rels
-290: 
-291: 
-292: def to_relationship(
-293:     inferred: InferredRelationship,
-294:     namespace_id: UUID,
-295: ) -> Relationship:
-296:     """Convert an InferredRelationship to a domain Relationship model.
-297: 
-298:     Args:
-299:         inferred: The inferred relationship to convert
-300:         namespace_id: Namespace ID for the relationship
-301: 
-302:     Returns:
-303:         Domain Relationship model
-304:     """
-305:     from khora.core.models import Relationship
-306:     from khora.core.models.entity import RelationshipType
-307: 
-308:     # Try to map relationship type to enum
-309:     try:
-310:         rel_type = RelationshipType[inferred.relationship_type]
-311:     except (KeyError, AttributeError):
-312:         rel_type = RelationshipType.CUSTOM
-313: 
-314:     return Relationship(
-315:         id=uuid4(),
-316:         namespace_id=namespace_id,
-317:         source_entity_id=inferred.source_entity_id,
-318:         target_entity_id=inferred.target_entity_id,
-319:         relationship_type=rel_type,
-320:         description=inferred.description,
-321:         properties={
-322:             "inferred": True,
-323:             "rule_name": inferred.rule_name,
-324:             "evidence": [str(e) for e in inferred.evidence],
-325:         },
-326:         source_document_ids=[],
-327:         source_chunk_ids=[],
-328:         confidence=inferred.confidence,
-329:         metadata={"inferred": True},
-330:         created_at=datetime.now(UTC),
-331:         updated_at=datetime.now(UTC),
-332:     )
-````
-
 ## File: src/khora/extraction/expansion/rule_engine.py
 ````python
   1: """Configurable rule evaluation engine.
@@ -9440,146 +8847,158 @@ README.md
 326:         """Get relationships for an entity."""
 327:         ...
 328: 
-329:     # Episode operations
-330:     @abstractmethod
-331:     async def create_episode(self, episode: Episode) -> Episode:
-332:         """Create an episode node."""
-333:         ...
-334: 
-335:     @abstractmethod
-336:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-337:         """Get an episode by ID."""
-338:         ...
-339: 
-340:     @abstractmethod
-341:     async def list_episodes(
-342:         self,
-343:         namespace_id: UUID,
-344:         *,
-345:         start_time: datetime | None = None,
-346:         end_time: datetime | None = None,
-347:         limit: int = 100,
-348:     ) -> list[Episode]:
-349:         """List episodes in a time range."""
+329:     @abstractmethod
+330:     async def list_relationships(
+331:         self,
+332:         namespace_id: UUID,
+333:         *,
+334:         relationship_type: str | None = None,
+335:         limit: int = 1000,
+336:         offset: int = 0,
+337:     ) -> list[Relationship]:
+338:         """List all relationships in a namespace."""
+339:         ...
+340: 
+341:     # Episode operations
+342:     @abstractmethod
+343:     async def create_episode(self, episode: Episode) -> Episode:
+344:         """Create an episode node."""
+345:         ...
+346: 
+347:     @abstractmethod
+348:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+349:         """Get an episode by ID."""
 350:         ...
 351: 
-352:     # Graph traversal
-353:     @abstractmethod
-354:     async def find_paths(
-355:         self,
-356:         namespace_id: UUID,
-357:         source_entity_id: UUID,
-358:         target_entity_id: UUID,
-359:         *,
-360:         max_depth: int = 3,
-361:         relationship_types: list[str] | None = None,
-362:     ) -> list[list[dict[str, Any]]]:
-363:         """Find paths between two entities."""
-364:         ...
-365: 
-366:     @abstractmethod
-367:     async def get_neighborhood(
-368:         self,
-369:         entity_id: UUID,
-370:         *,
-371:         depth: int = 1,
-372:         relationship_types: list[str] | None = None,
-373:         limit: int = 50,
-374:     ) -> dict[str, Any]:
-375:         """Get the neighborhood of an entity up to a certain depth."""
+352:     @abstractmethod
+353:     async def list_episodes(
+354:         self,
+355:         namespace_id: UUID,
+356:         *,
+357:         start_time: datetime | None = None,
+358:         end_time: datetime | None = None,
+359:         limit: int = 100,
+360:     ) -> list[Episode]:
+361:         """List episodes in a time range."""
+362:         ...
+363: 
+364:     # Graph traversal
+365:     @abstractmethod
+366:     async def find_paths(
+367:         self,
+368:         namespace_id: UUID,
+369:         source_entity_id: UUID,
+370:         target_entity_id: UUID,
+371:         *,
+372:         max_depth: int = 3,
+373:         relationship_types: list[str] | None = None,
+374:     ) -> list[list[dict[str, Any]]]:
+375:         """Find paths between two entities."""
 376:         ...
 377: 
 378:     @abstractmethod
-379:     async def search_entities_by_attribute(
+379:     async def get_neighborhood(
 380:         self,
-381:         namespace_id: UUID,
-382:         attribute_name: str,
-383:         attribute_value: Any,
-384:         *,
-385:         limit: int = 100,
-386:     ) -> list[Entity]:
-387:         """Search entities by attribute value."""
+381:         entity_id: UUID,
+382:         *,
+383:         depth: int = 1,
+384:         relationship_types: list[str] | None = None,
+385:         limit: int = 50,
+386:     ) -> dict[str, Any]:
+387:         """Get the neighborhood of an entity up to a certain depth."""
 388:         ...
 389: 
-390: 
-391: @runtime_checkable
-392: class EventStoreProtocol(Protocol):
-393:     """Protocol for event store backends.
-394: 
-395:     Handles the append-only event log for event sourcing.
-396:     """
-397: 
-398:     @abstractmethod
-399:     async def connect(self) -> None:
-400:         """Establish connection to the store."""
-401:         ...
+390:     @abstractmethod
+391:     async def search_entities_by_attribute(
+392:         self,
+393:         namespace_id: UUID,
+394:         attribute_name: str,
+395:         attribute_value: Any,
+396:         *,
+397:         limit: int = 100,
+398:     ) -> list[Entity]:
+399:         """Search entities by attribute value."""
+400:         ...
+401: 
 402: 
-403:     @abstractmethod
-404:     async def disconnect(self) -> None:
-405:         """Close connections."""
-406:         ...
-407: 
-408:     @abstractmethod
-409:     async def is_healthy(self) -> bool:
-410:         """Check if the store is healthy."""
-411:         ...
-412: 
-413:     @abstractmethod
-414:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-415:         """Append an event to the log."""
-416:         ...
-417: 
-418:     @abstractmethod
-419:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-420:         """Append multiple events in a batch."""
-421:         ...
-422: 
-423:     @abstractmethod
-424:     async def get_events(
-425:         self,
-426:         namespace_id: UUID,
-427:         *,
-428:         event_types: list[str] | None = None,
-429:         resource_type: str | None = None,
-430:         resource_id: UUID | None = None,
-431:         after: datetime | None = None,
-432:         before: datetime | None = None,
-433:         limit: int = 100,
-434:         offset: int = 0,
-435:     ) -> list[MemoryEvent]:
-436:         """Query events from the log."""
-437:         ...
-438: 
-439:     @abstractmethod
-440:     async def get_events_for_resource(
-441:         self,
-442:         resource_type: str,
-443:         resource_id: UUID,
-444:         *,
+403: @runtime_checkable
+404: class EventStoreProtocol(Protocol):
+405:     """Protocol for event store backends.
+406: 
+407:     Handles the append-only event log for event sourcing.
+408:     """
+409: 
+410:     @abstractmethod
+411:     async def connect(self) -> None:
+412:         """Establish connection to the store."""
+413:         ...
+414: 
+415:     @abstractmethod
+416:     async def disconnect(self) -> None:
+417:         """Close connections."""
+418:         ...
+419: 
+420:     @abstractmethod
+421:     async def is_healthy(self) -> bool:
+422:         """Check if the store is healthy."""
+423:         ...
+424: 
+425:     @abstractmethod
+426:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+427:         """Append an event to the log."""
+428:         ...
+429: 
+430:     @abstractmethod
+431:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+432:         """Append multiple events in a batch."""
+433:         ...
+434: 
+435:     @abstractmethod
+436:     async def get_events(
+437:         self,
+438:         namespace_id: UUID,
+439:         *,
+440:         event_types: list[str] | None = None,
+441:         resource_type: str | None = None,
+442:         resource_id: UUID | None = None,
+443:         after: datetime | None = None,
+444:         before: datetime | None = None,
 445:         limit: int = 100,
-446:     ) -> list[MemoryEvent]:
-447:         """Get all events for a specific resource."""
-448:         ...
-449: 
-450:     @abstractmethod
-451:     async def get_latest_event(
-452:         self,
-453:         resource_type: str,
-454:         resource_id: UUID,
-455:     ) -> MemoryEvent | None:
-456:         """Get the latest event for a resource."""
-457:         ...
-458: 
-459:     @abstractmethod
-460:     async def count_events(
-461:         self,
-462:         namespace_id: UUID,
-463:         *,
-464:         event_types: list[str] | None = None,
-465:         after: datetime | None = None,
-466:     ) -> int:
-467:         """Count events matching criteria."""
-468:         ...
+446:         offset: int = 0,
+447:     ) -> list[MemoryEvent]:
+448:         """Query events from the log."""
+449:         ...
+450: 
+451:     @abstractmethod
+452:     async def get_events_for_resource(
+453:         self,
+454:         resource_type: str,
+455:         resource_id: UUID,
+456:         *,
+457:         limit: int = 100,
+458:     ) -> list[MemoryEvent]:
+459:         """Get all events for a specific resource."""
+460:         ...
+461: 
+462:     @abstractmethod
+463:     async def get_latest_event(
+464:         self,
+465:         resource_type: str,
+466:         resource_id: UUID,
+467:     ) -> MemoryEvent | None:
+468:         """Get the latest event for a resource."""
+469:         ...
+470: 
+471:     @abstractmethod
+472:     async def count_events(
+473:         self,
+474:         namespace_id: UUID,
+475:         *,
+476:         event_types: list[str] | None = None,
+477:         after: datetime | None = None,
+478:     ) -> int:
+479:         """Count events matching criteria."""
+480:         ...
 ````
 
 ## File: src/khora/storage/event_store.py
@@ -13253,6 +12672,599 @@ README.md
 41:     "init_db",
 42:     "run_migrations",
 43: ]
+````
+
+## File: src/khora/extraction/expansion/expander.py
+````python
+  1: """Semantic expander for knowledge graph enhancement.
+  2: 
+  3: Orchestrates cross-tool entity unification and relationship inference
+  4: to enrich extracted knowledge graphs.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from dataclasses import dataclass, field
+ 10: from typing import TYPE_CHECKING
+ 11: from uuid import UUID
+ 12: 
+ 13: from loguru import logger
+ 14: 
+ 15: from .cross_tool_unifier import CrossToolUnifier
+ 16: from .relationship_inferrer import RelationshipInferrer, to_relationship
+ 17: 
+ 18: if TYPE_CHECKING:
+ 19:     from khora.core.models import Entity, Relationship
+ 20:     from khora.extraction.skills import ExpertiseConfig
+ 21: 
+ 22: 
+ 23: @dataclass
+ 24: class ExpansionResult:
+ 25:     """Result of semantic expansion."""
+ 26: 
+ 27:     # Unified entities (after deduplication)
+ 28:     entities: list[Entity] = field(default_factory=list)
+ 29: 
+ 30:     # Updated existing relationships
+ 31:     relationships: list[Relationship] = field(default_factory=list)
+ 32: 
+ 33:     # New inferred relationships
+ 34:     inferred_relationships: list[Relationship] = field(default_factory=list)
+ 35: 
+ 36:     # Statistics
+ 37:     original_entity_count: int = 0
+ 38:     merged_entity_count: int = 0
+ 39:     original_relationship_count: int = 0
+ 40:     inferred_relationship_count: int = 0
+ 41: 
+ 42:     # Mapping for provenance tracking
+ 43:     entity_mapping: dict[UUID, UUID] = field(default_factory=dict)
+ 44: 
+ 45:     @property
+ 46:     def total_entities(self) -> int:
+ 47:         """Total entities after expansion."""
+ 48:         return len(self.entities)
+ 49: 
+ 50:     @property
+ 51:     def total_relationships(self) -> int:
+ 52:         """Total relationships after expansion."""
+ 53:         return len(self.relationships) + len(self.inferred_relationships)
+ 54: 
+ 55:     @property
+ 56:     def all_relationships(self) -> list[Relationship]:
+ 57:         """All relationships (existing + inferred)."""
+ 58:         return self.relationships + self.inferred_relationships
+ 59: 
+ 60: 
+ 61: class SemanticExpander:
+ 62:     """Orchestrates semantic expansion of knowledge graphs.
+ 63: 
+ 64:     Combines:
+ 65:     - Cross-tool entity unification
+ 66:     - Relationship inference
+ 67:     - LLM-powered expansion (future)
+ 68: 
+ 69:     Example usage:
+ 70:         from khora.extraction.expansion import SemanticExpander
+ 71:         from khora.extraction.skills import load_expertise
+ 72: 
+ 73:         expertise = load_expertise("saas_expert")
+ 74:         expander = SemanticExpander(expertise=expertise)
+ 75: 
+ 76:         result = await expander.expand(
+ 77:             entities=extracted_entities,
+ 78:             relationships=extracted_relationships,
+ 79:         )
+ 80:     """
+ 81: 
+ 82:     def __init__(
+ 83:         self,
+ 84:         expertise: ExpertiseConfig | None = None,
+ 85:         *,
+ 86:         enable_unification: bool = True,
+ 87:         enable_inference: bool = True,
+ 88:         inference_depth: int = 2,
+ 89:         embedding_threshold: float = 0.85,
+ 90:         fuzzy_threshold: float = 0.85,
+ 91:         min_inference_confidence: float = 0.3,
+ 92:     ) -> None:
+ 93:         """Initialize the semantic expander.
+ 94: 
+ 95:         Args:
+ 96:             expertise: ExpertiseConfig with expansion rules
+ 97:             enable_unification: Whether to run cross-tool unification
+ 98:             enable_inference: Whether to run relationship inference
+ 99:             inference_depth: Number of inference passes
+100:             embedding_threshold: Similarity threshold for embedding matching
+101:             fuzzy_threshold: Threshold for fuzzy string matching
+102:             min_inference_confidence: Minimum confidence for inferred relationships
+103:         """
+104:         self._expertise = expertise
+105:         self._enable_unification = enable_unification
+106:         self._enable_inference = enable_inference
+107:         self._inference_depth = inference_depth
+108: 
+109:         # Apply expertise settings if available
+110:         if expertise and expertise.expansion:
+111:             self._enable_unification = expertise.expansion.cross_tool_unification
+112:             self._enable_inference = expertise.expansion.relationship_inference
+113:             self._inference_depth = expertise.expansion.depth
+114: 
+115:         if expertise and expertise.confidence:
+116:             min_inference_confidence = expertise.confidence.min_inferred
+117: 
+118:         # Initialize components
+119:         self._unifier = CrossToolUnifier(
+120:             expertise=expertise,
+121:             embedding_threshold=embedding_threshold,
+122:             fuzzy_threshold=fuzzy_threshold,
+123:         )
+124:         self._inferrer = RelationshipInferrer(
+125:             expertise=expertise,
+126:             min_confidence=min_inference_confidence,
+127:         )
+128: 
+129:     async def expand(
+130:         self,
+131:         entities: list[Entity],
+132:         relationships: list[Relationship],
+133:         *,
+134:         namespace_id: UUID | None = None,
+135:     ) -> ExpansionResult:
+136:         """Expand the knowledge graph.
+137: 
+138:         Runs unification and inference phases based on configuration.
+139: 
+140:         Args:
+141:             entities: Entities to expand
+142:             relationships: Relationships to expand
+143:             namespace_id: Namespace ID for new relationships
+144: 
+145:         Returns:
+146:             ExpansionResult with expanded graph
+147:         """
+148:         result = ExpansionResult(
+149:             original_entity_count=len(entities),
+150:             original_relationship_count=len(relationships),
+151:         )
+152: 
+153:         if not entities:
+154:             return result
+155: 
+156:         # Determine namespace
+157:         if namespace_id is None and entities:
+158:             namespace_id = entities[0].namespace_id
+159: 
+160:         current_entities = list(entities)
+161:         current_relationships = list(relationships)
+162: 
+163:         # Phase 1: Cross-tool entity unification
+164:         if self._enable_unification:
+165:             logger.debug("Running cross-tool entity unification...")
+166:             unification_result = self._unifier.unify(
+167:                 current_entities,
+168:                 current_relationships,
+169:                 use_embeddings=True,
+170:                 use_fuzzy=True,
+171:             )
+172: 
+173:             current_entities = unification_result.unified_entities
+174:             current_relationships = unification_result.updated_relationships
+175:             result.entity_mapping = unification_result.entity_mapping
+176:             result.merged_entity_count = unification_result.entities_merged
+177: 
+178:             logger.debug(
+179:                 f"Unified {result.original_entity_count} entities into {len(current_entities)} "
+180:                 f"({result.merged_entity_count} merged)"
+181:             )
+182: 
+183:         # Phase 2: Relationship inference
+184:         inferred_relationships: list[Relationship] = []
+185:         if self._enable_inference and self._expertise:
+186:             logger.debug(f"Running relationship inference (depth={self._inference_depth})...")
+187:             inferred = self._inferrer.infer(
+188:                 current_entities,
+189:                 current_relationships,
+190:                 depth=self._inference_depth,
+191:             )
+192: 
+193:             # Convert to domain relationships
+194:             inferred_relationships = [to_relationship(inf, namespace_id) for inf in inferred]
+195:             result.inferred_relationship_count = len(inferred_relationships)
+196: 
+197:             logger.debug(f"Inferred {len(inferred_relationships)} new relationships")
+198: 
+199:         # Build final result
+200:         result.entities = current_entities
+201:         result.relationships = current_relationships
+202:         result.inferred_relationships = inferred_relationships
+203: 
+204:         return result
+205: 
+206:     def expand_sync(
+207:         self,
+208:         entities: list[Entity],
+209:         relationships: list[Relationship],
+210:         *,
+211:         namespace_id: UUID | None = None,
+212:     ) -> ExpansionResult:
+213:         """Synchronous version of expand.
+214: 
+215:         Useful for non-async contexts or when LLM expansion is not needed.
+216:         """
+217:         import asyncio
+218: 
+219:         return asyncio.get_event_loop().run_until_complete(
+220:             self.expand(entities, relationships, namespace_id=namespace_id)
+221:         )
+222: 
+223:     @classmethod
+224:     def from_expertise(cls, expertise: ExpertiseConfig) -> SemanticExpander:
+225:         """Create expander from expertise configuration.
+226: 
+227:         Args:
+228:             expertise: ExpertiseConfig to use
+229: 
+230:         Returns:
+231:             Configured SemanticExpander
+232:         """
+233:         return cls(
+234:             expertise=expertise,
+235:             enable_unification=expertise.expansion.cross_tool_unification,
+236:             enable_inference=expertise.expansion.relationship_inference,
+237:             inference_depth=expertise.expansion.depth,
+238:         )
+239: 
+240:     @classmethod
+241:     def from_expertise_name(cls, name: str) -> SemanticExpander:
+242:         """Create expander from expertise name.
+243: 
+244:         Args:
+245:             name: Name of expertise to load
+246: 
+247:         Returns:
+248:             Configured SemanticExpander
+249:         """
+250:         from khora.extraction.skills import load_expertise
+251: 
+252:         expertise = load_expertise(f"builtin:{name}")
+253:         return cls.from_expertise(expertise)
+````
+
+## File: src/khora/extraction/expansion/relationship_inferrer.py
+````python
+  1: """Relationship inference from existing graph patterns.
+  2: 
+  3: Infers new relationships based on configurable inference rules
+  4: defined in expertise configuration.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from dataclasses import dataclass, field
+ 10: from datetime import UTC, datetime
+ 11: from typing import TYPE_CHECKING
+ 12: from uuid import UUID, uuid4
+ 13: 
+ 14: from loguru import logger
+ 15: 
+ 16: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
+ 17: 
+ 18: if TYPE_CHECKING:
+ 19:     from khora.core.models import Entity, Relationship
+ 20:     from khora.extraction.skills import ExpertiseConfig
+ 21: 
+ 22: 
+ 23: @dataclass
+ 24: class InferredRelationship:
+ 25:     """An inferred relationship from rule evaluation."""
+ 26: 
+ 27:     source_entity_id: UUID
+ 28:     target_entity_id: UUID
+ 29:     relationship_type: str
+ 30:     description: str = ""
+ 31:     confidence: float = 0.5
+ 32:     rule_name: str = ""  # Name of inference rule that created this
+ 33:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
+ 34: 
+ 35: 
+ 36: class RelationshipInferrer:
+ 37:     """Infers new relationships based on existing graph patterns.
+ 38: 
+ 39:     Uses inference rules from expertise configuration to deduce
+ 40:     relationships that aren't explicitly stated but can be inferred
+ 41:     from existing relationships.
+ 42: 
+ 43:     Example inference rules:
+ 44:     - If A manages B and B works on project C, A is stakeholder of C
+ 45:     - If person P is mentioned in channel for project X, P is involved in X
+ 46:     - If PR author and reviewer work on same PR, they collaborate
+ 47:     """
+ 48: 
+ 49:     def __init__(
+ 50:         self,
+ 51:         expertise: ExpertiseConfig | None = None,
+ 52:         *,
+ 53:         min_confidence: float = 0.3,
+ 54:         max_inferences_per_rule: int = 100,
+ 55:     ) -> None:
+ 56:         """Initialize the relationship inferrer.
+ 57: 
+ 58:         Args:
+ 59:             expertise: ExpertiseConfig with inference rules
+ 60:             min_confidence: Minimum confidence for inferred relationships
+ 61:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
+ 62:         """
+ 63:         self._expertise = expertise
+ 64:         self._min_confidence = min_confidence
+ 65:         self._max_inferences_per_rule = max_inferences_per_rule
+ 66:         self._rule_engine = RuleEngine(expertise)
+ 67: 
+ 68:     def infer(
+ 69:         self,
+ 70:         entities: list[Entity],
+ 71:         relationships: list[Relationship],
+ 72:         *,
+ 73:         depth: int = 1,
+ 74:     ) -> list[InferredRelationship]:
+ 75:         """Infer new relationships from existing graph.
+ 76: 
+ 77:         Args:
+ 78:             entities: Existing entities
+ 79:             relationships: Existing relationships
+ 80:             depth: Number of inference passes (for transitive inference)
+ 81: 
+ 82:         Returns:
+ 83:             List of inferred relationships
+ 84:         """
+ 85:         if not self._expertise or not self._expertise.inference_rules:
+ 86:             return []
+ 87: 
+ 88:         all_inferred: list[InferredRelationship] = []
+ 89:         current_relationships = list(relationships)
+ 90: 
+ 91:         for pass_num in range(depth):
+ 92:             # Build context with current state
+ 93:             context = RuleEvaluationContext.from_data(entities, current_relationships)
+ 94: 
+ 95:             # Evaluate inference rules
+ 96:             matches = self._rule_engine.evaluate_inference_rules(context)
+ 97: 
+ 98:             # Convert matches to inferred relationships
+ 99:             pass_inferred = self._matches_to_relationships(matches, context)
+100: 
+101:             if not pass_inferred:
+102:                 # No new inferences, stop early
+103:                 break
+104: 
+105:             # Filter out duplicates and already existing relationships
+106:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
+107: 
+108:             if not new_inferred:
+109:                 break
+110: 
+111:             all_inferred.extend(new_inferred)
+112: 
+113:             # Add inferred to current for next pass (as mock relationships)
+114:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
+115: 
+116:             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
+117: 
+118:         logger.debug(f"Inferred {len(all_inferred)} relationships in {depth} pass(es)")
+119:         return all_inferred
+120: 
+121:     def infer_from_pattern(
+122:         self,
+123:         entities: list[Entity],
+124:         relationships: list[Relationship],
+125:         pattern: str,
+126:     ) -> list[InferredRelationship]:
+127:         """Infer relationships matching a specific pattern.
+128: 
+129:         Args:
+130:             entities: Existing entities
+131:             relationships: Existing relationships
+132:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
+133: 
+134:         Returns:
+135:             List of inferred relationships
+136:         """
+137:         # Parse pattern and find matches
+138:         # For now, delegate to rule engine
+139:         context = RuleEvaluationContext.from_data(entities, relationships)
+140:         matches = self._rule_engine.evaluate_inference_rules(context)
+141:         return self._matches_to_relationships(matches, context)
+142: 
+143:     def _matches_to_relationships(
+144:         self,
+145:         matches: list[RuleMatch],
+146:         context: RuleEvaluationContext,
+147:     ) -> list[InferredRelationship]:
+148:         """Convert rule matches to inferred relationships."""
+149:         inferred = []
+150:         rule_counts: dict[str, int] = {}
+151: 
+152:         for match in matches:
+153:             # Check rule limit
+154:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
+155:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
+156:                 continue
+157: 
+158:             # Check confidence threshold
+159:             if match.confidence < self._min_confidence:
+160:                 continue
+161: 
+162:             # Resolve source and target from metadata
+163:             source_entity, target_entity = self._resolve_inference_entities(match, context)
+164: 
+165:             if not source_entity or not target_entity:
+166:                 continue
+167: 
+168:             # Skip self-referential
+169:             if source_entity.id == target_entity.id:
+170:                 continue
+171: 
+172:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
+173: 
+174:             inferred.append(
+175:                 InferredRelationship(
+176:                     source_entity_id=source_entity.id,
+177:                     target_entity_id=target_entity.id,
+178:                     relationship_type=relationship_type,
+179:                     description=f"Inferred by rule: {match.rule_name}",
+180:                     confidence=match.confidence,
+181:                     rule_name=match.rule_name,
+182:                     evidence=[r.id for r in match.matched_relationships],
+183:                 )
+184:             )
+185: 
+186:         return inferred
+187: 
+188:     def _resolve_inference_entities(
+189:         self,
+190:         match: RuleMatch,
+191:         context: RuleEvaluationContext,
+192:     ) -> tuple[Entity | None, Entity | None]:
+193:         """Resolve source and target entities from match metadata.
+194: 
+195:         The then_source and then_target specify which entity to use:
+196:         - "first.source": Source entity of first matched relationship
+197:         - "first.target": Target entity of first matched relationship
+198:         - "second.source": Source entity of second matched relationship
+199:         - "second.target": Target entity of second matched relationship
+200:         """
+201:         then_source = match.metadata.get("then_source", "first.source")
+202:         then_target = match.metadata.get("then_target", "second.target")
+203: 
+204:         first = match.metadata.get("first", {})
+205:         second = match.metadata.get("second", {})
+206: 
+207:         def resolve_ref(ref: str) -> Entity | None:
+208:             parts = ref.split(".")
+209:             if len(parts) != 2:
+210:                 return None
+211: 
+212:             group, position = parts
+213:             data = first if group == "first" else second
+214: 
+215:             return data.get(position)
+216: 
+217:         source = resolve_ref(then_source)
+218:         target = resolve_ref(then_target)
+219: 
+220:         return source, target
+221: 
+222:     def _filter_duplicates(
+223:         self,
+224:         new_inferred: list[InferredRelationship],
+225:         existing_relationships: list[Relationship],
+226:         already_inferred: list[InferredRelationship],
+227:     ) -> list[InferredRelationship]:
+228:         """Filter out duplicate inferences."""
+229:         # Build set of existing relationship keys
+230:         existing_keys: set[tuple[UUID, UUID, str]] = set()
+231: 
+232:         for rel in existing_relationships:
+233:             rel_type = str(
+234:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+235:             )
+236:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
+237: 
+238:         for inf in already_inferred:
+239:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
+240: 
+241:         # Filter new inferences
+242:         filtered = []
+243:         for inf in new_inferred:
+244:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
+245:             if key not in existing_keys:
+246:                 filtered.append(inf)
+247:                 existing_keys.add(key)
+248: 
+249:         return filtered
+250: 
+251:     def _to_mock_relationships(
+252:         self,
+253:         inferred: list[InferredRelationship],
+254:         entities: list[Entity],
+255:     ) -> list[Relationship]:
+256:         """Convert inferred relationships to mock Relationship objects for next pass."""
+257:         from khora.core.models import Relationship
+258:         from khora.core.models.entity import RelationshipType
+259: 
+260:         mock_rels = []
+261:         # Get namespace from first entity if available
+262:         namespace_id = entities[0].namespace_id if entities else uuid4()
+263: 
+264:         for inf in inferred:
+265:             # Try to map relationship type to enum
+266:             try:
+267:                 rel_type = RelationshipType[inf.relationship_type]
+268:             except (KeyError, AttributeError):
+269:                 rel_type = RelationshipType.CUSTOM
+270: 
+271:             mock_rels.append(
+272:                 Relationship(
+273:                     id=uuid4(),
+274:                     namespace_id=namespace_id,
+275:                     source_entity_id=inf.source_entity_id,
+276:                     target_entity_id=inf.target_entity_id,
+277:                     relationship_type=rel_type,
+278:                     description=inf.description,
+279:                     properties={},
+280:                     source_document_ids=[],
+281:                     source_chunk_ids=[],
+282:                     confidence=inf.confidence,
+283:                     metadata={"inferred": True, "rule": inf.rule_name},
+284:                     created_at=datetime.now(UTC),
+285:                     updated_at=datetime.now(UTC),
+286:                 )
+287:             )
+288: 
+289:         return mock_rels
+290: 
+291: 
+292: def to_relationship(
+293:     inferred: InferredRelationship,
+294:     namespace_id: UUID,
+295: ) -> Relationship:
+296:     """Convert an InferredRelationship to a domain Relationship model.
+297: 
+298:     Args:
+299:         inferred: The inferred relationship to convert
+300:         namespace_id: Namespace ID for the relationship
+301: 
+302:     Returns:
+303:         Domain Relationship model
+304:     """
+305:     from khora.core.models import Relationship
+306:     from khora.core.models.entity import RelationshipType
+307: 
+308:     # Try to map relationship type to enum
+309:     try:
+310:         rel_type = RelationshipType[inferred.relationship_type]
+311:     except (KeyError, AttributeError):
+312:         rel_type = RelationshipType.CUSTOM
+313: 
+314:     return Relationship(
+315:         id=uuid4(),
+316:         namespace_id=namespace_id,
+317:         source_entity_id=inferred.source_entity_id,
+318:         target_entity_id=inferred.target_entity_id,
+319:         relationship_type=rel_type,
+320:         description=inferred.description,
+321:         properties={
+322:             "inferred": True,
+323:             "rule_name": inferred.rule_name,
+324:             "evidence": [str(e) for e in inferred.evidence],
+325:         },
+326:         source_document_ids=[],
+327:         source_chunk_ids=[],
+328:         confidence=inferred.confidence,
+329:         metadata={"inferred": True},
+330:         created_at=datetime.now(UTC),
+331:         updated_at=datetime.now(UTC),
+332:     )
 ````
 
 ## File: src/khora/extraction/skills/__init__.py
@@ -18007,195 +18019,210 @@ README.md
 439:             )
 440:         return []
 441: 
-442:     # =========================================================================
-443:     # Episode operations (delegated to graph)
-444:     # =========================================================================
-445: 
-446:     async def create_episode(self, episode: Episode) -> Episode:
-447:         """Create an episode."""
-448:         if not self.graph:
-449:             raise RuntimeError("Graph backend not configured")
-450:         return await self.graph.create_episode(episode)
-451: 
-452:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-453:         """Get an episode by ID."""
-454:         if self.graph:
-455:             return await self.graph.get_episode(episode_id)
-456:         return None
-457: 
-458:     async def list_episodes(
-459:         self,
-460:         namespace_id: UUID,
-461:         *,
-462:         start_time: datetime | None = None,
-463:         end_time: datetime | None = None,
-464:         limit: int = 100,
-465:     ) -> list[Episode]:
-466:         """List episodes in a time range."""
-467:         if self.graph:
-468:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
-469:         return []
-470: 
-471:     # =========================================================================
-472:     # Graph traversal (delegated to graph)
-473:     # =========================================================================
-474: 
-475:     async def find_paths(
-476:         self,
-477:         namespace_id: UUID,
-478:         source_entity_id: UUID,
-479:         target_entity_id: UUID,
-480:         *,
-481:         max_depth: int = 3,
-482:         relationship_types: list[str] | None = None,
-483:     ) -> list[list[dict[str, Any]]]:
-484:         """Find paths between two entities."""
-485:         if self.graph:
-486:             return await self.graph.find_paths(
-487:                 namespace_id,
-488:                 source_entity_id,
-489:                 target_entity_id,
-490:                 max_depth=max_depth,
-491:                 relationship_types=relationship_types,
-492:             )
-493:         return []
-494: 
-495:     async def get_neighborhood(
-496:         self,
-497:         entity_id: UUID,
-498:         *,
-499:         depth: int = 1,
-500:         relationship_types: list[str] | None = None,
-501:         limit: int = 50,
-502:     ) -> dict[str, Any]:
-503:         """Get the neighborhood of an entity."""
-504:         if self.graph:
-505:             return await self.graph.get_neighborhood(
-506:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
+442:     async def list_relationships(
+443:         self,
+444:         namespace_id: UUID,
+445:         *,
+446:         relationship_type: str | None = None,
+447:         limit: int = 1000,
+448:         offset: int = 0,
+449:     ) -> list[Relationship]:
+450:         """List all relationships in a namespace."""
+451:         if self.graph:
+452:             return await self.graph.list_relationships(
+453:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+454:             )
+455:         return []
+456: 
+457:     # =========================================================================
+458:     # Episode operations (delegated to graph)
+459:     # =========================================================================
+460: 
+461:     async def create_episode(self, episode: Episode) -> Episode:
+462:         """Create an episode."""
+463:         if not self.graph:
+464:             raise RuntimeError("Graph backend not configured")
+465:         return await self.graph.create_episode(episode)
+466: 
+467:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+468:         """Get an episode by ID."""
+469:         if self.graph:
+470:             return await self.graph.get_episode(episode_id)
+471:         return None
+472: 
+473:     async def list_episodes(
+474:         self,
+475:         namespace_id: UUID,
+476:         *,
+477:         start_time: datetime | None = None,
+478:         end_time: datetime | None = None,
+479:         limit: int = 100,
+480:     ) -> list[Episode]:
+481:         """List episodes in a time range."""
+482:         if self.graph:
+483:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
+484:         return []
+485: 
+486:     # =========================================================================
+487:     # Graph traversal (delegated to graph)
+488:     # =========================================================================
+489: 
+490:     async def find_paths(
+491:         self,
+492:         namespace_id: UUID,
+493:         source_entity_id: UUID,
+494:         target_entity_id: UUID,
+495:         *,
+496:         max_depth: int = 3,
+497:         relationship_types: list[str] | None = None,
+498:     ) -> list[list[dict[str, Any]]]:
+499:         """Find paths between two entities."""
+500:         if self.graph:
+501:             return await self.graph.find_paths(
+502:                 namespace_id,
+503:                 source_entity_id,
+504:                 target_entity_id,
+505:                 max_depth=max_depth,
+506:                 relationship_types=relationship_types,
 507:             )
-508:         return {"entities": [], "relationships": []}
+508:         return []
 509: 
-510:     # =========================================================================
-511:     # Batch operations (optimized for parallel fetching)
-512:     # =========================================================================
-513: 
-514:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-515:         """Fetch multiple entities in a single query.
-516: 
-517:         Args:
-518:             entity_ids: List of entity IDs to fetch
-519: 
-520:         Returns:
-521:             Dictionary mapping entity ID to Entity object
-522:         """
-523:         if not entity_ids:
-524:             return {}
-525:         if self.graph:
-526:             return await self.graph.get_entities_batch(entity_ids)
-527:         return {}
+510:     async def get_neighborhood(
+511:         self,
+512:         entity_id: UUID,
+513:         *,
+514:         depth: int = 1,
+515:         relationship_types: list[str] | None = None,
+516:         limit: int = 50,
+517:     ) -> dict[str, Any]:
+518:         """Get the neighborhood of an entity."""
+519:         if self.graph:
+520:             return await self.graph.get_neighborhood(
+521:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
+522:             )
+523:         return {"entities": [], "relationships": []}
+524: 
+525:     # =========================================================================
+526:     # Batch operations (optimized for parallel fetching)
+527:     # =========================================================================
 528: 
-529:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-530:         """Fetch multiple documents in a single query.
+529:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+530:         """Fetch multiple entities in a single query.
 531: 
 532:         Args:
-533:             document_ids: List of document IDs to fetch
+533:             entity_ids: List of entity IDs to fetch
 534: 
 535:         Returns:
-536:             Dictionary mapping document ID to Document object
+536:             Dictionary mapping entity ID to Entity object
 537:         """
-538:         if not document_ids:
+538:         if not entity_ids:
 539:             return {}
-540:         if self.relational:
-541:             return await self.relational.get_documents_batch(document_ids)
+540:         if self.graph:
+541:             return await self.graph.get_entities_batch(entity_ids)
 542:         return {}
 543: 
-544:     async def get_neighborhoods_batch(
-545:         self,
-546:         entity_ids: list[UUID],
-547:         *,
-548:         depth: int = 1,
-549:         relationship_types: list[str] | None = None,
-550:         limit_per_entity: int = 20,
-551:     ) -> dict[UUID, dict[str, Any]]:
-552:         """Get neighborhoods for multiple entities in a single query.
-553: 
-554:         Args:
-555:             entity_ids: List of entity IDs
-556:             depth: Max traversal depth
-557:             relationship_types: Optional relationship type filter
-558:             limit_per_entity: Max nodes per entity neighborhood
-559: 
-560:         Returns:
-561:             Dictionary mapping entity ID to neighborhood data
-562:         """
-563:         if not entity_ids:
-564:             return {}
-565:         if self.graph:
-566:             return await self.graph.get_neighborhoods_batch(
-567:                 entity_ids,
-568:                 depth=depth,
-569:                 relationship_types=relationship_types,
-570:                 limit_per_entity=limit_per_entity,
-571:             )
-572:         return {}
-573: 
-574:     # =========================================================================
-575:     # Event operations (delegated to event store)
-576:     # =========================================================================
-577: 
-578:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-579:         """Append an event to the log."""
-580:         if not self.event_store:
-581:             raise RuntimeError("Event store not configured")
-582:         return await self.event_store.append_event(event)
-583: 
-584:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-585:         """Append multiple events in a batch."""
-586:         if not self.event_store:
-587:             raise RuntimeError("Event store not configured")
-588:         return await self.event_store.append_events_batch(events)
-589: 
-590:     async def get_events(
-591:         self,
-592:         namespace_id: UUID,
-593:         *,
-594:         event_types: list[str] | None = None,
-595:         resource_type: str | None = None,
-596:         resource_id: UUID | None = None,
-597:         after: datetime | None = None,
-598:         before: datetime | None = None,
-599:         limit: int = 100,
-600:         offset: int = 0,
-601:     ) -> list[MemoryEvent]:
-602:         """Query events from the log."""
-603:         if not self.event_store:
-604:             raise RuntimeError("Event store not configured")
-605:         return await self.event_store.get_events(
-606:             namespace_id,
-607:             event_types=event_types,
-608:             resource_type=resource_type,
-609:             resource_id=resource_id,
-610:             after=after,
-611:             before=before,
-612:             limit=limit,
-613:             offset=offset,
-614:         )
-615: 
-616:     # =========================================================================
-617:     # Sync checkpoint operations (delegated to relational)
-618:     # =========================================================================
-619: 
-620:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-621:         """Get the last sync checkpoint for a source."""
-622:         if not self.relational:
-623:             raise RuntimeError("Relational backend not configured")
-624:         return await self.relational.get_sync_checkpoint(namespace_id, source)
-625: 
-626:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-627:         """Set the sync checkpoint for a source."""
-628:         if not self.relational:
-629:             raise RuntimeError("Relational backend not configured")
-630:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
+544:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+545:         """Fetch multiple documents in a single query.
+546: 
+547:         Args:
+548:             document_ids: List of document IDs to fetch
+549: 
+550:         Returns:
+551:             Dictionary mapping document ID to Document object
+552:         """
+553:         if not document_ids:
+554:             return {}
+555:         if self.relational:
+556:             return await self.relational.get_documents_batch(document_ids)
+557:         return {}
+558: 
+559:     async def get_neighborhoods_batch(
+560:         self,
+561:         entity_ids: list[UUID],
+562:         *,
+563:         depth: int = 1,
+564:         relationship_types: list[str] | None = None,
+565:         limit_per_entity: int = 20,
+566:     ) -> dict[UUID, dict[str, Any]]:
+567:         """Get neighborhoods for multiple entities in a single query.
+568: 
+569:         Args:
+570:             entity_ids: List of entity IDs
+571:             depth: Max traversal depth
+572:             relationship_types: Optional relationship type filter
+573:             limit_per_entity: Max nodes per entity neighborhood
+574: 
+575:         Returns:
+576:             Dictionary mapping entity ID to neighborhood data
+577:         """
+578:         if not entity_ids:
+579:             return {}
+580:         if self.graph:
+581:             return await self.graph.get_neighborhoods_batch(
+582:                 entity_ids,
+583:                 depth=depth,
+584:                 relationship_types=relationship_types,
+585:                 limit_per_entity=limit_per_entity,
+586:             )
+587:         return {}
+588: 
+589:     # =========================================================================
+590:     # Event operations (delegated to event store)
+591:     # =========================================================================
+592: 
+593:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+594:         """Append an event to the log."""
+595:         if not self.event_store:
+596:             raise RuntimeError("Event store not configured")
+597:         return await self.event_store.append_event(event)
+598: 
+599:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+600:         """Append multiple events in a batch."""
+601:         if not self.event_store:
+602:             raise RuntimeError("Event store not configured")
+603:         return await self.event_store.append_events_batch(events)
+604: 
+605:     async def get_events(
+606:         self,
+607:         namespace_id: UUID,
+608:         *,
+609:         event_types: list[str] | None = None,
+610:         resource_type: str | None = None,
+611:         resource_id: UUID | None = None,
+612:         after: datetime | None = None,
+613:         before: datetime | None = None,
+614:         limit: int = 100,
+615:         offset: int = 0,
+616:     ) -> list[MemoryEvent]:
+617:         """Query events from the log."""
+618:         if not self.event_store:
+619:             raise RuntimeError("Event store not configured")
+620:         return await self.event_store.get_events(
+621:             namespace_id,
+622:             event_types=event_types,
+623:             resource_type=resource_type,
+624:             resource_id=resource_id,
+625:             after=after,
+626:             before=before,
+627:             limit=limit,
+628:             offset=offset,
+629:         )
+630: 
+631:     # =========================================================================
+632:     # Sync checkpoint operations (delegated to relational)
+633:     # =========================================================================
+634: 
+635:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+636:         """Get the last sync checkpoint for a source."""
+637:         if not self.relational:
+638:             raise RuntimeError("Relational backend not configured")
+639:         return await self.relational.get_sync_checkpoint(namespace_id, source)
+640: 
+641:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+642:         """Set the sync checkpoint for a source."""
+643:         if not self.relational:
+644:             raise RuntimeError("Relational backend not configured")
+645:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
 ## File: CLAUDE.md
@@ -19785,313 +19812,348 @@ README.md
 529:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
 530:         )
 531: 
-532:     # =========================================================================
-533:     # Episode operations
-534:     # =========================================================================
-535: 
-536:     async def create_episode(self, episode: Episode) -> Episode:
-537:         """Create an episode node."""
-538:         driver = self._get_driver()
-539: 
-540:         async def _create(tx: AsyncManagedTransaction) -> None:
-541:             query = """
-542:             CREATE (ep:Episode {
-543:                 id: $id,
-544:                 namespace_id: $namespace_id,
-545:                 name: $name,
-546:                 description: $description,
-547:                 occurred_at: $occurred_at,
-548:                 duration_seconds: $duration_seconds,
-549:                 entity_ids: $entity_ids,
-550:                 source_document_ids: $source_document_ids,
-551:                 source_chunk_ids: $source_chunk_ids,
-552:                 metadata: $metadata,
-553:                 created_at: $created_at,
-554:                 updated_at: $updated_at
-555:             })
-556:             """
-557:             await tx.run(
-558:                 query,
-559:                 id=str(episode.id),
-560:                 namespace_id=str(episode.namespace_id),
-561:                 name=episode.name,
-562:                 description=episode.description,
-563:                 occurred_at=episode.occurred_at.isoformat(),
-564:                 duration_seconds=episode.duration_seconds,
-565:                 entity_ids=[str(e) for e in episode.entity_ids],
-566:                 source_document_ids=[str(d) for d in episode.source_document_ids],
-567:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
-568:                 metadata=_serialize_dict(episode.metadata),
-569:                 created_at=episode.created_at.isoformat(),
-570:                 updated_at=episode.updated_at.isoformat(),
-571:             )
-572: 
-573:             # Create links to entities
-574:             if episode.entity_ids:
-575:                 link_query = """
-576:                 MATCH (ep:Episode {id: $episode_id})
-577:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
-578:                 CREATE (ep)-[:INVOLVES]->(e)
-579:                 """
-580:                 await tx.run(
-581:                     link_query,
-582:                     episode_id=str(episode.id),
-583:                     entity_ids=[str(e) for e in episode.entity_ids],
-584:                 )
-585: 
-586:         async with driver.session(database=self._database) as session:
-587:             await session.execute_write(_create)
-588: 
-589:         return episode
-590: 
-591:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-592:         """Get an episode by ID."""
-593:         driver = self._get_driver()
-594: 
-595:         async with driver.session(database=self._database) as session:
-596:             result = await session.run(
-597:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
-598:                 id=str(episode_id),
-599:             )
-600:             record = await result.single()
-601:             if record:
-602:                 return self._record_to_episode(record["ep"])
-603:             return None
-604: 
-605:     async def list_episodes(
-606:         self,
-607:         namespace_id: UUID,
-608:         *,
-609:         start_time: datetime | None = None,
-610:         end_time: datetime | None = None,
-611:         limit: int = 100,
-612:     ) -> list[Episode]:
-613:         """List episodes in a time range."""
-614:         driver = self._get_driver()
-615: 
-616:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
-617:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
-618:         conditions = []
-619: 
-620:         if start_time:
-621:             conditions.append("ep.occurred_at >= $start_time")
-622:             params["start_time"] = start_time.isoformat()
-623:         if end_time:
-624:             conditions.append("ep.occurred_at <= $end_time")
-625:             params["end_time"] = end_time.isoformat()
-626: 
-627:         if conditions:
-628:             query += " WHERE " + " AND ".join(conditions)
+532:     async def list_relationships(
+533:         self,
+534:         namespace_id: UUID,
+535:         *,
+536:         relationship_type: str | None = None,
+537:         limit: int = 1000,
+538:         offset: int = 0,
+539:     ) -> list[Relationship]:
+540:         """List all relationships in a namespace."""
+541:         driver = self._get_driver()
+542: 
+543:         # Build relationship type filter
+544:         rel_filter = f":{relationship_type}" if relationship_type else ""
+545: 
+546:         query = f"""
+547:         MATCH (source)-[r{rel_filter}]->(target)
+548:         WHERE r.namespace_id = $namespace_id
+549:         RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+550:         ORDER BY r.created_at DESC
+551:         SKIP $offset
+552:         LIMIT $limit
+553:         """
+554: 
+555:         async with driver.session(database=self._database) as session:
+556:             result = await session.run(
+557:                 query,
+558:                 namespace_id=str(namespace_id),
+559:                 offset=offset,
+560:                 limit=limit,
+561:             )
+562:             records = await result.data()
+563:             return [
+564:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+565:             ]
+566: 
+567:     # =========================================================================
+568:     # Episode operations
+569:     # =========================================================================
+570: 
+571:     async def create_episode(self, episode: Episode) -> Episode:
+572:         """Create an episode node."""
+573:         driver = self._get_driver()
+574: 
+575:         async def _create(tx: AsyncManagedTransaction) -> None:
+576:             query = """
+577:             CREATE (ep:Episode {
+578:                 id: $id,
+579:                 namespace_id: $namespace_id,
+580:                 name: $name,
+581:                 description: $description,
+582:                 occurred_at: $occurred_at,
+583:                 duration_seconds: $duration_seconds,
+584:                 entity_ids: $entity_ids,
+585:                 source_document_ids: $source_document_ids,
+586:                 source_chunk_ids: $source_chunk_ids,
+587:                 metadata: $metadata,
+588:                 created_at: $created_at,
+589:                 updated_at: $updated_at
+590:             })
+591:             """
+592:             await tx.run(
+593:                 query,
+594:                 id=str(episode.id),
+595:                 namespace_id=str(episode.namespace_id),
+596:                 name=episode.name,
+597:                 description=episode.description,
+598:                 occurred_at=episode.occurred_at.isoformat(),
+599:                 duration_seconds=episode.duration_seconds,
+600:                 entity_ids=[str(e) for e in episode.entity_ids],
+601:                 source_document_ids=[str(d) for d in episode.source_document_ids],
+602:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
+603:                 metadata=_serialize_dict(episode.metadata),
+604:                 created_at=episode.created_at.isoformat(),
+605:                 updated_at=episode.updated_at.isoformat(),
+606:             )
+607: 
+608:             # Create links to entities
+609:             if episode.entity_ids:
+610:                 link_query = """
+611:                 MATCH (ep:Episode {id: $episode_id})
+612:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
+613:                 CREATE (ep)-[:INVOLVES]->(e)
+614:                 """
+615:                 await tx.run(
+616:                     link_query,
+617:                     episode_id=str(episode.id),
+618:                     entity_ids=[str(e) for e in episode.entity_ids],
+619:                 )
+620: 
+621:         async with driver.session(database=self._database) as session:
+622:             await session.execute_write(_create)
+623: 
+624:         return episode
+625: 
+626:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+627:         """Get an episode by ID."""
+628:         driver = self._get_driver()
 629: 
-630:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
-631:         params["limit"] = limit
-632: 
-633:         async with driver.session(database=self._database) as session:
-634:             result = await session.run(query, **params)
-635:             records = await result.data()
-636:             return [self._record_to_episode(r["ep"]) for r in records]
-637: 
-638:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
-639:         """Convert a Neo4j node to a domain Episode."""
-640:         return Episode(
-641:             id=UUID(node["id"]),
-642:             namespace_id=UUID(node["namespace_id"]),
-643:             name=node["name"],
-644:             description=node.get("description", ""),
-645:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
-646:             duration_seconds=node.get("duration_seconds"),
-647:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
-648:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-649:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
-650:             metadata=_deserialize_dict(node.get("metadata")),
-651:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
-652:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
-653:         )
+630:         async with driver.session(database=self._database) as session:
+631:             result = await session.run(
+632:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
+633:                 id=str(episode_id),
+634:             )
+635:             record = await result.single()
+636:             if record:
+637:                 return self._record_to_episode(record["ep"])
+638:             return None
+639: 
+640:     async def list_episodes(
+641:         self,
+642:         namespace_id: UUID,
+643:         *,
+644:         start_time: datetime | None = None,
+645:         end_time: datetime | None = None,
+646:         limit: int = 100,
+647:     ) -> list[Episode]:
+648:         """List episodes in a time range."""
+649:         driver = self._get_driver()
+650: 
+651:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
+652:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+653:         conditions = []
 654: 
-655:     # =========================================================================
-656:     # Graph traversal
-657:     # =========================================================================
-658: 
-659:     async def find_paths(
-660:         self,
-661:         namespace_id: UUID,
-662:         source_entity_id: UUID,
-663:         target_entity_id: UUID,
-664:         *,
-665:         max_depth: int = 3,
-666:         relationship_types: list[str] | None = None,
-667:     ) -> list[list[dict[str, Any]]]:
-668:         """Find paths between two entities."""
-669:         driver = self._get_driver()
-670: 
-671:         rel_filter = ""
-672:         if relationship_types:
-673:             rel_filter = ":" + "|".join(relationship_types)
-674: 
-675:         query = f"""
-676:         MATCH path = shortestPath(
-677:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
-678:         )
-679:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
-680:         RETURN path
-681:         LIMIT 10
-682:         """
-683: 
-684:         async with driver.session(database=self._database) as session:
-685:             result = await session.run(
-686:                 query,
-687:                 source_id=str(source_entity_id),
-688:                 target_id=str(target_entity_id),
-689:                 namespace_id=str(namespace_id),
-690:             )
-691:             records = await result.data()
-692: 
-693:             paths = []
-694:             for record in records:
-695:                 path = record["path"]
-696:                 path_elements = []
-697:                 for element in path:
-698:                     if hasattr(element, "items"):  # Node
-699:                         path_elements.append({"type": "node", "data": dict(element)})
-700:                     else:  # Relationship
-701:                         path_elements.append({"type": "relationship", "data": dict(element)})
-702:                 paths.append(path_elements)
-703: 
-704:             return paths
+655:         if start_time:
+656:             conditions.append("ep.occurred_at >= $start_time")
+657:             params["start_time"] = start_time.isoformat()
+658:         if end_time:
+659:             conditions.append("ep.occurred_at <= $end_time")
+660:             params["end_time"] = end_time.isoformat()
+661: 
+662:         if conditions:
+663:             query += " WHERE " + " AND ".join(conditions)
+664: 
+665:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
+666:         params["limit"] = limit
+667: 
+668:         async with driver.session(database=self._database) as session:
+669:             result = await session.run(query, **params)
+670:             records = await result.data()
+671:             return [self._record_to_episode(r["ep"]) for r in records]
+672: 
+673:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
+674:         """Convert a Neo4j node to a domain Episode."""
+675:         return Episode(
+676:             id=UUID(node["id"]),
+677:             namespace_id=UUID(node["namespace_id"]),
+678:             name=node["name"],
+679:             description=node.get("description", ""),
+680:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
+681:             duration_seconds=node.get("duration_seconds"),
+682:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
+683:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+684:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+685:             metadata=_deserialize_dict(node.get("metadata")),
+686:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+687:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+688:         )
+689: 
+690:     # =========================================================================
+691:     # Graph traversal
+692:     # =========================================================================
+693: 
+694:     async def find_paths(
+695:         self,
+696:         namespace_id: UUID,
+697:         source_entity_id: UUID,
+698:         target_entity_id: UUID,
+699:         *,
+700:         max_depth: int = 3,
+701:         relationship_types: list[str] | None = None,
+702:     ) -> list[list[dict[str, Any]]]:
+703:         """Find paths between two entities."""
+704:         driver = self._get_driver()
 705: 
-706:     async def get_neighborhood(
-707:         self,
-708:         entity_id: UUID,
-709:         *,
-710:         depth: int = 1,
-711:         relationship_types: list[str] | None = None,
-712:         limit: int = 50,
-713:     ) -> dict[str, Any]:
-714:         """Get the neighborhood of an entity up to a certain depth."""
-715:         driver = self._get_driver()
-716: 
-717:         rel_filter = ""
-718:         if relationship_types:
-719:             rel_filter = ":" + "|".join(relationship_types)
-720: 
-721:         query = f"""
-722:         MATCH (center:Entity {{id: $entity_id}})
-723:         CALL apoc.path.subgraphAll(center, {{
-724:             maxLevel: {depth},
-725:             relationshipFilter: '{rel_filter.lstrip(":")}',
-726:             limit: $limit
-727:         }})
-728:         YIELD nodes, relationships
-729:         RETURN nodes, relationships
-730:         """
-731: 
-732:         # Fallback query if APOC is not available
-733:         fallback_query = f"""
-734:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
-735:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
-736:         LIMIT $limit
-737:         """
+706:         rel_filter = ""
+707:         if relationship_types:
+708:             rel_filter = ":" + "|".join(relationship_types)
+709: 
+710:         query = f"""
+711:         MATCH path = shortestPath(
+712:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+713:         )
+714:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+715:         RETURN path
+716:         LIMIT 10
+717:         """
+718: 
+719:         async with driver.session(database=self._database) as session:
+720:             result = await session.run(
+721:                 query,
+722:                 source_id=str(source_entity_id),
+723:                 target_id=str(target_entity_id),
+724:                 namespace_id=str(namespace_id),
+725:             )
+726:             records = await result.data()
+727: 
+728:             paths = []
+729:             for record in records:
+730:                 path = record["path"]
+731:                 path_elements = []
+732:                 for element in path:
+733:                     if hasattr(element, "items"):  # Node
+734:                         path_elements.append({"type": "node", "data": dict(element)})
+735:                     else:  # Relationship
+736:                         path_elements.append({"type": "relationship", "data": dict(element)})
+737:                 paths.append(path_elements)
 738: 
-739:         async with driver.session(database=self._database) as session:
-740:             try:
-741:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
-742:                 record = await result.single()
-743:             except Exception:
-744:                 # Fallback if APOC not available
-745:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
-746:                 record = await result.single()
-747: 
-748:             if record:
-749:                 nodes = [dict(n) for n in record.get("nodes", [])]
-750:                 relationships = [dict(r) for r in record.get("relationships", [])]
-751:                 return {"entities": nodes, "relationships": relationships}
-752: 
-753:             return {"entities": [], "relationships": []}
-754: 
-755:     async def get_neighborhoods_batch(
-756:         self,
-757:         entity_ids: list[UUID],
-758:         *,
-759:         depth: int = 1,
-760:         relationship_types: list[str] | None = None,
-761:         limit_per_entity: int = 20,
-762:     ) -> dict[UUID, dict[str, Any]]:
-763:         """Get neighborhoods for multiple entities in parallel.
-764: 
-765:         Args:
-766:             entity_ids: List of entity IDs
-767:             depth: Max traversal depth
-768:             relationship_types: Optional relationship type filter
-769:             limit_per_entity: Max nodes per entity neighborhood
-770: 
-771:         Returns:
-772:             Dictionary mapping entity ID to neighborhood data
-773:         """
-774:         if not entity_ids:
-775:             return {}
-776: 
-777:         driver = self._get_driver()
-778:         id_strings = [str(eid) for eid in entity_ids]
-779: 
-780:         rel_filter = ""
-781:         if relationship_types:
-782:             rel_filter = ":" + "|".join(relationship_types)
-783: 
-784:         # Use UNWIND to process all entities in a single query
-785:         query = f"""
-786:         UNWIND $entity_ids AS eid
-787:         MATCH (center:Entity {{id: eid}})
-788:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-789:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
-790:         RETURN eid, neighbors, rels
-791:         """
-792: 
-793:         async with driver.session(database=self._database) as session:
-794:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
-795:             records = await result.data()
-796: 
-797:             neighborhoods = {}
-798:             for record in records:
-799:                 eid = UUID(record["eid"])
-800:                 nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
-801:                 relationships = []
-802:                 for rel_list in record.get("rels") or []:
-803:                     if rel_list:
-804:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
-805:                             if r:
-806:                                 relationships.append(dict(r))
-807:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
-808: 
-809:             return neighborhoods
-810: 
-811:     async def search_entities_by_attribute(
-812:         self,
-813:         namespace_id: UUID,
-814:         attribute_name: str,
-815:         attribute_value: Any,
-816:         *,
-817:         limit: int = 100,
-818:     ) -> list[Entity]:
-819:         """Search entities by attribute value."""
-820:         driver = self._get_driver()
-821: 
-822:         query = """
-823:         MATCH (e:Entity {namespace_id: $namespace_id})
-824:         WHERE e.attributes[$attribute_name] = $attribute_value
-825:         RETURN e
-826:         LIMIT $limit
-827:         """
-828: 
-829:         async with driver.session(database=self._database) as session:
-830:             result = await session.run(
-831:                 query,
-832:                 namespace_id=str(namespace_id),
-833:                 attribute_name=attribute_name,
-834:                 attribute_value=attribute_value,
-835:                 limit=limit,
-836:             )
-837:             records = await result.data()
-838:             return [self._record_to_entity(r["e"]) for r in records]
+739:             return paths
+740: 
+741:     async def get_neighborhood(
+742:         self,
+743:         entity_id: UUID,
+744:         *,
+745:         depth: int = 1,
+746:         relationship_types: list[str] | None = None,
+747:         limit: int = 50,
+748:     ) -> dict[str, Any]:
+749:         """Get the neighborhood of an entity up to a certain depth."""
+750:         driver = self._get_driver()
+751: 
+752:         rel_filter = ""
+753:         if relationship_types:
+754:             rel_filter = ":" + "|".join(relationship_types)
+755: 
+756:         query = f"""
+757:         MATCH (center:Entity {{id: $entity_id}})
+758:         CALL apoc.path.subgraphAll(center, {{
+759:             maxLevel: {depth},
+760:             relationshipFilter: '{rel_filter.lstrip(":")}',
+761:             limit: $limit
+762:         }})
+763:         YIELD nodes, relationships
+764:         RETURN nodes, relationships
+765:         """
+766: 
+767:         # Fallback query if APOC is not available
+768:         fallback_query = f"""
+769:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+770:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+771:         LIMIT $limit
+772:         """
+773: 
+774:         async with driver.session(database=self._database) as session:
+775:             try:
+776:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
+777:                 record = await result.single()
+778:             except Exception:
+779:                 # Fallback if APOC not available
+780:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
+781:                 record = await result.single()
+782: 
+783:             if record:
+784:                 nodes = [dict(n) for n in record.get("nodes", [])]
+785:                 relationships = [dict(r) for r in record.get("relationships", [])]
+786:                 return {"entities": nodes, "relationships": relationships}
+787: 
+788:             return {"entities": [], "relationships": []}
+789: 
+790:     async def get_neighborhoods_batch(
+791:         self,
+792:         entity_ids: list[UUID],
+793:         *,
+794:         depth: int = 1,
+795:         relationship_types: list[str] | None = None,
+796:         limit_per_entity: int = 20,
+797:     ) -> dict[UUID, dict[str, Any]]:
+798:         """Get neighborhoods for multiple entities in parallel.
+799: 
+800:         Args:
+801:             entity_ids: List of entity IDs
+802:             depth: Max traversal depth
+803:             relationship_types: Optional relationship type filter
+804:             limit_per_entity: Max nodes per entity neighborhood
+805: 
+806:         Returns:
+807:             Dictionary mapping entity ID to neighborhood data
+808:         """
+809:         if not entity_ids:
+810:             return {}
+811: 
+812:         driver = self._get_driver()
+813:         id_strings = [str(eid) for eid in entity_ids]
+814: 
+815:         rel_filter = ""
+816:         if relationship_types:
+817:             rel_filter = ":" + "|".join(relationship_types)
+818: 
+819:         # Use UNWIND to process all entities in a single query
+820:         query = f"""
+821:         UNWIND $entity_ids AS eid
+822:         MATCH (center:Entity {{id: eid}})
+823:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+824:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+825:         RETURN eid, neighbors, rels
+826:         """
+827: 
+828:         async with driver.session(database=self._database) as session:
+829:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+830:             records = await result.data()
+831: 
+832:             neighborhoods = {}
+833:             for record in records:
+834:                 eid = UUID(record["eid"])
+835:                 nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
+836:                 relationships = []
+837:                 for rel_list in record.get("rels") or []:
+838:                     if rel_list:
+839:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+840:                             if r:
+841:                                 relationships.append(dict(r))
+842:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+843: 
+844:             return neighborhoods
+845: 
+846:     async def search_entities_by_attribute(
+847:         self,
+848:         namespace_id: UUID,
+849:         attribute_name: str,
+850:         attribute_value: Any,
+851:         *,
+852:         limit: int = 100,
+853:     ) -> list[Entity]:
+854:         """Search entities by attribute value."""
+855:         driver = self._get_driver()
+856: 
+857:         query = """
+858:         MATCH (e:Entity {namespace_id: $namespace_id})
+859:         WHERE e.attributes[$attribute_name] = $attribute_value
+860:         RETURN e
+861:         LIMIT $limit
+862:         """
+863: 
+864:         async with driver.session(database=self._database) as session:
+865:             result = await session.run(
+866:                 query,
+867:                 namespace_id=str(namespace_id),
+868:                 attribute_name=attribute_name,
+869:                 attribute_value=attribute_value,
+870:                 limit=limit,
+871:             )
+872:             records = await result.data()
+873:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
 ## File: tests/unit/test_api.py
@@ -20932,478 +20994,6 @@ README.md
 26:     "RecallResult",
 27:     "SearchMode",
 28: ]
-````
-
-## File: src/khora/pipelines/flows/ingest.py
-````python
-  1: """Two-phase ingestion flow for Khora Memory Lake.
-  2: 
-  3: Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
-  4: Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph
-  5: Phase 3 (Expansion, optional): Semantic expansion, entity unification, relationship inference
-  6: 
-  7: Supports parallel document processing with configurable concurrency.
-  8: """
-  9: 
- 10: from __future__ import annotations
- 11: 
- 12: import asyncio
- 13: import hashlib
- 14: from typing import TYPE_CHECKING, Any
- 15: from uuid import UUID
- 16: 
- 17: from loguru import logger
- 18: from prefect import flow, task
- 19: from prefect.cache_policies import NO_CACHE
- 20: 
- 21: from ..registry import pipeline
- 22: 
- 23: if TYPE_CHECKING:
- 24:     from khora.core.models import Document
- 25:     from khora.extraction.skills import ExpertiseConfig
- 26:     from khora.storage import StorageCoordinator
- 27: 
- 28: 
- 29: @task(name="compute_checksum")
- 30: def compute_checksum(content: str) -> str:
- 31:     """Compute SHA-256 checksum of content."""
- 32:     return hashlib.sha256(content.encode("utf-8")).hexdigest()
- 33: 
- 34: 
- 35: @task(name="stage_document", cache_policy=NO_CACHE)
- 36: async def stage_document(
- 37:     doc_input: dict[str, Any],
- 38:     namespace_id: UUID,
- 39:     storage: StorageCoordinator,
- 40: ) -> Document | None:
- 41:     """Stage a document for processing.
- 42: 
- 43:     Checks if document already exists (by checksum) and creates it if new.
- 44: 
- 45:     Returns:
- 46:         Document if new or updated, None if unchanged
- 47:     """
- 48:     from khora.core.models import Document, DocumentMetadata
- 49: 
- 50:     content = doc_input.get("content", "")
- 51:     checksum = compute_checksum(content)
- 52: 
- 53:     # Check for existing document - skip if any document with same checksum exists
- 54:     existing = await storage.get_document_by_checksum(namespace_id, checksum)
- 55:     if existing:
- 56:         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
- 57:         return None
- 58: 
- 59:     # Create document
- 60:     metadata = DocumentMetadata(
- 61:         source=doc_input.get("source", ""),
- 62:         source_type=doc_input.get("source_type", "manual"),
- 63:         content_type=doc_input.get("content_type", "text/plain"),
- 64:         title=doc_input.get("title", ""),
- 65:         author=doc_input.get("author", ""),
- 66:         language=doc_input.get("language", "en"),
- 67:         checksum=checksum,
- 68:         size_bytes=len(content.encode("utf-8")),
- 69:         custom=doc_input.get("metadata", {}),
- 70:     )
- 71: 
- 72:     document = Document(
- 73:         namespace_id=namespace_id,
- 74:         content=content,
- 75:         metadata=metadata,
- 76:     )
- 77: 
- 78:     return await storage.create_document(document)
- 79: 
- 80: 
- 81: @task(name="process_document", cache_policy=NO_CACHE)
- 82: async def process_document(
- 83:     document: Document,
- 84:     storage: StorageCoordinator,
- 85:     *,
- 86:     chunk_strategy: str = "semantic",
- 87:     chunk_size: int = 512,
- 88:     embedding_model: str = "text-embedding-3-small",
- 89:     extraction_model: str = "gpt-4o-mini",
- 90:     skill_name: str = "general_entities",
- 91:     expertise: ExpertiseConfig | str | None = None,
- 92:     max_concurrent_extractions: int = 10,
- 93:     enable_expansion: bool = False,
- 94:     extraction_context: dict[str, Any] | None = None,
- 95: ) -> dict[str, Any]:
- 96:     """Process a document through the enrichment pipeline.
- 97: 
- 98:     Steps:
- 99:     1. Chunk the document
-100:     2. Generate embeddings for chunks (batched)
-101:     3. Extract entities and relationships (parallel)
-102:     4. (Optional) Semantic expansion - unify entities, infer relationships
-103:     5. Store everything (batched)
-104: 
-105:     Args:
-106:         document: Document to process
-107:         storage: Storage coordinator
-108:         chunk_strategy: Chunking strategy
-109:         chunk_size: Target chunk size
-110:         embedding_model: Model for embeddings
-111:         extraction_model: Model for extraction
-112:         skill_name: Legacy skill name (ignored if expertise provided)
-113:         expertise: ExpertiseConfig, expertise name, or file path
-114:         max_concurrent_extractions: Maximum concurrent LLM extractions
-115:         enable_expansion: Whether to run semantic expansion
-116:         extraction_context: Context dict for prompt template rendering
-117:     """
-118:     from ..tasks import chunk_document, embed_chunks, extract_entities
-119: 
-120:     # Resolve expertise if needed
-121:     resolved_expertise: ExpertiseConfig | None = None
-122:     if expertise is not None:
-123:         from khora.extraction.skills import ExpertiseConfig as EC
-124:         from khora.extraction.skills import load_expertise
-125: 
-126:         if isinstance(expertise, EC):
-127:             resolved_expertise = expertise
-128:         elif isinstance(expertise, str):
-129:             try:
-130:                 resolved_expertise = load_expertise(expertise)
-131:             except Exception:
-132:                 pass
-133: 
-134:     # Check if expansion is enabled in expertise config
-135:     if resolved_expertise and resolved_expertise.expansion.enabled:
-136:         enable_expansion = True
-137: 
-138:     # Mark as processing
-139:     document.mark_processing()
-140:     await storage.update_document(document)
-141: 
-142:     try:
-143:         # Step 1: Chunk
-144:         chunks = await chunk_document(
-145:             document,
-146:             strategy=chunk_strategy,
-147:             chunk_size=chunk_size,
-148:         )
-149:         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
-150: 
-151:         # Step 2: Embed (already batched internally)
-152:         chunks = await embed_chunks(chunks, model=embedding_model)
-153:         logger.debug(f"Document {document.id}: generated embeddings")
-154: 
-155:         # Step 3: Extract entities (parallel extraction across chunks)
-156:         entities, relationships = await extract_entities(
-157:             chunks,
-158:             skill_name=skill_name,
-159:             expertise=resolved_expertise,
-160:             model=extraction_model,
-161:             max_concurrent=max_concurrent_extractions,
-162:             context=extraction_context,
-163:         )
-164:         logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
-165: 
-166:         # Step 4 (Optional): Semantic expansion
-167:         inferred_relationships = []
-168:         if enable_expansion and resolved_expertise:
-169:             from khora.extraction.expansion import SemanticExpander
-170: 
-171:             # Determine inference mode from expertise config
-172:             inference_mode = resolved_expertise.expansion.inference_mode
-173: 
-174:             # For incremental mode, fetch existing entities/relationships from storage
-175:             # to enable cross-document inference
-176:             expansion_entities = list(entities)
-177:             expansion_relationships = list(relationships)
-178: 
-179:             if inference_mode == "incremental":
-180:                 # Query existing entities and relationships from the namespace
-181:                 existing_entities = await storage.list_entities(document.namespace_id, limit=1000)
-182:                 existing_relationships = await storage.list_relationships(document.namespace_id, limit=5000)
-183: 
-184:                 # Add existing data to expansion context
-185:                 expansion_entities.extend(existing_entities)
-186:                 expansion_relationships.extend(existing_relationships)
-187: 
-188:                 logger.debug(
-189:                     f"Document {document.id}: incremental mode - added {len(existing_entities)} existing entities, "
-190:                     f"{len(existing_relationships)} existing relationships to expansion context"
-191:                 )
-192: 
-193:             # For batch mode, skip inference (only do unification on current doc)
-194:             # Inference will be run separately after all documents are processed
-195:             enable_inference = inference_mode != "batch" and inference_mode != "none"
-196: 
-197:             expander = SemanticExpander(
-198:                 expertise=resolved_expertise,
-199:                 enable_inference=enable_inference,
-200:             )
-201:             expansion_result = await expander.expand(
-202:                 entities=expansion_entities,
-203:                 relationships=expansion_relationships,
-204:                 namespace_id=document.namespace_id,
-205:             )
-206: 
-207:             # Only keep entities from current document (not the existing ones we added)
-208:             # The existing entities are already stored
-209:             if inference_mode == "incremental":
-210:                 current_entity_ids = {e.id for e in entities}
-211:                 entities = [e for e in expansion_result.entities if e.id in current_entity_ids]
-212:             else:
-213:                 entities = expansion_result.entities
-214: 
-215:             relationships = expansion_result.relationships
-216:             inferred_relationships = expansion_result.inferred_relationships
-217: 
-218:             logger.debug(
-219:                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
-220:                 f"inferred {len(inferred_relationships)} relationships (mode={inference_mode})"
-221:             )
-222: 
-223:         # Step 4: Store chunks (batched)
-224:         await storage.create_chunks_batch(chunks)
-225: 
-226:         # Step 5: Store entities with deduplication
-227:         # Process entities concurrently but with semaphore to avoid overwhelming the DB
-228:         entity_semaphore = asyncio.Semaphore(20)
-229: 
-230:         async def store_entity(entity):
-231:             async with entity_semaphore:
-232:                 existing = await storage.get_entity_by_name(
-233:                     document.namespace_id,
-234:                     entity.name,
-235:                     entity.entity_type.value,
-236:                 )
-237:                 if existing:
-238:                     existing.merge_with(entity)
-239:                     return await storage.update_entity(existing)
-240:                 else:
-241:                     return await storage.create_entity(entity)
-242: 
-243:         await asyncio.gather(*[store_entity(e) for e in entities])
-244: 
-245:         # Step 6: Store relationships concurrently
-246:         async def store_relationship(rel):
-247:             async with entity_semaphore:
-248:                 return await storage.create_relationship(rel)
-249: 
-250:         all_relationships = relationships + inferred_relationships
-251:         if all_relationships:
-252:             await asyncio.gather(*[store_relationship(r) for r in all_relationships])
-253: 
-254:         # Mark as completed
-255:         document.mark_completed(len(chunks), len(entities))
-256:         await storage.update_document(document)
-257: 
-258:         return {
-259:             "document_id": str(document.id),
-260:             "chunks": len(chunks),
-261:             "entities": len(entities),
-262:             "relationships": len(relationships),
-263:             "inferred_relationships": len(inferred_relationships),
-264:         }
-265: 
-266:     except Exception as e:
-267:         document.mark_failed(str(e))
-268:         await storage.update_document(document)
-269:         raise
-270: 
-271: 
-272: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
-273: @flow(name="ingest_documents", log_prints=True)
-274: async def ingest_documents(
-275:     namespace_id: UUID,
-276:     documents: list[dict[str, Any]],
-277:     storage: StorageCoordinator | None = None,
-278:     *,
-279:     skill_name: str = "general_entities",
-280:     expertise: ExpertiseConfig | str | None = None,
-281:     chunk_strategy: str = "semantic",
-282:     chunk_size: int = 512,
-283:     embedding_model: str = "text-embedding-3-small",
-284:     extraction_model: str = "gpt-4o-mini",
-285:     max_concurrent_documents: int = 5,
-286:     max_concurrent_extractions: int = 10,
-287:     enable_expansion: bool = False,
-288:     extraction_context: dict[str, Any] | None = None,
-289:     **kwargs,
-290: ) -> dict[str, Any]:
-291:     """Two-phase document ingestion flow with parallel processing.
-292: 
-293:     Phase 1: Stage documents (checksum-based change detection)
-294:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
-295:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
-296: 
-297:     Args:
-298:         namespace_id: Target namespace
-299:         documents: List of document dicts with 'content' and optional metadata
-300:         storage: StorageCoordinator instance
-301:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
-302:         expertise: ExpertiseConfig, expertise name string, or file path
-303:         chunk_strategy: Chunking strategy
-304:         chunk_size: Target chunk size
-305:         embedding_model: Model for embeddings
-306:         extraction_model: Model for extraction
-307:         max_concurrent_documents: Maximum documents to process in parallel
-308:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
-309:         enable_expansion: Whether to run semantic expansion
-310:         extraction_context: Context dict for prompt template rendering
-311: 
-312:     Returns:
-313:         Summary of ingestion results
-314:     """
-315:     if storage is None:
-316:         raise ValueError("storage is required")
-317: 
-318:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
-319: 
-320:     # Phase 1: Stage documents (can run in parallel too)
-321:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
-322: 
-323:     async def stage_with_limit(doc_input):
-324:         async with staging_semaphore:
-325:             return await stage_document(doc_input, namespace_id, storage)
-326: 
-327:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
-328:     staged_docs = [doc for doc in staged_results if doc is not None]
-329: 
-330:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
-331: 
-332:     if not staged_docs:
-333:         return {
-334:             "total_documents": len(documents),
-335:             "processed_documents": 0,
-336:             "skipped_documents": len(documents),
-337:             "total_chunks": 0,
-338:             "total_entities": 0,
-339:             "total_relationships": 0,
-340:         }
-341: 
-342:     # Phase 2: Process staged documents in parallel with controlled concurrency
-343:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
-344: 
-345:     async def process_with_limit(doc):
-346:         async with doc_semaphore:
-347:             return await process_document(
-348:                 doc,
-349:                 storage,
-350:                 chunk_strategy=chunk_strategy,
-351:                 chunk_size=chunk_size,
-352:                 embedding_model=embedding_model,
-353:                 extraction_model=extraction_model,
-354:                 skill_name=skill_name,
-355:                 expertise=expertise,
-356:                 max_concurrent_extractions=max_concurrent_extractions,
-357:                 enable_expansion=enable_expansion,
-358:                 extraction_context=extraction_context,
-359:             )
-360: 
-361:     results = await asyncio.gather(
-362:         *[process_with_limit(doc) for doc in staged_docs],
-363:         return_exceptions=True,
-364:     )
-365: 
-366:     # Filter out exceptions and count errors
-367:     successful_results = []
-368:     error_count = 0
-369:     for result in results:
-370:         if isinstance(result, Exception):
-371:             logger.error(f"Document processing failed: {result}")
-372:             error_count += 1
-373:         else:
-374:             successful_results.append(result)
-375: 
-376:     # Aggregate results
-377:     total_chunks = sum(r["chunks"] for r in successful_results)
-378:     total_entities = sum(r["entities"] for r in successful_results)
-379:     total_relationships = sum(r["relationships"] for r in successful_results)
-380:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
-381: 
-382:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
-383: 
-384:     return {
-385:         "total_documents": len(documents),
-386:         "processed_documents": len(successful_results),
-387:         "skipped_documents": len(documents) - len(staged_docs),
-388:         "failed_documents": error_count,
-389:         "total_chunks": total_chunks,
-390:         "total_entities": total_entities,
-391:         "total_relationships": total_relationships,
-392:         "total_inferred_relationships": total_inferred,
-393:     }
-394: 
-395: 
-396: @task(name="run_batch_inference", cache_policy=NO_CACHE)
-397: async def run_batch_inference(
-398:     namespace_id: UUID,
-399:     storage: StorageCoordinator,
-400:     expertise: ExpertiseConfig,
-401:     *,
-402:     max_entities: int = 10000,
-403:     max_relationships: int = 50000,
-404: ) -> dict[str, Any]:
-405:     """Run batch inference on the entire namespace.
-406: 
-407:     This should be called after all documents are ingested when using
-408:     inference_mode="batch". It queries all entities and relationships
-409:     from the namespace and runs inference rules to create new relationships.
-410: 
-411:     Args:
-412:         namespace_id: Namespace to run inference on
-413:         storage: Storage coordinator
-414:         expertise: ExpertiseConfig with inference rules
-415:         max_entities: Maximum entities to load
-416:         max_relationships: Maximum relationships to load
-417: 
-418:     Returns:
-419:         Summary of inference results
-420:     """
-421:     from khora.extraction.expansion import SemanticExpander
-422: 
-423:     logger.info(f"Starting batch inference for namespace {namespace_id}")
-424: 
-425:     # Load all entities and relationships from storage
-426:     entities = await storage.list_entities(namespace_id, limit=max_entities)
-427:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
-428: 
-429:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
-430: 
-431:     if not entities:
-432:         return {
-433:             "entities": 0,
-434:             "relationships": 0,
-435:             "inferred_relationships": 0,
-436:         }
-437: 
-438:     # Create expander with inference enabled
-439:     expander = SemanticExpander(
-440:         expertise=expertise,
-441:         enable_unification=False,  # Entities already unified during ingestion
-442:         enable_inference=True,
-443:     )
-444: 
-445:     # Run expansion (inference only)
-446:     expansion_result = await expander.expand(
-447:         entities=entities,
-448:         relationships=relationships,
-449:         namespace_id=namespace_id,
-450:     )
-451: 
-452:     # Store inferred relationships
-453:     inferred_count = 0
-454:     if expansion_result.inferred_relationships:
-455:         for rel in expansion_result.inferred_relationships:
-456:             try:
-457:                 await storage.create_relationship(rel)
-458:                 inferred_count += 1
-459:             except Exception as e:
-460:                 logger.warning(f"Failed to store inferred relationship: {e}")
-461: 
-462:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
-463: 
-464:     return {
-465:         "entities": len(entities),
-466:         "relationships": len(relationships),
-467:         "inferred_relationships": inferred_count,
-468:     }
 ````
 
 ## File: src/khora/query/engine.py
@@ -23258,9 +22848,490 @@ README.md
 131: ]
 ````
 
+## File: src/khora/pipelines/flows/ingest.py
+````python
+  1: """Two-phase ingestion flow for Khora Memory Lake.
+  2: 
+  3: Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
+  4: Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph
+  5: Phase 3 (Expansion, optional): Semantic expansion, entity unification, relationship inference
+  6: 
+  7: Supports parallel document processing with configurable concurrency.
+  8: """
+  9: 
+ 10: from __future__ import annotations
+ 11: 
+ 12: import asyncio
+ 13: import hashlib
+ 14: from typing import TYPE_CHECKING, Any
+ 15: from uuid import UUID
+ 16: 
+ 17: from loguru import logger
+ 18: from prefect import flow, task
+ 19: from prefect.cache_policies import NO_CACHE
+ 20: 
+ 21: from ..registry import pipeline
+ 22: 
+ 23: if TYPE_CHECKING:
+ 24:     from khora.core.models import Document
+ 25:     from khora.extraction.skills import ExpertiseConfig
+ 26:     from khora.storage import StorageCoordinator
+ 27: 
+ 28: 
+ 29: @task(name="compute_checksum")
+ 30: def compute_checksum(content: str) -> str:
+ 31:     """Compute SHA-256 checksum of content."""
+ 32:     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+ 33: 
+ 34: 
+ 35: @task(name="stage_document", cache_policy=NO_CACHE)
+ 36: async def stage_document(
+ 37:     doc_input: dict[str, Any],
+ 38:     namespace_id: UUID,
+ 39:     storage: StorageCoordinator,
+ 40: ) -> Document | None:
+ 41:     """Stage a document for processing.
+ 42: 
+ 43:     Checks if document already exists (by checksum) and creates it if new.
+ 44: 
+ 45:     Returns:
+ 46:         Document if new or updated, None if unchanged
+ 47:     """
+ 48:     from khora.core.models import Document, DocumentMetadata
+ 49: 
+ 50:     content = doc_input.get("content", "")
+ 51:     checksum = compute_checksum(content)
+ 52: 
+ 53:     # Check for existing document - skip if any document with same checksum exists
+ 54:     existing = await storage.get_document_by_checksum(namespace_id, checksum)
+ 55:     if existing:
+ 56:         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
+ 57:         return None
+ 58: 
+ 59:     # Create document
+ 60:     metadata = DocumentMetadata(
+ 61:         source=doc_input.get("source", ""),
+ 62:         source_type=doc_input.get("source_type", "manual"),
+ 63:         content_type=doc_input.get("content_type", "text/plain"),
+ 64:         title=doc_input.get("title", ""),
+ 65:         author=doc_input.get("author", ""),
+ 66:         language=doc_input.get("language", "en"),
+ 67:         checksum=checksum,
+ 68:         size_bytes=len(content.encode("utf-8")),
+ 69:         custom=doc_input.get("metadata", {}),
+ 70:     )
+ 71: 
+ 72:     document = Document(
+ 73:         namespace_id=namespace_id,
+ 74:         content=content,
+ 75:         metadata=metadata,
+ 76:     )
+ 77: 
+ 78:     return await storage.create_document(document)
+ 79: 
+ 80: 
+ 81: @task(name="process_document", cache_policy=NO_CACHE)
+ 82: async def process_document(
+ 83:     document: Document,
+ 84:     storage: StorageCoordinator,
+ 85:     *,
+ 86:     chunk_strategy: str = "semantic",
+ 87:     chunk_size: int = 512,
+ 88:     embedding_model: str = "text-embedding-3-small",
+ 89:     extraction_model: str = "gpt-4o-mini",
+ 90:     skill_name: str = "general_entities",
+ 91:     expertise: ExpertiseConfig | str | None = None,
+ 92:     max_concurrent_extractions: int = 10,
+ 93:     enable_expansion: bool = False,
+ 94:     extraction_context: dict[str, Any] | None = None,
+ 95: ) -> dict[str, Any]:
+ 96:     """Process a document through the enrichment pipeline.
+ 97: 
+ 98:     Steps:
+ 99:     1. Chunk the document
+100:     2. Generate embeddings for chunks (batched)
+101:     3. Extract entities and relationships (parallel)
+102:     4. (Optional) Semantic expansion - unify entities, infer relationships
+103:     5. Store everything (batched)
+104: 
+105:     Args:
+106:         document: Document to process
+107:         storage: Storage coordinator
+108:         chunk_strategy: Chunking strategy
+109:         chunk_size: Target chunk size
+110:         embedding_model: Model for embeddings
+111:         extraction_model: Model for extraction
+112:         skill_name: Legacy skill name (ignored if expertise provided)
+113:         expertise: ExpertiseConfig, expertise name, or file path
+114:         max_concurrent_extractions: Maximum concurrent LLM extractions
+115:         enable_expansion: Whether to run semantic expansion
+116:         extraction_context: Context dict for prompt template rendering
+117:     """
+118:     from ..tasks import chunk_document, embed_chunks, extract_entities
+119: 
+120:     # Resolve expertise if needed
+121:     resolved_expertise: ExpertiseConfig | None = None
+122:     if expertise is not None:
+123:         from khora.extraction.skills import ExpertiseConfig as EC
+124:         from khora.extraction.skills import load_expertise
+125: 
+126:         if isinstance(expertise, EC):
+127:             resolved_expertise = expertise
+128:         elif isinstance(expertise, str):
+129:             try:
+130:                 resolved_expertise = load_expertise(expertise)
+131:             except Exception:
+132:                 pass
+133: 
+134:     # Check if expansion is enabled in expertise config
+135:     if resolved_expertise and resolved_expertise.expansion.enabled:
+136:         enable_expansion = True
+137: 
+138:     # Mark as processing
+139:     document.mark_processing()
+140:     await storage.update_document(document)
+141: 
+142:     try:
+143:         # Step 1: Chunk
+144:         chunks = await chunk_document(
+145:             document,
+146:             strategy=chunk_strategy,
+147:             chunk_size=chunk_size,
+148:         )
+149:         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
+150: 
+151:         # Step 2: Embed (already batched internally)
+152:         chunks = await embed_chunks(chunks, model=embedding_model)
+153:         logger.debug(f"Document {document.id}: generated embeddings")
+154: 
+155:         # Step 3: Extract entities (parallel extraction across chunks)
+156:         entities, relationships = await extract_entities(
+157:             chunks,
+158:             skill_name=skill_name,
+159:             expertise=resolved_expertise,
+160:             model=extraction_model,
+161:             max_concurrent=max_concurrent_extractions,
+162:             context=extraction_context,
+163:         )
+164:         logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
+165: 
+166:         # Step 4 (Optional): Semantic expansion
+167:         inferred_relationships = []
+168:         if enable_expansion and resolved_expertise:
+169:             from khora.extraction.expansion import SemanticExpander
+170: 
+171:             # Determine inference mode from expertise config
+172:             inference_mode = resolved_expertise.expansion.inference_mode
+173: 
+174:             # For incremental mode, fetch existing entities/relationships from storage
+175:             # to enable cross-document inference
+176:             expansion_entities = list(entities)
+177:             expansion_relationships = list(relationships)
+178: 
+179:             if inference_mode == "incremental":
+180:                 # Query existing entities and relationships from the namespace
+181:                 existing_entities = await storage.list_entities(document.namespace_id, limit=1000)
+182:                 existing_relationships = await storage.list_relationships(document.namespace_id, limit=5000)
+183: 
+184:                 # Add existing data to expansion context
+185:                 expansion_entities.extend(existing_entities)
+186:                 expansion_relationships.extend(existing_relationships)
+187: 
+188:                 logger.debug(
+189:                     f"Document {document.id}: incremental mode - added {len(existing_entities)} existing entities, "
+190:                     f"{len(existing_relationships)} existing relationships to expansion context"
+191:                 )
+192: 
+193:             # For batch mode, skip inference (only do unification on current doc)
+194:             # Inference will be run separately after all documents are processed
+195:             enable_inference = inference_mode != "batch" and inference_mode != "none"
+196: 
+197:             expander = SemanticExpander(
+198:                 expertise=resolved_expertise,
+199:                 enable_inference=enable_inference,
+200:             )
+201:             expansion_result = await expander.expand(
+202:                 entities=expansion_entities,
+203:                 relationships=expansion_relationships,
+204:                 namespace_id=document.namespace_id,
+205:             )
+206: 
+207:             # Only keep entities from current document (not the existing ones we added)
+208:             # The existing entities are already stored
+209:             if inference_mode == "incremental":
+210:                 current_entity_ids = {e.id for e in entities}
+211:                 entities = [e for e in expansion_result.entities if e.id in current_entity_ids]
+212:             else:
+213:                 entities = expansion_result.entities
+214: 
+215:             relationships = expansion_result.relationships
+216:             inferred_relationships = expansion_result.inferred_relationships
+217: 
+218:             logger.debug(
+219:                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
+220:                 f"inferred {len(inferred_relationships)} relationships (mode={inference_mode})"
+221:             )
+222: 
+223:         # Step 4: Store chunks (batched)
+224:         await storage.create_chunks_batch(chunks)
+225: 
+226:         # Step 5: Store entities with deduplication
+227:         # Process entities concurrently but with semaphore to avoid overwhelming the DB
+228:         entity_semaphore = asyncio.Semaphore(20)
+229: 
+230:         async def store_entity(entity):
+231:             async with entity_semaphore:
+232:                 existing = await storage.get_entity_by_name(
+233:                     document.namespace_id,
+234:                     entity.name,
+235:                     entity.entity_type.value,
+236:                 )
+237:                 if existing:
+238:                     existing.merge_with(entity)
+239:                     return await storage.update_entity(existing)
+240:                 else:
+241:                     return await storage.create_entity(entity)
+242: 
+243:         await asyncio.gather(*[store_entity(e) for e in entities])
+244: 
+245:         # Step 6: Store relationships concurrently
+246:         async def store_relationship(rel):
+247:             async with entity_semaphore:
+248:                 return await storage.create_relationship(rel)
+249: 
+250:         all_relationships = relationships + inferred_relationships
+251:         if all_relationships:
+252:             await asyncio.gather(*[store_relationship(r) for r in all_relationships])
+253: 
+254:         # Mark as completed
+255:         document.mark_completed(len(chunks), len(entities))
+256:         await storage.update_document(document)
+257: 
+258:         return {
+259:             "document_id": str(document.id),
+260:             "chunks": len(chunks),
+261:             "entities": len(entities),
+262:             "relationships": len(relationships),
+263:             "inferred_relationships": len(inferred_relationships),
+264:         }
+265: 
+266:     except Exception as e:
+267:         document.mark_failed(str(e))
+268:         await storage.update_document(document)
+269:         raise
+270: 
+271: 
+272: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
+273: @flow(name="ingest_documents", log_prints=True)
+274: async def ingest_documents(
+275:     namespace_id: UUID,
+276:     documents: list[dict[str, Any]],
+277:     storage: StorageCoordinator | None = None,
+278:     *,
+279:     skill_name: str = "general_entities",
+280:     expertise: ExpertiseConfig | str | None = None,
+281:     chunk_strategy: str = "semantic",
+282:     chunk_size: int = 512,
+283:     embedding_model: str = "text-embedding-3-small",
+284:     extraction_model: str = "gpt-4o-mini",
+285:     max_concurrent_documents: int = 5,
+286:     max_concurrent_extractions: int = 10,
+287:     enable_expansion: bool = False,
+288:     extraction_context: dict[str, Any] | None = None,
+289:     **kwargs,
+290: ) -> dict[str, Any]:
+291:     """Two-phase document ingestion flow with parallel processing.
+292: 
+293:     Phase 1: Stage documents (checksum-based change detection)
+294:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
+295:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
+296: 
+297:     Args:
+298:         namespace_id: Target namespace
+299:         documents: List of document dicts with 'content' and optional metadata
+300:         storage: StorageCoordinator instance
+301:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
+302:         expertise: ExpertiseConfig, expertise name string, or file path
+303:         chunk_strategy: Chunking strategy
+304:         chunk_size: Target chunk size
+305:         embedding_model: Model for embeddings
+306:         extraction_model: Model for extraction
+307:         max_concurrent_documents: Maximum documents to process in parallel
+308:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
+309:         enable_expansion: Whether to run semantic expansion
+310:         extraction_context: Context dict for prompt template rendering
+311: 
+312:     Returns:
+313:         Summary of ingestion results
+314:     """
+315:     if storage is None:
+316:         raise ValueError("storage is required")
+317: 
+318:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
+319: 
+320:     # Phase 1: Stage documents (can run in parallel too)
+321:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
+322: 
+323:     async def stage_with_limit(doc_input):
+324:         async with staging_semaphore:
+325:             return await stage_document(doc_input, namespace_id, storage)
+326: 
+327:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+328:     staged_docs = [doc for doc in staged_results if doc is not None]
+329: 
+330:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
+331: 
+332:     if not staged_docs:
+333:         return {
+334:             "total_documents": len(documents),
+335:             "processed_documents": 0,
+336:             "skipped_documents": len(documents),
+337:             "total_chunks": 0,
+338:             "total_entities": 0,
+339:             "total_relationships": 0,
+340:         }
+341: 
+342:     # Phase 2: Process staged documents in parallel with controlled concurrency
+343:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+344: 
+345:     async def process_with_limit(doc):
+346:         async with doc_semaphore:
+347:             return await process_document(
+348:                 doc,
+349:                 storage,
+350:                 chunk_strategy=chunk_strategy,
+351:                 chunk_size=chunk_size,
+352:                 embedding_model=embedding_model,
+353:                 extraction_model=extraction_model,
+354:                 skill_name=skill_name,
+355:                 expertise=expertise,
+356:                 max_concurrent_extractions=max_concurrent_extractions,
+357:                 enable_expansion=enable_expansion,
+358:                 extraction_context=extraction_context,
+359:             )
+360: 
+361:     results = await asyncio.gather(
+362:         *[process_with_limit(doc) for doc in staged_docs],
+363:         return_exceptions=True,
+364:     )
+365: 
+366:     # Filter out exceptions and count errors
+367:     successful_results = []
+368:     error_count = 0
+369:     for result in results:
+370:         if isinstance(result, Exception):
+371:             logger.error(f"Document processing failed: {result}")
+372:             error_count += 1
+373:         else:
+374:             successful_results.append(result)
+375: 
+376:     # Aggregate results
+377:     total_chunks = sum(r["chunks"] for r in successful_results)
+378:     total_entities = sum(r["entities"] for r in successful_results)
+379:     total_relationships = sum(r["relationships"] for r in successful_results)
+380:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
+381: 
+382:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
+383: 
+384:     return {
+385:         "total_documents": len(documents),
+386:         "processed_documents": len(successful_results),
+387:         "skipped_documents": len(documents) - len(staged_docs),
+388:         "failed_documents": error_count,
+389:         "total_chunks": total_chunks,
+390:         "total_entities": total_entities,
+391:         "total_relationships": total_relationships,
+392:         "total_inferred_relationships": total_inferred,
+393:     }
+394: 
+395: 
+396: @task(name="run_batch_inference", cache_policy=NO_CACHE)
+397: async def run_batch_inference(
+398:     namespace_id: UUID,
+399:     storage: StorageCoordinator,
+400:     expertise: ExpertiseConfig,
+401:     *,
+402:     max_entities: int = 10000,
+403:     max_relationships: int = 50000,
+404: ) -> dict[str, Any]:
+405:     """Run batch inference on the entire namespace.
+406: 
+407:     This should be called after all documents are ingested when using
+408:     inference_mode="batch". It queries all entities and relationships
+409:     from the namespace and runs inference rules to create new relationships.
+410: 
+411:     Args:
+412:         namespace_id: Namespace to run inference on
+413:         storage: Storage coordinator
+414:         expertise: ExpertiseConfig with inference rules
+415:         max_entities: Maximum entities to load
+416:         max_relationships: Maximum relationships to load
+417: 
+418:     Returns:
+419:         Summary of inference results
+420:     """
+421:     from khora.extraction.expansion import SemanticExpander
+422: 
+423:     logger.info(f"Starting batch inference for namespace {namespace_id}")
+424: 
+425:     # Load all entities and relationships from storage
+426:     entities = await storage.list_entities(namespace_id, limit=max_entities)
+427:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
+428: 
+429:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
+430: 
+431:     if not entities:
+432:         return {
+433:             "entities": 0,
+434:             "relationships": 0,
+435:             "inferred_relationships": 0,
+436:         }
+437: 
+438:     # Create expander with inference enabled
+439:     expander = SemanticExpander(
+440:         expertise=expertise,
+441:         enable_unification=False,  # Entities already unified during ingestion
+442:         enable_inference=True,
+443:     )
+444: 
+445:     # Run expansion (inference only)
+446:     expansion_result = await expander.expand(
+447:         entities=entities,
+448:         relationships=relationships,
+449:         namespace_id=namespace_id,
+450:     )
+451: 
+452:     # Store inferred relationships
+453:     inferred_count = 0
+454:     if expansion_result.inferred_relationships:
+455:         for rel in expansion_result.inferred_relationships:
+456:             try:
+457:                 await storage.create_relationship(rel)
+458:                 inferred_count += 1
+459:             except Exception as e:
+460:                 logger.warning(f"Failed to store inferred relationship: {e}")
+461: 
+462:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
+463: 
+464:     return {
+465:         "entities": len(entities),
+466:         "relationships": len(relationships),
+467:         "inferred_relationships": inferred_count,
+468:     }
+````
+
 
 
 # Git Logs
+
+## Commit: 2026-01-27 09:15:13 +0100
+**Message:** chore: reduce log verbosity for large ingestion runs
+
+**Files:**
+- REPOMIX.md
+- src/khora/extraction/expansion/expander.py
+- src/khora/extraction/expansion/relationship_inferrer.py
+- src/khora/pipelines/flows/ingest.py
 
 ## Commit: 2026-01-27 09:09:42 +0100
 **Message:** Add comprehensive unit tests for models, chunkers, and skills registry
@@ -23581,12 +23652,5 @@ README.md
 **Files:**
 - .env.example
 - Makefile
-- compose.full.yaml
-- compose.yaml
-
-## Commit: 2026-01-25 23:21:17 +0100
-**Message:** Update Neo4j to latest stable version 2025.12.1
-
-**Files:**
 - compose.full.yaml
 - compose.yaml
