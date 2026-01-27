@@ -31,6 +31,42 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 
 ---
 
+## Documentation
+
+Comprehensive documentation is available in the [`docs/`](docs/) directory:
+
+| Topic | Description |
+|-------|-------------|
+| **Architecture** | |
+| [Overview](docs/architecture/overview.md) | System design, components, data flow |
+| [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
+| [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
+| [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
+| **Data Models** | |
+| [Overview](docs/data-models/overview.md) | Model relationships and purposes |
+| [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
+| [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
+| [Events](docs/data-models/events.md) | MemoryEvent types and usage |
+| **Extraction Pipeline** | |
+| [Overview](docs/extraction/overview.md) | Pipeline components and flow |
+| [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
+| [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
+| [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
+| [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
+| [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
+| [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
+| **Query Engine** | |
+| [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
+| [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
+| [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
+| [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
+| [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
+| [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
+| **Planning** | |
+| [Roadmap](docs/roadmap.md) | Future improvements and features |
+
+---
+
 ## Installation
 
 ### Prerequisites
