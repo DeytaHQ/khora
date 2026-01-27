@@ -238,6 +238,8 @@ class ExpansionConfig:
     cross_tool_unification: bool = True
     relationship_inference: bool = True
     max_entities_per_expansion: int = 100
+    # Inference mode: "batch" (after all docs), "incremental" (per doc with graph query), "none"
+    inference_mode: str = "incremental"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation."""
@@ -247,6 +249,7 @@ class ExpansionConfig:
             "cross_tool_unification": self.cross_tool_unification,
             "relationship_inference": self.relationship_inference,
             "max_entities_per_expansion": self.max_entities_per_expansion,
+            "inference_mode": self.inference_mode,
         }
 
     @classmethod
@@ -258,6 +261,7 @@ class ExpansionConfig:
             cross_tool_unification=data.get("cross_tool_unification", True),
             relationship_inference=data.get("relationship_inference", True),
             max_entities_per_expansion=data.get("max_entities_per_expansion", 100),
+            inference_mode=data.get("inference_mode", "incremental"),
         )
 
 

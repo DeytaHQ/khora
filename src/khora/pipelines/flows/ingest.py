@@ -168,20 +168,56 @@ async def process_document(
         if enable_expansion and resolved_expertise:
             from khora.extraction.expansion import SemanticExpander
 
-            expander = SemanticExpander(expertise=resolved_expertise)
+            # Determine inference mode from expertise config
+            inference_mode = resolved_expertise.expansion.inference_mode
+
+            # For incremental mode, fetch existing entities/relationships from storage
+            # to enable cross-document inference
+            expansion_entities = list(entities)
+            expansion_relationships = list(relationships)
+
+            if inference_mode == "incremental":
+                # Query existing entities and relationships from the namespace
+                existing_entities = await storage.list_entities(document.namespace_id, limit=1000)
+                existing_relationships = await storage.list_relationships(document.namespace_id, limit=5000)
+
+                # Add existing data to expansion context
+                expansion_entities.extend(existing_entities)
+                expansion_relationships.extend(existing_relationships)
+
+                logger.debug(
+                    f"Document {document.id}: incremental mode - added {len(existing_entities)} existing entities, "
+                    f"{len(existing_relationships)} existing relationships to expansion context"
+                )
+
+            # For batch mode, skip inference (only do unification on current doc)
+            # Inference will be run separately after all documents are processed
+            enable_inference = inference_mode != "batch" and inference_mode != "none"
+
+            expander = SemanticExpander(
+                expertise=resolved_expertise,
+                enable_inference=enable_inference,
+            )
             expansion_result = await expander.expand(
-                entities=entities,
-                relationships=relationships,
+                entities=expansion_entities,
+                relationships=expansion_relationships,
                 namespace_id=document.namespace_id,
             )
 
-            entities = expansion_result.entities
+            # Only keep entities from current document (not the existing ones we added)
+            # The existing entities are already stored
+            if inference_mode == "incremental":
+                current_entity_ids = {e.id for e in entities}
+                entities = [e for e in expansion_result.entities if e.id in current_entity_ids]
+            else:
+                entities = expansion_result.entities
+
             relationships = expansion_result.relationships
             inferred_relationships = expansion_result.inferred_relationships
 
             logger.info(
                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
-                f"inferred {len(inferred_relationships)} relationships"
+                f"inferred {len(inferred_relationships)} relationships (mode={inference_mode})"
             )
 
         # Step 4: Store chunks (batched)
@@ -354,4 +390,79 @@ async def ingest_documents(
         "total_entities": total_entities,
         "total_relationships": total_relationships,
         "total_inferred_relationships": total_inferred,
+    }
+
+
+@task(name="run_batch_inference", cache_policy=NO_CACHE)
+async def run_batch_inference(
+    namespace_id: UUID,
+    storage: StorageCoordinator,
+    expertise: ExpertiseConfig,
+    *,
+    max_entities: int = 10000,
+    max_relationships: int = 50000,
+) -> dict[str, Any]:
+    """Run batch inference on the entire namespace.
+
+    This should be called after all documents are ingested when using
+    inference_mode="batch". It queries all entities and relationships
+    from the namespace and runs inference rules to create new relationships.
+
+    Args:
+        namespace_id: Namespace to run inference on
+        storage: Storage coordinator
+        expertise: ExpertiseConfig with inference rules
+        max_entities: Maximum entities to load
+        max_relationships: Maximum relationships to load
+
+    Returns:
+        Summary of inference results
+    """
+    from khora.extraction.expansion import SemanticExpander
+
+    logger.info(f"Starting batch inference for namespace {namespace_id}")
+
+    # Load all entities and relationships from storage
+    entities = await storage.list_entities(namespace_id, limit=max_entities)
+    relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
+
+    logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
+
+    if not entities:
+        return {
+            "entities": 0,
+            "relationships": 0,
+            "inferred_relationships": 0,
+        }
+
+    # Create expander with inference enabled
+    expander = SemanticExpander(
+        expertise=expertise,
+        enable_unification=False,  # Entities already unified during ingestion
+        enable_inference=True,
+    )
+
+    # Run expansion (inference only)
+    expansion_result = await expander.expand(
+        entities=entities,
+        relationships=relationships,
+        namespace_id=namespace_id,
+    )
+
+    # Store inferred relationships
+    inferred_count = 0
+    if expansion_result.inferred_relationships:
+        for rel in expansion_result.inferred_relationships:
+            try:
+                await storage.create_relationship(rel)
+                inferred_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to store inferred relationship: {e}")
+
+    logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
+
+    return {
+        "entities": len(entities),
+        "relationships": len(relationships),
+        "inferred_relationships": inferred_count,
     }

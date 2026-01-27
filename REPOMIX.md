@@ -2628,218 +2628,6 @@ README.md
 128:         return self.embedding is not None and len(self.embedding) > 0
 ````
 
-## File: src/khora/core/models/entity.py
-````python
-  1: """Entity and relationship models for Khora Memory Lake.
-  2: 
-  3: Entities represent extracted knowledge (people, organizations, concepts, etc.)
-  4: and relationships connect them in a knowledge graph stored in Neo4j.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from dataclasses import dataclass, field
- 10: from datetime import UTC, datetime
- 11: from enum import Enum
- 12: from typing import Any
- 13: from uuid import UUID, uuid4
- 14: 
- 15: 
- 16: class EntityType(str, Enum):
- 17:     """Standard entity types for knowledge extraction."""
- 18: 
- 19:     PERSON = "PERSON"
- 20:     ORGANIZATION = "ORGANIZATION"
- 21:     LOCATION = "LOCATION"
- 22:     CONCEPT = "CONCEPT"
- 23:     EVENT = "EVENT"
- 24:     PRODUCT = "PRODUCT"
- 25:     TECHNOLOGY = "TECHNOLOGY"
- 26:     DATE = "DATE"
- 27:     CUSTOM = "CUSTOM"
- 28: 
- 29: 
- 30: class RelationshipType(str, Enum):
- 31:     """Standard relationship types for knowledge graphs."""
- 32: 
- 33:     # Person relationships
- 34:     WORKS_FOR = "WORKS_FOR"
- 35:     KNOWS = "KNOWS"
- 36:     MANAGES = "MANAGES"
- 37:     REPORTS_TO = "REPORTS_TO"
- 38:     COLLABORATES_WITH = "COLLABORATES_WITH"
- 39: 
- 40:     # Organization relationships
- 41:     OWNS = "OWNS"
- 42:     PART_OF = "PART_OF"
- 43:     COMPETES_WITH = "COMPETES_WITH"
- 44:     PARTNERS_WITH = "PARTNERS_WITH"
- 45: 
- 46:     # Location relationships
- 47:     LOCATED_IN = "LOCATED_IN"
- 48:     HEADQUARTERED_IN = "HEADQUARTERED_IN"
- 49: 
- 50:     # Concept relationships
- 51:     RELATES_TO = "RELATES_TO"
- 52:     DEPENDS_ON = "DEPENDS_ON"
- 53:     IMPLEMENTS = "IMPLEMENTS"
- 54:     DERIVED_FROM = "DERIVED_FROM"
- 55: 
- 56:     # Temporal relationships
- 57:     PRECEDES = "PRECEDES"
- 58:     FOLLOWS = "FOLLOWS"
- 59:     CONCURRENT_WITH = "CONCURRENT_WITH"
- 60: 
- 61:     # Generic
- 62:     ASSOCIATED_WITH = "ASSOCIATED_WITH"
- 63:     CUSTOM = "CUSTOM"
- 64: 
- 65: 
- 66: @dataclass
- 67: class Entity:
- 68:     """An extracted entity from a document.
- 69: 
- 70:     Entities are nodes in the knowledge graph stored in Neo4j.
- 71:     They represent people, organizations, concepts, and other
- 72:     knowledge extracted from documents.
- 73:     """
- 74: 
- 75:     id: UUID = field(default_factory=uuid4)
- 76:     namespace_id: UUID = field(default_factory=uuid4)
- 77:     name: str = ""
- 78:     entity_type: EntityType = EntityType.CONCEPT
- 79:     description: str = ""
- 80: 
- 81:     # Attributes from extraction
- 82:     attributes: dict[str, Any] = field(default_factory=dict)
- 83: 
- 84:     # Source tracking
- 85:     source_document_ids: list[UUID] = field(default_factory=list)
- 86:     source_chunk_ids: list[UUID] = field(default_factory=list)
- 87:     mention_count: int = 1
- 88: 
- 89:     # Embedding for entity similarity search
- 90:     embedding: list[float] | None = None
- 91:     embedding_model: str = ""
- 92: 
- 93:     # Temporal validity
- 94:     valid_from: datetime | None = None
- 95:     valid_until: datetime | None = None
- 96: 
- 97:     # Confidence score from extraction
- 98:     confidence: float = 1.0
- 99: 
-100:     metadata: dict[str, Any] = field(default_factory=dict)
-101:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-102:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-103: 
-104:     def merge_with(self, other: Entity) -> None:
-105:         """Merge another entity into this one (deduplication)."""
-106:         # Combine source references
-107:         for doc_id in other.source_document_ids:
-108:             if doc_id not in self.source_document_ids:
-109:                 self.source_document_ids.append(doc_id)
-110:         for chunk_id in other.source_chunk_ids:
-111:             if chunk_id not in self.source_chunk_ids:
-112:                 self.source_chunk_ids.append(chunk_id)
-113: 
-114:         # Update mention count
-115:         self.mention_count += other.mention_count
-116: 
-117:         # Merge attributes (prefer existing)
-118:         # Handle case where attributes might be a list instead of dict (defensive)
-119:         other_attrs = other.attributes if isinstance(other.attributes, dict) else {}
-120:         for key, value in other_attrs.items():
-121:             if key not in self.attributes:
-122:                 self.attributes[key] = value
-123: 
-124:         # Update confidence (take max)
-125:         self.confidence = max(self.confidence, other.confidence)
-126: 
-127:         # Update description if empty
-128:         if not self.description and other.description:
-129:             self.description = other.description
-130: 
-131:         self.updated_at = datetime.now(UTC)
-132: 
-133: 
-134: @dataclass
-135: class Relationship:
-136:     """A relationship between two entities.
-137: 
-138:     Relationships are edges in the knowledge graph stored in Neo4j.
-139:     They connect entities and describe how they relate to each other.
-140:     """
-141: 
-142:     id: UUID = field(default_factory=uuid4)
-143:     namespace_id: UUID = field(default_factory=uuid4)
-144:     source_entity_id: UUID = field(default_factory=uuid4)
-145:     target_entity_id: UUID = field(default_factory=uuid4)
-146:     relationship_type: RelationshipType = RelationshipType.RELATES_TO
-147:     description: str = ""
-148: 
-149:     # Additional properties
-150:     properties: dict[str, Any] = field(default_factory=dict)
-151: 
-152:     # Source tracking
-153:     source_document_ids: list[UUID] = field(default_factory=list)
-154:     source_chunk_ids: list[UUID] = field(default_factory=list)
-155: 
-156:     # Temporal validity
-157:     valid_from: datetime | None = None
-158:     valid_until: datetime | None = None
-159: 
-160:     # Confidence and weight
-161:     confidence: float = 1.0
-162:     weight: float = 1.0
-163: 
-164:     metadata: dict[str, Any] = field(default_factory=dict)
-165:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-166:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-167: 
-168: 
-169: @dataclass
-170: class Episode:
-171:     """An episodic memory representing a temporal event or experience.
-172: 
-173:     Episodes capture time-bound events with associated entities,
-174:     supporting temporal queries and event-based recall.
-175:     """
-176: 
-177:     id: UUID = field(default_factory=uuid4)
-178:     namespace_id: UUID = field(default_factory=uuid4)
-179:     name: str = ""
-180:     description: str = ""
-181: 
-182:     # Temporal bounds
-183:     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-184:     duration_seconds: int | None = None
-185: 
-186:     # Associated entities
-187:     entity_ids: list[UUID] = field(default_factory=list)
-188: 
-189:     # Source tracking
-190:     source_document_ids: list[UUID] = field(default_factory=list)
-191:     source_chunk_ids: list[UUID] = field(default_factory=list)
-192: 
-193:     # Episode embedding for similarity search
-194:     embedding: list[float] | None = None
-195:     embedding_model: str = ""
-196: 
-197:     metadata: dict[str, Any] = field(default_factory=dict)
-198:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-199:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-200: 
-201:     @property
-202:     def end_time(self) -> datetime | None:
-203:         """Calculate the end time of the episode."""
-204:         if self.duration_seconds is not None:
-205:             from datetime import timedelta
-206: 
-207:             return self.occurred_at + timedelta(seconds=self.duration_seconds)
-208:         return None
-````
-
 ## File: src/khora/core/models/event.py
 ````python
   1: """Event sourcing models for Khora Memory Lake.
@@ -10893,6 +10681,218 @@ README.md
 5: __all__ = ["status", "memory", "namespaces", "sync"]
 ````
 
+## File: src/khora/core/models/entity.py
+````python
+  1: """Entity and relationship models for Khora Memory Lake.
+  2: 
+  3: Entities represent extracted knowledge (people, organizations, concepts, etc.)
+  4: and relationships connect them in a knowledge graph stored in Neo4j.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from dataclasses import dataclass, field
+ 10: from datetime import UTC, datetime
+ 11: from enum import Enum
+ 12: from typing import Any
+ 13: from uuid import UUID, uuid4
+ 14: 
+ 15: 
+ 16: class EntityType(str, Enum):
+ 17:     """Standard entity types for knowledge extraction."""
+ 18: 
+ 19:     PERSON = "PERSON"
+ 20:     ORGANIZATION = "ORGANIZATION"
+ 21:     LOCATION = "LOCATION"
+ 22:     CONCEPT = "CONCEPT"
+ 23:     EVENT = "EVENT"
+ 24:     PRODUCT = "PRODUCT"
+ 25:     TECHNOLOGY = "TECHNOLOGY"
+ 26:     DATE = "DATE"
+ 27:     CUSTOM = "CUSTOM"
+ 28: 
+ 29: 
+ 30: class RelationshipType(str, Enum):
+ 31:     """Standard relationship types for knowledge graphs."""
+ 32: 
+ 33:     # Person relationships
+ 34:     WORKS_FOR = "WORKS_FOR"
+ 35:     KNOWS = "KNOWS"
+ 36:     MANAGES = "MANAGES"
+ 37:     REPORTS_TO = "REPORTS_TO"
+ 38:     COLLABORATES_WITH = "COLLABORATES_WITH"
+ 39: 
+ 40:     # Organization relationships
+ 41:     OWNS = "OWNS"
+ 42:     PART_OF = "PART_OF"
+ 43:     COMPETES_WITH = "COMPETES_WITH"
+ 44:     PARTNERS_WITH = "PARTNERS_WITH"
+ 45: 
+ 46:     # Location relationships
+ 47:     LOCATED_IN = "LOCATED_IN"
+ 48:     HEADQUARTERED_IN = "HEADQUARTERED_IN"
+ 49: 
+ 50:     # Concept relationships
+ 51:     RELATES_TO = "RELATES_TO"
+ 52:     DEPENDS_ON = "DEPENDS_ON"
+ 53:     IMPLEMENTS = "IMPLEMENTS"
+ 54:     DERIVED_FROM = "DERIVED_FROM"
+ 55: 
+ 56:     # Temporal relationships
+ 57:     PRECEDES = "PRECEDES"
+ 58:     FOLLOWS = "FOLLOWS"
+ 59:     CONCURRENT_WITH = "CONCURRENT_WITH"
+ 60: 
+ 61:     # Generic
+ 62:     ASSOCIATED_WITH = "ASSOCIATED_WITH"
+ 63:     CUSTOM = "CUSTOM"
+ 64: 
+ 65: 
+ 66: @dataclass
+ 67: class Entity:
+ 68:     """An extracted entity from a document.
+ 69: 
+ 70:     Entities are nodes in the knowledge graph stored in Neo4j.
+ 71:     They represent people, organizations, concepts, and other
+ 72:     knowledge extracted from documents.
+ 73:     """
+ 74: 
+ 75:     id: UUID = field(default_factory=uuid4)
+ 76:     namespace_id: UUID = field(default_factory=uuid4)
+ 77:     name: str = ""
+ 78:     entity_type: EntityType = EntityType.CONCEPT
+ 79:     description: str = ""
+ 80: 
+ 81:     # Attributes from extraction
+ 82:     attributes: dict[str, Any] = field(default_factory=dict)
+ 83: 
+ 84:     # Source tracking
+ 85:     source_document_ids: list[UUID] = field(default_factory=list)
+ 86:     source_chunk_ids: list[UUID] = field(default_factory=list)
+ 87:     mention_count: int = 1
+ 88: 
+ 89:     # Embedding for entity similarity search
+ 90:     embedding: list[float] | None = None
+ 91:     embedding_model: str = ""
+ 92: 
+ 93:     # Temporal validity
+ 94:     valid_from: datetime | None = None
+ 95:     valid_until: datetime | None = None
+ 96: 
+ 97:     # Confidence score from extraction
+ 98:     confidence: float = 1.0
+ 99: 
+100:     metadata: dict[str, Any] = field(default_factory=dict)
+101:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+102:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+103: 
+104:     def merge_with(self, other: Entity) -> None:
+105:         """Merge another entity into this one (deduplication)."""
+106:         # Combine source references
+107:         for doc_id in other.source_document_ids:
+108:             if doc_id not in self.source_document_ids:
+109:                 self.source_document_ids.append(doc_id)
+110:         for chunk_id in other.source_chunk_ids:
+111:             if chunk_id not in self.source_chunk_ids:
+112:                 self.source_chunk_ids.append(chunk_id)
+113: 
+114:         # Update mention count
+115:         self.mention_count += other.mention_count
+116: 
+117:         # Merge attributes (prefer existing)
+118:         # Handle case where attributes might be a list instead of dict (defensive)
+119:         other_attrs = other.attributes if isinstance(other.attributes, dict) else {}
+120:         for key, value in other_attrs.items():
+121:             if key not in self.attributes:
+122:                 self.attributes[key] = value
+123: 
+124:         # Update confidence (take max)
+125:         self.confidence = max(self.confidence, other.confidence)
+126: 
+127:         # Update description if empty
+128:         if not self.description and other.description:
+129:             self.description = other.description
+130: 
+131:         self.updated_at = datetime.now(UTC)
+132: 
+133: 
+134: @dataclass
+135: class Relationship:
+136:     """A relationship between two entities.
+137: 
+138:     Relationships are edges in the knowledge graph stored in Neo4j.
+139:     They connect entities and describe how they relate to each other.
+140:     """
+141: 
+142:     id: UUID = field(default_factory=uuid4)
+143:     namespace_id: UUID = field(default_factory=uuid4)
+144:     source_entity_id: UUID = field(default_factory=uuid4)
+145:     target_entity_id: UUID = field(default_factory=uuid4)
+146:     relationship_type: RelationshipType = RelationshipType.RELATES_TO
+147:     description: str = ""
+148: 
+149:     # Additional properties
+150:     properties: dict[str, Any] = field(default_factory=dict)
+151: 
+152:     # Source tracking
+153:     source_document_ids: list[UUID] = field(default_factory=list)
+154:     source_chunk_ids: list[UUID] = field(default_factory=list)
+155: 
+156:     # Temporal validity
+157:     valid_from: datetime | None = None
+158:     valid_until: datetime | None = None
+159: 
+160:     # Confidence and weight
+161:     confidence: float = 1.0
+162:     weight: float = 1.0
+163: 
+164:     metadata: dict[str, Any] = field(default_factory=dict)
+165:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+166:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+167: 
+168: 
+169: @dataclass
+170: class Episode:
+171:     """An episodic memory representing a temporal event or experience.
+172: 
+173:     Episodes capture time-bound events with associated entities,
+174:     supporting temporal queries and event-based recall.
+175:     """
+176: 
+177:     id: UUID = field(default_factory=uuid4)
+178:     namespace_id: UUID = field(default_factory=uuid4)
+179:     name: str = ""
+180:     description: str = ""
+181: 
+182:     # Temporal bounds
+183:     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+184:     duration_seconds: int | None = None
+185: 
+186:     # Associated entities
+187:     entity_ids: list[UUID] = field(default_factory=list)
+188: 
+189:     # Source tracking
+190:     source_document_ids: list[UUID] = field(default_factory=list)
+191:     source_chunk_ids: list[UUID] = field(default_factory=list)
+192: 
+193:     # Episode embedding for similarity search
+194:     embedding: list[float] | None = None
+195:     embedding_model: str = ""
+196: 
+197:     metadata: dict[str, Any] = field(default_factory=dict)
+198:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+199:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+200: 
+201:     @property
+202:     def end_time(self) -> datetime | None:
+203:         """Calculate the end time of the episode."""
+204:         if self.duration_seconds is not None:
+205:             from datetime import timedelta
+206: 
+207:             return self.occurred_at + timedelta(seconds=self.duration_seconds)
+208:         return None
+````
+
 ## File: src/khora/db/__init__.py
 ````python
  1: """Database module for Khora.
@@ -11265,295 +11265,299 @@ README.md
 238:     cross_tool_unification: bool = True
 239:     relationship_inference: bool = True
 240:     max_entities_per_expansion: int = 100
-241: 
-242:     def to_dict(self) -> dict[str, Any]:
-243:         """Convert to dictionary representation."""
-244:         return {
-245:             "enabled": self.enabled,
-246:             "depth": self.depth,
-247:             "cross_tool_unification": self.cross_tool_unification,
-248:             "relationship_inference": self.relationship_inference,
-249:             "max_entities_per_expansion": self.max_entities_per_expansion,
-250:         }
-251: 
-252:     @classmethod
-253:     def from_dict(cls, data: dict[str, Any]) -> ExpansionConfig:
-254:         """Create from dictionary."""
-255:         return cls(
-256:             enabled=data.get("enabled", True),
-257:             depth=data.get("depth", 2),
-258:             cross_tool_unification=data.get("cross_tool_unification", True),
-259:             relationship_inference=data.get("relationship_inference", True),
-260:             max_entities_per_expansion=data.get("max_entities_per_expansion", 100),
-261:         )
-262: 
-263: 
-264: @dataclass
-265: class ExpertiseConfig:
-266:     """Complete configurable expertise definition.
+241:     # Inference mode: "batch" (after all docs), "incremental" (per doc with graph query), "none"
+242:     inference_mode: str = "incremental"
+243: 
+244:     def to_dict(self) -> dict[str, Any]:
+245:         """Convert to dictionary representation."""
+246:         return {
+247:             "enabled": self.enabled,
+248:             "depth": self.depth,
+249:             "cross_tool_unification": self.cross_tool_unification,
+250:             "relationship_inference": self.relationship_inference,
+251:             "max_entities_per_expansion": self.max_entities_per_expansion,
+252:             "inference_mode": self.inference_mode,
+253:         }
+254: 
+255:     @classmethod
+256:     def from_dict(cls, data: dict[str, Any]) -> ExpansionConfig:
+257:         """Create from dictionary."""
+258:         return cls(
+259:             enabled=data.get("enabled", True),
+260:             depth=data.get("depth", 2),
+261:             cross_tool_unification=data.get("cross_tool_unification", True),
+262:             relationship_inference=data.get("relationship_inference", True),
+263:             max_entities_per_expansion=data.get("max_entities_per_expansion", 100),
+264:             inference_mode=data.get("inference_mode", "incremental"),
+265:         )
+266: 
 267: 
-268:     Expertise configurations define domain-specific knowledge for entity
-269:     extraction, including entity types, relationship types, correlation rules,
-270:     and inference rules. All expertise is loaded from configuration (YAML/JSON)
-271:     or defined programmatically - no hard-coded domain knowledge.
-272: 
-273:     Example usage:
-274:         # Load from file
-275:         loader = ExpertiseLoader()
-276:         expertise = loader.load_file("saas_expert.yaml")
-277: 
-278:         # Use with MemoryLake
-279:         async with MemoryLake() as lake:
-280:             result = await lake.remember(content, expertise=expertise)
+268: @dataclass
+269: class ExpertiseConfig:
+270:     """Complete configurable expertise definition.
+271: 
+272:     Expertise configurations define domain-specific knowledge for entity
+273:     extraction, including entity types, relationship types, correlation rules,
+274:     and inference rules. All expertise is loaded from configuration (YAML/JSON)
+275:     or defined programmatically - no hard-coded domain knowledge.
+276: 
+277:     Example usage:
+278:         # Load from file
+279:         loader = ExpertiseLoader()
+280:         expertise = loader.load_file("saas_expert.yaml")
 281: 
-282:         # Or define programmatically
-283:         expertise = ExpertiseConfig(
-284:             name="custom",
-285:             system_prompt="You are an expert in...",
-286:             entity_types=[EntityTypeConfig(name="CUSTOM", description="...")],
-287:         )
-288:     """
-289: 
-290:     name: str
-291:     version: str = "1.0.0"
-292:     description: str = ""
-293:     extends: list[str] = field(default_factory=list)  # Inherit from other configs
-294: 
-295:     # LLM prompts (Jinja2 templates supported)
-296:     system_prompt: str | None = None
-297:     extraction_prompt: str | None = None
+282:         # Use with MemoryLake
+283:         async with MemoryLake() as lake:
+284:             result = await lake.remember(content, expertise=expertise)
+285: 
+286:         # Or define programmatically
+287:         expertise = ExpertiseConfig(
+288:             name="custom",
+289:             system_prompt="You are an expert in...",
+290:             entity_types=[EntityTypeConfig(name="CUSTOM", description="...")],
+291:         )
+292:     """
+293: 
+294:     name: str
+295:     version: str = "1.0.0"
+296:     description: str = ""
+297:     extends: list[str] = field(default_factory=list)  # Inherit from other configs
 298: 
-299:     # Type definitions
-300:     entity_types: list[EntityTypeConfig] = field(default_factory=list)
-301:     relationship_types: list[RelationshipTypeConfig] = field(default_factory=list)
+299:     # LLM prompts (Jinja2 templates supported)
+300:     system_prompt: str | None = None
+301:     extraction_prompt: str | None = None
 302: 
-303:     # Tool-specific knowledge (arbitrary dict for schema info)
-304:     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
-305: 
-306:     # Cross-tool correlation rules
-307:     correlation_rules: list[CorrelationRule] = field(default_factory=list)
-308: 
-309:     # Inference rules for semantic expansion
-310:     inference_rules: list[InferenceRule] = field(default_factory=list)
-311: 
-312:     # Confidence thresholds
-313:     confidence: ConfidenceConfig = field(default_factory=ConfidenceConfig)
-314: 
-315:     # Expansion settings
-316:     expansion: ExpansionConfig = field(default_factory=ExpansionConfig)
-317: 
-318:     # Additional metadata
-319:     metadata: dict[str, Any] = field(default_factory=dict)
-320: 
-321:     def get_entity_type_names(self) -> list[str]:
-322:         """Get list of entity type names."""
-323:         return [et.name for et in self.entity_types]
+303:     # Type definitions
+304:     entity_types: list[EntityTypeConfig] = field(default_factory=list)
+305:     relationship_types: list[RelationshipTypeConfig] = field(default_factory=list)
+306: 
+307:     # Tool-specific knowledge (arbitrary dict for schema info)
+308:     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+309: 
+310:     # Cross-tool correlation rules
+311:     correlation_rules: list[CorrelationRule] = field(default_factory=list)
+312: 
+313:     # Inference rules for semantic expansion
+314:     inference_rules: list[InferenceRule] = field(default_factory=list)
+315: 
+316:     # Confidence thresholds
+317:     confidence: ConfidenceConfig = field(default_factory=ConfidenceConfig)
+318: 
+319:     # Expansion settings
+320:     expansion: ExpansionConfig = field(default_factory=ExpansionConfig)
+321: 
+322:     # Additional metadata
+323:     metadata: dict[str, Any] = field(default_factory=dict)
 324: 
-325:     def get_relationship_type_names(self) -> list[str]:
-326:         """Get list of relationship type names."""
-327:         return [rt.name for rt in self.relationship_types]
+325:     def get_entity_type_names(self) -> list[str]:
+326:         """Get list of entity type names."""
+327:         return [et.name for et in self.entity_types]
 328: 
-329:     def get_entity_type(self, name: str) -> EntityTypeConfig | None:
-330:         """Get entity type config by name."""
-331:         for et in self.entity_types:
-332:             if et.name == name:
-333:                 return et
-334:         return None
-335: 
-336:     def get_relationship_type(self, name: str) -> RelationshipTypeConfig | None:
-337:         """Get relationship type config by name."""
-338:         for rt in self.relationship_types:
-339:             if rt.name == name:
-340:                 return rt
-341:         return None
-342: 
-343:     def to_dict(self) -> dict[str, Any]:
-344:         """Convert to dictionary representation."""
-345:         return {
-346:             "name": self.name,
-347:             "version": self.version,
-348:             "description": self.description,
-349:             "extends": self.extends,
-350:             "system_prompt": self.system_prompt,
-351:             "extraction_prompt": self.extraction_prompt,
-352:             "entity_types": [et.to_dict() for et in self.entity_types],
-353:             "relationship_types": [rt.to_dict() for rt in self.relationship_types],
-354:             "tool_schemas": self.tool_schemas,
-355:             "correlation_rules": [cr.to_dict() for cr in self.correlation_rules],
-356:             "inference_rules": [ir.to_dict() for ir in self.inference_rules],
-357:             "confidence": self.confidence.to_dict(),
-358:             "expansion": self.expansion.to_dict(),
-359:             "metadata": self.metadata,
-360:         }
-361: 
-362:     @classmethod
-363:     def from_dict(cls, data: dict[str, Any]) -> ExpertiseConfig:
-364:         """Create expertise config from dictionary."""
-365:         entity_types = [
-366:             EntityTypeConfig.from_dict(et) if isinstance(et, dict) else et for et in data.get("entity_types", [])
-367:         ]
-368:         relationship_types = [
-369:             RelationshipTypeConfig.from_dict(rt) if isinstance(rt, dict) else rt
-370:             for rt in data.get("relationship_types", [])
+329:     def get_relationship_type_names(self) -> list[str]:
+330:         """Get list of relationship type names."""
+331:         return [rt.name for rt in self.relationship_types]
+332: 
+333:     def get_entity_type(self, name: str) -> EntityTypeConfig | None:
+334:         """Get entity type config by name."""
+335:         for et in self.entity_types:
+336:             if et.name == name:
+337:                 return et
+338:         return None
+339: 
+340:     def get_relationship_type(self, name: str) -> RelationshipTypeConfig | None:
+341:         """Get relationship type config by name."""
+342:         for rt in self.relationship_types:
+343:             if rt.name == name:
+344:                 return rt
+345:         return None
+346: 
+347:     def to_dict(self) -> dict[str, Any]:
+348:         """Convert to dictionary representation."""
+349:         return {
+350:             "name": self.name,
+351:             "version": self.version,
+352:             "description": self.description,
+353:             "extends": self.extends,
+354:             "system_prompt": self.system_prompt,
+355:             "extraction_prompt": self.extraction_prompt,
+356:             "entity_types": [et.to_dict() for et in self.entity_types],
+357:             "relationship_types": [rt.to_dict() for rt in self.relationship_types],
+358:             "tool_schemas": self.tool_schemas,
+359:             "correlation_rules": [cr.to_dict() for cr in self.correlation_rules],
+360:             "inference_rules": [ir.to_dict() for ir in self.inference_rules],
+361:             "confidence": self.confidence.to_dict(),
+362:             "expansion": self.expansion.to_dict(),
+363:             "metadata": self.metadata,
+364:         }
+365: 
+366:     @classmethod
+367:     def from_dict(cls, data: dict[str, Any]) -> ExpertiseConfig:
+368:         """Create expertise config from dictionary."""
+369:         entity_types = [
+370:             EntityTypeConfig.from_dict(et) if isinstance(et, dict) else et for et in data.get("entity_types", [])
 371:         ]
-372:         correlation_rules = [
-373:             CorrelationRule.from_dict(cr) if isinstance(cr, dict) else cr for cr in data.get("correlation_rules", [])
-374:         ]
-375:         inference_rules = [
-376:             InferenceRule.from_dict(ir) if isinstance(ir, dict) else ir for ir in data.get("inference_rules", [])
-377:         ]
-378: 
-379:         confidence_data = data.get("confidence", {})
-380:         confidence = (
-381:             ConfidenceConfig.from_dict(confidence_data) if isinstance(confidence_data, dict) else confidence_data
-382:         )
-383: 
-384:         expansion_data = data.get("expansion", {})
-385:         expansion = ExpansionConfig.from_dict(expansion_data) if isinstance(expansion_data, dict) else expansion_data
-386: 
-387:         return cls(
-388:             name=data.get("name", "custom"),
-389:             version=data.get("version", "1.0.0"),
-390:             description=data.get("description", ""),
-391:             extends=data.get("extends", []),
-392:             system_prompt=data.get("system_prompt"),
-393:             extraction_prompt=data.get("extraction_prompt"),
-394:             entity_types=entity_types,
-395:             relationship_types=relationship_types,
-396:             tool_schemas=data.get("tool_schemas", {}),
-397:             correlation_rules=correlation_rules,
-398:             inference_rules=inference_rules,
-399:             confidence=confidence if isinstance(confidence, ConfidenceConfig) else ConfidenceConfig(),
-400:             expansion=expansion if isinstance(expansion, ExpansionConfig) else ExpansionConfig(),
-401:             metadata=data.get("metadata", {}),
-402:         )
-403: 
-404:     def to_extraction_skill(self) -> ExtractionSkill:
-405:         """Convert to a legacy ExtractionSkill for backward compatibility."""
-406:         return ExtractionSkill(
-407:             name=self.name,
-408:             description=self.description,
-409:             entity_types=self.get_entity_type_names(),
-410:             relationship_types=self.get_relationship_type_names(),
-411:             custom_prompt=self.extraction_prompt,
-412:             min_entity_confidence=self.confidence.min_entity,
-413:             min_relationship_confidence=self.confidence.min_relationship,
-414:             metadata=self.metadata,
-415:         )
-416: 
-417: 
-418: @dataclass
-419: class ExtractionSkill:
-420:     """Configurable extraction skill definition.
+372:         relationship_types = [
+373:             RelationshipTypeConfig.from_dict(rt) if isinstance(rt, dict) else rt
+374:             for rt in data.get("relationship_types", [])
+375:         ]
+376:         correlation_rules = [
+377:             CorrelationRule.from_dict(cr) if isinstance(cr, dict) else cr for cr in data.get("correlation_rules", [])
+378:         ]
+379:         inference_rules = [
+380:             InferenceRule.from_dict(ir) if isinstance(ir, dict) else ir for ir in data.get("inference_rules", [])
+381:         ]
+382: 
+383:         confidence_data = data.get("confidence", {})
+384:         confidence = (
+385:             ConfidenceConfig.from_dict(confidence_data) if isinstance(confidence_data, dict) else confidence_data
+386:         )
+387: 
+388:         expansion_data = data.get("expansion", {})
+389:         expansion = ExpansionConfig.from_dict(expansion_data) if isinstance(expansion_data, dict) else expansion_data
+390: 
+391:         return cls(
+392:             name=data.get("name", "custom"),
+393:             version=data.get("version", "1.0.0"),
+394:             description=data.get("description", ""),
+395:             extends=data.get("extends", []),
+396:             system_prompt=data.get("system_prompt"),
+397:             extraction_prompt=data.get("extraction_prompt"),
+398:             entity_types=entity_types,
+399:             relationship_types=relationship_types,
+400:             tool_schemas=data.get("tool_schemas", {}),
+401:             correlation_rules=correlation_rules,
+402:             inference_rules=inference_rules,
+403:             confidence=confidence if isinstance(confidence, ConfidenceConfig) else ConfidenceConfig(),
+404:             expansion=expansion if isinstance(expansion, ExpansionConfig) else ExpansionConfig(),
+405:             metadata=data.get("metadata", {}),
+406:         )
+407: 
+408:     def to_extraction_skill(self) -> ExtractionSkill:
+409:         """Convert to a legacy ExtractionSkill for backward compatibility."""
+410:         return ExtractionSkill(
+411:             name=self.name,
+412:             description=self.description,
+413:             entity_types=self.get_entity_type_names(),
+414:             relationship_types=self.get_relationship_type_names(),
+415:             custom_prompt=self.extraction_prompt,
+416:             min_entity_confidence=self.confidence.min_entity,
+417:             min_relationship_confidence=self.confidence.min_relationship,
+418:             metadata=self.metadata,
+419:         )
+420: 
 421: 
-422:     Skills define what types of entities and relationships to extract
-423:     from documents. They can be customized per namespace or document type.
-424:     """
+422: @dataclass
+423: class ExtractionSkill:
+424:     """Configurable extraction skill definition.
 425: 
-426:     name: str
-427:     description: str = ""
-428: 
-429:     # Entity extraction configuration
-430:     entity_types: list[str] = field(default_factory=list)
-431:     relationship_types: list[str] = field(default_factory=list)
+426:     Skills define what types of entities and relationships to extract
+427:     from documents. They can be customized per namespace or document type.
+428:     """
+429: 
+430:     name: str
+431:     description: str = ""
 432: 
-433:     # Custom extraction prompt (optional)
-434:     custom_prompt: str | None = None
-435: 
-436:     # Processing configuration
-437:     extract_entities: bool = True
-438:     extract_relationships: bool = True
+433:     # Entity extraction configuration
+434:     entity_types: list[str] = field(default_factory=list)
+435:     relationship_types: list[str] = field(default_factory=list)
+436: 
+437:     # Custom extraction prompt (optional)
+438:     custom_prompt: str | None = None
 439: 
-440:     # Confidence thresholds
-441:     min_entity_confidence: float = 0.5
-442:     min_relationship_confidence: float = 0.5
+440:     # Processing configuration
+441:     extract_entities: bool = True
+442:     extract_relationships: bool = True
 443: 
-444:     # Additional metadata
-445:     metadata: dict[str, Any] = field(default_factory=dict)
-446: 
-447:     @classmethod
-448:     def general_entities(cls) -> ExtractionSkill:
-449:         """Create a general entity extraction skill."""
-450:         return cls(
-451:             name="general_entities",
-452:             description="Extract general entities like people, organizations, and concepts",
-453:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
-454:             relationship_types=["WORKS_FOR", "KNOWS", "RELATES_TO", "LOCATED_IN"],
-455:         )
-456: 
-457:     @classmethod
-458:     def technical_docs(cls) -> ExtractionSkill:
-459:         """Create a skill for technical documentation."""
-460:         return cls(
-461:             name="technical_docs",
-462:             description="Extract technical entities from documentation",
-463:             entity_types=["TECHNOLOGY", "CONCEPT", "PRODUCT", "ORGANIZATION"],
-464:             relationship_types=["DEPENDS_ON", "IMPLEMENTS", "PART_OF", "RELATES_TO"],
-465:         )
-466: 
-467:     @classmethod
-468:     def business_intel(cls) -> ExtractionSkill:
-469:         """Create a skill for business intelligence."""
-470:         return cls(
-471:             name="business_intel",
-472:             description="Extract business entities and relationships",
-473:             entity_types=["PERSON", "ORGANIZATION", "PRODUCT", "EVENT", "LOCATION"],
-474:             relationship_types=[
-475:                 "WORKS_FOR",
-476:                 "MANAGES",
-477:                 "OWNS",
-478:                 "COMPETES_WITH",
-479:                 "PARTNERS_WITH",
-480:                 "HEADQUARTERED_IN",
-481:             ],
-482:         )
-483: 
-484:     @classmethod
-485:     def research_papers(cls) -> ExtractionSkill:
-486:         """Create a skill for research papers."""
-487:         return cls(
-488:             name="research_papers",
-489:             description="Extract entities from academic research",
-490:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "TECHNOLOGY", "EVENT"],
-491:             relationship_types=[
-492:                 "COLLABORATES_WITH",
-493:                 "DERIVED_FROM",
-494:                 "IMPLEMENTS",
-495:                 "RELATES_TO",
-496:                 "PRECEDES",
-497:             ],
-498:         )
-499: 
-500:     def to_dict(self) -> dict[str, Any]:
-501:         """Convert skill to dictionary."""
-502:         return {
-503:             "name": self.name,
-504:             "description": self.description,
-505:             "entity_types": self.entity_types,
-506:             "relationship_types": self.relationship_types,
-507:             "custom_prompt": self.custom_prompt,
-508:             "extract_entities": self.extract_entities,
-509:             "extract_relationships": self.extract_relationships,
-510:             "min_entity_confidence": self.min_entity_confidence,
-511:             "min_relationship_confidence": self.min_relationship_confidence,
-512:             "metadata": self.metadata,
-513:         }
-514: 
-515:     @classmethod
-516:     def from_dict(cls, data: dict[str, Any]) -> ExtractionSkill:
-517:         """Create skill from dictionary."""
-518:         return cls(
-519:             name=data.get("name", "custom"),
-520:             description=data.get("description", ""),
-521:             entity_types=data.get("entity_types", []),
-522:             relationship_types=data.get("relationship_types", []),
-523:             custom_prompt=data.get("custom_prompt"),
-524:             extract_entities=data.get("extract_entities", True),
-525:             extract_relationships=data.get("extract_relationships", True),
-526:             min_entity_confidence=data.get("min_entity_confidence", 0.5),
-527:             min_relationship_confidence=data.get("min_relationship_confidence", 0.5),
-528:             metadata=data.get("metadata", {}),
-529:         )
+444:     # Confidence thresholds
+445:     min_entity_confidence: float = 0.5
+446:     min_relationship_confidence: float = 0.5
+447: 
+448:     # Additional metadata
+449:     metadata: dict[str, Any] = field(default_factory=dict)
+450: 
+451:     @classmethod
+452:     def general_entities(cls) -> ExtractionSkill:
+453:         """Create a general entity extraction skill."""
+454:         return cls(
+455:             name="general_entities",
+456:             description="Extract general entities like people, organizations, and concepts",
+457:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
+458:             relationship_types=["WORKS_FOR", "KNOWS", "RELATES_TO", "LOCATED_IN"],
+459:         )
+460: 
+461:     @classmethod
+462:     def technical_docs(cls) -> ExtractionSkill:
+463:         """Create a skill for technical documentation."""
+464:         return cls(
+465:             name="technical_docs",
+466:             description="Extract technical entities from documentation",
+467:             entity_types=["TECHNOLOGY", "CONCEPT", "PRODUCT", "ORGANIZATION"],
+468:             relationship_types=["DEPENDS_ON", "IMPLEMENTS", "PART_OF", "RELATES_TO"],
+469:         )
+470: 
+471:     @classmethod
+472:     def business_intel(cls) -> ExtractionSkill:
+473:         """Create a skill for business intelligence."""
+474:         return cls(
+475:             name="business_intel",
+476:             description="Extract business entities and relationships",
+477:             entity_types=["PERSON", "ORGANIZATION", "PRODUCT", "EVENT", "LOCATION"],
+478:             relationship_types=[
+479:                 "WORKS_FOR",
+480:                 "MANAGES",
+481:                 "OWNS",
+482:                 "COMPETES_WITH",
+483:                 "PARTNERS_WITH",
+484:                 "HEADQUARTERED_IN",
+485:             ],
+486:         )
+487: 
+488:     @classmethod
+489:     def research_papers(cls) -> ExtractionSkill:
+490:         """Create a skill for research papers."""
+491:         return cls(
+492:             name="research_papers",
+493:             description="Extract entities from academic research",
+494:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "TECHNOLOGY", "EVENT"],
+495:             relationship_types=[
+496:                 "COLLABORATES_WITH",
+497:                 "DERIVED_FROM",
+498:                 "IMPLEMENTS",
+499:                 "RELATES_TO",
+500:                 "PRECEDES",
+501:             ],
+502:         )
+503: 
+504:     def to_dict(self) -> dict[str, Any]:
+505:         """Convert skill to dictionary."""
+506:         return {
+507:             "name": self.name,
+508:             "description": self.description,
+509:             "entity_types": self.entity_types,
+510:             "relationship_types": self.relationship_types,
+511:             "custom_prompt": self.custom_prompt,
+512:             "extract_entities": self.extract_entities,
+513:             "extract_relationships": self.extract_relationships,
+514:             "min_entity_confidence": self.min_entity_confidence,
+515:             "min_relationship_confidence": self.min_relationship_confidence,
+516:             "metadata": self.metadata,
+517:         }
+518: 
+519:     @classmethod
+520:     def from_dict(cls, data: dict[str, Any]) -> ExtractionSkill:
+521:         """Create skill from dictionary."""
+522:         return cls(
+523:             name=data.get("name", "custom"),
+524:             description=data.get("description", ""),
+525:             entity_types=data.get("entity_types", []),
+526:             relationship_types=data.get("relationship_types", []),
+527:             custom_prompt=data.get("custom_prompt"),
+528:             extract_entities=data.get("extract_entities", True),
+529:             extract_relationships=data.get("extract_relationships", True),
+530:             min_entity_confidence=data.get("min_entity_confidence", 0.5),
+531:             min_relationship_confidence=data.get("min_relationship_confidence", 0.5),
+532:             metadata=data.get("metadata", {}),
+533:         )
 ````
 
 ## File: src/khora/extraction/skills/registry.py
@@ -14138,412 +14142,6 @@ README.md
 124:             List of ExtractionResult objects
 125:         """
 126:         ...
-````
-
-## File: src/khora/extraction/extractors/llm.py
-````python
-  1: """LLM-based entity extraction using LiteLLM."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import asyncio
-  6: import json
-  7: from typing import TYPE_CHECKING, Any
-  8: 
-  9: from loguru import logger
- 10: 
- 11: from .base import (
- 12:     EntityExtractor,
- 13:     ExtractedEntity,
- 14:     ExtractedEvent,
- 15:     ExtractedRelationship,
- 16:     ExtractionResult,
- 17:     TemporalInfo,
- 18: )
- 19: 
- 20: if TYPE_CHECKING:
- 21:     from khora.config import LiteLLMConfig
- 22:     from khora.extraction.skills import ExpertiseConfig
- 23: 
- 24: 
- 25: # Default entity types to extract
- 26: DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
- 27: 
- 28: # Default system prompt for extraction
- 29: DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
- 30: 
- 31: # Extraction prompt template with temporal awareness
- 32: EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
- 33: 
- 34: Entity types to extract: {entity_types}
- 35: 
- 36: Text:
- 37: {text}
- 38: 
- 39: Return a JSON object with the following structure:
- 40: {{
- 41:     "entities": [
- 42:         {{
- 43:             "name": "entity name (canonical form, properly capitalized)",
- 44:             "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|PRODUCT|DATE|etc",
- 45:             "description": "brief description of the entity",
- 46:             "attributes": {{"key": "value"}},
- 47:             "aliases": ["alternative names", "nicknames", "abbreviations"],
- 48:             "temporal": {{
- 49:                 "mentioned_at": "when entity is mentioned (if temporal context exists)",
- 50:                 "valid_from": "ISO date or null if entity validity period is mentioned",
- 51:                 "valid_until": "ISO date or null if entity validity period ends"
- 52:             }}
- 53:         }}
- 54:     ],
- 55:     "relationships": [
- 56:         {{
- 57:             "source_entity": "source entity name (must match an entity above)",
- 58:             "target_entity": "target entity name (must match an entity above)",
- 59:             "relationship_type": "WORKS_FOR|KNOWS|MANAGES|REPORTS_TO|COLLABORATES_WITH|OWNS|PART_OF|LOCATED_IN|RELATES_TO|DEPENDS_ON|IMPLEMENTS|PRECEDES|FOLLOWS|ASSOCIATED_WITH|etc",
- 60:             "description": "brief description of relationship",
- 61:             "temporal": {{
- 62:                 "occurred_at": "when relationship occurred/started",
- 63:                 "valid_from": "ISO date or null if relationship has time bounds",
- 64:                 "valid_until": "ISO date or null if relationship ended"
- 65:             }}
- 66:         }}
- 67:     ],
- 68:     "events": [
- 69:         {{
- 70:             "description": "what happened",
- 71:             "occurred_at": "when it occurred (ISO date or descriptive)",
- 72:             "participants": ["entity names involved"],
- 73:             "event_type": "MEETING|DECISION|MILESTONE|ANNOUNCEMENT|INCIDENT|etc"
- 74:         }}
- 75:     ]
- 76: }}
- 77: 
- 78: Guidelines:
- 79: - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
- 80: - Include aliases for entities that have multiple names/abbreviations
- 81: - Extract temporal information when dates, times, or relative time references appear
- 82: - For events, capture the when, who, and what
- 83: - Be thorough but precise - only extract entities that are clearly mentioned
- 84: - Ensure relationship source/target names match extracted entity names exactly
- 85: 
- 86: Return ONLY valid JSON, no other text."""
- 87: 
- 88: 
- 89: class LLMEntityExtractor(EntityExtractor):
- 90:     """LLM-based entity extractor using LiteLLM.
- 91: 
- 92:     Uses an LLM to extract entities and relationships from text
- 93:     through structured JSON output.
- 94:     """
- 95: 
- 96:     def __init__(
- 97:         self,
- 98:         model: str = "gpt-4o-mini",
- 99:         *,
-100:         temperature: float = 0.3,  # Lower for more consistent extraction
-101:         max_tokens: int = 4000,
-102:         timeout: int = 60,
-103:         max_retries: int = 3,
-104:         max_concurrent: int = 5,
-105:     ) -> None:
-106:         """Initialize the LLM entity extractor.
-107: 
-108:         Args:
-109:             model: LLM model to use
-110:             temperature: Sampling temperature
-111:             max_tokens: Maximum tokens in response
-112:             timeout: Request timeout in seconds
-113:             max_retries: Maximum retries on failure
-114:             max_concurrent: Maximum concurrent extractions
-115:         """
-116:         self._model = model
-117:         self._temperature = temperature
-118:         self._max_tokens = max_tokens
-119:         self._timeout = timeout
-120:         self._max_retries = max_retries
-121:         self._semaphore = asyncio.Semaphore(max_concurrent)
-122: 
-123:     @classmethod
-124:     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
-125:         """Create extractor from LiteLLM configuration.
-126: 
-127:         Args:
-128:             config: LiteLLMConfig instance
-129: 
-130:         Returns:
-131:             Configured LLMEntityExtractor
-132:         """
-133:         return cls(
-134:             model=config.model,
-135:             temperature=0.3,  # Override for extraction
-136:             max_tokens=config.max_tokens,
-137:             timeout=config.timeout,
-138:             max_retries=config.max_retries,
-139:             max_concurrent=config.max_concurrent_llm_calls,
-140:         )
-141: 
-142:     async def extract(
-143:         self,
-144:         text: str,
-145:         *,
-146:         entity_types: list[str] | None = None,
-147:         expertise: ExpertiseConfig | None = None,
-148:         context: dict[str, Any] | None = None,
-149:     ) -> ExtractionResult:
-150:         """Extract entities and relationships from text.
-151: 
-152:         Args:
-153:             text: Text to extract from
-154:             entity_types: Optional list of entity types to extract
-155:             expertise: Optional ExpertiseConfig for domain-specific extraction
-156:             context: Optional context dict for prompt template rendering
-157: 
-158:         Returns:
-159:             ExtractionResult containing entities and relationships
-160:         """
-161:         if not text.strip():
-162:             return ExtractionResult()
-163: 
-164:         # Determine entity types from expertise or fallback
-165:         if expertise:
-166:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
-167:         else:
-168:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
-169: 
-170:         try:
-171:             import litellm
-172:         except ImportError:
-173:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
-174: 
-175:         # Render prompts based on expertise
-176:         system_prompt = self._render_system_prompt(expertise, context)
-177:         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
-178: 
-179:         async with self._semaphore:
-180:             for attempt in range(self._max_retries):
-181:                 try:
-182:                     response = await litellm.acompletion(
-183:                         model=self._model,
-184:                         messages=[
-185:                             {"role": "system", "content": system_prompt},
-186:                             {"role": "user", "content": extraction_prompt},
-187:                         ],
-188:                         temperature=self._temperature,
-189:                         max_tokens=self._max_tokens,
-190:                         timeout=self._timeout,
-191:                         response_format={"type": "json_object"},
-192:                     )
-193: 
-194:                     content = response.choices[0].message.content
-195:                     result = self._parse_response(content)
-196: 
-197:                     # Apply confidence filtering from expertise if available
-198:                     if expertise:
-199:                         result = self._filter_by_confidence(result, expertise)
-200: 
-201:                     return result
-202: 
-203:                 except Exception as e:
-204:                     if attempt < self._max_retries - 1:
-205:                         wait_time = 2**attempt
-206:                         logger.warning(f"Extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
-207:                         await asyncio.sleep(wait_time)
-208:                     else:
-209:                         logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
-210:                         return ExtractionResult(metadata={"error": str(e)})
-211: 
-212:     def _render_system_prompt(
-213:         self,
-214:         expertise: ExpertiseConfig | None,
-215:         context: dict[str, Any] | None,
-216:     ) -> str:
-217:         """Render the system prompt, optionally using expertise config."""
-218:         if not expertise or not expertise.system_prompt:
-219:             return DEFAULT_SYSTEM_PROMPT
-220: 
-221:         try:
-222:             from khora.extraction.skills.composer import ExpertiseComposer
-223: 
-224:             composer = ExpertiseComposer()
-225:             return composer.render_prompt(
-226:                 expertise.system_prompt,
-227:                 expertise=expertise,
-228:                 context=context,
-229:             )
-230:         except Exception as e:
-231:             logger.warning(f"Failed to render system prompt: {e}")
-232:             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
-233: 
-234:     def _render_extraction_prompt(
-235:         self,
-236:         text: str,
-237:         entity_types: list[str],
-238:         expertise: ExpertiseConfig | None,
-239:         context: dict[str, Any] | None,
-240:     ) -> str:
-241:         """Render the extraction prompt, optionally using expertise config."""
-242:         # If expertise has a custom extraction prompt, use it
-243:         if expertise and expertise.extraction_prompt:
-244:             try:
-245:                 from khora.extraction.skills.composer import ExpertiseComposer
-246: 
-247:                 composer = ExpertiseComposer()
-248:                 return composer.render_prompt(
-249:                     expertise.extraction_prompt,
-250:                     expertise=expertise,
-251:                     context={**(context or {}), "text": text[:8000], "entity_types": entity_types},
-252:                 )
-253:             except Exception as e:
-254:                 logger.warning(f"Failed to render extraction prompt: {e}")
-255: 
-256:         # Use default extraction prompt
-257:         return EXTRACTION_PROMPT.format(
-258:             entity_types=", ".join(entity_types),
-259:             text=text[:8000],  # Truncate very long texts
-260:         )
-261: 
-262:     def _filter_by_confidence(
-263:         self,
-264:         result: ExtractionResult,
-265:         expertise: ExpertiseConfig,
-266:     ) -> ExtractionResult:
-267:         """Filter extraction results by confidence thresholds from expertise."""
-268:         min_entity = expertise.confidence.min_entity
-269:         min_relationship = expertise.confidence.min_relationship
-270: 
-271:         filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
-272:         filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
-273: 
-274:         return ExtractionResult(
-275:             entities=filtered_entities,
-276:             relationships=filtered_relationships,
-277:             events=result.events,
-278:             metadata=result.metadata,
-279:         )
-280: 
-281:     async def extract_batch(
-282:         self,
-283:         texts: list[str],
-284:         *,
-285:         entity_types: list[str] | None = None,
-286:         expertise: ExpertiseConfig | None = None,
-287:         context: dict[str, Any] | None = None,
-288:     ) -> list[ExtractionResult]:
-289:         """Extract from multiple texts concurrently.
-290: 
-291:         Args:
-292:             texts: List of texts to extract from
-293:             entity_types: Optional list of entity types to extract
-294:             expertise: Optional ExpertiseConfig for domain-specific extraction
-295:             context: Optional context dict for prompt template rendering
-296: 
-297:         Returns:
-298:             List of ExtractionResult objects
-299:         """
-300:         if not texts:
-301:             return []
-302: 
-303:         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
-304:         return await asyncio.gather(*tasks)
-305: 
-306:     def _parse_response(self, content: str) -> ExtractionResult:
-307:         """Parse the LLM response into an ExtractionResult."""
-308:         try:
-309:             # Try to parse as JSON
-310:             data = json.loads(content)
-311: 
-312:             entities = []
-313:             for e in data.get("entities", []):
-314:                 # Parse temporal info if present
-315:                 temporal = None
-316:                 if "temporal" in e and e["temporal"]:
-317:                     t = e["temporal"]
-318:                     temporal = TemporalInfo(
-319:                         mentioned_at=t.get("mentioned_at"),
-320:                         valid_from=t.get("valid_from"),
-321:                         valid_until=t.get("valid_until"),
-322:                     )
-323: 
-324:                 # Ensure attributes is a dict (LLM sometimes returns a list)
-325:                 attrs = e.get("attributes", {})
-326:                 if not isinstance(attrs, dict):
-327:                     attrs = {}
-328: 
-329:                 entities.append(
-330:                     ExtractedEntity(
-331:                         name=e.get("name", ""),
-332:                         entity_type=e.get("entity_type", "CONCEPT"),
-333:                         description=e.get("description", ""),
-334:                         attributes=attrs,
-335:                         aliases=e.get("aliases", []),
-336:                         temporal=temporal,
-337:                         confidence=e.get("confidence", 0.9),
-338:                     )
-339:                 )
-340: 
-341:             relationships = []
-342:             for r in data.get("relationships", []):
-343:                 # Parse temporal info if present
-344:                 temporal = None
-345:                 if "temporal" in r and r["temporal"]:
-346:                     t = r["temporal"]
-347:                     temporal = TemporalInfo(
-348:                         occurred_at=t.get("occurred_at"),
-349:                         valid_from=t.get("valid_from"),
-350:                         valid_until=t.get("valid_until"),
-351:                     )
-352: 
-353:                 relationships.append(
-354:                     ExtractedRelationship(
-355:                         source_entity=r.get("source_entity", ""),
-356:                         target_entity=r.get("target_entity", ""),
-357:                         relationship_type=r.get("relationship_type", "RELATES_TO"),
-358:                         description=r.get("description", ""),
-359:                         properties=r.get("properties", {}),
-360:                         temporal=temporal,
-361:                         confidence=r.get("confidence", 0.9),
-362:                     )
-363:                 )
-364: 
-365:             events = []
-366:             for ev in data.get("events", []):
-367:                 events.append(
-368:                     ExtractedEvent(
-369:                         description=ev.get("description", ""),
-370:                         event_type=ev.get("event_type", "EVENT"),
-371:                         occurred_at=ev.get("occurred_at"),
-372:                         participants=ev.get("participants", []),
-373:                         confidence=ev.get("confidence", 0.9),
-374:                     )
-375:                 )
-376: 
-377:             return ExtractionResult(
-378:                 entities=entities,
-379:                 relationships=relationships,
-380:                 events=events,
-381:             )
-382: 
-383:         except json.JSONDecodeError as e:
-384:             logger.warning(f"Failed to parse extraction response as JSON: {e}")
-385:             # Try to extract JSON from the response
-386:             return self._extract_json_from_text(content)
-387: 
-388:     def _extract_json_from_text(self, text: str) -> ExtractionResult:
-389:         """Try to extract JSON from text that may contain other content."""
-390:         import re
-391: 
-392:         # Look for JSON object in the text
-393:         json_match = re.search(r"\{[\s\S]*\}", text)
-394:         if json_match:
-395:             try:
-396:                 data = json.loads(json_match.group())
-397:                 return self._parse_response(json.dumps(data))
-398:             except json.JSONDecodeError:
-399:                 pass
-400: 
-401:         logger.warning("Could not extract valid JSON from response")
-402:         return ExtractionResult(metadata={"raw_response": text[:500]})
 ````
 
 ## File: src/khora/pipelines/tasks/extract.py
@@ -17161,6 +16759,412 @@ README.md
 306:         return self.storage.neo4j_database
 ````
 
+## File: src/khora/extraction/extractors/llm.py
+````python
+  1: """LLM-based entity extraction using LiteLLM."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import asyncio
+  6: import json
+  7: from typing import TYPE_CHECKING, Any
+  8: 
+  9: from loguru import logger
+ 10: 
+ 11: from .base import (
+ 12:     EntityExtractor,
+ 13:     ExtractedEntity,
+ 14:     ExtractedEvent,
+ 15:     ExtractedRelationship,
+ 16:     ExtractionResult,
+ 17:     TemporalInfo,
+ 18: )
+ 19: 
+ 20: if TYPE_CHECKING:
+ 21:     from khora.config import LiteLLMConfig
+ 22:     from khora.extraction.skills import ExpertiseConfig
+ 23: 
+ 24: 
+ 25: # Default entity types to extract
+ 26: DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
+ 27: 
+ 28: # Default system prompt for extraction
+ 29: DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
+ 30: 
+ 31: # Extraction prompt template with temporal awareness
+ 32: EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
+ 33: 
+ 34: Entity types to extract: {entity_types}
+ 35: 
+ 36: Text:
+ 37: {text}
+ 38: 
+ 39: Return a JSON object with the following structure:
+ 40: {{
+ 41:     "entities": [
+ 42:         {{
+ 43:             "name": "entity name (canonical form, properly capitalized)",
+ 44:             "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|PRODUCT|DATE|etc",
+ 45:             "description": "brief description of the entity",
+ 46:             "attributes": {{"key": "value"}},
+ 47:             "aliases": ["alternative names", "nicknames", "abbreviations"],
+ 48:             "temporal": {{
+ 49:                 "mentioned_at": "when entity is mentioned (if temporal context exists)",
+ 50:                 "valid_from": "ISO date or null if entity validity period is mentioned",
+ 51:                 "valid_until": "ISO date or null if entity validity period ends"
+ 52:             }}
+ 53:         }}
+ 54:     ],
+ 55:     "relationships": [
+ 56:         {{
+ 57:             "source_entity": "source entity name (must match an entity above)",
+ 58:             "target_entity": "target entity name (must match an entity above)",
+ 59:             "relationship_type": "WORKS_FOR|KNOWS|MANAGES|REPORTS_TO|COLLABORATES_WITH|OWNS|PART_OF|LOCATED_IN|RELATES_TO|DEPENDS_ON|IMPLEMENTS|PRECEDES|FOLLOWS|ASSOCIATED_WITH|etc",
+ 60:             "description": "brief description of relationship",
+ 61:             "temporal": {{
+ 62:                 "occurred_at": "when relationship occurred/started",
+ 63:                 "valid_from": "ISO date or null if relationship has time bounds",
+ 64:                 "valid_until": "ISO date or null if relationship ended"
+ 65:             }}
+ 66:         }}
+ 67:     ],
+ 68:     "events": [
+ 69:         {{
+ 70:             "description": "what happened",
+ 71:             "occurred_at": "when it occurred (ISO date or descriptive)",
+ 72:             "participants": ["entity names involved"],
+ 73:             "event_type": "MEETING|DECISION|MILESTONE|ANNOUNCEMENT|INCIDENT|etc"
+ 74:         }}
+ 75:     ]
+ 76: }}
+ 77: 
+ 78: Guidelines:
+ 79: - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
+ 80: - Include aliases for entities that have multiple names/abbreviations
+ 81: - Extract temporal information when dates, times, or relative time references appear
+ 82: - For events, capture the when, who, and what
+ 83: - Be thorough but precise - only extract entities that are clearly mentioned
+ 84: - Ensure relationship source/target names match extracted entity names exactly
+ 85: 
+ 86: Return ONLY valid JSON, no other text."""
+ 87: 
+ 88: 
+ 89: class LLMEntityExtractor(EntityExtractor):
+ 90:     """LLM-based entity extractor using LiteLLM.
+ 91: 
+ 92:     Uses an LLM to extract entities and relationships from text
+ 93:     through structured JSON output.
+ 94:     """
+ 95: 
+ 96:     def __init__(
+ 97:         self,
+ 98:         model: str = "gpt-4o-mini",
+ 99:         *,
+100:         temperature: float = 0.3,  # Lower for more consistent extraction
+101:         max_tokens: int = 4000,
+102:         timeout: int = 60,
+103:         max_retries: int = 3,
+104:         max_concurrent: int = 5,
+105:     ) -> None:
+106:         """Initialize the LLM entity extractor.
+107: 
+108:         Args:
+109:             model: LLM model to use
+110:             temperature: Sampling temperature
+111:             max_tokens: Maximum tokens in response
+112:             timeout: Request timeout in seconds
+113:             max_retries: Maximum retries on failure
+114:             max_concurrent: Maximum concurrent extractions
+115:         """
+116:         self._model = model
+117:         self._temperature = temperature
+118:         self._max_tokens = max_tokens
+119:         self._timeout = timeout
+120:         self._max_retries = max_retries
+121:         self._semaphore = asyncio.Semaphore(max_concurrent)
+122: 
+123:     @classmethod
+124:     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
+125:         """Create extractor from LiteLLM configuration.
+126: 
+127:         Args:
+128:             config: LiteLLMConfig instance
+129: 
+130:         Returns:
+131:             Configured LLMEntityExtractor
+132:         """
+133:         return cls(
+134:             model=config.model,
+135:             temperature=0.3,  # Override for extraction
+136:             max_tokens=config.max_tokens,
+137:             timeout=config.timeout,
+138:             max_retries=config.max_retries,
+139:             max_concurrent=config.max_concurrent_llm_calls,
+140:         )
+141: 
+142:     async def extract(
+143:         self,
+144:         text: str,
+145:         *,
+146:         entity_types: list[str] | None = None,
+147:         expertise: ExpertiseConfig | None = None,
+148:         context: dict[str, Any] | None = None,
+149:     ) -> ExtractionResult:
+150:         """Extract entities and relationships from text.
+151: 
+152:         Args:
+153:             text: Text to extract from
+154:             entity_types: Optional list of entity types to extract
+155:             expertise: Optional ExpertiseConfig for domain-specific extraction
+156:             context: Optional context dict for prompt template rendering
+157: 
+158:         Returns:
+159:             ExtractionResult containing entities and relationships
+160:         """
+161:         if not text.strip():
+162:             return ExtractionResult()
+163: 
+164:         # Determine entity types from expertise or fallback
+165:         if expertise:
+166:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+167:         else:
+168:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
+169: 
+170:         try:
+171:             import litellm
+172:         except ImportError:
+173:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
+174: 
+175:         # Render prompts based on expertise
+176:         system_prompt = self._render_system_prompt(expertise, context)
+177:         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
+178: 
+179:         async with self._semaphore:
+180:             for attempt in range(self._max_retries):
+181:                 try:
+182:                     response = await litellm.acompletion(
+183:                         model=self._model,
+184:                         messages=[
+185:                             {"role": "system", "content": system_prompt},
+186:                             {"role": "user", "content": extraction_prompt},
+187:                         ],
+188:                         temperature=self._temperature,
+189:                         max_tokens=self._max_tokens,
+190:                         timeout=self._timeout,
+191:                         response_format={"type": "json_object"},
+192:                     )
+193: 
+194:                     content = response.choices[0].message.content
+195:                     result = self._parse_response(content)
+196: 
+197:                     # Apply confidence filtering from expertise if available
+198:                     if expertise:
+199:                         result = self._filter_by_confidence(result, expertise)
+200: 
+201:                     return result
+202: 
+203:                 except Exception as e:
+204:                     if attempt < self._max_retries - 1:
+205:                         wait_time = 2**attempt
+206:                         logger.warning(f"Extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+207:                         await asyncio.sleep(wait_time)
+208:                     else:
+209:                         logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
+210:                         return ExtractionResult(metadata={"error": str(e)})
+211: 
+212:     def _render_system_prompt(
+213:         self,
+214:         expertise: ExpertiseConfig | None,
+215:         context: dict[str, Any] | None,
+216:     ) -> str:
+217:         """Render the system prompt, optionally using expertise config."""
+218:         if not expertise or not expertise.system_prompt:
+219:             return DEFAULT_SYSTEM_PROMPT
+220: 
+221:         try:
+222:             from khora.extraction.skills.composer import ExpertiseComposer
+223: 
+224:             composer = ExpertiseComposer()
+225:             return composer.render_prompt(
+226:                 expertise.system_prompt,
+227:                 expertise=expertise,
+228:                 context=context,
+229:             )
+230:         except Exception as e:
+231:             logger.warning(f"Failed to render system prompt: {e}")
+232:             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
+233: 
+234:     def _render_extraction_prompt(
+235:         self,
+236:         text: str,
+237:         entity_types: list[str],
+238:         expertise: ExpertiseConfig | None,
+239:         context: dict[str, Any] | None,
+240:     ) -> str:
+241:         """Render the extraction prompt, optionally using expertise config."""
+242:         # If expertise has a custom extraction prompt, use it
+243:         if expertise and expertise.extraction_prompt:
+244:             try:
+245:                 from khora.extraction.skills.composer import ExpertiseComposer
+246: 
+247:                 composer = ExpertiseComposer()
+248:                 return composer.render_prompt(
+249:                     expertise.extraction_prompt,
+250:                     expertise=expertise,
+251:                     context={**(context or {}), "text": text[:8000], "entity_types": entity_types},
+252:                 )
+253:             except Exception as e:
+254:                 logger.warning(f"Failed to render extraction prompt: {e}")
+255: 
+256:         # Use default extraction prompt
+257:         return EXTRACTION_PROMPT.format(
+258:             entity_types=", ".join(entity_types),
+259:             text=text[:8000],  # Truncate very long texts
+260:         )
+261: 
+262:     def _filter_by_confidence(
+263:         self,
+264:         result: ExtractionResult,
+265:         expertise: ExpertiseConfig,
+266:     ) -> ExtractionResult:
+267:         """Filter extraction results by confidence thresholds from expertise."""
+268:         min_entity = expertise.confidence.min_entity
+269:         min_relationship = expertise.confidence.min_relationship
+270: 
+271:         filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
+272:         filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
+273: 
+274:         return ExtractionResult(
+275:             entities=filtered_entities,
+276:             relationships=filtered_relationships,
+277:             events=result.events,
+278:             metadata=result.metadata,
+279:         )
+280: 
+281:     async def extract_batch(
+282:         self,
+283:         texts: list[str],
+284:         *,
+285:         entity_types: list[str] | None = None,
+286:         expertise: ExpertiseConfig | None = None,
+287:         context: dict[str, Any] | None = None,
+288:     ) -> list[ExtractionResult]:
+289:         """Extract from multiple texts concurrently.
+290: 
+291:         Args:
+292:             texts: List of texts to extract from
+293:             entity_types: Optional list of entity types to extract
+294:             expertise: Optional ExpertiseConfig for domain-specific extraction
+295:             context: Optional context dict for prompt template rendering
+296: 
+297:         Returns:
+298:             List of ExtractionResult objects
+299:         """
+300:         if not texts:
+301:             return []
+302: 
+303:         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
+304:         return await asyncio.gather(*tasks)
+305: 
+306:     def _parse_response(self, content: str) -> ExtractionResult:
+307:         """Parse the LLM response into an ExtractionResult."""
+308:         try:
+309:             # Try to parse as JSON
+310:             data = json.loads(content)
+311: 
+312:             entities = []
+313:             for e in data.get("entities", []):
+314:                 # Parse temporal info if present
+315:                 temporal = None
+316:                 if "temporal" in e and e["temporal"]:
+317:                     t = e["temporal"]
+318:                     temporal = TemporalInfo(
+319:                         mentioned_at=t.get("mentioned_at"),
+320:                         valid_from=t.get("valid_from"),
+321:                         valid_until=t.get("valid_until"),
+322:                     )
+323: 
+324:                 # Ensure attributes is a dict (LLM sometimes returns a list)
+325:                 attrs = e.get("attributes", {})
+326:                 if not isinstance(attrs, dict):
+327:                     attrs = {}
+328: 
+329:                 entities.append(
+330:                     ExtractedEntity(
+331:                         name=e.get("name", ""),
+332:                         entity_type=e.get("entity_type", "CONCEPT"),
+333:                         description=e.get("description", ""),
+334:                         attributes=attrs,
+335:                         aliases=e.get("aliases", []),
+336:                         temporal=temporal,
+337:                         confidence=e.get("confidence", 0.9),
+338:                     )
+339:                 )
+340: 
+341:             relationships = []
+342:             for r in data.get("relationships", []):
+343:                 # Parse temporal info if present
+344:                 temporal = None
+345:                 if "temporal" in r and r["temporal"]:
+346:                     t = r["temporal"]
+347:                     temporal = TemporalInfo(
+348:                         occurred_at=t.get("occurred_at"),
+349:                         valid_from=t.get("valid_from"),
+350:                         valid_until=t.get("valid_until"),
+351:                     )
+352: 
+353:                 relationships.append(
+354:                     ExtractedRelationship(
+355:                         source_entity=r.get("source_entity", ""),
+356:                         target_entity=r.get("target_entity", ""),
+357:                         relationship_type=r.get("relationship_type", "RELATES_TO"),
+358:                         description=r.get("description", ""),
+359:                         properties=r.get("properties", {}),
+360:                         temporal=temporal,
+361:                         confidence=r.get("confidence", 0.9),
+362:                     )
+363:                 )
+364: 
+365:             events = []
+366:             for ev in data.get("events", []):
+367:                 events.append(
+368:                     ExtractedEvent(
+369:                         description=ev.get("description", ""),
+370:                         event_type=ev.get("event_type", "EVENT"),
+371:                         occurred_at=ev.get("occurred_at"),
+372:                         participants=ev.get("participants", []),
+373:                         confidence=ev.get("confidence", 0.9),
+374:                     )
+375:                 )
+376: 
+377:             return ExtractionResult(
+378:                 entities=entities,
+379:                 relationships=relationships,
+380:                 events=events,
+381:             )
+382: 
+383:         except json.JSONDecodeError as e:
+384:             logger.warning(f"Failed to parse extraction response as JSON: {e}")
+385:             # Try to extract JSON from the response
+386:             return self._extract_json_from_text(content)
+387: 
+388:     def _extract_json_from_text(self, text: str) -> ExtractionResult:
+389:         """Try to extract JSON from text that may contain other content."""
+390:         import re
+391: 
+392:         # Look for JSON object in the text
+393:         json_match = re.search(r"\{[\s\S]*\}", text)
+394:         if json_match:
+395:             try:
+396:                 data = json.loads(json_match.group())
+397:                 return self._parse_response(json.dumps(data))
+398:             except json.JSONDecodeError:
+399:                 pass
+400: 
+401:         logger.warning("Could not extract valid JSON from response")
+402:         return ExtractionResult(metadata={"raw_response": text[:500]})
+````
+
 ## File: src/khora/storage/backends/neo4j.py
 ````python
   1: """Neo4j backend for knowledge graph storage.
@@ -18787,193 +18791,304 @@ README.md
 168:         if enable_expansion and resolved_expertise:
 169:             from khora.extraction.expansion import SemanticExpander
 170: 
-171:             expander = SemanticExpander(expertise=resolved_expertise)
-172:             expansion_result = await expander.expand(
-173:                 entities=entities,
-174:                 relationships=relationships,
-175:                 namespace_id=document.namespace_id,
-176:             )
-177: 
-178:             entities = expansion_result.entities
-179:             relationships = expansion_result.relationships
-180:             inferred_relationships = expansion_result.inferred_relationships
-181: 
-182:             logger.info(
-183:                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
-184:                 f"inferred {len(inferred_relationships)} relationships"
-185:             )
-186: 
-187:         # Step 4: Store chunks (batched)
-188:         await storage.create_chunks_batch(chunks)
-189: 
-190:         # Step 5: Store entities with deduplication
-191:         # Process entities concurrently but with semaphore to avoid overwhelming the DB
-192:         entity_semaphore = asyncio.Semaphore(20)
-193: 
-194:         async def store_entity(entity):
-195:             async with entity_semaphore:
-196:                 existing = await storage.get_entity_by_name(
-197:                     document.namespace_id,
-198:                     entity.name,
-199:                     entity.entity_type.value,
-200:                 )
-201:                 if existing:
-202:                     existing.merge_with(entity)
-203:                     return await storage.update_entity(existing)
-204:                 else:
-205:                     return await storage.create_entity(entity)
+171:             # Determine inference mode from expertise config
+172:             inference_mode = resolved_expertise.expansion.inference_mode
+173: 
+174:             # For incremental mode, fetch existing entities/relationships from storage
+175:             # to enable cross-document inference
+176:             expansion_entities = list(entities)
+177:             expansion_relationships = list(relationships)
+178: 
+179:             if inference_mode == "incremental":
+180:                 # Query existing entities and relationships from the namespace
+181:                 existing_entities = await storage.list_entities(document.namespace_id, limit=1000)
+182:                 existing_relationships = await storage.list_relationships(document.namespace_id, limit=5000)
+183: 
+184:                 # Add existing data to expansion context
+185:                 expansion_entities.extend(existing_entities)
+186:                 expansion_relationships.extend(existing_relationships)
+187: 
+188:                 logger.debug(
+189:                     f"Document {document.id}: incremental mode - added {len(existing_entities)} existing entities, "
+190:                     f"{len(existing_relationships)} existing relationships to expansion context"
+191:                 )
+192: 
+193:             # For batch mode, skip inference (only do unification on current doc)
+194:             # Inference will be run separately after all documents are processed
+195:             enable_inference = inference_mode != "batch" and inference_mode != "none"
+196: 
+197:             expander = SemanticExpander(
+198:                 expertise=resolved_expertise,
+199:                 enable_inference=enable_inference,
+200:             )
+201:             expansion_result = await expander.expand(
+202:                 entities=expansion_entities,
+203:                 relationships=expansion_relationships,
+204:                 namespace_id=document.namespace_id,
+205:             )
 206: 
-207:         await asyncio.gather(*[store_entity(e) for e in entities])
-208: 
-209:         # Step 6: Store relationships concurrently
-210:         async def store_relationship(rel):
-211:             async with entity_semaphore:
-212:                 return await storage.create_relationship(rel)
-213: 
-214:         all_relationships = relationships + inferred_relationships
-215:         if all_relationships:
-216:             await asyncio.gather(*[store_relationship(r) for r in all_relationships])
+207:             # Only keep entities from current document (not the existing ones we added)
+208:             # The existing entities are already stored
+209:             if inference_mode == "incremental":
+210:                 current_entity_ids = {e.id for e in entities}
+211:                 entities = [e for e in expansion_result.entities if e.id in current_entity_ids]
+212:             else:
+213:                 entities = expansion_result.entities
+214: 
+215:             relationships = expansion_result.relationships
+216:             inferred_relationships = expansion_result.inferred_relationships
 217: 
-218:         # Mark as completed
-219:         document.mark_completed(len(chunks), len(entities))
-220:         await storage.update_document(document)
-221: 
-222:         return {
-223:             "document_id": str(document.id),
-224:             "chunks": len(chunks),
-225:             "entities": len(entities),
-226:             "relationships": len(relationships),
-227:             "inferred_relationships": len(inferred_relationships),
-228:         }
+218:             logger.info(
+219:                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
+220:                 f"inferred {len(inferred_relationships)} relationships (mode={inference_mode})"
+221:             )
+222: 
+223:         # Step 4: Store chunks (batched)
+224:         await storage.create_chunks_batch(chunks)
+225: 
+226:         # Step 5: Store entities with deduplication
+227:         # Process entities concurrently but with semaphore to avoid overwhelming the DB
+228:         entity_semaphore = asyncio.Semaphore(20)
 229: 
-230:     except Exception as e:
-231:         document.mark_failed(str(e))
-232:         await storage.update_document(document)
-233:         raise
-234: 
-235: 
-236: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
-237: @flow(name="ingest_documents", log_prints=True)
-238: async def ingest_documents(
-239:     namespace_id: UUID,
-240:     documents: list[dict[str, Any]],
-241:     storage: StorageCoordinator | None = None,
-242:     *,
-243:     skill_name: str = "general_entities",
-244:     expertise: ExpertiseConfig | str | None = None,
-245:     chunk_strategy: str = "semantic",
-246:     chunk_size: int = 512,
-247:     embedding_model: str = "text-embedding-3-small",
-248:     extraction_model: str = "gpt-4o-mini",
-249:     max_concurrent_documents: int = 5,
-250:     max_concurrent_extractions: int = 10,
-251:     enable_expansion: bool = False,
-252:     extraction_context: dict[str, Any] | None = None,
-253:     **kwargs,
-254: ) -> dict[str, Any]:
-255:     """Two-phase document ingestion flow with parallel processing.
-256: 
-257:     Phase 1: Stage documents (checksum-based change detection)
-258:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
-259:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
-260: 
-261:     Args:
-262:         namespace_id: Target namespace
-263:         documents: List of document dicts with 'content' and optional metadata
-264:         storage: StorageCoordinator instance
-265:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
-266:         expertise: ExpertiseConfig, expertise name string, or file path
-267:         chunk_strategy: Chunking strategy
-268:         chunk_size: Target chunk size
-269:         embedding_model: Model for embeddings
-270:         extraction_model: Model for extraction
-271:         max_concurrent_documents: Maximum documents to process in parallel
-272:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
-273:         enable_expansion: Whether to run semantic expansion
-274:         extraction_context: Context dict for prompt template rendering
-275: 
-276:     Returns:
-277:         Summary of ingestion results
-278:     """
-279:     if storage is None:
-280:         raise ValueError("storage is required")
-281: 
-282:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
-283: 
-284:     # Phase 1: Stage documents (can run in parallel too)
-285:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
-286: 
-287:     async def stage_with_limit(doc_input):
-288:         async with staging_semaphore:
-289:             return await stage_document(doc_input, namespace_id, storage)
-290: 
-291:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
-292:     staged_docs = [doc for doc in staged_results if doc is not None]
-293: 
-294:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
-295: 
-296:     if not staged_docs:
-297:         return {
-298:             "total_documents": len(documents),
-299:             "processed_documents": 0,
-300:             "skipped_documents": len(documents),
-301:             "total_chunks": 0,
-302:             "total_entities": 0,
-303:             "total_relationships": 0,
-304:         }
-305: 
-306:     # Phase 2: Process staged documents in parallel with controlled concurrency
-307:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
-308: 
-309:     async def process_with_limit(doc):
-310:         async with doc_semaphore:
-311:             return await process_document(
-312:                 doc,
-313:                 storage,
-314:                 chunk_strategy=chunk_strategy,
-315:                 chunk_size=chunk_size,
-316:                 embedding_model=embedding_model,
-317:                 extraction_model=extraction_model,
-318:                 skill_name=skill_name,
-319:                 expertise=expertise,
-320:                 max_concurrent_extractions=max_concurrent_extractions,
-321:                 enable_expansion=enable_expansion,
-322:                 extraction_context=extraction_context,
-323:             )
-324: 
-325:     results = await asyncio.gather(
-326:         *[process_with_limit(doc) for doc in staged_docs],
-327:         return_exceptions=True,
-328:     )
+230:         async def store_entity(entity):
+231:             async with entity_semaphore:
+232:                 existing = await storage.get_entity_by_name(
+233:                     document.namespace_id,
+234:                     entity.name,
+235:                     entity.entity_type.value,
+236:                 )
+237:                 if existing:
+238:                     existing.merge_with(entity)
+239:                     return await storage.update_entity(existing)
+240:                 else:
+241:                     return await storage.create_entity(entity)
+242: 
+243:         await asyncio.gather(*[store_entity(e) for e in entities])
+244: 
+245:         # Step 6: Store relationships concurrently
+246:         async def store_relationship(rel):
+247:             async with entity_semaphore:
+248:                 return await storage.create_relationship(rel)
+249: 
+250:         all_relationships = relationships + inferred_relationships
+251:         if all_relationships:
+252:             await asyncio.gather(*[store_relationship(r) for r in all_relationships])
+253: 
+254:         # Mark as completed
+255:         document.mark_completed(len(chunks), len(entities))
+256:         await storage.update_document(document)
+257: 
+258:         return {
+259:             "document_id": str(document.id),
+260:             "chunks": len(chunks),
+261:             "entities": len(entities),
+262:             "relationships": len(relationships),
+263:             "inferred_relationships": len(inferred_relationships),
+264:         }
+265: 
+266:     except Exception as e:
+267:         document.mark_failed(str(e))
+268:         await storage.update_document(document)
+269:         raise
+270: 
+271: 
+272: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
+273: @flow(name="ingest_documents", log_prints=True)
+274: async def ingest_documents(
+275:     namespace_id: UUID,
+276:     documents: list[dict[str, Any]],
+277:     storage: StorageCoordinator | None = None,
+278:     *,
+279:     skill_name: str = "general_entities",
+280:     expertise: ExpertiseConfig | str | None = None,
+281:     chunk_strategy: str = "semantic",
+282:     chunk_size: int = 512,
+283:     embedding_model: str = "text-embedding-3-small",
+284:     extraction_model: str = "gpt-4o-mini",
+285:     max_concurrent_documents: int = 5,
+286:     max_concurrent_extractions: int = 10,
+287:     enable_expansion: bool = False,
+288:     extraction_context: dict[str, Any] | None = None,
+289:     **kwargs,
+290: ) -> dict[str, Any]:
+291:     """Two-phase document ingestion flow with parallel processing.
+292: 
+293:     Phase 1: Stage documents (checksum-based change detection)
+294:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
+295:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
+296: 
+297:     Args:
+298:         namespace_id: Target namespace
+299:         documents: List of document dicts with 'content' and optional metadata
+300:         storage: StorageCoordinator instance
+301:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
+302:         expertise: ExpertiseConfig, expertise name string, or file path
+303:         chunk_strategy: Chunking strategy
+304:         chunk_size: Target chunk size
+305:         embedding_model: Model for embeddings
+306:         extraction_model: Model for extraction
+307:         max_concurrent_documents: Maximum documents to process in parallel
+308:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
+309:         enable_expansion: Whether to run semantic expansion
+310:         extraction_context: Context dict for prompt template rendering
+311: 
+312:     Returns:
+313:         Summary of ingestion results
+314:     """
+315:     if storage is None:
+316:         raise ValueError("storage is required")
+317: 
+318:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
+319: 
+320:     # Phase 1: Stage documents (can run in parallel too)
+321:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
+322: 
+323:     async def stage_with_limit(doc_input):
+324:         async with staging_semaphore:
+325:             return await stage_document(doc_input, namespace_id, storage)
+326: 
+327:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+328:     staged_docs = [doc for doc in staged_results if doc is not None]
 329: 
-330:     # Filter out exceptions and count errors
-331:     successful_results = []
-332:     error_count = 0
-333:     for result in results:
-334:         if isinstance(result, Exception):
-335:             logger.error(f"Document processing failed: {result}")
-336:             error_count += 1
-337:         else:
-338:             successful_results.append(result)
-339: 
-340:     # Aggregate results
-341:     total_chunks = sum(r["chunks"] for r in successful_results)
-342:     total_entities = sum(r["entities"] for r in successful_results)
-343:     total_relationships = sum(r["relationships"] for r in successful_results)
-344:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
-345: 
-346:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
-347: 
-348:     return {
-349:         "total_documents": len(documents),
-350:         "processed_documents": len(successful_results),
-351:         "skipped_documents": len(documents) - len(staged_docs),
-352:         "failed_documents": error_count,
-353:         "total_chunks": total_chunks,
-354:         "total_entities": total_entities,
-355:         "total_relationships": total_relationships,
-356:         "total_inferred_relationships": total_inferred,
-357:     }
+330:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
+331: 
+332:     if not staged_docs:
+333:         return {
+334:             "total_documents": len(documents),
+335:             "processed_documents": 0,
+336:             "skipped_documents": len(documents),
+337:             "total_chunks": 0,
+338:             "total_entities": 0,
+339:             "total_relationships": 0,
+340:         }
+341: 
+342:     # Phase 2: Process staged documents in parallel with controlled concurrency
+343:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+344: 
+345:     async def process_with_limit(doc):
+346:         async with doc_semaphore:
+347:             return await process_document(
+348:                 doc,
+349:                 storage,
+350:                 chunk_strategy=chunk_strategy,
+351:                 chunk_size=chunk_size,
+352:                 embedding_model=embedding_model,
+353:                 extraction_model=extraction_model,
+354:                 skill_name=skill_name,
+355:                 expertise=expertise,
+356:                 max_concurrent_extractions=max_concurrent_extractions,
+357:                 enable_expansion=enable_expansion,
+358:                 extraction_context=extraction_context,
+359:             )
+360: 
+361:     results = await asyncio.gather(
+362:         *[process_with_limit(doc) for doc in staged_docs],
+363:         return_exceptions=True,
+364:     )
+365: 
+366:     # Filter out exceptions and count errors
+367:     successful_results = []
+368:     error_count = 0
+369:     for result in results:
+370:         if isinstance(result, Exception):
+371:             logger.error(f"Document processing failed: {result}")
+372:             error_count += 1
+373:         else:
+374:             successful_results.append(result)
+375: 
+376:     # Aggregate results
+377:     total_chunks = sum(r["chunks"] for r in successful_results)
+378:     total_entities = sum(r["entities"] for r in successful_results)
+379:     total_relationships = sum(r["relationships"] for r in successful_results)
+380:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
+381: 
+382:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
+383: 
+384:     return {
+385:         "total_documents": len(documents),
+386:         "processed_documents": len(successful_results),
+387:         "skipped_documents": len(documents) - len(staged_docs),
+388:         "failed_documents": error_count,
+389:         "total_chunks": total_chunks,
+390:         "total_entities": total_entities,
+391:         "total_relationships": total_relationships,
+392:         "total_inferred_relationships": total_inferred,
+393:     }
+394: 
+395: 
+396: @task(name="run_batch_inference", cache_policy=NO_CACHE)
+397: async def run_batch_inference(
+398:     namespace_id: UUID,
+399:     storage: StorageCoordinator,
+400:     expertise: ExpertiseConfig,
+401:     *,
+402:     max_entities: int = 10000,
+403:     max_relationships: int = 50000,
+404: ) -> dict[str, Any]:
+405:     """Run batch inference on the entire namespace.
+406: 
+407:     This should be called after all documents are ingested when using
+408:     inference_mode="batch". It queries all entities and relationships
+409:     from the namespace and runs inference rules to create new relationships.
+410: 
+411:     Args:
+412:         namespace_id: Namespace to run inference on
+413:         storage: Storage coordinator
+414:         expertise: ExpertiseConfig with inference rules
+415:         max_entities: Maximum entities to load
+416:         max_relationships: Maximum relationships to load
+417: 
+418:     Returns:
+419:         Summary of inference results
+420:     """
+421:     from khora.extraction.expansion import SemanticExpander
+422: 
+423:     logger.info(f"Starting batch inference for namespace {namespace_id}")
+424: 
+425:     # Load all entities and relationships from storage
+426:     entities = await storage.list_entities(namespace_id, limit=max_entities)
+427:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
+428: 
+429:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
+430: 
+431:     if not entities:
+432:         return {
+433:             "entities": 0,
+434:             "relationships": 0,
+435:             "inferred_relationships": 0,
+436:         }
+437: 
+438:     # Create expander with inference enabled
+439:     expander = SemanticExpander(
+440:         expertise=expertise,
+441:         enable_unification=False,  # Entities already unified during ingestion
+442:         enable_inference=True,
+443:     )
+444: 
+445:     # Run expansion (inference only)
+446:     expansion_result = await expander.expand(
+447:         entities=entities,
+448:         relationships=relationships,
+449:         namespace_id=namespace_id,
+450:     )
+451: 
+452:     # Store inferred relationships
+453:     inferred_count = 0
+454:     if expansion_result.inferred_relationships:
+455:         for rel in expansion_result.inferred_relationships:
+456:             try:
+457:                 await storage.create_relationship(rel)
+458:                 inferred_count += 1
+459:             except Exception as e:
+460:                 logger.warning(f"Failed to store inferred relationship: {e}")
+461: 
+462:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
+463: 
+464:     return {
+465:         "entities": len(entities),
+466:         "relationships": len(relationships),
+467:         "inferred_relationships": inferred_count,
+468:     }
 ````
 
 ## File: pyproject.toml
@@ -20832,6 +20947,14 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-01-27 00:30:31 +0100
+**Message:** fix: handle attributes as list instead of dict
+
+**Files:**
+- REPOMIX.md
+- src/khora/core/models/entity.py
+- src/khora/extraction/extractors/llm.py
+
 ## Commit: 2026-01-26 23:29:36 +0100
 **Message:** Add configurable expertise system and semantic expansion
 
@@ -21175,9 +21298,3 @@ README.md
 - tests/unit/__init__.py
 - tests/unit/test_api.py
 - uv.lock
-
-## Commit: 2026-01-25 22:29:55 +0100
-**Message:** Correct capitalization of project name
-
-**Files:**
-- README.md
