@@ -11979,549 +11979,6 @@ README.md
 253:         return cls.from_expertise(expertise)
 ````
 
-## File: src/khora/extraction/expansion/rule_engine.py
-````python
-  1: """Configurable rule evaluation engine.
-  2: 
-  3: Provides a generic rule evaluation system for both correlation rules
-  4: and inference rules defined in expertise configurations.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import re
- 10: from dataclasses import dataclass, field
- 11: from typing import TYPE_CHECKING, Any
- 12: 
- 13: from loguru import logger
- 14: 
- 15: if TYPE_CHECKING:
- 16:     from khora.core.models import Entity, Relationship
- 17:     from khora.extraction.skills import CorrelationRule, ExpertiseConfig, InferenceRule
- 18: 
- 19: 
- 20: @dataclass
- 21: class RuleMatch:
- 22:     """Result of a rule match."""
- 23: 
- 24:     rule_name: str
- 25:     matched_value: str | None = None
- 26:     matched_entities: list[Entity] = field(default_factory=list)
- 27:     matched_relationships: list[Relationship] = field(default_factory=list)
- 28:     confidence: float = 1.0
- 29:     metadata: dict[str, Any] = field(default_factory=dict)
- 30: 
- 31: 
- 32: @dataclass
- 33: class RuleEvaluationContext:
- 34:     """Context for rule evaluation containing available data."""
- 35: 
- 36:     entities: list[Entity] = field(default_factory=list)
- 37:     relationships: list[Relationship] = field(default_factory=list)
- 38:     entity_index: dict[str, list[Entity]] = field(default_factory=dict)  # name -> entities
- 39:     type_index: dict[str, list[Entity]] = field(default_factory=dict)  # type -> entities
- 40:     relationship_index: dict[str, list[Relationship]] = field(default_factory=dict)  # type -> relationships
- 41: 
- 42:     @classmethod
- 43:     def from_data(
- 44:         cls,
- 45:         entities: list[Entity],
- 46:         relationships: list[Relationship],
- 47:     ) -> RuleEvaluationContext:
- 48:         """Create context with built indices."""
- 49:         ctx = cls(entities=entities, relationships=relationships)
- 50: 
- 51:         # Build entity indices
- 52:         for entity in entities:
- 53:             # Index by name (lowercase for matching)
- 54:             name_key = entity.name.lower()
- 55:             if name_key not in ctx.entity_index:
- 56:                 ctx.entity_index[name_key] = []
- 57:             ctx.entity_index[name_key].append(entity)
- 58: 
- 59:             # Index by type
- 60:             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
- 61:             if type_key not in ctx.type_index:
- 62:                 ctx.type_index[type_key] = []
- 63:             ctx.type_index[type_key].append(entity)
- 64: 
- 65:         # Build relationship index
- 66:         for rel in relationships:
- 67:             rel_type = str(
- 68:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
- 69:             )
- 70:             if rel_type not in ctx.relationship_index:
- 71:                 ctx.relationship_index[rel_type] = []
- 72:             ctx.relationship_index[rel_type].append(rel)
- 73: 
- 74:         return ctx
- 75: 
- 76: 
- 77: # Type hierarchy for flexible matching
- 78: # Child types can match parent types in inference rules
- 79: # e.g., EMPLOYEE matches rules expecting PERSON
- 80: TYPE_HIERARCHY: dict[str, list[str]] = {
- 81:     "EMPLOYEE": ["PERSON"],
- 82:     "EXTERNAL_PERSON": ["PERSON"],
- 83:     "COMPANY": ["ORGANIZATION"],
- 84:     "DEPARTMENT": ["ORGANIZATION"],
- 85:     "TEAM": ["ORGANIZATION"],
- 86:     "MESSAGE": ["CONTENT"],
- 87:     "PAGE": ["CONTENT", "DOCUMENT"],
- 88:     "ISSUE": ["WORK_ITEM", "CONTENT"],
- 89:     "SALES_NOTE": ["CONTENT", "NOTE"],
- 90:     "CALL": ["EVENT", "MEETING"],
- 91:     "DEAL": ["OPPORTUNITY"],
- 92:     "PROJECT": ["WORK_ITEM"],
- 93:     "CYCLE": ["WORK_ITEM", "SPRINT"],
- 94: }
- 95: 
- 96: 
- 97: def types_match(actual_type: str, expected_type: str) -> bool:
- 98:     """Check if actual type matches expected, considering type hierarchy.
- 99: 
-100:     Args:
-101:         actual_type: The actual entity type from the graph
-102:         expected_type: The expected type from the inference rule
-103: 
-104:     Returns:
-105:         True if types match directly or via hierarchy
-106:     """
-107:     # Direct match
-108:     if actual_type == expected_type:
-109:         return True
-110: 
-111:     # Check if actual is a subtype of expected (e.g., EMPLOYEE matches PERSON)
-112:     parents = TYPE_HIERARCHY.get(actual_type, [])
-113:     if expected_type in parents:
-114:         return True
-115: 
-116:     # Check reverse: if expected is a subtype of actual (e.g., PERSON matches EMPLOYEE)
-117:     # This allows rules written for specific types to match more generic extractions
-118:     parents_of_expected = TYPE_HIERARCHY.get(expected_type, [])
-119:     if actual_type in parents_of_expected:
-120:         return True
-121: 
-122:     return False
-123: 
-124: 
-125: class RuleEngine:
-126:     """Engine for evaluating correlation and inference rules.
-127: 
-128:     Supports:
-129:     - Pattern-based matching (regex)
-130:     - Field-based matching
-131:     - Multi-condition inference rules
-132:     - Confidence scoring
-133:     - Type hierarchy matching (EMPLOYEE matches rules expecting PERSON)
-134:     """
-135: 
-136:     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
-137:         """Initialize the rule engine.
-138: 
-139:         Args:
-140:             expertise: ExpertiseConfig with rules to evaluate
-141:         """
-142:         self._expertise = expertise
-143:         self._compiled_patterns: dict[str, re.Pattern] = {}
-144: 
-145:     def evaluate_correlation_rules(
-146:         self,
-147:         text: str,
-148:         context: RuleEvaluationContext,
-149:     ) -> list[RuleMatch]:
-150:         """Evaluate correlation rules against text and context.
-151: 
-152:         Args:
-153:             text: Text to search for patterns
-154:             context: Evaluation context with entities and relationships
-155: 
-156:         Returns:
-157:             List of rule matches
-158:         """
-159:         if not self._expertise:
-160:             return []
-161: 
-162:         matches = []
-163:         for rule in self._expertise.correlation_rules:
-164:             rule_matches = self._evaluate_correlation_rule(rule, text, context)
-165:             matches.extend(rule_matches)
-166: 
-167:         return matches
-168: 
-169:     def evaluate_inference_rules(
-170:         self,
-171:         context: RuleEvaluationContext,
-172:     ) -> list[RuleMatch]:
-173:         """Evaluate inference rules against the context.
-174: 
-175:         Inference rules create new relationships based on existing patterns.
-176: 
-177:         Args:
-178:             context: Evaluation context with entities and relationships
-179: 
-180:         Returns:
-181:             List of rule matches that would create new relationships
-182:         """
-183:         if not self._expertise:
-184:             return []
-185: 
-186:         matches = []
-187:         for rule in self._expertise.inference_rules:
-188:             rule_matches = self._evaluate_inference_rule(rule, context)
-189:             matches.extend(rule_matches)
-190: 
-191:         return matches
-192: 
-193:     def find_pattern_matches(
-194:         self,
-195:         pattern: str,
-196:         text: str,
-197:     ) -> list[tuple[str, int, int]]:
-198:         """Find all pattern matches in text.
-199: 
-200:         Args:
-201:             pattern: Regex pattern to match
-202:             text: Text to search
-203: 
-204:         Returns:
-205:             List of (matched_value, start, end) tuples
-206:         """
-207:         compiled = self._get_compiled_pattern(pattern)
-208:         if not compiled:
-209:             return []
-210: 
-211:         matches = []
-212:         for match in compiled.finditer(text):
-213:             matches.append((match.group(), match.start(), match.end()))
-214: 
-215:         return matches
-216: 
-217:     def match_entities_by_field(
-218:         self,
-219:         entities: list[Entity],
-220:         field_name: str,
-221:         field_value: Any,
-222:     ) -> list[Entity]:
-223:         """Find entities matching a field value.
-224: 
-225:         Args:
-226:             entities: Entities to search
-227:             field_name: Attribute field name
-228:             field_value: Value to match
-229: 
-230:         Returns:
-231:             Matching entities
-232:         """
-233:         matches = []
-234:         for entity in entities:
-235:             entity_value = entity.attributes.get(field_name)
-236:             if entity_value is None:
-237:                 continue
-238: 
-239:             # Normalize for comparison
-240:             if isinstance(entity_value, str) and isinstance(field_value, str):
-241:                 if entity_value.lower() == field_value.lower():
-242:                     matches.append(entity)
-243:             elif entity_value == field_value:
-244:                 matches.append(entity)
-245: 
-246:         return matches
-247: 
-248:     def _evaluate_correlation_rule(
-249:         self,
-250:         rule: CorrelationRule,
-251:         text: str,
-252:         context: RuleEvaluationContext,
-253:     ) -> list[RuleMatch]:
-254:         """Evaluate a single correlation rule."""
-255:         matches = []
-256: 
-257:         # Pattern-based matching
-258:         if rule.pattern:
-259:             pattern_matches = self.find_pattern_matches(rule.pattern, text)
-260:             for matched_value, start, end in pattern_matches:
-261:                 # Find entities that might match this value
-262:                 matched_entities = self._find_entities_for_pattern_match(matched_value, rule.entity_types, context)
-263: 
-264:                 matches.append(
-265:                     RuleMatch(
-266:                         rule_name=rule.name,
-267:                         matched_value=matched_value,
-268:                         matched_entities=matched_entities,
-269:                         confidence=rule.confidence,
-270:                         metadata={
-271:                             "start": start,
-272:                             "end": end,
-273:                             "creates_relationship": rule.creates_relationship,
-274:                         },
-275:                     )
-276:                 )
-277: 
-278:         # Field-based matching
-279:         if rule.match_fields:
-280:             # This requires comparing entities against each other
-281:             field_matches = self._find_field_matches(rule, context)
-282:             matches.extend(field_matches)
-283: 
-284:         return matches
-285: 
-286:     def _evaluate_inference_rule(
-287:         self,
-288:         rule: InferenceRule,
-289:         context: RuleEvaluationContext,
-290:     ) -> list[RuleMatch]:
-291:         """Evaluate a single inference rule."""
-292:         if not rule.when or len(rule.when) < 1:
-293:             return []
-294: 
-295:         matches = []
-296: 
-297:         # Get relationships matching the first condition
-298:         first_condition = rule.when[0]
-299:         first_rels = context.relationship_index.get(first_condition.relationship, [])
-300: 
-301:         # Diagnostic: Log how many relationships match before filtering
-302:         before_filter_count = len(first_rels)
-303: 
-304:         # Filter by source/target type if specified
-305:         first_rels = self._filter_relationships_by_types(
-306:             first_rels, first_condition.source_type, first_condition.target_type, context
-307:         )
-308: 
-309:         # Diagnostic: Log filtering results for debugging
-310:         if before_filter_count > 0 and len(first_rels) == 0:
-311:             logger.debug(
-312:                 f"Rule '{rule.name}': {before_filter_count} {first_condition.relationship} rels "
-313:                 f"all filtered out by type filter (need {first_condition.source_type}->{first_condition.target_type})"
-314:             )
-315: 
-316:         if len(rule.when) == 1:
-317:             # Single condition rule
-318:             for rel in first_rels:
-319:                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
-320:                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
-321: 
-322:                 if source_entity and target_entity:
-323:                     matches.append(
-324:                         RuleMatch(
-325:                             rule_name=rule.name,
-326:                             matched_relationships=[rel],
-327:                             matched_entities=[source_entity, target_entity],
-328:                             confidence=rule.confidence,
-329:                             metadata={
-330:                                 "then_relationship": rule.then_relationship,
-331:                                 "then_source": rule.then_source,
-332:                                 "then_target": rule.then_target,
-333:                                 "first": {"source": source_entity, "target": target_entity},
-334:                             },
-335:                         )
-336:                     )
-337:         else:
-338:             # Multi-condition rule - need to find matching chains
-339:             for rel1 in first_rels:
-340:                 # For each first relationship, find matching second relationships
-341:                 second_condition = rule.when[1]
-342:                 second_rels = context.relationship_index.get(second_condition.relationship, [])
-343:                 second_rels = self._filter_relationships_by_types(
-344:                     second_rels, second_condition.source_type, second_condition.target_type, context
-345:                 )
-346: 
-347:                 # Find chains where relationships connect
-348:                 for rel2 in second_rels:
-349:                     if self._relationships_connect(rel1, rel2, context):
-350:                         source1 = self._find_entity_by_id(rel1.source_entity_id, context)
-351:                         target1 = self._find_entity_by_id(rel1.target_entity_id, context)
-352:                         source2 = self._find_entity_by_id(rel2.source_entity_id, context)
-353:                         target2 = self._find_entity_by_id(rel2.target_entity_id, context)
-354: 
-355:                         if all([source1, target1, source2, target2]):
-356:                             matches.append(
-357:                                 RuleMatch(
-358:                                     rule_name=rule.name,
-359:                                     matched_relationships=[rel1, rel2],
-360:                                     matched_entities=[source1, target1, source2, target2],
-361:                                     confidence=rule.confidence,
-362:                                     metadata={
-363:                                         "then_relationship": rule.then_relationship,
-364:                                         "then_source": rule.then_source,
-365:                                         "then_target": rule.then_target,
-366:                                         "first": {"source": source1, "target": target1},
-367:                                         "second": {"source": source2, "target": target2},
-368:                                     },
-369:                                 )
-370:                             )
-371: 
-372:         return matches
-373: 
-374:     def _find_entities_for_pattern_match(
-375:         self,
-376:         matched_value: str,
-377:         entity_types: list[str],
-378:         context: RuleEvaluationContext,
-379:     ) -> list[Entity]:
-380:         """Find entities that might match a pattern value.
-381: 
-382:         Uses type hierarchy matching so EMPLOYEE matches expected type PERSON.
-383:         """
-384:         candidates = []
-385: 
-386:         # Check entity names
-387:         name_key = matched_value.lower()
-388:         if name_key in context.entity_index:
-389:             candidates.extend(context.entity_index[name_key])
-390: 
-391:         # Check entity attributes for the matched value
-392:         for entity in context.entities:
-393:             for attr_value in entity.attributes.values():
-394:                 if isinstance(attr_value, str) and matched_value in attr_value:
-395:                     if entity not in candidates:
-396:                         candidates.append(entity)
-397:                     break
-398: 
-399:         # Filter by entity types if specified, using hierarchy matching
-400:         if entity_types:
-401:             filtered = []
-402:             for e in candidates:
-403:                 actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
-404:                 # Check if actual type matches any of the expected types via hierarchy
-405:                 if any(types_match(actual_type, expected_type) for expected_type in entity_types):
-406:                     filtered.append(e)
-407:             candidates = filtered
-408: 
-409:         return candidates
-410: 
-411:     def _find_field_matches(
-412:         self,
-413:         rule: CorrelationRule,
-414:         context: RuleEvaluationContext,
-415:     ) -> list[RuleMatch]:
-416:         """Find entities that match on specified fields."""
-417:         matches = []
-418: 
-419:         # Filter entities by type
-420:         candidates = []
-421:         if rule.entity_types:
-422:             for entity_type in rule.entity_types:
-423:                 candidates.extend(context.type_index.get(entity_type, []))
-424:         else:
-425:             candidates = context.entities
-426: 
-427:         # Group entities by field values
-428:         for field_name in rule.match_fields:
-429:             field_groups: dict[Any, list[Entity]] = {}
-430:             for entity in candidates:
-431:                 field_value = entity.attributes.get(field_name)
-432:                 if field_value:
-433:                     # Normalize string values
-434:                     if isinstance(field_value, str):
-435:                         field_value = field_value.lower()
-436:                     if field_value not in field_groups:
-437:                         field_groups[field_value] = []
-438:                     field_groups[field_value].append(entity)
-439: 
-440:             # Create matches for groups with multiple entities
-441:             for field_value, entities in field_groups.items():
-442:                 if len(entities) > 1:
-443:                     matches.append(
-444:                         RuleMatch(
-445:                             rule_name=rule.name,
-446:                             matched_value=str(field_value),
-447:                             matched_entities=entities,
-448:                             confidence=rule.confidence,
-449:                             metadata={
-450:                                 "match_field": field_name,
-451:                                 "creates_relationship": rule.creates_relationship,
-452:                             },
-453:                         )
-454:                     )
-455: 
-456:         return matches
-457: 
-458:     def _filter_relationships_by_types(
-459:         self,
-460:         relationships: list[Relationship],
-461:         source_type: str | None,
-462:         target_type: str | None,
-463:         context: RuleEvaluationContext,
-464:     ) -> list[Relationship]:
-465:         """Filter relationships by source and target entity types.
-466: 
-467:         Uses type hierarchy matching so EMPLOYEE matches rules expecting PERSON,
-468:         and vice versa.
-469:         """
-470:         if not source_type and not target_type:
-471:             return relationships
-472: 
-473:         filtered = []
-474:         for rel in relationships:
-475:             source_entity = self._find_entity_by_id(rel.source_entity_id, context)
-476:             target_entity = self._find_entity_by_id(rel.target_entity_id, context)
-477: 
-478:             if not source_entity or not target_entity:
-479:                 continue
-480: 
-481:             # Get actual entity types
-482:             actual_source_type = str(
-483:                 source_entity.entity_type.value
-484:                 if hasattr(source_entity.entity_type, "value")
-485:                 else source_entity.entity_type
-486:             )
-487:             actual_target_type = str(
-488:                 target_entity.entity_type.value
-489:                 if hasattr(target_entity.entity_type, "value")
-490:                 else target_entity.entity_type
-491:             )
-492: 
-493:             # Use hierarchy-aware type matching
-494:             source_matches = not source_type or types_match(actual_source_type, source_type)
-495:             target_matches = not target_type or types_match(actual_target_type, target_type)
-496: 
-497:             if source_matches and target_matches:
-498:                 filtered.append(rel)
-499: 
-500:         return filtered
-501: 
-502:     def _find_entity_by_id(
-503:         self,
-504:         entity_id: Any,
-505:         context: RuleEvaluationContext,
-506:     ) -> Entity | None:
-507:         """Find entity by ID in context."""
-508:         for entity in context.entities:
-509:             if entity.id == entity_id:
-510:                 return entity
-511:         return None
-512: 
-513:     def _relationships_connect(
-514:         self,
-515:         rel1: Relationship,
-516:         rel2: Relationship,
-517:         context: RuleEvaluationContext,
-518:     ) -> bool:
-519:         """Check if two relationships connect (share an entity)."""
-520:         # Check if rel1's target is rel2's source (chain pattern)
-521:         if rel1.target_entity_id == rel2.source_entity_id:
-522:             return True
-523:         # Check if they share source or target
-524:         if rel1.source_entity_id == rel2.source_entity_id:
-525:             return True
-526:         if rel1.target_entity_id == rel2.target_entity_id:
-527:             return True
-528:         return False
-529: 
-530:     def _get_compiled_pattern(self, pattern: str) -> re.Pattern | None:
-531:         """Get or compile a regex pattern."""
-532:         if pattern not in self._compiled_patterns:
-533:             try:
-534:                 self._compiled_patterns[pattern] = re.compile(pattern, re.IGNORECASE)
-535:             except re.error as e:
-536:                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
-537:                 return None
-538: 
-539:         return self._compiled_patterns[pattern]
-````
-
 ## File: src/khora/extraction/skills/__init__.py
 ````python
  1: """Configurable extraction skills and expertise for Khora Memory Lake.
@@ -14345,420 +13802,547 @@ README.md
 65: ]
 ````
 
-## File: src/khora/extraction/expansion/relationship_inferrer.py
+## File: src/khora/extraction/expansion/rule_engine.py
 ````python
-  1: """Relationship inference from existing graph patterns.
+  1: """Configurable rule evaluation engine.
   2: 
-  3: Infers new relationships based on configurable inference rules
-  4: defined in expertise configuration.
+  3: Provides a generic rule evaluation system for both correlation rules
+  4: and inference rules defined in expertise configurations.
   5: """
   6: 
   7: from __future__ import annotations
   8: 
-  9: from collections import Counter
+  9: import re
  10: from dataclasses import dataclass, field
- 11: from datetime import UTC, datetime
- 12: from typing import TYPE_CHECKING
- 13: from uuid import UUID, uuid4
+ 11: from typing import TYPE_CHECKING, Any
+ 12: 
+ 13: from loguru import logger
  14: 
- 15: from loguru import logger
- 16: 
- 17: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
+ 15: if TYPE_CHECKING:
+ 16:     from khora.core.models import Entity, Relationship
+ 17:     from khora.extraction.skills import CorrelationRule, ExpertiseConfig, InferenceRule
  18: 
- 19: if TYPE_CHECKING:
- 20:     from khora.core.models import Entity, Relationship
- 21:     from khora.extraction.skills import ExpertiseConfig
- 22: 
+ 19: 
+ 20: @dataclass
+ 21: class RuleMatch:
+ 22:     """Result of a rule match."""
  23: 
- 24: @dataclass
- 25: class InferredRelationship:
- 26:     """An inferred relationship from rule evaluation."""
- 27: 
- 28:     source_entity_id: UUID
- 29:     target_entity_id: UUID
- 30:     relationship_type: str
- 31:     description: str = ""
- 32:     confidence: float = 0.5
- 33:     rule_name: str = ""  # Name of inference rule that created this
- 34:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
+ 24:     rule_name: str
+ 25:     matched_value: str | None = None
+ 26:     matched_entities: list[Entity] = field(default_factory=list)
+ 27:     matched_relationships: list[Relationship] = field(default_factory=list)
+ 28:     confidence: float = 1.0
+ 29:     metadata: dict[str, Any] = field(default_factory=dict)
+ 30: 
+ 31: 
+ 32: @dataclass
+ 33: class RuleEvaluationContext:
+ 34:     """Context for rule evaluation containing available data."""
  35: 
- 36: 
- 37: class RelationshipInferrer:
- 38:     """Infers new relationships based on existing graph patterns.
- 39: 
- 40:     Uses inference rules from expertise configuration to deduce
- 41:     relationships that aren't explicitly stated but can be inferred
- 42:     from existing relationships.
- 43: 
- 44:     Example inference rules:
- 45:     - If A manages B and B works on project C, A is stakeholder of C
- 46:     - If person P is mentioned in channel for project X, P is involved in X
- 47:     - If PR author and reviewer work on same PR, they collaborate
- 48:     """
- 49: 
- 50:     def __init__(
- 51:         self,
- 52:         expertise: ExpertiseConfig | None = None,
- 53:         *,
- 54:         min_confidence: float = 0.3,
- 55:         max_inferences_per_rule: int = 100,
- 56:     ) -> None:
- 57:         """Initialize the relationship inferrer.
+ 36:     entities: list[Entity] = field(default_factory=list)
+ 37:     relationships: list[Relationship] = field(default_factory=list)
+ 38:     entity_index: dict[str, list[Entity]] = field(default_factory=dict)  # name -> entities
+ 39:     type_index: dict[str, list[Entity]] = field(default_factory=dict)  # type -> entities
+ 40:     relationship_index: dict[str, list[Relationship]] = field(default_factory=dict)  # type -> relationships
+ 41: 
+ 42:     @classmethod
+ 43:     def from_data(
+ 44:         cls,
+ 45:         entities: list[Entity],
+ 46:         relationships: list[Relationship],
+ 47:     ) -> RuleEvaluationContext:
+ 48:         """Create context with built indices."""
+ 49:         ctx = cls(entities=entities, relationships=relationships)
+ 50: 
+ 51:         # Build entity indices
+ 52:         for entity in entities:
+ 53:             # Index by name (lowercase for matching)
+ 54:             name_key = entity.name.lower()
+ 55:             if name_key not in ctx.entity_index:
+ 56:                 ctx.entity_index[name_key] = []
+ 57:             ctx.entity_index[name_key].append(entity)
  58: 
- 59:         Args:
- 60:             expertise: ExpertiseConfig with inference rules
- 61:             min_confidence: Minimum confidence for inferred relationships
- 62:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
- 63:         """
- 64:         self._expertise = expertise
- 65:         self._min_confidence = min_confidence
- 66:         self._max_inferences_per_rule = max_inferences_per_rule
- 67:         self._rule_engine = RuleEngine(expertise)
- 68: 
- 69:     def infer(
- 70:         self,
- 71:         entities: list[Entity],
- 72:         relationships: list[Relationship],
- 73:         *,
- 74:         depth: int = 1,
- 75:     ) -> list[InferredRelationship]:
- 76:         """Infer new relationships from existing graph.
- 77: 
- 78:         Args:
- 79:             entities: Existing entities
- 80:             relationships: Existing relationships
- 81:             depth: Number of inference passes (for transitive inference)
- 82: 
- 83:         Returns:
- 84:             List of inferred relationships
- 85:         """
- 86:         if not self._expertise or not self._expertise.inference_rules:
- 87:             logger.debug("No expertise or inference rules configured, skipping inference")
- 88:             return []
- 89: 
- 90:         # Diagnostic: Log entity types in the graph
- 91:         entity_types = Counter(
- 92:             e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
- 93:         )
- 94:         logger.info(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
+ 59:             # Index by type
+ 60:             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+ 61:             if type_key not in ctx.type_index:
+ 62:                 ctx.type_index[type_key] = []
+ 63:             ctx.type_index[type_key].append(entity)
+ 64: 
+ 65:         # Build relationship index
+ 66:         for rel in relationships:
+ 67:             rel_type = str(
+ 68:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+ 69:             )
+ 70:             if rel_type not in ctx.relationship_index:
+ 71:                 ctx.relationship_index[rel_type] = []
+ 72:             ctx.relationship_index[rel_type].append(rel)
+ 73: 
+ 74:         return ctx
+ 75: 
+ 76: 
+ 77: # Type hierarchy for flexible matching
+ 78: # Child types can match parent types in inference rules
+ 79: # e.g., EMPLOYEE matches rules expecting PERSON
+ 80: TYPE_HIERARCHY: dict[str, list[str]] = {
+ 81:     "EMPLOYEE": ["PERSON"],
+ 82:     "EXTERNAL_PERSON": ["PERSON"],
+ 83:     "COMPANY": ["ORGANIZATION"],
+ 84:     "DEPARTMENT": ["ORGANIZATION"],
+ 85:     "TEAM": ["ORGANIZATION"],
+ 86:     "MESSAGE": ["CONTENT"],
+ 87:     "PAGE": ["CONTENT", "DOCUMENT"],
+ 88:     "ISSUE": ["WORK_ITEM", "CONTENT"],
+ 89:     "SALES_NOTE": ["CONTENT", "NOTE"],
+ 90:     "CALL": ["EVENT", "MEETING"],
+ 91:     "DEAL": ["OPPORTUNITY"],
+ 92:     "PROJECT": ["WORK_ITEM"],
+ 93:     "CYCLE": ["WORK_ITEM", "SPRINT"],
+ 94: }
  95: 
- 96:         # Diagnostic: Log relationship types in the graph
- 97:         rel_types = Counter(
- 98:             r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
- 99:             for r in relationships
-100:         )
-101:         logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
-102: 
-103:         # Diagnostic: Log source/target entity types for each relationship type
-104:         # Build entity ID to type lookup
-105:         entity_type_lookup = {
-106:             e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
-107:         }
-108: 
-109:         # For each relationship type, count source->target type combinations
-110:         rel_type_patterns: dict[str, Counter] = {}
-111:         for r in relationships:
-112:             rel_type = r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
-113:             source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
-114:             target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
-115:             pattern = f"{source_type}->{target_type}"
-116: 
-117:             if rel_type not in rel_type_patterns:
-118:                 rel_type_patterns[rel_type] = Counter()
-119:             rel_type_patterns[rel_type][pattern] += 1
-120: 
-121:         # Log top patterns for relationship types that rules expect
-122:         for rel_type, patterns in rel_type_patterns.items():
-123:             top_patterns = patterns.most_common(5)
-124:             logger.debug(f"  {rel_type} patterns: {dict(top_patterns)}")
-125: 
-126:         # Diagnostic: Log what inference rules expect
-127:         expected_rels = set()
-128:         expected_entities = set()
-129:         for rule in self._expertise.inference_rules:
-130:             for cond in rule.when:
-131:                 if hasattr(cond, "relationship"):
-132:                     expected_rels.add(cond.relationship)
-133:                 if hasattr(cond, "source_type"):
-134:                     expected_entities.add(cond.source_type)
-135:                 if hasattr(cond, "target_type"):
-136:                     expected_entities.add(cond.target_type)
-137:         logger.info(f"Inference rules expect relationships: {expected_rels}")
-138:         logger.info(f"Inference rules expect entity types: {expected_entities}")
-139: 
-140:         # Diagnostic: Check for matches between actual and expected
-141:         actual_rel_types = set(rel_types.keys())
-142:         actual_entity_types = set(entity_types.keys())
-143:         matching_rels = actual_rel_types & expected_rels
-144:         matching_entities = actual_entity_types & expected_entities
-145:         logger.info(f"Matching relationship types: {matching_rels or 'NONE'}")
-146:         logger.info(f"Matching entity types: {matching_entities or 'NONE'}")
-147: 
-148:         if not matching_rels:
-149:             logger.warning(
-150:                 f"No relationship type matches! Rules expect {expected_rels} " f"but graph has {actual_rel_types}"
-151:             )
-152:         if not matching_entities:
-153:             logger.warning(
-154:                 f"No entity type matches! Rules expect {expected_entities} " f"but graph has {actual_entity_types}"
-155:             )
-156: 
-157:         all_inferred: list[InferredRelationship] = []
-158:         current_relationships = list(relationships)
-159: 
-160:         for pass_num in range(depth):
-161:             # Build context with current state
-162:             context = RuleEvaluationContext.from_data(entities, current_relationships)
-163: 
-164:             # Evaluate inference rules
-165:             matches = self._rule_engine.evaluate_inference_rules(context)
-166:             logger.info(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
-167: 
-168:             # Log details of first few matches for debugging
-169:             for i, match in enumerate(matches[:5]):
-170:                 logger.info(
-171:                     f"  Match {i + 1}: rule={match.rule_name}, "
-172:                     f"confidence={match.confidence:.2f}, "
-173:                     f"metadata_keys={list(match.metadata.keys())}"
-174:                 )
-175: 
-176:             # Convert matches to inferred relationships
-177:             pass_inferred = self._matches_to_relationships(matches, context)
-178:             logger.info(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
+ 96: 
+ 97: def types_match(actual_type: str, expected_type: str) -> bool:
+ 98:     """Check if actual type matches expected, considering type hierarchy.
+ 99: 
+100:     Args:
+101:         actual_type: The actual entity type from the graph
+102:         expected_type: The expected type from the inference rule
+103: 
+104:     Returns:
+105:         True if types match directly or via hierarchy
+106:     """
+107:     # Direct match
+108:     if actual_type == expected_type:
+109:         return True
+110: 
+111:     # Check if actual is a subtype of expected (e.g., EMPLOYEE matches PERSON)
+112:     parents = TYPE_HIERARCHY.get(actual_type, [])
+113:     if expected_type in parents:
+114:         return True
+115: 
+116:     # Check reverse: if expected is a subtype of actual (e.g., PERSON matches EMPLOYEE)
+117:     # This allows rules written for specific types to match more generic extractions
+118:     parents_of_expected = TYPE_HIERARCHY.get(expected_type, [])
+119:     if actual_type in parents_of_expected:
+120:         return True
+121: 
+122:     return False
+123: 
+124: 
+125: class RuleEngine:
+126:     """Engine for evaluating correlation and inference rules.
+127: 
+128:     Supports:
+129:     - Pattern-based matching (regex)
+130:     - Field-based matching
+131:     - Multi-condition inference rules
+132:     - Confidence scoring
+133:     - Type hierarchy matching (EMPLOYEE matches rules expecting PERSON)
+134:     """
+135: 
+136:     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
+137:         """Initialize the rule engine.
+138: 
+139:         Args:
+140:             expertise: ExpertiseConfig with rules to evaluate
+141:         """
+142:         self._expertise = expertise
+143:         self._compiled_patterns: dict[str, re.Pattern] = {}
+144: 
+145:     def evaluate_correlation_rules(
+146:         self,
+147:         text: str,
+148:         context: RuleEvaluationContext,
+149:     ) -> list[RuleMatch]:
+150:         """Evaluate correlation rules against text and context.
+151: 
+152:         Args:
+153:             text: Text to search for patterns
+154:             context: Evaluation context with entities and relationships
+155: 
+156:         Returns:
+157:             List of rule matches
+158:         """
+159:         if not self._expertise:
+160:             return []
+161: 
+162:         matches = []
+163:         for rule in self._expertise.correlation_rules:
+164:             rule_matches = self._evaluate_correlation_rule(rule, text, context)
+165:             matches.extend(rule_matches)
+166: 
+167:         return matches
+168: 
+169:     def evaluate_inference_rules(
+170:         self,
+171:         context: RuleEvaluationContext,
+172:     ) -> list[RuleMatch]:
+173:         """Evaluate inference rules against the context.
+174: 
+175:         Inference rules create new relationships based on existing patterns.
+176: 
+177:         Args:
+178:             context: Evaluation context with entities and relationships
 179: 
-180:             if not pass_inferred:
-181:                 # No new inferences, stop early
-182:                 logger.info(f"Pass {pass_num + 1}: No new inferences, stopping early")
-183:                 break
-184: 
-185:             # Filter out duplicates and already existing relationships
-186:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
-187: 
-188:             if not new_inferred:
-189:                 break
+180:         Returns:
+181:             List of rule matches that would create new relationships
+182:         """
+183:         if not self._expertise:
+184:             return []
+185: 
+186:         matches = []
+187:         for rule in self._expertise.inference_rules:
+188:             rule_matches = self._evaluate_inference_rule(rule, context)
+189:             matches.extend(rule_matches)
 190: 
-191:             all_inferred.extend(new_inferred)
+191:         return matches
 192: 
-193:             # Add inferred to current for next pass (as mock relationships)
-194:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
-195: 
-196:             logger.info(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
-197: 
-198:         logger.info(f"Inference complete: {len(all_inferred)} total relationships inferred")
-199:         return all_inferred
-200: 
-201:     def infer_from_pattern(
-202:         self,
-203:         entities: list[Entity],
-204:         relationships: list[Relationship],
-205:         pattern: str,
-206:     ) -> list[InferredRelationship]:
-207:         """Infer relationships matching a specific pattern.
-208: 
-209:         Args:
-210:             entities: Existing entities
-211:             relationships: Existing relationships
-212:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
-213: 
-214:         Returns:
-215:             List of inferred relationships
-216:         """
-217:         # Parse pattern and find matches
-218:         # For now, delegate to rule engine
-219:         context = RuleEvaluationContext.from_data(entities, relationships)
-220:         matches = self._rule_engine.evaluate_inference_rules(context)
-221:         return self._matches_to_relationships(matches, context)
-222: 
-223:     def _matches_to_relationships(
-224:         self,
-225:         matches: list[RuleMatch],
-226:         context: RuleEvaluationContext,
-227:     ) -> list[InferredRelationship]:
-228:         """Convert rule matches to inferred relationships."""
-229:         inferred = []
-230:         rule_counts: dict[str, int] = {}
-231: 
-232:         for match in matches:
-233:             # Check rule limit
-234:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
-235:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
-236:                 continue
-237: 
-238:             # Check confidence threshold
-239:             if match.confidence < self._min_confidence:
-240:                 continue
-241: 
-242:             # Resolve source and target from metadata
-243:             source_entity, target_entity = self._resolve_inference_entities(match, context)
-244: 
-245:             if not source_entity or not target_entity:
-246:                 continue
+193:     def find_pattern_matches(
+194:         self,
+195:         pattern: str,
+196:         text: str,
+197:     ) -> list[tuple[str, int, int]]:
+198:         """Find all pattern matches in text.
+199: 
+200:         Args:
+201:             pattern: Regex pattern to match
+202:             text: Text to search
+203: 
+204:         Returns:
+205:             List of (matched_value, start, end) tuples
+206:         """
+207:         compiled = self._get_compiled_pattern(pattern)
+208:         if not compiled:
+209:             return []
+210: 
+211:         matches = []
+212:         for match in compiled.finditer(text):
+213:             matches.append((match.group(), match.start(), match.end()))
+214: 
+215:         return matches
+216: 
+217:     def match_entities_by_field(
+218:         self,
+219:         entities: list[Entity],
+220:         field_name: str,
+221:         field_value: Any,
+222:     ) -> list[Entity]:
+223:         """Find entities matching a field value.
+224: 
+225:         Args:
+226:             entities: Entities to search
+227:             field_name: Attribute field name
+228:             field_value: Value to match
+229: 
+230:         Returns:
+231:             Matching entities
+232:         """
+233:         matches = []
+234:         for entity in entities:
+235:             entity_value = entity.attributes.get(field_name)
+236:             if entity_value is None:
+237:                 continue
+238: 
+239:             # Normalize for comparison
+240:             if isinstance(entity_value, str) and isinstance(field_value, str):
+241:                 if entity_value.lower() == field_value.lower():
+242:                     matches.append(entity)
+243:             elif entity_value == field_value:
+244:                 matches.append(entity)
+245: 
+246:         return matches
 247: 
-248:             # Skip self-referential
-249:             if source_entity.id == target_entity.id:
-250:                 continue
-251: 
-252:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
-253: 
-254:             inferred.append(
-255:                 InferredRelationship(
-256:                     source_entity_id=source_entity.id,
-257:                     target_entity_id=target_entity.id,
-258:                     relationship_type=relationship_type,
-259:                     description=f"Inferred by rule: {match.rule_name}",
-260:                     confidence=match.confidence,
-261:                     rule_name=match.rule_name,
-262:                     evidence=[r.id for r in match.matched_relationships],
-263:                 )
-264:             )
-265: 
-266:         return inferred
-267: 
-268:     def _resolve_inference_entities(
-269:         self,
-270:         match: RuleMatch,
-271:         context: RuleEvaluationContext,
-272:     ) -> tuple[Entity | None, Entity | None]:
-273:         """Resolve source and target entities from match metadata.
-274: 
-275:         The then_source and then_target specify which entity to use:
-276:         - "first.source": Source entity of first matched relationship
-277:         - "first.target": Target entity of first matched relationship
-278:         - "second.source": Source entity of second matched relationship
-279:         - "second.target": Target entity of second matched relationship
-280:         """
-281:         then_source = match.metadata.get("then_source", "first.source")
-282:         then_target = match.metadata.get("then_target", "second.target")
+248:     def _evaluate_correlation_rule(
+249:         self,
+250:         rule: CorrelationRule,
+251:         text: str,
+252:         context: RuleEvaluationContext,
+253:     ) -> list[RuleMatch]:
+254:         """Evaluate a single correlation rule."""
+255:         matches = []
+256: 
+257:         # Pattern-based matching
+258:         if rule.pattern:
+259:             pattern_matches = self.find_pattern_matches(rule.pattern, text)
+260:             for matched_value, start, end in pattern_matches:
+261:                 # Find entities that might match this value
+262:                 matched_entities = self._find_entities_for_pattern_match(matched_value, rule.entity_types, context)
+263: 
+264:                 matches.append(
+265:                     RuleMatch(
+266:                         rule_name=rule.name,
+267:                         matched_value=matched_value,
+268:                         matched_entities=matched_entities,
+269:                         confidence=rule.confidence,
+270:                         metadata={
+271:                             "start": start,
+272:                             "end": end,
+273:                             "creates_relationship": rule.creates_relationship,
+274:                         },
+275:                     )
+276:                 )
+277: 
+278:         # Field-based matching
+279:         if rule.match_fields:
+280:             # This requires comparing entities against each other
+281:             field_matches = self._find_field_matches(rule, context)
+282:             matches.extend(field_matches)
 283: 
-284:         first = match.metadata.get("first", {})
-285:         second = match.metadata.get("second", {})
-286: 
-287:         def resolve_ref(ref: str) -> Entity | None:
-288:             parts = ref.split(".")
-289:             if len(parts) != 2:
-290:                 return None
-291: 
-292:             group, position = parts
-293:             data = first if group == "first" else second
+284:         return matches
+285: 
+286:     def _evaluate_inference_rule(
+287:         self,
+288:         rule: InferenceRule,
+289:         context: RuleEvaluationContext,
+290:     ) -> list[RuleMatch]:
+291:         """Evaluate a single inference rule."""
+292:         if not rule.when or len(rule.when) < 1:
+293:             return []
 294: 
-295:             return data.get(position)
+295:         matches = []
 296: 
-297:         source = resolve_ref(then_source)
-298:         target = resolve_ref(then_target)
-299: 
-300:         return source, target
-301: 
-302:     def _filter_duplicates(
-303:         self,
-304:         new_inferred: list[InferredRelationship],
-305:         existing_relationships: list[Relationship],
-306:         already_inferred: list[InferredRelationship],
-307:     ) -> list[InferredRelationship]:
-308:         """Filter out duplicate inferences."""
-309:         # Build set of existing relationship keys
-310:         existing_keys: set[tuple[UUID, UUID, str]] = set()
-311: 
-312:         for rel in existing_relationships:
-313:             rel_type = str(
-314:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-315:             )
-316:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
-317: 
-318:         for inf in already_inferred:
-319:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
-320: 
-321:         # Filter new inferences
-322:         filtered = []
-323:         for inf in new_inferred:
-324:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
-325:             if key not in existing_keys:
-326:                 filtered.append(inf)
-327:                 existing_keys.add(key)
-328: 
-329:         return filtered
-330: 
-331:     def _to_mock_relationships(
-332:         self,
-333:         inferred: list[InferredRelationship],
-334:         entities: list[Entity],
-335:     ) -> list[Relationship]:
-336:         """Convert inferred relationships to mock Relationship objects for next pass."""
-337:         from khora.core.models import Relationship
-338:         from khora.core.models.entity import RelationshipType
-339: 
-340:         mock_rels = []
-341:         # Get namespace from first entity if available
-342:         namespace_id = entities[0].namespace_id if entities else uuid4()
-343: 
-344:         for inf in inferred:
-345:             # Try to map relationship type to enum
-346:             try:
-347:                 rel_type = RelationshipType[inf.relationship_type]
-348:             except (KeyError, AttributeError):
-349:                 rel_type = RelationshipType.CUSTOM
-350: 
-351:             mock_rels.append(
-352:                 Relationship(
-353:                     id=uuid4(),
-354:                     namespace_id=namespace_id,
-355:                     source_entity_id=inf.source_entity_id,
-356:                     target_entity_id=inf.target_entity_id,
-357:                     relationship_type=rel_type,
-358:                     description=inf.description,
-359:                     properties={},
-360:                     source_document_ids=[],
-361:                     source_chunk_ids=[],
-362:                     confidence=inf.confidence,
-363:                     metadata={"inferred": True, "rule": inf.rule_name},
-364:                     created_at=datetime.now(UTC),
-365:                     updated_at=datetime.now(UTC),
-366:                 )
-367:             )
-368: 
-369:         return mock_rels
-370: 
+297:         # Get relationships matching the first condition
+298:         first_condition = rule.when[0]
+299:         first_rels = context.relationship_index.get(first_condition.relationship, [])
+300: 
+301:         # Diagnostic: Log how many relationships match before filtering
+302:         before_filter_count = len(first_rels)
+303: 
+304:         # Filter by source/target type if specified
+305:         first_rels = self._filter_relationships_by_types(
+306:             first_rels, first_condition.source_type, first_condition.target_type, context
+307:         )
+308: 
+309:         # Diagnostic: Log filtering results for debugging
+310:         if before_filter_count > 0 and len(first_rels) == 0:
+311:             logger.debug(
+312:                 f"Rule '{rule.name}': {before_filter_count} {first_condition.relationship} rels "
+313:                 f"all filtered out by type filter (need {first_condition.source_type}->{first_condition.target_type})"
+314:             )
+315: 
+316:         if len(rule.when) == 1:
+317:             # Single condition rule
+318:             for rel in first_rels:
+319:                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
+320:                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
+321: 
+322:                 if source_entity and target_entity:
+323:                     matches.append(
+324:                         RuleMatch(
+325:                             rule_name=rule.name,
+326:                             matched_relationships=[rel],
+327:                             matched_entities=[source_entity, target_entity],
+328:                             confidence=rule.confidence,
+329:                             metadata={
+330:                                 "then_relationship": rule.then_relationship,
+331:                                 "then_source": rule.then_source,
+332:                                 "then_target": rule.then_target,
+333:                                 "first": {"source": source_entity, "target": target_entity},
+334:                             },
+335:                         )
+336:                     )
+337:         else:
+338:             # Multi-condition rule - need to find matching chains
+339:             for rel1 in first_rels:
+340:                 # For each first relationship, find matching second relationships
+341:                 second_condition = rule.when[1]
+342:                 second_rels = context.relationship_index.get(second_condition.relationship, [])
+343:                 second_rels = self._filter_relationships_by_types(
+344:                     second_rels, second_condition.source_type, second_condition.target_type, context
+345:                 )
+346: 
+347:                 # Find chains where relationships connect
+348:                 for rel2 in second_rels:
+349:                     if self._relationships_connect(rel1, rel2, context):
+350:                         source1 = self._find_entity_by_id(rel1.source_entity_id, context)
+351:                         target1 = self._find_entity_by_id(rel1.target_entity_id, context)
+352:                         source2 = self._find_entity_by_id(rel2.source_entity_id, context)
+353:                         target2 = self._find_entity_by_id(rel2.target_entity_id, context)
+354: 
+355:                         if all([source1, target1, source2, target2]):
+356:                             matches.append(
+357:                                 RuleMatch(
+358:                                     rule_name=rule.name,
+359:                                     matched_relationships=[rel1, rel2],
+360:                                     matched_entities=[source1, target1, source2, target2],
+361:                                     confidence=rule.confidence,
+362:                                     metadata={
+363:                                         "then_relationship": rule.then_relationship,
+364:                                         "then_source": rule.then_source,
+365:                                         "then_target": rule.then_target,
+366:                                         "first": {"source": source1, "target": target1},
+367:                                         "second": {"source": source2, "target": target2},
+368:                                     },
+369:                                 )
+370:                             )
 371: 
-372: def to_relationship(
-373:     inferred: InferredRelationship,
-374:     namespace_id: UUID,
-375: ) -> Relationship:
-376:     """Convert an InferredRelationship to a domain Relationship model.
-377: 
-378:     Args:
-379:         inferred: The inferred relationship to convert
-380:         namespace_id: Namespace ID for the relationship
+372:         return matches
+373: 
+374:     def _find_entities_for_pattern_match(
+375:         self,
+376:         matched_value: str,
+377:         entity_types: list[str],
+378:         context: RuleEvaluationContext,
+379:     ) -> list[Entity]:
+380:         """Find entities that might match a pattern value.
 381: 
-382:     Returns:
-383:         Domain Relationship model
-384:     """
-385:     from khora.core.models import Relationship
-386:     from khora.core.models.entity import RelationshipType
-387: 
-388:     # Try to map relationship type to enum
-389:     try:
-390:         rel_type = RelationshipType[inferred.relationship_type]
-391:     except (KeyError, AttributeError):
-392:         rel_type = RelationshipType.CUSTOM
-393: 
-394:     return Relationship(
-395:         id=uuid4(),
-396:         namespace_id=namespace_id,
-397:         source_entity_id=inferred.source_entity_id,
-398:         target_entity_id=inferred.target_entity_id,
-399:         relationship_type=rel_type,
-400:         description=inferred.description,
-401:         properties={
-402:             "inferred": True,
-403:             "rule_name": inferred.rule_name,
-404:             "evidence": [str(e) for e in inferred.evidence],
-405:         },
-406:         source_document_ids=[],
-407:         source_chunk_ids=[],
-408:         confidence=inferred.confidence,
-409:         metadata={"inferred": True},
-410:         created_at=datetime.now(UTC),
-411:         updated_at=datetime.now(UTC),
-412:     )
+382:         Uses type hierarchy matching so EMPLOYEE matches expected type PERSON.
+383:         """
+384:         candidates = []
+385: 
+386:         # Check entity names
+387:         name_key = matched_value.lower()
+388:         if name_key in context.entity_index:
+389:             candidates.extend(context.entity_index[name_key])
+390: 
+391:         # Check entity attributes for the matched value
+392:         for entity in context.entities:
+393:             for attr_value in entity.attributes.values():
+394:                 if isinstance(attr_value, str) and matched_value in attr_value:
+395:                     if entity not in candidates:
+396:                         candidates.append(entity)
+397:                     break
+398: 
+399:         # Filter by entity types if specified, using hierarchy matching
+400:         if entity_types:
+401:             filtered = []
+402:             for e in candidates:
+403:                 actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
+404:                 # Check if actual type matches any of the expected types via hierarchy
+405:                 if any(types_match(actual_type, expected_type) for expected_type in entity_types):
+406:                     filtered.append(e)
+407:             candidates = filtered
+408: 
+409:         return candidates
+410: 
+411:     def _find_field_matches(
+412:         self,
+413:         rule: CorrelationRule,
+414:         context: RuleEvaluationContext,
+415:     ) -> list[RuleMatch]:
+416:         """Find entities that match on specified fields."""
+417:         matches = []
+418: 
+419:         # Filter entities by type
+420:         candidates = []
+421:         if rule.entity_types:
+422:             for entity_type in rule.entity_types:
+423:                 candidates.extend(context.type_index.get(entity_type, []))
+424:         else:
+425:             candidates = context.entities
+426: 
+427:         # Group entities by field values
+428:         for field_name in rule.match_fields:
+429:             field_groups: dict[Any, list[Entity]] = {}
+430:             for entity in candidates:
+431:                 field_value = entity.attributes.get(field_name)
+432:                 if field_value:
+433:                     # Normalize string values
+434:                     if isinstance(field_value, str):
+435:                         field_value = field_value.lower()
+436:                     if field_value not in field_groups:
+437:                         field_groups[field_value] = []
+438:                     field_groups[field_value].append(entity)
+439: 
+440:             # Create matches for groups with multiple entities
+441:             for field_value, entities in field_groups.items():
+442:                 if len(entities) > 1:
+443:                     matches.append(
+444:                         RuleMatch(
+445:                             rule_name=rule.name,
+446:                             matched_value=str(field_value),
+447:                             matched_entities=entities,
+448:                             confidence=rule.confidence,
+449:                             metadata={
+450:                                 "match_field": field_name,
+451:                                 "creates_relationship": rule.creates_relationship,
+452:                             },
+453:                         )
+454:                     )
+455: 
+456:         return matches
+457: 
+458:     def _filter_relationships_by_types(
+459:         self,
+460:         relationships: list[Relationship],
+461:         source_type: str | None,
+462:         target_type: str | None,
+463:         context: RuleEvaluationContext,
+464:     ) -> list[Relationship]:
+465:         """Filter relationships by source and target entity types.
+466: 
+467:         Uses type hierarchy matching so EMPLOYEE matches rules expecting PERSON,
+468:         and vice versa.
+469:         """
+470:         if not source_type and not target_type:
+471:             return relationships
+472: 
+473:         filtered = []
+474:         for rel in relationships:
+475:             source_entity = self._find_entity_by_id(rel.source_entity_id, context)
+476:             target_entity = self._find_entity_by_id(rel.target_entity_id, context)
+477: 
+478:             if not source_entity or not target_entity:
+479:                 continue
+480: 
+481:             # Get actual entity types
+482:             actual_source_type = str(
+483:                 source_entity.entity_type.value
+484:                 if hasattr(source_entity.entity_type, "value")
+485:                 else source_entity.entity_type
+486:             )
+487:             actual_target_type = str(
+488:                 target_entity.entity_type.value
+489:                 if hasattr(target_entity.entity_type, "value")
+490:                 else target_entity.entity_type
+491:             )
+492: 
+493:             # Use hierarchy-aware type matching
+494:             source_matches = not source_type or types_match(actual_source_type, source_type)
+495:             target_matches = not target_type or types_match(actual_target_type, target_type)
+496: 
+497:             if source_matches and target_matches:
+498:                 filtered.append(rel)
+499: 
+500:         return filtered
+501: 
+502:     def _find_entity_by_id(
+503:         self,
+504:         entity_id: Any,
+505:         context: RuleEvaluationContext,
+506:     ) -> Entity | None:
+507:         """Find entity by ID in context."""
+508:         for entity in context.entities:
+509:             if entity.id == entity_id:
+510:                 return entity
+511:         return None
+512: 
+513:     def _relationships_connect(
+514:         self,
+515:         rel1: Relationship,
+516:         rel2: Relationship,
+517:         context: RuleEvaluationContext,
+518:     ) -> bool:
+519:         """Check if two relationships connect (share an entity)."""
+520:         # Check if rel1's target is rel2's source (chain pattern)
+521:         if rel1.target_entity_id == rel2.source_entity_id:
+522:             return True
+523:         # Check if they share source or target
+524:         if rel1.source_entity_id == rel2.source_entity_id:
+525:             return True
+526:         if rel1.target_entity_id == rel2.target_entity_id:
+527:             return True
+528:         return False
+529: 
+530:     def _get_compiled_pattern(self, pattern: str) -> re.Pattern | None:
+531:         """Get or compile a regex pattern."""
+532:         if pattern not in self._compiled_patterns:
+533:             try:
+534:                 self._compiled_patterns[pattern] = re.compile(pattern, re.IGNORECASE)
+535:             except re.error as e:
+536:                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
+537:                 return None
+538: 
+539:         return self._compiled_patterns[pattern]
 ````
 
 ## File: src/khora/extraction/extractors/base.py
@@ -17792,6 +17376,422 @@ README.md
 584: 
 585:     def __repr__(self) -> str:
 586:         return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"
+````
+
+## File: src/khora/extraction/expansion/relationship_inferrer.py
+````python
+  1: """Relationship inference from existing graph patterns.
+  2: 
+  3: Infers new relationships based on configurable inference rules
+  4: defined in expertise configuration.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from collections import Counter
+ 10: from dataclasses import dataclass, field
+ 11: from datetime import UTC, datetime
+ 12: from typing import TYPE_CHECKING
+ 13: from uuid import UUID, uuid4
+ 14: 
+ 15: from loguru import logger
+ 16: 
+ 17: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
+ 18: 
+ 19: if TYPE_CHECKING:
+ 20:     from khora.core.models import Entity, Relationship
+ 21:     from khora.extraction.skills import ExpertiseConfig
+ 22: 
+ 23: 
+ 24: @dataclass
+ 25: class InferredRelationship:
+ 26:     """An inferred relationship from rule evaluation."""
+ 27: 
+ 28:     source_entity_id: UUID
+ 29:     target_entity_id: UUID
+ 30:     relationship_type: str
+ 31:     description: str = ""
+ 32:     confidence: float = 0.5
+ 33:     rule_name: str = ""  # Name of inference rule that created this
+ 34:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
+ 35: 
+ 36: 
+ 37: class RelationshipInferrer:
+ 38:     """Infers new relationships based on existing graph patterns.
+ 39: 
+ 40:     Uses inference rules from expertise configuration to deduce
+ 41:     relationships that aren't explicitly stated but can be inferred
+ 42:     from existing relationships.
+ 43: 
+ 44:     Example inference rules:
+ 45:     - If A manages B and B works on project C, A is stakeholder of C
+ 46:     - If person P is mentioned in channel for project X, P is involved in X
+ 47:     - If PR author and reviewer work on same PR, they collaborate
+ 48:     """
+ 49: 
+ 50:     def __init__(
+ 51:         self,
+ 52:         expertise: ExpertiseConfig | None = None,
+ 53:         *,
+ 54:         min_confidence: float = 0.3,
+ 55:         max_inferences_per_rule: int = 100,
+ 56:     ) -> None:
+ 57:         """Initialize the relationship inferrer.
+ 58: 
+ 59:         Args:
+ 60:             expertise: ExpertiseConfig with inference rules
+ 61:             min_confidence: Minimum confidence for inferred relationships
+ 62:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
+ 63:         """
+ 64:         self._expertise = expertise
+ 65:         self._min_confidence = min_confidence
+ 66:         self._max_inferences_per_rule = max_inferences_per_rule
+ 67:         self._rule_engine = RuleEngine(expertise)
+ 68: 
+ 69:     def infer(
+ 70:         self,
+ 71:         entities: list[Entity],
+ 72:         relationships: list[Relationship],
+ 73:         *,
+ 74:         depth: int = 1,
+ 75:     ) -> list[InferredRelationship]:
+ 76:         """Infer new relationships from existing graph.
+ 77: 
+ 78:         Args:
+ 79:             entities: Existing entities
+ 80:             relationships: Existing relationships
+ 81:             depth: Number of inference passes (for transitive inference)
+ 82: 
+ 83:         Returns:
+ 84:             List of inferred relationships
+ 85:         """
+ 86:         if not self._expertise or not self._expertise.inference_rules:
+ 87:             logger.debug("No expertise or inference rules configured, skipping inference")
+ 88:             return []
+ 89: 
+ 90:         # Diagnostic: Log entity types in the graph
+ 91:         entity_types = Counter(
+ 92:             e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
+ 93:         )
+ 94:         logger.info(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
+ 95: 
+ 96:         # Diagnostic: Log relationship types in the graph
+ 97:         rel_types = Counter(
+ 98:             r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+ 99:             for r in relationships
+100:         )
+101:         logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
+102: 
+103:         # Diagnostic: Log source/target entity types for each relationship type
+104:         # Build entity ID to type lookup
+105:         entity_type_lookup = {
+106:             e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
+107:         }
+108: 
+109:         # For each relationship type, count source->target type combinations
+110:         rel_type_patterns: dict[str, Counter] = {}
+111:         for r in relationships:
+112:             rel_type = r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+113:             source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
+114:             target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
+115:             pattern = f"{source_type}->{target_type}"
+116: 
+117:             if rel_type not in rel_type_patterns:
+118:                 rel_type_patterns[rel_type] = Counter()
+119:             rel_type_patterns[rel_type][pattern] += 1
+120: 
+121:         # Log top patterns for relationship types that rules expect
+122:         for rel_type, patterns in rel_type_patterns.items():
+123:             top_patterns = patterns.most_common(5)
+124:             logger.debug(f"  {rel_type} patterns: {dict(top_patterns)}")
+125: 
+126:         # Diagnostic: Log what inference rules expect
+127:         expected_rels = set()
+128:         expected_entities = set()
+129:         for rule in self._expertise.inference_rules:
+130:             for cond in rule.when:
+131:                 if hasattr(cond, "relationship"):
+132:                     expected_rels.add(cond.relationship)
+133:                 if hasattr(cond, "source_type"):
+134:                     expected_entities.add(cond.source_type)
+135:                 if hasattr(cond, "target_type"):
+136:                     expected_entities.add(cond.target_type)
+137:         logger.info(f"Inference rules expect relationships: {expected_rels}")
+138:         logger.info(f"Inference rules expect entity types: {expected_entities}")
+139: 
+140:         # Diagnostic: Check for matches between actual and expected
+141:         actual_rel_types = set(rel_types.keys())
+142:         actual_entity_types = set(entity_types.keys())
+143:         matching_rels = actual_rel_types & expected_rels
+144:         matching_entities = actual_entity_types & expected_entities
+145:         logger.info(f"Matching relationship types: {matching_rels or 'NONE'}")
+146:         logger.info(f"Matching entity types: {matching_entities or 'NONE'}")
+147: 
+148:         if not matching_rels:
+149:             logger.warning(
+150:                 f"No relationship type matches! Rules expect {expected_rels} " f"but graph has {actual_rel_types}"
+151:             )
+152:         if not matching_entities:
+153:             logger.warning(
+154:                 f"No entity type matches! Rules expect {expected_entities} " f"but graph has {actual_entity_types}"
+155:             )
+156: 
+157:         all_inferred: list[InferredRelationship] = []
+158:         current_relationships = list(relationships)
+159: 
+160:         for pass_num in range(depth):
+161:             # Build context with current state
+162:             context = RuleEvaluationContext.from_data(entities, current_relationships)
+163: 
+164:             # Evaluate inference rules
+165:             matches = self._rule_engine.evaluate_inference_rules(context)
+166:             logger.info(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
+167: 
+168:             # Log details of first few matches for debugging
+169:             for i, match in enumerate(matches[:5]):
+170:                 logger.info(
+171:                     f"  Match {i + 1}: rule={match.rule_name}, "
+172:                     f"confidence={match.confidence:.2f}, "
+173:                     f"metadata_keys={list(match.metadata.keys())}"
+174:                 )
+175: 
+176:             # Convert matches to inferred relationships
+177:             pass_inferred = self._matches_to_relationships(matches, context)
+178:             logger.info(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
+179: 
+180:             if not pass_inferred:
+181:                 # No new inferences, stop early
+182:                 logger.info(f"Pass {pass_num + 1}: No new inferences, stopping early")
+183:                 break
+184: 
+185:             # Filter out duplicates and already existing relationships
+186:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
+187: 
+188:             if not new_inferred:
+189:                 break
+190: 
+191:             all_inferred.extend(new_inferred)
+192: 
+193:             # Add inferred to current for next pass (as mock relationships)
+194:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
+195: 
+196:             logger.info(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
+197: 
+198:         logger.info(f"Inference complete: {len(all_inferred)} total relationships inferred")
+199:         return all_inferred
+200: 
+201:     def infer_from_pattern(
+202:         self,
+203:         entities: list[Entity],
+204:         relationships: list[Relationship],
+205:         pattern: str,
+206:     ) -> list[InferredRelationship]:
+207:         """Infer relationships matching a specific pattern.
+208: 
+209:         Args:
+210:             entities: Existing entities
+211:             relationships: Existing relationships
+212:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
+213: 
+214:         Returns:
+215:             List of inferred relationships
+216:         """
+217:         # Parse pattern and find matches
+218:         # For now, delegate to rule engine
+219:         context = RuleEvaluationContext.from_data(entities, relationships)
+220:         matches = self._rule_engine.evaluate_inference_rules(context)
+221:         return self._matches_to_relationships(matches, context)
+222: 
+223:     def _matches_to_relationships(
+224:         self,
+225:         matches: list[RuleMatch],
+226:         context: RuleEvaluationContext,
+227:     ) -> list[InferredRelationship]:
+228:         """Convert rule matches to inferred relationships."""
+229:         inferred = []
+230:         rule_counts: dict[str, int] = {}
+231: 
+232:         for match in matches:
+233:             # Check rule limit
+234:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
+235:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
+236:                 continue
+237: 
+238:             # Check confidence threshold
+239:             if match.confidence < self._min_confidence:
+240:                 continue
+241: 
+242:             # Resolve source and target from metadata
+243:             source_entity, target_entity = self._resolve_inference_entities(match, context)
+244: 
+245:             if not source_entity or not target_entity:
+246:                 continue
+247: 
+248:             # Skip self-referential
+249:             if source_entity.id == target_entity.id:
+250:                 continue
+251: 
+252:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
+253: 
+254:             inferred.append(
+255:                 InferredRelationship(
+256:                     source_entity_id=source_entity.id,
+257:                     target_entity_id=target_entity.id,
+258:                     relationship_type=relationship_type,
+259:                     description=f"Inferred by rule: {match.rule_name}",
+260:                     confidence=match.confidence,
+261:                     rule_name=match.rule_name,
+262:                     evidence=[r.id for r in match.matched_relationships],
+263:                 )
+264:             )
+265: 
+266:         return inferred
+267: 
+268:     def _resolve_inference_entities(
+269:         self,
+270:         match: RuleMatch,
+271:         context: RuleEvaluationContext,
+272:     ) -> tuple[Entity | None, Entity | None]:
+273:         """Resolve source and target entities from match metadata.
+274: 
+275:         The then_source and then_target specify which entity to use:
+276:         - "first.source": Source entity of first matched relationship
+277:         - "first.target": Target entity of first matched relationship
+278:         - "second.source": Source entity of second matched relationship
+279:         - "second.target": Target entity of second matched relationship
+280:         """
+281:         then_source = match.metadata.get("then_source", "first.source")
+282:         then_target = match.metadata.get("then_target", "second.target")
+283: 
+284:         first = match.metadata.get("first", {})
+285:         second = match.metadata.get("second", {})
+286: 
+287:         def resolve_ref(ref: str) -> Entity | None:
+288:             parts = ref.split(".")
+289:             if len(parts) != 2:
+290:                 return None
+291: 
+292:             group, position = parts
+293:             data = first if group == "first" else second
+294: 
+295:             return data.get(position)
+296: 
+297:         source = resolve_ref(then_source)
+298:         target = resolve_ref(then_target)
+299: 
+300:         return source, target
+301: 
+302:     def _filter_duplicates(
+303:         self,
+304:         new_inferred: list[InferredRelationship],
+305:         existing_relationships: list[Relationship],
+306:         already_inferred: list[InferredRelationship],
+307:     ) -> list[InferredRelationship]:
+308:         """Filter out duplicate inferences."""
+309:         # Build set of existing relationship keys
+310:         existing_keys: set[tuple[UUID, UUID, str]] = set()
+311: 
+312:         for rel in existing_relationships:
+313:             rel_type = str(
+314:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+315:             )
+316:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
+317: 
+318:         for inf in already_inferred:
+319:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
+320: 
+321:         # Filter new inferences
+322:         filtered = []
+323:         for inf in new_inferred:
+324:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
+325:             if key not in existing_keys:
+326:                 filtered.append(inf)
+327:                 existing_keys.add(key)
+328: 
+329:         return filtered
+330: 
+331:     def _to_mock_relationships(
+332:         self,
+333:         inferred: list[InferredRelationship],
+334:         entities: list[Entity],
+335:     ) -> list[Relationship]:
+336:         """Convert inferred relationships to mock Relationship objects for next pass."""
+337:         from khora.core.models import Relationship
+338:         from khora.core.models.entity import RelationshipType
+339: 
+340:         mock_rels = []
+341:         # Get namespace from first entity if available
+342:         namespace_id = entities[0].namespace_id if entities else uuid4()
+343: 
+344:         for inf in inferred:
+345:             # Try to map relationship type to enum
+346:             try:
+347:                 rel_type = RelationshipType[inf.relationship_type]
+348:             except (KeyError, AttributeError):
+349:                 rel_type = RelationshipType.CUSTOM
+350: 
+351:             mock_rels.append(
+352:                 Relationship(
+353:                     id=uuid4(),
+354:                     namespace_id=namespace_id,
+355:                     source_entity_id=inf.source_entity_id,
+356:                     target_entity_id=inf.target_entity_id,
+357:                     relationship_type=rel_type,
+358:                     description=inf.description,
+359:                     properties={},
+360:                     source_document_ids=[],
+361:                     source_chunk_ids=[],
+362:                     confidence=inf.confidence,
+363:                     metadata={"inferred": True, "rule": inf.rule_name},
+364:                     created_at=datetime.now(UTC),
+365:                     updated_at=datetime.now(UTC),
+366:                 )
+367:             )
+368: 
+369:         return mock_rels
+370: 
+371: 
+372: def to_relationship(
+373:     inferred: InferredRelationship,
+374:     namespace_id: UUID,
+375: ) -> Relationship:
+376:     """Convert an InferredRelationship to a domain Relationship model.
+377: 
+378:     Args:
+379:         inferred: The inferred relationship to convert
+380:         namespace_id: Namespace ID for the relationship
+381: 
+382:     Returns:
+383:         Domain Relationship model
+384:     """
+385:     from khora.core.models import Relationship
+386:     from khora.core.models.entity import RelationshipType
+387: 
+388:     # Try to map relationship type to enum
+389:     try:
+390:         rel_type = RelationshipType[inferred.relationship_type]
+391:     except (KeyError, AttributeError):
+392:         rel_type = RelationshipType.CUSTOM
+393: 
+394:     return Relationship(
+395:         id=uuid4(),
+396:         namespace_id=namespace_id,
+397:         source_entity_id=inferred.source_entity_id,
+398:         target_entity_id=inferred.target_entity_id,
+399:         relationship_type=rel_type,
+400:         description=inferred.description,
+401:         properties={
+402:             "inferred": True,
+403:             "rule_name": inferred.rule_name,
+404:             "evidence": [str(e) for e in inferred.evidence],
+405:         },
+406:         source_document_ids=[],
+407:         source_chunk_ids=[],
+408:         confidence=inferred.confidence,
+409:         metadata={"inferred": True},
+410:         created_at=datetime.now(UTC),
+411:         updated_at=datetime.now(UTC),
+412:     )
 ````
 
 ## File: src/khora/extraction/extractors/llm.py
@@ -23243,245 +23243,284 @@ README.md
 227:         # Process entities concurrently but with semaphore to avoid overwhelming the DB
 228:         entity_semaphore = asyncio.Semaphore(20)
 229: 
-230:         async def store_entity(entity):
-231:             async with entity_semaphore:
-232:                 existing = await storage.get_entity_by_name(
-233:                     document.namespace_id,
-234:                     entity.name,
-235:                     entity.entity_type.value,
-236:                 )
-237:                 if existing:
-238:                     existing.merge_with(entity)
-239:                     return await storage.update_entity(existing)
-240:                 else:
-241:                     return await storage.create_entity(entity)
-242: 
-243:         await asyncio.gather(*[store_entity(e) for e in entities])
-244: 
-245:         # Step 6: Store relationships concurrently
-246:         async def store_relationship(rel):
-247:             async with entity_semaphore:
-248:                 return await storage.create_relationship(rel)
-249: 
-250:         all_relationships = relationships + inferred_relationships
-251:         if all_relationships:
-252:             await asyncio.gather(*[store_relationship(r) for r in all_relationships])
-253: 
-254:         # Mark as completed
-255:         document.mark_completed(len(chunks), len(entities))
-256:         await storage.update_document(document)
-257: 
-258:         return {
-259:             "document_id": str(document.id),
-260:             "chunks": len(chunks),
-261:             "entities": len(entities),
-262:             "relationships": len(relationships),
-263:             "inferred_relationships": len(inferred_relationships),
-264:         }
+230:         # Track mapping from original entity IDs to stored entity IDs (for dedup)
+231:         entity_id_mapping: dict[str, str] = {}
+232: 
+233:         async def store_entity(entity):
+234:             async with entity_semaphore:
+235:                 original_id = str(entity.id)
+236:                 existing = await storage.get_entity_by_name(
+237:                     document.namespace_id,
+238:                     entity.name,
+239:                     entity.entity_type.value,
+240:                 )
+241:                 if existing:
+242:                     existing.merge_with(entity)
+243:                     await storage.update_entity(existing)
+244:                     # Map original ID to existing entity's ID
+245:                     entity_id_mapping[original_id] = str(existing.id)
+246:                     return existing
+247:                 else:
+248:                     await storage.create_entity(entity)
+249:                     # ID stays the same for new entities
+250:                     entity_id_mapping[original_id] = original_id
+251:                     return entity
+252: 
+253:         await asyncio.gather(*[store_entity(e) for e in entities])
+254: 
+255:         # Step 6: Store relationships concurrently
+256:         # Update relationship entity IDs to use deduplicated entity IDs
+257:         async def store_relationship(rel):
+258:             async with entity_semaphore:
+259:                 # Remap source and target entity IDs if they were deduplicated
+260:                 source_id = str(rel.source_entity_id)
+261:                 target_id = str(rel.target_entity_id)
+262: 
+263:                 mapped_source = entity_id_mapping.get(source_id)
+264:                 mapped_target = entity_id_mapping.get(target_id)
 265: 
-266:     except Exception as e:
-267:         document.mark_failed(str(e))
-268:         await storage.update_document(document)
-269:         raise
-270: 
-271: 
-272: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
-273: @flow(name="ingest_documents", log_prints=True)
-274: async def ingest_documents(
-275:     namespace_id: UUID,
-276:     documents: list[dict[str, Any]],
-277:     storage: StorageCoordinator | None = None,
-278:     *,
-279:     skill_name: str = "general_entities",
-280:     expertise: ExpertiseConfig | str | None = None,
-281:     chunk_strategy: str = "semantic",
-282:     chunk_size: int = 512,
-283:     embedding_model: str = "text-embedding-3-small",
-284:     extraction_model: str = "gpt-4o-mini",
-285:     max_concurrent_documents: int = 5,
-286:     max_concurrent_extractions: int = 10,
-287:     enable_expansion: bool = False,
-288:     extraction_context: dict[str, Any] | None = None,
-289:     **kwargs,
-290: ) -> dict[str, Any]:
-291:     """Two-phase document ingestion flow with parallel processing.
+266:                 # Skip if either entity wasn't found (shouldn't happen but be safe)
+267:                 if not mapped_source or not mapped_target:
+268:                     logger.debug(
+269:                         f"Skipping relationship {rel.relationship_type}: "
+270:                         f"missing entity mapping (source={source_id}, target={target_id})"
+271:                     )
+272:                     return None
+273: 
+274:                 # Update the relationship with mapped IDs
+275:                 from uuid import UUID
+276: 
+277:                 rel.source_entity_id = UUID(mapped_source)
+278:                 rel.target_entity_id = UUID(mapped_target)
+279: 
+280:                 return await storage.create_relationship(rel)
+281: 
+282:         all_relationships = relationships + inferred_relationships
+283:         if all_relationships:
+284:             results = await asyncio.gather(*[store_relationship(r) for r in all_relationships])
+285:             # Count successfully stored relationships
+286:             stored_count = sum(1 for r in results if r is not None)
+287:             if stored_count < len(all_relationships):
+288:                 logger.debug(
+289:                     f"Stored {stored_count}/{len(all_relationships)} relationships "
+290:                     f"({len(all_relationships) - stored_count} skipped due to missing entity mappings)"
+291:                 )
 292: 
-293:     Phase 1: Stage documents (checksum-based change detection)
-294:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
-295:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
+293:         # Mark as completed
+294:         document.mark_completed(len(chunks), len(entities))
+295:         await storage.update_document(document)
 296: 
-297:     Args:
-298:         namespace_id: Target namespace
-299:         documents: List of document dicts with 'content' and optional metadata
-300:         storage: StorageCoordinator instance
-301:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
-302:         expertise: ExpertiseConfig, expertise name string, or file path
-303:         chunk_strategy: Chunking strategy
-304:         chunk_size: Target chunk size
-305:         embedding_model: Model for embeddings
-306:         extraction_model: Model for extraction
-307:         max_concurrent_documents: Maximum documents to process in parallel
-308:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
-309:         enable_expansion: Whether to run semantic expansion
-310:         extraction_context: Context dict for prompt template rendering
-311: 
-312:     Returns:
-313:         Summary of ingestion results
-314:     """
-315:     if storage is None:
-316:         raise ValueError("storage is required")
-317: 
-318:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
-319: 
-320:     # Phase 1: Stage documents (can run in parallel too)
-321:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
-322: 
-323:     async def stage_with_limit(doc_input):
-324:         async with staging_semaphore:
-325:             return await stage_document(doc_input, namespace_id, storage)
-326: 
-327:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
-328:     staged_docs = [doc for doc in staged_results if doc is not None]
-329: 
-330:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
+297:         return {
+298:             "document_id": str(document.id),
+299:             "chunks": len(chunks),
+300:             "entities": len(entities),
+301:             "relationships": len(relationships),
+302:             "inferred_relationships": len(inferred_relationships),
+303:         }
+304: 
+305:     except Exception as e:
+306:         document.mark_failed(str(e))
+307:         await storage.update_document(document)
+308:         raise
+309: 
+310: 
+311: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
+312: @flow(name="ingest_documents", log_prints=True)
+313: async def ingest_documents(
+314:     namespace_id: UUID,
+315:     documents: list[dict[str, Any]],
+316:     storage: StorageCoordinator | None = None,
+317:     *,
+318:     skill_name: str = "general_entities",
+319:     expertise: ExpertiseConfig | str | None = None,
+320:     chunk_strategy: str = "semantic",
+321:     chunk_size: int = 512,
+322:     embedding_model: str = "text-embedding-3-small",
+323:     extraction_model: str = "gpt-4o-mini",
+324:     max_concurrent_documents: int = 5,
+325:     max_concurrent_extractions: int = 10,
+326:     enable_expansion: bool = False,
+327:     extraction_context: dict[str, Any] | None = None,
+328:     **kwargs,
+329: ) -> dict[str, Any]:
+330:     """Two-phase document ingestion flow with parallel processing.
 331: 
-332:     if not staged_docs:
-333:         return {
-334:             "total_documents": len(documents),
-335:             "processed_documents": 0,
-336:             "skipped_documents": len(documents),
-337:             "total_chunks": 0,
-338:             "total_entities": 0,
-339:             "total_relationships": 0,
-340:         }
-341: 
-342:     # Phase 2: Process staged documents in parallel with controlled concurrency
-343:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
-344: 
-345:     async def process_with_limit(doc):
-346:         async with doc_semaphore:
-347:             return await process_document(
-348:                 doc,
-349:                 storage,
-350:                 chunk_strategy=chunk_strategy,
-351:                 chunk_size=chunk_size,
-352:                 embedding_model=embedding_model,
-353:                 extraction_model=extraction_model,
-354:                 skill_name=skill_name,
-355:                 expertise=expertise,
-356:                 max_concurrent_extractions=max_concurrent_extractions,
-357:                 enable_expansion=enable_expansion,
-358:                 extraction_context=extraction_context,
-359:             )
-360: 
-361:     results = await asyncio.gather(
-362:         *[process_with_limit(doc) for doc in staged_docs],
-363:         return_exceptions=True,
-364:     )
+332:     Phase 1: Stage documents (checksum-based change detection)
+333:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
+334:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
+335: 
+336:     Args:
+337:         namespace_id: Target namespace
+338:         documents: List of document dicts with 'content' and optional metadata
+339:         storage: StorageCoordinator instance
+340:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
+341:         expertise: ExpertiseConfig, expertise name string, or file path
+342:         chunk_strategy: Chunking strategy
+343:         chunk_size: Target chunk size
+344:         embedding_model: Model for embeddings
+345:         extraction_model: Model for extraction
+346:         max_concurrent_documents: Maximum documents to process in parallel
+347:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
+348:         enable_expansion: Whether to run semantic expansion
+349:         extraction_context: Context dict for prompt template rendering
+350: 
+351:     Returns:
+352:         Summary of ingestion results
+353:     """
+354:     if storage is None:
+355:         raise ValueError("storage is required")
+356: 
+357:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
+358: 
+359:     # Phase 1: Stage documents (can run in parallel too)
+360:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
+361: 
+362:     async def stage_with_limit(doc_input):
+363:         async with staging_semaphore:
+364:             return await stage_document(doc_input, namespace_id, storage)
 365: 
-366:     # Filter out exceptions and count errors
-367:     successful_results = []
-368:     error_count = 0
-369:     for result in results:
-370:         if isinstance(result, Exception):
-371:             logger.error(f"Document processing failed: {result}")
-372:             error_count += 1
-373:         else:
-374:             successful_results.append(result)
-375: 
-376:     # Aggregate results
-377:     total_chunks = sum(r["chunks"] for r in successful_results)
-378:     total_entities = sum(r["entities"] for r in successful_results)
-379:     total_relationships = sum(r["relationships"] for r in successful_results)
-380:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
-381: 
-382:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
+366:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+367:     staged_docs = [doc for doc in staged_results if doc is not None]
+368: 
+369:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
+370: 
+371:     if not staged_docs:
+372:         return {
+373:             "total_documents": len(documents),
+374:             "processed_documents": 0,
+375:             "skipped_documents": len(documents),
+376:             "total_chunks": 0,
+377:             "total_entities": 0,
+378:             "total_relationships": 0,
+379:         }
+380: 
+381:     # Phase 2: Process staged documents in parallel with controlled concurrency
+382:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
 383: 
-384:     return {
-385:         "total_documents": len(documents),
-386:         "processed_documents": len(successful_results),
-387:         "skipped_documents": len(documents) - len(staged_docs),
-388:         "failed_documents": error_count,
-389:         "total_chunks": total_chunks,
-390:         "total_entities": total_entities,
-391:         "total_relationships": total_relationships,
-392:         "total_inferred_relationships": total_inferred,
-393:     }
-394: 
-395: 
-396: @task(name="run_batch_inference", cache_policy=NO_CACHE)
-397: async def run_batch_inference(
-398:     namespace_id: UUID,
-399:     storage: StorageCoordinator,
-400:     expertise: ExpertiseConfig,
-401:     *,
-402:     max_entities: int = 10000,
-403:     max_relationships: int = 50000,
-404: ) -> dict[str, Any]:
-405:     """Run batch inference on the entire namespace.
-406: 
-407:     This should be called after all documents are ingested when using
-408:     inference_mode="batch". It queries all entities and relationships
-409:     from the namespace and runs inference rules to create new relationships.
-410: 
-411:     Args:
-412:         namespace_id: Namespace to run inference on
-413:         storage: Storage coordinator
-414:         expertise: ExpertiseConfig with inference rules
-415:         max_entities: Maximum entities to load
-416:         max_relationships: Maximum relationships to load
-417: 
-418:     Returns:
-419:         Summary of inference results
-420:     """
-421:     from khora.extraction.expansion import SemanticExpander
+384:     async def process_with_limit(doc):
+385:         async with doc_semaphore:
+386:             return await process_document(
+387:                 doc,
+388:                 storage,
+389:                 chunk_strategy=chunk_strategy,
+390:                 chunk_size=chunk_size,
+391:                 embedding_model=embedding_model,
+392:                 extraction_model=extraction_model,
+393:                 skill_name=skill_name,
+394:                 expertise=expertise,
+395:                 max_concurrent_extractions=max_concurrent_extractions,
+396:                 enable_expansion=enable_expansion,
+397:                 extraction_context=extraction_context,
+398:             )
+399: 
+400:     results = await asyncio.gather(
+401:         *[process_with_limit(doc) for doc in staged_docs],
+402:         return_exceptions=True,
+403:     )
+404: 
+405:     # Filter out exceptions and count errors
+406:     successful_results = []
+407:     error_count = 0
+408:     for result in results:
+409:         if isinstance(result, Exception):
+410:             logger.error(f"Document processing failed: {result}")
+411:             error_count += 1
+412:         else:
+413:             successful_results.append(result)
+414: 
+415:     # Aggregate results
+416:     total_chunks = sum(r["chunks"] for r in successful_results)
+417:     total_entities = sum(r["entities"] for r in successful_results)
+418:     total_relationships = sum(r["relationships"] for r in successful_results)
+419:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
+420: 
+421:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
 422: 
-423:     logger.info(f"Starting batch inference for namespace {namespace_id}")
-424: 
-425:     # Load all entities and relationships from storage
-426:     entities = await storage.list_entities(namespace_id, limit=max_entities)
-427:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
-428: 
-429:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
-430: 
-431:     if not entities:
-432:         return {
-433:             "entities": 0,
-434:             "relationships": 0,
-435:             "inferred_relationships": 0,
-436:         }
-437: 
-438:     # Create expander with inference enabled
-439:     expander = SemanticExpander(
-440:         expertise=expertise,
-441:         enable_unification=False,  # Entities already unified during ingestion
-442:         enable_inference=True,
-443:     )
-444: 
-445:     # Run expansion (inference only)
-446:     expansion_result = await expander.expand(
-447:         entities=entities,
-448:         relationships=relationships,
-449:         namespace_id=namespace_id,
-450:     )
-451: 
-452:     # Store inferred relationships
-453:     inferred_count = 0
-454:     if expansion_result.inferred_relationships:
-455:         for rel in expansion_result.inferred_relationships:
-456:             try:
-457:                 await storage.create_relationship(rel)
-458:                 inferred_count += 1
-459:             except Exception as e:
-460:                 logger.warning(f"Failed to store inferred relationship: {e}")
+423:     return {
+424:         "total_documents": len(documents),
+425:         "processed_documents": len(successful_results),
+426:         "skipped_documents": len(documents) - len(staged_docs),
+427:         "failed_documents": error_count,
+428:         "total_chunks": total_chunks,
+429:         "total_entities": total_entities,
+430:         "total_relationships": total_relationships,
+431:         "total_inferred_relationships": total_inferred,
+432:     }
+433: 
+434: 
+435: @task(name="run_batch_inference", cache_policy=NO_CACHE)
+436: async def run_batch_inference(
+437:     namespace_id: UUID,
+438:     storage: StorageCoordinator,
+439:     expertise: ExpertiseConfig,
+440:     *,
+441:     max_entities: int = 10000,
+442:     max_relationships: int = 50000,
+443: ) -> dict[str, Any]:
+444:     """Run batch inference on the entire namespace.
+445: 
+446:     This should be called after all documents are ingested when using
+447:     inference_mode="batch". It queries all entities and relationships
+448:     from the namespace and runs inference rules to create new relationships.
+449: 
+450:     Args:
+451:         namespace_id: Namespace to run inference on
+452:         storage: Storage coordinator
+453:         expertise: ExpertiseConfig with inference rules
+454:         max_entities: Maximum entities to load
+455:         max_relationships: Maximum relationships to load
+456: 
+457:     Returns:
+458:         Summary of inference results
+459:     """
+460:     from khora.extraction.expansion import SemanticExpander
 461: 
-462:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
+462:     logger.info(f"Starting batch inference for namespace {namespace_id}")
 463: 
-464:     return {
-465:         "entities": len(entities),
-466:         "relationships": len(relationships),
-467:         "inferred_relationships": inferred_count,
-468:     }
+464:     # Load all entities and relationships from storage
+465:     entities = await storage.list_entities(namespace_id, limit=max_entities)
+466:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
+467: 
+468:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
+469: 
+470:     if not entities:
+471:         return {
+472:             "entities": 0,
+473:             "relationships": 0,
+474:             "inferred_relationships": 0,
+475:         }
+476: 
+477:     # Create expander with inference enabled
+478:     expander = SemanticExpander(
+479:         expertise=expertise,
+480:         enable_unification=False,  # Entities already unified during ingestion
+481:         enable_inference=True,
+482:     )
+483: 
+484:     # Run expansion (inference only)
+485:     expansion_result = await expander.expand(
+486:         entities=entities,
+487:         relationships=relationships,
+488:         namespace_id=namespace_id,
+489:     )
+490: 
+491:     # Store inferred relationships
+492:     inferred_count = 0
+493:     if expansion_result.inferred_relationships:
+494:         for rel in expansion_result.inferred_relationships:
+495:             try:
+496:                 await storage.create_relationship(rel)
+497:                 inferred_count += 1
+498:             except Exception as e:
+499:                 logger.warning(f"Failed to store inferred relationship: {e}")
+500: 
+501:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
+502: 
+503:     return {
+504:         "entities": len(entities),
+505:         "relationships": len(relationships),
+506:         "inferred_relationships": inferred_count,
+507:     }
 ````
 
 ## File: src/khora/__init__.py
@@ -23654,6 +23693,14 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-27 14:43:27 +0100
+**Message:** debug: Add detailed inference diagnostic logging
+
+**Files:**
+- REPOMIX.md
+- src/khora/extraction/expansion/relationship_inferrer.py
+- src/khora/extraction/expansion/rule_engine.py
 
 ## Commit: 2026-01-27 13:33:17 +0100
 **Message:** feat: Add type hierarchy support to inference rule matching
@@ -23919,12 +23966,3 @@ README.md
 - src/khora/memory_lake.py
 - src/khora/pipelines/flows/ingest.py
 - src/khora/pipelines/tasks/extract.py
-
-## Commit: 2026-01-26 14:15:33 +0100
-**Message:** Fix duplicate document detection to prevent race conditions
-
-**Files:**
-- REPOMIX.md
-- src/khora/memory_lake.py
-- src/khora/pipelines/flows/ingest.py
-- src/khora/storage/backends/postgresql.py

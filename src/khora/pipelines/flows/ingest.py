@@ -227,8 +227,12 @@ async def process_document(
         # Process entities concurrently but with semaphore to avoid overwhelming the DB
         entity_semaphore = asyncio.Semaphore(20)
 
+        # Track mapping from original entity IDs to stored entity IDs (for dedup)
+        entity_id_mapping: dict[str, str] = {}
+
         async def store_entity(entity):
             async with entity_semaphore:
+                original_id = str(entity.id)
                 existing = await storage.get_entity_by_name(
                     document.namespace_id,
                     entity.name,
@@ -236,20 +240,55 @@ async def process_document(
                 )
                 if existing:
                     existing.merge_with(entity)
-                    return await storage.update_entity(existing)
+                    await storage.update_entity(existing)
+                    # Map original ID to existing entity's ID
+                    entity_id_mapping[original_id] = str(existing.id)
+                    return existing
                 else:
-                    return await storage.create_entity(entity)
+                    await storage.create_entity(entity)
+                    # ID stays the same for new entities
+                    entity_id_mapping[original_id] = original_id
+                    return entity
 
         await asyncio.gather(*[store_entity(e) for e in entities])
 
         # Step 6: Store relationships concurrently
+        # Update relationship entity IDs to use deduplicated entity IDs
         async def store_relationship(rel):
             async with entity_semaphore:
+                # Remap source and target entity IDs if they were deduplicated
+                source_id = str(rel.source_entity_id)
+                target_id = str(rel.target_entity_id)
+
+                mapped_source = entity_id_mapping.get(source_id)
+                mapped_target = entity_id_mapping.get(target_id)
+
+                # Skip if either entity wasn't found (shouldn't happen but be safe)
+                if not mapped_source or not mapped_target:
+                    logger.debug(
+                        f"Skipping relationship {rel.relationship_type}: "
+                        f"missing entity mapping (source={source_id}, target={target_id})"
+                    )
+                    return None
+
+                # Update the relationship with mapped IDs
+                from uuid import UUID
+
+                rel.source_entity_id = UUID(mapped_source)
+                rel.target_entity_id = UUID(mapped_target)
+
                 return await storage.create_relationship(rel)
 
         all_relationships = relationships + inferred_relationships
         if all_relationships:
-            await asyncio.gather(*[store_relationship(r) for r in all_relationships])
+            results = await asyncio.gather(*[store_relationship(r) for r in all_relationships])
+            # Count successfully stored relationships
+            stored_count = sum(1 for r in results if r is not None)
+            if stored_count < len(all_relationships):
+                logger.debug(
+                    f"Stored {stored_count}/{len(all_relationships)} relationships "
+                    f"({len(all_relationships) - stored_count} skipped due to missing entity mappings)"
+                )
 
         # Mark as completed
         document.mark_completed(len(chunks), len(entities))
