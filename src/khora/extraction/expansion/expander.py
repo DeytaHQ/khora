@@ -159,6 +159,9 @@ class SemanticExpander:
 
         current_entities = list(entities)
         current_relationships = list(relationships)
+        logger.info(
+            f"Starting expansion with {len(current_entities)} entities, {len(current_relationships)} relationships"
+        )
 
         # Phase 1: Cross-tool entity unification
         if self._enable_unification:
@@ -183,7 +186,7 @@ class SemanticExpander:
         # Phase 2: Relationship inference
         inferred_relationships: list[Relationship] = []
         if self._enable_inference and self._expertise:
-            logger.debug(f"Running relationship inference (depth={self._inference_depth})...")
+            logger.info(f"Running relationship inference (depth={self._inference_depth})...")
             inferred = self._inferrer.infer(
                 current_entities,
                 current_relationships,

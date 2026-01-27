@@ -544,11 +544,13 @@ async def run_batch_inference(
         }
 
     # Create expander with inference enabled
+    logger.info("Creating SemanticExpander...")
     expander = SemanticExpander(
         expertise=expertise,
         enable_unification=False,  # Entities already unified during ingestion
         enable_inference=True,
     )
+    logger.info("SemanticExpander created, starting expansion...")
 
     # Run expansion (inference only)
     expansion_result = await expander.expand(
@@ -556,6 +558,7 @@ async def run_batch_inference(
         relationships=relationships,
         namespace_id=namespace_id,
     )
+    logger.info(f"Expansion complete: {expansion_result.inferred_relationship_count} inferred")
 
     # Store inferred relationships
     inferred_count = 0
