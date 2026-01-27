@@ -287,6 +287,7 @@ class PgVectorBackend:
                 updated_at=entity.updated_at,
             )
             # On conflict (entity already exists), update all fields
+            # Note: use database column name "metadata" not Python attribute "metadata_"
             stmt = stmt.on_conflict_do_update(
                 index_elements=["id"],
                 set_={
@@ -301,7 +302,7 @@ class PgVectorBackend:
                     "valid_from": stmt.excluded.valid_from,
                     "valid_until": stmt.excluded.valid_until,
                     "confidence": stmt.excluded.confidence,
-                    "metadata_": stmt.excluded.metadata_,
+                    "metadata": stmt.excluded.metadata,
                     "updated_at": stmt.excluded.updated_at,
                 },
             )
