@@ -178,8 +178,11 @@ tests/
   unit/
     __init__.py
     test_api.py
+    test_chunkers.py
     test_expansion.py
     test_expertise.py
+    test_models.py
+    test_skills_registry.py
   __init__.py
   conftest.py
 CLAUDE.md
@@ -192,1255 +195,1063 @@ README.md
 
 # Files
 
-## File: tests/unit/test_expansion.py
+## File: tests/unit/test_chunkers.py
 ````python
-  1: """Unit tests for semantic expansion components."""
+  1: """Unit tests for text chunking functionality."""
   2: 
   3: from __future__ import annotations
   4: 
-  5: from uuid import uuid4
+  5: import pytest
   6: 
-  7: import pytest
-  8: 
-  9: from khora.core.models import Entity, Relationship
- 10: from khora.extraction.expansion import (
- 11:     CrossToolUnifier,
- 12:     RelationshipInferrer,
- 13:     SemanticExpander,
- 14: )
- 15: from khora.extraction.expansion.rule_engine import (
- 16:     RuleEngine,
- 17:     RuleEvaluationContext,
- 18: )
- 19: from khora.extraction.skills import (
- 20:     CorrelationRule,
- 21:     ExpertiseConfig,
- 22:     InferenceCondition,
- 23:     InferenceRule,
- 24: )
- 25: 
- 26: 
- 27: class TestRuleEvaluationContext:
- 28:     """Tests for RuleEvaluationContext."""
- 29: 
- 30:     def test_empty_context(self) -> None:
- 31:         """Test creating empty context."""
- 32:         ctx = RuleEvaluationContext()
- 33:         assert ctx.entities == []
- 34:         assert ctx.relationships == []
- 35:         assert ctx.entity_index == {}
- 36:         assert ctx.type_index == {}
- 37: 
- 38:     def test_from_data_builds_indices(self) -> None:
- 39:         """Test context builds indices from data."""
- 40:         namespace_id = uuid4()
- 41:         entities = [
- 42:             Entity(
- 43:                 id=uuid4(),
- 44:                 name="John Smith",
- 45:                 entity_type="PERSON",
- 46:                 namespace_id=namespace_id,
- 47:             ),
- 48:             Entity(
- 49:                 id=uuid4(),
- 50:                 name="Acme Corp",
- 51:                 entity_type="ORGANIZATION",
- 52:                 namespace_id=namespace_id,
- 53:             ),
- 54:             Entity(
- 55:                 id=uuid4(),
- 56:                 name="Jane Doe",
- 57:                 entity_type="PERSON",
- 58:                 namespace_id=namespace_id,
- 59:             ),
- 60:         ]
+  7: from khora.extraction.chunkers import (
+  8:     Chunker,
+  9:     ChunkResult,
+ 10:     FixedChunker,
+ 11:     RecursiveChunker,
+ 12:     create_chunker,
+ 13: )
+ 14: 
+ 15: 
+ 16: class TestChunkResult:
+ 17:     """Tests for ChunkResult dataclass."""
+ 18: 
+ 19:     def test_create_chunk_result(self) -> None:
+ 20:         """Test creating a chunk result."""
+ 21:         result = ChunkResult(
+ 22:             content="Test content",
+ 23:             index=0,
+ 24:             start_char=0,
+ 25:             end_char=12,
+ 26:             token_count=3,
+ 27:         )
+ 28:         assert result.content == "Test content"
+ 29:         assert result.index == 0
+ 30:         assert result.start_char == 0
+ 31:         assert result.end_char == 12
+ 32:         assert result.token_count == 3
+ 33: 
+ 34:     def test_chunk_result_with_metadata(self) -> None:
+ 35:         """Test chunk result with metadata."""
+ 36:         result = ChunkResult(
+ 37:             content="Content",
+ 38:             index=0,
+ 39:             start_char=0,
+ 40:             end_char=7,
+ 41:             token_count=1,
+ 42:             metadata={"key": "value"},
+ 43:         )
+ 44:         assert result.metadata["key"] == "value"
+ 45: 
+ 46: 
+ 47: class TestFixedChunker:
+ 48:     """Tests for FixedChunker."""
+ 49: 
+ 50:     def test_basic_chunking(self) -> None:
+ 51:         """Test basic text chunking."""
+ 52:         chunker = FixedChunker(chunk_size=50, chunk_overlap=10)
+ 53:         text = "A" * 200  # 200 characters, ~50 tokens
+ 54: 
+ 55:         chunks = chunker.chunk(text)
+ 56: 
+ 57:         assert len(chunks) >= 1
+ 58:         for chunk in chunks:
+ 59:             assert isinstance(chunk, ChunkResult)
+ 60:             assert len(chunk.content) > 0
  61: 
- 62:         ctx = RuleEvaluationContext.from_data(entities, [])
- 63: 
- 64:         # Check entity index (by name, lowercase)
- 65:         assert "john smith" in ctx.entity_index
- 66:         assert "acme corp" in ctx.entity_index
- 67:         assert len(ctx.entity_index["john smith"]) == 1
+ 62:     def test_short_text_single_chunk(self) -> None:
+ 63:         """Test that short text produces single chunk."""
+ 64:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+ 65:         text = "Short text"
+ 66: 
+ 67:         chunks = chunker.chunk(text)
  68: 
- 69:         # Check type index
- 70:         assert "PERSON" in ctx.type_index
- 71:         assert "ORGANIZATION" in ctx.type_index
- 72:         assert len(ctx.type_index["PERSON"]) == 2
- 73:         assert len(ctx.type_index["ORGANIZATION"]) == 1
- 74: 
- 75:     def test_from_data_builds_relationship_index(self) -> None:
- 76:         """Test context builds relationship index."""
- 77:         namespace_id = uuid4()
- 78:         e1_id = uuid4()
- 79:         e2_id = uuid4()
- 80: 
- 81:         relationships = [
- 82:             Relationship(
- 83:                 id=uuid4(),
- 84:                 source_entity_id=e1_id,
- 85:                 target_entity_id=e2_id,
- 86:                 relationship_type="WORKS_FOR",
- 87:                 namespace_id=namespace_id,
- 88:             ),
- 89:             Relationship(
- 90:                 id=uuid4(),
- 91:                 source_entity_id=e2_id,
- 92:                 target_entity_id=e1_id,
- 93:                 relationship_type="EMPLOYS",
- 94:                 namespace_id=namespace_id,
- 95:             ),
- 96:         ]
- 97: 
- 98:         ctx = RuleEvaluationContext.from_data([], relationships)
+ 69:         assert len(chunks) == 1
+ 70:         assert chunks[0].content == "Short text"
+ 71: 
+ 72:     def test_empty_text(self) -> None:
+ 73:         """Test empty text handling."""
+ 74:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+ 75: 
+ 76:         chunks = chunker.chunk("")
+ 77: 
+ 78:         assert chunks == []
+ 79: 
+ 80:     def test_whitespace_only(self) -> None:
+ 81:         """Test whitespace-only text."""
+ 82:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+ 83: 
+ 84:         chunks = chunker.chunk("   \n\t  ")
+ 85: 
+ 86:         assert chunks == []
+ 87: 
+ 88:     def test_chunk_has_position_info(self) -> None:
+ 89:         """Test that chunks have position information."""
+ 90:         chunker = FixedChunker(chunk_size=50, chunk_overlap=10)
+ 91:         text = "This is a test. " * 20  # Long enough for multiple chunks
+ 92: 
+ 93:         chunks = chunker.chunk(text)
+ 94: 
+ 95:         for i, chunk in enumerate(chunks):
+ 96:             assert chunk.index == i
+ 97:             assert chunk.start_char >= 0
+ 98:             assert chunk.end_char > chunk.start_char
  99: 
-100:         assert "WORKS_FOR" in ctx.relationship_index
-101:         assert "EMPLOYS" in ctx.relationship_index
-102:         assert len(ctx.relationship_index["WORKS_FOR"]) == 1
-103: 
+100:     def test_token_count_populated(self) -> None:
+101:         """Test that token count is populated."""
+102:         chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+103:         text = "Hello world, this is a test."
 104: 
-105: class TestRuleEngine:
-106:     """Tests for RuleEngine."""
-107: 
-108:     def test_engine_without_expertise(self) -> None:
-109:         """Test engine without expertise returns empty matches."""
-110:         engine = RuleEngine()
-111:         ctx = RuleEvaluationContext()
-112: 
-113:         correlation_matches = engine.evaluate_correlation_rules("test text", ctx)
-114:         inference_matches = engine.evaluate_inference_rules(ctx)
+105:         chunks = chunker.chunk(text)
+106: 
+107:         assert len(chunks) == 1
+108:         assert chunks[0].token_count > 0
+109: 
+110:     def test_default_config(self) -> None:
+111:         """Test chunker with default config."""
+112:         chunker = FixedChunker()
+113:         assert chunker.chunk_size == 512
+114:         assert chunker.chunk_overlap == 50
 115: 
-116:         assert correlation_matches == []
-117:         assert inference_matches == []
-118: 
-119:     def test_find_pattern_matches(self) -> None:
-120:         """Test finding regex pattern matches."""
-121:         engine = RuleEngine()
-122: 
-123:         text = "Working on PROJ-123 and TEAM-456 today"
-124:         matches = engine.find_pattern_matches(r"[A-Z]+-\d+", text)
-125: 
-126:         assert len(matches) == 2
-127:         assert matches[0][0] == "PROJ-123"
-128:         assert matches[1][0] == "TEAM-456"
-129: 
-130:     def test_find_pattern_matches_with_positions(self) -> None:
-131:         """Test pattern matches include positions."""
-132:         engine = RuleEngine()
-133: 
-134:         text = "Issue ABC-1"
-135:         matches = engine.find_pattern_matches(r"[A-Z]+-\d+", text)
-136: 
-137:         assert len(matches) == 1
-138:         matched_value, start, end = matches[0]
-139:         assert matched_value == "ABC-1"
-140:         assert text[start:end] == "ABC-1"
-141: 
-142:     def test_find_pattern_matches_invalid_regex(self) -> None:
-143:         """Test invalid regex returns empty list."""
-144:         engine = RuleEngine()
-145: 
-146:         matches = engine.find_pattern_matches(r"[invalid", "test")
-147:         assert matches == []
+116: 
+117: class TestRecursiveChunker:
+118:     """Tests for RecursiveChunker."""
+119: 
+120:     def test_basic_chunking(self) -> None:
+121:         """Test basic recursive chunking."""
+122:         chunker = RecursiveChunker(chunk_size=50, chunk_overlap=10)
+123:         text = "A" * 200
+124: 
+125:         chunks = chunker.chunk(text)
+126: 
+127:         assert len(chunks) >= 1
+128:         for chunk in chunks:
+129:             assert isinstance(chunk, ChunkResult)
+130: 
+131:     def test_respects_paragraph_boundaries(self) -> None:
+132:         """Test that chunker respects paragraph boundaries."""
+133:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
+134:         text = "First paragraph with some content.\n\nSecond paragraph here.\n\nThird paragraph."
+135: 
+136:         chunks = chunker.chunk(text)
+137: 
+138:         # Should chunk at paragraph boundaries when possible
+139:         assert len(chunks) >= 1
+140: 
+141:     def test_empty_text(self) -> None:
+142:         """Test empty text handling."""
+143:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
+144: 
+145:         chunks = chunker.chunk("")
+146: 
+147:         assert chunks == []
 148: 
-149:     def test_match_entities_by_field(self) -> None:
-150:         """Test matching entities by field value."""
-151:         namespace_id = uuid4()
-152:         entities = [
-153:             Entity(
-154:                 id=uuid4(),
-155:                 name="John",
-156:                 entity_type="PERSON",
-157:                 namespace_id=namespace_id,
-158:                 attributes={"email": "john@example.com"},
-159:             ),
-160:             Entity(
-161:                 id=uuid4(),
-162:                 name="Jane",
-163:                 entity_type="PERSON",
-164:                 namespace_id=namespace_id,
-165:                 attributes={"email": "jane@example.com"},
-166:             ),
-167:             Entity(
-168:                 id=uuid4(),
-169:                 name="John Copy",
-170:                 entity_type="PERSON",
-171:                 namespace_id=namespace_id,
-172:                 attributes={"email": "john@example.com"},
-173:             ),
-174:         ]
-175: 
-176:         engine = RuleEngine()
-177:         matches = engine.match_entities_by_field(entities, "email", "john@example.com")
-178: 
-179:         assert len(matches) == 2
-180: 
-181:     def test_match_entities_case_insensitive(self) -> None:
-182:         """Test field matching is case insensitive for strings."""
-183:         namespace_id = uuid4()
-184:         entities = [
-185:             Entity(
-186:                 id=uuid4(),
-187:                 name="Test",
-188:                 entity_type="PERSON",
-189:                 namespace_id=namespace_id,
-190:                 attributes={"domain": "EXAMPLE.COM"},
-191:             ),
-192:         ]
-193: 
-194:         engine = RuleEngine()
-195:         matches = engine.match_entities_by_field(entities, "domain", "example.com")
-196: 
-197:         assert len(matches) == 1
-198: 
-199:     def test_evaluate_correlation_rules_pattern(self) -> None:
-200:         """Test evaluating correlation rules with patterns."""
-201:         expertise = ExpertiseConfig(
-202:             name="test",
-203:             correlation_rules=[
-204:                 CorrelationRule(
-205:                     name="issue_ref",
-206:                     pattern=r"[A-Z]+-\d+",
-207:                     creates_relationship="REFERENCES",
-208:                     confidence=0.9,
-209:                 ),
-210:             ],
-211:         )
-212: 
-213:         engine = RuleEngine(expertise=expertise)
-214:         ctx = RuleEvaluationContext()
-215: 
-216:         matches = engine.evaluate_correlation_rules("See PROJ-123 for details", ctx)
-217: 
-218:         assert len(matches) == 1
-219:         assert matches[0].rule_name == "issue_ref"
-220:         assert matches[0].matched_value == "PROJ-123"
-221:         assert matches[0].confidence == 0.9
+149:     def test_short_text(self) -> None:
+150:         """Test short text produces single chunk."""
+151:         chunker = RecursiveChunker(chunk_size=100, chunk_overlap=20)
+152:         text = "Short text."
+153: 
+154:         chunks = chunker.chunk(text)
+155: 
+156:         assert len(chunks) == 1
+157:         assert chunks[0].content == "Short text."
+158: 
+159:     def test_chunk_indices_sequential(self) -> None:
+160:         """Test that chunk indices are sequential."""
+161:         chunker = RecursiveChunker(chunk_size=50, chunk_overlap=10)
+162:         text = "Word " * 100  # Long text
+163: 
+164:         chunks = chunker.chunk(text)
+165: 
+166:         for i, chunk in enumerate(chunks):
+167:             assert chunk.index == i
+168: 
+169: 
+170: class TestCreateChunker:
+171:     """Tests for chunker factory function."""
+172: 
+173:     def test_create_fixed_chunker(self) -> None:
+174:         """Test creating fixed chunker by name."""
+175:         chunker = create_chunker("fixed")
+176:         assert isinstance(chunker, FixedChunker)
+177: 
+178:     def test_create_recursive_chunker(self) -> None:
+179:         """Test creating recursive chunker by name."""
+180:         chunker = create_chunker("recursive")
+181:         assert isinstance(chunker, RecursiveChunker)
+182: 
+183:     def test_create_default_chunker(self) -> None:
+184:         """Test creating default chunker (semantic)."""
+185:         chunker = create_chunker()
+186:         # Default is semantic
+187:         assert isinstance(chunker, Chunker)
+188: 
+189:     def test_create_chunker_with_config(self) -> None:
+190:         """Test creating chunker with custom config."""
+191:         chunker = create_chunker("fixed", chunk_size=256, chunk_overlap=32)
+192:         assert isinstance(chunker, FixedChunker)
+193:         assert chunker.chunk_size == 256
+194:         assert chunker.chunk_overlap == 32
+195: 
+196:     def test_unknown_chunker_type(self) -> None:
+197:         """Test unknown chunker type raises error."""
+198:         with pytest.raises(ValueError):
+199:             create_chunker("unknown_type")
+200: 
+201: 
+202: class TestChunkerBase:
+203:     """Tests for Chunker abstract base class."""
+204: 
+205:     def test_chunker_is_abstract(self) -> None:
+206:         """Test that Chunker cannot be instantiated directly."""
+207:         with pytest.raises(TypeError):
+208:             Chunker()  # type: ignore
+209: 
+210:     def test_count_tokens_fallback(self) -> None:
+211:         """Test token counting fallback."""
+212:         # Create a concrete chunker to test the method
+213:         chunker = FixedChunker(chunk_size=100, chunk_overlap=10)
+214:         count = chunker.count_tokens("Hello world")
+215:         assert count > 0
+216: 
+217:     def test_subclass_must_implement_chunk(self) -> None:
+218:         """Test that subclass must implement chunk method."""
+219: 
+220:         class IncompleteChunker(Chunker):
+221:             pass
 222: 
-223:     def test_evaluate_correlation_rules_field_matching(self) -> None:
-224:         """Test evaluating correlation rules with field matching."""
-225:         namespace_id = uuid4()
-226:         entities = [
-227:             Entity(
-228:                 id=uuid4(),
-229:                 name="Person A",
-230:                 entity_type="PERSON",
-231:                 namespace_id=namespace_id,
-232:                 attributes={"email": "shared@example.com"},
-233:             ),
-234:             Entity(
-235:                 id=uuid4(),
-236:                 name="Person B",
-237:                 entity_type="PERSON",
-238:                 namespace_id=namespace_id,
-239:                 attributes={"email": "shared@example.com"},
-240:             ),
-241:         ]
-242: 
-243:         expertise = ExpertiseConfig(
-244:             name="test",
-245:             correlation_rules=[
-246:                 CorrelationRule(
-247:                     name="email_match",
-248:                     match_fields=["email"],
-249:                     entity_types=["PERSON"],
-250:                     creates_relationship="SAME_AS",
-251:                 ),
-252:             ],
-253:         )
-254: 
-255:         engine = RuleEngine(expertise=expertise)
-256:         ctx = RuleEvaluationContext.from_data(entities, [])
-257: 
-258:         matches = engine.evaluate_correlation_rules("", ctx)
-259: 
-260:         assert len(matches) == 1
-261:         assert matches[0].rule_name == "email_match"
-262:         assert len(matches[0].matched_entities) == 2
-263: 
-264: 
-265: class TestCrossToolUnifier:
-266:     """Tests for CrossToolUnifier."""
-267: 
-268:     def test_unifier_without_expertise(self) -> None:
-269:         """Test unifier works without expertise."""
-270:         unifier = CrossToolUnifier()
-271:         namespace_id = uuid4()
-272: 
-273:         entities = [
-274:             Entity(
-275:                 id=uuid4(),
-276:                 name="Test",
-277:                 entity_type="PERSON",
-278:                 namespace_id=namespace_id,
-279:             ),
-280:         ]
-281: 
-282:         result = unifier.unify(entities, [], use_embeddings=False, use_fuzzy=False)
-283: 
-284:         assert len(result.unified_entities) == 1
-285:         assert result.entities_merged == 0
-286: 
-287:     def test_unify_by_email(self) -> None:
-288:         """Test unifying entities by email with correlation rule."""
-289:         # Expertise with email matching rule
-290:         expertise = ExpertiseConfig(
-291:             name="test",
-292:             correlation_rules=[
-293:                 CorrelationRule(
-294:                     name="email_match",
-295:                     match_fields=["email"],
-296:                     entity_types=["PERSON"],
-297:                 ),
-298:             ],
-299:         )
-300:         unifier = CrossToolUnifier(expertise=expertise)
-301:         namespace_id = uuid4()
-302: 
-303:         e1 = Entity(
-304:             id=uuid4(),
-305:             name="John Smith",
-306:             entity_type="PERSON",
-307:             namespace_id=namespace_id,
-308:             attributes={"email": "john@example.com", "source": "slack"},
-309:         )
-310:         e2 = Entity(
-311:             id=uuid4(),
-312:             name="J. Smith",
-313:             entity_type="PERSON",
-314:             namespace_id=namespace_id,
-315:             attributes={"email": "john@example.com", "source": "jira"},
-316:         )
-317:         e3 = Entity(
-318:             id=uuid4(),
-319:             name="Jane Doe",
-320:             entity_type="PERSON",
-321:             namespace_id=namespace_id,
-322:             attributes={"email": "jane@example.com"},
-323:         )
-324: 
-325:         result = unifier.unify([e1, e2, e3], [], use_embeddings=False, use_fuzzy=False)
-326: 
-327:         # e1 and e2 should be merged, e3 separate
-328:         assert len(result.unified_entities) == 2
-329:         assert result.entities_merged == 1
-330:         assert len(result.entity_mapping) == 3
-331: 
-332:     def test_unify_by_domain(self) -> None:
-333:         """Test unifying entities by domain with correlation rule."""
-334:         # Expertise with domain matching rule
-335:         expertise = ExpertiseConfig(
-336:             name="test",
-337:             correlation_rules=[
-338:                 CorrelationRule(
-339:                     name="domain_match",
-340:                     match_fields=["domain"],
-341:                     entity_types=["CUSTOMER"],
-342:                 ),
-343:             ],
-344:         )
-345:         unifier = CrossToolUnifier(expertise=expertise)
-346:         namespace_id = uuid4()
-347: 
-348:         e1 = Entity(
-349:             id=uuid4(),
-350:             name="Acme Corp",
-351:             entity_type="CUSTOMER",
-352:             namespace_id=namespace_id,
-353:             attributes={"domain": "acme.com"},
-354:         )
-355:         e2 = Entity(
-356:             id=uuid4(),
-357:             name="Acme Corporation",
-358:             entity_type="CUSTOMER",
-359:             namespace_id=namespace_id,
-360:             attributes={"domain": "acme.com"},
-361:         )
-362: 
-363:         result = unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=False)
-364: 
-365:         assert len(result.unified_entities) == 1
-366:         assert result.entities_merged == 1
-367: 
-368:     def test_unify_updates_relationships(self) -> None:
-369:         """Test that unification updates relationship entity IDs."""
-370:         # Expertise with email matching rule
-371:         expertise = ExpertiseConfig(
-372:             name="test",
-373:             correlation_rules=[
-374:                 CorrelationRule(
-375:                     name="email_match",
-376:                     match_fields=["email"],
-377:                     entity_types=["PERSON"],
-378:                 ),
-379:             ],
-380:         )
-381:         unifier = CrossToolUnifier(expertise=expertise)
-382:         namespace_id = uuid4()
-383: 
-384:         e1 = Entity(
-385:             id=uuid4(),
-386:             name="John",
-387:             entity_type="PERSON",
-388:             namespace_id=namespace_id,
-389:             attributes={"email": "john@example.com"},
-390:         )
-391:         e2 = Entity(
-392:             id=uuid4(),
-393:             name="John Smith",
-394:             entity_type="PERSON",
-395:             namespace_id=namespace_id,
-396:             attributes={"email": "john@example.com"},
-397:         )
-398:         e3 = Entity(
-399:             id=uuid4(),
-400:             name="Acme",
-401:             entity_type="ORGANIZATION",
-402:             namespace_id=namespace_id,
-403:         )
-404: 
-405:         # Relationship from e2 to e3
-406:         rel = Relationship(
-407:             id=uuid4(),
-408:             source_entity_id=e2.id,
-409:             target_entity_id=e3.id,
-410:             relationship_type="WORKS_FOR",
-411:             namespace_id=namespace_id,
-412:         )
-413: 
-414:         result = unifier.unify([e1, e2, e3], [rel], use_embeddings=False, use_fuzzy=False)
-415: 
-416:         # e1 and e2 merged, relationship should be updated
-417:         assert len(result.unified_entities) == 2
-418:         assert len(result.updated_relationships) == 1
-419: 
-420:         # Relationship source should now point to canonical entity
-421:         updated_rel = result.updated_relationships[0]
-422:         canonical_id = result.entity_mapping[e2.id]
-423:         assert updated_rel.source_entity_id == canonical_id
-424: 
-425:     def test_unify_with_fuzzy_matching(self) -> None:
-426:         """Test unifying with fuzzy string matching."""
-427:         unifier = CrossToolUnifier(fuzzy_threshold=0.8)
-428:         namespace_id = uuid4()
-429: 
-430:         e1 = Entity(
-431:             id=uuid4(),
-432:             name="John Smith",
-433:             entity_type="PERSON",
-434:             namespace_id=namespace_id,
-435:         )
-436:         e2 = Entity(
-437:             id=uuid4(),
-438:             name="Jon Smith",  # Typo
-439:             entity_type="PERSON",
-440:             namespace_id=namespace_id,
-441:         )
-442: 
-443:         result = unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=True)
-444: 
-445:         # Names are similar enough to merge
-446:         assert len(result.unified_entities) == 1
-447:         assert result.entities_merged == 1
-448: 
-449: 
-450: class TestRelationshipInferrer:
-451:     """Tests for RelationshipInferrer."""
-452: 
-453:     def test_inferrer_without_expertise(self) -> None:
-454:         """Test inferrer without expertise returns empty."""
-455:         inferrer = RelationshipInferrer()
-456:         result = inferrer.infer([], [])
-457:         assert result == []
-458: 
-459:     def test_inferrer_with_empty_rules(self) -> None:
-460:         """Test inferrer with expertise but no rules."""
-461:         expertise = ExpertiseConfig(name="test")
-462:         inferrer = RelationshipInferrer(expertise=expertise)
-463:         result = inferrer.infer([], [])
-464:         assert result == []
-465: 
-466:     def test_single_condition_inference(self) -> None:
-467:         """Test inference with single condition rule."""
-468:         namespace_id = uuid4()
-469: 
-470:         person = Entity(
-471:             id=uuid4(),
-472:             name="John",
-473:             entity_type="PERSON",
-474:             namespace_id=namespace_id,
-475:         )
-476:         project = Entity(
-477:             id=uuid4(),
-478:             name="Project Alpha",
-479:             entity_type="PROJECT",
-480:             namespace_id=namespace_id,
-481:         )
-482: 
-483:         owns_rel = Relationship(
-484:             id=uuid4(),
-485:             source_entity_id=person.id,
-486:             target_entity_id=project.id,
-487:             relationship_type="OWNS",
-488:             namespace_id=namespace_id,
-489:         )
-490: 
-491:         expertise = ExpertiseConfig(
-492:             name="test",
-493:             inference_rules=[
-494:                 InferenceRule(
-495:                     name="owner_is_stakeholder",
-496:                     when=[
-497:                         InferenceCondition(
-498:                             relationship="OWNS",
-499:                             source_type="PERSON",
-500:                             target_type="PROJECT",
-501:                         ),
-502:                     ],
-503:                     then_relationship="STAKEHOLDER_OF",
-504:                     then_source="first.source",
-505:                     then_target="first.target",
-506:                     confidence=0.8,
-507:                 ),
-508:             ],
-509:         )
-510: 
-511:         inferrer = RelationshipInferrer(expertise=expertise, min_confidence=0.5)
-512:         inferred = inferrer.infer([person, project], [owns_rel], depth=1)
-513: 
-514:         assert len(inferred) == 1
-515:         assert inferred[0].relationship_type == "STAKEHOLDER_OF"
-516:         assert inferred[0].source_entity_id == person.id
-517:         assert inferred[0].target_entity_id == project.id
-518:         assert inferred[0].confidence == 0.8
-519: 
-520:     def test_confidence_filtering(self) -> None:
-521:         """Test that low confidence inferences are filtered."""
-522:         namespace_id = uuid4()
-523: 
-524:         e1 = Entity(id=uuid4(), name="A", entity_type="TYPE", namespace_id=namespace_id)
-525:         e2 = Entity(id=uuid4(), name="B", entity_type="TYPE", namespace_id=namespace_id)
-526: 
-527:         rel = Relationship(
-528:             id=uuid4(),
-529:             source_entity_id=e1.id,
-530:             target_entity_id=e2.id,
-531:             relationship_type="REL",
-532:             namespace_id=namespace_id,
-533:         )
-534: 
-535:         expertise = ExpertiseConfig(
-536:             name="test",
-537:             inference_rules=[
-538:                 InferenceRule(
-539:                     name="low_confidence",
-540:                     when=[InferenceCondition(relationship="REL")],
-541:                     then_relationship="INFERRED",
-542:                     confidence=0.2,  # Below threshold
-543:                 ),
-544:             ],
-545:         )
-546: 
-547:         inferrer = RelationshipInferrer(expertise=expertise, min_confidence=0.5)
-548:         inferred = inferrer.infer([e1, e2], [rel])
-549: 
-550:         assert len(inferred) == 0
-551: 
-552:     def test_no_duplicate_inference(self) -> None:
-553:         """Test that existing relationships aren't re-inferred."""
-554:         namespace_id = uuid4()
-555: 
-556:         e1 = Entity(id=uuid4(), name="A", entity_type="TYPE", namespace_id=namespace_id)
-557:         e2 = Entity(id=uuid4(), name="B", entity_type="TYPE", namespace_id=namespace_id)
-558: 
-559:         # Original relationship
-560:         rel = Relationship(
-561:             id=uuid4(),
-562:             source_entity_id=e1.id,
-563:             target_entity_id=e2.id,
-564:             relationship_type="OWNS",
-565:             namespace_id=namespace_id,
-566:         )
-567: 
-568:         # Relationship that would be inferred (already exists)
-569:         existing = Relationship(
-570:             id=uuid4(),
-571:             source_entity_id=e1.id,
-572:             target_entity_id=e2.id,
-573:             relationship_type="STAKEHOLDER_OF",
-574:             namespace_id=namespace_id,
-575:         )
-576: 
-577:         expertise = ExpertiseConfig(
-578:             name="test",
-579:             inference_rules=[
-580:                 InferenceRule(
-581:                     name="test",
-582:                     when=[InferenceCondition(relationship="OWNS")],
-583:                     then_relationship="STAKEHOLDER_OF",
-584:                     confidence=0.8,
-585:                 ),
-586:             ],
-587:         )
-588: 
-589:         inferrer = RelationshipInferrer(expertise=expertise)
-590:         inferred = inferrer.infer([e1, e2], [rel, existing])
-591: 
-592:         # Should not create duplicate
-593:         assert len(inferred) == 0
-594: 
-595: 
-596: class TestSemanticExpander:
-597:     """Tests for SemanticExpander."""
-598: 
-599:     @pytest.mark.asyncio
-600:     async def test_expander_no_entities(self) -> None:
-601:         """Test expander with no entities."""
-602:         expander = SemanticExpander()
-603:         result = await expander.expand([], [])
-604: 
-605:         assert result.total_entities == 0
-606:         assert result.total_relationships == 0
-607:         assert result.original_entity_count == 0
-608: 
-609:     @pytest.mark.asyncio
-610:     async def test_expander_passthrough(self) -> None:
-611:         """Test expander passes through entities when disabled."""
-612:         namespace_id = uuid4()
-613:         entities = [
-614:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
-615:         ]
-616: 
-617:         expander = SemanticExpander(
-618:             enable_unification=False,
-619:             enable_inference=False,
-620:         )
-621:         result = await expander.expand(entities, [])
-622: 
-623:         assert result.total_entities == 1
-624:         assert result.original_entity_count == 1
-625:         assert result.merged_entity_count == 0
-626: 
-627:     @pytest.mark.asyncio
-628:     async def test_expander_with_unification(self) -> None:
-629:         """Test expander performs unification with expertise."""
-630:         namespace_id = uuid4()
-631: 
-632:         e1 = Entity(
-633:             id=uuid4(),
-634:             name="John",
-635:             entity_type="PERSON",
-636:             namespace_id=namespace_id,
-637:             attributes={"email": "john@test.com"},
-638:         )
-639:         e2 = Entity(
-640:             id=uuid4(),
-641:             name="John Smith",
-642:             entity_type="PERSON",
-643:             namespace_id=namespace_id,
-644:             attributes={"email": "john@test.com"},
-645:         )
-646: 
-647:         # Need expertise with correlation rules for email matching
-648:         expertise = ExpertiseConfig(
-649:             name="test",
-650:             correlation_rules=[
-651:                 CorrelationRule(name="email_match", match_fields=["email"], entity_types=["PERSON"]),
-652:             ],
-653:         )
-654: 
-655:         expander = SemanticExpander(
-656:             expertise=expertise,
-657:             enable_unification=True,
-658:             enable_inference=False,
-659:         )
-660:         result = await expander.expand([e1, e2], [])
-661: 
-662:         assert result.original_entity_count == 2
-663:         assert result.total_entities == 1
-664:         assert result.merged_entity_count == 1
-665: 
-666:     @pytest.mark.asyncio
-667:     async def test_expander_with_expertise(self) -> None:
-668:         """Test expander uses expertise configuration."""
-669:         from khora.extraction.skills import ExpansionConfig
-670: 
-671:         expertise = ExpertiseConfig(
-672:             name="test",
-673:             expansion=ExpansionConfig(
-674:                 enabled=True,
-675:                 cross_tool_unification=True,
-676:                 relationship_inference=False,
-677:                 depth=1,
-678:             ),
-679:         )
-680: 
-681:         namespace_id = uuid4()
-682:         entities = [
-683:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
-684:         ]
-685: 
-686:         expander = SemanticExpander(expertise=expertise)
-687:         result = await expander.expand(entities, [])
-688: 
-689:         assert result.total_entities == 1
-690: 
-691:     @pytest.mark.asyncio
-692:     async def test_expander_sync_alternative(self) -> None:
-693:         """Test expand method directly instead of deprecated sync version."""
-694:         namespace_id = uuid4()
-695:         entities = [
-696:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
-697:         ]
-698: 
-699:         expander = SemanticExpander(
-700:             enable_unification=False,
-701:             enable_inference=False,
-702:         )
-703:         result = await expander.expand(entities, [])
-704: 
-705:         assert result.total_entities == 1
-706: 
-707:     def test_from_expertise(self) -> None:
-708:         """Test creating expander from expertise config."""
-709:         from khora.extraction.skills import ExpansionConfig
-710: 
-711:         expertise = ExpertiseConfig(
-712:             name="test",
-713:             expansion=ExpansionConfig(
-714:                 enabled=True,
-715:                 depth=3,
-716:                 cross_tool_unification=True,
-717:                 relationship_inference=True,
-718:             ),
-719:         )
-720: 
-721:         expander = SemanticExpander.from_expertise(expertise)
-722: 
-723:         assert expander._enable_unification is True
-724:         assert expander._enable_inference is True
-725:         assert expander._inference_depth == 3
-726: 
-727:     def test_from_expertise_name(self) -> None:
-728:         """Test creating expander from expertise name."""
-729:         expander = SemanticExpander.from_expertise_name("general")
-730:         assert expander._expertise is not None
-731:         assert expander._expertise.name == "general"
-732: 
-733:     @pytest.mark.asyncio
-734:     async def test_expansion_result_properties(self) -> None:
-735:         """Test ExpansionResult computed properties."""
-736:         namespace_id = uuid4()
-737: 
-738:         e1 = Entity(id=uuid4(), name="A", entity_type="PERSON", namespace_id=namespace_id)
-739:         e2 = Entity(id=uuid4(), name="B", entity_type="PERSON", namespace_id=namespace_id)
-740: 
-741:         rel = Relationship(
-742:             id=uuid4(),
-743:             source_entity_id=e1.id,
-744:             target_entity_id=e2.id,
-745:             relationship_type="KNOWS",
-746:             namespace_id=namespace_id,
-747:         )
-748: 
-749:         expander = SemanticExpander(
-750:             enable_unification=False,
-751:             enable_inference=False,
-752:         )
-753:         result = await expander.expand([e1, e2], [rel])
-754: 
-755:         assert result.total_entities == 2
-756:         assert result.total_relationships == 1
-757:         assert len(result.all_relationships) == 1
+223:         with pytest.raises(TypeError):
+224:             IncompleteChunker()  # type: ignore
 ````
 
-## File: tests/unit/test_expertise.py
+## File: tests/unit/test_models.py
 ````python
-  1: """Unit tests for expertise configuration system."""
+  1: """Unit tests for core domain models."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from datetime import datetime, timezone
+  6: from uuid import uuid4
+  7: 
+  8: from khora.core.models import Chunk, Document, Entity, Relationship
+  9: from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
+ 10: from khora.core.models.entity import EntityType, Episode, RelationshipType
+ 11: from khora.core.models.event import EventType, MemoryEvent
+ 12: from khora.core.models.tenancy import MemoryNamespace, Organization, TenancyMode, Workspace
+ 13: 
+ 14: 
+ 15: class TestDocument:
+ 16:     """Tests for Document model."""
+ 17: 
+ 18:     def test_create_document(self) -> None:
+ 19:         """Test basic document creation."""
+ 20:         doc = Document(content="This is test content.")
+ 21:         assert doc.content == "This is test content."
+ 22:         assert doc.status == DocumentStatus.PENDING
+ 23:         assert doc.id is not None
+ 24: 
+ 25:     def test_document_with_metadata(self) -> None:
+ 26:         """Test document with metadata."""
+ 27:         metadata = DocumentMetadata(source="test", author="user", title="Test Doc")
+ 28:         doc = Document(content="Content", metadata=metadata)
+ 29:         assert doc.metadata.source == "test"
+ 30:         assert doc.metadata.author == "user"
+ 31:         assert doc.metadata.title == "Test Doc"
+ 32: 
+ 33:     def test_document_timestamps(self) -> None:
+ 34:         """Test document timestamp handling."""
+ 35:         now = datetime.now(timezone.utc)
+ 36:         doc = Document(content="Content", created_at=now, updated_at=now)
+ 37:         assert doc.created_at == now
+ 38:         assert doc.updated_at == now
+ 39: 
+ 40:     def test_document_mark_processing(self) -> None:
+ 41:         """Test marking document as processing."""
+ 42:         doc = Document(content="Content")
+ 43:         doc.mark_processing()
+ 44:         assert doc.status == DocumentStatus.PROCESSING
+ 45: 
+ 46:     def test_document_mark_completed(self) -> None:
+ 47:         """Test marking document as completed."""
+ 48:         doc = Document(content="Content")
+ 49:         doc.mark_completed(chunk_count=5, entity_count=3)
+ 50:         assert doc.status == DocumentStatus.COMPLETED
+ 51:         assert doc.chunk_count == 5
+ 52:         assert doc.entity_count == 3
+ 53:         assert doc.is_processed
+ 54: 
+ 55:     def test_document_mark_failed(self) -> None:
+ 56:         """Test marking document as failed."""
+ 57:         doc = Document(content="Content")
+ 58:         doc.mark_failed("Processing error")
+ 59:         assert doc.status == DocumentStatus.FAILED
+ 60:         assert doc.error_message == "Processing error"
+ 61: 
+ 62: 
+ 63: class TestChunk:
+ 64:     """Tests for Chunk model."""
+ 65: 
+ 66:     def test_create_chunk(self) -> None:
+ 67:         """Test basic chunk creation."""
+ 68:         chunk = Chunk(content="Chunk content")
+ 69:         assert chunk.content == "Chunk content"
+ 70:         assert chunk.id is not None
+ 71: 
+ 72:     def test_chunk_with_embedding(self) -> None:
+ 73:         """Test chunk with embedding vector."""
+ 74:         embedding = [0.1, 0.2, 0.3, 0.4, 0.5]
+ 75:         chunk = Chunk(
+ 76:             content="Content",
+ 77:             embedding=embedding,
+ 78:             embedding_model="text-embedding-3-small",
+ 79:         )
+ 80:         assert chunk.embedding == embedding
+ 81:         assert chunk.embedding_model == "text-embedding-3-small"
+ 82:         assert chunk.has_embedding
+ 83: 
+ 84:     def test_chunk_without_embedding(self) -> None:
+ 85:         """Test chunk without embedding."""
+ 86:         chunk = Chunk(content="Content")
+ 87:         assert not chunk.has_embedding
+ 88: 
+ 89:     def test_chunk_with_metadata(self) -> None:
+ 90:         """Test chunk with metadata."""
+ 91:         doc_id = uuid4()
+ 92:         metadata = ChunkMetadata(
+ 93:             document_id=doc_id,
+ 94:             chunk_index=1,
+ 95:             start_char=100,
+ 96:             end_char=200,
+ 97:             token_count=25,
+ 98:         )
+ 99:         chunk = Chunk(content="Content", metadata=metadata)
+100:         assert chunk.metadata.document_id == doc_id
+101:         assert chunk.metadata.chunk_index == 1
+102:         assert chunk.metadata.start_char == 100
+103:         assert chunk.metadata.end_char == 200
+104:         assert chunk.metadata.token_count == 25
+105: 
+106: 
+107: class TestEntity:
+108:     """Tests for Entity model."""
+109: 
+110:     def test_create_entity(self) -> None:
+111:         """Test basic entity creation."""
+112:         entity = Entity(name="John Smith", entity_type=EntityType.PERSON)
+113:         assert entity.name == "John Smith"
+114:         assert entity.entity_type == EntityType.PERSON
+115: 
+116:     def test_entity_with_attributes(self) -> None:
+117:         """Test entity with attributes."""
+118:         entity = Entity(
+119:             name="Acme Corp",
+120:             entity_type=EntityType.ORGANIZATION,
+121:             attributes={"industry": "Technology", "employees": 500},
+122:         )
+123:         assert entity.attributes["industry"] == "Technology"
+124:         assert entity.attributes["employees"] == 500
+125: 
+126:     def test_entity_with_description(self) -> None:
+127:         """Test entity with description."""
+128:         entity = Entity(
+129:             name="Python",
+130:             entity_type=EntityType.TECHNOLOGY,
+131:             description="A programming language",
+132:         )
+133:         assert entity.description == "A programming language"
+134: 
+135:     def test_entity_confidence(self) -> None:
+136:         """Test entity confidence score."""
+137:         entity = Entity(
+138:             name="Test",
+139:             entity_type=EntityType.CONCEPT,
+140:             confidence=0.85,
+141:         )
+142:         assert entity.confidence == 0.85
+143: 
+144:     def test_entity_source_tracking(self) -> None:
+145:         """Test entity source document/chunk tracking."""
+146:         doc_id = uuid4()
+147:         chunk_id = uuid4()
+148:         entity = Entity(
+149:             name="Test",
+150:             entity_type=EntityType.CONCEPT,
+151:             source_document_ids=[doc_id],
+152:             source_chunk_ids=[chunk_id],
+153:         )
+154:         assert doc_id in entity.source_document_ids
+155:         assert chunk_id in entity.source_chunk_ids
+156: 
+157:     def test_entity_mention_count(self) -> None:
+158:         """Test entity mention counting."""
+159:         entity = Entity(
+160:             name="Test",
+161:             entity_type=EntityType.CONCEPT,
+162:             mention_count=5,
+163:         )
+164:         assert entity.mention_count == 5
+165: 
+166:     def test_entity_temporal_validity(self) -> None:
+167:         """Test entity temporal validity range."""
+168:         now = datetime.now(timezone.utc)
+169:         entity = Entity(
+170:             name="Test",
+171:             entity_type=EntityType.EVENT,
+172:             valid_from=now,
+173:             valid_until=now,
+174:         )
+175:         assert entity.valid_from == now
+176:         assert entity.valid_until == now
+177: 
+178:     def test_entity_merge(self) -> None:
+179:         """Test merging two entities."""
+180:         doc_id1 = uuid4()
+181:         doc_id2 = uuid4()
+182:         entity1 = Entity(
+183:             name="Test",
+184:             entity_type=EntityType.PERSON,
+185:             source_document_ids=[doc_id1],
+186:             mention_count=2,
+187:             confidence=0.8,
+188:         )
+189:         entity2 = Entity(
+190:             name="Test",
+191:             entity_type=EntityType.PERSON,
+192:             source_document_ids=[doc_id2],
+193:             mention_count=3,
+194:             confidence=0.9,
+195:             description="A person",
+196:         )
+197:         entity1.merge_with(entity2)
+198:         assert doc_id1 in entity1.source_document_ids
+199:         assert doc_id2 in entity1.source_document_ids
+200:         assert entity1.mention_count == 5
+201:         assert entity1.confidence == 0.9
+202:         assert entity1.description == "A person"
+203: 
+204: 
+205: class TestRelationship:
+206:     """Tests for Relationship model."""
+207: 
+208:     def test_create_relationship(self) -> None:
+209:         """Test basic relationship creation."""
+210:         source_id = uuid4()
+211:         target_id = uuid4()
+212:         rel = Relationship(
+213:             source_entity_id=source_id,
+214:             target_entity_id=target_id,
+215:             relationship_type=RelationshipType.WORKS_FOR,
+216:         )
+217:         assert rel.source_entity_id == source_id
+218:         assert rel.target_entity_id == target_id
+219:         assert rel.relationship_type == RelationshipType.WORKS_FOR
+220: 
+221:     def test_relationship_with_properties(self) -> None:
+222:         """Test relationship with properties."""
+223:         rel = Relationship(
+224:             source_entity_id=uuid4(),
+225:             target_entity_id=uuid4(),
+226:             relationship_type=RelationshipType.WORKS_FOR,
+227:             properties={"since": "2020", "role": "Engineer"},
+228:         )
+229:         assert rel.properties["since"] == "2020"
+230:         assert rel.properties["role"] == "Engineer"
+231: 
+232:     def test_relationship_confidence(self) -> None:
+233:         """Test relationship confidence score."""
+234:         rel = Relationship(
+235:             source_entity_id=uuid4(),
+236:             target_entity_id=uuid4(),
+237:             relationship_type=RelationshipType.KNOWS,
+238:             confidence=0.75,
+239:         )
+240:         assert rel.confidence == 0.75
+241: 
+242:     def test_relationship_description(self) -> None:
+243:         """Test relationship with description."""
+244:         rel = Relationship(
+245:             source_entity_id=uuid4(),
+246:             target_entity_id=uuid4(),
+247:             relationship_type=RelationshipType.COLLABORATES_WITH,
+248:             description="Worked together on Project X",
+249:         )
+250:         assert rel.description == "Worked together on Project X"
+251: 
+252:     def test_relationship_weight(self) -> None:
+253:         """Test relationship weight."""
+254:         rel = Relationship(
+255:             source_entity_id=uuid4(),
+256:             target_entity_id=uuid4(),
+257:             relationship_type=RelationshipType.RELATES_TO,
+258:             weight=0.5,
+259:         )
+260:         assert rel.weight == 0.5
+261: 
+262: 
+263: class TestEpisode:
+264:     """Tests for Episode model."""
+265: 
+266:     def test_create_episode(self) -> None:
+267:         """Test basic episode creation."""
+268:         episode = Episode(name="Meeting with client")
+269:         assert episode.name == "Meeting with client"
+270:         assert episode.id is not None
+271: 
+272:     def test_episode_with_entities(self) -> None:
+273:         """Test episode with associated entities."""
+274:         entity_ids = [uuid4(), uuid4()]
+275:         episode = Episode(name="Team standup", entity_ids=entity_ids)
+276:         assert len(episode.entity_ids) == 2
+277: 
+278:     def test_episode_temporal(self) -> None:
+279:         """Test episode with temporal information."""
+280:         now = datetime.now(timezone.utc)
+281:         episode = Episode(name="Conference", occurred_at=now)
+282:         assert episode.occurred_at == now
+283: 
+284:     def test_episode_duration(self) -> None:
+285:         """Test episode duration and end_time property."""
+286:         episode = Episode(name="Meeting", duration_seconds=3600)
+287:         assert episode.duration_seconds == 3600
+288:         assert episode.end_time is not None
+289: 
+290:     def test_episode_no_duration(self) -> None:
+291:         """Test episode without duration has no end_time."""
+292:         episode = Episode(name="Event")
+293:         assert episode.end_time is None
+294: 
+295: 
+296: class TestMemoryEvent:
+297:     """Tests for MemoryEvent model."""
+298: 
+299:     def test_create_event(self) -> None:
+300:         """Test basic event creation."""
+301:         event = MemoryEvent(
+302:             event_type=EventType.DOCUMENT_CREATED,
+303:             resource_id=uuid4(),
+304:             data={"title": "New doc"},
+305:         )
+306:         assert event.event_type == EventType.DOCUMENT_CREATED
+307:         assert event.data["title"] == "New doc"
+308:         assert event.resource_type == "document"
+309: 
+310:     def test_event_types(self) -> None:
+311:         """Test different event types."""
+312:         ns_id = uuid4()
+313:         resource_id = uuid4()
+314: 
+315:         created = MemoryEvent(
+316:             namespace_id=ns_id,
+317:             event_type=EventType.DOCUMENT_CREATED,
+318:             resource_id=resource_id,
+319:         )
+320:         assert created.event_type == EventType.DOCUMENT_CREATED
+321: 
+322:         updated = MemoryEvent(
+323:             namespace_id=ns_id,
+324:             event_type=EventType.DOCUMENT_UPDATED,
+325:             resource_id=resource_id,
+326:         )
+327:         assert updated.event_type == EventType.DOCUMENT_UPDATED
+328: 
+329:         deleted = MemoryEvent(
+330:             namespace_id=ns_id,
+331:             event_type=EventType.DOCUMENT_DELETED,
+332:             resource_id=resource_id,
+333:         )
+334:         assert deleted.event_type == EventType.DOCUMENT_DELETED
+335: 
+336:     def test_event_timestamp(self) -> None:
+337:         """Test event timestamp."""
+338:         event = MemoryEvent(event_type=EventType.ENTITY_CREATED)
+339:         assert event.timestamp is not None
+340: 
+341:     def test_event_factory_methods(self) -> None:
+342:         """Test event factory methods."""
+343:         ns_id = uuid4()
+344:         doc_id = uuid4()
+345: 
+346:         event = MemoryEvent.document_created(
+347:             namespace_id=ns_id,
+348:             document_id=doc_id,
+349:             data={"content": "test"},
+350:         )
+351:         assert event.event_type == EventType.DOCUMENT_CREATED
+352:         assert event.resource_id == doc_id
+353:         assert event.resource_type == "document"
+354: 
+355:     def test_event_entity_created_factory(self) -> None:
+356:         """Test entity_created factory method."""
+357:         ns_id = uuid4()
+358:         entity_id = uuid4()
+359: 
+360:         event = MemoryEvent.entity_created(
+361:             namespace_id=ns_id,
+362:             entity_id=entity_id,
+363:             data={"name": "Test"},
+364:         )
+365:         assert event.event_type == EventType.ENTITY_CREATED
+366:         assert event.resource_id == entity_id
+367: 
+368:     def test_event_resource_type_auto_extraction(self) -> None:
+369:         """Test that resource_type is auto-extracted from event_type."""
+370:         event = MemoryEvent(event_type=EventType.CHUNK_EMBEDDED)
+371:         assert event.resource_type == "chunk"
+372: 
+373:         event2 = MemoryEvent(event_type=EventType.RELATIONSHIP_CREATED)
+374:         assert event2.resource_type == "relationship"
+375: 
+376: 
+377: class TestTenancyModels:
+378:     """Tests for tenancy models (Organization, Workspace, MemoryNamespace)."""
+379: 
+380:     def test_create_organization(self) -> None:
+381:         """Test organization creation."""
+382:         org = Organization(name="Acme Inc", slug="acme")
+383:         assert org.name == "Acme Inc"
+384:         assert org.slug == "acme"
+385: 
+386:     def test_organization_auto_slug(self) -> None:
+387:         """Test organization auto-generates slug from name."""
+388:         org = Organization(name="Test Organization")
+389:         assert org.slug == "test-organization"
+390: 
+391:     def test_organization_tenancy_mode(self) -> None:
+392:         """Test organization tenancy mode."""
+393:         org = Organization(name="Test", tenancy_mode=TenancyMode.ISOLATED)
+394:         assert org.tenancy_mode == TenancyMode.ISOLATED
+395: 
+396:     def test_organization_with_metadata(self) -> None:
+397:         """Test organization with metadata."""
+398:         org = Organization(
+399:             name="Test Org",
+400:             slug="test",
+401:             metadata={"feature_x": True},
+402:         )
+403:         assert org.metadata["feature_x"] is True
+404: 
+405:     def test_create_workspace(self) -> None:
+406:         """Test workspace creation."""
+407:         org_id = uuid4()
+408:         ws = Workspace(organization_id=org_id, name="Engineering", slug="engineering")
+409:         assert ws.name == "Engineering"
+410:         assert ws.organization_id == org_id
+411: 
+412:     def test_workspace_auto_slug(self) -> None:
+413:         """Test workspace auto-generates slug from name."""
+414:         ws = Workspace(organization_id=uuid4(), name="My Workspace")
+415:         assert ws.slug == "my-workspace"
+416: 
+417:     def test_workspace_with_description(self) -> None:
+418:         """Test workspace with description."""
+419:         ws = Workspace(
+420:             organization_id=uuid4(),
+421:             name="Sales",
+422:             slug="sales",
+423:             description="Sales team workspace",
+424:         )
+425:         assert ws.description == "Sales team workspace"
+426: 
+427:     def test_create_namespace(self) -> None:
+428:         """Test namespace creation."""
+429:         ws_id = uuid4()
+430:         ns = MemoryNamespace(workspace_id=ws_id, name="Project Alpha", slug="project-alpha")
+431:         assert ns.name == "Project Alpha"
+432:         assert ns.workspace_id == ws_id
+433: 
+434:     def test_namespace_auto_slug(self) -> None:
+435:         """Test namespace auto-generates slug from name."""
+436:         ns = MemoryNamespace(workspace_id=uuid4(), name="My Project")
+437:         assert ns.slug == "my-project"
+438: 
+439:     def test_namespace_with_config(self) -> None:
+440:         """Test namespace with configuration overrides."""
+441:         ns = MemoryNamespace(
+442:             workspace_id=uuid4(),
+443:             name="Test",
+444:             slug="test",
+445:             config_overrides={"extraction_skill": "technical_docs"},
+446:         )
+447:         assert ns.config_overrides["extraction_skill"] == "technical_docs"
+448: 
+449:     def test_namespace_full_path(self) -> None:
+450:         """Test namespace full path property."""
+451:         ws_id = uuid4()
+452:         ns = MemoryNamespace(workspace_id=ws_id, name="Test", slug="test-ns")
+453:         assert ns.full_path == f"{ws_id}/test-ns"
+454: 
+455:     def test_namespace_sync_checkpoints(self) -> None:
+456:         """Test namespace sync checkpoints."""
+457:         ns = MemoryNamespace(
+458:             workspace_id=uuid4(),
+459:             name="Test",
+460:             sync_checkpoints={"source1": "checkpoint123"},
+461:         )
+462:         assert ns.sync_checkpoints["source1"] == "checkpoint123"
+````
+
+## File: tests/unit/test_skills_registry.py
+````python
+  1: """Unit tests for skill registry and composer."""
   2: 
   3: from __future__ import annotations
   4: 
   5: import pytest
   6: 
   7: from khora.extraction.skills import (
-  8:     ConfidenceConfig,
-  9:     CorrelationRule,
- 10:     EntityTypeConfig,
- 11:     ExpansionConfig,
- 12:     ExpertiseConfig,
- 13:     ExpertiseLoader,
- 14:     InferenceCondition,
- 15:     InferenceRule,
- 16:     RelationshipTypeConfig,
- 17:     get_default_loader,
- 18: )
- 19: 
- 20: 
- 21: class TestEntityTypeConfig:
- 22:     """Tests for EntityTypeConfig dataclass."""
- 23: 
- 24:     def test_basic_creation(self) -> None:
- 25:         """Test basic EntityTypeConfig creation."""
- 26:         entity_type = EntityTypeConfig(
- 27:             name="PERSON",
- 28:             description="A human individual",
- 29:         )
- 30:         assert entity_type.name == "PERSON"
- 31:         assert entity_type.description == "A human individual"
- 32:         assert entity_type.attributes == {}
- 33:         assert entity_type.identifiers == []
- 34:         assert entity_type.aliases == []
- 35: 
- 36:     def test_with_attributes(self) -> None:
- 37:         """Test EntityTypeConfig with attributes."""
- 38:         entity_type = EntityTypeConfig(
- 39:             name="TICKET",
- 40:             description="Issue tracker ticket",
- 41:             attributes={"required": ["key", "status"], "optional": ["assignee"]},
- 42:             identifiers=["key"],
- 43:             aliases=["issue", "bug", "story"],
- 44:         )
- 45:         assert entity_type.attributes["required"] == ["key", "status"]
- 46:         assert entity_type.identifiers == ["key"]
- 47:         assert "issue" in entity_type.aliases
- 48: 
- 49:     def test_to_dict(self) -> None:
- 50:         """Test EntityTypeConfig serialization."""
- 51:         entity_type = EntityTypeConfig(
- 52:             name="CUSTOMER",
- 53:             description="Customer account",
- 54:             identifiers=["domain"],
- 55:         )
- 56:         data = entity_type.to_dict()
- 57:         assert data["name"] == "CUSTOMER"
- 58:         assert data["description"] == "Customer account"
- 59:         assert data["identifiers"] == ["domain"]
+  8:     EntityTypeConfig,
+  9:     ExpertiseConfig,
+ 10:     ExtractionSkill,
+ 11:     RelationshipTypeConfig,
+ 12:     SkillRegistry,
+ 13:     get_default_registry,
+ 14: )
+ 15: from khora.extraction.skills.composer import ExpertiseComposer
+ 16: from khora.extraction.skills.loader import ExpertiseLoader
+ 17: 
+ 18: 
+ 19: class TestSkillRegistry:
+ 20:     """Tests for SkillRegistry."""
+ 21: 
+ 22:     def test_create_registry(self) -> None:
+ 23:         """Test creating a new registry."""
+ 24:         registry = SkillRegistry()
+ 25:         # Should have built-in skills
+ 26:         skills = registry.list_skills()
+ 27:         assert "general_entities" in skills
+ 28: 
+ 29:     def test_register_skill(self) -> None:
+ 30:         """Test registering a custom skill."""
+ 31:         registry = SkillRegistry()
+ 32:         skill = ExtractionSkill(
+ 33:             name="custom_skill",
+ 34:             description="A custom skill",
+ 35:             entity_types=["CUSTOM_TYPE"],
+ 36:             relationship_types=["CUSTOM_REL"],
+ 37:         )
+ 38:         registry.register(skill)
+ 39: 
+ 40:         assert "custom_skill" in registry.list_skills()
+ 41:         retrieved = registry.get("custom_skill")
+ 42:         assert retrieved is not None
+ 43:         assert retrieved.name == "custom_skill"
+ 44: 
+ 45:     def test_register_expertise_config(self) -> None:
+ 46:         """Test registering an ExpertiseConfig."""
+ 47:         registry = SkillRegistry()
+ 48:         expertise = ExpertiseConfig(
+ 49:             name="test_expertise",
+ 50:             description="Test expertise",
+ 51:             entity_types=[
+ 52:                 EntityTypeConfig(name="TEST", description="Test entity"),
+ 53:             ],
+ 54:         )
+ 55:         registry.register(expertise)
+ 56: 
+ 57:         # Should be available as both expertise and skill
+ 58:         assert "test_expertise" in registry.list_expertise()
+ 59:         assert "test_expertise" in registry.list_skills()
  60: 
- 61:     def test_from_dict(self) -> None:
- 62:         """Test EntityTypeConfig deserialization."""
- 63:         data = {
- 64:             "name": "PROJECT",
- 65:             "description": "A project",
- 66:             "attributes": {"required": ["name"]},
- 67:         }
- 68:         entity_type = EntityTypeConfig.from_dict(data)
- 69:         assert entity_type.name == "PROJECT"
- 70:         assert entity_type.attributes["required"] == ["name"]
- 71: 
+ 61:     def test_get_nonexistent_skill(self) -> None:
+ 62:         """Test getting a skill that doesn't exist."""
+ 63:         registry = SkillRegistry()
+ 64:         result = registry.get("nonexistent")
+ 65:         assert result is None
+ 66: 
+ 67:     def test_get_or_default(self) -> None:
+ 68:         """Test get_or_default falls back to general_entities."""
+ 69:         registry = SkillRegistry()
+ 70:         result = registry.get_or_default("nonexistent")
+ 71:         assert result.name == "general_entities"
  72: 
- 73: class TestRelationshipTypeConfig:
- 74:     """Tests for RelationshipTypeConfig dataclass."""
- 75: 
- 76:     def test_basic_creation(self) -> None:
- 77:         """Test basic RelationshipTypeConfig creation."""
- 78:         rel_type = RelationshipTypeConfig(
- 79:             name="WORKS_FOR",
- 80:             description="Employment relationship",
- 81:         )
- 82:         assert rel_type.name == "WORKS_FOR"
- 83:         assert rel_type.source_types == []
- 84:         assert rel_type.target_types == []
- 85: 
- 86:     def test_with_constraints(self) -> None:
- 87:         """Test RelationshipTypeConfig with type constraints."""
- 88:         rel_type = RelationshipTypeConfig(
- 89:             name="ASSIGNED_TO",
- 90:             description="Task assignment",
- 91:             source_types=["TICKET", "TASK"],
- 92:             target_types=["PERSON", "TEAM"],
- 93:         )
- 94:         assert "TICKET" in rel_type.source_types
- 95:         assert "PERSON" in rel_type.target_types
- 96: 
- 97:     def test_serialization(self) -> None:
- 98:         """Test RelationshipTypeConfig round-trip serialization."""
- 99:         original = RelationshipTypeConfig(
-100:             name="OWNS",
-101:             description="Ownership",
-102:             source_types=["PERSON"],
-103:             target_types=["PROJECT"],
-104:         )
-105:         data = original.to_dict()
-106:         restored = RelationshipTypeConfig.from_dict(data)
-107:         assert restored.name == original.name
-108:         assert restored.source_types == original.source_types
-109: 
-110: 
-111: class TestCorrelationRule:
-112:     """Tests for CorrelationRule dataclass."""
+ 73:     def test_unregister_skill(self) -> None:
+ 74:         """Test unregistering a skill."""
+ 75:         registry = SkillRegistry()
+ 76:         skill = ExtractionSkill(name="to_remove", description="Will be removed")
+ 77:         registry.register(skill)
+ 78: 
+ 79:         assert "to_remove" in registry.list_skills()
+ 80: 
+ 81:         removed = registry.unregister("to_remove")
+ 82:         assert removed is True
+ 83:         assert "to_remove" not in registry.list_skills()
+ 84: 
+ 85:     def test_unregister_nonexistent(self) -> None:
+ 86:         """Test unregistering nonexistent skill returns False."""
+ 87:         registry = SkillRegistry()
+ 88:         removed = registry.unregister("nonexistent")
+ 89:         assert removed is False
+ 90: 
+ 91:     def test_all_skills(self) -> None:
+ 92:         """Test getting all skills."""
+ 93:         registry = SkillRegistry()
+ 94:         skills = registry.all_skills()
+ 95:         assert len(skills) >= 4  # Built-in skills
+ 96:         assert all(isinstance(s, ExtractionSkill) for s in skills)
+ 97: 
+ 98:     def test_get_expertise(self) -> None:
+ 99:         """Test getting expertise by name."""
+100:         registry = SkillRegistry()
+101:         expertise = ExpertiseConfig(name="test_exp", description="Test")
+102:         registry.register(expertise)
+103: 
+104:         retrieved = registry.get_expertise("test_exp")
+105:         assert retrieved is not None
+106:         assert retrieved.name == "test_exp"
+107: 
+108:     def test_get_expertise_nonexistent(self) -> None:
+109:         """Test getting nonexistent expertise."""
+110:         registry = SkillRegistry()
+111:         result = registry.get_expertise("nonexistent")
+112:         assert result is None
 113: 
-114:     def test_pattern_rule(self) -> None:
-115:         """Test correlation rule with regex pattern."""
-116:         rule = CorrelationRule(
-117:             name="issue_reference",
-118:             description="Match issue keys",
-119:             pattern=r"[A-Z]+-\d+",
-120:             creates_relationship="REFERENCES",
-121:         )
-122:         assert rule.pattern == r"[A-Z]+-\d+"
-123:         assert rule.creates_relationship == "REFERENCES"
-124:         assert rule.confidence == 0.9  # default
-125: 
-126:     def test_field_matching_rule(self) -> None:
-127:         """Test correlation rule with field matching."""
-128:         rule = CorrelationRule(
-129:             name="email_match",
-130:             description="Match by email",
-131:             match_fields=["email"],
-132:             entity_types=["PERSON", "CONTACT"],
-133:             confidence=0.95,
-134:         )
-135:         assert rule.match_fields == ["email"]
-136:         assert rule.entity_types == ["PERSON", "CONTACT"]
-137:         assert rule.confidence == 0.95
-138: 
-139:     def test_serialization(self) -> None:
-140:         """Test CorrelationRule round-trip serialization."""
-141:         original = CorrelationRule(
-142:             name="test",
-143:             pattern=r"\d+",
-144:             confidence=0.7,
-145:         )
-146:         data = original.to_dict()
-147:         restored = CorrelationRule.from_dict(data)
-148:         assert restored.name == original.name
-149:         assert restored.pattern == original.pattern
-150:         assert restored.confidence == original.confidence
+114:     def test_get_expertise_or_default(self) -> None:
+115:         """Test get_expertise_or_default falls back to general."""
+116:         registry = SkillRegistry()
+117:         result = registry.get_expertise_or_default("nonexistent")
+118:         # Should return some default expertise
+119:         assert result is not None
+120:         assert result.name in ["general", "nonexistent"]
+121: 
+122:     def test_all_expertise(self) -> None:
+123:         """Test getting all expertise configs."""
+124:         registry = SkillRegistry()
+125:         expertise = ExpertiseConfig(name="exp1", description="First")
+126:         registry.register(expertise)
+127: 
+128:         all_exp = registry.all_expertise()
+129:         assert len(all_exp) >= 1
+130:         assert all(isinstance(e, ExpertiseConfig) for e in all_exp)
+131: 
+132:     def test_register_from_config(self) -> None:
+133:         """Test registering skills from config dictionaries."""
+134:         registry = SkillRegistry()
+135:         config = [
+136:             {
+137:                 "name": "from_config",
+138:                 "description": "Loaded from config",
+139:                 "entity_types": ["TYPE_A"],
+140:                 "relationship_types": ["REL_A"],
+141:             },
+142:         ]
+143:         registry.register_from_config(config)
+144: 
+145:         assert "from_config" in registry.list_skills()
+146: 
+147:     def test_to_dict(self) -> None:
+148:         """Test exporting registry to dictionary."""
+149:         registry = SkillRegistry()
+150:         data = registry.to_dict()
 151: 
-152: 
-153: class TestInferenceRule:
-154:     """Tests for InferenceRule dataclass."""
+152:         assert "general_entities" in data
+153:         assert isinstance(data["general_entities"], dict)
+154: 
 155: 
-156:     def test_basic_rule(self) -> None:
-157:         """Test basic inference rule creation."""
-158:         rule = InferenceRule(
-159:             name="project_stakeholder",
-160:             description="Infer stakeholder relationship",
-161:             when=[
-162:                 InferenceCondition(relationship="OWNS", source_type="PERSON", target_type="PROJECT"),
-163:             ],
-164:             then_relationship="STAKEHOLDER_OF",
-165:             then_source="first.source",
-166:             then_target="first.target",
-167:             confidence=0.7,
-168:         )
-169:         assert rule.name == "project_stakeholder"
-170:         assert len(rule.when) == 1
-171:         assert rule.then_relationship == "STAKEHOLDER_OF"
-172:         assert rule.confidence == 0.7
-173: 
-174:     def test_multi_condition_rule(self) -> None:
-175:         """Test inference rule with multiple conditions."""
-176:         rule = InferenceRule(
-177:             name="transitive_membership",
-178:             when=[
-179:                 InferenceCondition(relationship="MEMBER_OF", source_type="PERSON", target_type="TEAM"),
-180:                 InferenceCondition(relationship="PART_OF", source_type="TEAM", target_type="DEPARTMENT"),
-181:             ],
-182:             then_relationship="BELONGS_TO",
-183:             confidence=0.6,
-184:         )
-185:         assert len(rule.when) == 2
-186: 
-187:     def test_serialization(self) -> None:
-188:         """Test InferenceRule round-trip serialization."""
-189:         original = InferenceRule(
-190:             name="test_rule",
-191:             when=[InferenceCondition(relationship="KNOWS")],
-192:             then_relationship="CONNECTED_TO",
-193:         )
-194:         data = original.to_dict()
-195:         restored = InferenceRule.from_dict(data)
-196:         assert restored.name == original.name
-197:         assert restored.then_relationship == original.then_relationship
-198: 
-199: 
-200: class TestConfidenceConfig:
-201:     """Tests for ConfidenceConfig dataclass."""
-202: 
-203:     def test_defaults(self) -> None:
-204:         """Test default confidence thresholds."""
-205:         config = ConfidenceConfig()
-206:         assert config.min_entity == 0.5
-207:         assert config.min_relationship == 0.5
-208:         assert config.min_inferred == 0.3
-209: 
-210:     def test_custom_thresholds(self) -> None:
-211:         """Test custom confidence thresholds."""
-212:         config = ConfidenceConfig(
-213:             min_entity=0.7,
-214:             min_relationship=0.6,
-215:             min_inferred=0.4,
-216:         )
-217:         assert config.min_entity == 0.7
-218:         assert config.min_relationship == 0.6
-219:         assert config.min_inferred == 0.4
-220: 
-221: 
-222: class TestExpansionConfig:
-223:     """Tests for ExpansionConfig dataclass."""
+156: class TestDefaultRegistry:
+157:     """Tests for the default global registry."""
+158: 
+159:     def test_get_default_registry_singleton(self) -> None:
+160:         """Test that get_default_registry returns singleton."""
+161:         reg1 = get_default_registry()
+162:         reg2 = get_default_registry()
+163:         assert reg1 is reg2
+164: 
+165:     def test_default_registry_has_builtins(self) -> None:
+166:         """Test default registry has built-in skills."""
+167:         registry = get_default_registry()
+168:         skills = registry.list_skills()
+169: 
+170:         assert "general_entities" in skills
+171:         assert "technical_docs" in skills
+172:         assert "business_intel" in skills
+173:         assert "research_papers" in skills
+174: 
+175: 
+176: class TestExtractionSkill:
+177:     """Tests for ExtractionSkill dataclass."""
+178: 
+179:     def test_create_skill(self) -> None:
+180:         """Test creating an extraction skill."""
+181:         skill = ExtractionSkill(
+182:             name="test_skill",
+183:             description="A test skill",
+184:             entity_types=["PERSON", "ORG"],
+185:             relationship_types=["WORKS_FOR"],
+186:         )
+187:         assert skill.name == "test_skill"
+188:         assert "PERSON" in skill.entity_types
+189:         assert "WORKS_FOR" in skill.relationship_types
+190: 
+191:     def test_skill_to_dict(self) -> None:
+192:         """Test skill serialization."""
+193:         skill = ExtractionSkill(
+194:             name="test",
+195:             description="Test skill",
+196:             entity_types=["A", "B"],
+197:             relationship_types=["R"],
+198:         )
+199:         data = skill.to_dict()
+200: 
+201:         assert data["name"] == "test"
+202:         assert data["description"] == "Test skill"
+203:         assert "A" in data["entity_types"]
+204: 
+205:     def test_skill_from_dict(self) -> None:
+206:         """Test skill deserialization."""
+207:         data = {
+208:             "name": "loaded",
+209:             "description": "Loaded skill",
+210:             "entity_types": ["X", "Y"],
+211:             "relationship_types": ["Z"],
+212:         }
+213:         skill = ExtractionSkill.from_dict(data)
+214: 
+215:         assert skill.name == "loaded"
+216:         assert "X" in skill.entity_types
+217:         assert "Z" in skill.relationship_types
+218: 
+219:     def test_builtin_general_entities(self) -> None:
+220:         """Test built-in general_entities skill."""
+221:         skill = ExtractionSkill.general_entities()
+222:         assert skill.name == "general_entities"
+223:         assert len(skill.entity_types) > 0
 224: 
-225:     def test_defaults(self) -> None:
-226:         """Test default expansion settings."""
-227:         config = ExpansionConfig()
-228:         assert config.enabled is True
-229:         assert config.depth == 2
-230:         assert config.cross_tool_unification is True
-231:         assert config.relationship_inference is True
-232: 
-233:     def test_disabled(self) -> None:
-234:         """Test disabled expansion."""
-235:         config = ExpansionConfig(
-236:             enabled=False,
-237:             cross_tool_unification=False,
-238:             relationship_inference=False,
-239:         )
-240:         assert config.enabled is False
-241: 
-242: 
-243: class TestExpertiseConfig:
-244:     """Tests for ExpertiseConfig dataclass."""
-245: 
-246:     def test_minimal_config(self) -> None:
-247:         """Test minimal expertise configuration."""
-248:         config = ExpertiseConfig(name="test")
-249:         assert config.name == "test"
-250:         assert config.version == "1.0.0"
-251:         assert config.entity_types == []
-252:         assert config.relationship_types == []
-253: 
-254:     def test_full_config(self) -> None:
-255:         """Test full expertise configuration."""
-256:         config = ExpertiseConfig(
-257:             name="saas_expert",
-258:             version="2.0.0",
-259:             description="SaaS tools expertise",
-260:             extends=["general"],
-261:             system_prompt="You are an expert...",
-262:             extraction_prompt="Extract entities from: {{ text }}",
-263:             entity_types=[
-264:                 EntityTypeConfig(name="TICKET", description="Issue ticket"),
-265:                 EntityTypeConfig(name="CUSTOMER", description="Customer account"),
-266:             ],
-267:             relationship_types=[
-268:                 RelationshipTypeConfig(name="ASSIGNED_TO", description="Assignment"),
-269:             ],
-270:             correlation_rules=[
-271:                 CorrelationRule(name="email_match", match_fields=["email"]),
-272:             ],
-273:             inference_rules=[
-274:                 InferenceRule(
-275:                     name="test",
-276:                     when=[InferenceCondition(relationship="OWNS")],
-277:                     then_relationship="STAKEHOLDER_OF",
-278:                 ),
-279:             ],
-280:             confidence=ConfidenceConfig(min_entity=0.6),
-281:             expansion=ExpansionConfig(depth=3),
-282:         )
-283:         assert config.name == "saas_expert"
-284:         assert len(config.entity_types) == 2
-285:         assert len(config.relationship_types) == 1
-286:         assert len(config.correlation_rules) == 1
-287:         assert len(config.inference_rules) == 1
-288:         assert config.confidence.min_entity == 0.6
-289:         assert config.expansion.depth == 3
-290: 
-291:     def test_to_dict(self) -> None:
-292:         """Test ExpertiseConfig serialization."""
-293:         config = ExpertiseConfig(
-294:             name="test",
-295:             entity_types=[EntityTypeConfig(name="PERSON", description="A person")],
-296:         )
-297:         data = config.to_dict()
-298:         assert data["name"] == "test"
-299:         assert len(data["entity_types"]) == 1
-300:         assert data["entity_types"][0]["name"] == "PERSON"
-301: 
-302:     def test_from_dict(self) -> None:
-303:         """Test ExpertiseConfig deserialization."""
-304:         data = {
-305:             "name": "restored",
-306:             "version": "1.0.0",
-307:             "entity_types": [{"name": "ORG", "description": "Organization"}],
-308:             "relationship_types": [{"name": "OWNS", "description": "Ownership"}],
-309:         }
-310:         config = ExpertiseConfig.from_dict(data)
-311:         assert config.name == "restored"
-312:         assert len(config.entity_types) == 1
-313:         assert config.entity_types[0].name == "ORG"
-314: 
-315:     def test_round_trip_serialization(self) -> None:
-316:         """Test full round-trip serialization."""
-317:         original = ExpertiseConfig(
-318:             name="roundtrip_test",
-319:             version="1.2.3",
-320:             description="Test config",
-321:             entity_types=[
-322:                 EntityTypeConfig(name="A", description="Type A", identifiers=["id"]),
-323:             ],
-324:             relationship_types=[
-325:                 RelationshipTypeConfig(name="R", source_types=["A"], target_types=["A"]),
-326:             ],
-327:             correlation_rules=[
-328:                 CorrelationRule(name="c1", pattern=r"\d+"),
-329:             ],
-330:             inference_rules=[
-331:                 InferenceRule(
-332:                     name="i1",
-333:                     when=[InferenceCondition(relationship="R")],
-334:                     then_relationship="R2",
-335:                 ),
-336:             ],
-337:         )
-338:         data = original.to_dict()
-339:         restored = ExpertiseConfig.from_dict(data)
-340: 
-341:         assert restored.name == original.name
-342:         assert restored.version == original.version
-343:         assert len(restored.entity_types) == len(original.entity_types)
-344:         assert len(restored.relationship_types) == len(original.relationship_types)
-345:         assert len(restored.correlation_rules) == len(original.correlation_rules)
-346:         assert len(restored.inference_rules) == len(original.inference_rules)
-347: 
-348:     def test_to_extraction_skill(self) -> None:
-349:         """Test conversion to ExtractionSkill."""
-350:         config = ExpertiseConfig(
-351:             name="skill_test",
-352:             description="Test skill",
-353:             entity_types=[
-354:                 EntityTypeConfig(name="PERSON", description="A person"),
-355:                 EntityTypeConfig(name="ORG", description="An organization"),
-356:             ],
-357:             relationship_types=[
-358:                 RelationshipTypeConfig(name="WORKS_FOR", description="Employment"),
-359:             ],
-360:         )
-361:         skill = config.to_extraction_skill()
-362: 
-363:         assert skill.name == "skill_test"
-364:         assert skill.description == "Test skill"
-365:         assert "PERSON" in skill.entity_types
-366:         assert "ORG" in skill.entity_types
-367:         assert "WORKS_FOR" in skill.relationship_types
-368: 
-369: 
-370: class TestExpertiseLoader:
-371:     """Tests for ExpertiseLoader."""
-372: 
-373:     def test_get_default_loader(self) -> None:
-374:         """Test getting the default loader singleton."""
-375:         loader1 = get_default_loader()
-376:         loader2 = get_default_loader()
-377:         assert loader1 is loader2
-378: 
-379:     def test_load_builtin_general(self) -> None:
-380:         """Test loading built-in general expertise."""
-381:         loader = ExpertiseLoader()
-382:         config = loader.load_builtin("general")
-383: 
-384:         assert config.name == "general"
-385:         assert len(config.entity_types) > 0
-386:         assert len(config.relationship_types) > 0
-387: 
-388:         # Check for expected entity types
-389:         entity_names = [e.name for e in config.entity_types]
-390:         assert "PERSON" in entity_names
-391:         assert "ORGANIZATION" in entity_names
-392: 
-393:     def test_load_source_builtin_prefix(self) -> None:
-394:         """Test loading with builtin: prefix."""
-395:         loader = ExpertiseLoader()
-396:         config = loader.load_source("builtin:general")
-397:         assert config.name == "general"
-398: 
-399:     def test_load_file(self) -> None:
-400:         """Test loading from YAML file."""
-401:         loader = ExpertiseLoader()
-402:         config = loader.load_file("examples/config/expertise/saas_expert.yaml")
-403: 
-404:         assert config.name == "saas_expert"
-405:         assert config.version == "1.0.0"
-406:         assert len(config.entity_types) > 20  # SaaS has many entity types
-407:         assert len(config.correlation_rules) > 0
-408:         assert len(config.inference_rules) > 0
-409: 
-410:     def test_load_source_file_prefix(self) -> None:
-411:         """Test loading with file: prefix."""
-412:         loader = ExpertiseLoader()
-413:         config = loader.load_source("file:examples/config/expertise/technical_docs.yaml")
-414:         assert config.name == "technical_docs"
-415: 
-416:     def test_load_source_direct_path(self) -> None:
-417:         """Test loading with direct file path."""
-418:         loader = ExpertiseLoader()
-419:         config = loader.load_source("examples/config/expertise/business_intel.yaml")
-420:         assert config.name == "business_intel"
-421: 
-422:     def test_cache_behavior(self) -> None:
-423:         """Test that caching works correctly."""
-424:         loader = ExpertiseLoader()
-425: 
-426:         # First load
-427:         config1 = loader.load_builtin("general", use_cache=True)
-428: 
-429:         # Second load should return cached
-430:         config2 = loader.load_builtin("general", use_cache=True)
-431:         assert config1 is config2
-432: 
-433:         # Clear cache and reload
-434:         loader.clear_cache()
-435:         config3 = loader.load_builtin("general", use_cache=True)
-436:         assert config3 is not config1
-437: 
-438:     def test_load_nonexistent_file(self) -> None:
-439:         """Test loading nonexistent file raises error."""
-440:         from khora.extraction.skills.loader import ExpertiseLoadError
-441: 
-442:         loader = ExpertiseLoader()
-443:         with pytest.raises(ExpertiseLoadError):
-444:             loader.load_file("/nonexistent/path.yaml")
-445: 
-446:     def test_load_nonexistent_builtin(self) -> None:
-447:         """Test loading nonexistent builtin raises error."""
-448:         from khora.extraction.skills.loader import ExpertiseLoadError
-449: 
-450:         loader = ExpertiseLoader()
-451:         with pytest.raises(ExpertiseLoadError):
-452:             loader.load_builtin("nonexistent_builtin_xyz")
-453: 
-454:     def test_load_merged(self) -> None:
-455:         """Test merging multiple expertise configs."""
-456:         loader = ExpertiseLoader()
-457:         merged = loader.load_merged(
-458:             [
-459:                 "builtin:general",
-460:                 "file:examples/config/expertise/technical_docs.yaml",
-461:             ]
-462:         )
-463: 
-464:         # Should have entity types from both
-465:         entity_names = [e.name for e in merged.entity_types]
-466:         assert "PERSON" in entity_names  # from general
-467:         assert "API" in entity_names  # from technical_docs
-468: 
-469:     def test_resolve_extends(self) -> None:
-470:         """Test resolving extends inheritance."""
-471:         loader = ExpertiseLoader()
-472: 
-473:         child = ExpertiseConfig(
-474:             name="child",
-475:             extends=["builtin:general"],
-476:             entity_types=[
-477:                 EntityTypeConfig(name="CUSTOM", description="Custom type"),
-478:             ],
-479:         )
-480: 
-481:         resolved = loader.resolve_extends(child)
-482: 
-483:         # Should have entities from both parent and child
-484:         entity_names = [e.name for e in resolved.entity_types]
-485:         assert "PERSON" in entity_names  # from parent
-486:         assert "CUSTOM" in entity_names  # from child
+225:     def test_builtin_technical_docs(self) -> None:
+226:         """Test built-in technical_docs skill."""
+227:         skill = ExtractionSkill.technical_docs()
+228:         assert skill.name == "technical_docs"
+229: 
+230:     def test_builtin_business_intel(self) -> None:
+231:         """Test built-in business_intel skill."""
+232:         skill = ExtractionSkill.business_intel()
+233:         assert skill.name == "business_intel"
+234: 
+235:     def test_builtin_research_papers(self) -> None:
+236:         """Test built-in research_papers skill."""
+237:         skill = ExtractionSkill.research_papers()
+238:         assert skill.name == "research_papers"
+239: 
+240: 
+241: class TestExpertiseComposer:
+242:     """Tests for ExpertiseComposer."""
+243: 
+244:     def test_create_composer(self) -> None:
+245:         """Test creating a composer."""
+246:         loader = ExpertiseLoader()
+247:         composer = ExpertiseComposer(loader)
+248:         assert composer is not None
+249: 
+250:     def test_merge_single_config(self) -> None:
+251:         """Test merging a single config returns it unchanged."""
+252:         loader = ExpertiseLoader()
+253:         composer = ExpertiseComposer(loader)
+254: 
+255:         config = ExpertiseConfig(
+256:             name="single",
+257:             entity_types=[EntityTypeConfig(name="A", description="Type A")],
+258:         )
+259: 
+260:         merged = composer.merge([config])
+261:         assert merged.name == "single"
+262:         assert len(merged.entity_types) == 1
+263: 
+264:     def test_merge_multiple_configs(self) -> None:
+265:         """Test merging multiple configs."""
+266:         loader = ExpertiseLoader()
+267:         composer = ExpertiseComposer(loader)
+268: 
+269:         config1 = ExpertiseConfig(
+270:             name="first",
+271:             entity_types=[EntityTypeConfig(name="A", description="Type A")],
+272:             relationship_types=[RelationshipTypeConfig(name="R1", description="Rel 1")],
+273:         )
+274: 
+275:         config2 = ExpertiseConfig(
+276:             name="second",
+277:             entity_types=[EntityTypeConfig(name="B", description="Type B")],
+278:             relationship_types=[RelationshipTypeConfig(name="R2", description="Rel 2")],
+279:         )
+280: 
+281:         merged = composer.merge([config1, config2])
+282: 
+283:         # Should have entity types from both
+284:         entity_names = [e.name for e in merged.entity_types]
+285:         assert "A" in entity_names
+286:         assert "B" in entity_names
+287: 
+288:         # Should have relationship types from both
+289:         rel_names = [r.name for r in merged.relationship_types]
+290:         assert "R1" in rel_names
+291:         assert "R2" in rel_names
+292: 
+293:     def test_merge_overwrites_same_name(self) -> None:
+294:         """Test that later config overwrites same-named items."""
+295:         loader = ExpertiseLoader()
+296:         composer = ExpertiseComposer(loader)
+297: 
+298:         config1 = ExpertiseConfig(
+299:             name="first",
+300:             entity_types=[EntityTypeConfig(name="A", description="Original A")],
+301:         )
+302: 
+303:         config2 = ExpertiseConfig(
+304:             name="second",
+305:             entity_types=[EntityTypeConfig(name="A", description="Updated A")],
+306:         )
+307: 
+308:         merged = composer.merge([config1, config2])
+309: 
+310:         # Should have updated description
+311:         a_type = next(e for e in merged.entity_types if e.name == "A")
+312:         assert a_type.description == "Updated A"
+313: 
+314:     def test_merge_system_prompts(self) -> None:
+315:         """Test merging system prompts."""
+316:         loader = ExpertiseLoader()
+317:         composer = ExpertiseComposer(loader)
+318: 
+319:         config1 = ExpertiseConfig(
+320:             name="first",
+321:             system_prompt="First prompt",
+322:         )
+323: 
+324:         config2 = ExpertiseConfig(
+325:             name="second",
+326:             system_prompt="Second prompt",
+327:         )
+328: 
+329:         merged = composer.merge([config1, config2])
+330: 
+331:         # Later prompt should win
+332:         assert merged.system_prompt == "Second prompt"
+333: 
+334:     def test_merge_empty_list(self) -> None:
+335:         """Test merging empty list raises error."""
+336:         loader = ExpertiseLoader()
+337:         composer = ExpertiseComposer(loader)
+338: 
+339:         with pytest.raises(ValueError):
+340:             composer.merge([])
+341: 
+342:     def test_merge_preserves_confidence_config(self) -> None:
+343:         """Test that merge preserves confidence config from last."""
+344:         from khora.extraction.skills import ConfidenceConfig
+345: 
+346:         loader = ExpertiseLoader()
+347:         composer = ExpertiseComposer(loader)
+348: 
+349:         config1 = ExpertiseConfig(
+350:             name="first",
+351:             confidence=ConfidenceConfig(min_entity=0.5),
+352:         )
+353: 
+354:         config2 = ExpertiseConfig(
+355:             name="second",
+356:             confidence=ConfidenceConfig(min_entity=0.7),
+357:         )
+358: 
+359:         merged = composer.merge([config1, config2])
+360: 
+361:         assert merged.confidence.min_entity == 0.7
 ````
 
 ## File: alembic/env.py
@@ -11729,6 +11540,1257 @@ README.md
 1: """Unit tests for Khora."""
 ````
 
+## File: tests/unit/test_expansion.py
+````python
+  1: """Unit tests for semantic expansion components."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from uuid import uuid4
+  6: 
+  7: import pytest
+  8: 
+  9: from khora.core.models import Entity, Relationship
+ 10: from khora.extraction.expansion import (
+ 11:     CrossToolUnifier,
+ 12:     RelationshipInferrer,
+ 13:     SemanticExpander,
+ 14: )
+ 15: from khora.extraction.expansion.rule_engine import (
+ 16:     RuleEngine,
+ 17:     RuleEvaluationContext,
+ 18: )
+ 19: from khora.extraction.skills import (
+ 20:     CorrelationRule,
+ 21:     ExpertiseConfig,
+ 22:     InferenceCondition,
+ 23:     InferenceRule,
+ 24: )
+ 25: 
+ 26: 
+ 27: class TestRuleEvaluationContext:
+ 28:     """Tests for RuleEvaluationContext."""
+ 29: 
+ 30:     def test_empty_context(self) -> None:
+ 31:         """Test creating empty context."""
+ 32:         ctx = RuleEvaluationContext()
+ 33:         assert ctx.entities == []
+ 34:         assert ctx.relationships == []
+ 35:         assert ctx.entity_index == {}
+ 36:         assert ctx.type_index == {}
+ 37: 
+ 38:     def test_from_data_builds_indices(self) -> None:
+ 39:         """Test context builds indices from data."""
+ 40:         namespace_id = uuid4()
+ 41:         entities = [
+ 42:             Entity(
+ 43:                 id=uuid4(),
+ 44:                 name="John Smith",
+ 45:                 entity_type="PERSON",
+ 46:                 namespace_id=namespace_id,
+ 47:             ),
+ 48:             Entity(
+ 49:                 id=uuid4(),
+ 50:                 name="Acme Corp",
+ 51:                 entity_type="ORGANIZATION",
+ 52:                 namespace_id=namespace_id,
+ 53:             ),
+ 54:             Entity(
+ 55:                 id=uuid4(),
+ 56:                 name="Jane Doe",
+ 57:                 entity_type="PERSON",
+ 58:                 namespace_id=namespace_id,
+ 59:             ),
+ 60:         ]
+ 61: 
+ 62:         ctx = RuleEvaluationContext.from_data(entities, [])
+ 63: 
+ 64:         # Check entity index (by name, lowercase)
+ 65:         assert "john smith" in ctx.entity_index
+ 66:         assert "acme corp" in ctx.entity_index
+ 67:         assert len(ctx.entity_index["john smith"]) == 1
+ 68: 
+ 69:         # Check type index
+ 70:         assert "PERSON" in ctx.type_index
+ 71:         assert "ORGANIZATION" in ctx.type_index
+ 72:         assert len(ctx.type_index["PERSON"]) == 2
+ 73:         assert len(ctx.type_index["ORGANIZATION"]) == 1
+ 74: 
+ 75:     def test_from_data_builds_relationship_index(self) -> None:
+ 76:         """Test context builds relationship index."""
+ 77:         namespace_id = uuid4()
+ 78:         e1_id = uuid4()
+ 79:         e2_id = uuid4()
+ 80: 
+ 81:         relationships = [
+ 82:             Relationship(
+ 83:                 id=uuid4(),
+ 84:                 source_entity_id=e1_id,
+ 85:                 target_entity_id=e2_id,
+ 86:                 relationship_type="WORKS_FOR",
+ 87:                 namespace_id=namespace_id,
+ 88:             ),
+ 89:             Relationship(
+ 90:                 id=uuid4(),
+ 91:                 source_entity_id=e2_id,
+ 92:                 target_entity_id=e1_id,
+ 93:                 relationship_type="EMPLOYS",
+ 94:                 namespace_id=namespace_id,
+ 95:             ),
+ 96:         ]
+ 97: 
+ 98:         ctx = RuleEvaluationContext.from_data([], relationships)
+ 99: 
+100:         assert "WORKS_FOR" in ctx.relationship_index
+101:         assert "EMPLOYS" in ctx.relationship_index
+102:         assert len(ctx.relationship_index["WORKS_FOR"]) == 1
+103: 
+104: 
+105: class TestRuleEngine:
+106:     """Tests for RuleEngine."""
+107: 
+108:     def test_engine_without_expertise(self) -> None:
+109:         """Test engine without expertise returns empty matches."""
+110:         engine = RuleEngine()
+111:         ctx = RuleEvaluationContext()
+112: 
+113:         correlation_matches = engine.evaluate_correlation_rules("test text", ctx)
+114:         inference_matches = engine.evaluate_inference_rules(ctx)
+115: 
+116:         assert correlation_matches == []
+117:         assert inference_matches == []
+118: 
+119:     def test_find_pattern_matches(self) -> None:
+120:         """Test finding regex pattern matches."""
+121:         engine = RuleEngine()
+122: 
+123:         text = "Working on PROJ-123 and TEAM-456 today"
+124:         matches = engine.find_pattern_matches(r"[A-Z]+-\d+", text)
+125: 
+126:         assert len(matches) == 2
+127:         assert matches[0][0] == "PROJ-123"
+128:         assert matches[1][0] == "TEAM-456"
+129: 
+130:     def test_find_pattern_matches_with_positions(self) -> None:
+131:         """Test pattern matches include positions."""
+132:         engine = RuleEngine()
+133: 
+134:         text = "Issue ABC-1"
+135:         matches = engine.find_pattern_matches(r"[A-Z]+-\d+", text)
+136: 
+137:         assert len(matches) == 1
+138:         matched_value, start, end = matches[0]
+139:         assert matched_value == "ABC-1"
+140:         assert text[start:end] == "ABC-1"
+141: 
+142:     def test_find_pattern_matches_invalid_regex(self) -> None:
+143:         """Test invalid regex returns empty list."""
+144:         engine = RuleEngine()
+145: 
+146:         matches = engine.find_pattern_matches(r"[invalid", "test")
+147:         assert matches == []
+148: 
+149:     def test_match_entities_by_field(self) -> None:
+150:         """Test matching entities by field value."""
+151:         namespace_id = uuid4()
+152:         entities = [
+153:             Entity(
+154:                 id=uuid4(),
+155:                 name="John",
+156:                 entity_type="PERSON",
+157:                 namespace_id=namespace_id,
+158:                 attributes={"email": "john@example.com"},
+159:             ),
+160:             Entity(
+161:                 id=uuid4(),
+162:                 name="Jane",
+163:                 entity_type="PERSON",
+164:                 namespace_id=namespace_id,
+165:                 attributes={"email": "jane@example.com"},
+166:             ),
+167:             Entity(
+168:                 id=uuid4(),
+169:                 name="John Copy",
+170:                 entity_type="PERSON",
+171:                 namespace_id=namespace_id,
+172:                 attributes={"email": "john@example.com"},
+173:             ),
+174:         ]
+175: 
+176:         engine = RuleEngine()
+177:         matches = engine.match_entities_by_field(entities, "email", "john@example.com")
+178: 
+179:         assert len(matches) == 2
+180: 
+181:     def test_match_entities_case_insensitive(self) -> None:
+182:         """Test field matching is case insensitive for strings."""
+183:         namespace_id = uuid4()
+184:         entities = [
+185:             Entity(
+186:                 id=uuid4(),
+187:                 name="Test",
+188:                 entity_type="PERSON",
+189:                 namespace_id=namespace_id,
+190:                 attributes={"domain": "EXAMPLE.COM"},
+191:             ),
+192:         ]
+193: 
+194:         engine = RuleEngine()
+195:         matches = engine.match_entities_by_field(entities, "domain", "example.com")
+196: 
+197:         assert len(matches) == 1
+198: 
+199:     def test_evaluate_correlation_rules_pattern(self) -> None:
+200:         """Test evaluating correlation rules with patterns."""
+201:         expertise = ExpertiseConfig(
+202:             name="test",
+203:             correlation_rules=[
+204:                 CorrelationRule(
+205:                     name="issue_ref",
+206:                     pattern=r"[A-Z]+-\d+",
+207:                     creates_relationship="REFERENCES",
+208:                     confidence=0.9,
+209:                 ),
+210:             ],
+211:         )
+212: 
+213:         engine = RuleEngine(expertise=expertise)
+214:         ctx = RuleEvaluationContext()
+215: 
+216:         matches = engine.evaluate_correlation_rules("See PROJ-123 for details", ctx)
+217: 
+218:         assert len(matches) == 1
+219:         assert matches[0].rule_name == "issue_ref"
+220:         assert matches[0].matched_value == "PROJ-123"
+221:         assert matches[0].confidence == 0.9
+222: 
+223:     def test_evaluate_correlation_rules_field_matching(self) -> None:
+224:         """Test evaluating correlation rules with field matching."""
+225:         namespace_id = uuid4()
+226:         entities = [
+227:             Entity(
+228:                 id=uuid4(),
+229:                 name="Person A",
+230:                 entity_type="PERSON",
+231:                 namespace_id=namespace_id,
+232:                 attributes={"email": "shared@example.com"},
+233:             ),
+234:             Entity(
+235:                 id=uuid4(),
+236:                 name="Person B",
+237:                 entity_type="PERSON",
+238:                 namespace_id=namespace_id,
+239:                 attributes={"email": "shared@example.com"},
+240:             ),
+241:         ]
+242: 
+243:         expertise = ExpertiseConfig(
+244:             name="test",
+245:             correlation_rules=[
+246:                 CorrelationRule(
+247:                     name="email_match",
+248:                     match_fields=["email"],
+249:                     entity_types=["PERSON"],
+250:                     creates_relationship="SAME_AS",
+251:                 ),
+252:             ],
+253:         )
+254: 
+255:         engine = RuleEngine(expertise=expertise)
+256:         ctx = RuleEvaluationContext.from_data(entities, [])
+257: 
+258:         matches = engine.evaluate_correlation_rules("", ctx)
+259: 
+260:         assert len(matches) == 1
+261:         assert matches[0].rule_name == "email_match"
+262:         assert len(matches[0].matched_entities) == 2
+263: 
+264: 
+265: class TestCrossToolUnifier:
+266:     """Tests for CrossToolUnifier."""
+267: 
+268:     def test_unifier_without_expertise(self) -> None:
+269:         """Test unifier works without expertise."""
+270:         unifier = CrossToolUnifier()
+271:         namespace_id = uuid4()
+272: 
+273:         entities = [
+274:             Entity(
+275:                 id=uuid4(),
+276:                 name="Test",
+277:                 entity_type="PERSON",
+278:                 namespace_id=namespace_id,
+279:             ),
+280:         ]
+281: 
+282:         result = unifier.unify(entities, [], use_embeddings=False, use_fuzzy=False)
+283: 
+284:         assert len(result.unified_entities) == 1
+285:         assert result.entities_merged == 0
+286: 
+287:     def test_unify_by_email(self) -> None:
+288:         """Test unifying entities by email with correlation rule."""
+289:         # Expertise with email matching rule
+290:         expertise = ExpertiseConfig(
+291:             name="test",
+292:             correlation_rules=[
+293:                 CorrelationRule(
+294:                     name="email_match",
+295:                     match_fields=["email"],
+296:                     entity_types=["PERSON"],
+297:                 ),
+298:             ],
+299:         )
+300:         unifier = CrossToolUnifier(expertise=expertise)
+301:         namespace_id = uuid4()
+302: 
+303:         e1 = Entity(
+304:             id=uuid4(),
+305:             name="John Smith",
+306:             entity_type="PERSON",
+307:             namespace_id=namespace_id,
+308:             attributes={"email": "john@example.com", "source": "slack"},
+309:         )
+310:         e2 = Entity(
+311:             id=uuid4(),
+312:             name="J. Smith",
+313:             entity_type="PERSON",
+314:             namespace_id=namespace_id,
+315:             attributes={"email": "john@example.com", "source": "jira"},
+316:         )
+317:         e3 = Entity(
+318:             id=uuid4(),
+319:             name="Jane Doe",
+320:             entity_type="PERSON",
+321:             namespace_id=namespace_id,
+322:             attributes={"email": "jane@example.com"},
+323:         )
+324: 
+325:         result = unifier.unify([e1, e2, e3], [], use_embeddings=False, use_fuzzy=False)
+326: 
+327:         # e1 and e2 should be merged, e3 separate
+328:         assert len(result.unified_entities) == 2
+329:         assert result.entities_merged == 1
+330:         assert len(result.entity_mapping) == 3
+331: 
+332:     def test_unify_by_domain(self) -> None:
+333:         """Test unifying entities by domain with correlation rule."""
+334:         # Expertise with domain matching rule
+335:         expertise = ExpertiseConfig(
+336:             name="test",
+337:             correlation_rules=[
+338:                 CorrelationRule(
+339:                     name="domain_match",
+340:                     match_fields=["domain"],
+341:                     entity_types=["CUSTOMER"],
+342:                 ),
+343:             ],
+344:         )
+345:         unifier = CrossToolUnifier(expertise=expertise)
+346:         namespace_id = uuid4()
+347: 
+348:         e1 = Entity(
+349:             id=uuid4(),
+350:             name="Acme Corp",
+351:             entity_type="CUSTOMER",
+352:             namespace_id=namespace_id,
+353:             attributes={"domain": "acme.com"},
+354:         )
+355:         e2 = Entity(
+356:             id=uuid4(),
+357:             name="Acme Corporation",
+358:             entity_type="CUSTOMER",
+359:             namespace_id=namespace_id,
+360:             attributes={"domain": "acme.com"},
+361:         )
+362: 
+363:         result = unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=False)
+364: 
+365:         assert len(result.unified_entities) == 1
+366:         assert result.entities_merged == 1
+367: 
+368:     def test_unify_updates_relationships(self) -> None:
+369:         """Test that unification updates relationship entity IDs."""
+370:         # Expertise with email matching rule
+371:         expertise = ExpertiseConfig(
+372:             name="test",
+373:             correlation_rules=[
+374:                 CorrelationRule(
+375:                     name="email_match",
+376:                     match_fields=["email"],
+377:                     entity_types=["PERSON"],
+378:                 ),
+379:             ],
+380:         )
+381:         unifier = CrossToolUnifier(expertise=expertise)
+382:         namespace_id = uuid4()
+383: 
+384:         e1 = Entity(
+385:             id=uuid4(),
+386:             name="John",
+387:             entity_type="PERSON",
+388:             namespace_id=namespace_id,
+389:             attributes={"email": "john@example.com"},
+390:         )
+391:         e2 = Entity(
+392:             id=uuid4(),
+393:             name="John Smith",
+394:             entity_type="PERSON",
+395:             namespace_id=namespace_id,
+396:             attributes={"email": "john@example.com"},
+397:         )
+398:         e3 = Entity(
+399:             id=uuid4(),
+400:             name="Acme",
+401:             entity_type="ORGANIZATION",
+402:             namespace_id=namespace_id,
+403:         )
+404: 
+405:         # Relationship from e2 to e3
+406:         rel = Relationship(
+407:             id=uuid4(),
+408:             source_entity_id=e2.id,
+409:             target_entity_id=e3.id,
+410:             relationship_type="WORKS_FOR",
+411:             namespace_id=namespace_id,
+412:         )
+413: 
+414:         result = unifier.unify([e1, e2, e3], [rel], use_embeddings=False, use_fuzzy=False)
+415: 
+416:         # e1 and e2 merged, relationship should be updated
+417:         assert len(result.unified_entities) == 2
+418:         assert len(result.updated_relationships) == 1
+419: 
+420:         # Relationship source should now point to canonical entity
+421:         updated_rel = result.updated_relationships[0]
+422:         canonical_id = result.entity_mapping[e2.id]
+423:         assert updated_rel.source_entity_id == canonical_id
+424: 
+425:     def test_unify_with_fuzzy_matching(self) -> None:
+426:         """Test unifying with fuzzy string matching."""
+427:         unifier = CrossToolUnifier(fuzzy_threshold=0.8)
+428:         namespace_id = uuid4()
+429: 
+430:         e1 = Entity(
+431:             id=uuid4(),
+432:             name="John Smith",
+433:             entity_type="PERSON",
+434:             namespace_id=namespace_id,
+435:         )
+436:         e2 = Entity(
+437:             id=uuid4(),
+438:             name="Jon Smith",  # Typo
+439:             entity_type="PERSON",
+440:             namespace_id=namespace_id,
+441:         )
+442: 
+443:         result = unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=True)
+444: 
+445:         # Names are similar enough to merge
+446:         assert len(result.unified_entities) == 1
+447:         assert result.entities_merged == 1
+448: 
+449: 
+450: class TestRelationshipInferrer:
+451:     """Tests for RelationshipInferrer."""
+452: 
+453:     def test_inferrer_without_expertise(self) -> None:
+454:         """Test inferrer without expertise returns empty."""
+455:         inferrer = RelationshipInferrer()
+456:         result = inferrer.infer([], [])
+457:         assert result == []
+458: 
+459:     def test_inferrer_with_empty_rules(self) -> None:
+460:         """Test inferrer with expertise but no rules."""
+461:         expertise = ExpertiseConfig(name="test")
+462:         inferrer = RelationshipInferrer(expertise=expertise)
+463:         result = inferrer.infer([], [])
+464:         assert result == []
+465: 
+466:     def test_single_condition_inference(self) -> None:
+467:         """Test inference with single condition rule."""
+468:         namespace_id = uuid4()
+469: 
+470:         person = Entity(
+471:             id=uuid4(),
+472:             name="John",
+473:             entity_type="PERSON",
+474:             namespace_id=namespace_id,
+475:         )
+476:         project = Entity(
+477:             id=uuid4(),
+478:             name="Project Alpha",
+479:             entity_type="PROJECT",
+480:             namespace_id=namespace_id,
+481:         )
+482: 
+483:         owns_rel = Relationship(
+484:             id=uuid4(),
+485:             source_entity_id=person.id,
+486:             target_entity_id=project.id,
+487:             relationship_type="OWNS",
+488:             namespace_id=namespace_id,
+489:         )
+490: 
+491:         expertise = ExpertiseConfig(
+492:             name="test",
+493:             inference_rules=[
+494:                 InferenceRule(
+495:                     name="owner_is_stakeholder",
+496:                     when=[
+497:                         InferenceCondition(
+498:                             relationship="OWNS",
+499:                             source_type="PERSON",
+500:                             target_type="PROJECT",
+501:                         ),
+502:                     ],
+503:                     then_relationship="STAKEHOLDER_OF",
+504:                     then_source="first.source",
+505:                     then_target="first.target",
+506:                     confidence=0.8,
+507:                 ),
+508:             ],
+509:         )
+510: 
+511:         inferrer = RelationshipInferrer(expertise=expertise, min_confidence=0.5)
+512:         inferred = inferrer.infer([person, project], [owns_rel], depth=1)
+513: 
+514:         assert len(inferred) == 1
+515:         assert inferred[0].relationship_type == "STAKEHOLDER_OF"
+516:         assert inferred[0].source_entity_id == person.id
+517:         assert inferred[0].target_entity_id == project.id
+518:         assert inferred[0].confidence == 0.8
+519: 
+520:     def test_confidence_filtering(self) -> None:
+521:         """Test that low confidence inferences are filtered."""
+522:         namespace_id = uuid4()
+523: 
+524:         e1 = Entity(id=uuid4(), name="A", entity_type="TYPE", namespace_id=namespace_id)
+525:         e2 = Entity(id=uuid4(), name="B", entity_type="TYPE", namespace_id=namespace_id)
+526: 
+527:         rel = Relationship(
+528:             id=uuid4(),
+529:             source_entity_id=e1.id,
+530:             target_entity_id=e2.id,
+531:             relationship_type="REL",
+532:             namespace_id=namespace_id,
+533:         )
+534: 
+535:         expertise = ExpertiseConfig(
+536:             name="test",
+537:             inference_rules=[
+538:                 InferenceRule(
+539:                     name="low_confidence",
+540:                     when=[InferenceCondition(relationship="REL")],
+541:                     then_relationship="INFERRED",
+542:                     confidence=0.2,  # Below threshold
+543:                 ),
+544:             ],
+545:         )
+546: 
+547:         inferrer = RelationshipInferrer(expertise=expertise, min_confidence=0.5)
+548:         inferred = inferrer.infer([e1, e2], [rel])
+549: 
+550:         assert len(inferred) == 0
+551: 
+552:     def test_no_duplicate_inference(self) -> None:
+553:         """Test that existing relationships aren't re-inferred."""
+554:         namespace_id = uuid4()
+555: 
+556:         e1 = Entity(id=uuid4(), name="A", entity_type="TYPE", namespace_id=namespace_id)
+557:         e2 = Entity(id=uuid4(), name="B", entity_type="TYPE", namespace_id=namespace_id)
+558: 
+559:         # Original relationship
+560:         rel = Relationship(
+561:             id=uuid4(),
+562:             source_entity_id=e1.id,
+563:             target_entity_id=e2.id,
+564:             relationship_type="OWNS",
+565:             namespace_id=namespace_id,
+566:         )
+567: 
+568:         # Relationship that would be inferred (already exists)
+569:         existing = Relationship(
+570:             id=uuid4(),
+571:             source_entity_id=e1.id,
+572:             target_entity_id=e2.id,
+573:             relationship_type="STAKEHOLDER_OF",
+574:             namespace_id=namespace_id,
+575:         )
+576: 
+577:         expertise = ExpertiseConfig(
+578:             name="test",
+579:             inference_rules=[
+580:                 InferenceRule(
+581:                     name="test",
+582:                     when=[InferenceCondition(relationship="OWNS")],
+583:                     then_relationship="STAKEHOLDER_OF",
+584:                     confidence=0.8,
+585:                 ),
+586:             ],
+587:         )
+588: 
+589:         inferrer = RelationshipInferrer(expertise=expertise)
+590:         inferred = inferrer.infer([e1, e2], [rel, existing])
+591: 
+592:         # Should not create duplicate
+593:         assert len(inferred) == 0
+594: 
+595: 
+596: class TestSemanticExpander:
+597:     """Tests for SemanticExpander."""
+598: 
+599:     @pytest.mark.asyncio
+600:     async def test_expander_no_entities(self) -> None:
+601:         """Test expander with no entities."""
+602:         expander = SemanticExpander()
+603:         result = await expander.expand([], [])
+604: 
+605:         assert result.total_entities == 0
+606:         assert result.total_relationships == 0
+607:         assert result.original_entity_count == 0
+608: 
+609:     @pytest.mark.asyncio
+610:     async def test_expander_passthrough(self) -> None:
+611:         """Test expander passes through entities when disabled."""
+612:         namespace_id = uuid4()
+613:         entities = [
+614:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
+615:         ]
+616: 
+617:         expander = SemanticExpander(
+618:             enable_unification=False,
+619:             enable_inference=False,
+620:         )
+621:         result = await expander.expand(entities, [])
+622: 
+623:         assert result.total_entities == 1
+624:         assert result.original_entity_count == 1
+625:         assert result.merged_entity_count == 0
+626: 
+627:     @pytest.mark.asyncio
+628:     async def test_expander_with_unification(self) -> None:
+629:         """Test expander performs unification with expertise."""
+630:         namespace_id = uuid4()
+631: 
+632:         e1 = Entity(
+633:             id=uuid4(),
+634:             name="John",
+635:             entity_type="PERSON",
+636:             namespace_id=namespace_id,
+637:             attributes={"email": "john@test.com"},
+638:         )
+639:         e2 = Entity(
+640:             id=uuid4(),
+641:             name="John Smith",
+642:             entity_type="PERSON",
+643:             namespace_id=namespace_id,
+644:             attributes={"email": "john@test.com"},
+645:         )
+646: 
+647:         # Need expertise with correlation rules for email matching
+648:         expertise = ExpertiseConfig(
+649:             name="test",
+650:             correlation_rules=[
+651:                 CorrelationRule(name="email_match", match_fields=["email"], entity_types=["PERSON"]),
+652:             ],
+653:         )
+654: 
+655:         expander = SemanticExpander(
+656:             expertise=expertise,
+657:             enable_unification=True,
+658:             enable_inference=False,
+659:         )
+660:         result = await expander.expand([e1, e2], [])
+661: 
+662:         assert result.original_entity_count == 2
+663:         assert result.total_entities == 1
+664:         assert result.merged_entity_count == 1
+665: 
+666:     @pytest.mark.asyncio
+667:     async def test_expander_with_expertise(self) -> None:
+668:         """Test expander uses expertise configuration."""
+669:         from khora.extraction.skills import ExpansionConfig
+670: 
+671:         expertise = ExpertiseConfig(
+672:             name="test",
+673:             expansion=ExpansionConfig(
+674:                 enabled=True,
+675:                 cross_tool_unification=True,
+676:                 relationship_inference=False,
+677:                 depth=1,
+678:             ),
+679:         )
+680: 
+681:         namespace_id = uuid4()
+682:         entities = [
+683:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
+684:         ]
+685: 
+686:         expander = SemanticExpander(expertise=expertise)
+687:         result = await expander.expand(entities, [])
+688: 
+689:         assert result.total_entities == 1
+690: 
+691:     @pytest.mark.asyncio
+692:     async def test_expander_sync_alternative(self) -> None:
+693:         """Test expand method directly instead of deprecated sync version."""
+694:         namespace_id = uuid4()
+695:         entities = [
+696:             Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
+697:         ]
+698: 
+699:         expander = SemanticExpander(
+700:             enable_unification=False,
+701:             enable_inference=False,
+702:         )
+703:         result = await expander.expand(entities, [])
+704: 
+705:         assert result.total_entities == 1
+706: 
+707:     def test_from_expertise(self) -> None:
+708:         """Test creating expander from expertise config."""
+709:         from khora.extraction.skills import ExpansionConfig
+710: 
+711:         expertise = ExpertiseConfig(
+712:             name="test",
+713:             expansion=ExpansionConfig(
+714:                 enabled=True,
+715:                 depth=3,
+716:                 cross_tool_unification=True,
+717:                 relationship_inference=True,
+718:             ),
+719:         )
+720: 
+721:         expander = SemanticExpander.from_expertise(expertise)
+722: 
+723:         assert expander._enable_unification is True
+724:         assert expander._enable_inference is True
+725:         assert expander._inference_depth == 3
+726: 
+727:     def test_from_expertise_name(self) -> None:
+728:         """Test creating expander from expertise name."""
+729:         expander = SemanticExpander.from_expertise_name("general")
+730:         assert expander._expertise is not None
+731:         assert expander._expertise.name == "general"
+732: 
+733:     @pytest.mark.asyncio
+734:     async def test_expansion_result_properties(self) -> None:
+735:         """Test ExpansionResult computed properties."""
+736:         namespace_id = uuid4()
+737: 
+738:         e1 = Entity(id=uuid4(), name="A", entity_type="PERSON", namespace_id=namespace_id)
+739:         e2 = Entity(id=uuid4(), name="B", entity_type="PERSON", namespace_id=namespace_id)
+740: 
+741:         rel = Relationship(
+742:             id=uuid4(),
+743:             source_entity_id=e1.id,
+744:             target_entity_id=e2.id,
+745:             relationship_type="KNOWS",
+746:             namespace_id=namespace_id,
+747:         )
+748: 
+749:         expander = SemanticExpander(
+750:             enable_unification=False,
+751:             enable_inference=False,
+752:         )
+753:         result = await expander.expand([e1, e2], [rel])
+754: 
+755:         assert result.total_entities == 2
+756:         assert result.total_relationships == 1
+757:         assert len(result.all_relationships) == 1
+````
+
+## File: tests/unit/test_expertise.py
+````python
+  1: """Unit tests for expertise configuration system."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import pytest
+  6: 
+  7: from khora.extraction.skills import (
+  8:     ConfidenceConfig,
+  9:     CorrelationRule,
+ 10:     EntityTypeConfig,
+ 11:     ExpansionConfig,
+ 12:     ExpertiseConfig,
+ 13:     ExpertiseLoader,
+ 14:     InferenceCondition,
+ 15:     InferenceRule,
+ 16:     RelationshipTypeConfig,
+ 17:     get_default_loader,
+ 18: )
+ 19: 
+ 20: 
+ 21: class TestEntityTypeConfig:
+ 22:     """Tests for EntityTypeConfig dataclass."""
+ 23: 
+ 24:     def test_basic_creation(self) -> None:
+ 25:         """Test basic EntityTypeConfig creation."""
+ 26:         entity_type = EntityTypeConfig(
+ 27:             name="PERSON",
+ 28:             description="A human individual",
+ 29:         )
+ 30:         assert entity_type.name == "PERSON"
+ 31:         assert entity_type.description == "A human individual"
+ 32:         assert entity_type.attributes == {}
+ 33:         assert entity_type.identifiers == []
+ 34:         assert entity_type.aliases == []
+ 35: 
+ 36:     def test_with_attributes(self) -> None:
+ 37:         """Test EntityTypeConfig with attributes."""
+ 38:         entity_type = EntityTypeConfig(
+ 39:             name="TICKET",
+ 40:             description="Issue tracker ticket",
+ 41:             attributes={"required": ["key", "status"], "optional": ["assignee"]},
+ 42:             identifiers=["key"],
+ 43:             aliases=["issue", "bug", "story"],
+ 44:         )
+ 45:         assert entity_type.attributes["required"] == ["key", "status"]
+ 46:         assert entity_type.identifiers == ["key"]
+ 47:         assert "issue" in entity_type.aliases
+ 48: 
+ 49:     def test_to_dict(self) -> None:
+ 50:         """Test EntityTypeConfig serialization."""
+ 51:         entity_type = EntityTypeConfig(
+ 52:             name="CUSTOMER",
+ 53:             description="Customer account",
+ 54:             identifiers=["domain"],
+ 55:         )
+ 56:         data = entity_type.to_dict()
+ 57:         assert data["name"] == "CUSTOMER"
+ 58:         assert data["description"] == "Customer account"
+ 59:         assert data["identifiers"] == ["domain"]
+ 60: 
+ 61:     def test_from_dict(self) -> None:
+ 62:         """Test EntityTypeConfig deserialization."""
+ 63:         data = {
+ 64:             "name": "PROJECT",
+ 65:             "description": "A project",
+ 66:             "attributes": {"required": ["name"]},
+ 67:         }
+ 68:         entity_type = EntityTypeConfig.from_dict(data)
+ 69:         assert entity_type.name == "PROJECT"
+ 70:         assert entity_type.attributes["required"] == ["name"]
+ 71: 
+ 72: 
+ 73: class TestRelationshipTypeConfig:
+ 74:     """Tests for RelationshipTypeConfig dataclass."""
+ 75: 
+ 76:     def test_basic_creation(self) -> None:
+ 77:         """Test basic RelationshipTypeConfig creation."""
+ 78:         rel_type = RelationshipTypeConfig(
+ 79:             name="WORKS_FOR",
+ 80:             description="Employment relationship",
+ 81:         )
+ 82:         assert rel_type.name == "WORKS_FOR"
+ 83:         assert rel_type.source_types == []
+ 84:         assert rel_type.target_types == []
+ 85: 
+ 86:     def test_with_constraints(self) -> None:
+ 87:         """Test RelationshipTypeConfig with type constraints."""
+ 88:         rel_type = RelationshipTypeConfig(
+ 89:             name="ASSIGNED_TO",
+ 90:             description="Task assignment",
+ 91:             source_types=["TICKET", "TASK"],
+ 92:             target_types=["PERSON", "TEAM"],
+ 93:         )
+ 94:         assert "TICKET" in rel_type.source_types
+ 95:         assert "PERSON" in rel_type.target_types
+ 96: 
+ 97:     def test_serialization(self) -> None:
+ 98:         """Test RelationshipTypeConfig round-trip serialization."""
+ 99:         original = RelationshipTypeConfig(
+100:             name="OWNS",
+101:             description="Ownership",
+102:             source_types=["PERSON"],
+103:             target_types=["PROJECT"],
+104:         )
+105:         data = original.to_dict()
+106:         restored = RelationshipTypeConfig.from_dict(data)
+107:         assert restored.name == original.name
+108:         assert restored.source_types == original.source_types
+109: 
+110: 
+111: class TestCorrelationRule:
+112:     """Tests for CorrelationRule dataclass."""
+113: 
+114:     def test_pattern_rule(self) -> None:
+115:         """Test correlation rule with regex pattern."""
+116:         rule = CorrelationRule(
+117:             name="issue_reference",
+118:             description="Match issue keys",
+119:             pattern=r"[A-Z]+-\d+",
+120:             creates_relationship="REFERENCES",
+121:         )
+122:         assert rule.pattern == r"[A-Z]+-\d+"
+123:         assert rule.creates_relationship == "REFERENCES"
+124:         assert rule.confidence == 0.9  # default
+125: 
+126:     def test_field_matching_rule(self) -> None:
+127:         """Test correlation rule with field matching."""
+128:         rule = CorrelationRule(
+129:             name="email_match",
+130:             description="Match by email",
+131:             match_fields=["email"],
+132:             entity_types=["PERSON", "CONTACT"],
+133:             confidence=0.95,
+134:         )
+135:         assert rule.match_fields == ["email"]
+136:         assert rule.entity_types == ["PERSON", "CONTACT"]
+137:         assert rule.confidence == 0.95
+138: 
+139:     def test_serialization(self) -> None:
+140:         """Test CorrelationRule round-trip serialization."""
+141:         original = CorrelationRule(
+142:             name="test",
+143:             pattern=r"\d+",
+144:             confidence=0.7,
+145:         )
+146:         data = original.to_dict()
+147:         restored = CorrelationRule.from_dict(data)
+148:         assert restored.name == original.name
+149:         assert restored.pattern == original.pattern
+150:         assert restored.confidence == original.confidence
+151: 
+152: 
+153: class TestInferenceRule:
+154:     """Tests for InferenceRule dataclass."""
+155: 
+156:     def test_basic_rule(self) -> None:
+157:         """Test basic inference rule creation."""
+158:         rule = InferenceRule(
+159:             name="project_stakeholder",
+160:             description="Infer stakeholder relationship",
+161:             when=[
+162:                 InferenceCondition(relationship="OWNS", source_type="PERSON", target_type="PROJECT"),
+163:             ],
+164:             then_relationship="STAKEHOLDER_OF",
+165:             then_source="first.source",
+166:             then_target="first.target",
+167:             confidence=0.7,
+168:         )
+169:         assert rule.name == "project_stakeholder"
+170:         assert len(rule.when) == 1
+171:         assert rule.then_relationship == "STAKEHOLDER_OF"
+172:         assert rule.confidence == 0.7
+173: 
+174:     def test_multi_condition_rule(self) -> None:
+175:         """Test inference rule with multiple conditions."""
+176:         rule = InferenceRule(
+177:             name="transitive_membership",
+178:             when=[
+179:                 InferenceCondition(relationship="MEMBER_OF", source_type="PERSON", target_type="TEAM"),
+180:                 InferenceCondition(relationship="PART_OF", source_type="TEAM", target_type="DEPARTMENT"),
+181:             ],
+182:             then_relationship="BELONGS_TO",
+183:             confidence=0.6,
+184:         )
+185:         assert len(rule.when) == 2
+186: 
+187:     def test_serialization(self) -> None:
+188:         """Test InferenceRule round-trip serialization."""
+189:         original = InferenceRule(
+190:             name="test_rule",
+191:             when=[InferenceCondition(relationship="KNOWS")],
+192:             then_relationship="CONNECTED_TO",
+193:         )
+194:         data = original.to_dict()
+195:         restored = InferenceRule.from_dict(data)
+196:         assert restored.name == original.name
+197:         assert restored.then_relationship == original.then_relationship
+198: 
+199: 
+200: class TestConfidenceConfig:
+201:     """Tests for ConfidenceConfig dataclass."""
+202: 
+203:     def test_defaults(self) -> None:
+204:         """Test default confidence thresholds."""
+205:         config = ConfidenceConfig()
+206:         assert config.min_entity == 0.5
+207:         assert config.min_relationship == 0.5
+208:         assert config.min_inferred == 0.3
+209: 
+210:     def test_custom_thresholds(self) -> None:
+211:         """Test custom confidence thresholds."""
+212:         config = ConfidenceConfig(
+213:             min_entity=0.7,
+214:             min_relationship=0.6,
+215:             min_inferred=0.4,
+216:         )
+217:         assert config.min_entity == 0.7
+218:         assert config.min_relationship == 0.6
+219:         assert config.min_inferred == 0.4
+220: 
+221: 
+222: class TestExpansionConfig:
+223:     """Tests for ExpansionConfig dataclass."""
+224: 
+225:     def test_defaults(self) -> None:
+226:         """Test default expansion settings."""
+227:         config = ExpansionConfig()
+228:         assert config.enabled is True
+229:         assert config.depth == 2
+230:         assert config.cross_tool_unification is True
+231:         assert config.relationship_inference is True
+232: 
+233:     def test_disabled(self) -> None:
+234:         """Test disabled expansion."""
+235:         config = ExpansionConfig(
+236:             enabled=False,
+237:             cross_tool_unification=False,
+238:             relationship_inference=False,
+239:         )
+240:         assert config.enabled is False
+241: 
+242: 
+243: class TestExpertiseConfig:
+244:     """Tests for ExpertiseConfig dataclass."""
+245: 
+246:     def test_minimal_config(self) -> None:
+247:         """Test minimal expertise configuration."""
+248:         config = ExpertiseConfig(name="test")
+249:         assert config.name == "test"
+250:         assert config.version == "1.0.0"
+251:         assert config.entity_types == []
+252:         assert config.relationship_types == []
+253: 
+254:     def test_full_config(self) -> None:
+255:         """Test full expertise configuration."""
+256:         config = ExpertiseConfig(
+257:             name="saas_expert",
+258:             version="2.0.0",
+259:             description="SaaS tools expertise",
+260:             extends=["general"],
+261:             system_prompt="You are an expert...",
+262:             extraction_prompt="Extract entities from: {{ text }}",
+263:             entity_types=[
+264:                 EntityTypeConfig(name="TICKET", description="Issue ticket"),
+265:                 EntityTypeConfig(name="CUSTOMER", description="Customer account"),
+266:             ],
+267:             relationship_types=[
+268:                 RelationshipTypeConfig(name="ASSIGNED_TO", description="Assignment"),
+269:             ],
+270:             correlation_rules=[
+271:                 CorrelationRule(name="email_match", match_fields=["email"]),
+272:             ],
+273:             inference_rules=[
+274:                 InferenceRule(
+275:                     name="test",
+276:                     when=[InferenceCondition(relationship="OWNS")],
+277:                     then_relationship="STAKEHOLDER_OF",
+278:                 ),
+279:             ],
+280:             confidence=ConfidenceConfig(min_entity=0.6),
+281:             expansion=ExpansionConfig(depth=3),
+282:         )
+283:         assert config.name == "saas_expert"
+284:         assert len(config.entity_types) == 2
+285:         assert len(config.relationship_types) == 1
+286:         assert len(config.correlation_rules) == 1
+287:         assert len(config.inference_rules) == 1
+288:         assert config.confidence.min_entity == 0.6
+289:         assert config.expansion.depth == 3
+290: 
+291:     def test_to_dict(self) -> None:
+292:         """Test ExpertiseConfig serialization."""
+293:         config = ExpertiseConfig(
+294:             name="test",
+295:             entity_types=[EntityTypeConfig(name="PERSON", description="A person")],
+296:         )
+297:         data = config.to_dict()
+298:         assert data["name"] == "test"
+299:         assert len(data["entity_types"]) == 1
+300:         assert data["entity_types"][0]["name"] == "PERSON"
+301: 
+302:     def test_from_dict(self) -> None:
+303:         """Test ExpertiseConfig deserialization."""
+304:         data = {
+305:             "name": "restored",
+306:             "version": "1.0.0",
+307:             "entity_types": [{"name": "ORG", "description": "Organization"}],
+308:             "relationship_types": [{"name": "OWNS", "description": "Ownership"}],
+309:         }
+310:         config = ExpertiseConfig.from_dict(data)
+311:         assert config.name == "restored"
+312:         assert len(config.entity_types) == 1
+313:         assert config.entity_types[0].name == "ORG"
+314: 
+315:     def test_round_trip_serialization(self) -> None:
+316:         """Test full round-trip serialization."""
+317:         original = ExpertiseConfig(
+318:             name="roundtrip_test",
+319:             version="1.2.3",
+320:             description="Test config",
+321:             entity_types=[
+322:                 EntityTypeConfig(name="A", description="Type A", identifiers=["id"]),
+323:             ],
+324:             relationship_types=[
+325:                 RelationshipTypeConfig(name="R", source_types=["A"], target_types=["A"]),
+326:             ],
+327:             correlation_rules=[
+328:                 CorrelationRule(name="c1", pattern=r"\d+"),
+329:             ],
+330:             inference_rules=[
+331:                 InferenceRule(
+332:                     name="i1",
+333:                     when=[InferenceCondition(relationship="R")],
+334:                     then_relationship="R2",
+335:                 ),
+336:             ],
+337:         )
+338:         data = original.to_dict()
+339:         restored = ExpertiseConfig.from_dict(data)
+340: 
+341:         assert restored.name == original.name
+342:         assert restored.version == original.version
+343:         assert len(restored.entity_types) == len(original.entity_types)
+344:         assert len(restored.relationship_types) == len(original.relationship_types)
+345:         assert len(restored.correlation_rules) == len(original.correlation_rules)
+346:         assert len(restored.inference_rules) == len(original.inference_rules)
+347: 
+348:     def test_to_extraction_skill(self) -> None:
+349:         """Test conversion to ExtractionSkill."""
+350:         config = ExpertiseConfig(
+351:             name="skill_test",
+352:             description="Test skill",
+353:             entity_types=[
+354:                 EntityTypeConfig(name="PERSON", description="A person"),
+355:                 EntityTypeConfig(name="ORG", description="An organization"),
+356:             ],
+357:             relationship_types=[
+358:                 RelationshipTypeConfig(name="WORKS_FOR", description="Employment"),
+359:             ],
+360:         )
+361:         skill = config.to_extraction_skill()
+362: 
+363:         assert skill.name == "skill_test"
+364:         assert skill.description == "Test skill"
+365:         assert "PERSON" in skill.entity_types
+366:         assert "ORG" in skill.entity_types
+367:         assert "WORKS_FOR" in skill.relationship_types
+368: 
+369: 
+370: class TestExpertiseLoader:
+371:     """Tests for ExpertiseLoader."""
+372: 
+373:     def test_get_default_loader(self) -> None:
+374:         """Test getting the default loader singleton."""
+375:         loader1 = get_default_loader()
+376:         loader2 = get_default_loader()
+377:         assert loader1 is loader2
+378: 
+379:     def test_load_builtin_general(self) -> None:
+380:         """Test loading built-in general expertise."""
+381:         loader = ExpertiseLoader()
+382:         config = loader.load_builtin("general")
+383: 
+384:         assert config.name == "general"
+385:         assert len(config.entity_types) > 0
+386:         assert len(config.relationship_types) > 0
+387: 
+388:         # Check for expected entity types
+389:         entity_names = [e.name for e in config.entity_types]
+390:         assert "PERSON" in entity_names
+391:         assert "ORGANIZATION" in entity_names
+392: 
+393:     def test_load_source_builtin_prefix(self) -> None:
+394:         """Test loading with builtin: prefix."""
+395:         loader = ExpertiseLoader()
+396:         config = loader.load_source("builtin:general")
+397:         assert config.name == "general"
+398: 
+399:     def test_load_file(self) -> None:
+400:         """Test loading from YAML file."""
+401:         loader = ExpertiseLoader()
+402:         config = loader.load_file("examples/config/expertise/saas_expert.yaml")
+403: 
+404:         assert config.name == "saas_expert"
+405:         assert config.version == "1.0.0"
+406:         assert len(config.entity_types) > 20  # SaaS has many entity types
+407:         assert len(config.correlation_rules) > 0
+408:         assert len(config.inference_rules) > 0
+409: 
+410:     def test_load_source_file_prefix(self) -> None:
+411:         """Test loading with file: prefix."""
+412:         loader = ExpertiseLoader()
+413:         config = loader.load_source("file:examples/config/expertise/technical_docs.yaml")
+414:         assert config.name == "technical_docs"
+415: 
+416:     def test_load_source_direct_path(self) -> None:
+417:         """Test loading with direct file path."""
+418:         loader = ExpertiseLoader()
+419:         config = loader.load_source("examples/config/expertise/business_intel.yaml")
+420:         assert config.name == "business_intel"
+421: 
+422:     def test_cache_behavior(self) -> None:
+423:         """Test that caching works correctly."""
+424:         loader = ExpertiseLoader()
+425: 
+426:         # First load
+427:         config1 = loader.load_builtin("general", use_cache=True)
+428: 
+429:         # Second load should return cached
+430:         config2 = loader.load_builtin("general", use_cache=True)
+431:         assert config1 is config2
+432: 
+433:         # Clear cache and reload
+434:         loader.clear_cache()
+435:         config3 = loader.load_builtin("general", use_cache=True)
+436:         assert config3 is not config1
+437: 
+438:     def test_load_nonexistent_file(self) -> None:
+439:         """Test loading nonexistent file raises error."""
+440:         from khora.extraction.skills.loader import ExpertiseLoadError
+441: 
+442:         loader = ExpertiseLoader()
+443:         with pytest.raises(ExpertiseLoadError):
+444:             loader.load_file("/nonexistent/path.yaml")
+445: 
+446:     def test_load_nonexistent_builtin(self) -> None:
+447:         """Test loading nonexistent builtin raises error."""
+448:         from khora.extraction.skills.loader import ExpertiseLoadError
+449: 
+450:         loader = ExpertiseLoader()
+451:         with pytest.raises(ExpertiseLoadError):
+452:             loader.load_builtin("nonexistent_builtin_xyz")
+453: 
+454:     def test_load_merged(self) -> None:
+455:         """Test merging multiple expertise configs."""
+456:         loader = ExpertiseLoader()
+457:         merged = loader.load_merged(
+458:             [
+459:                 "builtin:general",
+460:                 "file:examples/config/expertise/technical_docs.yaml",
+461:             ]
+462:         )
+463: 
+464:         # Should have entity types from both
+465:         entity_names = [e.name for e in merged.entity_types]
+466:         assert "PERSON" in entity_names  # from general
+467:         assert "API" in entity_names  # from technical_docs
+468: 
+469:     def test_resolve_extends(self) -> None:
+470:         """Test resolving extends inheritance."""
+471:         loader = ExpertiseLoader()
+472: 
+473:         child = ExpertiseConfig(
+474:             name="child",
+475:             extends=["builtin:general"],
+476:             entity_types=[
+477:                 EntityTypeConfig(name="CUSTOM", description="Custom type"),
+478:             ],
+479:         )
+480: 
+481:         resolved = loader.resolve_extends(child)
+482: 
+483:         # Should have entities from both parent and child
+484:         entity_names = [e.name for e in resolved.entity_types]
+485:         assert "PERSON" in entity_names  # from parent
+486:         assert "CUSTOM" in entity_names  # from child
+````
+
 ## File: tests/__init__.py
 ````python
 1: """Tests for Khora."""
@@ -13945,149 +15007,6 @@ README.md
 41:     # Expertise
 42:     "ExpertiseStore",
 43: ]
-````
-
-## File: src/khora/api/routes/status.py
-````python
- 1: """Status endpoints for Khora API."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: router = APIRouter()
-11: 
-12: 
-13: @router.get("/status")
-14: async def status_check(request: Request) -> dict[str, Any]:
-15:     """Basic status check endpoint.
-16: 
-17:     Returns:
-18:         Status with timestamp and version
-19:     """
-20:     return {
-21:         "status": "ok",
-22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.4",
-24:         "service": "khora",
-25:     }
-26: 
-27: 
-28: @router.get("/health")
-29: async def health_check(request: Request) -> dict[str, Any]:
-30:     """Health check endpoint for orchestration systems.
-31: 
-32:     Returns:
-33:         Health status with timestamp
-34:     """
-35:     return {
-36:         "status": "healthy",
-37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.4",
-39:     }
-40: 
-41: 
-42: @router.get("/health/ready")
-43: async def readiness_check(request: Request) -> dict[str, Any]:
-44:     """Readiness check for Kubernetes/orchestration.
-45: 
-46:     Checks that all required services are available.
-47: 
-48:     Returns:
-49:         Readiness status with component checks
-50:     """
-51:     config = request.app.state.config
-52:     checks: dict[str, bool] = {}
-53: 
-54:     # TODO: Add actual health checks for:
-55:     # - Database connections
-56:     # - External services
-57: 
-58:     # For now, return basic status
-59:     checks["config_loaded"] = config is not None
-60: 
-61:     all_healthy = all(checks.values())
-62: 
-63:     return {
-64:         "status": "ready" if all_healthy else "not_ready",
-65:         "timestamp": datetime.now(UTC).isoformat(),
-66:         "checks": checks,
-67:     }
-68: 
-69: 
-70: @router.get("/health/live")
-71: async def liveness_check() -> dict[str, Any]:
-72:     """Liveness check for Kubernetes/orchestration.
-73: 
-74:     Simple check that the application is running.
-75: 
-76:     Returns:
-77:         Liveness status
-78:     """
-79:     return {
-80:         "status": "alive",
-81:         "timestamp": datetime.now(UTC).isoformat(),
-82:     }
-````
-
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.0.4")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/config/__init__.py
@@ -17279,91 +18198,6 @@ README.md
 630:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
-## File: tests/unit/test_api.py
-````python
- 1: """Tests for API module."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
- 7: 
- 8: 
- 9: @pytest.mark.unit
-10: class TestStatusEndpoints:
-11:     """Tests for status check endpoints."""
-12: 
-13:     def test_status_check(self, test_client: TestClient) -> None:
-14:         """Test basic status check endpoint."""
-15:         response = test_client.get("/status")
-16: 
-17:         assert response.status_code == 200
-18:         data = response.json()
-19:         assert data["status"] == "ok"
-20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.4"
-22:         assert data["service"] == "khora"
-23: 
-24:     def test_health_check(self, test_client: TestClient) -> None:
-25:         """Test health check endpoint."""
-26:         response = test_client.get("/health")
-27: 
-28:         assert response.status_code == 200
-29:         data = response.json()
-30:         assert data["status"] == "healthy"
-31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.4"
-33: 
-34:     def test_readiness_check(self, test_client: TestClient) -> None:
-35:         """Test readiness check endpoint."""
-36:         response = test_client.get("/health/ready")
-37: 
-38:         assert response.status_code == 200
-39:         data = response.json()
-40:         assert data["status"] in ["ready", "not_ready"]
-41:         assert "timestamp" in data
-42:         assert "checks" in data
-43: 
-44:     def test_liveness_check(self, test_client: TestClient) -> None:
-45:         """Test liveness check endpoint."""
-46:         response = test_client.get("/health/live")
-47: 
-48:         assert response.status_code == 200
-49:         data = response.json()
-50:         assert data["status"] == "alive"
-51:         assert "timestamp" in data
-52: 
-53: 
-54: @pytest.mark.unit
-55: class TestConfig:
-56:     """Tests for configuration."""
-57: 
-58:     def test_default_config(self) -> None:
-59:         """Test default configuration values."""
-60:         from khora.config import KhoraConfig
-61: 
-62:         config = KhoraConfig()
-63:         assert config.app_name == "khora"
-64:         assert config.environment == "development"
-65:         assert config.debug is False
-66:         assert config.api_host == "127.0.0.1"
-67:         assert config.api_port == 8000
-68:         assert config.auth_enabled is True
-69: 
-70:     def test_config_from_env(self, monkeypatch) -> None:
-71:         """Test configuration from environment variables."""
-72:         from khora.config import KhoraConfig
-73: 
-74:         monkeypatch.setenv("KHORA_DEBUG", "true")
-75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-77: 
-78:         config = KhoraConfig()
-79:         assert config.debug is True
-80:         assert config.api_port == 9000
-81:         assert config.environment == "staging"
-````
-
 ## File: CLAUDE.md
 ````markdown
   1: # Khora - Development Guide
@@ -17559,147 +18393,147 @@ README.md
 191: - `GET /health/live` - Liveness probe
 ````
 
-## File: src/khora/api/app.py
+## File: src/khora/api/routes/status.py
 ````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     await close_db()
- 86: 
- 87: 
- 88: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 89:     """Create and configure the FastAPI application.
- 90: 
- 91:     Args:
- 92:         config: Optional application configuration
- 93: 
- 94:     Returns:
- 95:         Configured FastAPI application
- 96:     """
- 97:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
- 98:     from ..logging_config import setup_logging
- 99: 
-100:     setup_logging(level="INFO")
-101: 
-102:     if config is None:
-103:         from ..config import load_config
-104: 
-105:         config = load_config()
-106: 
-107:     app = FastAPI(
-108:         title="Khora",
-109:         description="Deyta's memory lake and materialization of knowledge",
-110:         version="0.0.4",
-111:         lifespan=lifespan,
-112:         debug=config.debug,
-113:     )
-114: 
-115:     # Store config in app state
-116:     app.state.config = config
-117: 
-118:     # Configure CORS
-119:     app.add_middleware(
-120:         CORSMiddleware,
-121:         allow_origins=["*"] if config.debug else [],
-122:         allow_credentials=True,
-123:         allow_methods=["*"],
-124:         allow_headers=["*"],
-125:     )
-126: 
-127:     # Add request logging
-128:     app.add_middleware(LoggingMiddleware)
-129: 
-130:     # Register routes
-131:     # Status endpoint is public (no auth)
-132:     app.include_router(status.router, tags=["status"])
-133: 
-134:     # Memory Lake API routes
-135:     app.include_router(memory.router)
-136:     app.include_router(namespaces.router)
-137:     app.include_router(sync.router)
-138: 
-139:     return app
+ 1: """Status endpoints for Khora API."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
+ 7: 
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: router = APIRouter()
+11: 
+12: 
+13: @router.get("/status")
+14: async def status_check(request: Request) -> dict[str, Any]:
+15:     """Basic status check endpoint.
+16: 
+17:     Returns:
+18:         Status with timestamp and version
+19:     """
+20:     return {
+21:         "status": "ok",
+22:         "timestamp": datetime.now(UTC).isoformat(),
+23:         "version": "0.0.4",
+24:         "service": "khora",
+25:     }
+26: 
+27: 
+28: @router.get("/health")
+29: async def health_check(request: Request) -> dict[str, Any]:
+30:     """Health check endpoint for orchestration systems.
+31: 
+32:     Returns:
+33:         Health status with timestamp
+34:     """
+35:     return {
+36:         "status": "healthy",
+37:         "timestamp": datetime.now(UTC).isoformat(),
+38:         "version": "0.0.4",
+39:     }
+40: 
+41: 
+42: @router.get("/health/ready")
+43: async def readiness_check(request: Request) -> dict[str, Any]:
+44:     """Readiness check for Kubernetes/orchestration.
+45: 
+46:     Checks that all required services are available.
+47: 
+48:     Returns:
+49:         Readiness status with component checks
+50:     """
+51:     config = request.app.state.config
+52:     checks: dict[str, bool] = {}
+53: 
+54:     # TODO: Add actual health checks for:
+55:     # - Database connections
+56:     # - External services
+57: 
+58:     # For now, return basic status
+59:     checks["config_loaded"] = config is not None
+60: 
+61:     all_healthy = all(checks.values())
+62: 
+63:     return {
+64:         "status": "ready" if all_healthy else "not_ready",
+65:         "timestamp": datetime.now(UTC).isoformat(),
+66:         "checks": checks,
+67:     }
+68: 
+69: 
+70: @router.get("/health/live")
+71: async def liveness_check() -> dict[str, Any]:
+72:     """Liveness check for Kubernetes/orchestration.
+73: 
+74:     Simple check that the application is running.
+75: 
+76:     Returns:
+77:         Liveness status
+78:     """
+79:     return {
+80:         "status": "alive",
+81:         "timestamp": datetime.now(UTC).isoformat(),
+82:     }
+````
+
+## File: src/khora/cli/__init__.py
+````python
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.0.4")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/config/schema.py
@@ -19260,36 +20094,89 @@ README.md
 838:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
-## File: src/khora/__init__.py
+## File: tests/unit/test_api.py
 ````python
- 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 1: """Tests for API module."""
  2: 
- 3: Khora provides a unified interface for:
- 4: - Storing and retrieving knowledge artifacts
- 5: - Materializing data transformations
- 6: - Building memory graphs and relationships
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
  7: 
- 8: Example usage:
- 9:     from khora import MemoryLake
-10: 
-11:     async with MemoryLake() as lake:
-12:         await lake.remember("Important information to store")
-13:         results = await lake.recall("query about information")
-14: """
-15: 
-16: from .cli import main
-17: from .memory_lake import MemoryLake, RecallResult, RememberResult
-18: from .query import SearchMode
-19: 
-20: __version__ = "0.0.4"
-21: 
-22: __all__ = [
-23:     "main",
-24:     "MemoryLake",
-25:     "RememberResult",
-26:     "RecallResult",
-27:     "SearchMode",
-28: ]
+ 8: 
+ 9: @pytest.mark.unit
+10: class TestStatusEndpoints:
+11:     """Tests for status check endpoints."""
+12: 
+13:     def test_status_check(self, test_client: TestClient) -> None:
+14:         """Test basic status check endpoint."""
+15:         response = test_client.get("/status")
+16: 
+17:         assert response.status_code == 200
+18:         data = response.json()
+19:         assert data["status"] == "ok"
+20:         assert "timestamp" in data
+21:         assert data["version"] == "0.0.4"
+22:         assert data["service"] == "khora"
+23: 
+24:     def test_health_check(self, test_client: TestClient) -> None:
+25:         """Test health check endpoint."""
+26:         response = test_client.get("/health")
+27: 
+28:         assert response.status_code == 200
+29:         data = response.json()
+30:         assert data["status"] == "healthy"
+31:         assert "timestamp" in data
+32:         assert data["version"] == "0.0.4"
+33: 
+34:     def test_readiness_check(self, test_client: TestClient) -> None:
+35:         """Test readiness check endpoint."""
+36:         response = test_client.get("/health/ready")
+37: 
+38:         assert response.status_code == 200
+39:         data = response.json()
+40:         assert data["status"] in ["ready", "not_ready"]
+41:         assert "timestamp" in data
+42:         assert "checks" in data
+43: 
+44:     def test_liveness_check(self, test_client: TestClient) -> None:
+45:         """Test liveness check endpoint."""
+46:         response = test_client.get("/health/live")
+47: 
+48:         assert response.status_code == 200
+49:         data = response.json()
+50:         assert data["status"] == "alive"
+51:         assert "timestamp" in data
+52: 
+53: 
+54: @pytest.mark.unit
+55: class TestConfig:
+56:     """Tests for configuration."""
+57: 
+58:     def test_default_config(self) -> None:
+59:         """Test default configuration values."""
+60:         from khora.config import KhoraConfig
+61: 
+62:         config = KhoraConfig()
+63:         assert config.app_name == "khora"
+64:         assert config.environment == "development"
+65:         assert config.debug is False
+66:         assert config.api_host == "127.0.0.1"
+67:         assert config.api_port == 8000
+68:         assert config.auth_enabled is True
+69: 
+70:     def test_config_from_env(self, monkeypatch) -> None:
+71:         """Test configuration from environment variables."""
+72:         from khora.config import KhoraConfig
+73: 
+74:         monkeypatch.setenv("KHORA_DEBUG", "true")
+75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+77: 
+78:         config = KhoraConfig()
+79:         assert config.debug is True
+80:         assert config.api_port == 9000
+81:         assert config.environment == "staging"
 ````
 
 ## File: README.md
@@ -19872,139 +20759,179 @@ README.md
 576: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
-## File: pyproject.toml
-````toml
-  1: [project]
-  2: name = "khora"
-  3: version = "0.0.4"
-  4: description = "Khora is Memory Lake"
-  5: readme = "README.md"
-  6: authors = [
-  7:     { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
-  8: ]
-  9: requires-python = ">=3.13"
- 10: dependencies = [
- 11:     # Configuration
- 12:     "pydantic-settings>=2.12.0",
- 13:     "pyyaml>=6.0.3",
- 14:     # FastAPI service
- 15:     "fastapi>=0.128.0",
- 16:     "uvicorn[standard]>=0.40.0",
- 17:     "httpx>=0.28.1",
- 18:     # CLI
- 19:     "click>=8.3.0",
- 20:     # Async support
- 21:     "asyncpg>=0.31.0",
- 22:     # Database
- 23:     "sqlalchemy[asyncio]>=2.0.46",
- 24:     "alembic>=1.18.0",
- 25:     # Terminal UI
- 26:     "rich>=14.0.0",
- 27:     "loguru>=0.7.3",
- 28:     # LLM Access (unified interface)
- 29:     "litellm>=1.81.0",
- 30:     # Graph database
- 31:     "neo4j>=6.1.0",
- 32:     # Vector database
- 33:     "pgvector>=0.4.2",
- 34:     # Pipeline orchestration
- 35:     "prefect>=3.6.13",
- 36:     # Token counting
- 37:     "tiktoken>=0.12.0",
- 38: ]
- 39: 
- 40: [project.optional-dependencies]
- 41: dev = [
- 42:     "pytest>=9.0.2",
- 43:     "pytest-cov>=7.0.0",
- 44:     "pytest-mock>=3.15.0",
- 45:     "pytest-asyncio>=1.3.0",
- 46:     "coverage>=7.13.2",
- 47:     "black>=26.0.0",
- 48:     "ruff>=0.14.14",
- 49:     "isort>=7.0.0",
- 50:     "prek>=0.3.0",
- 51:     "faker>=40.0.0",
- 52: ]
- 53: # Data storage backends
- 54: postgres = [
- 55:     "asyncpg>=0.31.0",
- 56:     "pgvector>=0.4.2",
- 57: ]
- 58: 
- 59: [project.scripts]
- 60: khora = "khora:main"
- 61: 
- 62: [build-system]
- 63: requires = ["uv_build>=0.8.17,<0.9.0"]
- 64: build-backend = "uv_build"
- 65: 
- 66: [tool.pytest.ini_options]
- 67: testpaths = ["tests"]
- 68: python_files = ["test_*.py"]
- 69: python_classes = ["Test*"]
- 70: python_functions = ["test_*"]
- 71: addopts = [
- 72:     "--strict-markers",
- 73:     "--strict-config",
- 74:     "--cov=khora",
- 75:     "--cov-branch",
- 76:     "--cov-report=term-missing",
- 77:     "--cov-fail-under=30",
- 78: ]
- 79: markers = [
- 80:     "unit: Unit tests",
- 81:     "integration: Integration tests",
- 82:     "e2e: End-to-end tests",
- 83: ]
- 84: asyncio_mode = "auto"
- 85: 
- 86: [tool.coverage.run]
- 87: source = ["src"]
- 88: omit = [
- 89:     "tests/*",
- 90:     "*/test_*.py",
- 91:     "*/__pycache__/*",
- 92: ]
+## File: src/khora/api/app.py
+````python
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     await close_db()
+ 86: 
+ 87: 
+ 88: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 89:     """Create and configure the FastAPI application.
+ 90: 
+ 91:     Args:
+ 92:         config: Optional application configuration
  93: 
- 94: [tool.coverage.report]
- 95: exclude_lines = [
- 96:     "pragma: no cover",
- 97:     "def __repr__",
- 98:     "raise AssertionError",
- 99:     "raise NotImplementedError",
-100:     "if __name__ == .__main__.:",
-101:     "if TYPE_CHECKING:",
-102: ]
-103: 
-104: [tool.black]
-105: target-version = ["py313"]
-106: line-length = 120
-107: 
-108: [tool.isort]
-109: profile = "black"
-110: line_length = 120
-111: known_first_party = ["khora"]
-112: skip_gitignore = true
-113: 
-114: [tool.ruff]
-115: target-version = "py313"
-116: line-length = 120
+ 94:     Returns:
+ 95:         Configured FastAPI application
+ 96:     """
+ 97:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+ 98:     from ..logging_config import setup_logging
+ 99: 
+100:     setup_logging(level="INFO")
+101: 
+102:     if config is None:
+103:         from ..config import load_config
+104: 
+105:         config = load_config()
+106: 
+107:     app = FastAPI(
+108:         title="Khora",
+109:         description="Deyta's memory lake and materialization of knowledge",
+110:         version="0.0.4",
+111:         lifespan=lifespan,
+112:         debug=config.debug,
+113:     )
+114: 
+115:     # Store config in app state
+116:     app.state.config = config
 117: 
-118: [tool.ruff.lint]
-119: select = ["E", "F", "W"]
-120: ignore = ["E501"]  # Line too long - handled by black
-121: 
-122: [dependency-groups]
-123: dev = [
-124:     "prek>=0.3.0",
-125:     "pytest>=9.0.2",
-126:     "pytest-asyncio>=1.3.0",
-127:     "pytest-cov>=7.0.0",
-128:     "black>=26.0.0",
-129:     "ruff>=0.14.14",
-130:     "isort>=7.0.0",
-131: ]
+118:     # Configure CORS
+119:     app.add_middleware(
+120:         CORSMiddleware,
+121:         allow_origins=["*"] if config.debug else [],
+122:         allow_credentials=True,
+123:         allow_methods=["*"],
+124:         allow_headers=["*"],
+125:     )
+126: 
+127:     # Add request logging
+128:     app.add_middleware(LoggingMiddleware)
+129: 
+130:     # Register routes
+131:     # Status endpoint is public (no auth)
+132:     app.include_router(status.router, tags=["status"])
+133: 
+134:     # Memory Lake API routes
+135:     app.include_router(memory.router)
+136:     app.include_router(namespaces.router)
+137:     app.include_router(sync.router)
+138: 
+139:     return app
+````
+
+## File: src/khora/__init__.py
+````python
+ 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 2: 
+ 3: Khora provides a unified interface for:
+ 4: - Storing and retrieving knowledge artifacts
+ 5: - Materializing data transformations
+ 6: - Building memory graphs and relationships
+ 7: 
+ 8: Example usage:
+ 9:     from khora import MemoryLake
+10: 
+11:     async with MemoryLake() as lake:
+12:         await lake.remember("Important information to store")
+13:         results = await lake.recall("query about information")
+14: """
+15: 
+16: from .cli import main
+17: from .memory_lake import MemoryLake, RecallResult, RememberResult
+18: from .query import SearchMode
+19: 
+20: __version__ = "0.0.4"
+21: 
+22: __all__ = [
+23:     "main",
+24:     "MemoryLake",
+25:     "RememberResult",
+26:     "RecallResult",
+27:     "SearchMode",
+28: ]
 ````
 
 ## File: src/khora/pipelines/flows/ingest.py
@@ -22196,9 +23123,159 @@ README.md
 578:         await lake.disconnect()
 ````
 
+## File: pyproject.toml
+````toml
+  1: [project]
+  2: name = "khora"
+  3: version = "0.0.4"
+  4: description = "Khora is Memory Lake"
+  5: readme = "README.md"
+  6: authors = [
+  7:     { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" }
+  8: ]
+  9: requires-python = ">=3.13"
+ 10: dependencies = [
+ 11:     # Configuration
+ 12:     "pydantic-settings>=2.12.0",
+ 13:     "pyyaml>=6.0.3",
+ 14:     # FastAPI service
+ 15:     "fastapi>=0.128.0",
+ 16:     "uvicorn[standard]>=0.40.0",
+ 17:     "httpx>=0.28.1",
+ 18:     # CLI
+ 19:     "click>=8.3.0",
+ 20:     # Async support
+ 21:     "asyncpg>=0.31.0",
+ 22:     # Database
+ 23:     "sqlalchemy[asyncio]>=2.0.46",
+ 24:     "alembic>=1.18.0",
+ 25:     # Terminal UI
+ 26:     "rich>=14.0.0",
+ 27:     "loguru>=0.7.3",
+ 28:     # LLM Access (unified interface)
+ 29:     "litellm>=1.81.0",
+ 30:     # Graph database
+ 31:     "neo4j>=6.1.0",
+ 32:     # Vector database
+ 33:     "pgvector>=0.4.2",
+ 34:     # Pipeline orchestration
+ 35:     "prefect>=3.6.13",
+ 36:     # Token counting
+ 37:     "tiktoken>=0.12.0",
+ 38: ]
+ 39: 
+ 40: [project.optional-dependencies]
+ 41: dev = [
+ 42:     "pytest>=9.0.2",
+ 43:     "pytest-cov>=7.0.0",
+ 44:     "pytest-mock>=3.15.0",
+ 45:     "pytest-asyncio>=1.3.0",
+ 46:     "coverage>=7.13.2",
+ 47:     "black>=26.0.0",
+ 48:     "ruff>=0.14.14",
+ 49:     "isort>=7.0.0",
+ 50:     "prek>=0.3.0",
+ 51:     "faker>=40.0.0",
+ 52: ]
+ 53: # Data storage backends
+ 54: postgres = [
+ 55:     "asyncpg>=0.31.0",
+ 56:     "pgvector>=0.4.2",
+ 57: ]
+ 58: 
+ 59: [project.scripts]
+ 60: khora = "khora:main"
+ 61: 
+ 62: [build-system]
+ 63: requires = ["uv_build>=0.8.17,<0.9.0"]
+ 64: build-backend = "uv_build"
+ 65: 
+ 66: [tool.pytest.ini_options]
+ 67: testpaths = ["tests"]
+ 68: python_files = ["test_*.py"]
+ 69: python_classes = ["Test*"]
+ 70: python_functions = ["test_*"]
+ 71: addopts = [
+ 72:     "--strict-markers",
+ 73:     "--strict-config",
+ 74:     "--cov=khora",
+ 75:     "--cov-branch",
+ 76:     "--cov-report=term-missing",
+ 77:     "--cov-fail-under=30",
+ 78: ]
+ 79: markers = [
+ 80:     "unit: Unit tests",
+ 81:     "integration: Integration tests",
+ 82:     "e2e: End-to-end tests",
+ 83: ]
+ 84: asyncio_mode = "auto"
+ 85: 
+ 86: [tool.coverage.run]
+ 87: source = ["src"]
+ 88: omit = [
+ 89:     "tests/*",
+ 90:     "*/test_*.py",
+ 91:     "*/__pycache__/*",
+ 92: ]
+ 93: 
+ 94: [tool.coverage.report]
+ 95: exclude_lines = [
+ 96:     "pragma: no cover",
+ 97:     "def __repr__",
+ 98:     "raise AssertionError",
+ 99:     "raise NotImplementedError",
+100:     "if __name__ == .__main__.:",
+101:     "if TYPE_CHECKING:",
+102: ]
+103: 
+104: [tool.black]
+105: target-version = ["py313"]
+106: line-length = 120
+107: 
+108: [tool.isort]
+109: profile = "black"
+110: line_length = 120
+111: known_first_party = ["khora"]
+112: skip_gitignore = true
+113: 
+114: [tool.ruff]
+115: target-version = "py313"
+116: line-length = 120
+117: 
+118: [tool.ruff.lint]
+119: select = ["E", "F", "W"]
+120: ignore = ["E501"]  # Line too long - handled by black
+121: 
+122: [dependency-groups]
+123: dev = [
+124:     "prek>=0.3.0",
+125:     "pytest>=9.0.2",
+126:     "pytest-asyncio>=1.3.0",
+127:     "pytest-cov>=7.0.0",
+128:     "black>=26.0.0",
+129:     "ruff>=0.14.14",
+130:     "isort>=7.0.0",
+131: ]
+````
+
 
 
 # Git Logs
+
+## Commit: 2026-01-27 08:53:43 +0100
+**Message:** Add unit tests for expertise system and bump version to 0.0.4
+
+**Files:**
+- REPOMIX.md
+- pyproject.toml
+- src/khora/__init__.py
+- src/khora/api/app.py
+- src/khora/api/routes/status.py
+- src/khora/cli/__init__.py
+- tests/unit/test_api.py
+- tests/unit/test_expansion.py
+- tests/unit/test_expertise.py
+- uv.lock
 
 ## Commit: 2026-01-27 08:39:53 +0100
 **Message:** feat: add inference_mode support (batch/incremental/none)
@@ -22514,11 +23591,3 @@ README.md
 - compose.full.yaml
 - compose.yaml
 - docker/postgres/init/01_init.sql
-
-## Commit: 2026-01-25 23:00:56 +0100
-**Message:** Add Dockerfile and Fly.io configuration
-
-**Files:**
-- Dockerfile
-- docker-entrypoint.sh
-- fly.toml
