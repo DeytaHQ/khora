@@ -15014,184 +15014,6 @@ README.md
 533:         )
 ````
 
-## File: src/khora/pipelines/tasks/extract.py
-````python
-  1: """Entity extraction task."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from typing import TYPE_CHECKING, Any
-  6: 
-  7: from prefect import task
-  8: 
-  9: if TYPE_CHECKING:
- 10:     from khora.core.models import Chunk, Entity, Relationship
- 11:     from khora.extraction.skills import ExpertiseConfig
- 12: 
- 13: 
- 14: @task(name="extract_entities", retries=2, retry_delay_seconds=10)
- 15: async def extract_entities(
- 16:     chunks: list[Chunk],
- 17:     *,
- 18:     skill_name: str = "general_entities",
- 19:     expertise: ExpertiseConfig | str | None = None,
- 20:     model: str = "gpt-4o-mini",
- 21:     max_concurrent: int = 10,
- 22:     context: dict[str, Any] | None = None,
- 23: ) -> tuple[list[Entity], list[Relationship]]:
- 24:     """Extract entities and relationships from chunks.
- 25: 
- 26:     Uses batch extraction for parallel processing of multiple chunks.
- 27:     Supports both legacy skills and new expertise configurations.
- 28: 
- 29:     Args:
- 30:         chunks: Chunks to extract from
- 31:         skill_name: Extraction skill to use (legacy, ignored if expertise provided)
- 32:         expertise: ExpertiseConfig, expertise name string, or file path
- 33:         model: LLM model for extraction
- 34:         max_concurrent: Maximum concurrent extractions
- 35:         context: Optional context dict for prompt template rendering
- 36: 
- 37:     Returns:
- 38:         Tuple of (entities, relationships)
- 39:     """
- 40:     from khora.core.models import Entity, Relationship
- 41:     from khora.core.models.entity import EntityType, RelationshipType
- 42:     from khora.extraction.extractors import LLMEntityExtractor
- 43:     from khora.extraction.skills import ExpertiseConfig
- 44:     from khora.extraction.skills.registry import get_default_registry
- 45: 
- 46:     if not chunks:
- 47:         return [], []
- 48: 
- 49:     # Resolve expertise configuration
- 50:     resolved_expertise: ExpertiseConfig | None = None
- 51:     if expertise is not None:
- 52:         if isinstance(expertise, ExpertiseConfig):
- 53:             resolved_expertise = expertise
- 54:         elif isinstance(expertise, str):
- 55:             # Load from string (file path or builtin name)
- 56:             from khora.extraction.skills import load_expertise
- 57: 
- 58:             try:
- 59:                 resolved_expertise = load_expertise(expertise)
- 60:             except Exception:
- 61:                 # Fall back to registry lookup
- 62:                 registry = get_default_registry()
- 63:                 resolved_expertise = registry.get_expertise(expertise)
- 64: 
- 65:     # Get legacy skill for backward compatibility
- 66:     registry = get_default_registry()
- 67:     skill = registry.get_or_default(skill_name)
- 68: 
- 69:     # If expertise provided, use its confidence thresholds
- 70:     if resolved_expertise:
- 71:         min_entity_confidence = resolved_expertise.confidence.min_entity
- 72:         min_relationship_confidence = resolved_expertise.confidence.min_relationship
- 73:     else:
- 74:         min_entity_confidence = skill.min_entity_confidence
- 75:         min_relationship_confidence = skill.min_relationship_confidence
- 76: 
- 77:     # Create extractor with concurrency limit
- 78:     extractor = LLMEntityExtractor(model=model, max_concurrent=max_concurrent)
- 79: 
- 80:     # Extract from all chunks in parallel using batch extraction
- 81:     texts = [chunk.content for chunk in chunks]
- 82: 
- 83:     if resolved_expertise:
- 84:         # Use expertise-based extraction
- 85:         results = await extractor.extract_batch(
- 86:             texts,
- 87:             expertise=resolved_expertise,
- 88:             context=context,
- 89:         )
- 90:     else:
- 91:         # Use legacy skill-based extraction
- 92:         results = await extractor.extract_batch(texts, entity_types=skill.entity_types)
- 93: 
- 94:     # Process results
- 95:     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
- 96:     all_relationships: list[Relationship] = []
- 97: 
- 98:     for chunk, result in zip(chunks, results):
- 99:         # Process entities
-100:         for extracted in result.entities:
-101:             if extracted.confidence < min_entity_confidence:
-102:                 continue
-103: 
-104:             # Deduplicate by name
-105:             key = f"{extracted.name}:{extracted.entity_type}"
-106:             if key in all_entities:
-107:                 # Merge into existing
-108:                 existing = all_entities[key]
-109:                 existing.mention_count += 1
-110:                 if chunk.document_id not in existing.source_document_ids:
-111:                     existing.source_document_ids.append(chunk.document_id)
-112:                 if chunk.id not in existing.source_chunk_ids:
-113:                     existing.source_chunk_ids.append(chunk.id)
-114:                 # Update valid_from to earliest timestamp
-115:                 if existing.valid_from and chunk.created_at < existing.valid_from:
-116:                     existing.valid_from = chunk.created_at
-117:             else:
-118:                 # Create new entity
-119:                 entity_type = EntityType.CONCEPT
-120:                 try:
-121:                     entity_type = EntityType(extracted.entity_type)
-122:                 except ValueError:
-123:                     pass
-124: 
-125:                 entity = Entity(
-126:                     namespace_id=chunk.namespace_id,
-127:                     name=extracted.name,
-128:                     entity_type=entity_type,
-129:                     description=extracted.description,
-130:                     attributes=extracted.attributes,
-131:                     source_document_ids=[chunk.document_id],
-132:                     source_chunk_ids=[chunk.id],
-133:                     confidence=extracted.confidence,
-134:                     valid_from=chunk.created_at,  # Inherit source timestamp
-135:                 )
-136:                 all_entities[key] = entity
-137: 
-138:         # Process relationships
-139:         for extracted_rel in result.relationships:
-140:             if extracted_rel.confidence < min_relationship_confidence:
-141:                 continue
-142: 
-143:             rel_type = RelationshipType.RELATES_TO
-144:             try:
-145:                 rel_type = RelationshipType(extracted_rel.relationship_type)
-146:             except ValueError:
-147:                 pass
-148: 
-149:             # Find source and target entities
-150:             source_key = next(
-151:                 (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
-152:                 None,
-153:             )
-154:             target_key = next(
-155:                 (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
-156:                 None,
-157:             )
-158: 
-159:             if source_key and target_key:
-160:                 relationship = Relationship(
-161:                     namespace_id=chunk.namespace_id,
-162:                     source_entity_id=all_entities[source_key].id,
-163:                     target_entity_id=all_entities[target_key].id,
-164:                     relationship_type=rel_type,
-165:                     description=extracted_rel.description,
-166:                     properties=extracted_rel.properties,
-167:                     source_document_ids=[chunk.document_id],
-168:                     source_chunk_ids=[chunk.id],
-169:                     confidence=extracted_rel.confidence,
-170:                     valid_from=chunk.created_at,  # Inherit source timestamp
-171:                 )
-172:                 all_relationships.append(relationship)
-173: 
-174:     return list(all_entities.values()), all_relationships
-````
-
 ## File: src/khora/query/temporal.py
 ````python
   1: """Temporal query support for Khora Memory Lake."""
@@ -18207,6 +18029,184 @@ README.md
 402:         return ExtractionResult(metadata={"raw_response": text[:500]})
 ````
 
+## File: src/khora/pipelines/tasks/extract.py
+````python
+  1: """Entity extraction task."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from typing import TYPE_CHECKING, Any
+  6: 
+  7: from prefect import task
+  8: 
+  9: if TYPE_CHECKING:
+ 10:     from khora.core.models import Chunk, Entity, Relationship
+ 11:     from khora.extraction.skills import ExpertiseConfig
+ 12: 
+ 13: 
+ 14: @task(name="extract_entities", retries=2, retry_delay_seconds=10)
+ 15: async def extract_entities(
+ 16:     chunks: list[Chunk],
+ 17:     *,
+ 18:     skill_name: str = "general_entities",
+ 19:     expertise: ExpertiseConfig | str | None = None,
+ 20:     model: str = "gpt-4o-mini",
+ 21:     max_concurrent: int = 10,
+ 22:     context: dict[str, Any] | None = None,
+ 23: ) -> tuple[list[Entity], list[Relationship]]:
+ 24:     """Extract entities and relationships from chunks.
+ 25: 
+ 26:     Uses batch extraction for parallel processing of multiple chunks.
+ 27:     Supports both legacy skills and new expertise configurations.
+ 28: 
+ 29:     Args:
+ 30:         chunks: Chunks to extract from
+ 31:         skill_name: Extraction skill to use (legacy, ignored if expertise provided)
+ 32:         expertise: ExpertiseConfig, expertise name string, or file path
+ 33:         model: LLM model for extraction
+ 34:         max_concurrent: Maximum concurrent extractions
+ 35:         context: Optional context dict for prompt template rendering
+ 36: 
+ 37:     Returns:
+ 38:         Tuple of (entities, relationships)
+ 39:     """
+ 40:     from khora.core.models import Entity, Relationship
+ 41:     from khora.core.models.entity import EntityType, RelationshipType
+ 42:     from khora.extraction.extractors import LLMEntityExtractor
+ 43:     from khora.extraction.skills import ExpertiseConfig
+ 44:     from khora.extraction.skills.registry import get_default_registry
+ 45: 
+ 46:     if not chunks:
+ 47:         return [], []
+ 48: 
+ 49:     # Resolve expertise configuration
+ 50:     resolved_expertise: ExpertiseConfig | None = None
+ 51:     if expertise is not None:
+ 52:         if isinstance(expertise, ExpertiseConfig):
+ 53:             resolved_expertise = expertise
+ 54:         elif isinstance(expertise, str):
+ 55:             # Load from string (file path or builtin name)
+ 56:             from khora.extraction.skills import load_expertise
+ 57: 
+ 58:             try:
+ 59:                 resolved_expertise = load_expertise(expertise)
+ 60:             except Exception:
+ 61:                 # Fall back to registry lookup
+ 62:                 registry = get_default_registry()
+ 63:                 resolved_expertise = registry.get_expertise(expertise)
+ 64: 
+ 65:     # Get legacy skill for backward compatibility
+ 66:     registry = get_default_registry()
+ 67:     skill = registry.get_or_default(skill_name)
+ 68: 
+ 69:     # If expertise provided, use its confidence thresholds
+ 70:     if resolved_expertise:
+ 71:         min_entity_confidence = resolved_expertise.confidence.min_entity
+ 72:         min_relationship_confidence = resolved_expertise.confidence.min_relationship
+ 73:     else:
+ 74:         min_entity_confidence = skill.min_entity_confidence
+ 75:         min_relationship_confidence = skill.min_relationship_confidence
+ 76: 
+ 77:     # Create extractor with concurrency limit
+ 78:     extractor = LLMEntityExtractor(model=model, max_concurrent=max_concurrent)
+ 79: 
+ 80:     # Extract from all chunks in parallel using batch extraction
+ 81:     texts = [chunk.content for chunk in chunks]
+ 82: 
+ 83:     if resolved_expertise:
+ 84:         # Use expertise-based extraction
+ 85:         results = await extractor.extract_batch(
+ 86:             texts,
+ 87:             expertise=resolved_expertise,
+ 88:             context=context,
+ 89:         )
+ 90:     else:
+ 91:         # Use legacy skill-based extraction
+ 92:         results = await extractor.extract_batch(texts, entity_types=skill.entity_types)
+ 93: 
+ 94:     # Process results
+ 95:     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
+ 96:     all_relationships: list[Relationship] = []
+ 97: 
+ 98:     for chunk, result in zip(chunks, results):
+ 99:         # Process entities
+100:         for extracted in result.entities:
+101:             if extracted.confidence < min_entity_confidence:
+102:                 continue
+103: 
+104:             # Deduplicate by name
+105:             key = f"{extracted.name}:{extracted.entity_type}"
+106:             if key in all_entities:
+107:                 # Merge into existing
+108:                 existing = all_entities[key]
+109:                 existing.mention_count += 1
+110:                 if chunk.document_id not in existing.source_document_ids:
+111:                     existing.source_document_ids.append(chunk.document_id)
+112:                 if chunk.id not in existing.source_chunk_ids:
+113:                     existing.source_chunk_ids.append(chunk.id)
+114:                 # Update valid_from to earliest timestamp
+115:                 if existing.valid_from and chunk.created_at < existing.valid_from:
+116:                     existing.valid_from = chunk.created_at
+117:             else:
+118:                 # Create new entity
+119:                 entity_type = EntityType.CONCEPT
+120:                 try:
+121:                     entity_type = EntityType(extracted.entity_type)
+122:                 except ValueError:
+123:                     pass
+124: 
+125:                 entity = Entity(
+126:                     namespace_id=chunk.namespace_id,
+127:                     name=extracted.name,
+128:                     entity_type=entity_type,
+129:                     description=extracted.description,
+130:                     attributes=extracted.attributes,
+131:                     source_document_ids=[chunk.document_id],
+132:                     source_chunk_ids=[chunk.id],
+133:                     confidence=extracted.confidence,
+134:                     valid_from=chunk.created_at,  # Inherit source timestamp
+135:                 )
+136:                 all_entities[key] = entity
+137: 
+138:         # Process relationships
+139:         for extracted_rel in result.relationships:
+140:             if extracted_rel.confidence < min_relationship_confidence:
+141:                 continue
+142: 
+143:             rel_type = RelationshipType.RELATES_TO
+144:             try:
+145:                 rel_type = RelationshipType(extracted_rel.relationship_type)
+146:             except ValueError:
+147:                 pass
+148: 
+149:             # Find source and target entities
+150:             source_key = next(
+151:                 (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
+152:                 None,
+153:             )
+154:             target_key = next(
+155:                 (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
+156:                 None,
+157:             )
+158: 
+159:             if source_key and target_key:
+160:                 relationship = Relationship(
+161:                     namespace_id=chunk.namespace_id,
+162:                     source_entity_id=all_entities[source_key].id,
+163:                     target_entity_id=all_entities[target_key].id,
+164:                     relationship_type=rel_type,
+165:                     description=extracted_rel.description,
+166:                     properties=extracted_rel.properties,
+167:                     source_document_ids=[chunk.document_id],
+168:                     source_chunk_ids=[chunk.id],
+169:                     confidence=extracted_rel.confidence,
+170:                     valid_from=chunk.created_at,  # Inherit source timestamp
+171:                 )
+172:                 all_relationships.append(relationship)
+173: 
+174:     return list(all_entities.values()), all_relationships
+````
+
 ## File: src/khora/storage/backends/postgresql.py
 ````python
   1: """PostgreSQL backend for relational data storage.
@@ -20077,7 +20077,7 @@ README.md
 20:     return {
 21:         "status": "ok",
 22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.6",
+23:         "version": "0.0.7",
 24:         "service": "khora",
 25:     }
 26: 
@@ -20092,7 +20092,7 @@ README.md
 35:     return {
 36:         "status": "healthy",
 37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.6",
+38:         "version": "0.0.7",
 39:     }
 40: 
 41: 
@@ -20154,7 +20154,7 @@ README.md
 11: 
 12: 
 13: @click.group()
-14: @click.version_option(version="0.0.6")
+14: @click.version_option(version="0.0.7")
 15: @click.option(
 16:     "--log-level",
 17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
@@ -22813,7 +22813,7 @@ README.md
 18:         data = response.json()
 19:         assert data["status"] == "ok"
 20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.6"
+21:         assert data["version"] == "0.0.7"
 22:         assert data["service"] == "khora"
 23: 
 24:     def test_health_check(self, test_client: TestClient) -> None:
@@ -22824,7 +22824,7 @@ README.md
 29:         data = response.json()
 30:         assert data["status"] == "healthy"
 31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.6"
+32:         assert data["version"] == "0.0.7"
 33: 
 34:     def test_readiness_check(self, test_client: TestClient) -> None:
 35:         """Test readiness check endpoint."""
@@ -22987,7 +22987,7 @@ README.md
 107:     app = FastAPI(
 108:         title="Khora",
 109:         description="Deyta's memory lake and materialization of knowledge",
-110:         version="0.0.6",
+110:         version="0.0.7",
 111:         lifespan=lifespan,
 112:         debug=config.debug,
 113:     )
@@ -23040,7 +23040,7 @@ README.md
 17: from .memory_lake import MemoryLake, RecallResult, RememberResult
 18: from .query import SearchMode
 19: 
-20: __version__ = "0.0.6"
+20: __version__ = "0.0.7"
 21: 
 22: __all__ = [
 23:     "main",
@@ -23055,7 +23055,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.0.6"
+  3: version = "0.0.7"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -23746,6 +23746,13 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-01-27 18:06:58 +0100
+**Message:** feat: set valid_from on entities/relationships from source timestamps
+
+**Files:**
+- REPOMIX.md
+- src/khora/pipelines/tasks/extract.py
+
 ## Commit: 2026-01-27 18:06:25 +0100
 **Message:** feat: inherit document timestamps in chunks
 
@@ -23996,10 +24003,3 @@ README.md
 **Files:**
 - REPOMIX.md
 - src/khora/storage/backends/pgvector.py
-
-## Commit: 2026-01-26 20:08:35 +0100
-**Message:** Fix numpy array boolean comparison in query engine
-
-**Files:**
-- REPOMIX.md
-- src/khora/query/engine.py
