@@ -21,6 +21,8 @@ from prefect.cache_policies import NO_CACHE
 from ..registry import pipeline
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from khora.core.models import Document
     from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
@@ -32,6 +34,37 @@ def compute_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
+    """Extract the original timestamp from source metadata.
+
+    Looks for common timestamp fields and parses them.
+    Priority: sent_at > created_at > timestamp > date
+    """
+    from datetime import datetime
+
+    # Common timestamp field names in order of preference
+    timestamp_fields = ["sent_at", "created_at", "timestamp", "date", "occurred_at", "started_at"]
+
+    for field in timestamp_fields:
+        if field in metadata and metadata[field]:
+            value = metadata[field]
+            try:
+                if isinstance(value, datetime):
+                    return value
+                if isinstance(value, str):
+                    # Try ISO format first
+                    if "T" in value:
+                        # Handle ISO format with or without timezone
+                        if value.endswith("Z"):
+                            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                        return datetime.fromisoformat(value)
+                    # Try date-only format
+                    return datetime.fromisoformat(value + "T00:00:00+00:00")
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
 @task(name="stage_document", cache_policy=NO_CACHE)
 async def stage_document(
     doc_input: dict[str, Any],
@@ -41,10 +74,13 @@ async def stage_document(
     """Stage a document for processing.
 
     Checks if document already exists (by checksum) and creates it if new.
+    Uses source system timestamp for created_at when available.
 
     Returns:
         Document if new or updated, None if unchanged
     """
+    from datetime import UTC, datetime
+
     from khora.core.models import Document, DocumentMetadata
 
     content = doc_input.get("content", "")
@@ -56,6 +92,9 @@ async def stage_document(
         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
         return None
 
+    # Extract custom metadata
+    custom_metadata = doc_input.get("metadata", {})
+
     # Create document
     metadata = DocumentMetadata(
         source=doc_input.get("source", ""),
@@ -66,13 +105,19 @@ async def stage_document(
         language=doc_input.get("language", "en"),
         checksum=checksum,
         size_bytes=len(content.encode("utf-8")),
-        custom=doc_input.get("metadata", {}),
+        custom=custom_metadata,
     )
+
+    # Use source timestamp if available, otherwise use current time
+    source_timestamp = _extract_source_timestamp(custom_metadata)
+    created_at = source_timestamp or datetime.now(UTC)
 
     document = Document(
         namespace_id=namespace_id,
         content=content,
         metadata=metadata,
+        created_at=created_at,
+        updated_at=created_at,  # Set updated_at to source time too
     )
 
     return await storage.create_document(document)

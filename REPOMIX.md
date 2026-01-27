@@ -23012,517 +23012,6 @@ README.md
 139:     return app
 ````
 
-## File: src/khora/pipelines/flows/ingest.py
-````python
-  1: """Two-phase ingestion flow for Khora Memory Lake.
-  2: 
-  3: Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
-  4: Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph
-  5: Phase 3 (Expansion, optional): Semantic expansion, entity unification, relationship inference
-  6: 
-  7: Supports parallel document processing with configurable concurrency.
-  8: """
-  9: 
- 10: from __future__ import annotations
- 11: 
- 12: import asyncio
- 13: import hashlib
- 14: from typing import TYPE_CHECKING, Any
- 15: from uuid import UUID
- 16: 
- 17: from loguru import logger
- 18: from prefect import flow, task
- 19: from prefect.cache_policies import NO_CACHE
- 20: 
- 21: from ..registry import pipeline
- 22: 
- 23: if TYPE_CHECKING:
- 24:     from khora.core.models import Document
- 25:     from khora.extraction.skills import ExpertiseConfig
- 26:     from khora.storage import StorageCoordinator
- 27: 
- 28: 
- 29: @task(name="compute_checksum")
- 30: def compute_checksum(content: str) -> str:
- 31:     """Compute SHA-256 checksum of content."""
- 32:     return hashlib.sha256(content.encode("utf-8")).hexdigest()
- 33: 
- 34: 
- 35: @task(name="stage_document", cache_policy=NO_CACHE)
- 36: async def stage_document(
- 37:     doc_input: dict[str, Any],
- 38:     namespace_id: UUID,
- 39:     storage: StorageCoordinator,
- 40: ) -> Document | None:
- 41:     """Stage a document for processing.
- 42: 
- 43:     Checks if document already exists (by checksum) and creates it if new.
- 44: 
- 45:     Returns:
- 46:         Document if new or updated, None if unchanged
- 47:     """
- 48:     from khora.core.models import Document, DocumentMetadata
- 49: 
- 50:     content = doc_input.get("content", "")
- 51:     checksum = compute_checksum(content)
- 52: 
- 53:     # Check for existing document - skip if any document with same checksum exists
- 54:     existing = await storage.get_document_by_checksum(namespace_id, checksum)
- 55:     if existing:
- 56:         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
- 57:         return None
- 58: 
- 59:     # Create document
- 60:     metadata = DocumentMetadata(
- 61:         source=doc_input.get("source", ""),
- 62:         source_type=doc_input.get("source_type", "manual"),
- 63:         content_type=doc_input.get("content_type", "text/plain"),
- 64:         title=doc_input.get("title", ""),
- 65:         author=doc_input.get("author", ""),
- 66:         language=doc_input.get("language", "en"),
- 67:         checksum=checksum,
- 68:         size_bytes=len(content.encode("utf-8")),
- 69:         custom=doc_input.get("metadata", {}),
- 70:     )
- 71: 
- 72:     document = Document(
- 73:         namespace_id=namespace_id,
- 74:         content=content,
- 75:         metadata=metadata,
- 76:     )
- 77: 
- 78:     return await storage.create_document(document)
- 79: 
- 80: 
- 81: @task(name="process_document", cache_policy=NO_CACHE)
- 82: async def process_document(
- 83:     document: Document,
- 84:     storage: StorageCoordinator,
- 85:     *,
- 86:     chunk_strategy: str = "semantic",
- 87:     chunk_size: int = 512,
- 88:     embedding_model: str = "text-embedding-3-small",
- 89:     extraction_model: str = "gpt-4o-mini",
- 90:     skill_name: str = "general_entities",
- 91:     expertise: ExpertiseConfig | str | None = None,
- 92:     max_concurrent_extractions: int = 10,
- 93:     enable_expansion: bool = False,
- 94:     extraction_context: dict[str, Any] | None = None,
- 95: ) -> dict[str, Any]:
- 96:     """Process a document through the enrichment pipeline.
- 97: 
- 98:     Steps:
- 99:     1. Chunk the document
-100:     2. Generate embeddings for chunks (batched)
-101:     3. Extract entities and relationships (parallel)
-102:     4. (Optional) Semantic expansion - unify entities, infer relationships
-103:     5. Store everything (batched)
-104: 
-105:     Args:
-106:         document: Document to process
-107:         storage: Storage coordinator
-108:         chunk_strategy: Chunking strategy
-109:         chunk_size: Target chunk size
-110:         embedding_model: Model for embeddings
-111:         extraction_model: Model for extraction
-112:         skill_name: Legacy skill name (ignored if expertise provided)
-113:         expertise: ExpertiseConfig, expertise name, or file path
-114:         max_concurrent_extractions: Maximum concurrent LLM extractions
-115:         enable_expansion: Whether to run semantic expansion
-116:         extraction_context: Context dict for prompt template rendering
-117:     """
-118:     from ..tasks import chunk_document, embed_chunks, extract_entities
-119: 
-120:     # Resolve expertise if needed
-121:     resolved_expertise: ExpertiseConfig | None = None
-122:     if expertise is not None:
-123:         from khora.extraction.skills import ExpertiseConfig as EC
-124:         from khora.extraction.skills import load_expertise
-125: 
-126:         if isinstance(expertise, EC):
-127:             resolved_expertise = expertise
-128:         elif isinstance(expertise, str):
-129:             try:
-130:                 resolved_expertise = load_expertise(expertise)
-131:             except Exception:
-132:                 pass
-133: 
-134:     # Check if expansion is enabled in expertise config
-135:     if resolved_expertise and resolved_expertise.expansion.enabled:
-136:         enable_expansion = True
-137: 
-138:     # Mark as processing
-139:     document.mark_processing()
-140:     await storage.update_document(document)
-141: 
-142:     try:
-143:         # Step 1: Chunk
-144:         chunks = await chunk_document(
-145:             document,
-146:             strategy=chunk_strategy,
-147:             chunk_size=chunk_size,
-148:         )
-149:         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
-150: 
-151:         # Step 2: Embed (already batched internally)
-152:         chunks = await embed_chunks(chunks, model=embedding_model)
-153:         logger.debug(f"Document {document.id}: generated embeddings")
-154: 
-155:         # Step 3: Extract entities (parallel extraction across chunks)
-156:         entities, relationships = await extract_entities(
-157:             chunks,
-158:             skill_name=skill_name,
-159:             expertise=resolved_expertise,
-160:             model=extraction_model,
-161:             max_concurrent=max_concurrent_extractions,
-162:             context=extraction_context,
-163:         )
-164:         logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
-165: 
-166:         # Step 4 (Optional): Semantic expansion
-167:         inferred_relationships = []
-168:         if enable_expansion and resolved_expertise:
-169:             from khora.extraction.expansion import SemanticExpander
-170: 
-171:             # Determine inference mode from expertise config
-172:             inference_mode = resolved_expertise.expansion.inference_mode
-173: 
-174:             # For incremental mode, fetch existing entities/relationships from storage
-175:             # to enable cross-document inference
-176:             expansion_entities = list(entities)
-177:             expansion_relationships = list(relationships)
-178: 
-179:             if inference_mode == "incremental":
-180:                 # Query existing entities and relationships from the namespace
-181:                 existing_entities = await storage.list_entities(document.namespace_id, limit=1000)
-182:                 existing_relationships = await storage.list_relationships(document.namespace_id, limit=5000)
-183: 
-184:                 # Add existing data to expansion context
-185:                 expansion_entities.extend(existing_entities)
-186:                 expansion_relationships.extend(existing_relationships)
-187: 
-188:                 logger.debug(
-189:                     f"Document {document.id}: incremental mode - added {len(existing_entities)} existing entities, "
-190:                     f"{len(existing_relationships)} existing relationships to expansion context"
-191:                 )
-192: 
-193:             # For batch mode, skip inference (only do unification on current doc)
-194:             # Inference will be run separately after all documents are processed
-195:             enable_inference = inference_mode != "batch" and inference_mode != "none"
-196: 
-197:             expander = SemanticExpander(
-198:                 expertise=resolved_expertise,
-199:                 enable_inference=enable_inference,
-200:             )
-201:             expansion_result = await expander.expand(
-202:                 entities=expansion_entities,
-203:                 relationships=expansion_relationships,
-204:                 namespace_id=document.namespace_id,
-205:             )
-206: 
-207:             # Only keep entities from current document (not the existing ones we added)
-208:             # The existing entities are already stored
-209:             if inference_mode == "incremental":
-210:                 current_entity_ids = {e.id for e in entities}
-211:                 entities = [e for e in expansion_result.entities if e.id in current_entity_ids]
-212:             else:
-213:                 entities = expansion_result.entities
-214: 
-215:             relationships = expansion_result.relationships
-216:             inferred_relationships = expansion_result.inferred_relationships
-217: 
-218:             logger.debug(
-219:                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
-220:                 f"inferred {len(inferred_relationships)} relationships (mode={inference_mode})"
-221:             )
-222: 
-223:         # Step 4: Store chunks (batched)
-224:         await storage.create_chunks_batch(chunks)
-225: 
-226:         # Step 5: Store entities with deduplication
-227:         # Process entities concurrently but with semaphore to avoid overwhelming the DB
-228:         entity_semaphore = asyncio.Semaphore(20)
-229: 
-230:         # Track mapping from original entity IDs to stored entity IDs (for dedup)
-231:         entity_id_mapping: dict[str, str] = {}
-232: 
-233:         async def store_entity(entity):
-234:             async with entity_semaphore:
-235:                 original_id = str(entity.id)
-236:                 existing = await storage.get_entity_by_name(
-237:                     document.namespace_id,
-238:                     entity.name,
-239:                     entity.entity_type.value,
-240:                 )
-241:                 if existing:
-242:                     existing.merge_with(entity)
-243:                     await storage.update_entity(existing)
-244:                     # Map original ID to existing entity's ID
-245:                     entity_id_mapping[original_id] = str(existing.id)
-246:                     return existing
-247:                 else:
-248:                     await storage.create_entity(entity)
-249:                     # ID stays the same for new entities
-250:                     entity_id_mapping[original_id] = original_id
-251:                     return entity
-252: 
-253:         await asyncio.gather(*[store_entity(e) for e in entities])
-254: 
-255:         # Step 6: Store relationships concurrently
-256:         # Update relationship entity IDs to use deduplicated entity IDs
-257:         async def store_relationship(rel):
-258:             async with entity_semaphore:
-259:                 # Remap source and target entity IDs if they were deduplicated
-260:                 source_id = str(rel.source_entity_id)
-261:                 target_id = str(rel.target_entity_id)
-262: 
-263:                 mapped_source = entity_id_mapping.get(source_id)
-264:                 mapped_target = entity_id_mapping.get(target_id)
-265: 
-266:                 # Skip if either entity wasn't found (shouldn't happen but be safe)
-267:                 if not mapped_source or not mapped_target:
-268:                     logger.debug(
-269:                         f"Skipping relationship {rel.relationship_type}: "
-270:                         f"missing entity mapping (source={source_id}, target={target_id})"
-271:                     )
-272:                     return None
-273: 
-274:                 # Update the relationship with mapped IDs
-275:                 from uuid import UUID
-276: 
-277:                 rel.source_entity_id = UUID(mapped_source)
-278:                 rel.target_entity_id = UUID(mapped_target)
-279: 
-280:                 return await storage.create_relationship(rel)
-281: 
-282:         all_relationships = relationships + inferred_relationships
-283:         if all_relationships:
-284:             results = await asyncio.gather(*[store_relationship(r) for r in all_relationships])
-285:             # Count successfully stored relationships
-286:             stored_count = sum(1 for r in results if r is not None)
-287:             if stored_count < len(all_relationships):
-288:                 logger.debug(
-289:                     f"Stored {stored_count}/{len(all_relationships)} relationships "
-290:                     f"({len(all_relationships) - stored_count} skipped due to missing entity mappings)"
-291:                 )
-292: 
-293:         # Mark as completed
-294:         document.mark_completed(len(chunks), len(entities))
-295:         await storage.update_document(document)
-296: 
-297:         return {
-298:             "document_id": str(document.id),
-299:             "chunks": len(chunks),
-300:             "entities": len(entities),
-301:             "relationships": len(relationships),
-302:             "inferred_relationships": len(inferred_relationships),
-303:         }
-304: 
-305:     except Exception as e:
-306:         document.mark_failed(str(e))
-307:         await storage.update_document(document)
-308:         raise
-309: 
-310: 
-311: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
-312: @flow(name="ingest_documents", log_prints=True)
-313: async def ingest_documents(
-314:     namespace_id: UUID,
-315:     documents: list[dict[str, Any]],
-316:     storage: StorageCoordinator | None = None,
-317:     *,
-318:     skill_name: str = "general_entities",
-319:     expertise: ExpertiseConfig | str | None = None,
-320:     chunk_strategy: str = "semantic",
-321:     chunk_size: int = 512,
-322:     embedding_model: str = "text-embedding-3-small",
-323:     extraction_model: str = "gpt-4o-mini",
-324:     max_concurrent_documents: int = 5,
-325:     max_concurrent_extractions: int = 10,
-326:     enable_expansion: bool = False,
-327:     extraction_context: dict[str, Any] | None = None,
-328:     **kwargs,
-329: ) -> dict[str, Any]:
-330:     """Two-phase document ingestion flow with parallel processing.
-331: 
-332:     Phase 1: Stage documents (checksum-based change detection)
-333:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
-334:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
-335: 
-336:     Args:
-337:         namespace_id: Target namespace
-338:         documents: List of document dicts with 'content' and optional metadata
-339:         storage: StorageCoordinator instance
-340:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
-341:         expertise: ExpertiseConfig, expertise name string, or file path
-342:         chunk_strategy: Chunking strategy
-343:         chunk_size: Target chunk size
-344:         embedding_model: Model for embeddings
-345:         extraction_model: Model for extraction
-346:         max_concurrent_documents: Maximum documents to process in parallel
-347:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
-348:         enable_expansion: Whether to run semantic expansion
-349:         extraction_context: Context dict for prompt template rendering
-350: 
-351:     Returns:
-352:         Summary of ingestion results
-353:     """
-354:     if storage is None:
-355:         raise ValueError("storage is required")
-356: 
-357:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
-358: 
-359:     # Phase 1: Stage documents (can run in parallel too)
-360:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
-361: 
-362:     async def stage_with_limit(doc_input):
-363:         async with staging_semaphore:
-364:             return await stage_document(doc_input, namespace_id, storage)
-365: 
-366:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
-367:     staged_docs = [doc for doc in staged_results if doc is not None]
-368: 
-369:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
-370: 
-371:     if not staged_docs:
-372:         return {
-373:             "total_documents": len(documents),
-374:             "processed_documents": 0,
-375:             "skipped_documents": len(documents),
-376:             "total_chunks": 0,
-377:             "total_entities": 0,
-378:             "total_relationships": 0,
-379:         }
-380: 
-381:     # Phase 2: Process staged documents in parallel with controlled concurrency
-382:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
-383: 
-384:     async def process_with_limit(doc):
-385:         async with doc_semaphore:
-386:             return await process_document(
-387:                 doc,
-388:                 storage,
-389:                 chunk_strategy=chunk_strategy,
-390:                 chunk_size=chunk_size,
-391:                 embedding_model=embedding_model,
-392:                 extraction_model=extraction_model,
-393:                 skill_name=skill_name,
-394:                 expertise=expertise,
-395:                 max_concurrent_extractions=max_concurrent_extractions,
-396:                 enable_expansion=enable_expansion,
-397:                 extraction_context=extraction_context,
-398:             )
-399: 
-400:     results = await asyncio.gather(
-401:         *[process_with_limit(doc) for doc in staged_docs],
-402:         return_exceptions=True,
-403:     )
-404: 
-405:     # Filter out exceptions and count errors
-406:     successful_results = []
-407:     error_count = 0
-408:     for result in results:
-409:         if isinstance(result, Exception):
-410:             logger.error(f"Document processing failed: {result}")
-411:             error_count += 1
-412:         else:
-413:             successful_results.append(result)
-414: 
-415:     # Aggregate results
-416:     total_chunks = sum(r["chunks"] for r in successful_results)
-417:     total_entities = sum(r["entities"] for r in successful_results)
-418:     total_relationships = sum(r["relationships"] for r in successful_results)
-419:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
-420: 
-421:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
-422: 
-423:     return {
-424:         "total_documents": len(documents),
-425:         "processed_documents": len(successful_results),
-426:         "skipped_documents": len(documents) - len(staged_docs),
-427:         "failed_documents": error_count,
-428:         "total_chunks": total_chunks,
-429:         "total_entities": total_entities,
-430:         "total_relationships": total_relationships,
-431:         "total_inferred_relationships": total_inferred,
-432:     }
-433: 
-434: 
-435: @task(name="run_batch_inference", cache_policy=NO_CACHE)
-436: async def run_batch_inference(
-437:     namespace_id: UUID,
-438:     storage: StorageCoordinator,
-439:     expertise: ExpertiseConfig,
-440:     *,
-441:     max_entities: int = 10000,
-442:     max_relationships: int = 50000,
-443: ) -> dict[str, Any]:
-444:     """Run batch inference on the entire namespace.
-445: 
-446:     This should be called after all documents are ingested when using
-447:     inference_mode="batch". It queries all entities and relationships
-448:     from the namespace and runs inference rules to create new relationships.
-449: 
-450:     Args:
-451:         namespace_id: Namespace to run inference on
-452:         storage: Storage coordinator
-453:         expertise: ExpertiseConfig with inference rules
-454:         max_entities: Maximum entities to load
-455:         max_relationships: Maximum relationships to load
-456: 
-457:     Returns:
-458:         Summary of inference results
-459:     """
-460:     from khora.extraction.expansion import SemanticExpander
-461: 
-462:     logger.info(f"Starting batch inference for namespace {namespace_id}")
-463: 
-464:     # Load all entities and relationships from storage
-465:     entities = await storage.list_entities(namespace_id, limit=max_entities)
-466:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
-467: 
-468:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
-469: 
-470:     if not entities:
-471:         return {
-472:             "entities": 0,
-473:             "relationships": 0,
-474:             "inferred_relationships": 0,
-475:         }
-476: 
-477:     # Create expander with inference enabled
-478:     expander = SemanticExpander(
-479:         expertise=expertise,
-480:         enable_unification=False,  # Entities already unified during ingestion
-481:         enable_inference=True,
-482:     )
-483: 
-484:     # Run expansion (inference only)
-485:     expansion_result = await expander.expand(
-486:         entities=entities,
-487:         relationships=relationships,
-488:         namespace_id=namespace_id,
-489:     )
-490: 
-491:     # Store inferred relationships
-492:     inferred_count = 0
-493:     if expansion_result.inferred_relationships:
-494:         for rel in expansion_result.inferred_relationships:
-495:             try:
-496:                 await storage.create_relationship(rel)
-497:                 inferred_count += 1
-498:             except Exception as e:
-499:                 logger.warning(f"Failed to store inferred relationship: {e}")
-500: 
-501:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
-502: 
-503:     return {
-504:         "entities": len(entities),
-505:         "relationships": len(relationships),
-506:         "inferred_relationships": inferred_count,
-507:     }
-````
-
 ## File: src/khora/__init__.py
 ````python
  1: """Khora - Deyta's memory lake and materialization of knowledge.
@@ -23553,6 +23042,562 @@ README.md
 26:     "RecallResult",
 27:     "SearchMode",
 28: ]
+````
+
+## File: src/khora/pipelines/flows/ingest.py
+````python
+  1: """Two-phase ingestion flow for Khora Memory Lake.
+  2: 
+  3: Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
+  4: Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph
+  5: Phase 3 (Expansion, optional): Semantic expansion, entity unification, relationship inference
+  6: 
+  7: Supports parallel document processing with configurable concurrency.
+  8: """
+  9: 
+ 10: from __future__ import annotations
+ 11: 
+ 12: import asyncio
+ 13: import hashlib
+ 14: from typing import TYPE_CHECKING, Any
+ 15: from uuid import UUID
+ 16: 
+ 17: from loguru import logger
+ 18: from prefect import flow, task
+ 19: from prefect.cache_policies import NO_CACHE
+ 20: 
+ 21: from ..registry import pipeline
+ 22: 
+ 23: if TYPE_CHECKING:
+ 24:     from datetime import datetime
+ 25: 
+ 26:     from khora.core.models import Document
+ 27:     from khora.extraction.skills import ExpertiseConfig
+ 28:     from khora.storage import StorageCoordinator
+ 29: 
+ 30: 
+ 31: @task(name="compute_checksum")
+ 32: def compute_checksum(content: str) -> str:
+ 33:     """Compute SHA-256 checksum of content."""
+ 34:     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+ 35: 
+ 36: 
+ 37: def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
+ 38:     """Extract the original timestamp from source metadata.
+ 39: 
+ 40:     Looks for common timestamp fields and parses them.
+ 41:     Priority: sent_at > created_at > timestamp > date
+ 42:     """
+ 43:     from datetime import datetime
+ 44: 
+ 45:     # Common timestamp field names in order of preference
+ 46:     timestamp_fields = ["sent_at", "created_at", "timestamp", "date", "occurred_at", "started_at"]
+ 47: 
+ 48:     for field in timestamp_fields:
+ 49:         if field in metadata and metadata[field]:
+ 50:             value = metadata[field]
+ 51:             try:
+ 52:                 if isinstance(value, datetime):
+ 53:                     return value
+ 54:                 if isinstance(value, str):
+ 55:                     # Try ISO format first
+ 56:                     if "T" in value:
+ 57:                         # Handle ISO format with or without timezone
+ 58:                         if value.endswith("Z"):
+ 59:                             return datetime.fromisoformat(value.replace("Z", "+00:00"))
+ 60:                         return datetime.fromisoformat(value)
+ 61:                     # Try date-only format
+ 62:                     return datetime.fromisoformat(value + "T00:00:00+00:00")
+ 63:             except (ValueError, TypeError):
+ 64:                 continue
+ 65:     return None
+ 66: 
+ 67: 
+ 68: @task(name="stage_document", cache_policy=NO_CACHE)
+ 69: async def stage_document(
+ 70:     doc_input: dict[str, Any],
+ 71:     namespace_id: UUID,
+ 72:     storage: StorageCoordinator,
+ 73: ) -> Document | None:
+ 74:     """Stage a document for processing.
+ 75: 
+ 76:     Checks if document already exists (by checksum) and creates it if new.
+ 77:     Uses source system timestamp for created_at when available.
+ 78: 
+ 79:     Returns:
+ 80:         Document if new or updated, None if unchanged
+ 81:     """
+ 82:     from datetime import UTC, datetime
+ 83: 
+ 84:     from khora.core.models import Document, DocumentMetadata
+ 85: 
+ 86:     content = doc_input.get("content", "")
+ 87:     checksum = compute_checksum(content)
+ 88: 
+ 89:     # Check for existing document - skip if any document with same checksum exists
+ 90:     existing = await storage.get_document_by_checksum(namespace_id, checksum)
+ 91:     if existing:
+ 92:         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
+ 93:         return None
+ 94: 
+ 95:     # Extract custom metadata
+ 96:     custom_metadata = doc_input.get("metadata", {})
+ 97: 
+ 98:     # Create document
+ 99:     metadata = DocumentMetadata(
+100:         source=doc_input.get("source", ""),
+101:         source_type=doc_input.get("source_type", "manual"),
+102:         content_type=doc_input.get("content_type", "text/plain"),
+103:         title=doc_input.get("title", ""),
+104:         author=doc_input.get("author", ""),
+105:         language=doc_input.get("language", "en"),
+106:         checksum=checksum,
+107:         size_bytes=len(content.encode("utf-8")),
+108:         custom=custom_metadata,
+109:     )
+110: 
+111:     # Use source timestamp if available, otherwise use current time
+112:     source_timestamp = _extract_source_timestamp(custom_metadata)
+113:     created_at = source_timestamp or datetime.now(UTC)
+114: 
+115:     document = Document(
+116:         namespace_id=namespace_id,
+117:         content=content,
+118:         metadata=metadata,
+119:         created_at=created_at,
+120:         updated_at=created_at,  # Set updated_at to source time too
+121:     )
+122: 
+123:     return await storage.create_document(document)
+124: 
+125: 
+126: @task(name="process_document", cache_policy=NO_CACHE)
+127: async def process_document(
+128:     document: Document,
+129:     storage: StorageCoordinator,
+130:     *,
+131:     chunk_strategy: str = "semantic",
+132:     chunk_size: int = 512,
+133:     embedding_model: str = "text-embedding-3-small",
+134:     extraction_model: str = "gpt-4o-mini",
+135:     skill_name: str = "general_entities",
+136:     expertise: ExpertiseConfig | str | None = None,
+137:     max_concurrent_extractions: int = 10,
+138:     enable_expansion: bool = False,
+139:     extraction_context: dict[str, Any] | None = None,
+140: ) -> dict[str, Any]:
+141:     """Process a document through the enrichment pipeline.
+142: 
+143:     Steps:
+144:     1. Chunk the document
+145:     2. Generate embeddings for chunks (batched)
+146:     3. Extract entities and relationships (parallel)
+147:     4. (Optional) Semantic expansion - unify entities, infer relationships
+148:     5. Store everything (batched)
+149: 
+150:     Args:
+151:         document: Document to process
+152:         storage: Storage coordinator
+153:         chunk_strategy: Chunking strategy
+154:         chunk_size: Target chunk size
+155:         embedding_model: Model for embeddings
+156:         extraction_model: Model for extraction
+157:         skill_name: Legacy skill name (ignored if expertise provided)
+158:         expertise: ExpertiseConfig, expertise name, or file path
+159:         max_concurrent_extractions: Maximum concurrent LLM extractions
+160:         enable_expansion: Whether to run semantic expansion
+161:         extraction_context: Context dict for prompt template rendering
+162:     """
+163:     from ..tasks import chunk_document, embed_chunks, extract_entities
+164: 
+165:     # Resolve expertise if needed
+166:     resolved_expertise: ExpertiseConfig | None = None
+167:     if expertise is not None:
+168:         from khora.extraction.skills import ExpertiseConfig as EC
+169:         from khora.extraction.skills import load_expertise
+170: 
+171:         if isinstance(expertise, EC):
+172:             resolved_expertise = expertise
+173:         elif isinstance(expertise, str):
+174:             try:
+175:                 resolved_expertise = load_expertise(expertise)
+176:             except Exception:
+177:                 pass
+178: 
+179:     # Check if expansion is enabled in expertise config
+180:     if resolved_expertise and resolved_expertise.expansion.enabled:
+181:         enable_expansion = True
+182: 
+183:     # Mark as processing
+184:     document.mark_processing()
+185:     await storage.update_document(document)
+186: 
+187:     try:
+188:         # Step 1: Chunk
+189:         chunks = await chunk_document(
+190:             document,
+191:             strategy=chunk_strategy,
+192:             chunk_size=chunk_size,
+193:         )
+194:         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
+195: 
+196:         # Step 2: Embed (already batched internally)
+197:         chunks = await embed_chunks(chunks, model=embedding_model)
+198:         logger.debug(f"Document {document.id}: generated embeddings")
+199: 
+200:         # Step 3: Extract entities (parallel extraction across chunks)
+201:         entities, relationships = await extract_entities(
+202:             chunks,
+203:             skill_name=skill_name,
+204:             expertise=resolved_expertise,
+205:             model=extraction_model,
+206:             max_concurrent=max_concurrent_extractions,
+207:             context=extraction_context,
+208:         )
+209:         logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
+210: 
+211:         # Step 4 (Optional): Semantic expansion
+212:         inferred_relationships = []
+213:         if enable_expansion and resolved_expertise:
+214:             from khora.extraction.expansion import SemanticExpander
+215: 
+216:             # Determine inference mode from expertise config
+217:             inference_mode = resolved_expertise.expansion.inference_mode
+218: 
+219:             # For incremental mode, fetch existing entities/relationships from storage
+220:             # to enable cross-document inference
+221:             expansion_entities = list(entities)
+222:             expansion_relationships = list(relationships)
+223: 
+224:             if inference_mode == "incremental":
+225:                 # Query existing entities and relationships from the namespace
+226:                 existing_entities = await storage.list_entities(document.namespace_id, limit=1000)
+227:                 existing_relationships = await storage.list_relationships(document.namespace_id, limit=5000)
+228: 
+229:                 # Add existing data to expansion context
+230:                 expansion_entities.extend(existing_entities)
+231:                 expansion_relationships.extend(existing_relationships)
+232: 
+233:                 logger.debug(
+234:                     f"Document {document.id}: incremental mode - added {len(existing_entities)} existing entities, "
+235:                     f"{len(existing_relationships)} existing relationships to expansion context"
+236:                 )
+237: 
+238:             # For batch mode, skip inference (only do unification on current doc)
+239:             # Inference will be run separately after all documents are processed
+240:             enable_inference = inference_mode != "batch" and inference_mode != "none"
+241: 
+242:             expander = SemanticExpander(
+243:                 expertise=resolved_expertise,
+244:                 enable_inference=enable_inference,
+245:             )
+246:             expansion_result = await expander.expand(
+247:                 entities=expansion_entities,
+248:                 relationships=expansion_relationships,
+249:                 namespace_id=document.namespace_id,
+250:             )
+251: 
+252:             # Only keep entities from current document (not the existing ones we added)
+253:             # The existing entities are already stored
+254:             if inference_mode == "incremental":
+255:                 current_entity_ids = {e.id for e in entities}
+256:                 entities = [e for e in expansion_result.entities if e.id in current_entity_ids]
+257:             else:
+258:                 entities = expansion_result.entities
+259: 
+260:             relationships = expansion_result.relationships
+261:             inferred_relationships = expansion_result.inferred_relationships
+262: 
+263:             logger.debug(
+264:                 f"Document {document.id}: expansion unified to {len(entities)} entities, "
+265:                 f"inferred {len(inferred_relationships)} relationships (mode={inference_mode})"
+266:             )
+267: 
+268:         # Step 4: Store chunks (batched)
+269:         await storage.create_chunks_batch(chunks)
+270: 
+271:         # Step 5: Store entities with deduplication
+272:         # Process entities concurrently but with semaphore to avoid overwhelming the DB
+273:         entity_semaphore = asyncio.Semaphore(20)
+274: 
+275:         # Track mapping from original entity IDs to stored entity IDs (for dedup)
+276:         entity_id_mapping: dict[str, str] = {}
+277: 
+278:         async def store_entity(entity):
+279:             async with entity_semaphore:
+280:                 original_id = str(entity.id)
+281:                 existing = await storage.get_entity_by_name(
+282:                     document.namespace_id,
+283:                     entity.name,
+284:                     entity.entity_type.value,
+285:                 )
+286:                 if existing:
+287:                     existing.merge_with(entity)
+288:                     await storage.update_entity(existing)
+289:                     # Map original ID to existing entity's ID
+290:                     entity_id_mapping[original_id] = str(existing.id)
+291:                     return existing
+292:                 else:
+293:                     await storage.create_entity(entity)
+294:                     # ID stays the same for new entities
+295:                     entity_id_mapping[original_id] = original_id
+296:                     return entity
+297: 
+298:         await asyncio.gather(*[store_entity(e) for e in entities])
+299: 
+300:         # Step 6: Store relationships concurrently
+301:         # Update relationship entity IDs to use deduplicated entity IDs
+302:         async def store_relationship(rel):
+303:             async with entity_semaphore:
+304:                 # Remap source and target entity IDs if they were deduplicated
+305:                 source_id = str(rel.source_entity_id)
+306:                 target_id = str(rel.target_entity_id)
+307: 
+308:                 mapped_source = entity_id_mapping.get(source_id)
+309:                 mapped_target = entity_id_mapping.get(target_id)
+310: 
+311:                 # Skip if either entity wasn't found (shouldn't happen but be safe)
+312:                 if not mapped_source or not mapped_target:
+313:                     logger.debug(
+314:                         f"Skipping relationship {rel.relationship_type}: "
+315:                         f"missing entity mapping (source={source_id}, target={target_id})"
+316:                     )
+317:                     return None
+318: 
+319:                 # Update the relationship with mapped IDs
+320:                 from uuid import UUID
+321: 
+322:                 rel.source_entity_id = UUID(mapped_source)
+323:                 rel.target_entity_id = UUID(mapped_target)
+324: 
+325:                 return await storage.create_relationship(rel)
+326: 
+327:         all_relationships = relationships + inferred_relationships
+328:         if all_relationships:
+329:             results = await asyncio.gather(*[store_relationship(r) for r in all_relationships])
+330:             # Count successfully stored relationships
+331:             stored_count = sum(1 for r in results if r is not None)
+332:             if stored_count < len(all_relationships):
+333:                 logger.debug(
+334:                     f"Stored {stored_count}/{len(all_relationships)} relationships "
+335:                     f"({len(all_relationships) - stored_count} skipped due to missing entity mappings)"
+336:                 )
+337: 
+338:         # Mark as completed
+339:         document.mark_completed(len(chunks), len(entities))
+340:         await storage.update_document(document)
+341: 
+342:         return {
+343:             "document_id": str(document.id),
+344:             "chunks": len(chunks),
+345:             "entities": len(entities),
+346:             "relationships": len(relationships),
+347:             "inferred_relationships": len(inferred_relationships),
+348:         }
+349: 
+350:     except Exception as e:
+351:         document.mark_failed(str(e))
+352:         await storage.update_document(document)
+353:         raise
+354: 
+355: 
+356: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
+357: @flow(name="ingest_documents", log_prints=True)
+358: async def ingest_documents(
+359:     namespace_id: UUID,
+360:     documents: list[dict[str, Any]],
+361:     storage: StorageCoordinator | None = None,
+362:     *,
+363:     skill_name: str = "general_entities",
+364:     expertise: ExpertiseConfig | str | None = None,
+365:     chunk_strategy: str = "semantic",
+366:     chunk_size: int = 512,
+367:     embedding_model: str = "text-embedding-3-small",
+368:     extraction_model: str = "gpt-4o-mini",
+369:     max_concurrent_documents: int = 5,
+370:     max_concurrent_extractions: int = 10,
+371:     enable_expansion: bool = False,
+372:     extraction_context: dict[str, Any] | None = None,
+373:     **kwargs,
+374: ) -> dict[str, Any]:
+375:     """Two-phase document ingestion flow with parallel processing.
+376: 
+377:     Phase 1: Stage documents (checksum-based change detection)
+378:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
+379:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
+380: 
+381:     Args:
+382:         namespace_id: Target namespace
+383:         documents: List of document dicts with 'content' and optional metadata
+384:         storage: StorageCoordinator instance
+385:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
+386:         expertise: ExpertiseConfig, expertise name string, or file path
+387:         chunk_strategy: Chunking strategy
+388:         chunk_size: Target chunk size
+389:         embedding_model: Model for embeddings
+390:         extraction_model: Model for extraction
+391:         max_concurrent_documents: Maximum documents to process in parallel
+392:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
+393:         enable_expansion: Whether to run semantic expansion
+394:         extraction_context: Context dict for prompt template rendering
+395: 
+396:     Returns:
+397:         Summary of ingestion results
+398:     """
+399:     if storage is None:
+400:         raise ValueError("storage is required")
+401: 
+402:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
+403: 
+404:     # Phase 1: Stage documents (can run in parallel too)
+405:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
+406: 
+407:     async def stage_with_limit(doc_input):
+408:         async with staging_semaphore:
+409:             return await stage_document(doc_input, namespace_id, storage)
+410: 
+411:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+412:     staged_docs = [doc for doc in staged_results if doc is not None]
+413: 
+414:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
+415: 
+416:     if not staged_docs:
+417:         return {
+418:             "total_documents": len(documents),
+419:             "processed_documents": 0,
+420:             "skipped_documents": len(documents),
+421:             "total_chunks": 0,
+422:             "total_entities": 0,
+423:             "total_relationships": 0,
+424:         }
+425: 
+426:     # Phase 2: Process staged documents in parallel with controlled concurrency
+427:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+428: 
+429:     async def process_with_limit(doc):
+430:         async with doc_semaphore:
+431:             return await process_document(
+432:                 doc,
+433:                 storage,
+434:                 chunk_strategy=chunk_strategy,
+435:                 chunk_size=chunk_size,
+436:                 embedding_model=embedding_model,
+437:                 extraction_model=extraction_model,
+438:                 skill_name=skill_name,
+439:                 expertise=expertise,
+440:                 max_concurrent_extractions=max_concurrent_extractions,
+441:                 enable_expansion=enable_expansion,
+442:                 extraction_context=extraction_context,
+443:             )
+444: 
+445:     results = await asyncio.gather(
+446:         *[process_with_limit(doc) for doc in staged_docs],
+447:         return_exceptions=True,
+448:     )
+449: 
+450:     # Filter out exceptions and count errors
+451:     successful_results = []
+452:     error_count = 0
+453:     for result in results:
+454:         if isinstance(result, Exception):
+455:             logger.error(f"Document processing failed: {result}")
+456:             error_count += 1
+457:         else:
+458:             successful_results.append(result)
+459: 
+460:     # Aggregate results
+461:     total_chunks = sum(r["chunks"] for r in successful_results)
+462:     total_entities = sum(r["entities"] for r in successful_results)
+463:     total_relationships = sum(r["relationships"] for r in successful_results)
+464:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
+465: 
+466:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
+467: 
+468:     return {
+469:         "total_documents": len(documents),
+470:         "processed_documents": len(successful_results),
+471:         "skipped_documents": len(documents) - len(staged_docs),
+472:         "failed_documents": error_count,
+473:         "total_chunks": total_chunks,
+474:         "total_entities": total_entities,
+475:         "total_relationships": total_relationships,
+476:         "total_inferred_relationships": total_inferred,
+477:     }
+478: 
+479: 
+480: @task(name="run_batch_inference", cache_policy=NO_CACHE)
+481: async def run_batch_inference(
+482:     namespace_id: UUID,
+483:     storage: StorageCoordinator,
+484:     expertise: ExpertiseConfig,
+485:     *,
+486:     max_entities: int = 10000,
+487:     max_relationships: int = 50000,
+488: ) -> dict[str, Any]:
+489:     """Run batch inference on the entire namespace.
+490: 
+491:     This should be called after all documents are ingested when using
+492:     inference_mode="batch". It queries all entities and relationships
+493:     from the namespace and runs inference rules to create new relationships.
+494: 
+495:     Args:
+496:         namespace_id: Namespace to run inference on
+497:         storage: Storage coordinator
+498:         expertise: ExpertiseConfig with inference rules
+499:         max_entities: Maximum entities to load
+500:         max_relationships: Maximum relationships to load
+501: 
+502:     Returns:
+503:         Summary of inference results
+504:     """
+505:     from khora.extraction.expansion import SemanticExpander
+506: 
+507:     logger.info(f"Starting batch inference for namespace {namespace_id}")
+508: 
+509:     # Load all entities and relationships from storage
+510:     entities = await storage.list_entities(namespace_id, limit=max_entities)
+511:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
+512: 
+513:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
+514: 
+515:     if not entities:
+516:         return {
+517:             "entities": 0,
+518:             "relationships": 0,
+519:             "inferred_relationships": 0,
+520:         }
+521: 
+522:     # Create expander with inference enabled
+523:     expander = SemanticExpander(
+524:         expertise=expertise,
+525:         enable_unification=False,  # Entities already unified during ingestion
+526:         enable_inference=True,
+527:     )
+528: 
+529:     # Run expansion (inference only)
+530:     expansion_result = await expander.expand(
+531:         entities=entities,
+532:         relationships=relationships,
+533:         namespace_id=namespace_id,
+534:     )
+535: 
+536:     # Store inferred relationships
+537:     inferred_count = 0
+538:     if expansion_result.inferred_relationships:
+539:         for rel in expansion_result.inferred_relationships:
+540:             try:
+541:                 await storage.create_relationship(rel)
+542:                 inferred_count += 1
+543:             except Exception as e:
+544:                 logger.warning(f"Failed to store inferred relationship: {e}")
+545: 
+546:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
+547: 
+548:     return {
+549:         "entities": len(entities),
+550:         "relationships": len(relationships),
+551:         "inferred_relationships": inferred_count,
+552:     }
 ````
 
 ## File: pyproject.toml
@@ -23693,6 +23738,13 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-27 16:27:41 +0100
+**Message:** fix: Remap relationship entity IDs after deduplication
+
+**Files:**
+- REPOMIX.md
+- src/khora/pipelines/flows/ingest.py
 
 ## Commit: 2026-01-27 14:43:27 +0100
 **Message:** debug: Add detailed inference diagnostic logging
@@ -23957,12 +24009,3 @@ README.md
 - src/khora/query/understanding.py
 - src/khora/storage/backends/pgvector.py
 - src/khora/storage/coordinator.py
-
-## Commit: 2026-01-26 14:23:43 +0100
-**Message:** Add parallel processing for batch document ingestion
-
-**Files:**
-- REPOMIX.md
-- src/khora/memory_lake.py
-- src/khora/pipelines/flows/ingest.py
-- src/khora/pipelines/tasks/extract.py
