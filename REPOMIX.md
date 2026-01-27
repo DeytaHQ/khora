@@ -23567,6 +23567,13 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-01-27 13:11:26 +0100
+**Message:** chore: add migration for namespace versioning columns
+
+**Files:**
+- REPOMIX.md
+- alembic/versions/001_add_namespace_versioning.py
+
 ## Commit: 2026-01-27 13:07:57 +0100
 **Message:** feat: add namespace versioning and inference diagnostics
 
@@ -23827,11 +23834,3 @@ README.md
 - REPOMIX.md
 - src/khora/memory_lake.py
 - src/khora/pipelines/flows/ingest.py
-
-## Commit: 2026-01-26 11:51:49 +0100
-**Message:** Update dependencies to latest versions
-
-**Files:**
-- REPOMIX.md
-- pyproject.toml
-- uv.lock
