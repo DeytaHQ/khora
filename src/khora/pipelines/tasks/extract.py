@@ -111,6 +111,9 @@ async def extract_entities(
                     existing.source_document_ids.append(chunk.document_id)
                 if chunk.id not in existing.source_chunk_ids:
                     existing.source_chunk_ids.append(chunk.id)
+                # Update valid_from to earliest timestamp
+                if existing.valid_from and chunk.created_at < existing.valid_from:
+                    existing.valid_from = chunk.created_at
             else:
                 # Create new entity
                 entity_type = EntityType.CONCEPT
@@ -128,6 +131,7 @@ async def extract_entities(
                     source_document_ids=[chunk.document_id],
                     source_chunk_ids=[chunk.id],
                     confidence=extracted.confidence,
+                    valid_from=chunk.created_at,  # Inherit source timestamp
                 )
                 all_entities[key] = entity
 
@@ -163,6 +167,7 @@ async def extract_entities(
                     source_document_ids=[chunk.document_id],
                     source_chunk_ids=[chunk.id],
                     confidence=extracted_rel.confidence,
+                    valid_from=chunk.created_at,  # Inherit source timestamp
                 )
                 all_relationships.append(relationship)
 

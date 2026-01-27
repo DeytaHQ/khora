@@ -5825,71 +5825,6 @@ README.md
 13: ]
 ````
 
-## File: src/khora/pipelines/tasks/chunk.py
-````python
- 1: """Chunking task for document processing."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from typing import TYPE_CHECKING
- 6: 
- 7: from prefect import task
- 8: 
- 9: if TYPE_CHECKING:
-10:     from khora.core.models import Chunk, Document
-11: 
-12: 
-13: @task(name="chunk_document", retries=2, retry_delay_seconds=5)
-14: async def chunk_document(
-15:     document: Document,
-16:     *,
-17:     strategy: str = "semantic",
-18:     chunk_size: int = 512,
-19:     chunk_overlap: int = 50,
-20: ) -> list[Chunk]:
-21:     """Chunk a document into smaller pieces.
-22: 
-23:     Args:
-24:         document: Document to chunk
-25:         strategy: Chunking strategy (fixed, semantic, recursive)
-26:         chunk_size: Target chunk size in tokens
-27:         chunk_overlap: Overlap between chunks
-28: 
-29:     Returns:
-30:         List of Chunk objects
-31:     """
-32:     from khora.core.models import Chunk, ChunkMetadata
-33:     from khora.extraction.chunkers import create_chunker
-34: 
-35:     # Create chunker
-36:     chunker = create_chunker(strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-37: 
-38:     # Chunk the document
-39:     chunk_results = chunker.chunk(document.content)
-40: 
-41:     # Convert to Chunk objects
-42:     # Inherit document timestamp so temporal filters work correctly
-43:     chunks = []
-44:     for result in chunk_results:
-45:         chunk = Chunk(
-46:             namespace_id=document.namespace_id,
-47:             document_id=document.id,
-48:             content=result.content,
-49:             metadata=ChunkMetadata(
-50:                 document_id=document.id,
-51:                 chunk_index=result.index,
-52:                 start_char=result.start_char,
-53:                 end_char=result.end_char,
-54:                 token_count=result.token_count,
-55:                 custom=result.metadata,
-56:             ),
-57:             created_at=document.created_at,  # Inherit source timestamp from document
-58:         )
-59:         chunks.append(chunk)
-60: 
-61:     return chunks
-````
-
 ## File: src/khora/pipelines/tasks/embed.py
 ````python
  1: """Embedding task for chunks."""
@@ -12386,6 +12321,71 @@ README.md
 14: ]
 ````
 
+## File: src/khora/pipelines/tasks/chunk.py
+````python
+ 1: """Chunking task for document processing."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from typing import TYPE_CHECKING
+ 6: 
+ 7: from prefect import task
+ 8: 
+ 9: if TYPE_CHECKING:
+10:     from khora.core.models import Chunk, Document
+11: 
+12: 
+13: @task(name="chunk_document", retries=2, retry_delay_seconds=5)
+14: async def chunk_document(
+15:     document: Document,
+16:     *,
+17:     strategy: str = "semantic",
+18:     chunk_size: int = 512,
+19:     chunk_overlap: int = 50,
+20: ) -> list[Chunk]:
+21:     """Chunk a document into smaller pieces.
+22: 
+23:     Args:
+24:         document: Document to chunk
+25:         strategy: Chunking strategy (fixed, semantic, recursive)
+26:         chunk_size: Target chunk size in tokens
+27:         chunk_overlap: Overlap between chunks
+28: 
+29:     Returns:
+30:         List of Chunk objects
+31:     """
+32:     from khora.core.models import Chunk, ChunkMetadata
+33:     from khora.extraction.chunkers import create_chunker
+34: 
+35:     # Create chunker
+36:     chunker = create_chunker(strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+37: 
+38:     # Chunk the document
+39:     chunk_results = chunker.chunk(document.content)
+40: 
+41:     # Convert to Chunk objects
+42:     # Inherit document timestamp so temporal filters work correctly
+43:     chunks = []
+44:     for result in chunk_results:
+45:         chunk = Chunk(
+46:             namespace_id=document.namespace_id,
+47:             document_id=document.id,
+48:             content=result.content,
+49:             metadata=ChunkMetadata(
+50:                 document_id=document.id,
+51:                 chunk_index=result.index,
+52:                 start_char=result.start_char,
+53:                 end_char=result.end_char,
+54:                 token_count=result.token_count,
+55:                 custom=result.metadata,
+56:             ),
+57:             created_at=document.created_at,  # Inherit source timestamp from document
+58:         )
+59:         chunks.append(chunk)
+60: 
+61:     return chunks
+````
+
 ## File: src/khora/query/__init__.py
 ````python
  1: """Query engine for Khora Memory Lake.
@@ -15129,62 +15129,67 @@ README.md
 111:                     existing.source_document_ids.append(chunk.document_id)
 112:                 if chunk.id not in existing.source_chunk_ids:
 113:                     existing.source_chunk_ids.append(chunk.id)
-114:             else:
-115:                 # Create new entity
-116:                 entity_type = EntityType.CONCEPT
-117:                 try:
-118:                     entity_type = EntityType(extracted.entity_type)
-119:                 except ValueError:
-120:                     pass
-121: 
-122:                 entity = Entity(
-123:                     namespace_id=chunk.namespace_id,
-124:                     name=extracted.name,
-125:                     entity_type=entity_type,
-126:                     description=extracted.description,
-127:                     attributes=extracted.attributes,
-128:                     source_document_ids=[chunk.document_id],
-129:                     source_chunk_ids=[chunk.id],
-130:                     confidence=extracted.confidence,
-131:                 )
-132:                 all_entities[key] = entity
-133: 
-134:         # Process relationships
-135:         for extracted_rel in result.relationships:
-136:             if extracted_rel.confidence < min_relationship_confidence:
-137:                 continue
-138: 
-139:             rel_type = RelationshipType.RELATES_TO
-140:             try:
-141:                 rel_type = RelationshipType(extracted_rel.relationship_type)
-142:             except ValueError:
-143:                 pass
-144: 
-145:             # Find source and target entities
-146:             source_key = next(
-147:                 (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
-148:                 None,
-149:             )
-150:             target_key = next(
-151:                 (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
+114:                 # Update valid_from to earliest timestamp
+115:                 if existing.valid_from and chunk.created_at < existing.valid_from:
+116:                     existing.valid_from = chunk.created_at
+117:             else:
+118:                 # Create new entity
+119:                 entity_type = EntityType.CONCEPT
+120:                 try:
+121:                     entity_type = EntityType(extracted.entity_type)
+122:                 except ValueError:
+123:                     pass
+124: 
+125:                 entity = Entity(
+126:                     namespace_id=chunk.namespace_id,
+127:                     name=extracted.name,
+128:                     entity_type=entity_type,
+129:                     description=extracted.description,
+130:                     attributes=extracted.attributes,
+131:                     source_document_ids=[chunk.document_id],
+132:                     source_chunk_ids=[chunk.id],
+133:                     confidence=extracted.confidence,
+134:                     valid_from=chunk.created_at,  # Inherit source timestamp
+135:                 )
+136:                 all_entities[key] = entity
+137: 
+138:         # Process relationships
+139:         for extracted_rel in result.relationships:
+140:             if extracted_rel.confidence < min_relationship_confidence:
+141:                 continue
+142: 
+143:             rel_type = RelationshipType.RELATES_TO
+144:             try:
+145:                 rel_type = RelationshipType(extracted_rel.relationship_type)
+146:             except ValueError:
+147:                 pass
+148: 
+149:             # Find source and target entities
+150:             source_key = next(
+151:                 (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
 152:                 None,
 153:             )
-154: 
-155:             if source_key and target_key:
-156:                 relationship = Relationship(
-157:                     namespace_id=chunk.namespace_id,
-158:                     source_entity_id=all_entities[source_key].id,
-159:                     target_entity_id=all_entities[target_key].id,
-160:                     relationship_type=rel_type,
-161:                     description=extracted_rel.description,
-162:                     properties=extracted_rel.properties,
-163:                     source_document_ids=[chunk.document_id],
-164:                     source_chunk_ids=[chunk.id],
-165:                     confidence=extracted_rel.confidence,
-166:                 )
-167:                 all_relationships.append(relationship)
-168: 
-169:     return list(all_entities.values()), all_relationships
+154:             target_key = next(
+155:                 (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
+156:                 None,
+157:             )
+158: 
+159:             if source_key and target_key:
+160:                 relationship = Relationship(
+161:                     namespace_id=chunk.namespace_id,
+162:                     source_entity_id=all_entities[source_key].id,
+163:                     target_entity_id=all_entities[target_key].id,
+164:                     relationship_type=rel_type,
+165:                     description=extracted_rel.description,
+166:                     properties=extracted_rel.properties,
+167:                     source_document_ids=[chunk.document_id],
+168:                     source_chunk_ids=[chunk.id],
+169:                     confidence=extracted_rel.confidence,
+170:                     valid_from=chunk.created_at,  # Inherit source timestamp
+171:                 )
+172:                 all_relationships.append(relationship)
+173: 
+174:     return list(all_entities.values()), all_relationships
 ````
 
 ## File: src/khora/query/temporal.py
@@ -23741,6 +23746,13 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-01-27 18:06:25 +0100
+**Message:** feat: inherit document timestamps in chunks
+
+**Files:**
+- REPOMIX.md
+- src/khora/pipelines/tasks/chunk.py
+
 ## Commit: 2026-01-27 18:05:12 +0100
 **Message:** feat: preserve source timestamps on documents
 
@@ -23991,10 +24003,3 @@ README.md
 **Files:**
 - REPOMIX.md
 - src/khora/query/engine.py
-
-## Commit: 2026-01-26 18:20:32 +0100
-**Message:** Update example config with new query settings
-
-**Files:**
-- REPOMIX.md
-- config/khora.example.yaml
