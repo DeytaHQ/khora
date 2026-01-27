@@ -38,6 +38,10 @@ class RuleEvaluationContext:
     entity_index: dict[str, list[Entity]] = field(default_factory=dict)  # name -> entities
     type_index: dict[str, list[Entity]] = field(default_factory=dict)  # type -> entities
     relationship_index: dict[str, list[Relationship]] = field(default_factory=dict)  # type -> relationships
+    # New: Index relationships by entity for fast chain lookups
+    rels_by_source: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> outgoing rels
+    rels_by_target: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> incoming rels
+    entity_by_id: dict[str, Entity] = field(default_factory=dict)  # entity_id -> entity
 
     @classmethod
     def from_data(
@@ -62,7 +66,10 @@ class RuleEvaluationContext:
                 ctx.type_index[type_key] = []
             ctx.type_index[type_key].append(entity)
 
-        # Build relationship index
+            # Index by ID for fast lookup
+            ctx.entity_by_id[str(entity.id)] = entity
+
+        # Build relationship indices
         for rel in relationships:
             rel_type = str(
                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
@@ -70,6 +77,18 @@ class RuleEvaluationContext:
             if rel_type not in ctx.relationship_index:
                 ctx.relationship_index[rel_type] = []
             ctx.relationship_index[rel_type].append(rel)
+
+            # Index by source entity for fast chain lookups
+            source_key = str(rel.source_entity_id)
+            if source_key not in ctx.rels_by_source:
+                ctx.rels_by_source[source_key] = []
+            ctx.rels_by_source[source_key].append(rel)
+
+            # Index by target entity
+            target_key = str(rel.target_entity_id)
+            if target_key not in ctx.rels_by_target:
+                ctx.rels_by_target[target_key] = []
+            ctx.rels_by_target[target_key].append(rel)
 
         return ctx
 
@@ -287,8 +306,14 @@ class RuleEngine:
         self,
         rule: InferenceRule,
         context: RuleEvaluationContext,
+        *,
+        max_matches: int = 1000,
     ) -> list[RuleMatch]:
-        """Evaluate a single inference rule."""
+        """Evaluate a single inference rule.
+
+        Uses indexed lookups for O(1) entity access and O(k) chain lookups
+        where k is the number of relationships per entity (typically small).
+        """
         if not rule.when or len(rule.when) < 1:
             return []
 
@@ -316,6 +341,8 @@ class RuleEngine:
         if len(rule.when) == 1:
             # Single condition rule
             for rel in first_rels:
+                if len(matches) >= max_matches:
+                    break
                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
 
@@ -335,39 +362,80 @@ class RuleEngine:
                         )
                     )
         else:
-            # Multi-condition rule - need to find matching chains
+            # Multi-condition rule - use indexed lookups for O(k) instead of O(n)
+            second_condition = rule.when[1]
+            second_rel_type = second_condition.relationship
+
             for rel1 in first_rels:
-                # For each first relationship, find matching second relationships
-                second_condition = rule.when[1]
-                second_rels = context.relationship_index.get(second_condition.relationship, [])
-                second_rels = self._filter_relationships_by_types(
-                    second_rels, second_condition.source_type, second_condition.target_type, context
+                if len(matches) >= max_matches:
+                    break
+
+                # Get candidate second relationships connected to rel1's entities
+                # Instead of iterating ALL second_rels, only check those connected to rel1
+                candidate_rels: list[Relationship] = []
+
+                # Chain pattern: rel1.target -> rel2.source
+                target_key = str(rel1.target_entity_id)
+                for rel2 in context.rels_by_source.get(target_key, []):
+                    rel2_type = str(
+                        rel2.relationship_type.value
+                        if hasattr(rel2.relationship_type, "value")
+                        else rel2.relationship_type
+                    )
+                    if rel2_type == second_rel_type:
+                        candidate_rels.append(rel2)
+
+                # Shared source pattern: rel1.source == rel2.source
+                source_key = str(rel1.source_entity_id)
+                for rel2 in context.rels_by_source.get(source_key, []):
+                    rel2_type = str(
+                        rel2.relationship_type.value
+                        if hasattr(rel2.relationship_type, "value")
+                        else rel2.relationship_type
+                    )
+                    if rel2_type == second_rel_type and rel2 not in candidate_rels:
+                        candidate_rels.append(rel2)
+
+                # Shared target pattern: rel1.target == rel2.target
+                for rel2 in context.rels_by_target.get(target_key, []):
+                    rel2_type = str(
+                        rel2.relationship_type.value
+                        if hasattr(rel2.relationship_type, "value")
+                        else rel2.relationship_type
+                    )
+                    if rel2_type == second_rel_type and rel2 not in candidate_rels:
+                        candidate_rels.append(rel2)
+
+                # Filter candidates by type
+                candidate_rels = self._filter_relationships_by_types(
+                    candidate_rels, second_condition.source_type, second_condition.target_type, context
                 )
 
-                # Find chains where relationships connect
-                for rel2 in second_rels:
-                    if self._relationships_connect(rel1, rel2, context):
-                        source1 = self._find_entity_by_id(rel1.source_entity_id, context)
-                        target1 = self._find_entity_by_id(rel1.target_entity_id, context)
-                        source2 = self._find_entity_by_id(rel2.source_entity_id, context)
-                        target2 = self._find_entity_by_id(rel2.target_entity_id, context)
+                # Create matches from candidates
+                for rel2 in candidate_rels:
+                    if len(matches) >= max_matches:
+                        break
+                    source1 = self._find_entity_by_id(rel1.source_entity_id, context)
+                    target1 = self._find_entity_by_id(rel1.target_entity_id, context)
+                    source2 = self._find_entity_by_id(rel2.source_entity_id, context)
+                    target2 = self._find_entity_by_id(rel2.target_entity_id, context)
 
-                        if all([source1, target1, source2, target2]):
-                            matches.append(
-                                RuleMatch(
-                                    rule_name=rule.name,
-                                    matched_relationships=[rel1, rel2],
-                                    matched_entities=[source1, target1, source2, target2],
-                                    confidence=rule.confidence,
-                                    metadata={
-                                        "then_relationship": rule.then_relationship,
-                                        "then_source": rule.then_source,
-                                        "then_target": rule.then_target,
-                                        "first": {"source": source1, "target": target1},
-                                        "second": {"source": source2, "target": target2},
-                                    },
-                                )
+                    if all([source1, target1, source2, target2]):
+                        matches.append(
+                            RuleMatch(
+                                rule_name=rule.name,
+                                matched_relationships=[rel1, rel2],
+                                matched_entities=[source1, target1, source2, target2],
+                                confidence=rule.confidence,
+                                metadata={
+                                    "then_relationship": rule.then_relationship,
+                                    "then_source": rule.then_source,
+                                    "then_target": rule.then_target,
+                                    "first": {"source": source1, "target": target1},
+                                    "second": {"source": source2, "target": target2},
+                                },
                             )
+                        )
 
         return matches
 
@@ -504,11 +572,8 @@ class RuleEngine:
         entity_id: Any,
         context: RuleEvaluationContext,
     ) -> Entity | None:
-        """Find entity by ID in context."""
-        for entity in context.entities:
-            if entity.id == entity_id:
-                return entity
-        return None
+        """Find entity by ID in context using indexed lookup."""
+        return context.entity_by_id.get(str(entity_id))
 
     def _relationships_connect(
         self,
