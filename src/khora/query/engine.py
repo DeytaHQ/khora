@@ -65,11 +65,11 @@ class SearchMethodStats:
         return {
             "chunks": {
                 "count": self.chunk_count,
-                "ids": self.chunk_ids[:10],  # Limit for readability
+                "ids": self.chunk_ids,  # All IDs for proper attribution
             },
             "entities": {
                 "count": self.entity_count,
-                "ids": self.entity_ids[:10],
+                "ids": self.entity_ids,  # All IDs for proper attribution
             },
             "scores": {
                 "min": round(self.min_score, 4),
@@ -149,23 +149,23 @@ class SearchMethodContribution:
                 "keyword": self.keyword.to_dict(),
             },
             "chunk_overlap": {
-                "vector_only": {"count": len(self.vector_only_chunks), "ids": self.vector_only_chunks[:5]},
-                "graph_only": {"count": len(self.graph_only_chunks), "ids": self.graph_only_chunks[:5]},
-                "keyword_only": {"count": len(self.keyword_only_chunks), "ids": self.keyword_only_chunks[:5]},
-                "vector_and_graph": {"count": len(self.vector_graph_overlap), "ids": self.vector_graph_overlap[:5]},
+                "vector_only": {"count": len(self.vector_only_chunks), "ids": self.vector_only_chunks},
+                "graph_only": {"count": len(self.graph_only_chunks), "ids": self.graph_only_chunks},
+                "keyword_only": {"count": len(self.keyword_only_chunks), "ids": self.keyword_only_chunks},
+                "vector_and_graph": {"count": len(self.vector_graph_overlap), "ids": self.vector_graph_overlap},
                 "vector_and_keyword": {
                     "count": len(self.vector_keyword_overlap),
-                    "ids": self.vector_keyword_overlap[:5],
+                    "ids": self.vector_keyword_overlap,
                 },
-                "graph_and_keyword": {"count": len(self.graph_keyword_overlap), "ids": self.graph_keyword_overlap[:5]},
-                "all_three_methods": {"count": len(self.all_methods_overlap), "ids": self.all_methods_overlap[:5]},
+                "graph_and_keyword": {"count": len(self.graph_keyword_overlap), "ids": self.graph_keyword_overlap},
+                "all_three_methods": {"count": len(self.all_methods_overlap), "ids": self.all_methods_overlap},
             },
             "entity_overlap": {
-                "vector_only": {"count": len(self.vector_only_entities), "ids": self.vector_only_entities[:5]},
-                "graph_only": {"count": len(self.graph_only_entities), "ids": self.graph_only_entities[:5]},
+                "vector_only": {"count": len(self.vector_only_entities), "ids": self.vector_only_entities},
+                "graph_only": {"count": len(self.graph_only_entities), "ids": self.graph_only_entities},
                 "vector_and_graph": {
                     "count": len(self.vector_graph_entity_overlap),
-                    "ids": self.vector_graph_entity_overlap[:5],
+                    "ids": self.vector_graph_entity_overlap,
                 },
             },
         }
