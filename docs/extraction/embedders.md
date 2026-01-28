@@ -1,33 +1,45 @@
 # Embedders
 
-Embedders generate vector representations of text for semantic similarity search. Khora uses LiteLLM for unified access to multiple embedding providers.
+Embeddings are the magic that makes semantic search work. An embedder converts text into vectors - lists of numbers that capture meaning. Similar concepts get similar vectors, enabling "find things like this" queries even when the exact words differ.
 
-## Overview
+## What Embeddings Do
 
-Embeddings enable:
-- **Semantic search**: Find content by meaning, not just keywords
-- **Entity matching**: Identify similar entities for deduplication
-- **Query understanding**: Match queries to relevant content
+```
+Text:    "Einstein developed the theory of relativity"
+           |
+           v
+Embedder
+           |
+           v
+Vector:  [0.021, -0.156, 0.089, 0.334, -0.027, ...]
+         (1536 numbers that capture the meaning)
+```
 
-## LiteLLMEmbedder
+Now you can find similar content:
 
-The primary embedder uses LiteLLM for provider-agnostic embedding generation.
+```
+Query: "physicist's work on space-time"
+  → similar vector
+  → matches Einstein chunk
+  → even though no words overlap!
+```
 
-### Configuration
+## The LiteLLM Embedder
+
+Khora uses LiteLLM for embedding, giving you access to multiple providers through one interface.
+
+### Basic Setup
 
 ```python
 from khora.extraction.embedders import LiteLLMEmbedder
 
 embedder = LiteLLMEmbedder(
-    model="text-embedding-3-small",  # OpenAI default
-    dimension=1536,
-    timeout=30,          # Request timeout (seconds)
-    max_retries=3,       # Retry count on failure
-    batch_size=100,      # Max texts per batch
+    model="text-embedding-3-small",  # Default: OpenAI
+    dimension=1536                    # Output dimension
 )
 ```
 
-### From LiteLLM Config
+### From Configuration
 
 ```python
 from khora.config import LiteLLMConfig
@@ -36,59 +48,67 @@ config = LiteLLMConfig(
     embedding_model="text-embedding-3-small",
     embedding_dimension=1536,
     timeout=30,
-    max_retries=3,
+    max_retries=3
 )
 
 embedder = LiteLLMEmbedder.from_config(config)
 ```
 
-## Embedding Generation
+## Generating Embeddings
 
 ### Single Text
 
 ```python
 embedding = await embedder.embed("Hello, world!")
-# Returns: list[float] with 1536 dimensions
+# Returns: [0.012, -0.034, 0.089, ...] (1536 floats)
 ```
 
-### Batch Embedding
+### Batch (Efficient)
 
 ```python
 texts = [
-    "First document content",
-    "Second document content",
-    "Third document content",
+    "First document about machine learning",
+    "Second document about neural networks",
+    "Third document about data science"
 ]
 
 embeddings = await embedder.embed_batch(texts)
-# Returns: list[list[float]], one embedding per text
+# Returns: [[...], [...], [...]] (one embedding per text)
 ```
+
+Batching is important - 100 individual API calls is much slower than 1 call with 100 texts.
 
 ### Automatic Batching
 
-Large lists are automatically split into batches:
+Large lists are automatically split:
 
 ```python
 # 500 texts with batch_size=100
-# Internally splits into 5 batches
-embeddings = await embedder.embed_batch(large_text_list)
+# → 5 API calls instead of 500
+embeddings = await embedder.embed_batch(large_list)
 ```
 
 ## Supported Providers
 
-LiteLLM supports multiple embedding providers:
-
-### OpenAI
+### OpenAI (Default)
 
 ```python
+# Recommended for most use cases
 embedder = LiteLLMEmbedder(
-    model="text-embedding-3-small",  # Recommended
-    dimension=1536,
+    model="text-embedding-3-small",  # Fast, good quality
+    dimension=1536
 )
 
-# Other OpenAI models
-# - text-embedding-3-large (3072 dimensions)
-# - text-embedding-ada-002 (legacy, 1536 dimensions)
+# Higher quality, more dimensions
+embedder = LiteLLMEmbedder(
+    model="text-embedding-3-large",
+    dimension=3072
+)
+```
+
+Set your API key:
+```bash
+export OPENAI_API_KEY=sk-...
 ```
 
 ### Cohere
@@ -96,197 +116,186 @@ embedder = LiteLLMEmbedder(
 ```python
 embedder = LiteLLMEmbedder(
     model="cohere/embed-english-v3.0",
-    dimension=1024,
+    dimension=1024
 )
 ```
 
-### Voyage
+```bash
+export COHERE_API_KEY=...
+```
+
+### Voyage AI
 
 ```python
 embedder = LiteLLMEmbedder(
     model="voyage/voyage-02",
-    dimension=1024,
+    dimension=1024
 )
 ```
 
-### Self-Hosted
+```bash
+export VOYAGE_API_KEY=...
+```
+
+### Local (Ollama)
 
 ```python
 embedder = LiteLLMEmbedder(
     model="ollama/nomic-embed-text",
-    dimension=768,
+    dimension=768
 )
 ```
 
-## Retry Logic
+No API key needed - just run Ollama locally.
 
-Embedders implement exponential backoff:
+## Model Comparison
 
-```python
-async def _embed_batch_internal(self, texts: list[str]) -> list[list[float]]:
-    for attempt in range(self._max_retries):
-        try:
-            response = await litellm.aembedding(
-                model=self._model,
-                input=texts,
-                timeout=self._timeout,
-            )
-            return [item["embedding"] for item in response.data]
-        except Exception as e:
-            if attempt < self._max_retries - 1:
-                wait_time = 2 ** attempt  # 1s, 2s, 4s
-                await asyncio.sleep(wait_time)
-            else:
-                raise
-```
+| Model | Provider | Dimensions | Speed | Quality | Cost |
+|-------|----------|------------|-------|---------|------|
+| text-embedding-3-small | OpenAI | 1536 | Fast | Good | Low |
+| text-embedding-3-large | OpenAI | 3072 | Medium | Better | Medium |
+| embed-english-v3.0 | Cohere | 1024 | Fast | Good | Low |
+| voyage-02 | Voyage | 1024 | Medium | Better | Medium |
+| nomic-embed-text | Ollama | 768 | Varies | Good | Free |
 
-## Environment Variables
+**Recommendation:** Start with `text-embedding-3-small`. It's fast, cheap, and good enough for most use cases. Upgrade if you need better quality.
 
-Set provider API keys:
-
-```bash
-# OpenAI
-export OPENAI_API_KEY=sk-...
-
-# Cohere
-export COHERE_API_KEY=...
-
-# Voyage
-export VOYAGE_API_KEY=...
-```
-
-## Dimension Matching
-
-Ensure embedding dimension matches your pgvector schema:
-
-```sql
--- Create table with matching dimension
-CREATE TABLE chunk_embeddings (
-    id UUID PRIMARY KEY,
-    embedding vector(1536),  -- Must match embedding_dimension
-    ...
-);
-```
-
-Khora uses 1536 dimensions by default (OpenAI text-embedding-3-small).
-
-## Performance Considerations
-
-### Batch Size
-
-```python
-# Default: 100 texts per batch
-batch_size = 100
-
-# Larger batches: fewer API calls, more memory
-batch_size = 500
-
-# Smaller batches: more API calls, less memory
-batch_size = 25
-```
-
-### Concurrency
-
-Embedding is parallelized at the document level:
-
-```python
-# Each document's chunks are embedded together
-chunks = await embed_chunks(document_chunks, model=...)
-
-# Multiple documents embed in parallel
-await asyncio.gather(*[
-    process_document(doc)  # Each calls embed_chunks
-    for doc in documents
-])
-```
-
-## API Usage
+## Usage in Khora
 
 ### Via MemoryLake
 
 ```python
-result = await lake.remember(
-    content,
-    embedding_model="text-embedding-3-small",
+# Uses configured default embedding model
+await lake.remember("Your content...")
+
+# Override for specific content
+await lake.remember(
+    "Your content...",
+    embedding_model="text-embedding-3-large"
 )
 ```
 
-### In Pipeline Tasks
+### In Pipelines
 
 ```python
 from khora.pipelines.tasks import embed_chunks
 
 chunks = await embed_chunks(
     chunks,
-    model="text-embedding-3-small",
+    model="text-embedding-3-small"
 )
 
-# Chunks now have embedding field populated
+# Chunks now have embeddings
 for chunk in chunks:
-    assert chunk.embedding is not None
     assert len(chunk.embedding) == 1536
 ```
 
-### Direct Embedder Usage
+### For Search
 
 ```python
-from khora.extraction.embedders import LiteLLMEmbedder
+# Embed query with same model as content
+query_embedding = await embedder.embed("search query")
 
-embedder = LiteLLMEmbedder(model="text-embedding-3-small")
-
-# Embed query for search
-query_embedding = await embedder.embed(query)
-
-# Search similar chunks
+# Find similar chunks
 results = await storage.search_similar_chunks(
     namespace_id,
     query_embedding,
-    limit=10,
+    limit=10
 )
 ```
 
-## Embedder Protocol
+## Important: Dimension Matching
 
-Custom embedders can implement the base protocol:
+Your database must match your embedding dimension:
+
+```sql
+-- For text-embedding-3-small (1536 dimensions)
+CREATE TABLE chunks (
+    id UUID PRIMARY KEY,
+    embedding vector(1536),  -- Must match!
+    ...
+);
+```
+
+If you change embedding models, you need to:
+1. Re-embed all content
+2. Update (or recreate) the database schema
+
+This is why choosing a model upfront matters.
+
+## Error Handling
+
+The embedder handles transient failures automatically:
+
+```python
+# Exponential backoff: 1s, 2s, 4s
+max_retries = 3
+
+# Custom timeout
+timeout = 30  # seconds
+```
+
+If all retries fail, the exception propagates. Failed documents are marked as FAILED in the ingestion pipeline.
+
+## Performance Tips
+
+### Batch Size
+
+```python
+# Default: 100 texts per batch
+embedder = LiteLLMEmbedder(batch_size=100)
+
+# Larger = fewer API calls, more memory
+embedder = LiteLLMEmbedder(batch_size=500)
+
+# Smaller = more API calls, less memory
+embedder = LiteLLMEmbedder(batch_size=25)
+```
+
+### Parallel Processing
+
+Embedding happens in parallel at the document level:
+
+```python
+# Each document's chunks embed together
+# Multiple documents process in parallel
+results = await asyncio.gather(*[
+    process_document(doc)  # Each embeds its chunks
+    for doc in documents
+])
+```
+
+### Caching (Coming Soon)
+
+For repeated content, embedding caching would reduce costs. Currently not implemented - each ingestion generates fresh embeddings.
+
+## Custom Embedders
+
+You can implement your own embedder:
 
 ```python
 from khora.extraction.embedders.base import Embedder
 
-class Embedder(ABC):
+class MyEmbedder(Embedder):
     @property
-    @abstractmethod
     def model_name(self) -> str:
-        """Get the model name."""
-        ...
+        return "my-custom-model"
 
     @property
-    @abstractmethod
     def dimension(self) -> int:
-        """Get the embedding dimension."""
-        ...
+        return 768
 
-    @abstractmethod
     async def embed(self, text: str) -> list[float]:
-        """Generate embedding for single text."""
-        ...
+        # Your implementation
+        return await my_embedding_api(text)
 
-    @abstractmethod
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts."""
-        ...
+        # Your batch implementation
+        return await my_batch_api(texts)
 ```
 
-## Embedding Models Comparison
+## What's Next?
 
-| Model | Provider | Dimensions | Speed | Quality |
-|-------|----------|------------|-------|---------|
-| text-embedding-3-small | OpenAI | 1536 | Fast | Good |
-| text-embedding-3-large | OpenAI | 3072 | Medium | Better |
-| embed-english-v3.0 | Cohere | 1024 | Fast | Good |
-| voyage-02 | Voyage | 1024 | Medium | Better |
-
-## Next Steps
-
-- [Extractors](extractors.md) - Entity extraction
-- [Chunkers](chunkers.md) - Text splitting
-- [Query Engine](../query-engine/overview.md) - Semantic search
+- **[Chunkers](chunkers.md)** - Split text before embedding
+- **[Extractors](extractors.md)** - Extract entities from chunks
+- **[Query Engine](../query-engine/overview.md)** - Use embeddings for search

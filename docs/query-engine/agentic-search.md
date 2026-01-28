@@ -1,286 +1,121 @@
 # Agentic Search
 
-Khora provides a two-step exploration agent for deep search. The key efficiency: all LLM extraction happens in the initial query understanding call.
+Sometimes one search isn't enough. Complex questions need exploration - following threads, exploring entities, checking different sources. Agentic search does this automatically, but with a twist: all the "thinking" happens upfront.
 
-## Overview
+## The Key Insight
 
-Agentic search extends regular search with multi-step exploration:
+Traditional agentic approaches make multiple LLM calls - one to search, one to decide what to do next, one to search again, etc. This is slow and expensive.
+
+Khora's approach: **one LLM call upfront, multiple searches after.**
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Agentic Search                               │
-│                                                                  │
-│  Step 1: Initial Search                                         │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │ - Query understanding (single LLM call)                     ││
-│  │ - Multi-source search (vector + graph + keyword)            ││
-│  │ - Extract follow-up queries (pre-computed)                  ││
-│  │ - Extract source priorities                                 ││
-│  │ - Extract complexity score                                  ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                              │                                   │
-│                              ▼                                   │
-│  Step 2+: Follow-Up Exploration (no LLM calls)                  │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │ - Execute pre-computed follow-up queries                    ││
-│  │ - Explore under-represented sources                         ││
-│  │ - Investigate high-scoring entities                         ││
-│  │ - Merge results (keep higher scores)                        ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                              │                                   │
-│                              ▼                                   │
-│  Final: Merge and Rank                                          │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │ - Deduplicate across all steps                              ││
-│  │ - Sort by score                                              ││
-│  │ - Generate summary (no LLM call)                            ││
-│  │ - Return with full trace                                    ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+Regular Search:
+  Question → [LLM: understand] → [Search] → Results
+
+Agentic Search:
+  Question → [LLM: understand + plan follow-ups] → [Search] → [Search more] → [Search more] → Combined Results
+                         |
+                         └── All LLM work done here!
 ```
 
-## Regular vs Agentic Search
+The initial understanding call extracts not just what you're asking, but what follow-up queries would be useful if initial results aren't enough.
 
-| Aspect | Regular Search | Agentic Search |
-|--------|----------------|----------------|
-| LLM Calls | 1 (understanding) | 1 (understanding) |
-| Search Steps | 1 | 1-3+ |
-| Follow-ups | None | Pre-computed |
-| Source balance | As found | Explored |
-| Trace | Minimal | Full |
+## How It Works
 
-## AgenticSearchAgent
+### Step 1: Understand and Plan
 
-Located at `src/khora/query/agentic.py`.
+The initial LLM call extracts:
+- What you're asking
+- Entities mentioned
+- **Pre-computed follow-up queries** (the key innovation)
+- How complex this query is
+- Which sources to prioritize
 
 ```python
-from khora.query.agentic import AgenticSearchAgent
-
-agent = AgenticSearchAgent(
-    engine=hybrid_query_engine,
-    llm_config=llm_config,
-)
-
-result = await agent.search(
-    "What is our product strategy?",
-    namespace_id=namespace_id,
-    max_steps=3,
-)
+# From a single LLM call
+understanding = {
+    "intent": "find product strategy information",
+    "entities": ["Product Team", "2024 Roadmap"],
+    "follow_up_queries": [
+        {"query": "product roadmap 2024", "reason": "specific timeline details"},
+        {"query": "competitive analysis", "reason": "market positioning context"}
+    ],
+    "complexity_score": 0.75,  # High - suggests multi-step exploration
+    "source_priority": {"notion": 0.4, "linear": 0.3, "slack": 0.3}
+}
 ```
 
-## AgenticSearchResult
+### Step 2: Initial Search
 
-```python
-@dataclass
-class AgenticSearchResult:
-    # Combined results from all steps
-    chunks: list[tuple[Chunk, float, str]]  # (chunk, score, source)
-    entities: list[tuple[Entity, float]]
+Run the original query across all sources:
 
-    # Summary (generated without LLM)
-    summary: str
-
-    # Full exploration trace
-    trace: AgenticSearchTrace
-
-    # Query understanding from step 1
-    understanding: UnderstandingResult | None
-
-    # Metadata
-    metadata: dict[str, Any]
+```
+Query: "What is our product strategy?"
+         |
+    +----+----+----+
+    |    |    |    |
+    v    v    v    v
+ Vector Graph Keyword  → RRF Fusion → Initial Results
 ```
 
-## AgenticSearchTrace
+Analyze what came back:
+- Which sources contributed?
+- Any dominant source (>80%)?
+- Which entities were found?
 
-Full trace of the exploration:
+### Step 3+: Follow-Up Exploration
 
-```python
-@dataclass
-class AgenticSearchTrace:
-    session_id: str
-    original_query: str
-    started_at: datetime
-    completed_at: datetime | None
-
-    # Understanding (from single LLM call)
-    understanding_reasoning: str
-    complexity_score: float
-    source_priority: dict[str, float]
-
-    # Steps
-    steps: list[SearchStep]
-
-    # Summary
-    summary: str
-    total_unique_chunks: int
-    total_unique_entities: int
-    sources_explored: dict[str, int]
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for logging/storage."""
-```
-
-## SearchStep
-
-Each exploration step is tracked:
+Execute pre-computed follow-ups (no additional LLM calls):
 
 ```python
-@dataclass
-class SearchStep:
-    step_number: int
-    query: str
-    reasoning: str
-    timestamp: datetime
-
-    # Results summary
-    total_chunks: int
-    total_entities: int
-    sources_hit: dict[str, int]
-
-    # Search contributions
-    vector_hits: int
-    graph_hits: int
-    keyword_hits: int
-
-    # Graph exploration
-    entities_linked: list[str]
-    relationships_traversed: list[tuple[str, str, str]]
-
-    # Temporal info
-    temporal_filter_applied: bool
-    time_range: tuple[datetime | None, datetime | None] | None
-```
-
-## Follow-Up Query Generation
-
-Follow-ups come from two sources:
-
-### 1. Pre-Computed (Query Understanding)
-
-Extracted during the single LLM call:
-
-```python
-# From understanding result
+# From the understanding step
 follow_up_queries = [
-    {
-        "query": "product roadmap 2024",
-        "reasoning": "Find specific roadmap details",
-    },
-    {
-        "query": "competitive analysis",
-        "reasoning": "Understand market positioning",
-    },
+    {"query": "product roadmap 2024", "reason": "specific timeline details"},
+    {"query": "competitive analysis", "reason": "market positioning context"}
 ]
+
+# Execute each
+for follow_up in follow_up_queries:
+    results = await search(follow_up["query"], namespace_id)
+    all_results.merge(results)
 ```
 
-### 2. Result Analysis (No LLM)
-
-Generated locally based on results:
+Additional follow-ups may be generated locally (no LLM) based on results:
 
 ```python
-def _generate_additional_follow_ups(self, result, analysis):
-    follow_ups = []
+# If results are 90% from Notion, explore other sources
+if dominant_source == "notion" and dominance > 0.8:
+    follow_ups.append({"query": f"{query} slack", "reason": "balance sources"})
 
-    # Source imbalance detection
-    if one_source_dominates(analysis.sources_hit):
-        # Target under-represented sources
-        follow_ups.append({
-            "query": f"{query} {underrepresented_source}",
-            "reasoning": f"Targeting: {source}",
-        })
-
-    # Entity exploration
-    if result.entities:
-        top_entity = result.entities[0][0]
-        follow_ups.append({
-            "query": f"{top_entity.name} context details",
-            "reasoning": f"Exploring top entity: {top_entity.name}",
-        })
-
-    return follow_ups[:2]
+# Explore top entities
+if top_entity := results.entities[0]:
+    follow_ups.append({"query": f"{top_entity.name} details", "reason": "entity context"})
 ```
 
-## Source Imbalance Detection
+### Step 4: Merge and Return
 
-If initial results are concentrated in one source, explore others:
+Combine results from all steps:
+- Deduplicate (same chunk found multiple ways)
+- Keep higher scores when duplicates occur
+- Generate summary from structured data (no LLM)
 
-```python
-# If >80% from one source
-if dominant_source_ratio > 0.8:
-    # Generate query targeting other sources
-    for source in ["linear", "notion", "attio", "gong"]:
-        if source not in hit_sources:
-            add_follow_up(f"{query} {source}")
-```
+## Using Agentic Search
 
-## Summary Generation (No LLM)
-
-Summary is generated from structured data:
-
-```python
-def _generate_summary_fast(self, query, chunks, entities, trace):
-    # Count by source
-    sources = count_by_source(chunks)
-    source_summary = ", ".join(f"{s}: {c}" for s, c in sources.items())
-
-    # Top entities
-    top_entities = [e.name for e, _ in sorted(entities.values())[:5]]
-
-    parts = [
-        f"Found {len(chunks)} results across {len(sources)} sources ({source_summary}).",
-        f"Key entities: {', '.join(top_entities)}.",
-        f"Explored in {len(trace.steps)} steps.",
-    ]
-
-    if trace.complexity_score > 0.7:
-        parts.append("Query was identified as complex, requiring multi-step exploration.")
-
-    return " ".join(parts)
-```
-
-## Result Merging
-
-Results from all steps are merged, keeping higher scores:
-
-```python
-for chunk, score in step_result.chunks:
-    chunk_id = str(chunk.id)
-    if chunk_id not in all_chunks or all_chunks[chunk_id][1] < score:
-        all_chunks[chunk_id] = (chunk, score, source)
-```
-
-## Usage
-
-### Basic Agentic Search
+### Basic Usage
 
 ```python
 from khora.query.agentic import AgenticSearchAgent
 
-agent = AgenticSearchAgent(engine=engine)
+agent = AgenticSearchAgent(engine=hybrid_engine)
 
 result = await agent.search(
     "What is our product strategy?",
     namespace_id,
-    max_steps=3,
+    max_steps=3  # Initial + 2 follow-ups
 )
 
 print(f"Found {len(result.chunks)} unique chunks")
 print(f"Summary: {result.summary}")
-```
-
-### With QueryConfig
-
-```python
-result = await agent.search(
-    query,
-    namespace_id,
-    config=QueryConfig(
-        mode=SearchMode.HYBRID,
-        temporal_filter=TemporalFilter.last_days(30),
-    ),
-    max_steps=3,
-)
 ```
 
 ### Via MemoryLake
@@ -290,88 +125,181 @@ result = await lake.recall(
     "product strategy",
     config=QueryConfig(
         enable_agentic=True,
-        max_agentic_steps=3,
-    ),
+        max_agentic_steps=3
+    )
 )
 ```
 
-### Accessing Trace
+### With Other Options
+
+```python
+result = await agent.search(
+    query,
+    namespace_id,
+    config=QueryConfig(
+        mode=SearchMode.HYBRID,
+        temporal_filter=TemporalFilter.last_days(30),
+        recency_bias=0.2
+    ),
+    max_steps=3
+)
+```
+
+## The Result Object
+
+```python
+AgenticSearchResult(
+    # Combined results (chunk, score, source)
+    chunks=[(chunk1, 0.85, "notion"), (chunk2, 0.82, "slack"), ...],
+
+    # Entities found
+    entities=[(entity1, 0.9), (entity2, 0.8), ...],
+
+    # Auto-generated summary (no LLM call)
+    summary="Found 15 results across 3 sources (notion: 8, slack: 5, linear: 2). Key entities: Product Team, Q4 Roadmap. Explored in 3 steps.",
+
+    # Full trace for debugging/analysis
+    trace=AgenticSearchTrace(...),
+
+    # Original understanding
+    understanding=UnderstandingResult(...)
+)
+```
+
+## The Trace
+
+Every agentic search produces a detailed trace:
 
 ```python
 result = await agent.search(query, namespace_id)
 
-# Full trace as dict
-trace_dict = result.trace.to_dict()
-
-# Step-by-step analysis
+# See what happened
 for step in result.trace.steps:
     print(f"Step {step.step_number}: {step.query}")
-    print(f"  Reasoning: {step.reasoning}")
-    print(f"  Found: {step.total_chunks} chunks, {step.total_entities} entities")
-    print(f"  Sources: {step.sources_hit}")
+    print(f"  Reason: {step.reasoning}")
+    print(f"  Found: {step.total_chunks} chunks")
+    print(f"  Sources: vector={step.vector_hits}, graph={step.graph_hits}, keyword={step.keyword_hits}")
+```
+
+Example trace:
+
+```
+Step 1: "What is our product strategy?"
+  Reason: Initial query
+  Found: 8 chunks
+  Sources: vector=5, graph=2, keyword=1
+
+Step 2: "product roadmap 2024"
+  Reason: specific timeline details (pre-computed)
+  Found: 5 chunks
+  Sources: vector=4, graph=1, keyword=0
+
+Step 3: "Product Team context details"
+  Reason: exploring top entity (generated)
+  Found: 4 chunks
+  Sources: vector=1, graph=3, keyword=0
+```
+
+### Trace as Dict
+
+For logging or storage:
+
+```python
+trace_dict = result.trace.to_dict()
+# Contains: session_id, steps, complexity_score, sources_explored, etc.
+
+await save_to_analytics(trace_dict)
 ```
 
 ## When to Use Agentic Search
 
-**Use for:**
-- Complex queries requiring synthesis
-- Exploratory research
-- Queries about unknown territory
-- When initial results seem incomplete
+**Good candidates:**
+- Open-ended research questions
+- Complex topics requiring synthesis
+- Exploratory queries ("tell me about X")
+- Questions that might need context from multiple areas
 
 **Skip for:**
-- Simple factual lookups
-- Specific entity queries
-- Time-sensitive searches
-- Cost-constrained scenarios
+- Simple factual lookups ("what's Alice's email?")
+- Specific entity queries ("show me the Q4 report")
+- Time-sensitive real-time queries
+- When you're counting API costs
 
-## Complexity-Based Triggering
+## How Follow-Ups Are Generated
 
-The complexity score can trigger agentic search:
+### Pre-Computed (from LLM)
+
+The understanding step generates these based on:
+- What additional context would help
+- What aspects the question implies
+- Common follow-up patterns for this query type
+
+### Generated Locally
+
+No LLM needed - these come from analyzing results:
+
+**Source Imbalance:**
+```python
+# 85% from Notion? Try other sources
+if notion_ratio > 0.8:
+    follow_ups.append(f"{query} slack linear")
+```
+
+**Entity Exploration:**
+```python
+# Found "Product Team" entity? Get more context
+if top_entity := results.entities[0]:
+    follow_ups.append(f"{top_entity.name} context")
+```
+
+## Summary Generation (No LLM)
+
+The summary is built from structured data:
 
 ```python
-# In query understanding
-complexity_score = 0.8  # High complexity
+def generate_summary(query, chunks, entities, trace):
+    sources = count_by_source(chunks)
+    top_entities = [e.name for e, _ in entities[:5]]
 
-if complexity_score > 0.6:
-    # Suggest agentic search
-    pass
+    parts = [
+        f"Found {len(chunks)} results across {len(sources)} sources.",
+        f"Key entities: {', '.join(top_entities)}.",
+        f"Explored in {len(trace.steps)} steps."
+    ]
+
+    if trace.complexity_score > 0.7:
+        parts.append("Query identified as complex.")
+
+    return " ".join(parts)
 ```
 
 ## Performance
 
-- **Single LLM call**: All extraction happens upfront
-- **Parallel search**: Each step uses parallel multi-source search
-- **Batch source lookup**: Document sources fetched in batch
-- **No additional LLM**: Follow-ups are pre-computed or local
+Agentic search is designed to be efficient:
 
-## Example Output
+| Operation | LLM Calls | Notes |
+|-----------|-----------|-------|
+| Understanding | 1 | All extraction upfront |
+| Follow-up planning | 0 | Pre-computed |
+| Each search step | 0 | Pure retrieval |
+| Summary generation | 0 | Template-based |
+| **Total** | **1** | Same as regular search! |
 
-```python
-AgenticSearchResult(
-    chunks=[(chunk1, 0.85, "notion"), (chunk2, 0.82, "slack"), ...],
-    entities=[(entity1, 0.9), (entity2, 0.8), ...],
-    summary="Found 15 results across 3 sources (notion: 8, slack: 5, linear: 2). Key entities: Product Team, Q4 Roadmap, Feature X. Explored in 3 steps.",
-    trace=AgenticSearchTrace(
-        session_id="abc-123",
-        steps=[
-            SearchStep(step_number=1, query="product strategy", ...),
-            SearchStep(step_number=2, query="product roadmap 2024", ...),
-            SearchStep(step_number=3, query="Product Team context details", ...),
-        ],
-        complexity_score=0.75,
-        ...
-    ),
-    metadata={
-        "original_query": "What is our product strategy?",
-        "total_steps": 3,
-        "sources_explored": {"notion": 8, "slack": 5, "linear": 2},
-    },
-)
-```
+The cost difference vs. regular search is just the additional search queries (cheap) - not additional LLM calls (expensive).
 
-## Next Steps
+## Comparison
 
-- [Query Understanding](query-understanding.md) - Pre-computed follow-ups
-- [Search Modes](search-modes.md) - Multi-source search
-- [Overview](overview.md) - Full query pipeline
+| Feature | Regular Search | Agentic Search |
+|---------|----------------|----------------|
+| LLM calls | 1 | 1 |
+| Search steps | 1 | 1-3+ |
+| Follow-ups | None | Pre-computed + local |
+| Source balance | As found | Actively explored |
+| Entity exploration | Basic | Deep |
+| Trace detail | Minimal | Full |
+
+## What's Next?
+
+- **[Query Understanding](query-understanding.md)** - How follow-ups are pre-computed
+- **[Search Modes](search-modes.md)** - The underlying search methods
+- **[Fusion](fusion.md)** - How results are combined
