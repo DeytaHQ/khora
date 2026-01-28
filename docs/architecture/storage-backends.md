@@ -1,388 +1,362 @@
 # Storage Backends
 
-Khora uses three complementary storage systems, each optimized for specific access patterns. This document details the purpose, configuration, and implementation of each backend.
+Khora doesn't use one database - it uses three, each chosen for what it does best. This might seem like overkill, but each backend excels at queries the others struggle with.
 
-## Overview
+## The Three Musketeers
 
-| Backend | Technology | Purpose | Data Stored |
-|---------|------------|---------|-------------|
-| Relational | PostgreSQL | Structured data, ACID transactions | Documents, tenancy, permissions, metadata |
-| Vector | pgvector | Similarity search | Chunk embeddings, entity embeddings |
-| Graph | Neo4j | Relationship traversal | Entity nodes, relationship edges |
-| Event Store | PostgreSQL | Audit trail, temporal queries | Immutable events |
+```
++--------------------+    +--------------------+    +--------------------+
+|    PostgreSQL      |    |      pgvector      |    |       Neo4j        |
+|                    |    |                    |    |                    |
+|  The Record Keeper |    |  The Meaning       |    |  The Connector     |
+|                    |    |  Finder            |    |                    |
+|  Documents         |    |  "What's similar   |    |  "Who knows whom?" |
+|  Who owns what     |    |  to this?"         |    |  "What's related   |
+|  What happened     |    |                    |    |  to what?"         |
+|  when              |    |  Embedding         |    |                    |
+|                    |    |  similarity        |    |  Entity nodes      |
+|  ACID guarantees   |    |  search            |    |  Relationship      |
+|  Transactions      |    |                    |    |  edges             |
++--------------------+    +--------------------+    +--------------------+
+```
 
-## PostgreSQL (Relational Backend)
+**PostgreSQL** is your source of truth. It stores documents, tracks ownership through the tenant hierarchy, and maintains an immutable event log. When you need to know "what exactly is stored" or "who has access to what", PostgreSQL answers.
 
-The relational backend handles all structured data with full ACID guarantees.
+**pgvector** enables semantic search. It stores embeddings - those 1536-dimensional vectors that capture meaning - and finds similar content using cosine similarity. When you ask "what do we know about machine learning?", pgvector finds conceptually related content even if it uses different words.
 
-### Data Stored
+**Neo4j** captures relationships. It stores entities (people, organizations, concepts) as nodes and their relationships as edges. When you ask "who works with Alice?" or "what projects is this technology used in?", Neo4j traverses the graph to find answers.
 
-- **Documents** - Source content with metadata, status, and processing info
-- **Organizations** - Top-level tenant containers
-- **Workspaces** - Project/team isolation within organizations
-- **Namespaces** - Memory isolation with versioning support
-- **Sync Checkpoints** - Incremental sync state per source
+## PostgreSQL: The Foundation
 
-### Schema Highlights
+Everything starts and ends here. PostgreSQL handles all structured data with full ACID guarantees.
 
+### What It Stores
+
+**Documents** - Your actual content:
 ```sql
--- Documents table
 CREATE TABLE documents (
     id UUID PRIMARY KEY,
-    namespace_id UUID NOT NULL REFERENCES namespaces(id),
+    namespace_id UUID NOT NULL,
     content TEXT,
-    status VARCHAR(20),  -- pending, processing, completed, failed
-    metadata JSONB,
-    chunk_count INTEGER DEFAULT 0,
-    entity_count INTEGER DEFAULT 0,
+    status VARCHAR(20),  -- pending → processing → completed/failed
+    metadata JSONB,      -- title, source, checksum, etc.
+    chunk_count INTEGER,
+    entity_count INTEGER,
     created_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ,
     processed_at TIMESTAMPTZ
 );
+```
 
--- Tenancy hierarchy
+**Tenant Hierarchy** - Who owns what:
+```sql
+-- Organization (top level, e.g., your company)
+-- └── Workspace (team or project)
+--     └── Namespace (isolated data container)
+
 CREATE TABLE organizations (
     id UUID PRIMARY KEY,
     name VARCHAR(255),
     slug VARCHAR(100) UNIQUE,
-    tenancy_mode VARCHAR(20),  -- shared, isolated
-    metadata JSONB
+    tenancy_mode VARCHAR(20)  -- shared or isolated
 );
 
 CREATE TABLE workspaces (
     id UUID PRIMARY KEY,
     organization_id UUID REFERENCES organizations(id),
-    name VARCHAR(255),
-    slug VARCHAR(100)
+    name VARCHAR(255)
 );
 
 CREATE TABLE namespaces (
     id UUID PRIMARY KEY,
     workspace_id UUID REFERENCES workspaces(id),
     name VARCHAR(255),
-    slug VARCHAR(100),
     version INTEGER DEFAULT 1,
-    is_active BOOLEAN DEFAULT TRUE,
-    previous_version_id UUID,
-    config_overrides JSONB
+    is_active BOOLEAN DEFAULT TRUE
 );
 ```
 
-### Connection Configuration
+**Events** - Everything that happens:
+```sql
+CREATE TABLE memory_events (
+    id UUID PRIMARY KEY,
+    namespace_id UUID,
+    event_type VARCHAR(100),    -- document.created, entity.merged, etc.
+    resource_type VARCHAR(50),  -- document, chunk, entity
+    resource_id UUID,
+    data JSONB,
+    actor_id VARCHAR(255),
+    correlation_id UUID,
+    timestamp TIMESTAMPTZ
+);
+```
+
+### Connection Setup
 
 ```python
 from khora.storage import StorageConfig
 
 config = StorageConfig(
     postgresql_url="postgresql://user:pass@localhost:5432/khora",
-    # Connection pool settings
     pool_size=5,
-    max_overflow=10,
+    max_overflow=10
 )
 ```
 
-### Key Operations
+Or via environment:
+```bash
+export KHORA_DATABASE_URL="postgresql://user:pass@localhost:5432/khora"
+```
 
-- `create_document()` / `update_document()` / `delete_document()`
-- `create_organization()` / `create_workspace()` / `create_namespace()`
-- `get_document_by_checksum()` - Deduplication check
-- `create_namespace_version()` - Version management
-- `get_sync_checkpoint()` / `set_sync_checkpoint()` - Incremental sync
+## pgvector: Semantic Search
 
-## pgvector (Vector Backend)
+The pgvector extension turns PostgreSQL into a vector database. It stores embeddings and enables similarity search.
 
-The vector backend enables semantic similarity search using PostgreSQL's pgvector extension.
+### What It Stores
 
-### Data Stored
-
-- **Chunk Embeddings** - Vector representations of document chunks
-- **Entity Embeddings** - Vector representations of extracted entities
-
-### Index Configuration
-
-Khora uses IVFFlat indexing for approximate nearest neighbor search:
-
+**Chunk Embeddings** - Vector representations of document pieces:
 ```sql
--- Chunk embeddings with IVFFlat index
-CREATE TABLE chunk_embeddings (
+CREATE TABLE chunks (
     id UUID PRIMARY KEY,
     namespace_id UUID NOT NULL,
     document_id UUID NOT NULL,
     content TEXT,
-    embedding vector(1536),  -- Dimension matches embedding model
-    metadata JSONB,
+    embedding vector(1536),  -- The magic: 1536 floats
+    index INTEGER,           -- Position in document
+    token_count INTEGER,
     created_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_chunk_embeddings_vector
-ON chunk_embeddings
+-- IVFFlat index for fast approximate search
+CREATE INDEX ON chunks
 USING ivfflat (embedding vector_cosine_ops)
 WITH (lists = 100);
+```
 
--- Entity embeddings
-CREATE TABLE entity_embeddings (
-    entity_id UUID PRIMARY KEY,
+**Entity Embeddings** - For finding similar entities:
+```sql
+CREATE TABLE entities (
+    id UUID PRIMARY KEY,
     namespace_id UUID NOT NULL,
+    name VARCHAR(255),
+    entity_type VARCHAR(50),
     embedding vector(1536),
-    model VARCHAR(100)
+    -- ... other fields
 );
 ```
 
-### Similarity Search
+### How Similarity Search Works
 
-```python
-# Internal implementation
-async def search_similar_chunks(
-    namespace_id: UUID,
-    query_embedding: list[float],
-    limit: int = 10,
-    min_similarity: float = 0.3,
-) -> list[tuple[Chunk, float]]:
-    """
-    Uses pgvector's <=> operator for cosine distance.
-    Score = 1 - distance (so higher = more similar)
-    """
-    query = """
-        SELECT *, 1 - (embedding <=> $1) as similarity
-        FROM chunk_embeddings
-        WHERE namespace_id = $2
-          AND 1 - (embedding <=> $1) >= $3
-        ORDER BY embedding <=> $1
-        LIMIT $4
-    """
+When you search, Khora:
+1. Embeds your query using the same model as the stored content
+2. Finds nearest neighbors using cosine similarity
+3. Returns chunks sorted by how similar they are
+
+```sql
+-- The actual query (simplified)
+SELECT id, content,
+       1 - (embedding <=> $query_embedding) as similarity
+FROM chunks
+WHERE namespace_id = $namespace_id
+ORDER BY embedding <=> $query_embedding
+LIMIT 10;
 ```
 
-### Embedding Models
+The `<=>` operator computes cosine distance. Subtracting from 1 converts to similarity (higher = more similar).
 
-Khora uses LiteLLM for embedding generation, defaulting to:
-- **Model**: `text-embedding-3-small` (OpenAI)
-- **Dimension**: 1536
+### Embedding Configuration
 
-Configure in code:
+Default model: `text-embedding-3-small` (OpenAI, 1536 dimensions)
+
 ```python
 from khora.config import LiteLLMConfig
 
 config = LiteLLMConfig(
     embedding_model="text-embedding-3-small",
-    embedding_dimension=1536,
+    embedding_dimension=1536
 )
 ```
 
-## Neo4j (Graph Backend)
+## Neo4j: The Knowledge Graph
 
-The graph backend stores entities and relationships for traversal queries.
+Neo4j stores entities and relationships as a property graph - nodes connected by edges.
 
-### Data Stored
+### What It Stores
 
-- **Entity Nodes** - People, organizations, concepts, etc.
-- **Relationship Edges** - Typed connections between entities
-- **Episode Nodes** - Temporal events with associated entities
-
-### Node Labels
-
+**Entity Nodes**:
 ```cypher
-// Entity node structure
 (:Entity {
-    id: "uuid",
-    namespace_id: "uuid",
-    name: "Einstein",
+    id: "uuid-here",
+    namespace_id: "uuid-here",
+    name: "Albert Einstein",
     entity_type: "PERSON",
     description: "Theoretical physicist",
-    attributes: {role: "Professor"},
-    mention_count: 5,
     confidence: 0.95,
-    valid_from: datetime,
-    valid_until: datetime
+    mention_count: 15,
+    attributes: {
+        birth_year: 1879,
+        known_for: ["relativity", "E=mc²"]
+    }
 })
+```
 
-// Episode node structure
-(:Episode {
-    id: "uuid",
-    namespace_id: "uuid",
-    name: "Nobel Prize Award",
-    description: "Awarded Nobel Prize in Physics",
-    occurred_at: datetime,
-    duration_seconds: 3600
-})
+**Relationship Edges**:
+```cypher
+(:Entity)-[:WORKS_FOR {
+    weight: 0.9,
+    since: "1905-01-01"
+}]->(:Entity)
 ```
 
 ### Relationship Types
 
-Standard relationship types defined in `EntityType` enum:
+Built-in types cover common cases:
 
-| Type | Description |
-|------|-------------|
-| `WORKS_FOR` | Employment relationship |
+| Type | Meaning |
+|------|---------|
+| `WORKS_FOR` | Employment |
 | `KNOWS` | Personal connection |
-| `MANAGES` / `REPORTS_TO` | Organizational hierarchy |
-| `COLLABORATES_WITH` | Professional collaboration |
-| `OWNS` / `PART_OF` | Ownership and composition |
-| `LOCATED_IN` | Geographic association |
-| `RELATES_TO` | Generic relationship |
-| `DEPENDS_ON` / `IMPLEMENTS` | Technical dependencies |
-| `PRECEDES` / `FOLLOWS` | Temporal ordering |
+| `MANAGES` / `REPORTS_TO` | Hierarchy |
+| `COLLABORATES_WITH` | Professional relationship |
+| `OWNS` / `PART_OF` | Ownership, membership |
+| `LOCATED_IN` | Geographic |
+| `DEPENDS_ON` | Technical dependency |
+| `PRECEDES` / `FOLLOWS` | Temporal order |
+
+You can also define custom types through the expertise system.
 
 ### Graph Queries
 
+Finding an entity's neighborhood:
 ```cypher
-// Find entity neighborhood
 MATCH (e:Entity {id: $entity_id})-[r*1..2]-(related:Entity)
 WHERE related.namespace_id = $namespace_id
 RETURN DISTINCT related, r
-LIMIT $limit
+LIMIT 50
+```
 
-// Path finding between entities
+Finding paths between entities:
+```cypher
 MATCH path = shortestPath(
-    (source:Entity {id: $source_id})-[*..3]-(target:Entity {id: $target_id})
+    (a:Entity {id: $source})-[*..3]-(b:Entity {id: $target})
 )
 RETURN path
 ```
 
-### Connection Configuration
+### Connection Setup
 
 ```python
-from khora.storage import StorageConfig
-
 config = StorageConfig(
     neo4j_url="bolt://localhost:7687",
     neo4j_user="neo4j",
-    neo4j_password="password",
-    neo4j_database="neo4j",  # Optional, uses default
+    neo4j_password="your-password"
 )
-
-# Or via environment variables:
-# KHORA_NEO4J_URL=bolt://localhost:7687
-# KHORA_NEO4J_USER=neo4j
-# KHORA_NEO4J_PASSWORD=password
 ```
 
-## Event Store
-
-The event store provides an append-only log for all changes, enabling event sourcing patterns.
-
-See [Event Sourcing](event-sourcing.md) for detailed documentation.
+Or via environment:
+```bash
+export KHORA_NEO4J_URL="bolt://neo4j:password@localhost:7687"
+```
 
 ## Dual Entity Storage
 
-Entities are stored in **both** Neo4j (for graph traversal) and PostgreSQL/pgvector (for embedding similarity search). This enables:
+Here's something important: **entities live in both Neo4j AND pgvector**.
 
-- **Graph queries**: Traverse relationships via Neo4j
-- **Entity similarity**: Find related entities via embedding search in pgvector
+Why? Different query patterns:
 
-When entities are created or updated via the `StorageCoordinator`, they are automatically stored in both backends:
+- **Neo4j**: "Who works with Einstein?" → Graph traversal
+- **pgvector**: "Find entities similar to this description" → Embedding similarity
+
+When you create an entity, the `StorageCoordinator` stores it in both places:
 
 ```python
-# StorageCoordinator.create_entity() stores to both:
 async def create_entity(self, entity: Entity) -> Entity:
-    # Store in Neo4j for graph traversal
+    # Store in Neo4j for graph queries
     if self.graph:
         entity = await self.graph.create_entity(entity)
-    # Store in pgvector for embedding search
+
+    # Store in pgvector for similarity search
     if self.vector:
         await self.vector.create_entity(entity)
+
     return entity
 ```
 
-## Protocol-Based Design
+This redundancy is intentional - each backend serves different access patterns.
 
-All backends implement protocols defined in `src/khora/storage/backends/base.py`:
+## The StorageCoordinator
 
-```python
-from typing import Protocol
-
-class VectorBackendProtocol(Protocol):
-    """Protocol for vector storage backends."""
-
-    async def connect(self) -> None: ...
-    async def disconnect(self) -> None: ...
-    async def is_healthy(self) -> bool: ...
-
-    # Chunk operations
-    async def create_chunk(self, chunk: Chunk) -> Chunk: ...
-    async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]: ...
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None: ...
-    async def search_similar(
-        self,
-        namespace_id: UUID,
-        query_embedding: list[float],
-        limit: int = 10,
-        min_similarity: float = 0.0,
-    ) -> list[tuple[Chunk, float]]: ...
-
-    # Entity operations (for embedding search)
-    async def create_entity(self, entity: Entity) -> None: ...
-    async def update_entity(self, entity: Entity) -> None: ...
-    async def entity_exists(self, entity_id: UUID) -> bool: ...
-    async def update_entity_embedding(
-        self, entity_id: UUID, embedding: list[float], model: str
-    ) -> None: ...
-    async def search_similar_entities(
-        self,
-        namespace_id: UUID,
-        query_embedding: list[float],
-        limit: int = 10,
-        min_similarity: float = 0.0,
-    ) -> list[tuple[UUID, float]]: ...
-
-
-class GraphBackendProtocol(Protocol):
-    """Protocol for graph storage backends."""
-
-    async def create_entity(self, entity: Entity) -> Entity: ...
-    async def get_entity(self, entity_id: UUID) -> Entity | None: ...
-    async def get_entity_by_name(
-        self, namespace_id: UUID, name: str, entity_type: str
-    ) -> Entity | None: ...
-    async def get_neighborhood(
-        self,
-        entity_id: UUID,
-        depth: int = 1,
-        relationship_types: list[str] | None = None,
-        limit: int = 50,
-    ) -> dict[str, Any]: ...
-```
-
-This design enables:
-- **Testing**: Mock implementations for unit tests
-- **Swappability**: Replace backends without changing core logic
-- **Extensibility**: Add new backend types (e.g., Qdrant, Milvus)
-
-## Backend Initialization
-
-The `StorageCoordinator` is created via factory function:
+You don't interact with backends directly. The `StorageCoordinator` orchestrates everything:
 
 ```python
-from khora.storage import StorageConfig, create_storage_coordinator
+from khora.storage import create_storage_coordinator, StorageConfig
 
 config = StorageConfig(
     postgresql_url="postgresql://...",
-    pgvector_url="postgresql://...",  # Usually same as postgresql_url
-    neo4j_url="bolt://...",
+    neo4j_url="bolt://..."
 )
 
 coordinator = create_storage_coordinator(config)
 await coordinator.connect()
 
-# Use coordinator...
+# Store a document
+await coordinator.create_document(document)
+
+# Search for similar chunks
+results = await coordinator.search_similar_chunks(
+    namespace_id,
+    query_embedding,
+    limit=10
+)
+
+# Get entity neighborhood
+neighborhood = await coordinator.get_neighborhood(
+    entity_id,
+    depth=2
+)
 
 await coordinator.disconnect()
 ```
 
-## Health Checking
+### Health Checking
 
-Each backend provides health checking:
+Each backend reports its health:
 
 ```python
 health = await coordinator.health_check()
-# Returns StorageHealth with:
-# - relational: bool
-# - vector: bool
-# - graph: bool
-# - event_store: bool
-# - is_healthy: bool (True if relational + vector are healthy)
+
+print(f"PostgreSQL: {'OK' if health.relational else 'DOWN'}")
+print(f"pgvector: {'OK' if health.vector else 'DOWN'}")
+print(f"Neo4j: {'OK' if health.graph else 'DOWN'}")
+print(f"Overall: {'healthy' if health.is_healthy else 'degraded'}")
 ```
 
-## Next Steps
+## Protocol-Based Design
 
-- [Multi-Tenancy](multi-tenancy.md) - Namespace isolation and versioning
-- [Event Sourcing](event-sourcing.md) - Immutable event log
+Each backend implements a protocol (Python's version of an interface):
+
+```python
+class VectorBackendProtocol(Protocol):
+    async def connect(self) -> None: ...
+    async def search_similar(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        limit: int
+    ) -> list[tuple[Chunk, float]]: ...
+
+class GraphBackendProtocol(Protocol):
+    async def create_entity(self, entity: Entity) -> Entity: ...
+    async def get_neighborhood(
+        self,
+        entity_id: UUID,
+        depth: int
+    ) -> dict[str, Any]: ...
+```
+
+This means you could theoretically swap pgvector for Qdrant, or Neo4j for Memgraph, without changing the rest of the system. The protocols define the contract; implementations fulfill it.
+
+## What's Next?
+
+- **[Multi-Tenancy](multi-tenancy.md)** - Organizations, workspaces, namespaces
+- **[Event Sourcing](event-sourcing.md)** - The immutable event log
+- **[Overview](overview.md)** - High-level architecture

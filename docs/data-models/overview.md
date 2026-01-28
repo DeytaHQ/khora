@@ -1,233 +1,334 @@
 # Data Models Overview
 
-Khora's data models represent the core domain concepts for knowledge management. This document provides an overview of model relationships and their purposes.
+Khora's data models represent the things you care about: documents you've stored, concepts you've extracted, relationships you've discovered, and the history of how it all evolved.
 
-## Model Hierarchy
+## The Model Landscape
+
+Everything in Khora fits into one of three layers:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              Domain Models                                   │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                          Tenancy Layer                                   ││
-│  │                                                                          ││
-│  │   Organization ──┬── Workspace ──┬── Namespace                          ││
-│  │                  │               │                                       ││
-│  │                  └── Workspace   └── Namespace (versioned)              ││
-│  │                                                                          ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                      │                                       │
-│                                      ▼                                       │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                          Content Layer                                   ││
-│  │                                                                          ││
-│  │   Document ──┬── Chunk ──────────────────────────┐                       ││
-│  │   (source)   │   (text + embedding)              │                       ││
-│  │              │                                   │                       ││
-│  │              └── Chunk                           │                       ││
-│  │                                                  │                       ││
-│  │              ┌───────────────────────────────────┘                       ││
-│  │              ▼                                                           ││
-│  │   Entity ───┬── Relationship ─── Entity                                  ││
-│  │   (node)    │   (edge)            (node)                                 ││
-│  │             │                                                            ││
-│  │             └── Episode ────────── Entity                                ││
-│  │                 (temporal event)                                         ││
-│  │                                                                          ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                      │                                       │
-│                                      ▼                                       │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                          Event Layer                                     ││
-│  │                                                                          ││
-│  │   MemoryEvent ─── (append-only log of all changes)                       ││
-│  │                                                                          ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------+
+|                      TENANCY LAYER                        |
+|                                                           |
+|   Organization                                            |
+|        |                                                  |
+|        +-- Workspace                                      |
+|        |       |                                          |
+|        |       +-- Namespace  (your data lives here)      |
+|        |       +-- Namespace  (maybe version 2)           |
+|        |                                                  |
+|        +-- Workspace  (different team)                    |
+|                |                                          |
+|                +-- Namespace                              |
++-----------------------------------------------------------+
+                            |
+                            v
++-----------------------------------------------------------+
+|                      CONTENT LAYER                        |
+|                                                           |
+|   Document ----+---- Chunk ----+---- Entity               |
+|   (the source) |    (pieces)   |    (concepts)            |
+|                |               |         |                |
+|                +---- Chunk     |    Relationship          |
+|                      |         |    (connections)         |
+|                      +-------- +                          |
+|                                      Episode              |
+|                                      (events)             |
++-----------------------------------------------------------+
+                            |
+                            v
++-----------------------------------------------------------+
+|                       EVENT LAYER                         |
+|                                                           |
+|   MemoryEvent  (immutable log of everything that happens) |
++-----------------------------------------------------------+
 ```
 
-## Core Models
+## Content Models
 
 ### Document
 
-The source content container. Documents are the primary input to the memory lake.
+A document is the raw content you store - the starting point for everything.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Unique identifier |
-| `namespace_id` | UUID | Owning namespace |
-| `content` | str | Source text content |
-| `metadata` | DocumentMetadata | Source, title, type, checksum |
-| `status` | DocumentStatus | pending, processing, completed, failed |
-| `chunk_count` | int | Number of chunks created |
-| `entity_count` | int | Number of entities extracted |
-| `created_at` | datetime | When document was added |
+```python
+from khora.core.models import Document
 
-See [Documents & Chunks](documents-chunks.md) for details.
+Document(
+    id=UUID("..."),
+    namespace_id=UUID("..."),
+    content="Einstein published his theory...",
+    metadata=DocumentMetadata(
+        title="Physics History",
+        source="upload",
+        content_type="text/plain",
+        checksum="sha256:abc123..."
+    ),
+    status=DocumentStatus.COMPLETED,
+    chunk_count=5,
+    entity_count=12,
+    created_at=datetime(2024, 1, 15, 10, 30)
+)
+```
+
+**Key fields:**
+- `content` - The actual text
+- `metadata.checksum` - SHA-256 hash for deduplication
+- `status` - Where it is in processing (PENDING → PROCESSING → COMPLETED or FAILED)
+- `chunk_count`, `entity_count` - Summary stats after processing
+
+**Lifecycle:**
+```
+PENDING        Just created, waiting for processing
+    |
+    v
+PROCESSING     Being chunked, embedded, extracted
+    |
+    +---> COMPLETED    Successfully processed
+    |
+    +---> FAILED       Error occurred (message in metadata)
+```
 
 ### Chunk
 
-A segment of a document, sized for embedding and retrieval.
+Chunks are document pieces optimized for embedding and retrieval.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Unique identifier |
-| `document_id` | UUID | Parent document |
-| `namespace_id` | UUID | Owning namespace |
-| `content` | str | Chunk text |
-| `embedding` | list[float] | Vector embedding |
-| `index` | int | Position in document |
-| `token_count` | int | Token count for sizing |
-| `created_at` | datetime | When chunk was created |
+```python
+Chunk(
+    id=UUID("..."),
+    document_id=UUID("..."),    # Parent document
+    namespace_id=UUID("..."),
+    content="...portion of text...",
+    embedding=[0.021, -0.156, ...],  # 1536 floats
+    embedding_model="text-embedding-3-small",
+    index=2,                    # Third chunk in document
+    start_char=1024,            # Character offset
+    end_char=1536,
+    token_count=512,
+    created_at=datetime(2024, 1, 15, 10, 31)
+)
+```
 
-See [Documents & Chunks](documents-chunks.md) for details.
+**Key fields:**
+- `embedding` - Vector representation for similarity search
+- `index` - Position in parent document (for context)
+- `start_char`, `end_char` - Character offsets (for highlighting)
+- `token_count` - Useful for understanding chunk sizes
 
 ### Entity
 
-A named concept extracted from content (person, organization, concept, etc.).
+Entities are named concepts extracted from your content.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Unique identifier |
-| `namespace_id` | UUID | Owning namespace |
-| `name` | str | Entity name |
-| `entity_type` | EntityType | PERSON, ORGANIZATION, etc. |
-| `description` | str | Entity description |
-| `attributes` | dict | Arbitrary key-value attributes |
-| `embedding` | list[float] | Vector embedding |
-| `confidence` | float | Extraction confidence (0-1) |
-| `valid_from` / `valid_until` | datetime | Temporal validity |
+```python
+Entity(
+    id=UUID("..."),
+    namespace_id=UUID("..."),
+    name="Albert Einstein",
+    entity_type="PERSON",
+    description="German-born theoretical physicist",
+    attributes={
+        "birth_year": 1879,
+        "known_for": ["relativity", "quantum mechanics"]
+    },
+    embedding=[...],           # For similarity search
+    confidence=0.95,           # Extraction confidence
+    valid_from=datetime(1879, 3, 14),
+    valid_until=datetime(1955, 4, 18),
+    source_document_ids=[...], # Where we learned this
+    source_chunk_ids=[...],
+    mention_count=15           # How often mentioned
+)
+```
 
-See [Knowledge Graph](knowledge-graph.md) for details.
+**Built-in entity types:**
+- `PERSON` - People
+- `ORGANIZATION` - Companies, institutions
+- `LOCATION` - Places
+- `PRODUCT` - Products, services
+- `CONCEPT` - Abstract ideas
+- `EVENT` - Named events
+- `TECHNOLOGY` - Technologies, tools
+- `CUSTOM` - Your own types
+
+**Temporal validity**: Entities can have time bounds. Albert Einstein is valid from birth to death. A company's name might change. This enables temporal queries.
 
 ### Relationship
 
-A typed edge between two entities.
+Relationships connect entities with typed edges.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Unique identifier |
-| `namespace_id` | UUID | Owning namespace |
-| `source_entity_id` | UUID | Source entity |
-| `target_entity_id` | UUID | Target entity |
-| `relationship_type` | RelationshipType | WORKS_FOR, KNOWS, etc. |
-| `weight` | float | Relationship strength (0-1) |
-| `properties` | dict | Edge properties |
-| `valid_from` / `valid_until` | datetime | Temporal validity |
+```python
+Relationship(
+    id=UUID("..."),
+    namespace_id=UUID("..."),
+    source_entity_id=UUID("..."),  # From entity
+    target_entity_id=UUID("..."),  # To entity
+    relationship_type="WORKS_FOR",
+    properties={
+        "role": "Chief Scientist",
+        "start_date": "2020-01-15"
+    },
+    weight=0.9,                    # Strength (0-1)
+    confidence=0.85,               # Extraction confidence
+    valid_from=datetime(2020, 1, 15),
+    source_document_ids=[...],
+    source_chunk_ids=[...]
+)
+```
 
-See [Knowledge Graph](knowledge-graph.md) for details.
+**Built-in relationship types:**
+- `WORKS_FOR` - Employment
+- `KNOWS` - Personal connection
+- `PART_OF` - Membership, containment
+- `RELATED_TO` - General association
+- `CREATED` - Authorship, invention
+- `LOCATED_IN` - Physical location
+- `OWNS` - Ownership
+- `COLLABORATES_WITH` - Collaboration
 
 ### Episode
 
-A temporal event with associated entities and duration.
+Episodes are events with temporal extent.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Unique identifier |
-| `namespace_id` | UUID | Owning namespace |
-| `name` | str | Episode name |
-| `description` | str | What happened |
-| `occurred_at` | datetime | When it happened |
-| `duration_seconds` | int | Event duration |
-| `entity_ids` | list[UUID] | Participating entities |
+```python
+Episode(
+    id=UUID("..."),
+    namespace_id=UUID("..."),
+    name="Product Launch",
+    description="Launch of version 2.0 at the annual conference",
+    occurred_at=datetime(2024, 3, 15, 9, 0),
+    duration_seconds=7200,  # 2 hours
+    entity_ids=[product_id, conference_id, ceo_id],
+    source_document_ids=[...],
+    source_chunk_ids=[...]
+)
+```
 
-See [Knowledge Graph](knowledge-graph.md) for details.
+Episodes connect multiple entities to a point (or span) in time.
+
+## The Source Chain
+
+One crucial feature: everything tracks where it came from.
+
+```
+Document "Meeting Notes"
+     |
+     +-- Chunk #1 ----+
+     |                |
+     +-- Chunk #2 ----+-- Entity "Alice" (mentioned in chunks 1, 2, 3)
+     |                |
+     +-- Chunk #3 ----+-- Relationship "Alice WORKS_FOR Acme"
+```
+
+Every entity and relationship remembers:
+- `source_document_ids` - Which documents mentioned it
+- `source_chunk_ids` - Which specific chunks
+
+This enables:
+- **Provenance** - "Where did we learn this?"
+- **Citation** - "Here's the source for this claim"
+- **Cascading deletes** - Delete a document, its entities/relationships update
+
+## Event Models
 
 ### MemoryEvent
 
-An immutable record of a change to the memory lake.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | UUID | Unique event ID |
-| `namespace_id` | UUID | Namespace scope |
-| `event_type` | EventType | document.created, entity.merged, etc. |
-| `resource_type` | str | Affected resource type |
-| `resource_id` | UUID | Affected resource ID |
-| `data` | dict | Event payload |
-| `actor_id` | str | Who triggered the event |
-| `correlation_id` | UUID | Links related events |
-
-See [Events](events.md) for details.
-
-## Model Relationships
-
-```
-Namespace (1)
-    │
-    ├──────────────── Document (n)
-    │                      │
-    │                      └── Chunk (n per doc)
-    │                            │
-    │                            └── (generates embeddings)
-    │
-    ├──────────────── Entity (n)
-    │                      │
-    │                      ├── Relationship (n) ── Entity
-    │                      │
-    │                      └── (participates in) Episode
-    │
-    └──────────────── MemoryEvent (n)
-                           │
-                           └── (tracks all changes)
-```
-
-### Source Tracking
-
-All extracted entities and relationships track their sources:
+Every change is recorded as an immutable event:
 
 ```python
-@dataclass
-class Entity:
-    # ...
-    source_document_ids: list[UUID]  # Documents that mention this entity
-    source_chunk_ids: list[UUID]     # Specific chunks
-
-@dataclass
-class Relationship:
-    # ...
-    source_document_ids: list[UUID]
-    source_chunk_ids: list[UUID]
+MemoryEvent(
+    id=UUID("..."),
+    namespace_id=UUID("..."),
+    event_type="document.created",
+    resource_type="document",
+    resource_id=UUID("..."),
+    data={
+        "title": "Meeting Notes",
+        "source": "upload",
+        "size_bytes": 15234
+    },
+    actor_id="user:alice",
+    actor_type="user",
+    correlation_id=UUID("..."),  # Links related events
+    timestamp=datetime(2024, 1, 15, 10, 30)
+)
 ```
 
-This enables:
-- Provenance tracking
-- Source citation in responses
-- Cascading deletes when documents are removed
+**Event types span the lifecycle:**
 
-## Status Lifecycle
+| Category | Event Types |
+|----------|-------------|
+| Document | `document.created`, `document.updated`, `document.deleted`, `document.processing_started`, `document.processing_completed`, `document.processing_failed` |
+| Chunk | `chunk.created`, `chunk.deleted`, `chunk.embedding_generated` |
+| Entity | `entity.created`, `entity.updated`, `entity.deleted`, `entity.merged` |
+| Relationship | `relationship.created`, `relationship.updated`, `relationship.deleted`, `relationship.inferred` |
+| Namespace | `namespace.created`, `namespace.activated`, `namespace.archived` |
 
-### Document Status
+**Correlation IDs** link related events. When you call `remember()`, a single correlation ID ties together all the events it generates.
+
+## Model Relationships Summary
 
 ```
-PENDING → PROCESSING → COMPLETED
-              │
-              └──────── FAILED
+Namespace
+    |
+    |-- has many --> Document
+    |                    |
+    |                    +-- has many --> Chunk
+    |
+    |-- has many --> Entity
+    |                    |
+    |                    +-- source --> Relationship --> target --> Entity
+    |                    |
+    |                    +-- participates in --> Episode
+    |
+    |-- has many --> MemoryEvent
 ```
 
-| Status | Description |
-|--------|-------------|
-| `PENDING` | Awaiting processing |
-| `PROCESSING` | Currently being chunked/embedded/extracted |
-| `COMPLETED` | Successfully processed |
-| `FAILED` | Processing error (error message in metadata) |
+## Working with Models
 
-## Timestamps
-
-All models track temporal information:
+### Creating and Storing
 
 ```python
-created_at: datetime   # When created (immutable)
-updated_at: datetime   # When last modified
+from khora.core.models import Document, DocumentMetadata, DocumentStatus
 
-# For entities and relationships (optional):
-valid_from: datetime   # When this became true
-valid_until: datetime  # When this stopped being true
+doc = Document(
+    id=uuid4(),
+    namespace_id=namespace_id,
+    content="Your content here",
+    metadata=DocumentMetadata(title="My Doc"),
+    status=DocumentStatus.PENDING
+)
+
+await storage.create_document(doc)
 ```
 
-## Next Steps
+### Querying
 
-- [Documents & Chunks](documents-chunks.md) - Content storage
-- [Knowledge Graph](knowledge-graph.md) - Entities and relationships
-- [Events](events.md) - Audit trail
+```python
+# Get a document
+doc = await storage.get_document(doc_id)
+
+# Find entities by type
+entities = await storage.list_entities(
+    namespace_id,
+    entity_type="PERSON",
+    limit=50
+)
+
+# Get relationships for an entity
+relationships = await storage.get_entity_relationships(entity_id)
+```
+
+### Timestamps
+
+All models track time:
+- `created_at` - When created (never changes)
+- `updated_at` - When last modified
+
+Entities and relationships can also have:
+- `valid_from` - When this became true in the real world
+- `valid_until` - When it stopped being true
+
+## What's Next?
+
+- **[Documents & Chunks](documents-chunks.md)** - Content storage in depth
+- **[Knowledge Graph](knowledge-graph.md)** - Entities, relationships, episodes
+- **[Events](events.md)** - The immutable audit trail

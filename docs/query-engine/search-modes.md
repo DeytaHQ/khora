@@ -1,324 +1,242 @@
 # Search Modes
 
-Khora supports multiple search modes, each optimized for different query types. This document describes each mode and when to use it.
+Not all questions are the same. "What's machine learning?" is different from "Who manages the engineering team?" Khora offers different search modes to match different query types.
 
-## Available Modes
+## The Five Modes
 
 ```python
 from khora import SearchMode
 
-class SearchMode(str, Enum):
-    VECTOR = "vector"     # Semantic similarity search
-    GRAPH = "graph"       # Entity relationship traversal
-    KEYWORD = "keyword"   # BM25 keyword matching
-    HYBRID = "hybrid"     # Vector + Graph combined with RRF
-    ALL = "all"           # All three methods
+SearchMode.VECTOR    # Semantic similarity - "What's conceptually related?"
+SearchMode.GRAPH     # Relationship traversal - "What's connected to what?"
+SearchMode.KEYWORD   # Exact matching - "Where do these words appear?"
+SearchMode.HYBRID    # Vector + Graph combined (default)
+SearchMode.ALL       # All three methods
 ```
 
 ## Vector Search
 
-Semantic similarity search using embeddings.
+**What it does**: Finds content that's *semantically similar* to your query, even if the exact words are different.
 
-### How It Works
+**How it works**:
+1. Your query gets converted to a vector (embedding)
+2. pgvector finds chunks with similar vectors
+3. Results ranked by cosine similarity
 
-1. Embed the query using the same embedding model as chunks
-2. Search pgvector for nearest neighbors (cosine similarity)
-3. Return chunks sorted by similarity score
+**When to use it**:
+- Conceptual questions ("explain quantum computing")
+- Finding related content ("what else discusses this topic?")
+- When exact keywords don't matter
 
+**Example**:
 ```python
-# Internal implementation
-query_embedding = await embedder.embed(query)
-
-results = await storage.search_similar_chunks(
-    namespace_id,
-    query_embedding,
-    limit=limit,
-    min_similarity=min_similarity,
-)
-```
-
-### Best For
-
-- Conceptual queries ("explain quantum entanglement")
-- Finding related content even without exact keywords
-- Questions where meaning matters more than specific terms
-
-### Example
-
-```python
+# "AI ethics" will find content about
+# "artificial intelligence morality" or "responsible machine learning"
 results = await lake.recall(
-    "machine learning applications in healthcare",
-    mode=SearchMode.VECTOR,
+    "AI ethics in healthcare",
+    mode=SearchMode.VECTOR
 )
 ```
 
-### Configuration
-
-```python
-QueryConfig(
-    mode=SearchMode.VECTOR,
-    limit=10,
-    min_similarity=0.3,  # Minimum cosine similarity
-)
-```
+**The magic**: Vector search understands that "dog" and "puppy" are related, that "king" minus "man" plus "woman" roughly equals "queen", and that a question about "revenue" might be answered by content about "sales figures".
 
 ## Graph Search
 
-Entity and relationship traversal combining embedding similarity and Neo4j graph.
+**What it does**: Starts from entities mentioned in your query and explores their relationships.
 
-### How It Works
+**How it works**:
+1. Identifies entities in your query ("Einstein", "Acme Corp")
+2. Links them to stored entities (exact match, fuzzy match, or embedding similarity)
+3. Traverses relationships in Neo4j
+4. Returns content connected to discovered entities
 
-1. Embed the query using the same embedding model as entities
-2. Search pgvector for similar entities (entity embedding similarity)
-3. Link query mentions to stored entities (exact and fuzzy matching)
-4. Traverse the knowledge graph from linked/similar entities
-5. Retrieve chunks associated with discovered entities
+**When to use it**:
+- Relationship queries ("who works with Alice?")
+- Entity exploration ("what's connected to Project X?")
+- Organizational questions ("what teams report to Bob?")
 
+**Example**:
 ```python
-# Find similar entities via embedding search (pgvector)
-query_embedding = await embedder.embed(query)
-similar_entities = await storage.search_similar_entities(
-    namespace_id,
-    query_embedding,
-    limit=10,
-)
-
-# Also find entities via mention linking
-linked_entities = await link_query_entities(query, namespace_id)
-
-# Combine and traverse graph (Neo4j)
-for entity_id, similarity in similar_entities:
-    neighborhood = await storage.get_neighborhood(
-        entity_id=entity_id,
-        depth=graph_depth,
-        relationship_types=relationship_types,
-    )
-
-# Get chunks from related entities
-chunks = await get_entity_chunks(neighborhood.entities)
-```
-
-**Note:** Entity embeddings must be generated during ingestion for graph search to find entities via similarity. Use `backfill_entity_embeddings()` to generate embeddings for entities created before this feature was implemented.
-
-### Best For
-
-- Relationship queries ("who works with Einstein?")
-- Entity exploration ("what is related to Project X?")
-- When you know specific entity names
-
-### Example
-
-```python
+# Find everything connected to "Machine Learning Team"
 results = await lake.recall(
-    "Acme Corp partnerships",
+    "Machine Learning Team projects and members",
     mode=SearchMode.GRAPH,
     config=QueryConfig(
-        graph_depth=2,
-        graph_relationship_types=["PARTNERS_WITH", "COLLABORATES_WITH"],
-    ),
+        graph_depth=2,  # Go 2 hops out
+        graph_relationship_types=["WORKS_ON", "MEMBER_OF", "MANAGES"]
+    )
 )
 ```
 
-### Configuration
+**The magic**: If Alice works at Acme and Bob also works at Acme, graph search can infer they're colleagues - even if no document explicitly says so.
 
-```python
-QueryConfig(
-    mode=SearchMode.GRAPH,
-    graph_depth=2,                # Traversal depth
-    graph_relationship_types=[    # Filter by relationship type
-        "WORKS_FOR",
-        "MANAGES",
-    ],
-)
-```
+**Note**: Graph search now also uses entity embeddings. When your query mentions concepts rather than exact names, pgvector finds entities with similar descriptions, then Neo4j explores their relationships.
 
 ## Keyword Search
 
-Traditional BM25 keyword matching.
+**What it does**: Classic text search - finds content containing your exact terms.
 
-### How It Works
+**How it works**:
+1. Tokenizes and stems your query
+2. Applies BM25 (Best Match 25) scoring
+3. Ranks by term frequency / inverse document frequency
 
-1. Parse query into keywords (tokenization, stemming)
-2. Search using BM25 ranking algorithm
-3. Score based on term frequency and document frequency
+**When to use it**:
+- Exact phrase search ("error: connection refused")
+- Technical terms ("KHORA_DATABASE_URL")
+- Product names, acronyms, identifiers
+- When you need those specific words to appear
 
-### Best For
-
-- Exact phrase matching
-- Technical terms or product names
-- When you need specific keywords to appear
-
-### Example
-
+**Example**:
 ```python
+# Find content with exactly this error message
 results = await lake.recall(
-    "error: connection refused port 5432",
-    mode=SearchMode.KEYWORD,
+    '"NullPointerException in UserService.java"',
+    mode=SearchMode.KEYWORD
 )
 ```
 
-### Configuration
-
-```python
-QueryConfig(
-    mode=SearchMode.KEYWORD,
-    limit=10,
-)
-```
+**The magic**: Sometimes you don't want "conceptually similar" - you want exactly what you typed. Keyword search delivers precision.
 
 ## Hybrid Search (Default)
 
-Combines Vector and Graph search with Reciprocal Rank Fusion.
+**What it does**: Runs Vector and Graph search in parallel, then intelligently combines results.
 
-### How It Works
+**How it works**:
+1. Execute vector search → ranked list A
+2. Execute graph search → ranked list B
+3. Combine using Reciprocal Rank Fusion (RRF)
+4. Documents appearing in both lists get boosted
 
-1. Execute Vector search
-2. Execute Graph search
-3. Combine results using RRF
+**When to use it**:
+- General queries (this is the default for a reason)
+- When you want both semantic and relationship context
+- When you're not sure which mode would work best
 
+**Example**:
 ```python
-# Parallel execution
-vector_results, graph_results = await asyncio.gather(
-    vector_search(query, namespace_id, limit),
-    graph_search(query, namespace_id, depth),
-)
-
-# Fuse with RRF
-fused = reciprocal_rank_fusion(
-    [vector_results, graph_results],
-    weights=[0.5, 0.3],
-    k=60,
-)
-```
-
-### Best For
-
-- General queries (default mode)
-- When you want both semantic and relationship-based results
-- Balanced retrieval
-
-### Example
-
-```python
+# Gets the best of both worlds
 results = await lake.recall(
-    "quarterly planning discussion with engineering team",
-    mode=SearchMode.HYBRID,
+    "quarterly planning with the product team",
+    mode=SearchMode.HYBRID
 )
 ```
 
-### Configuration
+**The magic**: A document ranked #5 in vector and #3 in graph will beat one ranked #1 in vector alone. Consensus across methods signals relevance.
 
-```python
-QueryConfig(
-    mode=SearchMode.HYBRID,
-    vector_weight=0.5,
-    graph_weight=0.3,
-)
-```
+Default weights:
+- Vector: 50% (semantic similarity usually matters most)
+- Graph: 30% (relationships add important context)
 
 ## All Sources
 
-Executes all three search methods.
+**What it does**: Runs all three search methods and fuses the results.
 
-### How It Works
+**How it works**:
+1. Execute vector, graph, AND keyword searches in parallel
+2. Combine all three lists using RRF
+3. Track which sources contributed each result
 
-1. Execute Vector, Graph, and Keyword searches in parallel
-2. Combine all results using RRF
-3. Return combined rankings
+**When to use it**:
+- Comprehensive search where nothing should be missed
+- Exploratory queries when you're not sure what you're looking for
+- When you want to compare what each method finds
 
-### Best For
-
-- Comprehensive search
-- When unsure which method will work best
-- Research/exploration queries
-
-### Example
-
+**Example**:
 ```python
 results = await lake.recall(
-    "product launch timeline Q4",
-    mode=SearchMode.ALL,
+    "authentication security issues Q4",
+    mode=SearchMode.ALL
 )
 
-# See which sources contributed
-print(f"Vector hits: {results.search_contributions.vector}")
-print(f"Graph hits: {results.search_contributions.graph}")
-print(f"Keyword hits: {results.search_contributions.keyword}")
+# See what each method contributed
+print(f"Vector: {results.search_contributions.vector} results")
+print(f"Graph: {results.search_contributions.graph} results")
+print(f"Keyword: {results.search_contributions.keyword} results")
 ```
 
-### Configuration
+**The magic**: Some queries benefit from semantic understanding, others from relationships, others from exact terms. ALL mode lets each method contribute what it's good at.
+
+Default weights:
+- Vector: 50%
+- Graph: 30%
+- Keyword: 20%
+
+## Quick Reference
+
+| Query Type | Best Mode | Why |
+|------------|-----------|-----|
+| "What is X?" | `VECTOR` | Conceptual understanding |
+| "Who works with X?" | `GRAPH` | Relationship traversal |
+| "Error: connection refused" | `KEYWORD` | Exact phrase matching |
+| "Project updates" | `HYBRID` | Balanced (default) |
+| "Everything about the merger" | `ALL` | Comprehensive |
+
+## Tuning Weights
+
+You can adjust how much each method contributes:
 
 ```python
+# Boost semantic similarity
 QueryConfig(
     mode=SearchMode.ALL,
-    vector_weight=0.5,
-    graph_weight=0.3,
-    keyword_weight=0.2,
+    vector_weight=0.7,
+    graph_weight=0.2,
+    keyword_weight=0.1
+)
+
+# Boost relationships
+QueryConfig(
+    mode=SearchMode.HYBRID,
+    vector_weight=0.4,
+    graph_weight=0.6
 )
 ```
 
-## Mode Selection Guide
-
-| Query Type | Recommended Mode |
-|------------|------------------|
-| Conceptual questions | `VECTOR` |
-| "Related to X" queries | `GRAPH` |
-| Exact phrase search | `KEYWORD` |
-| General queries | `HYBRID` |
-| Uncertain/exploratory | `ALL` |
-
-## Search Contributions
-
-Query results include contribution tracking:
-
-```python
-result = await lake.recall(query, mode=SearchMode.ALL)
-
-contributions = result.search_contributions
-print(f"Vector: {contributions.vector} results")
-print(f"Graph: {contributions.graph} results")
-print(f"Keyword: {contributions.keyword} results")
-```
-
-## Combining with Other Options
+## Combining with Other Features
 
 ### With Temporal Filtering
 
+Limit results to a time window:
+
 ```python
 results = await lake.recall(
-    "engineering updates",
+    "product decisions",
     mode=SearchMode.HYBRID,
-    temporal_filter=TemporalFilter.last_days(30),
+    temporal_filter=TemporalFilter.last_days(30)
+)
+```
+
+### With Graph Constraints
+
+Control how deep and what relationships to explore:
+
+```python
+results = await lake.recall(
+    "engineering org structure",
+    mode=SearchMode.GRAPH,
+    config=QueryConfig(
+        graph_depth=3,
+        graph_relationship_types=["REPORTS_TO", "MANAGES", "MEMBER_OF"]
+    )
 )
 ```
 
 ### With Agentic Exploration
 
+Let the query engine follow up on initial results:
+
 ```python
 results = await lake.recall(
-    "product strategy",
+    "competitive landscape",
     mode=SearchMode.HYBRID,
-    config=QueryConfig(
-        enable_agentic=True,
-    ),
+    config=QueryConfig(enable_agentic=True)
 )
 ```
 
-### With Specific Graph Traversal
+## What's Next?
 
-```python
-results = await lake.recall(
-    "team structure",
-    mode=SearchMode.GRAPH,
-    config=QueryConfig(
-        graph_depth=3,
-        graph_relationship_types=["REPORTS_TO", "MANAGES"],
-    ),
-)
-```
-
-## Next Steps
-
-- [Query Understanding](query-understanding.md) - LLM analysis
-- [Fusion](fusion.md) - How results are combined
-- [Overview](overview.md) - Full query pipeline
+- **[Fusion](fusion.md)** - How RRF combines results
+- **[Query Understanding](query-understanding.md)** - How queries get analyzed
+- **[Temporal Queries](temporal-queries.md)** - Time-based filtering
+- **[Agentic Search](agentic-search.md)** - Multi-step exploration

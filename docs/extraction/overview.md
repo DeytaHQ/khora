@@ -1,260 +1,295 @@
 # Extraction Pipeline Overview
 
-Khora's extraction pipeline transforms raw content into structured knowledge. This document provides an overview of the extraction components and their interactions.
+When you store content in Khora, it doesn't just sit there as text. The extraction pipeline transforms your raw content into structured, searchable knowledge. This is where the magic happens.
 
-## Pipeline Flow
+## What the Pipeline Does
+
+Think of it as three questions Khora asks about your content:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Extraction Pipeline                                  │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                        Phase 1: Staging                                  ││
-│  │                                                                          ││
-│  │   Input          Checksum         Dedup           Document               ││
-│  │  Content   →    Compute     →    Check      →    Creation               ││
-│  │                                                                          ││
-│  │  (Parallel staging with controlled concurrency)                          ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                      │                                       │
-│                                      ▼                                       │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                       Phase 2: Enrichment                                ││
-│  │                                                                          ││
-│  │   ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐         ││
-│  │   │ Chunker  │ →  │ Embedder │ →  │Extractor │ →  │  Store   │          ││
-│  │   │          │    │          │    │          │    │          │          ││
-│  │   │ - Fixed  │    │ - LiteLLM│    │ - LLM    │    │ - Chunks │          ││
-│  │   │ - Seman- │    │ - OpenAI │    │ - Schema │    │ - Embeds │          ││
-│  │   │   tic    │    │ - Cohere │    │ - JSON   │    │ - Nodes  │          ││
-│  │   │ - Recur- │    │          │    │          │    │ - Edges  │          ││
-│  │   │   sive   │    │          │    │          │    │          │          ││
-│  │   └──────────┘    └──────────┘    └──────────┘    └──────────┘         ││
-│  │                                                                          ││
-│  │  (Parallel document processing with semaphores)                          ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                      │                                       │
-│                                      ▼                                       │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                  Phase 3: Expansion (Optional)                           ││
-│  │                                                                          ││
-│  │   ┌────────────────────┐    ┌────────────────────┐                      ││
-│  │   │  Cross-Tool        │    │   Relationship     │                      ││
-│  │   │  Unifier           │ →  │   Inferrer         │                      ││
-│  │   │                    │    │                    │                      ││
-│  │   │  - Exact match     │    │  - Pattern rules   │                      ││
-│  │   │  - Fuzzy match     │    │  - Transitive      │                      ││
-│  │   │  - Embedding sim   │    │  - Configurable    │                      ││
-│  │   └────────────────────┘    └────────────────────┘                      ││
-│  │                                                                          ││
-│  │  (Entity deduplication and relationship inference)                       ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+Your Document
+      |
+      v
++------------------------------------------+
+|  "Have we seen this before?"             |  STAGING
+|                                          |
+|  Check duplicates, create record         |
++------------------------------------------+
+      |
+      v
++------------------------------------------+
+|  "What's in here?"                       |  ENRICHMENT
+|                                          |
+|  Split, embed, extract knowledge         |
++------------------------------------------+
+      |
+      v
++------------------------------------------+
+|  "How does this connect?"                |  EXPANSION
+|                                          |
+|  Merge entities, infer relationships     |
++------------------------------------------+
 ```
 
-## Components
+## Phase 1: Staging
 
-### Chunkers
+Before we do any expensive processing, we check if this content is new:
 
-Split documents into segments optimized for embedding and retrieval.
+```
+Content arrives
+      |
+      v
+  +-----------+     +---------------+
+  |  Compute  | --> |  Check if     |
+  |  checksum |     |  exists       |
+  +-----------+     +---------------+
+                           |
+              +------------+------------+
+              |                         |
+         (duplicate)               (new content)
+              |                         |
+              v                         v
+         Skip it              Create Document record
+```
 
-| Chunker | Description |
-|---------|-------------|
-| `FixedChunker` | Token-based splitting with overlap |
-| `SemanticChunker` | Respects sentence/paragraph boundaries |
-| `RecursiveChunker` | Hierarchical splitting (LangChain-style) |
+**Why this matters**: If you accidentally upload the same file twice, Khora recognizes it and skips the duplicate. The checksum is computed from the content itself, so even if the filename changes, duplicates are caught.
 
-See [Chunkers](chunkers.md) for details.
+Staging runs in parallel with controlled concurrency - you can ingest thousands of documents without overwhelming your system.
 
-### Embedders
+## Phase 2: Enrichment
 
-Generate vector embeddings for semantic search.
+This is where content becomes knowledge. Each document goes through four transformations:
 
-| Embedder | Description |
-|----------|-------------|
-| `LiteLLMEmbedder` | Unified interface to multiple providers |
+### 1. Chunking - Break It Apart
 
-Supports OpenAI, Cohere, and other embedding providers via LiteLLM.
+Raw documents are too large for embedding models and too unwieldy for retrieval. Chunking splits them into digestible pieces:
 
-See [Embedders](embedders.md) for details.
+```
+Original Document (5000 tokens)
+            |
+            v
++-------+ +-------+ +-------+ +-------+ +-------+
+|Chunk 1| |Chunk 2| |Chunk 3| |Chunk 4| |Chunk 5|
+| 512t  | | 512t  | | 512t  | | 512t  | | 456t  |
++-------+ +-------+ +-------+ +-------+ +-------+
+     \______/  \______/  \______/
+       overlap   overlap   overlap
+```
 
-### Extractors
+Three chunking strategies are available:
 
-Extract structured knowledge from text.
+| Strategy | How It Works | Best For |
+|----------|--------------|----------|
+| **Fixed** | Split by token count | Predictable sizing |
+| **Semantic** | Split at sentence boundaries | Natural language |
+| **Recursive** | Try paragraphs, then lines, then sentences | Structured docs |
 
-| Extractor | Description |
-|-----------|-------------|
-| `LLMEntityExtractor` | LLM-based entity and relationship extraction |
+The overlap (typically 50 tokens) ensures context isn't lost at chunk boundaries.
 
-Uses structured JSON output for reliable extraction.
+### 2. Embedding - Capture Meaning
 
-See [Extractors](extractors.md) for details.
+Each chunk gets converted to a vector - a list of numbers that captures its semantic meaning:
 
-### Expertise System
+```
+"Einstein developed the theory of relativity"
+                    |
+                    v
+            [0.021, -0.156, 0.089, 0.334, ...]
+                 (1536 dimensions)
+```
 
-Configure domain-specific extraction behavior.
+Similar concepts get similar vectors. "Einstein's relativity theory" and "the physicist's work on space-time" will have vectors pointing in similar directions, even though the words are different.
 
-| Component | Description |
-|-----------|-------------|
-| `ExpertiseConfig` | Complete domain knowledge definition |
-| `EntityTypeConfig` | Define entity types and attributes |
-| `RelationshipTypeConfig` | Define relationship types and constraints |
-| `CorrelationRule` | Cross-tool entity matching rules |
-| `InferenceRule` | Pattern-based relationship inference |
+We use LiteLLM to support multiple embedding providers:
+- OpenAI (`text-embedding-3-small` default)
+- Cohere
+- Others
 
-See [Expertise System](expertise-system.md) for details.
+### 3. Extraction - Find the Knowledge
 
-### Semantic Expansion
+An LLM reads each chunk and extracts structured knowledge:
 
-Enhance the knowledge graph through unification and inference.
+**Entities** - Named things worth remembering:
+```python
+Entity(
+    name="Albert Einstein",
+    entity_type="PERSON",
+    description="German-born physicist, developed relativity",
+    confidence=0.95
+)
+```
 
-| Component | Description |
-|-----------|-------------|
-| `SemanticExpander` | Orchestrates expansion phases |
-| `CrossToolUnifier` | Deduplicate entities across sources |
-| `RelationshipInferrer` | Infer relationships from patterns |
+**Relationships** - How entities connect:
+```python
+Relationship(
+    source="Albert Einstein",
+    target="Theory of Relativity",
+    relationship_type="DEVELOPED",
+    confidence=0.90
+)
+```
 
-See [Semantic Expansion](semantic-expansion.md) for details.
+**Episodes** - Events that happened:
+```python
+Episode(
+    name="Nobel Prize Award",
+    description="Einstein received the Nobel Prize in Physics",
+    occurred_at="1921-11-09",
+    participants=["Albert Einstein", "Nobel Committee"]
+)
+```
+
+The extraction model (default: `gpt-4o-mini`) outputs structured JSON, making parsing reliable.
+
+### 4. Storage - Put It Where It Belongs
+
+Each piece of knowledge goes to its optimal storage backend:
+
+```
+                  Extracted Knowledge
+                          |
+          +---------------+---------------+
+          |               |               |
+          v               v               v
+    +-----------+   +-----------+   +-----------+
+    |PostgreSQL |   | pgvector  |   |   Neo4j   |
+    |           |   |           |   |           |
+    | Documents |   | Chunk     |   | Entity    |
+    | Metadata  |   | embeddings|   | nodes     |
+    | Events    |   | Entity    |   | Relation  |
+    |           |   | embeddings|   | edges     |
+    +-----------+   +-----------+   +-----------+
+```
+
+## Phase 3: Expansion (Optional)
+
+After basic enrichment, we can enhance the knowledge graph:
+
+### Entity Unification
+
+The same entity might be mentioned different ways across documents:
+
+```
+Document 1: "Microsoft Corporation"
+Document 2: "Microsoft"
+Document 3: "MSFT"
+                |
+                v
+    +-------------------------+
+    |  Cross-Tool Unifier     |
+    |                         |
+    |  Exact:  "Microsoft" == "Microsoft"
+    |  Fuzzy:  "Microsft" ~= "Microsoft"
+    |  Embed:  "the Redmond giant" ≈ "Microsoft"
+    +-------------------------+
+                |
+                v
+    Single unified "Microsoft" entity
+    with merged attributes and sources
+```
+
+### Relationship Inference
+
+Some relationships can be inferred from existing data:
+
+```
+Known:     Alice WORKS_FOR Acme Corp
+           Bob WORKS_FOR Acme Corp
+                |
+                v
+Inferred:  Alice COLLEAGUE_OF Bob
+```
+
+Inference rules are configurable through the expertise system.
+
+## Putting It Together
+
+Here's the complete flow for `remember()`:
+
+```python
+result = await lake.remember(
+    content="Einstein published his theory of general relativity in 1915...",
+    title="Physics History",
+    chunk_strategy="semantic",
+    enable_expansion=True
+)
+
+# Result
+RememberResult(
+    document_id=UUID("..."),
+    chunks_created=3,
+    entities_extracted=5,
+    relationships_extracted=4
+)
+```
+
+Behind the scenes:
+1. **Staging**: Checksum computed, no duplicate found, document created
+2. **Chunking**: Split into 3 chunks using semantic boundaries
+3. **Embedding**: 3 chunk embeddings + 5 entity embeddings generated
+4. **Extraction**: 5 entities, 4 relationships extracted by LLM
+5. **Storage**: Chunks → pgvector, Entities → Neo4j + pgvector
+6. **Expansion**: Entity dedup merged 2 entities, inferred 1 relationship
 
 ## Configuration
 
 ### Default Settings
 
 ```python
-# Chunking
 chunk_strategy = "semantic"
-chunk_size = 512          # tokens
-chunk_overlap = 50        # tokens
+chunk_size = 512          # tokens per chunk
+chunk_overlap = 50        # overlap between chunks
 
-# Embedding
 embedding_model = "text-embedding-3-small"
 embedding_dimension = 1536
 
-# Extraction
 extraction_model = "gpt-4o-mini"
 ```
 
-### Per-Ingestion Configuration
+### Per-Document Overrides
 
 ```python
-result = await lake.remember(
+await lake.remember(
     content,
     chunk_strategy="recursive",
     chunk_size=1024,
     embedding_model="text-embedding-3-large",
     extraction_model="claude-sonnet-4-20250514",
-    expertise="saas_expert",
+    expertise="technical_docs"  # Domain-specific extraction
 )
 ```
 
-### Batch Ingestion
+### Batch Processing
+
+For large ingestions:
 
 ```python
-result = await lake.remember_batch(
+results = await lake.remember_batch(
     documents,
-    max_concurrent_documents=5,
-    max_concurrent_extractions=10,
-    enable_expansion=True,
+    max_concurrent_documents=5,      # Process 5 docs at once
+    max_concurrent_extractions=10,   # Max 10 LLM calls in flight
+    enable_expansion=True
 )
 ```
 
-## Pipeline Orchestration
+## Error Handling
 
-The extraction pipeline is orchestrated by Prefect:
-
-```python
-from khora.pipelines.flows import ingest_documents
-
-result = await ingest_documents(
-    namespace_id=namespace_id,
-    documents=documents,
-    storage=storage,
-    expertise="saas_expert",
-    chunk_strategy="semantic",
-    enable_expansion=True,
-)
-```
-
-### Concurrency Control
-
-Concurrency is controlled at multiple levels:
+Documents that fail processing get marked, but don't stop the batch:
 
 ```python
-# Document-level concurrency
-max_concurrent_documents = 5     # Process 5 docs simultaneously
-
-# Extraction-level concurrency
-max_concurrent_extractions = 10  # Max parallel LLM calls
-
-# Staging concurrency
-staging_semaphore = max_concurrent_documents * 2
+# Document status lifecycle
+PENDING -> PROCESSING -> COMPLETED
+               |
+               +-------> FAILED (error message stored)
 ```
 
-### Error Handling
+Failed documents can be retried later without re-processing successful ones.
 
-Documents that fail processing are marked with `FAILED` status:
+## What's Next?
 
-```python
-try:
-    # Process document
-    await process_document(document, storage, ...)
-except Exception as e:
-    document.mark_failed(str(e))
-    await storage.update_document(document)
-    # Continue with other documents
-```
-
-## Output
-
-### RememberResult
-
-```python
-@dataclass
-class RememberResult:
-    document_id: UUID
-    chunks_created: int
-    entities_extracted: int
-    relationships_extracted: int
-```
-
-### Batch Ingestion Result
-
-```python
-{
-    "total_documents": 100,
-    "processed_documents": 95,
-    "skipped_documents": 3,     # Duplicates
-    "failed_documents": 2,
-    "total_chunks": 450,
-    "total_entities": 200,
-    "total_relationships": 150,
-    "total_inferred_relationships": 25,
-}
-```
-
-## Pipeline Registry
-
-Pipelines are registered for discovery:
-
-```python
-from khora.pipelines.registry import pipeline
-
-@pipeline("ingest", description="Document ingestion", tags=["ingestion"])
-@flow(name="ingest_documents")
-async def ingest_documents(...):
-    ...
-
-# List available pipelines
-from khora.pipelines.registry import list_pipelines
-pipelines = list_pipelines()
-```
-
-## Next Steps
-
-- [Ingestion Pipeline](ingestion-pipeline.md) - Two-phase ingestion details
-- [Chunkers](chunkers.md) - Text splitting strategies
-- [Embedders](embedders.md) - Embedding generation
-- [Extractors](extractors.md) - Entity extraction
-- [Expertise System](expertise-system.md) - Domain configuration
-- [Semantic Expansion](semantic-expansion.md) - Entity unification and inference
+- **[Ingestion Pipeline](ingestion-pipeline.md)** - Detailed pipeline mechanics
+- **[Chunkers](chunkers.md)** - Text splitting strategies
+- **[Embedders](embedders.md)** - Vector generation
+- **[Extractors](extractors.md)** - Entity and relationship extraction
+- **[Expertise System](expertise-system.md)** - Domain-specific configuration
+- **[Semantic Expansion](semantic-expansion.md)** - Entity unification and inference

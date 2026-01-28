@@ -1,302 +1,286 @@
 # Reciprocal Rank Fusion
 
-Khora uses Reciprocal Rank Fusion (RRF) to combine results from multiple search methods. This calibration-free algorithm produces stable rankings without score normalization.
+When you search Khora, you get results from multiple sources: vector similarity, graph traversal, and keyword matching. Each returns a ranked list. But how do you combine them into a single, coherent ranking?
 
-## Overview
+This is where Reciprocal Rank Fusion (RRF) comes in.
 
-RRF combines ranked lists by giving each document a score based on its rank in each list:
+## The Problem
 
-```
-score(d) = Σ (weight / (k + rank(d)))
-```
-
-Where:
-- `weight` = source-specific weight (e.g., 0.5 for vector)
-- `k` = smoothing constant (default 60)
-- `rank(d)` = position of document in that source's results (1-indexed)
-
-## Why RRF?
-
-**Calibration-free**: No need to normalize scores across sources
-- Vector similarity: 0.0-1.0
-- BM25 keyword: unbounded positive
-- Graph traversal: various metrics
-
-**Rank-based**: Position matters more than absolute score
-- Stable across different scoring systems
-- Resistant to outlier scores
-
-**Simple**: No training required
-- Works well out of the box
-- Tunable via weights and k
-
-## Formula
-
-For a document appearing in multiple sources:
+Different search methods return different kinds of scores:
 
 ```
-RRF_score(d) = Σ_s (weight_s / (k + rank_s(d)))
+Vector search:   0.92, 0.87, 0.81, 0.76, ...    (similarity: 0-1)
+Keyword search:  12.4, 8.7, 6.2, 4.1, ...       (BM25: unbounded)
+Graph search:    3, 2, 2, 1, ...                (hop count, degree)
 ```
 
-### Example
+You can't just add these scores - they're on completely different scales. Normalizing them is tricky and sensitive to outliers.
 
-Document "D" appears:
-- Rank 3 in vector search (weight 0.5)
-- Rank 7 in graph search (weight 0.3)
-- Rank 1 in keyword search (weight 0.2)
+## The Solution: Rank-Based Fusion
 
-With k=60:
+RRF ignores the scores entirely and focuses on *ranks*. The intuition: if a document appears near the top of multiple lists, it's probably relevant.
+
+The formula:
+
 ```
-score = 0.5/(60+3) + 0.3/(60+7) + 0.2/(60+1)
-      = 0.5/63 + 0.3/67 + 0.2/61
-      = 0.00794 + 0.00448 + 0.00328
-      = 0.0157
+RRF_score(doc) = Σ weight / (k + rank)
 ```
 
-## Default Configuration
+For each source where the document appears, add `weight / (k + rank)`.
+
+## How It Works
+
+Say document D appears in three search results:
+
+| Source | Rank | Weight |
+|--------|------|--------|
+| Vector | 2 | 0.5 |
+| Graph | 5 | 0.3 |
+| Keyword | 1 | 0.2 |
+
+With k=60 (the default smoothing constant):
+
+```
+Vector contribution:  0.5 / (60 + 2) = 0.5 / 62 = 0.00806
+Graph contribution:   0.3 / (60 + 5) = 0.3 / 65 = 0.00462
+Keyword contribution: 0.2 / (60 + 1) = 0.2 / 61 = 0.00328
+
+Total RRF score: 0.00806 + 0.00462 + 0.00328 = 0.01596
+```
+
+Now compare to document E, which only appears in vector search at rank 1:
+
+```
+Vector contribution:  0.5 / (60 + 1) = 0.5 / 61 = 0.00820
+
+Total RRF score: 0.00820
+```
+
+Document D scores higher (0.01596 vs 0.00820) because it appears in multiple sources, even though E ranked #1 in vector search.
+
+This is exactly what we want: **documents found by multiple methods get boosted**.
+
+## The K Parameter
+
+The `k` parameter controls how much top ranks matter versus lower ranks:
+
+### k = 60 (Default)
+
+Balanced. Top ranks are better, but not dramatically:
+
+```
+Rank 1:   1/(60+1)  = 0.0164
+Rank 10:  1/(60+10) = 0.0143
+Rank 50:  1/(60+50) = 0.0091
+
+Ratio (rank 1 vs 10): 1.15x
+```
+
+### k = 1 (Aggressive)
+
+Top ranks dominate:
+
+```
+Rank 1:   1/(1+1)  = 0.500
+Rank 10:  1/(1+10) = 0.091
+Rank 50:  1/(1+50) = 0.020
+
+Ratio (rank 1 vs 10): 5.5x
+```
+
+Use this when you're very confident in your top results.
+
+### k = 100 (Smooth)
+
+Ranks are more equal:
+
+```
+Rank 1:   1/(100+1)  = 0.0099
+Rank 10:  1/(100+10) = 0.0091
+Rank 50:  1/(100+50) = 0.0067
+
+Ratio (rank 1 vs 10): 1.09x
+```
+
+Use this when you want to give lower-ranked results more of a chance.
+
+## Default Weights
+
+Khora's defaults prioritize semantic similarity while still benefiting from other methods:
 
 ```python
-QueryConfig(
-    # Source weights (must sum to 1.0 for interpretability)
-    vector_weight=0.5,
-    graph_weight=0.3,
-    keyword_weight=0.2,
-
-    # Smoothing constant
-    rrf_k=60,
-)
+vector_weight = 0.5   # Semantic similarity is usually most valuable
+graph_weight = 0.3    # Relationships add important context
+keyword_weight = 0.2  # Catches exact matches that embeddings miss
 ```
 
-## Weight Selection
-
-### Default (Balanced)
-
-```python
-vector_weight = 0.5  # Semantic similarity prioritized
-graph_weight = 0.3   # Relationships considered
-keyword_weight = 0.2 # Exact matches as backup
-```
+## Tuning Weights for Your Use Case
 
 ### Semantic Focus
 
+When conceptual similarity matters most:
+
 ```python
-vector_weight = 0.7
-graph_weight = 0.2
-keyword_weight = 0.1
+QueryConfig(
+    vector_weight=0.7,
+    graph_weight=0.2,
+    keyword_weight=0.1
+)
 ```
+
+Good for: Research queries, "what's similar to X", exploratory search
 
 ### Relationship Focus
 
+When connections between things matter:
+
 ```python
-vector_weight = 0.3
-graph_weight = 0.5
-keyword_weight = 0.2
+QueryConfig(
+    vector_weight=0.3,
+    graph_weight=0.5,
+    keyword_weight=0.2
+)
 ```
+
+Good for: "Who works with X?", "What's connected to Y?", knowledge graphs
 
 ### Keyword Focus
 
+When exact terms are critical:
+
 ```python
-vector_weight = 0.2
-graph_weight = 0.2
-keyword_weight = 0.6
+QueryConfig(
+    vector_weight=0.2,
+    graph_weight=0.2,
+    keyword_weight=0.6
+)
 ```
 
-## K Parameter
+Good for: Technical searches, product names, acronyms, code
 
-The `k` parameter controls rank smoothness:
+### Balanced
 
-### k=60 (Default)
+When you're not sure:
 
-Standard smoothing. Top ranks matter significantly more than lower ranks.
-
-```
-Rank 1: 1/(60+1) = 0.0164
-Rank 10: 1/(60+10) = 0.0143
-Rank 100: 1/(60+100) = 0.0063
-
-Ratio (rank 1 vs rank 10): 1.15x
+```python
+QueryConfig(
+    vector_weight=0.4,
+    graph_weight=0.3,
+    keyword_weight=0.3
+)
 ```
 
-### k=1 (Aggressive)
+## Adaptive Weights
 
-Top ranks dominate. Massive difference between positions.
+Khora's query understanding can recommend weights based on your query:
 
-```
-Rank 1: 1/(1+1) = 0.5
-Rank 10: 1/(1+10) = 0.091
+```python
+# Query: "Who manages the engineering team?"
+# Understanding: This is a relationship query
 
-Ratio: 5.5x
-```
-
-### k=100 (Smooth)
-
-More equal treatment of ranks. Top positions less dominant.
-
-```
-Rank 1: 1/(100+1) = 0.0099
-Rank 10: 1/(100+10) = 0.0091
-
-Ratio: 1.09x
+# Automatically suggested:
+source_priority = {
+    "graph": 0.6,    # Boost graph for relationship queries
+    "vector": 0.3,
+    "keyword": 0.1
+}
 ```
 
-## Implementation
+To use these recommendations:
 
-Located at `src/khora/query/fusion.py`.
+```python
+from khora.query import HybridQueryEngine, QueryConfig
+
+# The engine can apply recommendations automatically
+result = await engine.query(
+    "Who manages engineering?",
+    namespace_id,
+    config=QueryConfig(use_adaptive_weights=True)
+)
+```
+
+## Implementation Details
+
+The fusion happens in `src/khora/query/fusion.py`:
 
 ```python
 def reciprocal_rank_fusion(
-    ranked_lists: list[list[tuple[Any, float]]],
-    weights: list[float] | None = None,
-    k: int = 60,
-) -> list[tuple[Any, float]]:
-    """Fuse multiple ranked lists using RRF.
+    ranked_lists: list[list[tuple[Chunk, float]]],
+    weights: list[float],
+    k: int = 60
+) -> list[tuple[Chunk, float]]:
+    """Combine ranked lists using RRF."""
 
-    Args:
-        ranked_lists: List of (item, score) tuples per source
-        weights: Weight per source (default: equal weights)
-        k: Smoothing constant
-
-    Returns:
-        Fused list of (item, score) tuples
-    """
-    if weights is None:
-        weights = [1.0 / len(ranked_lists)] * len(ranked_lists)
-
-    scores: dict[Any, float] = {}
+    scores: dict[UUID, float] = {}
 
     for source_idx, ranked_list in enumerate(ranked_lists):
         weight = weights[source_idx]
 
-        for rank, (item, _original_score) in enumerate(ranked_list, start=1):
-            item_key = get_item_key(item)  # e.g., chunk.id
-
+        for rank, (chunk, _original_score) in enumerate(ranked_list, start=1):
             rrf_contribution = weight / (k + rank)
-            scores[item_key] = scores.get(item_key, 0) + rrf_contribution
+            scores[chunk.id] = scores.get(chunk.id, 0) + rrf_contribution
 
-    # Sort by RRF score descending
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    # Sort by RRF score, highest first
+    sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return sorted_items
 ```
 
-## Query Engine Integration
+## Tracking Contributions
+
+After fusion, you can see where results came from:
 
 ```python
-class HybridQueryEngine:
-    async def query(self, query: str, namespace_id: UUID, config: QueryConfig):
-        # Execute searches in parallel
-        vector_results, graph_results, keyword_results = await asyncio.gather(
-            self._vector_search(query, namespace_id, config),
-            self._graph_search(query, namespace_id, config),
-            self._keyword_search(query, namespace_id, config),
-        )
+result = await lake.recall("machine learning applications")
 
-        # Determine which sources to fuse based on mode
-        ranked_lists = []
-        weights = []
-
-        if config.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
-            ranked_lists.append(vector_results)
-            weights.append(config.vector_weight)
-
-        if config.mode in (SearchMode.GRAPH, SearchMode.HYBRID, SearchMode.ALL):
-            ranked_lists.append(graph_results)
-            weights.append(config.graph_weight)
-
-        if config.mode in (SearchMode.KEYWORD, SearchMode.ALL):
-            ranked_lists.append(keyword_results)
-            weights.append(config.keyword_weight)
-
-        # Apply RRF
-        fused_results = reciprocal_rank_fusion(
-            ranked_lists,
-            weights=weights,
-            k=config.rrf_k,
-        )
-
-        return fused_results[:config.limit]
+print(f"Vector contributed: {result.search_contributions.vector} results")
+print(f"Graph contributed: {result.search_contributions.graph} results")
+print(f"Keyword contributed: {result.search_contributions.keyword} results")
 ```
 
-## Search Contributions Tracking
+This helps you understand which search methods are working for your queries.
 
-Track how many results came from each source:
+## Why RRF Works
 
-```python
-@dataclass
-class SearchContributions:
-    vector: int   # Results originating from vector search
-    graph: int    # Results originating from graph search
-    keyword: int  # Results originating from keyword search
+RRF has several nice properties:
 
-# In query result
-result = await engine.query(query, namespace_id)
-print(f"Vector contributed: {result.search_contributions.vector}")
-print(f"Graph contributed: {result.search_contributions.graph}")
-print(f"Keyword contributed: {result.search_contributions.keyword}")
-```
+1. **Calibration-free** - No need to normalize scores across different scales
 
-## Adaptive Weights (Query Understanding)
+2. **Robust to outliers** - A very high score in one source doesn't dominate
 
-Query understanding can recommend weights:
+3. **Favors agreement** - Documents found by multiple methods get boosted
 
-```python
-# Query understanding extracts source priority
-understanding = await understand_query("Who manages engineering?")
+4. **Simple** - No machine learning, no training, just math
 
-# relationship-focused → boost graph
-recommended_weights = understanding.source_priority
-# {"graph": 0.6, "vector": 0.3, "keyword": 0.1}
+5. **Tunable** - Weights and k let you adjust behavior
 
-# Apply recommended weights
-result = await engine.query(
-    query,
-    namespace_id,
-    config=QueryConfig(
-        vector_weight=recommended_weights["vector"],
-        graph_weight=recommended_weights["graph"],
-        keyword_weight=recommended_weights["keyword"],
-    ),
-)
-```
+Research has shown RRF performs comparably to learned fusion methods while being much simpler to implement and understand.
 
-## Handling Duplicates
-
-Documents appearing in multiple sources get contributions from all:
-
-```python
-# Document D in both vector (rank 2) and graph (rank 5)
-# k=60, equal weights 0.5
-
-vector_contribution = 0.5 / (60 + 2) = 0.00806
-graph_contribution = 0.5 / (60 + 5) = 0.00769
-
-total_score = 0.00806 + 0.00769 = 0.01575
-```
-
-This naturally boosts documents that appear in multiple sources.
-
-## API Example
+## Practical Example
 
 ```python
 from khora import MemoryLake, SearchMode
+from khora.query import QueryConfig
 
 async with MemoryLake() as lake:
+    # Search with custom fusion settings
     results = await lake.recall(
-        "Einstein contributions",
+        "Einstein's contributions to physics",
         mode=SearchMode.ALL,
         config=QueryConfig(
-            vector_weight=0.6,
+            vector_weight=0.5,
             graph_weight=0.3,
-            keyword_weight=0.1,
+            keyword_weight=0.2,
             rrf_k=60,
-        ),
+            limit=10
+        )
     )
 
-    # Results are RRF-fused from all three sources
     for chunk, score in results.chunks:
         print(f"[{score:.4f}] {chunk.content[:80]}...")
 ```
 
-## Next Steps
+## What's Next?
 
-- [Search Modes](search-modes.md) - When to use each mode
-- [Query Understanding](query-understanding.md) - Adaptive weight selection
-- [Overview](overview.md) - Full query pipeline
+- **[Search Modes](search-modes.md)** - When to use each search method
+- **[Query Understanding](query-understanding.md)** - How adaptive weights are determined
+- **[Overview](overview.md)** - The complete query pipeline

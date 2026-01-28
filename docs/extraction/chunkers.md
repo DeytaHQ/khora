@@ -1,136 +1,134 @@
 # Chunkers
 
-Chunkers split documents into segments optimized for embedding and retrieval. This document covers the available chunking strategies.
+Chunking is deceptively important. Split your documents wrong, and your retrieval suffers - fragments lose context, or bloated chunks dilute relevance. Split them right, and each chunk becomes a self-contained piece of knowledge.
 
-## Overview
+## Why Chunking Matters
 
-Chunking is a critical step that affects retrieval quality:
+Embedding models have token limits (typically 512-8192). More importantly, retrieval works best when chunks are:
 
-- **Too small**: Lose context, fragments of information
-- **Too large**: Diluted embeddings, exceed model limits
-- **Optimal**: Self-contained, coherent segments with preserved context
+- **Coherent** - A complete thought, not a sentence fragment
+- **Focused** - About one thing, not a rambling mixture
+- **Contextual** - Enough surrounding information to make sense
 
-## Base Chunker
-
-All chunkers extend the abstract `Chunker` base class:
-
-```python
-from abc import ABC, abstractmethod
-
-class Chunker(ABC):
-    def __init__(self, *, chunk_size: int = 512, chunk_overlap: int = 50):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-
-    @abstractmethod
-    def chunk(self, text: str) -> list[ChunkResult]:
-        """Split text into chunks."""
-        ...
-
-    def count_tokens(self, text: str) -> int:
-        """Count tokens using tiktoken."""
-        import tiktoken
-        encoding = tiktoken.get_encoding("cl100k_base")
-        return len(encoding.encode(text))
+Too small:
+```
+"Einstein developed"      <- Useless fragment
 ```
 
-### ChunkResult
-
-```python
-@dataclass
-class ChunkResult:
-    content: str              # Chunk text
-    index: int                # Position in document
-    start_char: int           # Character offset start
-    end_char: int             # Character offset end
-    token_count: int          # Token count
-    metadata: dict[str, Any]  # Additional metadata
+Too large:
+```
+"Einstein developed relativity. He also liked music.
+ Meanwhile, Marie Curie was working on radioactivity.
+ The periodic table was expanded that decade..."
+                          <- Too many topics, diluted embedding
 ```
 
-## Fixed Chunker
+Just right:
+```
+"Albert Einstein developed the theory of special relativity in 1905
+ while working at the Swiss patent office. This groundbreaking work
+ introduced the famous equation E=mc² and fundamentally changed our
+ understanding of space, time, and energy."
+                          <- Coherent, focused, contextual
+```
 
-Splits text by token count with overlap.
+## The Three Chunking Strategies
 
-### Configuration
+### Fixed Chunker
+
+The simplest approach: split by token count with overlap.
 
 ```python
 from khora.extraction.chunkers import FixedChunker
 
-chunker = FixedChunker(
-    chunk_size=512,       # Target tokens per chunk
-    chunk_overlap=50,     # Overlap tokens between chunks
-)
-
-results = chunker.chunk(text)
+chunker = FixedChunker(chunk_size=512, chunk_overlap=50)
+chunks = chunker.chunk(document_text)
 ```
 
-### Behavior
+**How it works:**
 
 ```
-Document: [====================================================]
-                    Token positions
+Document: |=========================================|
+          0       512      1024     1536     2048
 
-Chunk 0:  [===========]
-                      ↓ overlap
-Chunk 1:           [===========]
-                             ↓ overlap
-Chunk 2:                  [===========]
-                                    ↓ overlap
-Chunk 3:                         [=======]  (smaller, end of doc)
+Chunk 0:  |==========|
+          0         512
+
+Chunk 1:       |==========|
+              462        974
+               ^
+               overlap starts at 462 (512-50)
+
+Chunk 2:            |==========|
+                   924       1436
+
+Chunk 3:                 |======|
+                        1386   1800 (end of doc)
 ```
 
-### Use Cases
+**Pros:**
+- Predictable, consistent chunk sizes
+- Simple to reason about
+- Fast
 
-- Consistent chunk sizes needed
-- Simple, predictable chunking
-- When context preservation is less critical
+**Cons:**
+- Cuts mid-sentence, mid-paragraph
+- Context can be awkwardly split
 
-## Semantic Chunker
+**Best for:**
+- Content without clear structure
+- When you need consistent sizing
+- Large-scale processing where speed matters
 
-Respects sentence and paragraph boundaries.
+### Semantic Chunker
 
-### Configuration
+Respects natural language boundaries - never splits mid-sentence.
 
 ```python
 from khora.extraction.chunkers import SemanticChunker
 
-chunker = SemanticChunker(
-    chunk_size=512,       # Target tokens per chunk
-    chunk_overlap=50,     # Overlap tokens
-)
-
-results = chunker.chunk(text)
+chunker = SemanticChunker(chunk_size=512, chunk_overlap=50)
+chunks = chunker.chunk(document_text)
 ```
 
-### Behavior
+**How it works:**
 
-1. Split text into sentences (using sentence boundary detection)
-2. Group sentences until reaching `chunk_size`
-3. Apply overlap at sentence boundaries
-4. Never split mid-sentence
+1. Split text into sentences
+2. Group sentences until approaching `chunk_size`
+3. Add the next sentence only if it fits
+4. Overlap by including trailing sentences from previous chunk
 
 ```
-Document:  Sentence1. Sentence2. Sentence3. Sentence4. Sentence5.
-                     ↓           ↓           ↓           ↓
+Document:
+"Sentence one. Sentence two. Sentence three. Sentence four. Sentence five."
+      |              |             |              |              |
+     80t           120t          150t           100t           130t
+    (tokens)
 
-Chunk 0:   [Sentence1. Sentence2.]
-                       ↓ overlap (full sentence)
-Chunk 1:   [Sentence2. Sentence3. Sentence4.]
-                                  ↓ overlap
-Chunk 2:   [Sentence4. Sentence5.]
+Chunk 0: "Sentence one. Sentence two. Sentence three."
+         = 350 tokens (under 512, but adding #4 would exceed)
+
+Chunk 1: "Sentence three. Sentence four. Sentence five."
+         = 380 tokens (overlap includes sentence three)
 ```
 
-### Use Cases
+**Pros:**
+- Natural boundaries preserve meaning
+- Better embeddings (complete thoughts)
+- More readable chunks
 
+**Cons:**
+- Variable chunk sizes
+- Very long sentences can cause issues
+
+**Best for:**
 - Natural language content
-- When sentence context is important
-- Documents with clear sentence structure
+- Articles, reports, documentation
+- Content you might show to users
 
-## Recursive Chunker
+### Recursive Chunker
 
-Hierarchically splits using multiple separators (LangChain-style).
-
-### Configuration
+Tries increasingly fine-grained splits until chunks fit.
 
 ```python
 from khora.extraction.chunkers import RecursiveChunker
@@ -138,163 +136,184 @@ from khora.extraction.chunkers import RecursiveChunker
 chunker = RecursiveChunker(
     chunk_size=512,
     chunk_overlap=50,
-    separators=["\n\n", "\n", ". ", " "],  # Default separators
+    separators=["\n\n", "\n", ". ", " "]
 )
-
-results = chunker.chunk(text)
+chunks = chunker.chunk(document_text)
 ```
 
-### Behavior
-
-1. Try to split on first separator (`\n\n` = paragraphs)
-2. If chunks still too large, split on next separator (`\n` = lines)
-3. Continue until chunks fit within `chunk_size`
-4. Apply overlap at the chosen boundary level
+**How it works:**
 
 ```
-Level 1: Split on paragraphs (\\n\\n)
-         [Paragraph 1]  [Paragraph 2]  [Paragraph 3]
-                ↓ too large
-Level 2: Split on lines (\\n)
-         [Line 1, Line 2]  [Line 3, Line 4]
-                ↓ too large
-Level 3: Split on sentences (. )
-         [Sent1. Sent2.]  [Sent3. Sent4.]
+Level 1: Try splitting on paragraphs (\n\n)
+         |Paragraph 1|    |Paragraph 2|    |Paragraph 3|
+              |               |                |
+         (fits!)         (too big!)         (fits!)
+                              |
+                              v
+Level 2: Split big paragraph on lines (\n)
+         |Line 1|  |Line 2|  |Line 3|  |Line 4|
+             |         |         |         |
+         (fits!)   (fits!)   (too big!)  (fits!)
+                                  |
+                                  v
+Level 3: Split big line on sentences (. )
+         |Sent 1|  |Sent 2|  |Sent 3|
+             |         |         |
+         (fits!)   (fits!)   (fits!)
 ```
 
-### Default Separators
-
+**Default separators:**
 ```python
 DEFAULT_SEPARATORS = [
-    "\n\n",     # Paragraphs
-    "\n",       # Lines
-    ". ",       # Sentences
-    ", ",       # Clauses
-    " ",        # Words
-    "",         # Characters (fallback)
+    "\n\n",   # Paragraphs
+    "\n",     # Lines
+    ". ",     # Sentences
+    ", ",     # Clauses
+    " ",      # Words
+    ""        # Characters (last resort)
 ]
 ```
 
-### Use Cases
+**Pros:**
+- Respects document structure
+- Adapts to content hierarchy
+- Works well with Markdown, code, structured text
 
+**Cons:**
+- More complex logic
+- May produce uneven results on unstructured content
+
+**Best for:**
 - Markdown documents
 - Code files
-- Structured text with clear hierarchy
-- General-purpose chunking
+- Technical documentation
+- Any content with clear hierarchy
 
-## Token Counting
+## Choosing the Right Chunker
 
-All chunkers use tiktoken for accurate token counting:
+| Content Type | Recommended | Why |
+|--------------|-------------|-----|
+| Blog posts, articles | Semantic | Natural language with paragraphs |
+| Technical docs | Recursive | Headers, code blocks, structure |
+| Chat logs | Semantic | Conversational, sentence-focused |
+| Code files | Recursive | Functions, classes, blocks |
+| CSV/structured data | Fixed | No natural boundaries |
+| Books/long-form | Semantic | Chapter/paragraph structure |
+| API responses | Fixed or Recursive | Depends on format |
 
-```python
-import tiktoken
+## Configuration
 
-def count_tokens(text: str) -> int:
-    # Uses cl100k_base encoding (GPT-4, Claude compatible)
-    encoding = tiktoken.get_encoding("cl100k_base")
-    return len(encoding.encode(text))
-```
+### Chunk Size
 
-## Chunker Selection Guide
-
-| Content Type | Recommended Chunker |
-|--------------|---------------------|
-| General text | `semantic` |
-| Markdown/docs | `recursive` |
-| Fixed-size needs | `fixed` |
-| Unstructured data | `fixed` |
-| Technical docs | `recursive` |
-| Conversations | `semantic` |
-
-## Configuration Recommendations
-
-### General Use
+The `chunk_size` is measured in tokens, not characters. Khora uses tiktoken with the `cl100k_base` encoding (compatible with GPT-4, Claude).
 
 ```python
-chunk_size = 512      # Good balance
-chunk_overlap = 50    # ~10% overlap
-strategy = "semantic"
+# Rough conversion: 1 token ≈ 4 characters (English)
+chunk_size=512   # ~2000 characters
+chunk_size=1024  # ~4000 characters
+chunk_size=256   # ~1000 characters
 ```
 
-### Long Documents
+**Guidelines:**
+- `256` - Short, focused chunks (good for Q&A)
+- `512` - Balanced (default, works for most cases)
+- `1024` - More context (good for complex topics)
+- `2048+` - Long context (needs large embedding models)
+
+### Chunk Overlap
+
+Overlap prevents context loss at boundaries:
 
 ```python
-chunk_size = 1024     # Larger context
-chunk_overlap = 100   # More overlap
-strategy = "recursive"
+chunk_overlap=50   # ~10% of 512 (good default)
+chunk_overlap=100  # More overlap for complex content
+chunk_overlap=0    # No overlap (fastest, may lose context)
 ```
 
-### Short Documents
+More overlap = more redundancy = better boundary handling, but larger storage.
 
-```python
-chunk_size = 256      # Smaller chunks
-chunk_overlap = 25    # Proportional overlap
-strategy = "semantic"
-```
-
-## API Usage
+## Usage Examples
 
 ### Via MemoryLake
 
 ```python
-result = await lake.remember(
-    content,
-    chunk_strategy="semantic",
-    chunk_size=512,
-)
+# Use semantic chunking (default)
+await lake.remember(content, chunk_strategy="semantic")
+
+# Use recursive for structured docs
+await lake.remember(content, chunk_strategy="recursive", chunk_size=1024)
+
+# Use fixed for speed
+await lake.remember(content, chunk_strategy="fixed", chunk_size=512)
 ```
 
-### Direct Chunker Usage
+### Direct Usage
 
 ```python
 from khora.extraction.chunkers import SemanticChunker
 
-chunker = SemanticChunker(chunk_size=512)
-chunk_results = chunker.chunk(document_text)
+chunker = SemanticChunker(chunk_size=512, chunk_overlap=50)
+results = chunker.chunk(text)
 
-for result in chunk_results:
-    print(f"Chunk {result.index}: {result.token_count} tokens")
-    print(f"  Position: {result.start_char}-{result.end_char}")
+for result in results:
+    print(f"Chunk {result.index}:")
+    print(f"  Tokens: {result.token_count}")
+    print(f"  Position: chars {result.start_char}-{result.end_char}")
     print(f"  Content: {result.content[:100]}...")
 ```
 
-### In Pipeline Tasks
+### Token Counting
+
+All chunkers use tiktoken for accurate counts:
 
 ```python
-from khora.pipelines.tasks import chunk_document
+from khora.extraction.chunkers import Chunker
 
-chunks = await chunk_document(
-    document,
-    strategy="recursive",
-    chunk_size=1024,
+chunker = SemanticChunker()
+token_count = chunker.count_tokens("Hello, world!")
+# Returns: 4
+```
+
+## The ChunkResult Object
+
+Chunkers return `ChunkResult` objects:
+
+```python
+ChunkResult(
+    content="The actual chunk text...",
+    index=0,              # Position in document (0-indexed)
+    start_char=0,         # Character offset in original
+    end_char=2048,        # End character offset
+    token_count=512,      # Actual token count
+    metadata={            # Additional info
+        "sentences": 5,   # (semantic chunker adds this)
+    }
 )
 ```
 
-## Output
+The character offsets let you map chunks back to the original document - useful for highlighting or citation.
 
-Chunkers produce `Chunk` model instances with:
+## Performance Tips
 
-```python
-Chunk(
-    id=uuid4(),
-    document_id=document.id,
-    namespace_id=document.namespace_id,
-    content=chunk_result.content,
-    index=chunk_result.index,
-    start_char=chunk_result.start_char,
-    end_char=chunk_result.end_char,
-    token_count=chunk_result.token_count,
-    metadata={
-        "chunker": "semantic",
-        "overlap_tokens": 50,
-        **chunk_result.metadata,
-    },
-    created_at=document.created_at,  # Inherit timestamp
-)
-```
+1. **Batch processing**: Chunkers are synchronous and fast. The bottleneck is usually embedding, not chunking.
 
-## Next Steps
+2. **Reuse chunkers**: Create one chunker instance and reuse it:
+   ```python
+   chunker = SemanticChunker(chunk_size=512)
+   for doc in documents:
+       chunks = chunker.chunk(doc.content)
+   ```
 
-- [Embedders](embedders.md) - Embedding generation
-- [Extractors](extractors.md) - Entity extraction
-- [Ingestion Pipeline](ingestion-pipeline.md) - Full pipeline
+3. **Pre-filter content**: Remove boilerplate (headers, footers) before chunking.
+
+4. **Match embedding model**: If your embedding model handles 8192 tokens, you can use larger chunks:
+   ```python
+   # For models with large context
+   chunker = SemanticChunker(chunk_size=2048)
+   ```
+
+## What's Next?
+
+- **[Embedders](embedders.md)** - Turn chunks into vectors
+- **[Extractors](extractors.md)** - Extract entities from chunks
+- **[Ingestion Pipeline](ingestion-pipeline.md)** - The full processing flow

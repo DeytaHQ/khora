@@ -1,303 +1,297 @@
 # Query Engine Overview
 
-Khora's HybridQueryEngine combines multiple search methods to provide comprehensive retrieval. This document describes the query engine architecture and configuration.
+When you ask Khora a question, a lot happens behind the scenes. The query engine doesn't just do a simple search - it *understands* your question, searches multiple backends in parallel, and intelligently combines the results.
 
-## Query Pipeline
+## The Seven-Step Pipeline
+
+Every query goes through these steps:
 
 ```
-Query Input
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Step 1: Query Understanding                     │
-│                                                                  │
-│  Single LLM call extracts:                                      │
-│  - Intent classification                                         │
-│  - Entity mentions with confidence                               │
-│  - Temporal references (ISO 8601)                                │
-│  - Query expansion terms                                         │
-│  - Source priority weights                                       │
-│  - Search strategy recommendations                               │
-│  - Pre-computed follow-up queries                                │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Step 2: Entity Linking                          │
-│                                                                  │
-│  Link query entity mentions to stored entities:                 │
-│  - Exact name matching                                           │
-│  - Fuzzy matching (Levenshtein)                                  │
-│  - Embedding similarity                                          │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Step 3: Multi-Source Search                     │
-│                                                                  │
-│   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐          │
-│   │   Vector    │   │    Graph    │   │   Keyword   │          │
-│   │   Search    │   │   Search    │   │   (BM25)    │          │
-│   │             │   │             │   │             │          │
-│   │  pgvector   │   │   Neo4j     │   │  In-memory  │          │
-│   │  cosine     │   │  traversal  │   │   index     │          │
-│   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘          │
-│          │                 │                 │                   │
-│          └────────────────┬┘─────────────────┘                  │
-│                           │                                      │
-│            (Parallel execution)                                  │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Step 4: RRF Fusion                              │
-│                                                                  │
-│  Reciprocal Rank Fusion:                                        │
-│                                                                  │
-│    score(d) = Σ (weight_source / (k + rank_source(d)))          │
-│                                                                  │
-│  Default weights:                                                │
-│    - Vector: 0.5                                                 │
-│    - Graph: 0.3                                                  │
-│    - Keyword: 0.2                                                │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Step 5: Temporal Filtering                      │
-│                                                                  │
-│  Apply time constraints:                                         │
-│  - BEFORE / AFTER / BETWEEN                                      │
-│  - Recency bias (exponential decay)                              │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Step 6: Reranking (Optional)                    │
-│                                                                  │
-│  Neural reranking for improved relevance                        │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Step 7: Result Limiting                         │
-│                                                                  │
-│  Return top-k results                                            │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-   QueryResult
+"Who worked with Einstein on relativity?"
+                    |
+                    v
+         +--------------------+
+         |  1. UNDERSTAND     |  What are you really asking?
+         +--------------------+
+                    |
+                    v
+         +--------------------+
+         |  2. LINK           |  Match "Einstein" to stored entities
+         +--------------------+
+                    |
+         +---------+---------+
+         |         |         |
+         v         v         v
+     +-------+ +-------+ +-------+
+     |VECTOR | |GRAPH  | |KEYWORD|   3. SEARCH (parallel)
+     +-------+ +-------+ +-------+
+         |         |         |
+         +---------+---------+
+                   |
+                   v
+         +--------------------+
+         |  4. FUSE           |  Combine rankings with RRF
+         +--------------------+
+                   |
+                   v
+         +--------------------+
+         |  5. FILTER         |  Apply time constraints
+         +--------------------+
+                   |
+                   v
+         +--------------------+
+         |  6. RERANK         |  Optional: neural reranking
+         +--------------------+
+                   |
+                   v
+         +--------------------+
+         |  7. LIMIT          |  Return top results
+         +--------------------+
+                   |
+                   v
+           Your Results
 ```
 
-## HybridQueryEngine
+Let's walk through what happens at each step.
 
-Located at `src/khora/query/engine.py`.
+## Step 1: Query Understanding
+
+Before searching, Khora uses an LLM to understand what you're actually asking. A single call extracts:
+
+**Intent** - What type of question is this?
+- `SEARCH` - Find relevant information
+- `QUESTION` - Answer a specific question
+- `TEMPORAL` - Time-based query ("last week's updates")
+- `RELATIONSHIP` - Connection query ("who knows whom")
+- `EXPLORATION` - Open-ended browsing
+
+**Entity Mentions** - People, organizations, concepts referenced:
+```python
+# Query: "What did Microsoft announce about Azure?"
+entities = [
+    {"name": "Microsoft", "type": "ORGANIZATION", "confidence": 0.95},
+    {"name": "Azure", "type": "PRODUCT", "confidence": 0.90}
+]
+```
+
+**Temporal References** - Any time expressions, converted to ISO 8601:
+```python
+# Query: "Updates from last week"
+temporal = {
+    "original": "last week",
+    "start": "2024-01-08T00:00:00Z",
+    "end": "2024-01-14T23:59:59Z"
+}
+```
+
+**Search Strategy** - Which search methods will work best:
+```python
+# Relationship query -> boost graph search
+source_priority = {"graph": 0.6, "vector": 0.3, "keyword": 0.1}
+```
+
+**Follow-up Queries** - Pre-computed queries for agentic exploration:
+```python
+follow_ups = [
+    "What are Einstein's most famous publications?",
+    "Who else contributed to special relativity?"
+]
+```
+
+This understanding step is crucial - it shapes everything that follows.
+
+## Step 2: Entity Linking
+
+The query mentioned "Einstein" - but which Einstein? We need to connect query mentions to actual stored entities.
+
+Three matching strategies are used:
+
+1. **Exact match**: "Einstein" → entity named "Einstein"
+2. **Fuzzy match**: "Einstien" (typo) → entity "Einstein" (Levenshtein distance)
+3. **Embedding similarity**: "the famous physicist" → entity "Albert Einstein"
+
+Linked entities become starting points for graph traversal.
+
+## Step 3: Multi-Source Search
+
+Now we search, hitting all three backends in parallel:
+
+### Vector Search (pgvector)
+
+Converts your query to a vector and finds semantically similar chunks:
+
+```sql
+-- Under the hood (simplified)
+SELECT chunk_id, content,
+       1 - (embedding <=> query_embedding) as similarity
+FROM chunks
+WHERE namespace_id = $1
+ORDER BY embedding <=> query_embedding
+LIMIT 50;
+```
+
+Great for: Conceptual similarity, paraphrased content, "what's related to X"
+
+### Graph Search (Neo4j)
+
+Starts from linked entities and explores outward:
+
+```cypher
+// Find content connected to Einstein
+MATCH (e:Entity {name: "Einstein"})-[r*1..2]-(related)
+MATCH (related)-[:MENTIONED_IN]->(chunk:Chunk)
+RETURN chunk, r
+```
+
+Great for: Relationship queries, "who worked with", "what's connected to"
+
+### Keyword Search (BM25)
+
+Classic text matching with term frequency weighting:
 
 ```python
-from khora.query import HybridQueryEngine, QueryConfig, SearchMode
+# Tokenize, stem, match
+query_terms = ["einstein", "relativ"]  # stemmed
+scores = bm25.score(query_terms, all_chunks)
+```
 
-engine = HybridQueryEngine(
-    storage=storage_coordinator,
-    llm_config=llm_config,
-)
+Great for: Exact phrases, technical terms, names, acronyms
 
-result = await engine.query(
-    "Who developed relativity?",
-    namespace_id=namespace_id,
-    config=QueryConfig(
-        mode=SearchMode.HYBRID,
-        limit=10,
-        min_similarity=0.3,
+## Step 4: Reciprocal Rank Fusion
+
+Each search method returns a ranked list. How do we combine them?
+
+**The problem**: Scores aren't comparable. Vector similarity is 0-1, BM25 can be anything, graph metrics vary.
+
+**The solution**: Reciprocal Rank Fusion (RRF) ignores scores entirely and uses *ranks*:
+
+```
+RRF_score(chunk) = sum of (weight / (60 + rank)) for each source
+```
+
+A chunk ranked #1 in vector and #3 in graph:
+```
+score = 0.5/(60+1) + 0.3/(60+3) = 0.0082 + 0.0048 = 0.013
+```
+
+Chunks appearing in multiple sources get boosted. The `k=60` constant smooths out differences between top ranks.
+
+Default weights:
+- Vector: 0.5 (semantic similarity is usually most valuable)
+- Graph: 0.3 (relationships add crucial context)
+- Keyword: 0.2 (catches exact matches others might miss)
+
+## Step 5: Temporal Filtering
+
+If the query had a time component, we filter results:
+
+```python
+TemporalFilter.between("2024-01-01", "2024-01-31")
+TemporalFilter.last_days(7)
+TemporalFilter.after("2023-06-01")
+```
+
+Recency bias can also be applied - recent content scores higher:
+
+```python
+# Exponential decay: score *= e^(-decay * days_old)
+config = QueryConfig(recency_bias=0.3)
+```
+
+## Step 6: Reranking (Optional)
+
+For higher precision, a neural reranker can reorder the top results:
+
+```python
+config = QueryConfig(enable_reranking=True)
+```
+
+This uses a cross-encoder model that looks at query-document pairs together, catching nuances that initial retrieval might miss.
+
+## Step 7: Result Limiting
+
+Finally, we return the top-k results with all the metadata you need:
+
+```python
+QueryResult(
+    chunks=[(chunk1, 0.85), (chunk2, 0.72), ...],
+    entities=[(einstein_entity, 0.95), ...],
+    graph_info=GraphInfo(
+        entities_linked=["Albert Einstein"],
+        relationships_traversed=[("Einstein", "AUTHORED", "Relativity Paper")]
     ),
+    search_contributions=SearchContributions(vector=4, graph=3, keyword=1)
 )
 ```
 
-## QueryConfig
+## Using the Query Engine
 
-```python
-@dataclass
-class QueryConfig:
-    # Search mode
-    mode: SearchMode = SearchMode.HYBRID
-
-    # Result limits
-    limit: int = 10
-    min_similarity: float = 0.0
-
-    # RRF weights
-    vector_weight: float = 0.5
-    graph_weight: float = 0.3
-    keyword_weight: float = 0.2
-    rrf_k: int = 60
-
-    # Temporal
-    temporal_filter: TemporalFilter | None = None
-    recency_bias: float = 0.0  # 0 = disabled, 0.1-1.0 = strength
-
-    # Graph options
-    graph_depth: int = 2
-    graph_relationship_types: list[str] | None = None
-
-    # Features
-    enable_understanding: bool = True
-    enable_reranking: bool = False
-    enable_agentic: bool = False  # Multi-step exploration
-```
-
-## QueryResult
-
-```python
-@dataclass
-class QueryResult:
-    # Primary results
-    chunks: list[tuple[Chunk, float]]
-    entities: list[tuple[Entity, float]]
-
-    # Graph context
-    graph_info: GraphInfo | None = None
-
-    # Search contributions
-    search_contributions: SearchContributions | None = None
-
-    # Temporal info
-    temporal_info: TemporalInfo | None = None
-
-    # Metadata
-    metadata: dict[str, Any] = field(default_factory=dict)
-```
-
-### SearchContributions
-
-```python
-@dataclass
-class SearchContributions:
-    vector: int   # Chunks from vector search
-    graph: int    # Chunks from graph search
-    keyword: int  # Chunks from keyword search
-```
-
-### GraphInfo
-
-```python
-@dataclass
-class GraphInfo:
-    entities_linked: list[str]      # Entity names matched
-    relationships_traversed: list[tuple[str, str, str]]  # (from, type, to)
-```
-
-## Search Modes
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `VECTOR` | Semantic similarity only | Conceptual queries |
-| `GRAPH` | Entity/relationship traversal | "Related to X" queries |
-| `KEYWORD` | BM25 keyword matching | Exact term search |
-| `HYBRID` | Vector + Graph combined | Default, balanced |
-| `ALL` | All three methods | Comprehensive search |
-
-See [Search Modes](search-modes.md) for details.
-
-## API Usage
-
-### Via MemoryLake
+### Simple Usage via MemoryLake
 
 ```python
 from khora import MemoryLake, SearchMode
 
 async with MemoryLake() as lake:
     results = await lake.recall(
-        "quantum physics discoveries",
+        "machine learning applications",
         mode=SearchMode.HYBRID,
-        limit=10,
+        limit=10
     )
 
     for chunk, score in results.chunks:
         print(f"[{score:.2f}] {chunk.content[:100]}...")
 ```
 
-### Direct Engine Usage
+### With Full Configuration
 
 ```python
-from khora.query import HybridQueryEngine, QueryConfig
-
-engine = HybridQueryEngine(storage=storage)
-
-result = await engine.query(
-    "Einstein collaborators",
-    namespace_id,
-    config=QueryConfig(
-        mode=SearchMode.GRAPH,
-        graph_depth=2,
-    ),
-)
-```
-
-### With Temporal Filter
-
-```python
+from khora.query import QueryConfig
 from khora.query.temporal import TemporalFilter
 
 results = await lake.recall(
     "product updates",
-    temporal_filter=TemporalFilter.last_days(7),
-    recency_bias=0.3,
+    config=QueryConfig(
+        mode=SearchMode.ALL,
+        limit=20,
+        min_similarity=0.3,
+        vector_weight=0.6,
+        graph_weight=0.2,
+        keyword_weight=0.2,
+        temporal_filter=TemporalFilter.last_days(30),
+        recency_bias=0.2,
+        enable_reranking=True
+    )
 )
 ```
-
-See [Temporal Queries](temporal-queries.md) for details.
 
 ### Agentic Search
 
+For complex questions, enable multi-step exploration:
+
 ```python
-from khora.query.agentic import AgenticSearchAgent
-
-agent = AgenticSearchAgent(engine=engine)
-
-result = await agent.search(
-    "What is our product strategy?",
-    namespace_id,
-    max_steps=3,
+results = await lake.recall(
+    "What's our competitive strategy?",
+    config=QueryConfig(enable_agentic=True)
 )
 
-# Access full trace
-print(result.trace.to_dict())
+# The engine may execute follow-up queries automatically
+print(results.trace)  # See the full exploration path
 ```
 
-See [Agentic Search](agentic-search.md) for details.
+## Search Mode Quick Reference
 
-## Query Understanding
+| Mode | What It Does | Best For |
+|------|-------------|----------|
+| `VECTOR` | Semantic similarity only | "What's similar to X?" |
+| `GRAPH` | Entity relationships only | "Who works with X?" |
+| `KEYWORD` | Exact term matching only | Technical terms, names |
+| `HYBRID` | Vector + Graph | Default, balanced |
+| `ALL` | All three methods | Comprehensive search |
 
-The engine uses LLM-based query understanding to extract:
+## What's Next?
 
-- Intent classification
-- Entity mentions
-- Temporal references
-- Query expansions
-- Search strategy recommendations
-
-See [Query Understanding](query-understanding.md) for details.
-
-## Fusion
-
-Results from multiple sources are combined using Reciprocal Rank Fusion:
-
-```
-score(d) = Σ (weight / (k + rank))
-```
-
-See [Fusion](fusion.md) for details.
-
-## Next Steps
-
-- [Search Modes](search-modes.md) - Vector, Graph, Keyword, Hybrid
-- [Query Understanding](query-understanding.md) - LLM-based analysis
-- [Fusion](fusion.md) - Reciprocal Rank Fusion
-- [Temporal Queries](temporal-queries.md) - Time filtering
-- [Agentic Search](agentic-search.md) - Multi-step exploration
+- **[Search Modes](search-modes.md)** - When to use each mode
+- **[Query Understanding](query-understanding.md)** - How the LLM analyzes queries
+- **[Fusion](fusion.md)** - Deep dive into RRF
+- **[Temporal Queries](temporal-queries.md)** - Time-based filtering
+- **[Agentic Search](agentic-search.md)** - Multi-step exploration
