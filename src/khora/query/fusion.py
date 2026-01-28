@@ -44,13 +44,23 @@ def reciprocal_rank_fusion(
     if not ranked_lists:
         return []
 
+    # Filter out empty lists
+    ranked_lists = {k: v for k, v in ranked_lists.items() if v}
+    if not ranked_lists:
+        return []
+
     # Default equal weights
     if weights is None:
         weights = {source: 1.0 for source in ranked_lists}
 
     # Normalize weights
     total_weight = sum(weights.get(s, 1.0) for s in ranked_lists)
-    normalized_weights = {s: weights.get(s, 1.0) / total_weight for s in ranked_lists}
+    if total_weight == 0:
+        # If all weights are zero, use equal weights
+        total_weight = len(ranked_lists)
+        normalized_weights = {s: 1.0 / total_weight for s in ranked_lists}
+    else:
+        normalized_weights = {s: weights.get(s, 1.0) / total_weight for s in ranked_lists}
 
     # Calculate RRF scores
     rrf_scores: dict[Any, float] = {}
@@ -95,7 +105,11 @@ def combine_with_weights(
     """
     # Normalize weights
     total_weight = sum(weights)
-    normalized_weights = [w / total_weight for w in weights]
+    if total_weight == 0:
+        # If all weights are zero, use equal weights
+        normalized_weights = [1.0 / len(weights) for _ in weights] if weights else []
+    else:
+        normalized_weights = [w / total_weight for w in weights]
 
     # Combine scores
     combined_scores: dict[Any, float] = {}
