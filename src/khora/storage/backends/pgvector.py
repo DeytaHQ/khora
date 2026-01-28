@@ -253,6 +253,42 @@ class PgVectorBackend:
         )
 
     # =========================================================================
+    # Full-text search operations
+    # =========================================================================
+
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        language: str = "english",
+    ) -> list[tuple[Chunk, float]]:
+        """Search chunks using PostgreSQL full-text search with ts_rank.
+
+        Uses the content_tsv generated column and GIN index for efficient
+        full-text matching.
+        """
+        async with self._get_session() as session:
+            tsquery = func.plainto_tsquery(language, query_text)
+            rank = func.ts_rank(ChunkModel.content_tsv, tsquery)
+
+            query = (
+                select(ChunkModel, rank.label("rank"))
+                .where(
+                    ChunkModel.namespace_id == str(namespace_id),
+                    ChunkModel.content_tsv.op("@@")(tsquery),
+                )
+                .order_by(rank.desc())
+                .limit(limit)
+            )
+
+            result = await session.execute(query)
+            rows = result.all()
+
+            return [(self._chunk_model_to_domain(row.ChunkModel), float(row.rank)) for row in rows]
+
+    # =========================================================================
     # Entity operations (for vector search via PostgreSQL)
     # =========================================================================
 

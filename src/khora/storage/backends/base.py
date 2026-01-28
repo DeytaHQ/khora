@@ -281,6 +281,23 @@ class VectorBackendProtocol(Protocol):
         """Search for similar entities by embedding."""
         ...
 
+    @abstractmethod
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        language: str = "english",
+    ) -> list[tuple[Chunk, float]]:
+        """Search chunks using PostgreSQL full-text search.
+
+        Uses ts_rank on the content_tsv generated column.
+
+        Returns list of (chunk, rank_score) tuples.
+        """
+        ...
+
 
 @runtime_checkable
 class GraphBackendProtocol(Protocol):

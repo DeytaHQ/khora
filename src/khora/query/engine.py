@@ -22,6 +22,7 @@ from loguru import logger
 from .fusion import reciprocal_rank_fusion
 from .keyword import KeywordSearcher, normalize_bm25_score
 from .linking import EntityLinker, LinkingResult
+from .metrics import SearchMetrics
 from .reranking import RerankCandidate, create_reranker
 from .temporal import TemporalFilter, TemporalQuery
 from .understanding import QueryUnderstanding, UnderstandingResult
@@ -311,14 +312,18 @@ class QueryConfig:
     entity_linking_max_candidates: int = 5
 
     # Reranking settings
-    enable_reranking: bool = False
+    enable_reranking: bool = True
     reranking_method: str = "cross_encoder"
     reranking_top_n: int = 50
     reranking_final_k: int = 10
 
     # Keyword search settings
     enable_keyword_search: bool = True
-    keyword_search_method: str = "bm25"
+    keyword_search_method: str = "fulltext"
+
+    # HyDE settings
+    enable_hyde: bool = False
+    hyde_num_hypotheticals: int = 1
 
     @classmethod
     def from_settings(cls, settings: Any) -> QueryConfig:
@@ -365,6 +370,9 @@ class QueryConfig:
             # Keyword search
             enable_keyword_search=settings.keyword_search.enabled,
             keyword_search_method=settings.keyword_search.method,
+            # HyDE
+            enable_hyde=settings.hyde.enabled,
+            hyde_num_hypotheticals=settings.hyde.num_hypotheticals,
         )
 
 
@@ -407,6 +415,17 @@ class HybridQueryEngine:
 
         # Entity linker (created per-query with embedder)
         self._entity_linker: EntityLinker | None = None
+
+        # HyDE expander
+        self._hyde_expander: HyDEExpander | None = None
+        if self._config.enable_hyde and self._embedder:
+            from .hyde import HyDEExpander
+
+            self._hyde_expander = HyDEExpander(
+                self._embedder,
+                llm_config=llm_config,
+                num_hypotheticals=self._config.hyde_num_hypotheticals,
+            )
 
         # Keyword searcher (built per namespace)
         self._keyword_searchers: dict[str, KeywordSearcher] = {}
@@ -466,6 +485,17 @@ class HybridQueryEngine:
 
         logger.debug(f"Executing query: {query_text[:50]}... (mode={cfg.mode.name})")
 
+        # Initialize metrics
+        metrics = SearchMetrics()
+        metrics.total_timer.start()
+        metrics.features = {
+            "query_understanding": cfg.enable_query_understanding,
+            "entity_linking": cfg.enable_entity_linking,
+            "reranking": cfg.enable_reranking,
+            "hyde": cfg.enable_hyde,
+            "keyword_method": cfg.keyword_search_method,
+        }
+
         # Initialize tracking objects
         search_contributions = SearchMethodContribution()
         graph_info = GraphTraversalInfo()
@@ -479,6 +509,7 @@ class HybridQueryEngine:
         }
 
         # Step 1: Query Understanding
+        metrics.understanding_timer.start()
         understanding: UnderstandingResult | None = None
         if cfg.enable_query_understanding:
             try:
@@ -555,7 +586,10 @@ class HybridQueryEngine:
             except Exception as e:
                 logger.warning(f"Query understanding failed: {e}")
 
+        metrics.understanding_timer.stop()
+
         # Step 2: Entity Linking
+        metrics.linking_timer.start()
         linking_result: LinkingResult | None = None
         linked_entity_ids: list[UUID] = []
         if cfg.enable_entity_linking and understanding and understanding.entities:
@@ -585,6 +619,8 @@ class HybridQueryEngine:
             except Exception as e:
                 logger.warning(f"Entity linking failed: {e}")
 
+        metrics.linking_timer.stop()
+
         # Determine queries to search (original + expansions)
         queries_to_search = [query_text]
         if understanding and cfg.enable_query_expansion:
@@ -595,6 +631,7 @@ class HybridQueryEngine:
         all_entity_results: dict[str, list[tuple[Any, float]]] = {}
         graph_context: dict[str, Any] = {}
 
+        metrics.search_timer.start()
         search_start_time = time.perf_counter()
 
         for i, q in enumerate(queries_to_search):
@@ -604,6 +641,11 @@ class HybridQueryEngine:
             query_embedding = None
             if self._embedder and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
                 query_embedding = await self._embedder.embed(q)
+
+                # Apply HyDE expansion (only on the original query, not expansions)
+                if query_embedding is not None and self._hyde_expander and i == 0:
+                    query_embedding = await self._hyde_expander.expand_query_embedding(q, query_embedding)
+                    metadata["hyde_applied"] = True
 
             # Execute searches in parallel based on mode
             tasks = []
@@ -622,9 +664,13 @@ class HybridQueryEngine:
                 task_types.append("graph")
 
             if cfg.mode == SearchMode.ALL and cfg.enable_keyword_search:
-                # Use BM25 keyword search with extracted keywords if available
                 keywords = understanding.keywords if understanding else None
-                tasks.append(self._timed_search(self._keyword_search_bm25(namespace_id, q, cfg, keywords), "keyword"))
+                if cfg.keyword_search_method == "fulltext":
+                    tasks.append(self._timed_search(self._keyword_search_fulltext(namespace_id, q, cfg), "keyword"))
+                else:
+                    tasks.append(
+                        self._timed_search(self._keyword_search_bm25(namespace_id, q, cfg, keywords), "keyword")
+                    )
                 task_types.append("keyword")
 
             # Execute in parallel
@@ -702,8 +748,17 @@ class HybridQueryEngine:
 
         # Record total search time
         search_contributions.total_search_latency_ms = (time.perf_counter() - search_start_time) * 1000
+        metrics.search_timer.stop()
+
+        # Populate per-source counts into metrics
+        metrics.vector_chunk_count = search_contributions.vector.chunk_count
+        metrics.graph_chunk_count = search_contributions.graph.chunk_count
+        metrics.keyword_chunk_count = search_contributions.keyword.chunk_count
+        metrics.vector_entity_count = search_contributions.vector.entity_count
+        metrics.graph_entity_count = search_contributions.graph.entity_count
 
         # Step 4: Apply RRF fusion
+        metrics.fusion_timer.start()
         fusion_start_time = time.perf_counter()
 
         fused_chunks = []
@@ -740,6 +795,9 @@ class HybridQueryEngine:
             )
 
         search_contributions.fusion_latency_ms = (time.perf_counter() - fusion_start_time) * 1000
+        metrics.fusion_timer.stop()
+        metrics.fused_chunk_count = len(fused_chunks)
+        metrics.fused_entity_count = len(fused_entities)
 
         # Boost linked entities
         if linked_entity_ids:
@@ -765,6 +823,7 @@ class HybridQueryEngine:
             fused_chunks.sort(key=lambda x: x[1], reverse=True)
 
         # Step 6: Reranking (optional)
+        metrics.reranking_timer.start()
         if cfg.enable_reranking and fused_chunks:
             try:
                 reranker = create_reranker(
@@ -787,6 +846,8 @@ class HybridQueryEngine:
             except Exception as e:
                 logger.warning(f"Reranking failed: {e}")
 
+        metrics.reranking_timer.stop()
+
         # Step 7: Limit results
         fused_chunks = fused_chunks[: cfg.max_chunks]
         fused_entities = fused_entities[: cfg.max_entities]
@@ -797,10 +858,18 @@ class HybridQueryEngine:
         # Compute overlap statistics
         search_contributions.compute_overlaps()
 
+        # Finalize metrics
+        metrics.final_chunk_count = len(fused_chunks)
+        metrics.final_entity_count = len(fused_entities)
+        metrics.set_chunk_scores([s for _, s in fused_chunks])
+        metrics.total_timer.stop()
+        metrics.log()
+
         # Add search method info to metadata
         metadata["search_methods"] = search_contributions.to_dict()
         metadata["graph_traversal"] = graph_info.to_dict()
         metadata["temporal"] = temporal_info.to_dict()
+        metadata["metrics"] = metrics.to_dict()
 
         return QueryResult(
             chunks=fused_chunks,
@@ -1053,6 +1122,40 @@ class HybridQueryEngine:
             }
         except Exception as e:
             logger.warning(f"Keyword search failed: {e}")
+            return {"source": "keyword", "chunks": [], "entities": []}
+
+    async def _keyword_search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        config: QueryConfig,
+    ) -> dict[str, Any]:
+        """Perform PostgreSQL full-text search using tsvector/tsquery.
+
+        Unlike BM25, this runs entirely in PostgreSQL using the GIN-indexed
+        content_tsv column, with no chunk count limit.
+        """
+        try:
+            results = await self._storage.search_fulltext_chunks(
+                namespace_id,
+                query_text,
+                limit=config.max_chunks * 2,
+            )
+
+            # Normalize ts_rank scores to 0-1 range
+            if results:
+                max_score = max(s for _, s in results) or 1.0
+                normalized = [(chunk, score / max_score) for chunk, score in results]
+            else:
+                normalized = []
+
+            return {
+                "source": "keyword",
+                "chunks": normalized,
+                "entities": [],
+            }
+        except Exception as e:
+            logger.warning(f"Full-text search failed: {e}")
             return {"source": "keyword", "chunks": [], "entities": []}
 
     async def find_related_entities(

@@ -332,6 +332,24 @@ class StorageCoordinator:
             filter_document_ids=filter_document_ids,
         )
 
+    async def search_fulltext_chunks(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        language: str = "english",
+    ) -> list[tuple[Chunk, float]]:
+        """Search chunks using PostgreSQL full-text search."""
+        if not self.vector:
+            raise RuntimeError("Vector backend not configured")
+        return await self.vector.search_fulltext(
+            namespace_id,
+            query_text,
+            limit=limit,
+            language=language,
+        )
+
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Count chunks in a namespace."""
         if not self.vector:

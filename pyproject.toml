@@ -56,6 +56,10 @@ postgres = [
     "asyncpg>=0.31.0",
     "pgvector>=0.4.2",
 ]
+# Neural reranking
+reranking = [
+    "sentence-transformers>=3.0.0",
+]
 
 [project.scripts]
 khora = "khora:main"

@@ -15,8 +15,20 @@ from typing import Any
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy import (
+    Boolean,
+    Computed,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from khora.core.models.document import DocumentStatus
@@ -230,6 +242,13 @@ class ChunkModel(Base):
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
     embedding_model: Mapped[str] = mapped_column(String(128), default="")
 
+    # Full-text search (generated tsvector column)
+    content_tsv: Mapped[Any | None] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', content)", persisted=True),
+        nullable=True,
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
@@ -239,13 +258,19 @@ class ChunkModel(Base):
 
     __table_args__ = (
         Index("ix_chunks_document_index", "document_id", "chunk_index"),
-        # Vector similarity index (using IVFFlat for approximate nearest neighbor)
+        # Vector similarity index (HNSW for better recall)
         Index(
-            "ix_chunks_embedding",
+            "ix_chunks_embedding_hnsw",
             "embedding",
-            postgresql_using="ivfflat",
-            postgresql_with={"lists": 100},
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+        # GIN index for full-text search
+        Index(
+            "ix_chunks_content_tsv",
+            "content_tsv",
+            postgresql_using="gin",
         ),
     )
 
@@ -304,10 +329,10 @@ class EntityModel(Base):
     __table_args__ = (
         Index("ix_entities_namespace_name_type", "namespace_id", "name", "entity_type"),
         Index(
-            "ix_entities_embedding",
+            "ix_entities_embedding_hnsw",
             "embedding",
-            postgresql_using="ivfflat",
-            postgresql_with={"lists": 100},
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )

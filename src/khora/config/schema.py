@@ -134,18 +134,25 @@ class EntityLinkingSettings(BaseModel):
 class RerankingSettings(BaseModel):
     """Reranking configuration."""
 
-    enabled: bool = Field(default=False, description="Enable result reranking")
+    enabled: bool = Field(default=True, description="Enable result reranking")
     method: str = Field(default="cross_encoder", description="Reranking method: cross_encoder, llm")
     model: str | None = Field(default=None, description="Model for reranking (cross-encoder model or LLM)")
     top_n: int = Field(default=50, ge=1, description="Number of candidates to rerank")
     final_k: int = Field(default=10, ge=1, description="Number of results after reranking")
 
 
+class HyDESettings(BaseModel):
+    """Hypothetical Document Embeddings (HyDE) configuration."""
+
+    enabled: bool = Field(default=False, description="Enable HyDE query expansion")
+    num_hypotheticals: int = Field(default=1, ge=1, le=5, description="Number of hypothetical documents to generate")
+
+
 class KeywordSearchSettings(BaseModel):
     """Keyword search configuration."""
 
     enabled: bool = Field(default=True, description="Enable keyword search")
-    method: str = Field(default="bm25", description="Keyword search method: bm25, fulltext")
+    method: str = Field(default="fulltext", description="Keyword search method: bm25, fulltext")
     use_stemming: bool = Field(default=True, description="Apply stemming to search terms")
     use_stopwords: bool = Field(default=True, description="Remove stopwords from search")
     language: str = Field(default="english", description="Language for stemming and stopwords")
@@ -174,6 +181,7 @@ class QuerySettings(BaseModel):
     entity_linking: EntityLinkingSettings = Field(default_factory=EntityLinkingSettings)
     reranking: RerankingSettings = Field(default_factory=RerankingSettings)
     keyword_search: KeywordSearchSettings = Field(default_factory=KeywordSearchSettings)
+    hyde: HyDESettings = Field(default_factory=HyDESettings)
 
 
 class KhoraConfig(BaseSettings):
