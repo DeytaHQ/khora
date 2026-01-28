@@ -1,369 +1,345 @@
 # Multi-Tenancy
 
-Khora provides a hierarchical multi-tenancy model that supports both shared infrastructure and complete tenant isolation. This document describes the tenancy hierarchy, isolation modes, and versioning capabilities.
+Different teams need different data. Different projects shouldn't mix. Sometimes you need complete isolation for compliance. Khora's multi-tenancy model handles all of this through a simple hierarchy: Organizations contain Workspaces contain Namespaces.
 
-## Tenancy Hierarchy
-
-```
-Organization
-    │
-    ├── Workspace 1
-    │       │
-    │       ├── Namespace A (v1) ← active
-    │       ├── Namespace A (v2) ← inactive (previous version)
-    │       └── Namespace B
-    │
-    └── Workspace 2
-            │
-            └── Namespace C
-```
-
-### Organization
-
-The top-level tenant container representing a company or billing entity.
-
-```python
-@dataclass
-class Organization:
-    id: UUID
-    name: str              # "Acme Corporation"
-    slug: str              # "acme" (URL-friendly)
-    tenancy_mode: TenancyMode  # SHARED or ISOLATED
-    metadata: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
-```
-
-**Use Cases:**
-- Billing and subscription management
-- Cross-workspace analytics
-- Organization-wide settings
-
-### Workspace
-
-A logical grouping within an organization, typically representing a team or project.
-
-```python
-@dataclass
-class Workspace:
-    id: UUID
-    organization_id: UUID  # Parent organization
-    name: str              # "Engineering Team"
-    slug: str              # "engineering"
-    description: str
-    metadata: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
-```
-
-**Use Cases:**
-- Team-level isolation
-- Project boundaries
-- Access control groups
-
-### Namespace (MemoryNamespace)
-
-The primary unit of memory isolation. All documents, chunks, entities, and relationships are scoped to a namespace.
-
-```python
-@dataclass
-class MemoryNamespace:
-    id: UUID
-    workspace_id: UUID     # Parent workspace
-    name: str              # "Production Data"
-    slug: str              # "production"
-    description: str
-
-    # Versioning
-    version: int = 1
-    is_active: bool = True
-    previous_version_id: UUID | None = None
-
-    # Configuration
-    config_overrides: dict[str, Any] = {}
-    sync_checkpoints: dict[str, str] = {}
-
-    metadata: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
-```
-
-**Use Cases:**
-- Data isolation per use case
-- Environment separation (dev/staging/prod)
-- Data versioning for replacement workflows
-
-## Tenancy Modes
-
-### Shared Mode (Default)
-
-All tenants share the same database with row-level filtering by `namespace_id`.
-
-```python
-class TenancyMode(str, Enum):
-    SHARED = "shared"  # Row-level security with namespace_id filtering
-```
-
-**Characteristics:**
-- Single database instance
-- All queries filtered by `namespace_id`
-- Lower infrastructure cost
-- Suitable for most use cases
-
-**Query Pattern:**
-```sql
--- All queries include namespace filter
-SELECT * FROM documents
-WHERE namespace_id = $1
-  AND status = 'completed';
-```
-
-### Isolated Mode
-
-Each tenant gets dedicated database instances.
-
-```python
-class TenancyMode(str, Enum):
-    ISOLATED = "isolated"  # Separate database instances per tenant
-```
-
-**Characteristics:**
-- Separate PostgreSQL/Neo4j instances per organization
-- Complete data isolation
-- Higher infrastructure cost
-- Required for regulated industries (HIPAA, SOC2)
-
-**Configuration:**
-```python
-# Isolated mode requires per-org connection strings
-org_config = {
-    "postgresql_url": "postgresql://acme:pass@acme-db:5432/khora",
-    "neo4j_url": "bolt://acme-graph:7687",
-}
-```
-
-## Namespace Versioning
-
-Namespaces support versioning for data replacement workflows, enabling:
-- Full data replacement without downtime
-- Rollback to previous versions
-- A/B testing with different data sets
-
-### Version Workflow
+## The Hierarchy
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Version Workflow                              │
-│                                                                  │
-│   1. Create new version                                         │
-│      ┌─────────────┐                                            │
-│      │ Namespace   │ version=1, is_active=True                  │
-│      │ (v1)        │                                            │
-│      └─────────────┘                                            │
-│             │                                                    │
-│             ▼                                                    │
-│   2. Ingest new data into v2                                    │
-│      ┌─────────────┐     ┌─────────────┐                        │
-│      │ Namespace   │     │ Namespace   │ version=2              │
-│      │ (v1)        │     │ (v2)        │ is_active=False        │
-│      │ active      │     │ staging     │ previous=v1.id         │
-│      └─────────────┘     └─────────────┘                        │
-│                                 │                                │
-│                                 ▼                                │
-│   3. Activate v2, deactivate v1                                 │
-│      ┌─────────────┐     ┌─────────────┐                        │
-│      │ Namespace   │     │ Namespace   │ version=2              │
-│      │ (v1)        │     │ (v2)        │ is_active=True         │
-│      │ inactive    │     │ active      │                        │
-│      └─────────────┘     └─────────────┘                        │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+Acme Corporation (Organization)
+│
+├── Engineering (Workspace)
+│   ├── production (Namespace)    ← Live data
+│   ├── production-v2 (Namespace) ← New version being staged
+│   └── sandbox (Namespace)       ← Experiments
+│
+└── Product (Workspace)
+    ├── research (Namespace)
+    └── competitor-analysis (Namespace)
 ```
 
-### API Usage
+Each level serves a purpose:
+
+**Organization** - Your company. Handles billing, sets global policies, defines whether data is shared or isolated at the infrastructure level.
+
+**Workspace** - A team or project. Groups related namespaces, provides a boundary for access control.
+
+**Namespace** - Where data actually lives. Every document, chunk, entity, and relationship belongs to exactly one namespace. This is your unit of isolation.
+
+## Namespaces: Where Data Lives
+
+All your data is scoped to namespaces. When you call `remember()` or `recall()`, you're always operating within a namespace:
 
 ```python
 from khora import MemoryLake
 
 async with MemoryLake() as lake:
-    # Get current active namespace
-    current_ns = await lake.storage.get_namespace_by_slug(
+    # Store in a specific namespace
+    await lake.remember(
+        "Important document content...",
+        namespace=namespace_id
+    )
+
+    # Search within that namespace
+    results = await lake.recall(
+        "What's in those documents?",
+        namespace=namespace_id
+    )
+```
+
+This isolation is enforced at the database level:
+
+```sql
+-- Every query includes namespace filtering
+SELECT * FROM chunks
+WHERE namespace_id = '...'
+  AND similarity > 0.3
+ORDER BY similarity DESC;
+```
+
+You can't accidentally see another namespace's data.
+
+## Namespace Versioning
+
+Here's a powerful feature: namespaces can be versioned. This solves a common problem - how do you replace all your data without downtime?
+
+### The Problem
+
+Say you have a "production" namespace with 100,000 documents. You want to rebuild everything from scratch (maybe your extraction logic improved). You can't just delete and re-import - your users would see empty results during the rebuild.
+
+### The Solution: Version and Swap
+
+```
+Before:
+  production (v1) ← active, serving queries
+
+During rebuild:
+  production (v1) ← still active, serving queries
+  production (v2) ← inactive, being populated
+
+After:
+  production (v1) ← now inactive
+  production (v2) ← now active, serving queries
+```
+
+The swap is atomic. One moment users see v1, the next they see v2. No downtime, no partial data.
+
+### How to Do It
+
+```python
+async with MemoryLake() as lake:
+    # 1. Get current namespace
+    current = await lake.storage.get_namespace_by_slug(
         workspace_id, "production"
     )
 
-    # Create new version
-    new_ns = await lake.storage.create_namespace_version(
+    # 2. Create new version
+    new_version = await lake.storage.create_namespace_version(
         workspace_id,
-        "production",
-        previous_version=current_ns,
+        slug="production",
+        previous_version=current
     )
+    # new_version.version = 2
+    # new_version.is_active = False
+    # new_version.previous_version_id = current.id
 
-    # Ingest new data into v2
-    for doc in new_documents:
-        await lake.remember(doc.content, namespace=new_ns.id)
+    # 3. Populate the new version
+    for doc in all_your_documents:
+        await lake.remember(
+            doc.content,
+            namespace=new_version.id
+        )
 
-    # Verify new data is correct...
+    # 4. Verify everything looks good
+    test_results = await lake.recall("test query", namespace=new_version.id)
+    assert len(test_results.chunks) > 0
 
-    # Activate new version (deactivates previous)
-    new_ns.is_active = True
-    await lake.storage.update_namespace(new_ns)
-    await lake.storage.deactivate_namespace(current_ns.id)
+    # 5. Swap! Activate new, deactivate old
+    new_version.is_active = True
+    await lake.storage.update_namespace(new_version)
+    await lake.storage.deactivate_namespace(current.id)
+```
+
+### Rollback
+
+Made a mistake? Swap back:
+
+```python
+# Reactivate the old version
+old_version.is_active = True
+await lake.storage.update_namespace(old_version)
+await lake.storage.deactivate_namespace(new_version.id)
+```
+
+Keep old versions around until you're confident the new one is working.
+
+## Tenancy Modes
+
+### Shared Mode (Default)
+
+All organizations share the same database infrastructure. Isolation is achieved through row-level filtering on `namespace_id`.
+
+```python
+Organization(
+    name="Acme Corp",
+    tenancy_mode=TenancyMode.SHARED
+)
+```
+
+**Pros:**
+- Lower cost (shared infrastructure)
+- Simpler operations
+- Good enough for most use cases
+
+**Cons:**
+- Data is logically separate but physically together
+- May not satisfy strict compliance requirements
+
+### Isolated Mode
+
+Each organization gets its own database instances. Complete physical separation.
+
+```python
+Organization(
+    name="SecureCorp",
+    tenancy_mode=TenancyMode.ISOLATED
+)
+```
+
+**Pros:**
+- Complete data isolation
+- Meets HIPAA, SOC2, and similar requirements
+- Independent scaling and maintenance
+
+**Cons:**
+- Higher cost (dedicated infrastructure)
+- More operational complexity
+
+**Configuration:**
+```python
+# Each isolated org needs its own connection strings
+org_config = {
+    "postgresql_url": "postgresql://securecorp:pass@securecorp-db:5432/khora",
+    "neo4j_url": "bolt://securecorp-graph:7687"
+}
 ```
 
 ## Configuration Overrides
 
-Each namespace can override global configuration:
+Each namespace can override global settings. Maybe one namespace needs a different embedding model, or stricter similarity thresholds:
 
 ```python
 namespace = MemoryNamespace(
-    workspace_id=workspace.id,
-    name="Custom Config",
-    slug="custom",
+    workspace_id=workspace_id,
+    name="High-Precision Research",
+    slug="research",
     config_overrides={
-        # Override embedding model
         "embedding_model": "text-embedding-3-large",
         "embedding_dimension": 3072,
-
-        # Override extraction settings
-        "extraction_model": "claude-sonnet-4-20250514",
-
-        # Override query settings
-        "min_chunk_similarity": 0.4,
-    },
+        "min_chunk_similarity": 0.5,  # Higher threshold
+        "extraction_model": "claude-sonnet-4-20250514"
+    }
 )
 ```
 
-**Resolution Order:**
-1. Namespace `config_overrides` (highest priority)
-2. Workspace-level settings
-3. Organization-level settings
-4. Global `KhoraConfig` (lowest priority)
+Configuration resolves top-down:
+1. Namespace overrides (highest priority)
+2. Workspace defaults
+3. Organization defaults
+4. Global config (lowest priority)
 
 ## Sync Checkpoints
 
-Namespaces track incremental sync state per source:
+Namespaces track where they are in syncing from external sources:
 
 ```python
-@dataclass
-class MemoryNamespace:
-    # ...
-    sync_checkpoints: dict[str, str] = field(default_factory=dict)
-    # Example: {"slack": "1706140800", "linear": "2024-01-25T00:00:00Z"}
+namespace.sync_checkpoints = {
+    "slack": "1706140800",           # Unix timestamp
+    "linear": "2024-01-25T00:00:00Z" # ISO 8601
+}
 ```
 
-**Usage:**
-```python
-# Get last sync checkpoint
-checkpoint = await lake.storage.get_sync_checkpoint(
-    namespace_id, "slack"
-)
+This enables incremental sync:
 
-# Fetch only new messages since checkpoint
+```python
+# Get last checkpoint
+checkpoint = await lake.storage.get_sync_checkpoint(namespace_id, "slack")
+
+# Fetch only new messages
 new_messages = await slack_client.get_messages(since=checkpoint)
 
-# After sync, update checkpoint
+# Process them...
+for msg in new_messages:
+    await lake.remember(msg.content, namespace=namespace_id)
+
+# Update checkpoint
 await lake.storage.set_sync_checkpoint(
-    namespace_id, "slack", str(latest_timestamp)
+    namespace_id,
+    "slack",
+    str(new_messages[-1].timestamp)
 )
 ```
 
 ## Access Control
 
-Khora provides ACL enforcement at the namespace level:
+Permissions flow down the hierarchy:
+
+```
+Organization (admin role)
+    │
+    └── Workspace (member role)
+            │
+            └── Namespace (read/write permissions)
+```
+
+If you can access an organization, you can access its workspaces (subject to workspace permissions). If you can access a workspace, you can access its namespaces (subject to namespace permissions).
 
 ```python
 from khora.acl import ACLEnforcer, ACLContext
 
 enforcer = ACLEnforcer(storage)
 
-# Check permission before operation
+# Check before accessing
 context = ACLContext(
     user_id="user-123",
     namespace_id=namespace_id,
-    operation="read",
+    operation="read"
 )
 
 if await enforcer.check_permission(context):
     results = await lake.recall(query, namespace=namespace_id)
+else:
+    raise PermissionDenied()
 ```
 
-**Permission Inheritance:**
-```
-Organization permissions
-        │
-        ▼
-    Workspace permissions (inherit from org)
-        │
-        ▼
-    Namespace permissions (inherit from workspace)
-```
+## Setting Up the Hierarchy
 
-## API Examples
-
-### Creating Tenancy Hierarchy
+### Create Everything
 
 ```python
 from khora import MemoryLake
 from khora.core.models import Organization, Workspace, MemoryNamespace
 
 async with MemoryLake() as lake:
-    # Create organization
+    # Organization
     org = await lake.storage.create_organization(
         Organization(name="Acme Corp", slug="acme")
     )
 
-    # Create workspace
+    # Workspace
     workspace = await lake.storage.create_workspace(
         Workspace(
             organization_id=org.id,
             name="Engineering",
-            slug="engineering",
+            slug="engineering"
         )
     )
 
-    # Create namespace
+    # Namespace
     namespace = await lake.storage.create_namespace(
         MemoryNamespace(
             workspace_id=workspace.id,
             name="Production",
-            slug="production",
+            slug="production"
         )
     )
 
-    # Store memories in namespace
+    # Now store data
     await lake.remember(
-        "Important engineering document...",
-        namespace=namespace.id,
+        "Important content...",
+        namespace=namespace.id
     )
 ```
 
-### Listing Namespaces
+### Find Existing Namespaces
 
 ```python
-# List all namespaces in a workspace
-namespaces = await lake.storage.list_namespaces(workspace.id)
+# By slug
+ns = await lake.storage.get_namespace_by_slug(workspace_id, "production")
 
-# Get specific namespace by slug
-ns = await lake.storage.get_namespace_by_slug(
-    workspace.id, "production"
-)
+# List all in a workspace
+namespaces = await lake.storage.list_namespaces(workspace_id)
+
+# Filter to active only
+active = [ns for ns in namespaces if ns.is_active]
 ```
 
 ### Cross-Namespace Queries
 
-By default, queries are scoped to a single namespace. For cross-namespace queries, iterate over namespaces:
+Need to search multiple namespaces? (Note: this bypasses isolation - make sure you have permission)
 
 ```python
 all_results = []
-for namespace in await lake.storage.list_namespaces(workspace.id):
-    if namespace.is_active:
+for namespace in await lake.storage.list_namespaces(workspace_id):
+    if namespace.is_active and user_can_access(namespace):
         results = await lake.recall(query, namespace=namespace.id)
         all_results.extend(results.chunks)
 
-# Deduplicate and re-rank as needed
+# Re-rank the combined results
+all_results.sort(key=lambda x: x[1], reverse=True)
 ```
 
-## Next Steps
+## What's Next?
 
-- [Event Sourcing](event-sourcing.md) - Audit trails and temporal queries
-- [Architecture Overview](overview.md) - System design
+- **[Event Sourcing](event-sourcing.md)** - The audit trail of all changes
+- **[Storage Backends](storage-backends.md)** - How data is actually stored
+- **[Overview](overview.md)** - High-level architecture

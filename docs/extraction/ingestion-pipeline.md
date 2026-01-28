@@ -1,423 +1,419 @@
 # Ingestion Pipeline
 
-Khora uses a two-phase (optionally three-phase) ingestion pipeline orchestrated by Prefect. This document describes the pipeline architecture and configuration.
+When you call `remember()`, a lot happens behind the scenes. Your content gets deduplicated, split into chunks, converted to vectors, analyzed for entities and relationships, and stored across three different databases. This document explains that pipeline in detail.
 
-## Pipeline Overview
+## The Three Phases
 
 ```
-Documents
-    │
-    ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                      Phase 1: Staging                              │
-│                                                                    │
-│  For each document (parallel with semaphore):                     │
-│    1. Compute SHA-256 checksum                                    │
-│    2. Check for existing document with same checksum              │
-│    3. Extract source timestamp from metadata                       │
-│    4. Create Document with PENDING status                          │
-│                                                                    │
-│  Output: List of new documents (skipping duplicates)               │
-└───────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                     Phase 2: Enrichment                            │
-│                                                                    │
-│  For each staged document (parallel with semaphore):              │
-│    1. Mark document as PROCESSING                                  │
-│    2. Chunk document into segments                                 │
-│    3. Generate embeddings for all chunks (batched)                 │
-│    4. Extract entities and relationships (parallel LLM calls)      │
-│    5. Store chunks in pgvector                                     │
-│    6. Store entities (Neo4j + PostgreSQL with deduplication)       │
-│    7. Generate and store entity embeddings (for similarity search) │
-│    8. Store relationships in Neo4j                                 │
-│    9. Mark document as COMPLETED                                   │
-│                                                                    │
-│  Output: Processing statistics                                     │
-└───────────────────────────────────────────────────────────────────┘
-    │
-    ▼ (optional)
-┌───────────────────────────────────────────────────────────────────┐
-│                   Phase 3: Expansion                               │
-│                                                                    │
-│  If enable_expansion=True:                                        │
-│    1. Cross-tool entity unification                               │
-│       - Exact name matching                                        │
-│       - Fuzzy string matching (Levenshtein)                        │
-│       - Embedding similarity matching                              │
-│    2. Relationship inference                                       │
-│       - Apply inference rules from expertise config                │
-│       - Create inferred relationships                              │
-│                                                                    │
-│  Output: Unified entities, inferred relationships                  │
-└───────────────────────────────────────────────────────────────────┘
+Your Documents
+      |
+      v
++--------------------------------------------------+
+|  PHASE 1: STAGING                                |
+|                                                  |
+|  "Have we seen this before?"                     |
+|                                                  |
+|  - Compute checksum                              |
+|  - Skip duplicates                               |
+|  - Extract source timestamps                     |
+|  - Create document records                       |
++--------------------------------------------------+
+      |
+      v
++--------------------------------------------------+
+|  PHASE 2: ENRICHMENT                             |
+|                                                  |
+|  "What's in this content?"                       |
+|                                                  |
+|  - Chunk into segments                           |
+|  - Generate embeddings                           |
+|  - Extract entities & relationships              |
+|  - Store everything                              |
++--------------------------------------------------+
+      |
+      v  (optional)
++--------------------------------------------------+
+|  PHASE 3: EXPANSION                              |
+|                                                  |
+|  "How does this connect to what we know?"        |
+|                                                  |
+|  - Merge duplicate entities                      |
+|  - Infer new relationships                       |
++--------------------------------------------------+
 ```
 
 ## Phase 1: Staging
 
-### Checksum Deduplication
+Before doing any expensive processing, we answer a simple question: is this content actually new?
 
-Documents are deduplicated by content checksum:
+### Deduplication by Checksum
+
+Every document gets a SHA-256 hash of its content:
 
 ```python
 from hashlib import sha256
 
-def compute_checksum(content: str) -> str:
-    return sha256(content.encode("utf-8")).hexdigest()
+checksum = sha256(content.encode("utf-8")).hexdigest()
 
-# Check for existing
+# Check if we've seen this exact content before
 existing = await storage.get_document_by_checksum(namespace_id, checksum)
 if existing:
-    return None  # Skip duplicate
+    # Skip it - we already have this
+    return None
 ```
 
-### Source Timestamp Extraction
+This catches duplicates even if the filename or metadata changed. Same content = same checksum = skip.
 
-Timestamps are extracted from source metadata for accurate temporal ordering:
+### Source Timestamps
+
+When did this content actually originate? Not when it was ingested - when was it created at the source?
 
 ```python
-# Priority order for timestamp fields
+# We look for timestamps in the metadata, in priority order
 timestamp_fields = [
-    "sent_at",      # Email sent time
-    "created_at",   # Creation time
-    "timestamp",    # Generic timestamp
-    "date",         # Date field
-    "occurred_at",  # Event time
-    "started_at",   # Start time
+    "sent_at",      # Emails
+    "created_at",   # General creation time
+    "timestamp",    # Generic
+    "date",
+    "occurred_at",  # Events
 ]
 
-# Documents use source timestamp, not ingestion time
-document = Document(
-    content=content,
-    created_at=source_timestamp or datetime.now(UTC),
-)
+for field in timestamp_fields:
+    if field in metadata:
+        source_timestamp = parse_datetime(metadata[field])
+        break
 ```
+
+This matters for temporal queries - "what was discussed last week?" should find content from last week, not content that was ingested last week about events from six months ago.
 
 ### Document Creation
 
+Finally, we create the document record:
+
 ```python
-# Create document with metadata
 document = Document(
     namespace_id=namespace_id,
     content=content,
     metadata=DocumentMetadata(
-        source=doc_input.get("source", ""),
-        source_type=doc_input.get("source_type", "manual"),
-        title=doc_input.get("title", ""),
+        title=title,
+        source=source,
         checksum=checksum,
-        custom=doc_input.get("metadata", {}),
     ),
     status=DocumentStatus.PENDING,
+    created_at=source_timestamp or now()
 )
 
 await storage.create_document(document)
 ```
 
+Staging runs in parallel with controlled concurrency - typically `2 * max_concurrent_documents` since it's lightweight.
+
 ## Phase 2: Enrichment
+
+This is where content becomes knowledge. Each staged document goes through four steps.
 
 ### Step 1: Chunking
 
-```python
-from khora.pipelines.tasks import chunk_document
+Documents get split into segments optimized for embedding and retrieval:
 
+```python
 chunks = await chunk_document(
     document,
     strategy="semantic",  # or "fixed", "recursive"
-    chunk_size=512,
+    chunk_size=512,       # tokens
+    chunk_overlap=50      # overlap between chunks
 )
 ```
 
-See [Chunkers](chunkers.md) for chunking strategies.
+Why chunk? Embedding models have token limits, and retrieval works better with focused content. A 10,000-word document as a single embedding is too diluted - split it into coherent 500-token pieces.
+
+See [Chunkers](chunkers.md) for the different strategies.
 
 ### Step 2: Embedding
 
-```python
-from khora.pipelines.tasks import embed_chunks
+Each chunk gets converted to a vector:
 
+```python
 chunks = await embed_chunks(
     chunks,
-    model="text-embedding-3-small",
+    model="text-embedding-3-small"  # 1536 dimensions
 )
 ```
 
-Embedding is batched internally for efficiency.
+These vectors capture semantic meaning. Similar concepts get similar vectors, enabling "find content like this" queries.
+
+Embedding is batched internally - instead of 100 API calls for 100 chunks, we make ~3 calls with batches of 32.
 
 ### Step 3: Extraction
 
-```python
-from khora.pipelines.tasks import extract_entities
+An LLM reads each chunk and extracts structured knowledge:
 
+```python
 entities, relationships = await extract_entities(
     chunks,
-    skill_name="general_entities",
-    expertise=expertise_config,
     model="gpt-4o-mini",
-    max_concurrent=10,
+    skill="general_entities",  # or domain-specific
+    max_concurrent=10          # parallel LLM calls
 )
 ```
 
-Extraction runs in parallel across chunks with semaphore control.
+**Entities** - Named things worth remembering:
+```python
+Entity(
+    name="Einstein",
+    entity_type="PERSON",
+    description="Theoretical physicist"
+)
+```
+
+**Relationships** - Connections between entities:
+```python
+Relationship(
+    source="Einstein",
+    target="Theory of Relativity",
+    type="DEVELOPED"
+)
+```
+
+Extraction runs in parallel across chunks, with semaphores preventing API rate limits.
 
 ### Step 4: Storage
 
-```python
-# Store chunks (batched)
-await storage.create_chunks_batch(chunks)
+Now we save everything to its appropriate home:
 
-# Store entities with deduplication (stored in both Neo4j and PostgreSQL)
+**Chunks → pgvector:**
+```python
+await storage.create_chunks_batch(chunks)
+```
+
+**Entities → Neo4j + pgvector:**
+```python
 for entity in entities:
+    # Check if we already have this entity
     existing = await storage.get_entity_by_name(
         namespace_id, entity.name, entity.entity_type
     )
     if existing:
+        # Merge: combine attributes, add source references
         existing.merge_with(entity)
         await storage.update_entity(existing)
     else:
+        # Create in both Neo4j (graph) and pgvector (embeddings)
         await storage.create_entity(entity)
+```
 
-# Store relationships
+**Entity Embeddings → pgvector:**
+```python
+# Generate embeddings for entity similarity search
+entity_texts = [f"{e.name}: {e.description}" for e in entities]
+embeddings = await embedder.embed_batch(entity_texts)
+
+for entity, embedding in zip(entities, embeddings):
+    await storage.update_entity_embedding(entity.id, embedding, model)
+```
+
+**Relationships → Neo4j:**
+```python
 for relationship in relationships:
     await storage.create_relationship(relationship)
 ```
 
-### Step 5: Entity Embedding Generation
-
-After entities are stored, embeddings are generated and stored in pgvector to enable entity similarity search:
-
-```python
-from khora.extraction.embedders import LiteLLMEmbedder
-
-# Create embedder (same model as chunk embeddings)
-embedder = LiteLLMEmbedder(model=embedding_model)
-
-# Create text representation for each entity
-entity_texts = [
-    f"{e.name}: {e.description}" if e.description else e.name
-    for e in entities_needing_embeddings
-]
-
-# Generate embeddings in batch
-entity_embeddings = await embedder.embed_batch(entity_texts)
-
-# Store embeddings in pgvector
-for entity, embedding in zip(entities_needing_embeddings, entity_embeddings):
-    await storage.update_entity_embedding(entity.id, embedding, embedding_model)
-```
-
-This enables graph search to find relevant entities via embedding similarity before traversing relationships.
-
 ### Entity ID Remapping
 
-When entities are deduplicated, relationship IDs are remapped:
+When entities get deduplicated (merged with existing), we need to update relationship references:
 
 ```python
-# Track original → deduplicated ID mapping
-entity_id_mapping = {}
+# Track: original extraction ID → actual stored ID
+id_mapping = {}
 
-for entity in entities:
+for entity in extracted_entities:
     existing = await storage.get_entity_by_name(...)
     if existing:
-        entity_id_mapping[str(entity.id)] = str(existing.id)
+        id_mapping[entity.id] = existing.id  # Maps to existing
     else:
-        entity_id_mapping[str(entity.id)] = str(entity.id)
+        id_mapping[entity.id] = entity.id    # Maps to self
 
-# Remap relationship source/target IDs
-for relationship in relationships:
-    relationship.source_entity_id = UUID(
-        entity_id_mapping[str(relationship.source_entity_id)]
-    )
-    relationship.target_entity_id = UUID(
-        entity_id_mapping[str(relationship.target_entity_id)]
-    )
+# Update relationships to use the actual IDs
+for rel in relationships:
+    rel.source_entity_id = id_mapping[rel.source_entity_id]
+    rel.target_entity_id = id_mapping[rel.target_entity_id]
 ```
+
+Without this, relationships would point to entity IDs that don't exist (the extracted IDs that got merged away).
+
+### Document Status
+
+Throughout enrichment, the document's status tracks progress:
+
+```
+PENDING → PROCESSING → COMPLETED
+              |
+              +----→ FAILED (on error)
+```
+
+If processing fails, the error message is stored in the document's metadata, and other documents continue processing.
 
 ## Phase 3: Expansion (Optional)
 
-When `enable_expansion=True`, additional processing runs:
+After basic enrichment, expansion can enhance your knowledge graph.
 
-### Cross-Tool Unification
+### Entity Unification
+
+The same entity might appear differently across documents:
+
+```
+Document 1: "Microsoft Corporation"
+Document 2: "Microsoft"
+Document 3: "MSFT"
+```
+
+The unifier recognizes these as the same entity:
 
 ```python
-from khora.extraction.expansion import SemanticExpander
+expander = SemanticExpander(expertise=expertise)
 
-expander = SemanticExpander(
-    expertise=expertise,
-    enable_inference=True,
-)
+# Three matching strategies:
+# 1. Exact: "Microsoft" == "Microsoft"
+# 2. Fuzzy: "Microsft" ~= "Microsoft" (edit distance)
+# 3. Embedding: "the Redmond tech giant" ≈ "Microsoft" (semantic)
 
 result = await expander.expand(
     entities=entities,
     relationships=relationships,
-    namespace_id=namespace_id,
+    namespace_id=namespace_id
 )
 ```
+
+### Relationship Inference
+
+Some relationships can be inferred from what we know:
+
+```
+Known:     Alice WORKS_FOR Acme
+           Bob WORKS_FOR Acme
+                 |
+                 v
+Inferred:  Alice COLLEAGUE_OF Bob
+```
+
+Inference rules are defined in the expertise configuration.
 
 ### Inference Modes
 
 Three modes control when inference runs:
 
-| Mode | Description |
-|------|-------------|
-| `none` | No inference (unification only) |
-| `incremental` | Infer per-document (with existing graph context) |
-| `batch` | Infer after all documents processed |
+| Mode | When It Runs | Use Case |
+|------|-------------|----------|
+| `none` | Never | Unification only |
+| `incremental` | Per document, with existing graph context | Real-time, smaller graphs |
+| `batch` | After all documents, on full graph | Large initial imports |
 
 ```python
-# Incremental mode: fetch existing graph for context
+# Incremental: fetch existing graph for context
 if inference_mode == "incremental":
-    existing_entities = await storage.list_entities(namespace_id)
-    existing_relationships = await storage.list_relationships(namespace_id)
-    expansion_entities.extend(existing_entities)
-    expansion_relationships.extend(existing_relationships)
+    existing = await storage.list_entities(namespace_id)
+    expansion_context.extend(existing)
 ```
-
-### Batch Inference
-
-For batch mode, run inference separately after ingestion:
-
-```python
-from khora.pipelines.flows.ingest import run_batch_inference
-
-result = await run_batch_inference(
-    namespace_id=namespace_id,
-    storage=storage,
-    expertise=expertise,
-    max_entities=10000,
-    max_relationships=50000,
-)
-```
-
-### Backfilling Entity Embeddings
-
-For entities created before entity embedding generation was implemented, use the backfill function:
-
-```python
-from khora.pipelines.flows import backfill_entity_embeddings
-
-result = await backfill_entity_embeddings(
-    namespace_id=namespace_id,
-    storage=storage,
-    embedding_model="text-embedding-3-small",
-    batch_size=100,
-    max_entities=50000,
-)
-
-print(f"Updated {result['entities_updated']} entities with embeddings")
-```
-
-This function:
-1. Queries all entities from Neo4j
-2. Creates missing entity records in PostgreSQL (for backwards compatibility)
-3. Generates embeddings for entities that don't have them
-4. Stores embeddings in pgvector for similarity search
 
 ## Concurrency Control
 
-### Document Concurrency
+The pipeline uses semaphores to prevent overwhelming your system or hitting API limits:
 
 ```python
-# Maximum documents processed in parallel
-max_concurrent_documents = 5
+# Document-level: 5 docs processing at once
+doc_semaphore = asyncio.Semaphore(5)
 
-doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+# Extraction-level: 10 LLM calls at once
+extraction_semaphore = asyncio.Semaphore(10)
 
-async def process_with_limit(doc):
-    async with doc_semaphore:
-        return await process_document(doc, ...)
+# Staging-level: 10 docs staging at once (it's fast)
+staging_semaphore = asyncio.Semaphore(10)
+```
 
-# Process all documents
-results = await asyncio.gather(
-    *[process_with_limit(doc) for doc in staged_docs],
-    return_exceptions=True,
+These are configurable:
+
+```python
+result = await lake.remember_batch(
+    documents,
+    max_concurrent_documents=5,
+    max_concurrent_extractions=10
 )
-```
-
-### Extraction Concurrency
-
-```python
-# Maximum concurrent LLM calls
-max_concurrent_extractions = 10
-
-# Semaphore passed to extractor
-extractor = LLMEntityExtractor(max_concurrent=max_concurrent_extractions)
-```
-
-### Staging Concurrency
-
-```python
-# Staging runs faster, so higher concurrency
-staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
 ```
 
 ## Error Handling
 
-### Per-Document Errors
-
-Errors are captured per-document, allowing other documents to continue:
+Errors don't stop the batch - they're captured per-document:
 
 ```python
 results = await asyncio.gather(
-    *[process_with_limit(doc) for doc in staged_docs],
-    return_exceptions=True,  # Don't fail on individual errors
+    *[process(doc) for doc in docs],
+    return_exceptions=True  # Don't fail the whole batch
 )
 
-# Separate successful results from errors
-successful_results = []
-error_count = 0
-
-for result in results:
+for doc, result in zip(docs, results):
     if isinstance(result, Exception):
-        logger.error(f"Document processing failed: {result}")
-        error_count += 1
-    else:
-        successful_results.append(result)
+        doc.mark_failed(str(result))
+        await storage.update_document(doc)
+        # Continue with other documents
 ```
 
-### Document Status on Failure
+Check for failures in the result:
 
 ```python
-try:
-    # Process document
-    ...
-except Exception as e:
-    document.mark_failed(str(e))
-    await storage.update_document(document)
-    raise
+result = await lake.remember_batch(documents)
+
+print(f"Processed: {result['processed_documents']}")
+print(f"Skipped (duplicates): {result['skipped_documents']}")
+print(f"Failed: {result['failed_documents']}")
 ```
 
-## API Usage
+## Usage Examples
 
-### Basic Ingestion
+### Simple Ingestion
 
 ```python
-from khora import MemoryLake
+result = await lake.remember(
+    "Your content here...",
+    title="Document Title",
+    source="manual"
+)
 
-async with MemoryLake() as lake:
-    result = await lake.remember(
-        "Content to ingest...",
-        title="Document Title",
-        source="manual",
-    )
+print(f"Document: {result.document_id}")
+print(f"Chunks: {result.chunks_created}")
+print(f"Entities: {result.entities_extracted}")
 ```
 
 ### Batch Ingestion
 
 ```python
 documents = [
-    {"content": "Doc 1 content", "title": "Doc 1"},
-    {"content": "Doc 2 content", "title": "Doc 2"},
+    {"content": "Doc 1...", "title": "Doc 1", "source": "upload"},
+    {"content": "Doc 2...", "title": "Doc 2", "source": "upload"},
 ]
 
 result = await lake.remember_batch(
     documents,
     max_concurrent_documents=5,
-    enable_expansion=True,
+    enable_expansion=True
+)
+```
+
+### With Custom Configuration
+
+```python
+result = await lake.remember(
+    content,
+    chunk_strategy="recursive",
+    chunk_size=1024,
+    embedding_model="text-embedding-3-large",
+    extraction_model="claude-sonnet-4-20250514",
+    expertise="technical_docs"
 )
 ```
 
 ### Direct Pipeline Call
+
+For more control:
 
 ```python
 from khora.pipelines.flows import ingest_documents
@@ -426,62 +422,55 @@ result = await ingest_documents(
     namespace_id=namespace_id,
     documents=documents,
     storage=storage,
-    expertise="saas_expert",
     chunk_strategy="semantic",
-    chunk_size=512,
     embedding_model="text-embedding-3-small",
     extraction_model="gpt-4o-mini",
+    expertise="saas_expert",
     max_concurrent_documents=5,
     max_concurrent_extractions=10,
     enable_expansion=True,
+    inference_mode="batch"
 )
 ```
+
+## Backfilling Entity Embeddings
+
+If you have entities created before entity embedding was implemented:
+
+```python
+from khora.pipelines.flows import backfill_entity_embeddings
+
+result = await backfill_entity_embeddings(
+    namespace_id=namespace_id,
+    storage=storage,
+    embedding_model="text-embedding-3-small",
+    batch_size=100
+)
+
+print(f"Updated {result['entities_updated']} entities")
+```
+
+This is a one-time migration for existing data.
 
 ## Result Structure
 
 ```python
 {
-    "total_documents": 100,        # Input documents
-    "processed_documents": 95,     # Successfully processed
-    "skipped_documents": 3,        # Duplicates (by checksum)
-    "failed_documents": 2,         # Processing errors
-    "total_chunks": 450,           # Chunks created
-    "total_entities": 200,         # Entities extracted
-    "total_relationships": 150,    # Relationships extracted
-    "total_inferred_relationships": 25,  # From expansion
+    "total_documents": 100,
+    "processed_documents": 95,
+    "skipped_documents": 3,        # Duplicates
+    "failed_documents": 2,
+    "total_chunks": 450,
+    "total_entities": 200,
+    "total_relationships": 150,
+    "total_inferred_relationships": 25
 }
 ```
 
-## Prefect Integration
+## What's Next?
 
-The pipeline uses Prefect for orchestration:
-
-```python
-from prefect import flow, task
-from prefect.cache_policies import NO_CACHE
-
-@task(name="stage_document", cache_policy=NO_CACHE)
-async def stage_document(doc_input, namespace_id, storage):
-    ...
-
-@task(name="process_document", cache_policy=NO_CACHE)
-async def process_document(document, storage, **kwargs):
-    ...
-
-@flow(name="ingest_documents", log_prints=True)
-async def ingest_documents(namespace_id, documents, storage, **kwargs):
-    # Phase 1: Stage
-    staged_docs = await asyncio.gather(...)
-
-    # Phase 2: Enrich
-    results = await asyncio.gather(...)
-
-    return summary
-```
-
-## Next Steps
-
-- [Chunkers](chunkers.md) - Text splitting strategies
-- [Embedders](embedders.md) - Embedding generation
-- [Extractors](extractors.md) - Entity extraction
-- [Semantic Expansion](semantic-expansion.md) - Unification and inference
+- **[Chunkers](chunkers.md)** - Text splitting strategies
+- **[Embedders](embedders.md)** - Vector generation
+- **[Extractors](extractors.md)** - Entity extraction
+- **[Semantic Expansion](semantic-expansion.md)** - Unification and inference
+- **[Expertise System](expertise-system.md)** - Domain configuration
