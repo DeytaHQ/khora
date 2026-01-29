@@ -12720,26 +12720,29 @@ README.md
 39:     chunk_results = chunker.chunk(document.content)
 40: 
 41:     # Convert to Chunk objects
-42:     # Inherit document timestamp so temporal filters work correctly
-43:     chunks = []
-44:     for result in chunk_results:
-45:         chunk = Chunk(
-46:             namespace_id=document.namespace_id,
-47:             document_id=document.id,
-48:             content=result.content,
-49:             metadata=ChunkMetadata(
-50:                 document_id=document.id,
-51:                 chunk_index=result.index,
-52:                 start_char=result.start_char,
-53:                 end_char=result.end_char,
-54:                 token_count=result.token_count,
-55:                 custom=result.metadata,
-56:             ),
-57:             created_at=document.created_at,  # Inherit source timestamp from document
-58:         )
-59:         chunks.append(chunk)
-60: 
-61:     return chunks
+42:     # Inherit document timestamp and custom metadata so they propagate to search results
+43:     doc_custom = document.metadata.custom if document.metadata else {}
+44:     chunks = []
+45:     for result in chunk_results:
+46:         # Merge document custom metadata with any chunk-level metadata
+47:         custom = {**doc_custom, **result.metadata} if doc_custom else result.metadata
+48:         chunk = Chunk(
+49:             namespace_id=document.namespace_id,
+50:             document_id=document.id,
+51:             content=result.content,
+52:             metadata=ChunkMetadata(
+53:                 document_id=document.id,
+54:                 chunk_index=result.index,
+55:                 start_char=result.start_char,
+56:                 end_char=result.end_char,
+57:                 token_count=result.token_count,
+58:                 custom=custom,
+59:             ),
+60:             created_at=document.created_at,  # Inherit source timestamp from document
+61:         )
+62:         chunks.append(chunk)
+63: 
+64:     return chunks
 ````
 
 ## File: src/khora/query/__init__.py
@@ -25114,6 +25117,38 @@ README.md
 661:     }
 ````
 
+## File: src/khora/__init__.py
+````python
+ 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 2: 
+ 3: Khora provides a unified interface for:
+ 4: - Storing and retrieving knowledge artifacts
+ 5: - Materializing data transformations
+ 6: - Building memory graphs and relationships
+ 7: 
+ 8: Example usage:
+ 9:     from khora import MemoryLake
+10: 
+11:     async with MemoryLake() as lake:
+12:         await lake.remember("Important information to store")
+13:         results = await lake.recall("query about information")
+14: """
+15: 
+16: from .cli import main
+17: from .memory_lake import MemoryLake, RecallResult, RememberResult
+18: from .query import SearchMode
+19: 
+20: __version__ = "0.0.12"
+21: 
+22: __all__ = [
+23:     "main",
+24:     "MemoryLake",
+25:     "RememberResult",
+26:     "RecallResult",
+27:     "SearchMode",
+28: ]
+````
+
 ## File: src/khora/query/engine.py
 ````python
    1: """Hybrid query engine for Khora Memory Lake.
@@ -26373,38 +26408,6 @@ README.md
 1255:         )
 ````
 
-## File: src/khora/__init__.py
-````python
- 1: """Khora - Deyta's memory lake and materialization of knowledge.
- 2: 
- 3: Khora provides a unified interface for:
- 4: - Storing and retrieving knowledge artifacts
- 5: - Materializing data transformations
- 6: - Building memory graphs and relationships
- 7: 
- 8: Example usage:
- 9:     from khora import MemoryLake
-10: 
-11:     async with MemoryLake() as lake:
-12:         await lake.remember("Important information to store")
-13:         results = await lake.recall("query about information")
-14: """
-15: 
-16: from .cli import main
-17: from .memory_lake import MemoryLake, RecallResult, RememberResult
-18: from .query import SearchMode
-19: 
-20: __version__ = "0.0.12"
-21: 
-22: __all__ = [
-23:     "main",
-24:     "MemoryLake",
-25:     "RememberResult",
-26:     "RecallResult",
-27:     "SearchMode",
-28: ]
-````
-
 ## File: pyproject.toml
 ````toml
   1: [project]
@@ -26550,6 +26553,13 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-01-29 20:53:24 +0100
+**Message:** fix: cache reranker instance to avoid repeated model loading
+
+**Files:**
+- REPOMIX.md
+- src/khora/query/engine.py
 
 ## Commit: 2026-01-29 20:50:25 +0100
 **Message:** deps: promote sentence-transformers to main dependency
@@ -26770,9 +26780,3 @@ README.md
 
 **Files:**
 - src/khora/query/agentic.py
-
-## Commit: 2026-01-27 21:00:27 +0100
-**Message:** fix: return all IDs in search method attribution
-
-**Files:**
-- src/khora/query/engine.py

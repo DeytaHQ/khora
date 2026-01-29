@@ -39,9 +39,12 @@ async def chunk_document(
     chunk_results = chunker.chunk(document.content)
 
     # Convert to Chunk objects
-    # Inherit document timestamp so temporal filters work correctly
+    # Inherit document timestamp and custom metadata so they propagate to search results
+    doc_custom = document.metadata.custom if document.metadata else {}
     chunks = []
     for result in chunk_results:
+        # Merge document custom metadata with any chunk-level metadata
+        custom = {**doc_custom, **result.metadata} if doc_custom else result.metadata
         chunk = Chunk(
             namespace_id=document.namespace_id,
             document_id=document.id,
@@ -52,7 +55,7 @@ async def chunk_document(
                 start_char=result.start_char,
                 end_char=result.end_char,
                 token_count=result.token_count,
-                custom=result.metadata,
+                custom=custom,
             ),
             created_at=document.created_at,  # Inherit source timestamp from document
         )
