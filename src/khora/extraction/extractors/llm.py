@@ -303,6 +303,111 @@ class LLMEntityExtractor(EntityExtractor):
         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
         return await asyncio.gather(*tasks)
 
+    async def extract_multi(
+        self,
+        texts: list[str],
+        *,
+        entity_types: list[str] | None = None,
+        batch_size: int = 5,
+    ) -> list[ExtractionResult]:
+        """Extract entities from multiple texts in grouped LLM calls.
+
+        Groups texts into batches and sends each batch as a single LLM call,
+        reducing API round-trips by up to batch_size times.
+
+        Args:
+            texts: List of texts to extract from
+            entity_types: Optional list of entity types to extract
+            batch_size: Number of texts per LLM call
+
+        Returns:
+            List of ExtractionResult objects (one per input text)
+        """
+        if not texts:
+            return []
+
+        entity_types = entity_types or DEFAULT_ENTITY_TYPES
+
+        try:
+            import litellm
+        except ImportError:
+            raise RuntimeError("litellm package not installed. Run: pip install litellm")
+
+        batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+        all_results: list[ExtractionResult] = []
+
+        for batch in batches:
+            results = await self._extract_multi_batch(batch, entity_types, litellm)
+            all_results.extend(results)
+
+        return all_results
+
+    async def _extract_multi_batch(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        litellm: Any,
+    ) -> list[ExtractionResult]:
+        """Extract from a batch of texts in a single LLM call."""
+        sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
+
+        prompt = f"""Extract entities, relationships, and events from each text section below.
+
+Entity types to find: {", ".join(entity_types)}
+
+{sections}
+
+Return a JSON object with a "sections" array, one object per section:
+{{"sections": [
+    {{"entities": [...], "relationships": [...], "events": [...]}},
+    ...
+]}}
+
+Each section follows the same entity/relationship/event format.
+Return ONLY valid JSON, no other text."""
+
+        async with self._semaphore:
+            for attempt in range(self._max_retries):
+                try:
+                    response = await litellm.acompletion(
+                        model=self._model,
+                        messages=[
+                            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=self._temperature,
+                        max_tokens=self._max_tokens,
+                        timeout=self._timeout,
+                        response_format={"type": "json_object"},
+                    )
+
+                    content = response.choices[0].message.content
+                    data = json.loads(content)
+                    sections_data = data.get("sections", [])
+
+                    results: list[ExtractionResult] = []
+                    for i, text in enumerate(texts):
+                        if i < len(sections_data):
+                            section_json = json.dumps(sections_data[i])
+                            results.append(self._parse_response(section_json))
+                        else:
+                            results.append(ExtractionResult())
+
+                    return results
+
+                except Exception as e:
+                    if attempt < self._max_retries - 1:
+                        wait_time = 2**attempt
+                        logger.warning(
+                            f"Multi-extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s..."
+                        )
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
+                        return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
+
+        return [ExtractionResult() for _ in texts]
+
     def _parse_response(self, content: str) -> ExtractionResult:
         """Parse the LLM response into an ExtractionResult."""
         try:

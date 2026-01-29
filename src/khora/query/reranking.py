@@ -181,6 +181,21 @@ Score the relevance from 0 to 10 where:
 
 Respond with ONLY a single number (0-10), nothing else."""
 
+LLM_BATCH_RERANK_PROMPT = """You are a relevance scoring system. Given a query and multiple passages, score the relevance of each passage to the query.
+
+Query: {query}
+
+Passages:
+{passages}
+
+Score each passage from 0 to 10 where:
+- 0: Completely irrelevant
+- 5: Somewhat relevant, mentions related topics
+- 10: Highly relevant, directly answers or addresses the query
+
+Respond with ONLY a JSON object: {{"scores": [score1, score2, ...]}}
+The scores array must have exactly {count} numbers, one per passage in order."""
+
 
 class LLMReranker(Reranker):
     """Reranker using LLM-based relevance scoring.
@@ -213,7 +228,9 @@ class LLMReranker(Reranker):
         candidates: list[RerankCandidate[T]],
         top_k: int = 10,
     ) -> list[RerankResult[T]]:
-        """Rerank using LLM scoring.
+        """Rerank using batched LLM scoring.
+
+        Sends multiple candidates per LLM call to reduce API round-trips.
 
         Args:
             query: Query text
@@ -224,6 +241,7 @@ class LLMReranker(Reranker):
             Reranked results
         """
         import asyncio
+        import json
 
         from khora.config.llm import LiteLLMConfig, acompletion
 
@@ -231,81 +249,61 @@ class LLMReranker(Reranker):
             return []
 
         config = self._llm_config or LiteLLMConfig()
-        if self._model:
-            config = LiteLLMConfig(
-                model=self._model,
-                temperature=0.0,  # Deterministic scoring
-                max_tokens=10,
-            )
-        else:
-            config = LiteLLMConfig(
-                model=config.model,
-                temperature=0.0,
-                max_tokens=10,
+        config = LiteLLMConfig(
+            model=self._model or config.model,
+            temperature=0.0,
+            max_tokens=200,  # Enough for JSON scores array
+        )
+
+        async def score_batch(batch: list[RerankCandidate[T]]) -> list[float]:
+            """Score a batch of candidates in a single LLM call."""
+            passages = "\n".join(f"[{i + 1}] {c.content[:500]}" for i, c in enumerate(batch))
+            prompt = LLM_BATCH_RERANK_PROMPT.format(
+                query=query,
+                passages=passages,
+                count=len(batch),
             )
 
-        async def score_single(candidate: RerankCandidate[T]) -> RerankResult[T]:
-            """Score a single candidate."""
             try:
-                # Truncate content to avoid token limits
-                content = candidate.content[:2000]
-
-                prompt = LLM_RERANK_PROMPT.format(
-                    query=query,
-                    document=content,
-                )
-
                 response = await acompletion(prompt, config)
-
-                # Parse score
-                try:
-                    score = float(response.strip())
-                    score = max(0, min(10, score))  # Clamp to 0-10
-                except ValueError:
-                    logger.debug(f"Could not parse LLM score: {response}")
-                    score = 5.0
-
-                # Normalize to 0-1
-                normalized_score = score / 10.0
-
-                # Combine with original score
-                final_score = 0.7 * normalized_score + 0.3 * candidate.original_score
-
-                return RerankResult(
-                    item=candidate.item,
-                    original_score=candidate.original_score,
-                    rerank_score=normalized_score,
-                    final_score=final_score,
-                    metadata=candidate.metadata,
-                )
-
+                data = json.loads(response.strip())
+                scores = [float(s) for s in data["scores"]]
+                # Clamp and pad/truncate to match batch size
+                scores = [max(0.0, min(10.0, s)) for s in scores]
+                while len(scores) < len(batch):
+                    scores.append(5.0)
+                return scores[: len(batch)]
             except Exception as e:
-                logger.debug(f"LLM scoring failed: {e}")
-                return RerankResult(
-                    item=candidate.item,
-                    original_score=candidate.original_score,
-                    rerank_score=candidate.original_score,
-                    final_score=candidate.original_score,
-                    metadata=candidate.metadata,
-                )
+                logger.debug(f"Batch LLM scoring failed: {e}")
+                return [5.0] * len(batch)
 
-        # Process in batches with semaphore
-        semaphore = asyncio.Semaphore(self._batch_size)
-
-        async def score_with_semaphore(candidate):
-            async with semaphore:
-                return await score_single(candidate)
+        # Split candidates into batches
+        batches = [candidates[i : i + self._batch_size] for i in range(0, len(candidates), self._batch_size)]
 
         try:
-            results = await asyncio.gather(*[score_with_semaphore(c) for c in candidates])
+            batch_scores = await asyncio.gather(*[score_batch(b) for b in batches])
 
-            # Sort by final score
-            results = sorted(results, key=lambda r: r.final_score, reverse=True)
+            # Flatten and build results
+            results = []
+            for batch, scores in zip(batches, batch_scores):
+                for candidate, raw_score in zip(batch, scores):
+                    normalized_score = raw_score / 10.0
+                    final_score = 0.7 * normalized_score + 0.3 * candidate.original_score
+                    results.append(
+                        RerankResult(
+                            item=candidate.item,
+                            original_score=candidate.original_score,
+                            rerank_score=normalized_score,
+                            final_score=final_score,
+                            metadata=candidate.metadata,
+                        )
+                    )
+
+            results.sort(key=lambda r: r.final_score, reverse=True)
             return results[:top_k]
 
         except Exception as e:
             logger.warning(f"LLM reranking failed: {e}")
-            # Fall back to original ranking
             return [
                 RerankResult(
                     item=c.item,

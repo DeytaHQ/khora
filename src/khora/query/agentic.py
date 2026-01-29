@@ -12,6 +12,7 @@ call. Follow-up queries are pre-computed, eliminating additional LLM round-trips
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -128,6 +129,18 @@ class AgenticSearchTrace:
             "total_unique_entities": self.total_unique_entities,
             "sources_explored": self.sources_explored,
         }
+
+
+@dataclass
+class AgenticSearchStepResult:
+    """Yielded by search_stream for each completed step."""
+
+    step_number: int
+    query: str
+    chunks: list[tuple[Chunk, float, str]]
+    entities: list[tuple[Entity, float]]
+    is_final: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -318,6 +331,214 @@ class AgenticSearchAgent:
                 "search_methods": aggregated_search_methods,
             },
         )
+
+    async def search_speculative(
+        self,
+        query: str,
+        namespace_id: UUID,
+        config: QueryConfig | None = None,
+        max_steps: int = 3,
+    ) -> AgenticSearchResult:
+        """Perform agentic search with speculative follow-up execution.
+
+        Executes the main query, then runs all follow-up queries in parallel
+        (instead of sequentially), reducing total latency.
+
+        Args:
+            query: Original search query
+            namespace_id: Namespace to search in
+            config: Query configuration
+            max_steps: Maximum exploration steps
+
+        Returns:
+            AgenticSearchResult with combined results
+        """
+        import asyncio
+        import uuid as uuid_mod
+
+        trace = AgenticSearchTrace(
+            session_id=str(uuid_mod.uuid4()),
+            original_query=query,
+        )
+
+        all_chunks: dict[str, tuple[Chunk, float, str]] = {}
+        all_entities: dict[str, tuple[Entity, float]] = {}
+
+        # Step 1: Initial search (triggers query understanding)
+        logger.info(f"Speculative search step 1: '{query[:50]}...'")
+        step1_result = await self._engine.query(query, namespace_id, config=config)
+
+        if "understanding" in step1_result.metadata:
+            ud = step1_result.metadata["understanding"]
+            trace.understanding_reasoning = ud.get("reasoning", "")
+            trace.complexity_score = ud.get("complexity_score", 0.5)
+            trace.source_priority = ud.get("source_priority", {})
+
+        step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
+        trace.add_step(step1)
+
+        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+        for chunk, score in step1_result.chunks:
+            all_chunks[str(chunk.id)] = (chunk, score, chunk_sources.get(str(chunk.id), "unknown"))
+        for entity, score in step1_result.entities:
+            all_entities[str(entity.id)] = (entity, score)
+
+        # Collect all follow-up queries
+        follow_up_queries = step1_result.metadata.get("understanding", {}).get("follow_up_queries", [])
+        additional = self._generate_additional_follow_ups(step1_result, step1)
+        all_follow_ups = list(follow_up_queries) + additional
+        follow_ups_to_run = all_follow_ups[: max_steps - 1]
+
+        if follow_ups_to_run:
+            # Execute ALL follow-ups in parallel
+            async def run_follow_up(i: int, follow_up: Any) -> tuple[int, QueryResult, str]:
+                fq_query = follow_up.get("query", "") if isinstance(follow_up, dict) else str(follow_up)
+                fq_reasoning = (
+                    follow_up.get("reasoning", f"Follow-up {i + 2}")
+                    if isinstance(follow_up, dict)
+                    else f"Follow-up {i + 2}"
+                )
+                logger.info(f"Speculative search step {i + 2}: '{fq_query[:50]}...'")
+                result = await self._engine.query(fq_query, namespace_id, config=config)
+                return i, result, fq_reasoning
+
+            tasks = [
+                run_follow_up(i, fu)
+                for i, fu in enumerate(follow_ups_to_run)
+                if (fu.get("query", "") if isinstance(fu, dict) else str(fu))
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.warning(f"Speculative follow-up failed: {r}")
+                    continue
+                i, step_result, reasoning = r
+                fq_query = follow_ups_to_run[i]
+                fq_query_text = fq_query.get("query", "") if isinstance(fq_query, dict) else str(fq_query)
+
+                step = self._analyze_results(step_result, fq_query_text, i + 2, reasoning)
+                trace.add_step(step)
+
+                step_sources = await self._get_chunk_sources_batch(step_result.chunks)
+                for chunk, score in step_result.chunks:
+                    cid = str(chunk.id)
+                    if cid not in all_chunks or all_chunks[cid][1] < score:
+                        all_chunks[cid] = (chunk, score, step_sources.get(cid, "unknown"))
+                for entity, score in step_result.entities:
+                    eid = str(entity.id)
+                    if eid not in all_entities or all_entities[eid][1] < score:
+                        all_entities[eid] = (entity, score)
+
+        summary = self._generate_summary_fast(query, all_chunks, all_entities, trace)
+        trace.completed_at = datetime.utcnow()
+        trace.summary = summary
+        trace.total_unique_chunks = len(all_chunks)
+        trace.total_unique_entities = len(all_entities)
+
+        for _, (_, _, source) in all_chunks.items():
+            trace.sources_explored[source] = trace.sources_explored.get(source, 0) + 1
+
+        sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
+        sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
+        aggregated_search_methods = self._aggregate_search_methods(trace.steps)
+
+        return AgenticSearchResult(
+            chunks=sorted_chunks,
+            entities=sorted_entities,
+            summary=summary,
+            trace=trace,
+            understanding=None,
+            metadata={
+                "original_query": query,
+                "total_steps": len(trace.steps),
+                "sources_explored": trace.sources_explored,
+                "complexity_score": trace.complexity_score,
+                "search_methods": aggregated_search_methods,
+                "speculative": True,
+            },
+        )
+
+    async def search_stream(
+        self,
+        query: str,
+        namespace_id: UUID,
+        config: QueryConfig | None = None,
+        max_steps: int = 3,
+    ) -> AsyncGenerator[AgenticSearchStepResult]:
+        """Stream search results as each step completes.
+
+        Yields partial results after each exploration step,
+        allowing callers to display incremental progress.
+
+        Args:
+            query: Original search query
+            namespace_id: Namespace to search in
+            config: Query configuration
+            max_steps: Maximum exploration steps
+
+        Yields:
+            AgenticSearchStepResult for each completed step
+        """
+        all_chunks: dict[str, tuple[Chunk, float, str]] = {}
+        all_entities: dict[str, tuple[Entity, float]] = {}
+
+        # Step 1: Initial search
+        logger.info(f"Agentic stream step 1: '{query[:50]}...'")
+        step1_result = await self._engine.query(query, namespace_id, config=config)
+
+        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+        for chunk, score in step1_result.chunks:
+            source = chunk_sources.get(str(chunk.id), "unknown")
+            all_chunks[str(chunk.id)] = (chunk, score, source)
+        for entity, score in step1_result.entities:
+            all_entities[str(entity.id)] = (entity, score)
+
+        is_last = max_steps <= 1
+        yield AgenticSearchStepResult(
+            step_number=1,
+            query=query,
+            chunks=sorted(all_chunks.values(), key=lambda x: x[1], reverse=True),
+            entities=sorted(all_entities.values(), key=lambda x: x[1], reverse=True),
+            is_final=is_last,
+        )
+
+        if is_last:
+            return
+
+        # Follow-up steps
+        follow_up_queries = step1_result.metadata.get("understanding", {}).get("follow_up_queries", [])
+        step1_analysis = self._analyze_results(step1_result, query, 1, "Initial search")
+        additional = self._generate_additional_follow_ups(step1_result, step1_analysis)
+        all_follow_ups = list(follow_up_queries) + additional
+
+        for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
+            fq_query = follow_up.get("query", "") if isinstance(follow_up, dict) else str(follow_up)
+            if not fq_query:
+                continue
+
+            logger.info(f"Agentic stream step {i + 2}: '{fq_query[:50]}...'")
+            step_result = await self._engine.query(fq_query, namespace_id, config=config)
+
+            step_sources = await self._get_chunk_sources_batch(step_result.chunks)
+            for chunk, score in step_result.chunks:
+                cid = str(chunk.id)
+                if cid not in all_chunks or all_chunks[cid][1] < score:
+                    all_chunks[cid] = (chunk, score, step_sources.get(cid, "unknown"))
+            for entity, score in step_result.entities:
+                eid = str(entity.id)
+                if eid not in all_entities or all_entities[eid][1] < score:
+                    all_entities[eid] = (entity, score)
+
+            is_last = i + 2 >= max_steps or i + 1 >= len(all_follow_ups[: max_steps - 1])
+            yield AgenticSearchStepResult(
+                step_number=i + 2,
+                query=fq_query,
+                chunks=sorted(all_chunks.values(), key=lambda x: x[1], reverse=True),
+                entities=sorted(all_entities.values(), key=lambda x: x[1], reverse=True),
+                is_final=is_last,
+            )
 
     def _analyze_results(
         self,

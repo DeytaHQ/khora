@@ -9,6 +9,7 @@ Uses multiple strategies:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
@@ -125,17 +126,12 @@ class EntityLinker:
         if not mentions:
             return LinkingResult(total_mentions=0)
 
-        linked_entities = []
-        unlinked_count = 0
-
-        for mention in mentions:
-            linked = await self._link_single(mention, namespace_id)
-            linked_entities.append(linked)
-            if not linked.is_linked:
-                unlinked_count += 1
+        # Parallelize linking across all mentions
+        linked_entities = await asyncio.gather(*[self._link_single(m, namespace_id) for m in mentions])
+        unlinked_count = sum(1 for le in linked_entities if not le.is_linked)
 
         return LinkingResult(
-            linked_entities=linked_entities,
+            linked_entities=list(linked_entities),
             unlinked_count=unlinked_count,
             total_mentions=len(mentions),
         )
@@ -167,15 +163,20 @@ class EntityLinker:
                     match_score=1.0,
                 )
 
-        # 2. Try fuzzy matching
+        # 2+3. Run fuzzy and embedding matching in parallel
+        tasks: dict[str, Any] = {}
         if self._fuzzy_match:
-            fuzzy_matches = await self._fuzzy_name_match(mention, namespace_id)
-            candidates.extend([(e, s, "fuzzy") for e, s in fuzzy_matches])
-
-        # 3. Try embedding similarity
+            tasks["fuzzy"] = self._fuzzy_name_match(mention, namespace_id)
         if self._embedding_match and self._embedder:
-            embedding_matches = await self._embedding_match_entities(mention, namespace_id)
-            candidates.extend([(e, s, "embedding") for e, s in embedding_matches])
+            tasks["embedding"] = self._embedding_match_entities(mention, namespace_id)
+
+        if tasks:
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for method, result in zip(tasks.keys(), results):
+                if isinstance(result, Exception):
+                    logger.debug(f"{method} match failed: {result}")
+                    continue
+                candidates.extend([(e, s, method) for e, s in result])
 
         # Select best match
         if candidates:

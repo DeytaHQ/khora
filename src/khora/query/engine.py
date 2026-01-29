@@ -427,6 +427,11 @@ class HybridQueryEngine:
                 num_hypotheticals=self._config.hyde_num_hypotheticals,
             )
 
+        # Query cache
+        from .cache import QueryCache
+
+        self._cache = QueryCache()
+
         # Keyword searcher (built per namespace)
         self._keyword_searchers: dict[str, KeywordSearcher] = {}
 
@@ -482,6 +487,12 @@ class HybridQueryEngine:
             )
 
         cfg = config or self._config
+
+        # Check cache
+        cached = await self._cache.get(query_text, namespace_id, cfg.mode.name)
+        if cached is not None:
+            logger.debug(f"Cache hit for query: {query_text[:50]}...")
+            return cached
 
         logger.debug(f"Executing query: {query_text[:50]}... (mode={cfg.mode.name})")
 
@@ -871,7 +882,7 @@ class HybridQueryEngine:
         metadata["temporal"] = temporal_info.to_dict()
         metadata["metrics"] = metrics.to_dict()
 
-        return QueryResult(
+        result = QueryResult(
             chunks=fused_chunks,
             entities=fused_entities,
             graph_context=graph_context,
@@ -880,6 +891,11 @@ class HybridQueryEngine:
             graph_info=graph_info,
             temporal_info=temporal_info,
         )
+
+        # Cache the result
+        await self._cache.set(query_text, namespace_id, cfg.mode.name, result)
+
+        return result
 
     async def _timed_search(
         self,
