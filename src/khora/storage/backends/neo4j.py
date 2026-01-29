@@ -44,6 +44,27 @@ def _deserialize_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
         return {}
 
 
+def _element_to_dict(element: Any) -> dict[str, Any]:
+    """Safely convert a Neo4j graph element (Node, Relationship, or raw value) to a dict.
+
+    Handles Neo4j Node/Relationship objects, plain dicts, and unexpected types
+    (e.g. strings returned by some driver serialisation paths).
+    """
+    if isinstance(element, dict):
+        return element
+    # neo4j.graph.Node / Relationship expose _properties
+    if hasattr(element, "_properties"):
+        return dict(element._properties)
+    # Some driver versions make Node/Relationship a Mapping
+    if hasattr(element, "items"):
+        try:
+            return dict(element.items())
+        except Exception:
+            pass
+    # Last resort – avoid crashing on unexpected types
+    return {"_raw": str(element)}
+
+
 class Neo4jBackend:
     """Neo4j backend for knowledge graph operations.
 
@@ -732,9 +753,9 @@ class Neo4jBackend:
                 path_elements = []
                 for element in path:
                     if hasattr(element, "items"):  # Node
-                        path_elements.append({"type": "node", "data": dict(element)})
+                        path_elements.append({"type": "node", "data": _element_to_dict(element)})
                     else:  # Relationship
-                        path_elements.append({"type": "relationship", "data": dict(element)})
+                        path_elements.append({"type": "relationship", "data": _element_to_dict(element)})
                 paths.append(path_elements)
 
             return paths
@@ -782,8 +803,8 @@ class Neo4jBackend:
                 record = await result.single()
 
             if record:
-                nodes = [dict(n) for n in record.get("nodes", [])]
-                relationships = [dict(r) for r in record.get("relationships", [])]
+                nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
+                relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
                 return {"entities": nodes, "relationships": relationships}
 
             return {"entities": [], "relationships": []}
@@ -833,13 +854,13 @@ class Neo4jBackend:
             neighborhoods = {}
             for record in records:
                 eid = UUID(record["eid"])
-                nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
+                nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
                 relationships = []
                 for rel_list in record.get("rels") or []:
                     if rel_list:
                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
                             if r:
-                                relationships.append(dict(r))
+                                relationships.append(_element_to_dict(r))
                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
 
             return neighborhoods

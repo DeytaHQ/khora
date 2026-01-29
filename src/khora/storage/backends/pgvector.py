@@ -523,7 +523,7 @@ class PgVectorBackend:
                 .offset(offset)
             )
             rows = result.scalars().all()
-            return [self._chunk_from_model(row) for row in rows]
+            return [self._chunk_model_to_domain(row) for row in rows]
 
     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
         """Get statistics about embeddings in a namespace."""
