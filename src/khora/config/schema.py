@@ -109,50 +109,12 @@ class TenancySettings(BaseModel):
     enforce_namespace: bool = Field(default=True, description="Enforce namespace isolation")
 
 
-class QueryUnderstandingSettings(BaseModel):
-    """Query understanding configuration."""
-
-    enabled: bool = Field(default=True, description="Enable LLM-based query understanding")
-    expand_query: bool = Field(default=True, description="Generate query expansions/reformulations")
-    extract_entities: bool = Field(default=True, description="Extract entity mentions from query")
-    detect_temporal: bool = Field(default=True, description="Detect temporal references in query")
-    model: str | None = Field(default=None, description="Model to use for query understanding (defaults to main LLM)")
-
-
-class EntityLinkingSettings(BaseModel):
-    """Entity linking configuration."""
-
-    enabled: bool = Field(default=True, description="Enable entity linking")
-    exact_match: bool = Field(default=True, description="Use exact name matching")
-    fuzzy_match: bool = Field(default=True, description="Use fuzzy name matching")
-    embedding_match: bool = Field(default=True, description="Use embedding similarity matching")
-    fuzzy_threshold: float = Field(default=0.8, ge=0.0, le=1.0, description="Minimum fuzzy match ratio")
-    embedding_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum embedding similarity")
-    max_candidates: int = Field(default=5, ge=1, description="Maximum entity candidates per mention")
-
-
-class RerankingSettings(BaseModel):
-    """Reranking configuration."""
-
-    enabled: bool = Field(default=True, description="Enable result reranking")
-    method: str = Field(default="cross_encoder", description="Reranking method: cross_encoder, llm")
-    model: str | None = Field(default=None, description="Model for reranking (cross-encoder model or LLM)")
-    top_n: int = Field(default=50, ge=1, description="Number of candidates to rerank")
-    final_k: int = Field(default=10, ge=1, description="Number of results after reranking")
-
-
-class KeywordSearchSettings(BaseModel):
-    """Keyword search configuration."""
-
-    enabled: bool = Field(default=True, description="Enable keyword search")
-    method: str = Field(default="fulltext", description="Keyword search method: bm25, fulltext")
-    use_stemming: bool = Field(default=True, description="Apply stemming to search terms")
-    use_stopwords: bool = Field(default=True, description="Remove stopwords from search")
-    language: str = Field(default="english", description="Language for stemming and stopwords")
-
-
 class QuerySettings(BaseModel):
-    """Query pipeline configuration."""
+    """Query pipeline configuration.
+
+    All fields are flat to allow single-underscore env vars, e.g.:
+    KHORA_QUERY__DEFAULT_MODE, KHORA_QUERY__ENABLE_RERANKING, etc.
+    """
 
     # Basic search settings
     default_mode: str = Field(default="hybrid", description="Default search mode: vector, graph, hybrid, all")
@@ -169,17 +131,45 @@ class QuerySettings(BaseModel):
     recency_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight of recency in scoring")
     recency_decay_days: float = Field(default=30.0, ge=1.0, description="Days for recency score to decay by half")
 
-    # HyDE settings
+    # Query understanding
+    enable_understanding: bool = Field(default=True, description="Enable LLM-based query understanding")
+    understanding_expand_query: bool = Field(default=True, description="Generate query expansions/reformulations")
+    understanding_extract_entities: bool = Field(default=True, description="Extract entity mentions from query")
+    understanding_detect_temporal: bool = Field(default=True, description="Detect temporal references in query")
+    understanding_model: str | None = Field(
+        default=None, description="Model to use for query understanding (defaults to main LLM)"
+    )
+
+    # Entity linking
+    enable_entity_linking: bool = Field(default=True, description="Enable entity linking")
+    entity_linking_exact_match: bool = Field(default=True, description="Use exact name matching")
+    entity_linking_fuzzy_match: bool = Field(default=True, description="Use fuzzy name matching")
+    entity_linking_embedding_match: bool = Field(default=True, description="Use embedding similarity matching")
+    entity_linking_fuzzy_threshold: float = Field(default=0.8, ge=0.0, le=1.0, description="Minimum fuzzy match ratio")
+    entity_linking_embedding_threshold: float = Field(
+        default=0.7, ge=0.0, le=1.0, description="Minimum embedding similarity"
+    )
+    entity_linking_max_candidates: int = Field(default=5, ge=1, description="Maximum entity candidates per mention")
+
+    # Reranking
+    enable_reranking: bool = Field(default=True, description="Enable result reranking")
+    reranking_method: str = Field(default="cross_encoder", description="Reranking method: cross_encoder, llm")
+    reranking_model: str | None = Field(default=None, description="Model for reranking (cross-encoder model or LLM)")
+    reranking_top_n: int = Field(default=50, ge=1, description="Number of candidates to rerank")
+    reranking_final_k: int = Field(default=10, ge=1, description="Number of results after reranking")
+
+    # Keyword search
+    enable_keyword_search: bool = Field(default=True, description="Enable keyword search")
+    keyword_search_method: str = Field(default="fulltext", description="Keyword search method: bm25, fulltext")
+    keyword_search_use_stemming: bool = Field(default=True, description="Apply stemming to search terms")
+    keyword_search_use_stopwords: bool = Field(default=True, description="Remove stopwords from search")
+    keyword_search_language: str = Field(default="english", description="Language for stemming and stopwords")
+
+    # HyDE
     enable_hyde: bool = Field(default=False, description="Enable HyDE query expansion")
     hyde_num_hypotheticals: int = Field(
         default=1, ge=1, le=5, description="Number of hypothetical documents to generate"
     )
-
-    # Sub-component settings
-    understanding: QueryUnderstandingSettings = Field(default_factory=QueryUnderstandingSettings)
-    entity_linking: EntityLinkingSettings = Field(default_factory=EntityLinkingSettings)
-    reranking: RerankingSettings = Field(default_factory=RerankingSettings)
-    keyword_search: KeywordSearchSettings = Field(default_factory=KeywordSearchSettings)
 
 
 class KhoraConfig(BaseSettings):

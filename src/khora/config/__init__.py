@@ -2,14 +2,10 @@
 
 from .llm import LiteLLMConfig, acompletion, aembedding, configure_litellm, create_litellm_router
 from .schema import (
-    EntityLinkingSettings,
-    KeywordSearchSettings,
     KhoraConfig,
     LLMSettings,
     PipelineSettings,
     QuerySettings,
-    QueryUnderstandingSettings,
-    RerankingSettings,
     StorageSettings,
     TenancySettings,
 )
@@ -52,10 +48,6 @@ __all__ = [
     "PipelineSettings",
     "TenancySettings",
     "QuerySettings",
-    "QueryUnderstandingSettings",
-    "EntityLinkingSettings",
-    "RerankingSettings",
-    "KeywordSearchSettings",
     # LiteLLM
     "LiteLLMConfig",
     "configure_litellm",
