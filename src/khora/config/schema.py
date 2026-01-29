@@ -141,13 +141,6 @@ class RerankingSettings(BaseModel):
     final_k: int = Field(default=10, ge=1, description="Number of results after reranking")
 
 
-class HyDESettings(BaseModel):
-    """Hypothetical Document Embeddings (HyDE) configuration."""
-
-    enabled: bool = Field(default=False, description="Enable HyDE query expansion")
-    num_hypotheticals: int = Field(default=1, ge=1, le=5, description="Number of hypothetical documents to generate")
-
-
 class KeywordSearchSettings(BaseModel):
     """Keyword search configuration."""
 
@@ -176,12 +169,17 @@ class QuerySettings(BaseModel):
     recency_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight of recency in scoring")
     recency_decay_days: float = Field(default=30.0, ge=1.0, description="Days for recency score to decay by half")
 
+    # HyDE settings
+    enable_hyde: bool = Field(default=False, description="Enable HyDE query expansion")
+    hyde_num_hypotheticals: int = Field(
+        default=1, ge=1, le=5, description="Number of hypothetical documents to generate"
+    )
+
     # Sub-component settings
     understanding: QueryUnderstandingSettings = Field(default_factory=QueryUnderstandingSettings)
     entity_linking: EntityLinkingSettings = Field(default_factory=EntityLinkingSettings)
     reranking: RerankingSettings = Field(default_factory=RerankingSettings)
     keyword_search: KeywordSearchSettings = Field(default_factory=KeywordSearchSettings)
-    hyde: HyDESettings = Field(default_factory=HyDESettings)
 
 
 class KhoraConfig(BaseSettings):

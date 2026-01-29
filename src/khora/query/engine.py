@@ -371,8 +371,8 @@ class QueryConfig:
             enable_keyword_search=settings.keyword_search.enabled,
             keyword_search_method=settings.keyword_search.method,
             # HyDE
-            enable_hyde=settings.hyde.enabled,
-            hyde_num_hypotheticals=settings.hyde.num_hypotheticals,
+            enable_hyde=settings.enable_hyde,
+            hyde_num_hypotheticals=settings.hyde_num_hypotheticals,
         )
 
 
