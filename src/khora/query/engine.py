@@ -435,6 +435,9 @@ class HybridQueryEngine:
         # Keyword searcher (built per namespace)
         self._keyword_searchers: dict[str, KeywordSearcher] = {}
 
+        # Cached rerankers (keyed by method name) so model is loaded once
+        self._rerankers: dict[str, Any] = {}
+
     async def query(
         self,
         query_text: str,
@@ -837,10 +840,12 @@ class HybridQueryEngine:
         metrics.reranking_timer.start()
         if cfg.enable_reranking and fused_chunks:
             try:
-                reranker = create_reranker(
-                    method=cfg.reranking_method,
-                    llm_config=self._llm_config,
-                )
+                if cfg.reranking_method not in self._rerankers:
+                    self._rerankers[cfg.reranking_method] = create_reranker(
+                        method=cfg.reranking_method,
+                        llm_config=self._llm_config,
+                    )
+                reranker = self._rerankers[cfg.reranking_method]
                 candidates = [
                     RerankCandidate(
                         item=chunk,
