@@ -21023,884 +21023,6 @@ README.md
 612: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
-## File: src/khora/storage/backends/neo4j.py
-````python
-  1: """Neo4j backend for knowledge graph storage.
-  2: 
-  3: Handles storage and traversal of entities, relationships, and episodes
-  4: in Neo4j graph database.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import json
- 10: from datetime import datetime
- 11: from typing import Any
- 12: from uuid import UUID
- 13: 
- 14: from loguru import logger
- 15: from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
- 16: 
- 17: from khora.core.models import Entity, Episode, Relationship
- 18: from khora.core.models.entity import EntityType, RelationshipType
- 19: 
- 20: 
- 21: def _serialize_dict(value: dict[str, Any] | None) -> str | None:
- 22:     """Serialize a dict to JSON string for Neo4j storage.
- 23: 
- 24:     Neo4j property values can only be primitive types or arrays thereof,
- 25:     not nested objects. We serialize dicts to JSON strings.
- 26:     """
- 27:     if value is None:
- 28:         return None
- 29:     return json.dumps(value)
- 30: 
- 31: 
- 32: def _deserialize_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
- 33:     """Deserialize a JSON string back to dict.
- 34: 
- 35:     Handles both string (new format) and dict (legacy) values.
- 36:     """
- 37:     if value is None:
- 38:         return {}
- 39:     if isinstance(value, dict):
- 40:         return value
- 41:     try:
- 42:         return json.loads(value)
- 43:     except (json.JSONDecodeError, TypeError):
- 44:         return {}
- 45: 
- 46: 
- 47: class Neo4jBackend:
- 48:     """Neo4j backend for knowledge graph operations.
- 49: 
- 50:     Stores entities as nodes and relationships as edges in Neo4j,
- 51:     enabling efficient graph traversal and pattern matching.
- 52:     """
- 53: 
- 54:     def __init__(
- 55:         self,
- 56:         url: str,
- 57:         *,
- 58:         user: str = "neo4j",
- 59:         password: str = "",
- 60:         database: str = "neo4j",
- 61:         max_connection_pool_size: int = 50,
- 62:     ) -> None:
- 63:         """Initialize the Neo4j backend.
- 64: 
- 65:         Args:
- 66:             url: Neo4j connection URL (bolt:// or neo4j://)
- 67:             user: Database user
- 68:             password: Database password
- 69:             database: Database name
- 70:             max_connection_pool_size: Maximum connection pool size
- 71:         """
- 72:         self._url = url
- 73:         self._user = user
- 74:         self._password = password
- 75:         self._database = database
- 76:         self._max_connection_pool_size = max_connection_pool_size
- 77:         self._driver: AsyncDriver | None = None
- 78: 
- 79:     async def connect(self) -> None:
- 80:         """Establish connection to Neo4j."""
- 81:         if self._driver is not None:
- 82:             return
- 83: 
- 84:         logger.info(f"Connecting to Neo4j at {self._url}...")
- 85:         self._driver = AsyncGraphDatabase.driver(
- 86:             self._url,
- 87:             auth=(self._user, self._password),
- 88:             max_connection_pool_size=self._max_connection_pool_size,
- 89:         )
- 90:         # Verify connectivity
- 91:         await self._driver.verify_connectivity()
- 92: 
- 93:         # Create indexes for performance
- 94:         await self._create_indexes()
- 95:         logger.info("Connected to Neo4j")
- 96: 
- 97:     async def disconnect(self) -> None:
- 98:         """Close Neo4j connections."""
- 99:         if self._driver is not None:
-100:             logger.info("Disconnecting from Neo4j...")
-101:             await self._driver.close()
-102:             self._driver = None
-103:             logger.info("Disconnected from Neo4j")
-104: 
-105:     async def is_healthy(self) -> bool:
-106:         """Check if the backend is healthy and connected."""
-107:         if self._driver is None:
-108:             return False
-109:         try:
-110:             await self._driver.verify_connectivity()
-111:             return True
-112:         except Exception as e:
-113:             logger.error(f"Neo4j health check failed: {e}")
-114:             return False
-115: 
-116:     async def _create_indexes(self) -> None:
-117:         """Create indexes for common queries."""
-118:         if self._driver is None:
-119:             return
-120: 
-121:         indexes = [
-122:             # Entity indexes
-123:             "CREATE INDEX entity_id IF NOT EXISTS FOR (e:Entity) ON (e.id)",
-124:             "CREATE INDEX entity_namespace IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id)",
-125:             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
-126:             "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
-127:             # Episode indexes
-128:             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
-129:             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
-130:             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
-131:         ]
-132: 
-133:         async with self._driver.session(database=self._database) as session:
-134:             for index in indexes:
-135:                 try:
-136:                     await session.run(index)
-137:                 except Exception as e:
-138:                     logger.debug(f"Index creation: {e}")
-139: 
-140:     def _get_driver(self) -> AsyncDriver:
-141:         """Get the Neo4j driver."""
-142:         if self._driver is None:
-143:             raise RuntimeError("Backend not connected. Call connect() first.")
-144:         return self._driver
-145: 
-146:     # =========================================================================
-147:     # Entity operations
-148:     # =========================================================================
-149: 
-150:     async def create_entity(self, entity: Entity) -> Entity:
-151:         """Create an entity node in the graph."""
-152:         driver = self._get_driver()
-153: 
-154:         async def _create(tx: AsyncManagedTransaction) -> None:
-155:             query = """
-156:             CREATE (e:Entity {
-157:                 id: $id,
-158:                 namespace_id: $namespace_id,
-159:                 name: $name,
-160:                 entity_type: $entity_type,
-161:                 description: $description,
-162:                 attributes: $attributes,
-163:                 source_document_ids: $source_document_ids,
-164:                 source_chunk_ids: $source_chunk_ids,
-165:                 mention_count: $mention_count,
-166:                 valid_from: $valid_from,
-167:                 valid_until: $valid_until,
-168:                 confidence: $confidence,
-169:                 metadata: $metadata,
-170:                 created_at: $created_at,
-171:                 updated_at: $updated_at
-172:             })
-173:             """
-174:             await tx.run(
-175:                 query,
-176:                 id=str(entity.id),
-177:                 namespace_id=str(entity.namespace_id),
-178:                 name=entity.name,
-179:                 entity_type=(
-180:                     entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
-181:                 ),
-182:                 description=entity.description,
-183:                 attributes=_serialize_dict(entity.attributes),
-184:                 source_document_ids=[str(d) for d in entity.source_document_ids],
-185:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-186:                 mention_count=entity.mention_count,
-187:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
-188:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
-189:                 confidence=entity.confidence,
-190:                 metadata=_serialize_dict(entity.metadata),
-191:                 created_at=entity.created_at.isoformat(),
-192:                 updated_at=entity.updated_at.isoformat(),
-193:             )
-194: 
-195:         async with driver.session(database=self._database) as session:
-196:             await session.execute_write(_create)
-197: 
-198:         return entity
-199: 
-200:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-201:         """Get an entity by ID."""
-202:         driver = self._get_driver()
-203: 
-204:         async with driver.session(database=self._database) as session:
-205:             result = await session.run(
-206:                 "MATCH (e:Entity {id: $id}) RETURN e",
-207:                 id=str(entity_id),
-208:             )
-209:             record = await result.single()
-210:             if record:
-211:                 return self._record_to_entity(record["e"])
-212:             return None
-213: 
-214:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
-215:         """Get an entity by name and type (for deduplication)."""
-216:         driver = self._get_driver()
-217: 
-218:         async with driver.session(database=self._database) as session:
-219:             result = await session.run(
-220:                 """
-221:                 MATCH (e:Entity {namespace_id: $namespace_id, name: $name, entity_type: $entity_type})
-222:                 RETURN e
-223:                 LIMIT 1
-224:                 """,
-225:                 namespace_id=str(namespace_id),
-226:                 name=name,
-227:                 entity_type=entity_type,
-228:             )
-229:             record = await result.single()
-230:             if record:
-231:                 return self._record_to_entity(record["e"])
-232:             return None
-233: 
-234:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-235:         """Fetch multiple entities in a single query.
-236: 
-237:         Args:
-238:             entity_ids: List of entity IDs to fetch
-239: 
-240:         Returns:
-241:             Dictionary mapping entity ID to Entity object
-242:         """
-243:         if not entity_ids:
-244:             return {}
-245: 
-246:         driver = self._get_driver()
-247:         id_strings = [str(eid) for eid in entity_ids]
-248: 
-249:         async with driver.session(database=self._database) as session:
-250:             result = await session.run(
-251:                 """
-252:                 MATCH (e:Entity)
-253:                 WHERE e.id IN $ids
-254:                 RETURN e
-255:                 """,
-256:                 ids=id_strings,
-257:             )
-258:             records = await result.data()
-259:             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
-260: 
-261:     async def update_entity(self, entity: Entity) -> Entity:
-262:         """Update an entity."""
-263:         driver = self._get_driver()
-264: 
-265:         async def _update(tx: AsyncManagedTransaction) -> None:
-266:             query = """
-267:             MATCH (e:Entity {id: $id})
-268:             SET e.name = $name,
-269:                 e.description = $description,
-270:                 e.attributes = $attributes,
-271:                 e.source_document_ids = $source_document_ids,
-272:                 e.source_chunk_ids = $source_chunk_ids,
-273:                 e.mention_count = $mention_count,
-274:                 e.valid_from = $valid_from,
-275:                 e.valid_until = $valid_until,
-276:                 e.confidence = $confidence,
-277:                 e.metadata = $metadata,
-278:                 e.updated_at = $updated_at
-279:             """
-280:             await tx.run(
-281:                 query,
-282:                 id=str(entity.id),
-283:                 name=entity.name,
-284:                 description=entity.description,
-285:                 attributes=_serialize_dict(entity.attributes),
-286:                 source_document_ids=[str(d) for d in entity.source_document_ids],
-287:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-288:                 mention_count=entity.mention_count,
-289:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
-290:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
-291:                 confidence=entity.confidence,
-292:                 metadata=_serialize_dict(entity.metadata),
-293:                 updated_at=entity.updated_at.isoformat(),
-294:             )
-295: 
-296:         async with driver.session(database=self._database) as session:
-297:             await session.execute_write(_update)
-298: 
-299:         return entity
-300: 
-301:     async def delete_entity(self, entity_id: UUID) -> bool:
-302:         """Delete an entity and its relationships."""
-303:         driver = self._get_driver()
-304: 
-305:         async def _delete(tx: AsyncManagedTransaction) -> int:
-306:             result = await tx.run(
-307:                 """
-308:                 MATCH (e:Entity {id: $id})
-309:                 DETACH DELETE e
-310:                 RETURN count(e) as deleted
-311:                 """,
-312:                 id=str(entity_id),
-313:             )
-314:             record = await result.single()
-315:             return record["deleted"] if record else 0
-316: 
-317:         async with driver.session(database=self._database) as session:
-318:             deleted = await session.execute_write(_delete)
-319:             return deleted > 0
-320: 
-321:     async def list_entities(
-322:         self,
-323:         namespace_id: UUID,
-324:         *,
-325:         entity_type: str | None = None,
-326:         limit: int = 100,
-327:         offset: int = 0,
-328:     ) -> list[Entity]:
-329:         """List entities in a namespace."""
-330:         driver = self._get_driver()
-331: 
-332:         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
-333:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
-334: 
-335:         if entity_type:
-336:             query += " WHERE e.entity_type = $entity_type"
-337:             params["entity_type"] = entity_type
-338: 
-339:         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
-340:         params["offset"] = offset
-341:         params["limit"] = limit
-342: 
-343:         async with driver.session(database=self._database) as session:
-344:             result = await session.run(query, **params)
-345:             records = await result.data()
-346:             return [self._record_to_entity(r["e"]) for r in records]
-347: 
-348:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
-349:         """Convert a Neo4j node to a domain Entity."""
-350:         return Entity(
-351:             id=UUID(node["id"]),
-352:             namespace_id=UUID(node["namespace_id"]),
-353:             name=node["name"],
-354:             entity_type=EntityType(node["entity_type"]),
-355:             description=node.get("description", ""),
-356:             attributes=_deserialize_dict(node.get("attributes")),
-357:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-358:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
-359:             mention_count=node.get("mention_count", 1),
-360:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
-361:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
-362:             confidence=node.get("confidence", 1.0),
-363:             metadata=_deserialize_dict(node.get("metadata")),
-364:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
-365:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
-366:         )
-367: 
-368:     # =========================================================================
-369:     # Relationship operations
-370:     # =========================================================================
-371: 
-372:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-373:         """Create a relationship between entities."""
-374:         driver = self._get_driver()
-375: 
-376:         rel_type = (
-377:             relationship.relationship_type.value
-378:             if isinstance(relationship.relationship_type, RelationshipType)
-379:             else relationship.relationship_type
-380:         )
-381: 
-382:         async def _create(tx: AsyncManagedTransaction) -> None:
-383:             # Use dynamic relationship type
-384:             query = f"""
-385:             MATCH (source:Entity {{id: $source_id}})
-386:             MATCH (target:Entity {{id: $target_id}})
-387:             CREATE (source)-[r:{rel_type} {{
-388:                 id: $id,
-389:                 namespace_id: $namespace_id,
-390:                 description: $description,
-391:                 properties: $properties,
-392:                 source_document_ids: $source_document_ids,
-393:                 source_chunk_ids: $source_chunk_ids,
-394:                 valid_from: $valid_from,
-395:                 valid_until: $valid_until,
-396:                 confidence: $confidence,
-397:                 weight: $weight,
-398:                 metadata: $metadata,
-399:                 created_at: $created_at,
-400:                 updated_at: $updated_at
-401:             }}]->(target)
-402:             """
-403:             await tx.run(
-404:                 query,
-405:                 source_id=str(relationship.source_entity_id),
-406:                 target_id=str(relationship.target_entity_id),
-407:                 id=str(relationship.id),
-408:                 namespace_id=str(relationship.namespace_id),
-409:                 description=relationship.description,
-410:                 properties=_serialize_dict(relationship.properties),
-411:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
-412:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
-413:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
-414:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
-415:                 confidence=relationship.confidence,
-416:                 weight=relationship.weight,
-417:                 metadata=_serialize_dict(relationship.metadata),
-418:                 created_at=relationship.created_at.isoformat(),
-419:                 updated_at=relationship.updated_at.isoformat(),
-420:             )
-421: 
-422:         async with driver.session(database=self._database) as session:
-423:             await session.execute_write(_create)
-424: 
-425:         return relationship
-426: 
-427:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-428:         """Get a relationship by ID."""
-429:         driver = self._get_driver()
-430: 
-431:         async with driver.session(database=self._database) as session:
-432:             result = await session.run(
-433:                 """
-434:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
-435:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
-436:                 """,
-437:                 id=str(relationship_id),
-438:             )
-439:             record = await result.single()
-440:             if record:
-441:                 return self._record_to_relationship(
-442:                     record["r"],
-443:                     record["source_id"],
-444:                     record["target_id"],
-445:                     record["rel_type"],
-446:                 )
-447:             return None
-448: 
-449:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-450:         """Delete a relationship."""
-451:         driver = self._get_driver()
-452: 
-453:         async def _delete(tx: AsyncManagedTransaction) -> int:
-454:             result = await tx.run(
-455:                 """
-456:                 MATCH ()-[r {id: $id}]->()
-457:                 DELETE r
-458:                 RETURN count(r) as deleted
-459:                 """,
-460:                 id=str(relationship_id),
-461:             )
-462:             record = await result.single()
-463:             return record["deleted"] if record else 0
-464: 
-465:         async with driver.session(database=self._database) as session:
-466:             deleted = await session.execute_write(_delete)
-467:             return deleted > 0
-468: 
-469:     async def get_entity_relationships(
-470:         self,
-471:         entity_id: UUID,
-472:         *,
-473:         direction: str = "both",
-474:         relationship_types: list[str] | None = None,
-475:         limit: int = 100,
-476:     ) -> list[Relationship]:
-477:         """Get relationships for an entity."""
-478:         driver = self._get_driver()
-479: 
-480:         # Build relationship type filter
-481:         rel_filter = ""
-482:         if relationship_types:
-483:             rel_filter = ":" + "|".join(relationship_types)
-484: 
-485:         # Build direction query
-486:         if direction == "outgoing":
-487:             pattern = f"(e)-[r{rel_filter}]->(other)"
-488:         elif direction == "incoming":
-489:             pattern = f"(other)-[r{rel_filter}]->(e)"
-490:         else:  # both
-491:             pattern = f"(e)-[r{rel_filter}]-(other)"
-492: 
-493:         query = f"""
-494:         MATCH {pattern}
-495:         WHERE e.id = $entity_id
-496:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
-497:         LIMIT $limit
-498:         """
-499: 
-500:         async with driver.session(database=self._database) as session:
-501:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
-502:             records = await result.data()
-503:             return [
-504:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
-505:             ]
-506: 
-507:     def _record_to_relationship(
-508:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
-509:     ) -> Relationship:
-510:         """Convert a Neo4j relationship to a domain Relationship."""
-511:         return Relationship(
-512:             id=UUID(rel["id"]),
-513:             namespace_id=UUID(rel["namespace_id"]),
-514:             source_entity_id=UUID(source_id),
-515:             target_entity_id=UUID(target_id),
-516:             relationship_type=(
-517:                 RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else RelationshipType.CUSTOM
-518:             ),
-519:             description=rel.get("description", ""),
-520:             properties=_deserialize_dict(rel.get("properties")),
-521:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
-522:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
-523:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
-524:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
-525:             confidence=rel.get("confidence", 1.0),
-526:             weight=rel.get("weight", 1.0),
-527:             metadata=_deserialize_dict(rel.get("metadata")),
-528:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
-529:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
-530:         )
-531: 
-532:     async def list_relationships(
-533:         self,
-534:         namespace_id: UUID,
-535:         *,
-536:         relationship_type: str | None = None,
-537:         limit: int = 1000,
-538:         offset: int = 0,
-539:     ) -> list[Relationship]:
-540:         """List all relationships in a namespace."""
-541:         driver = self._get_driver()
-542: 
-543:         # Build relationship type filter
-544:         rel_filter = f":{relationship_type}" if relationship_type else ""
-545: 
-546:         query = f"""
-547:         MATCH (source)-[r{rel_filter}]->(target)
-548:         WHERE r.namespace_id = $namespace_id
-549:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
-550:         ORDER BY r.created_at DESC
-551:         SKIP $offset
-552:         LIMIT $limit
-553:         """
-554: 
-555:         async with driver.session(database=self._database) as session:
-556:             result = await session.run(
-557:                 query,
-558:                 namespace_id=str(namespace_id),
-559:                 offset=offset,
-560:                 limit=limit,
-561:             )
-562:             records = await result.data()
-563:             return [
-564:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
-565:                 for r in records
-566:             ]
-567: 
-568:     # =========================================================================
-569:     # Episode operations
-570:     # =========================================================================
-571: 
-572:     async def create_episode(self, episode: Episode) -> Episode:
-573:         """Create an episode node."""
-574:         driver = self._get_driver()
-575: 
-576:         async def _create(tx: AsyncManagedTransaction) -> None:
-577:             query = """
-578:             CREATE (ep:Episode {
-579:                 id: $id,
-580:                 namespace_id: $namespace_id,
-581:                 name: $name,
-582:                 description: $description,
-583:                 occurred_at: $occurred_at,
-584:                 duration_seconds: $duration_seconds,
-585:                 entity_ids: $entity_ids,
-586:                 source_document_ids: $source_document_ids,
-587:                 source_chunk_ids: $source_chunk_ids,
-588:                 metadata: $metadata,
-589:                 created_at: $created_at,
-590:                 updated_at: $updated_at
-591:             })
-592:             """
-593:             await tx.run(
-594:                 query,
-595:                 id=str(episode.id),
-596:                 namespace_id=str(episode.namespace_id),
-597:                 name=episode.name,
-598:                 description=episode.description,
-599:                 occurred_at=episode.occurred_at.isoformat(),
-600:                 duration_seconds=episode.duration_seconds,
-601:                 entity_ids=[str(e) for e in episode.entity_ids],
-602:                 source_document_ids=[str(d) for d in episode.source_document_ids],
-603:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
-604:                 metadata=_serialize_dict(episode.metadata),
-605:                 created_at=episode.created_at.isoformat(),
-606:                 updated_at=episode.updated_at.isoformat(),
-607:             )
-608: 
-609:             # Create links to entities
-610:             if episode.entity_ids:
-611:                 link_query = """
-612:                 MATCH (ep:Episode {id: $episode_id})
-613:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
-614:                 CREATE (ep)-[:INVOLVES]->(e)
-615:                 """
-616:                 await tx.run(
-617:                     link_query,
-618:                     episode_id=str(episode.id),
-619:                     entity_ids=[str(e) for e in episode.entity_ids],
-620:                 )
-621: 
-622:         async with driver.session(database=self._database) as session:
-623:             await session.execute_write(_create)
-624: 
-625:         return episode
-626: 
-627:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-628:         """Get an episode by ID."""
-629:         driver = self._get_driver()
-630: 
-631:         async with driver.session(database=self._database) as session:
-632:             result = await session.run(
-633:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
-634:                 id=str(episode_id),
-635:             )
-636:             record = await result.single()
-637:             if record:
-638:                 return self._record_to_episode(record["ep"])
-639:             return None
-640: 
-641:     async def list_episodes(
-642:         self,
-643:         namespace_id: UUID,
-644:         *,
-645:         start_time: datetime | None = None,
-646:         end_time: datetime | None = None,
-647:         limit: int = 100,
-648:     ) -> list[Episode]:
-649:         """List episodes in a time range."""
-650:         driver = self._get_driver()
-651: 
-652:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
-653:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
-654:         conditions = []
-655: 
-656:         if start_time:
-657:             conditions.append("ep.occurred_at >= $start_time")
-658:             params["start_time"] = start_time.isoformat()
-659:         if end_time:
-660:             conditions.append("ep.occurred_at <= $end_time")
-661:             params["end_time"] = end_time.isoformat()
-662: 
-663:         if conditions:
-664:             query += " WHERE " + " AND ".join(conditions)
-665: 
-666:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
-667:         params["limit"] = limit
-668: 
-669:         async with driver.session(database=self._database) as session:
-670:             result = await session.run(query, **params)
-671:             records = await result.data()
-672:             return [self._record_to_episode(r["ep"]) for r in records]
-673: 
-674:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
-675:         """Convert a Neo4j node to a domain Episode."""
-676:         return Episode(
-677:             id=UUID(node["id"]),
-678:             namespace_id=UUID(node["namespace_id"]),
-679:             name=node["name"],
-680:             description=node.get("description", ""),
-681:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
-682:             duration_seconds=node.get("duration_seconds"),
-683:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
-684:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-685:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
-686:             metadata=_deserialize_dict(node.get("metadata")),
-687:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
-688:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
-689:         )
-690: 
-691:     # =========================================================================
-692:     # Graph traversal
-693:     # =========================================================================
-694: 
-695:     async def find_paths(
-696:         self,
-697:         namespace_id: UUID,
-698:         source_entity_id: UUID,
-699:         target_entity_id: UUID,
-700:         *,
-701:         max_depth: int = 3,
-702:         relationship_types: list[str] | None = None,
-703:     ) -> list[list[dict[str, Any]]]:
-704:         """Find paths between two entities."""
-705:         driver = self._get_driver()
-706: 
-707:         rel_filter = ""
-708:         if relationship_types:
-709:             rel_filter = ":" + "|".join(relationship_types)
-710: 
-711:         query = f"""
-712:         MATCH path = shortestPath(
-713:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
-714:         )
-715:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
-716:         RETURN path
-717:         LIMIT 10
-718:         """
-719: 
-720:         async with driver.session(database=self._database) as session:
-721:             result = await session.run(
-722:                 query,
-723:                 source_id=str(source_entity_id),
-724:                 target_id=str(target_entity_id),
-725:                 namespace_id=str(namespace_id),
-726:             )
-727:             records = await result.data()
-728: 
-729:             paths = []
-730:             for record in records:
-731:                 path = record["path"]
-732:                 path_elements = []
-733:                 for element in path:
-734:                     if hasattr(element, "items"):  # Node
-735:                         path_elements.append({"type": "node", "data": dict(element)})
-736:                     else:  # Relationship
-737:                         path_elements.append({"type": "relationship", "data": dict(element)})
-738:                 paths.append(path_elements)
-739: 
-740:             return paths
-741: 
-742:     async def get_neighborhood(
-743:         self,
-744:         entity_id: UUID,
-745:         *,
-746:         depth: int = 1,
-747:         relationship_types: list[str] | None = None,
-748:         limit: int = 50,
-749:     ) -> dict[str, Any]:
-750:         """Get the neighborhood of an entity up to a certain depth."""
-751:         driver = self._get_driver()
-752: 
-753:         rel_filter = ""
-754:         if relationship_types:
-755:             rel_filter = ":" + "|".join(relationship_types)
-756: 
-757:         query = f"""
-758:         MATCH (center:Entity {{id: $entity_id}})
-759:         CALL apoc.path.subgraphAll(center, {{
-760:             maxLevel: {depth},
-761:             relationshipFilter: '{rel_filter.lstrip(":")}',
-762:             limit: $limit
-763:         }})
-764:         YIELD nodes, relationships
-765:         RETURN nodes, relationships
-766:         """
-767: 
-768:         # Fallback query if APOC is not available
-769:         fallback_query = f"""
-770:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
-771:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
-772:         LIMIT $limit
-773:         """
-774: 
-775:         async with driver.session(database=self._database) as session:
-776:             try:
-777:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
-778:                 record = await result.single()
-779:             except Exception:
-780:                 # Fallback if APOC not available
-781:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
-782:                 record = await result.single()
-783: 
-784:             if record:
-785:                 nodes = [dict(n) for n in record.get("nodes", [])]
-786:                 relationships = [dict(r) for r in record.get("relationships", [])]
-787:                 return {"entities": nodes, "relationships": relationships}
-788: 
-789:             return {"entities": [], "relationships": []}
-790: 
-791:     async def get_neighborhoods_batch(
-792:         self,
-793:         entity_ids: list[UUID],
-794:         *,
-795:         depth: int = 1,
-796:         relationship_types: list[str] | None = None,
-797:         limit_per_entity: int = 20,
-798:     ) -> dict[UUID, dict[str, Any]]:
-799:         """Get neighborhoods for multiple entities in parallel.
-800: 
-801:         Args:
-802:             entity_ids: List of entity IDs
-803:             depth: Max traversal depth
-804:             relationship_types: Optional relationship type filter
-805:             limit_per_entity: Max nodes per entity neighborhood
-806: 
-807:         Returns:
-808:             Dictionary mapping entity ID to neighborhood data
-809:         """
-810:         if not entity_ids:
-811:             return {}
-812: 
-813:         driver = self._get_driver()
-814:         id_strings = [str(eid) for eid in entity_ids]
-815: 
-816:         rel_filter = ""
-817:         if relationship_types:
-818:             rel_filter = ":" + "|".join(relationship_types)
-819: 
-820:         # Use UNWIND to process all entities in a single query
-821:         query = f"""
-822:         UNWIND $entity_ids AS eid
-823:         MATCH (center:Entity {{id: eid}})
-824:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-825:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
-826:         RETURN eid, neighbors, rels
-827:         """
-828: 
-829:         async with driver.session(database=self._database) as session:
-830:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
-831:             records = await result.data()
-832: 
-833:             neighborhoods = {}
-834:             for record in records:
-835:                 eid = UUID(record["eid"])
-836:                 nodes = [dict(n) for n in (record.get("neighbors") or []) if n]
-837:                 relationships = []
-838:                 for rel_list in record.get("rels") or []:
-839:                     if rel_list:
-840:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
-841:                             if r:
-842:                                 relationships.append(dict(r))
-843:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
-844: 
-845:             return neighborhoods
-846: 
-847:     async def search_entities_by_attribute(
-848:         self,
-849:         namespace_id: UUID,
-850:         attribute_name: str,
-851:         attribute_value: Any,
-852:         *,
-853:         limit: int = 100,
-854:     ) -> list[Entity]:
-855:         """Search entities by attribute value."""
-856:         driver = self._get_driver()
-857: 
-858:         query = """
-859:         MATCH (e:Entity {namespace_id: $namespace_id})
-860:         WHERE e.attributes[$attribute_name] = $attribute_value
-861:         RETURN e
-862:         LIMIT $limit
-863:         """
-864: 
-865:         async with driver.session(database=self._database) as session:
-866:             result = await session.run(
-867:                 query,
-868:                 namespace_id=str(namespace_id),
-869:                 attribute_name=attribute_name,
-870:                 attribute_value=attribute_value,
-871:                 limit=limit,
-872:             )
-873:             records = await result.data()
-874:             return [self._record_to_entity(r["e"]) for r in records]
-````
-
 ## File: src/khora/memory_lake.py
 ````python
   1: """MemoryLake - Primary API for Khora Memory Lake.
@@ -22481,6 +21603,905 @@ README.md
 576:         yield lake
 577:     finally:
 578:         await lake.disconnect()
+````
+
+## File: src/khora/storage/backends/neo4j.py
+````python
+  1: """Neo4j backend for knowledge graph storage.
+  2: 
+  3: Handles storage and traversal of entities, relationships, and episodes
+  4: in Neo4j graph database.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: import json
+ 10: from datetime import datetime
+ 11: from typing import Any
+ 12: from uuid import UUID
+ 13: 
+ 14: from loguru import logger
+ 15: from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
+ 16: 
+ 17: from khora.core.models import Entity, Episode, Relationship
+ 18: from khora.core.models.entity import EntityType, RelationshipType
+ 19: 
+ 20: 
+ 21: def _serialize_dict(value: dict[str, Any] | None) -> str | None:
+ 22:     """Serialize a dict to JSON string for Neo4j storage.
+ 23: 
+ 24:     Neo4j property values can only be primitive types or arrays thereof,
+ 25:     not nested objects. We serialize dicts to JSON strings.
+ 26:     """
+ 27:     if value is None:
+ 28:         return None
+ 29:     return json.dumps(value)
+ 30: 
+ 31: 
+ 32: def _deserialize_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
+ 33:     """Deserialize a JSON string back to dict.
+ 34: 
+ 35:     Handles both string (new format) and dict (legacy) values.
+ 36:     """
+ 37:     if value is None:
+ 38:         return {}
+ 39:     if isinstance(value, dict):
+ 40:         return value
+ 41:     try:
+ 42:         return json.loads(value)
+ 43:     except (json.JSONDecodeError, TypeError):
+ 44:         return {}
+ 45: 
+ 46: 
+ 47: def _element_to_dict(element: Any) -> dict[str, Any]:
+ 48:     """Safely convert a Neo4j graph element (Node, Relationship, or raw value) to a dict.
+ 49: 
+ 50:     Handles Neo4j Node/Relationship objects, plain dicts, and unexpected types
+ 51:     (e.g. strings returned by some driver serialisation paths).
+ 52:     """
+ 53:     if isinstance(element, dict):
+ 54:         return element
+ 55:     # neo4j.graph.Node / Relationship expose _properties
+ 56:     if hasattr(element, "_properties"):
+ 57:         return dict(element._properties)
+ 58:     # Some driver versions make Node/Relationship a Mapping
+ 59:     if hasattr(element, "items"):
+ 60:         try:
+ 61:             return dict(element.items())
+ 62:         except Exception:
+ 63:             pass
+ 64:     # Last resort – avoid crashing on unexpected types
+ 65:     return {"_raw": str(element)}
+ 66: 
+ 67: 
+ 68: class Neo4jBackend:
+ 69:     """Neo4j backend for knowledge graph operations.
+ 70: 
+ 71:     Stores entities as nodes and relationships as edges in Neo4j,
+ 72:     enabling efficient graph traversal and pattern matching.
+ 73:     """
+ 74: 
+ 75:     def __init__(
+ 76:         self,
+ 77:         url: str,
+ 78:         *,
+ 79:         user: str = "neo4j",
+ 80:         password: str = "",
+ 81:         database: str = "neo4j",
+ 82:         max_connection_pool_size: int = 50,
+ 83:     ) -> None:
+ 84:         """Initialize the Neo4j backend.
+ 85: 
+ 86:         Args:
+ 87:             url: Neo4j connection URL (bolt:// or neo4j://)
+ 88:             user: Database user
+ 89:             password: Database password
+ 90:             database: Database name
+ 91:             max_connection_pool_size: Maximum connection pool size
+ 92:         """
+ 93:         self._url = url
+ 94:         self._user = user
+ 95:         self._password = password
+ 96:         self._database = database
+ 97:         self._max_connection_pool_size = max_connection_pool_size
+ 98:         self._driver: AsyncDriver | None = None
+ 99: 
+100:     async def connect(self) -> None:
+101:         """Establish connection to Neo4j."""
+102:         if self._driver is not None:
+103:             return
+104: 
+105:         logger.info(f"Connecting to Neo4j at {self._url}...")
+106:         self._driver = AsyncGraphDatabase.driver(
+107:             self._url,
+108:             auth=(self._user, self._password),
+109:             max_connection_pool_size=self._max_connection_pool_size,
+110:         )
+111:         # Verify connectivity
+112:         await self._driver.verify_connectivity()
+113: 
+114:         # Create indexes for performance
+115:         await self._create_indexes()
+116:         logger.info("Connected to Neo4j")
+117: 
+118:     async def disconnect(self) -> None:
+119:         """Close Neo4j connections."""
+120:         if self._driver is not None:
+121:             logger.info("Disconnecting from Neo4j...")
+122:             await self._driver.close()
+123:             self._driver = None
+124:             logger.info("Disconnected from Neo4j")
+125: 
+126:     async def is_healthy(self) -> bool:
+127:         """Check if the backend is healthy and connected."""
+128:         if self._driver is None:
+129:             return False
+130:         try:
+131:             await self._driver.verify_connectivity()
+132:             return True
+133:         except Exception as e:
+134:             logger.error(f"Neo4j health check failed: {e}")
+135:             return False
+136: 
+137:     async def _create_indexes(self) -> None:
+138:         """Create indexes for common queries."""
+139:         if self._driver is None:
+140:             return
+141: 
+142:         indexes = [
+143:             # Entity indexes
+144:             "CREATE INDEX entity_id IF NOT EXISTS FOR (e:Entity) ON (e.id)",
+145:             "CREATE INDEX entity_namespace IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id)",
+146:             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
+147:             "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
+148:             # Episode indexes
+149:             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
+150:             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
+151:             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
+152:         ]
+153: 
+154:         async with self._driver.session(database=self._database) as session:
+155:             for index in indexes:
+156:                 try:
+157:                     await session.run(index)
+158:                 except Exception as e:
+159:                     logger.debug(f"Index creation: {e}")
+160: 
+161:     def _get_driver(self) -> AsyncDriver:
+162:         """Get the Neo4j driver."""
+163:         if self._driver is None:
+164:             raise RuntimeError("Backend not connected. Call connect() first.")
+165:         return self._driver
+166: 
+167:     # =========================================================================
+168:     # Entity operations
+169:     # =========================================================================
+170: 
+171:     async def create_entity(self, entity: Entity) -> Entity:
+172:         """Create an entity node in the graph."""
+173:         driver = self._get_driver()
+174: 
+175:         async def _create(tx: AsyncManagedTransaction) -> None:
+176:             query = """
+177:             CREATE (e:Entity {
+178:                 id: $id,
+179:                 namespace_id: $namespace_id,
+180:                 name: $name,
+181:                 entity_type: $entity_type,
+182:                 description: $description,
+183:                 attributes: $attributes,
+184:                 source_document_ids: $source_document_ids,
+185:                 source_chunk_ids: $source_chunk_ids,
+186:                 mention_count: $mention_count,
+187:                 valid_from: $valid_from,
+188:                 valid_until: $valid_until,
+189:                 confidence: $confidence,
+190:                 metadata: $metadata,
+191:                 created_at: $created_at,
+192:                 updated_at: $updated_at
+193:             })
+194:             """
+195:             await tx.run(
+196:                 query,
+197:                 id=str(entity.id),
+198:                 namespace_id=str(entity.namespace_id),
+199:                 name=entity.name,
+200:                 entity_type=(
+201:                     entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
+202:                 ),
+203:                 description=entity.description,
+204:                 attributes=_serialize_dict(entity.attributes),
+205:                 source_document_ids=[str(d) for d in entity.source_document_ids],
+206:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+207:                 mention_count=entity.mention_count,
+208:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
+209:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
+210:                 confidence=entity.confidence,
+211:                 metadata=_serialize_dict(entity.metadata),
+212:                 created_at=entity.created_at.isoformat(),
+213:                 updated_at=entity.updated_at.isoformat(),
+214:             )
+215: 
+216:         async with driver.session(database=self._database) as session:
+217:             await session.execute_write(_create)
+218: 
+219:         return entity
+220: 
+221:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+222:         """Get an entity by ID."""
+223:         driver = self._get_driver()
+224: 
+225:         async with driver.session(database=self._database) as session:
+226:             result = await session.run(
+227:                 "MATCH (e:Entity {id: $id}) RETURN e",
+228:                 id=str(entity_id),
+229:             )
+230:             record = await result.single()
+231:             if record:
+232:                 return self._record_to_entity(record["e"])
+233:             return None
+234: 
+235:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+236:         """Get an entity by name and type (for deduplication)."""
+237:         driver = self._get_driver()
+238: 
+239:         async with driver.session(database=self._database) as session:
+240:             result = await session.run(
+241:                 """
+242:                 MATCH (e:Entity {namespace_id: $namespace_id, name: $name, entity_type: $entity_type})
+243:                 RETURN e
+244:                 LIMIT 1
+245:                 """,
+246:                 namespace_id=str(namespace_id),
+247:                 name=name,
+248:                 entity_type=entity_type,
+249:             )
+250:             record = await result.single()
+251:             if record:
+252:                 return self._record_to_entity(record["e"])
+253:             return None
+254: 
+255:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+256:         """Fetch multiple entities in a single query.
+257: 
+258:         Args:
+259:             entity_ids: List of entity IDs to fetch
+260: 
+261:         Returns:
+262:             Dictionary mapping entity ID to Entity object
+263:         """
+264:         if not entity_ids:
+265:             return {}
+266: 
+267:         driver = self._get_driver()
+268:         id_strings = [str(eid) for eid in entity_ids]
+269: 
+270:         async with driver.session(database=self._database) as session:
+271:             result = await session.run(
+272:                 """
+273:                 MATCH (e:Entity)
+274:                 WHERE e.id IN $ids
+275:                 RETURN e
+276:                 """,
+277:                 ids=id_strings,
+278:             )
+279:             records = await result.data()
+280:             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
+281: 
+282:     async def update_entity(self, entity: Entity) -> Entity:
+283:         """Update an entity."""
+284:         driver = self._get_driver()
+285: 
+286:         async def _update(tx: AsyncManagedTransaction) -> None:
+287:             query = """
+288:             MATCH (e:Entity {id: $id})
+289:             SET e.name = $name,
+290:                 e.description = $description,
+291:                 e.attributes = $attributes,
+292:                 e.source_document_ids = $source_document_ids,
+293:                 e.source_chunk_ids = $source_chunk_ids,
+294:                 e.mention_count = $mention_count,
+295:                 e.valid_from = $valid_from,
+296:                 e.valid_until = $valid_until,
+297:                 e.confidence = $confidence,
+298:                 e.metadata = $metadata,
+299:                 e.updated_at = $updated_at
+300:             """
+301:             await tx.run(
+302:                 query,
+303:                 id=str(entity.id),
+304:                 name=entity.name,
+305:                 description=entity.description,
+306:                 attributes=_serialize_dict(entity.attributes),
+307:                 source_document_ids=[str(d) for d in entity.source_document_ids],
+308:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+309:                 mention_count=entity.mention_count,
+310:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
+311:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
+312:                 confidence=entity.confidence,
+313:                 metadata=_serialize_dict(entity.metadata),
+314:                 updated_at=entity.updated_at.isoformat(),
+315:             )
+316: 
+317:         async with driver.session(database=self._database) as session:
+318:             await session.execute_write(_update)
+319: 
+320:         return entity
+321: 
+322:     async def delete_entity(self, entity_id: UUID) -> bool:
+323:         """Delete an entity and its relationships."""
+324:         driver = self._get_driver()
+325: 
+326:         async def _delete(tx: AsyncManagedTransaction) -> int:
+327:             result = await tx.run(
+328:                 """
+329:                 MATCH (e:Entity {id: $id})
+330:                 DETACH DELETE e
+331:                 RETURN count(e) as deleted
+332:                 """,
+333:                 id=str(entity_id),
+334:             )
+335:             record = await result.single()
+336:             return record["deleted"] if record else 0
+337: 
+338:         async with driver.session(database=self._database) as session:
+339:             deleted = await session.execute_write(_delete)
+340:             return deleted > 0
+341: 
+342:     async def list_entities(
+343:         self,
+344:         namespace_id: UUID,
+345:         *,
+346:         entity_type: str | None = None,
+347:         limit: int = 100,
+348:         offset: int = 0,
+349:     ) -> list[Entity]:
+350:         """List entities in a namespace."""
+351:         driver = self._get_driver()
+352: 
+353:         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
+354:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+355: 
+356:         if entity_type:
+357:             query += " WHERE e.entity_type = $entity_type"
+358:             params["entity_type"] = entity_type
+359: 
+360:         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
+361:         params["offset"] = offset
+362:         params["limit"] = limit
+363: 
+364:         async with driver.session(database=self._database) as session:
+365:             result = await session.run(query, **params)
+366:             records = await result.data()
+367:             return [self._record_to_entity(r["e"]) for r in records]
+368: 
+369:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
+370:         """Convert a Neo4j node to a domain Entity."""
+371:         return Entity(
+372:             id=UUID(node["id"]),
+373:             namespace_id=UUID(node["namespace_id"]),
+374:             name=node["name"],
+375:             entity_type=EntityType(node["entity_type"]),
+376:             description=node.get("description", ""),
+377:             attributes=_deserialize_dict(node.get("attributes")),
+378:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+379:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+380:             mention_count=node.get("mention_count", 1),
+381:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
+382:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
+383:             confidence=node.get("confidence", 1.0),
+384:             metadata=_deserialize_dict(node.get("metadata")),
+385:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+386:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+387:         )
+388: 
+389:     # =========================================================================
+390:     # Relationship operations
+391:     # =========================================================================
+392: 
+393:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+394:         """Create a relationship between entities."""
+395:         driver = self._get_driver()
+396: 
+397:         rel_type = (
+398:             relationship.relationship_type.value
+399:             if isinstance(relationship.relationship_type, RelationshipType)
+400:             else relationship.relationship_type
+401:         )
+402: 
+403:         async def _create(tx: AsyncManagedTransaction) -> None:
+404:             # Use dynamic relationship type
+405:             query = f"""
+406:             MATCH (source:Entity {{id: $source_id}})
+407:             MATCH (target:Entity {{id: $target_id}})
+408:             CREATE (source)-[r:{rel_type} {{
+409:                 id: $id,
+410:                 namespace_id: $namespace_id,
+411:                 description: $description,
+412:                 properties: $properties,
+413:                 source_document_ids: $source_document_ids,
+414:                 source_chunk_ids: $source_chunk_ids,
+415:                 valid_from: $valid_from,
+416:                 valid_until: $valid_until,
+417:                 confidence: $confidence,
+418:                 weight: $weight,
+419:                 metadata: $metadata,
+420:                 created_at: $created_at,
+421:                 updated_at: $updated_at
+422:             }}]->(target)
+423:             """
+424:             await tx.run(
+425:                 query,
+426:                 source_id=str(relationship.source_entity_id),
+427:                 target_id=str(relationship.target_entity_id),
+428:                 id=str(relationship.id),
+429:                 namespace_id=str(relationship.namespace_id),
+430:                 description=relationship.description,
+431:                 properties=_serialize_dict(relationship.properties),
+432:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
+433:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
+434:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
+435:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
+436:                 confidence=relationship.confidence,
+437:                 weight=relationship.weight,
+438:                 metadata=_serialize_dict(relationship.metadata),
+439:                 created_at=relationship.created_at.isoformat(),
+440:                 updated_at=relationship.updated_at.isoformat(),
+441:             )
+442: 
+443:         async with driver.session(database=self._database) as session:
+444:             await session.execute_write(_create)
+445: 
+446:         return relationship
+447: 
+448:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+449:         """Get a relationship by ID."""
+450:         driver = self._get_driver()
+451: 
+452:         async with driver.session(database=self._database) as session:
+453:             result = await session.run(
+454:                 """
+455:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
+456:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+457:                 """,
+458:                 id=str(relationship_id),
+459:             )
+460:             record = await result.single()
+461:             if record:
+462:                 return self._record_to_relationship(
+463:                     record["r"],
+464:                     record["source_id"],
+465:                     record["target_id"],
+466:                     record["rel_type"],
+467:                 )
+468:             return None
+469: 
+470:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+471:         """Delete a relationship."""
+472:         driver = self._get_driver()
+473: 
+474:         async def _delete(tx: AsyncManagedTransaction) -> int:
+475:             result = await tx.run(
+476:                 """
+477:                 MATCH ()-[r {id: $id}]->()
+478:                 DELETE r
+479:                 RETURN count(r) as deleted
+480:                 """,
+481:                 id=str(relationship_id),
+482:             )
+483:             record = await result.single()
+484:             return record["deleted"] if record else 0
+485: 
+486:         async with driver.session(database=self._database) as session:
+487:             deleted = await session.execute_write(_delete)
+488:             return deleted > 0
+489: 
+490:     async def get_entity_relationships(
+491:         self,
+492:         entity_id: UUID,
+493:         *,
+494:         direction: str = "both",
+495:         relationship_types: list[str] | None = None,
+496:         limit: int = 100,
+497:     ) -> list[Relationship]:
+498:         """Get relationships for an entity."""
+499:         driver = self._get_driver()
+500: 
+501:         # Build relationship type filter
+502:         rel_filter = ""
+503:         if relationship_types:
+504:             rel_filter = ":" + "|".join(relationship_types)
+505: 
+506:         # Build direction query
+507:         if direction == "outgoing":
+508:             pattern = f"(e)-[r{rel_filter}]->(other)"
+509:         elif direction == "incoming":
+510:             pattern = f"(other)-[r{rel_filter}]->(e)"
+511:         else:  # both
+512:             pattern = f"(e)-[r{rel_filter}]-(other)"
+513: 
+514:         query = f"""
+515:         MATCH {pattern}
+516:         WHERE e.id = $entity_id
+517:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
+518:         LIMIT $limit
+519:         """
+520: 
+521:         async with driver.session(database=self._database) as session:
+522:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
+523:             records = await result.data()
+524:             return [
+525:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+526:             ]
+527: 
+528:     def _record_to_relationship(
+529:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
+530:     ) -> Relationship:
+531:         """Convert a Neo4j relationship to a domain Relationship."""
+532:         return Relationship(
+533:             id=UUID(rel["id"]),
+534:             namespace_id=UUID(rel["namespace_id"]),
+535:             source_entity_id=UUID(source_id),
+536:             target_entity_id=UUID(target_id),
+537:             relationship_type=(
+538:                 RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else RelationshipType.CUSTOM
+539:             ),
+540:             description=rel.get("description", ""),
+541:             properties=_deserialize_dict(rel.get("properties")),
+542:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
+543:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
+544:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
+545:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
+546:             confidence=rel.get("confidence", 1.0),
+547:             weight=rel.get("weight", 1.0),
+548:             metadata=_deserialize_dict(rel.get("metadata")),
+549:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
+550:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
+551:         )
+552: 
+553:     async def list_relationships(
+554:         self,
+555:         namespace_id: UUID,
+556:         *,
+557:         relationship_type: str | None = None,
+558:         limit: int = 1000,
+559:         offset: int = 0,
+560:     ) -> list[Relationship]:
+561:         """List all relationships in a namespace."""
+562:         driver = self._get_driver()
+563: 
+564:         # Build relationship type filter
+565:         rel_filter = f":{relationship_type}" if relationship_type else ""
+566: 
+567:         query = f"""
+568:         MATCH (source)-[r{rel_filter}]->(target)
+569:         WHERE r.namespace_id = $namespace_id
+570:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
+571:         ORDER BY r.created_at DESC
+572:         SKIP $offset
+573:         LIMIT $limit
+574:         """
+575: 
+576:         async with driver.session(database=self._database) as session:
+577:             result = await session.run(
+578:                 query,
+579:                 namespace_id=str(namespace_id),
+580:                 offset=offset,
+581:                 limit=limit,
+582:             )
+583:             records = await result.data()
+584:             return [
+585:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
+586:                 for r in records
+587:             ]
+588: 
+589:     # =========================================================================
+590:     # Episode operations
+591:     # =========================================================================
+592: 
+593:     async def create_episode(self, episode: Episode) -> Episode:
+594:         """Create an episode node."""
+595:         driver = self._get_driver()
+596: 
+597:         async def _create(tx: AsyncManagedTransaction) -> None:
+598:             query = """
+599:             CREATE (ep:Episode {
+600:                 id: $id,
+601:                 namespace_id: $namespace_id,
+602:                 name: $name,
+603:                 description: $description,
+604:                 occurred_at: $occurred_at,
+605:                 duration_seconds: $duration_seconds,
+606:                 entity_ids: $entity_ids,
+607:                 source_document_ids: $source_document_ids,
+608:                 source_chunk_ids: $source_chunk_ids,
+609:                 metadata: $metadata,
+610:                 created_at: $created_at,
+611:                 updated_at: $updated_at
+612:             })
+613:             """
+614:             await tx.run(
+615:                 query,
+616:                 id=str(episode.id),
+617:                 namespace_id=str(episode.namespace_id),
+618:                 name=episode.name,
+619:                 description=episode.description,
+620:                 occurred_at=episode.occurred_at.isoformat(),
+621:                 duration_seconds=episode.duration_seconds,
+622:                 entity_ids=[str(e) for e in episode.entity_ids],
+623:                 source_document_ids=[str(d) for d in episode.source_document_ids],
+624:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
+625:                 metadata=_serialize_dict(episode.metadata),
+626:                 created_at=episode.created_at.isoformat(),
+627:                 updated_at=episode.updated_at.isoformat(),
+628:             )
+629: 
+630:             # Create links to entities
+631:             if episode.entity_ids:
+632:                 link_query = """
+633:                 MATCH (ep:Episode {id: $episode_id})
+634:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
+635:                 CREATE (ep)-[:INVOLVES]->(e)
+636:                 """
+637:                 await tx.run(
+638:                     link_query,
+639:                     episode_id=str(episode.id),
+640:                     entity_ids=[str(e) for e in episode.entity_ids],
+641:                 )
+642: 
+643:         async with driver.session(database=self._database) as session:
+644:             await session.execute_write(_create)
+645: 
+646:         return episode
+647: 
+648:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+649:         """Get an episode by ID."""
+650:         driver = self._get_driver()
+651: 
+652:         async with driver.session(database=self._database) as session:
+653:             result = await session.run(
+654:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
+655:                 id=str(episode_id),
+656:             )
+657:             record = await result.single()
+658:             if record:
+659:                 return self._record_to_episode(record["ep"])
+660:             return None
+661: 
+662:     async def list_episodes(
+663:         self,
+664:         namespace_id: UUID,
+665:         *,
+666:         start_time: datetime | None = None,
+667:         end_time: datetime | None = None,
+668:         limit: int = 100,
+669:     ) -> list[Episode]:
+670:         """List episodes in a time range."""
+671:         driver = self._get_driver()
+672: 
+673:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
+674:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+675:         conditions = []
+676: 
+677:         if start_time:
+678:             conditions.append("ep.occurred_at >= $start_time")
+679:             params["start_time"] = start_time.isoformat()
+680:         if end_time:
+681:             conditions.append("ep.occurred_at <= $end_time")
+682:             params["end_time"] = end_time.isoformat()
+683: 
+684:         if conditions:
+685:             query += " WHERE " + " AND ".join(conditions)
+686: 
+687:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
+688:         params["limit"] = limit
+689: 
+690:         async with driver.session(database=self._database) as session:
+691:             result = await session.run(query, **params)
+692:             records = await result.data()
+693:             return [self._record_to_episode(r["ep"]) for r in records]
+694: 
+695:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
+696:         """Convert a Neo4j node to a domain Episode."""
+697:         return Episode(
+698:             id=UUID(node["id"]),
+699:             namespace_id=UUID(node["namespace_id"]),
+700:             name=node["name"],
+701:             description=node.get("description", ""),
+702:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
+703:             duration_seconds=node.get("duration_seconds"),
+704:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
+705:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+706:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+707:             metadata=_deserialize_dict(node.get("metadata")),
+708:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+709:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+710:         )
+711: 
+712:     # =========================================================================
+713:     # Graph traversal
+714:     # =========================================================================
+715: 
+716:     async def find_paths(
+717:         self,
+718:         namespace_id: UUID,
+719:         source_entity_id: UUID,
+720:         target_entity_id: UUID,
+721:         *,
+722:         max_depth: int = 3,
+723:         relationship_types: list[str] | None = None,
+724:     ) -> list[list[dict[str, Any]]]:
+725:         """Find paths between two entities."""
+726:         driver = self._get_driver()
+727: 
+728:         rel_filter = ""
+729:         if relationship_types:
+730:             rel_filter = ":" + "|".join(relationship_types)
+731: 
+732:         query = f"""
+733:         MATCH path = shortestPath(
+734:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+735:         )
+736:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+737:         RETURN path
+738:         LIMIT 10
+739:         """
+740: 
+741:         async with driver.session(database=self._database) as session:
+742:             result = await session.run(
+743:                 query,
+744:                 source_id=str(source_entity_id),
+745:                 target_id=str(target_entity_id),
+746:                 namespace_id=str(namespace_id),
+747:             )
+748:             records = await result.data()
+749: 
+750:             paths = []
+751:             for record in records:
+752:                 path = record["path"]
+753:                 path_elements = []
+754:                 for element in path:
+755:                     if hasattr(element, "items"):  # Node
+756:                         path_elements.append({"type": "node", "data": _element_to_dict(element)})
+757:                     else:  # Relationship
+758:                         path_elements.append({"type": "relationship", "data": _element_to_dict(element)})
+759:                 paths.append(path_elements)
+760: 
+761:             return paths
+762: 
+763:     async def get_neighborhood(
+764:         self,
+765:         entity_id: UUID,
+766:         *,
+767:         depth: int = 1,
+768:         relationship_types: list[str] | None = None,
+769:         limit: int = 50,
+770:     ) -> dict[str, Any]:
+771:         """Get the neighborhood of an entity up to a certain depth."""
+772:         driver = self._get_driver()
+773: 
+774:         rel_filter = ""
+775:         if relationship_types:
+776:             rel_filter = ":" + "|".join(relationship_types)
+777: 
+778:         query = f"""
+779:         MATCH (center:Entity {{id: $entity_id}})
+780:         CALL apoc.path.subgraphAll(center, {{
+781:             maxLevel: {depth},
+782:             relationshipFilter: '{rel_filter.lstrip(":")}',
+783:             limit: $limit
+784:         }})
+785:         YIELD nodes, relationships
+786:         RETURN nodes, relationships
+787:         """
+788: 
+789:         # Fallback query if APOC is not available
+790:         fallback_query = f"""
+791:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+792:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+793:         LIMIT $limit
+794:         """
+795: 
+796:         async with driver.session(database=self._database) as session:
+797:             try:
+798:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
+799:                 record = await result.single()
+800:             except Exception:
+801:                 # Fallback if APOC not available
+802:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
+803:                 record = await result.single()
+804: 
+805:             if record:
+806:                 nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
+807:                 relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
+808:                 return {"entities": nodes, "relationships": relationships}
+809: 
+810:             return {"entities": [], "relationships": []}
+811: 
+812:     async def get_neighborhoods_batch(
+813:         self,
+814:         entity_ids: list[UUID],
+815:         *,
+816:         depth: int = 1,
+817:         relationship_types: list[str] | None = None,
+818:         limit_per_entity: int = 20,
+819:     ) -> dict[UUID, dict[str, Any]]:
+820:         """Get neighborhoods for multiple entities in parallel.
+821: 
+822:         Args:
+823:             entity_ids: List of entity IDs
+824:             depth: Max traversal depth
+825:             relationship_types: Optional relationship type filter
+826:             limit_per_entity: Max nodes per entity neighborhood
+827: 
+828:         Returns:
+829:             Dictionary mapping entity ID to neighborhood data
+830:         """
+831:         if not entity_ids:
+832:             return {}
+833: 
+834:         driver = self._get_driver()
+835:         id_strings = [str(eid) for eid in entity_ids]
+836: 
+837:         rel_filter = ""
+838:         if relationship_types:
+839:             rel_filter = ":" + "|".join(relationship_types)
+840: 
+841:         # Use UNWIND to process all entities in a single query
+842:         query = f"""
+843:         UNWIND $entity_ids AS eid
+844:         MATCH (center:Entity {{id: eid}})
+845:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+846:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+847:         RETURN eid, neighbors, rels
+848:         """
+849: 
+850:         async with driver.session(database=self._database) as session:
+851:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+852:             records = await result.data()
+853: 
+854:             neighborhoods = {}
+855:             for record in records:
+856:                 eid = UUID(record["eid"])
+857:                 nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
+858:                 relationships = []
+859:                 for rel_list in record.get("rels") or []:
+860:                     if rel_list:
+861:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+862:                             if r:
+863:                                 relationships.append(_element_to_dict(r))
+864:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+865: 
+866:             return neighborhoods
+867: 
+868:     async def search_entities_by_attribute(
+869:         self,
+870:         namespace_id: UUID,
+871:         attribute_name: str,
+872:         attribute_value: Any,
+873:         *,
+874:         limit: int = 100,
+875:     ) -> list[Entity]:
+876:         """Search entities by attribute value."""
+877:         driver = self._get_driver()
+878: 
+879:         query = """
+880:         MATCH (e:Entity {namespace_id: $namespace_id})
+881:         WHERE e.attributes[$attribute_name] = $attribute_value
+882:         RETURN e
+883:         LIMIT $limit
+884:         """
+885: 
+886:         async with driver.session(database=self._database) as session:
+887:             result = await session.run(
+888:                 query,
+889:                 namespace_id=str(namespace_id),
+890:                 attribute_name=attribute_name,
+891:                 attribute_value=attribute_value,
+892:                 limit=limit,
+893:             )
+894:             records = await result.data()
+895:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
 ## File: src/khora/storage/coordinator.py
@@ -23504,6 +23525,149 @@ README.md
 310:         return self.storage.neo4j_database
 ````
 
+## File: src/khora/api/routes/status.py
+````python
+ 1: """Status endpoints for Khora API."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
+ 7: 
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: router = APIRouter()
+11: 
+12: 
+13: @router.get("/status")
+14: async def status_check(request: Request) -> dict[str, Any]:
+15:     """Basic status check endpoint.
+16: 
+17:     Returns:
+18:         Status with timestamp and version
+19:     """
+20:     return {
+21:         "status": "ok",
+22:         "timestamp": datetime.now(UTC).isoformat(),
+23:         "version": "0.0.9",
+24:         "service": "khora",
+25:     }
+26: 
+27: 
+28: @router.get("/health")
+29: async def health_check(request: Request) -> dict[str, Any]:
+30:     """Health check endpoint for orchestration systems.
+31: 
+32:     Returns:
+33:         Health status with timestamp
+34:     """
+35:     return {
+36:         "status": "healthy",
+37:         "timestamp": datetime.now(UTC).isoformat(),
+38:         "version": "0.0.9",
+39:     }
+40: 
+41: 
+42: @router.get("/health/ready")
+43: async def readiness_check(request: Request) -> dict[str, Any]:
+44:     """Readiness check for Kubernetes/orchestration.
+45: 
+46:     Checks that all required services are available.
+47: 
+48:     Returns:
+49:         Readiness status with component checks
+50:     """
+51:     config = request.app.state.config
+52:     checks: dict[str, bool] = {}
+53: 
+54:     # TODO: Add actual health checks for:
+55:     # - Database connections
+56:     # - External services
+57: 
+58:     # For now, return basic status
+59:     checks["config_loaded"] = config is not None
+60: 
+61:     all_healthy = all(checks.values())
+62: 
+63:     return {
+64:         "status": "ready" if all_healthy else "not_ready",
+65:         "timestamp": datetime.now(UTC).isoformat(),
+66:         "checks": checks,
+67:     }
+68: 
+69: 
+70: @router.get("/health/live")
+71: async def liveness_check() -> dict[str, Any]:
+72:     """Liveness check for Kubernetes/orchestration.
+73: 
+74:     Simple check that the application is running.
+75: 
+76:     Returns:
+77:         Liveness status
+78:     """
+79:     return {
+80:         "status": "alive",
+81:         "timestamp": datetime.now(UTC).isoformat(),
+82:     }
+````
+
+## File: src/khora/cli/__init__.py
+````python
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.0.9")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
+````
+
 ## File: src/khora/storage/backends/pgvector.py
 ````python
   1: """pgvector backend for vector embeddings storage.
@@ -24031,7 +24195,7 @@ README.md
 523:                 .offset(offset)
 524:             )
 525:             rows = result.scalars().all()
-526:             return [self._chunk_from_model(row) for row in rows]
+526:             return [self._chunk_model_to_domain(row) for row in rows]
 527: 
 528:     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
 529:         """Get statistics about embeddings in a namespace."""
@@ -24055,149 +24219,6 @@ README.md
 547:                 "chunk_embeddings": chunk_count.scalar_one(),
 548:                 "entity_embeddings": entity_count.scalar_one(),
 549:             }
-````
-
-## File: src/khora/api/routes/status.py
-````python
- 1: """Status endpoints for Khora API."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: router = APIRouter()
-11: 
-12: 
-13: @router.get("/status")
-14: async def status_check(request: Request) -> dict[str, Any]:
-15:     """Basic status check endpoint.
-16: 
-17:     Returns:
-18:         Status with timestamp and version
-19:     """
-20:     return {
-21:         "status": "ok",
-22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.9",
-24:         "service": "khora",
-25:     }
-26: 
-27: 
-28: @router.get("/health")
-29: async def health_check(request: Request) -> dict[str, Any]:
-30:     """Health check endpoint for orchestration systems.
-31: 
-32:     Returns:
-33:         Health status with timestamp
-34:     """
-35:     return {
-36:         "status": "healthy",
-37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.9",
-39:     }
-40: 
-41: 
-42: @router.get("/health/ready")
-43: async def readiness_check(request: Request) -> dict[str, Any]:
-44:     """Readiness check for Kubernetes/orchestration.
-45: 
-46:     Checks that all required services are available.
-47: 
-48:     Returns:
-49:         Readiness status with component checks
-50:     """
-51:     config = request.app.state.config
-52:     checks: dict[str, bool] = {}
-53: 
-54:     # TODO: Add actual health checks for:
-55:     # - Database connections
-56:     # - External services
-57: 
-58:     # For now, return basic status
-59:     checks["config_loaded"] = config is not None
-60: 
-61:     all_healthy = all(checks.values())
-62: 
-63:     return {
-64:         "status": "ready" if all_healthy else "not_ready",
-65:         "timestamp": datetime.now(UTC).isoformat(),
-66:         "checks": checks,
-67:     }
-68: 
-69: 
-70: @router.get("/health/live")
-71: async def liveness_check() -> dict[str, Any]:
-72:     """Liveness check for Kubernetes/orchestration.
-73: 
-74:     Simple check that the application is running.
-75: 
-76:     Returns:
-77:         Liveness status
-78:     """
-79:     return {
-80:         "status": "alive",
-81:         "timestamp": datetime.now(UTC).isoformat(),
-82:     }
-````
-
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.0.9")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
 ````
 
 ## File: tests/unit/test_api.py
@@ -26419,109 +26440,125 @@ README.md
  36:     "prefect>=3.6.13",
  37:     # Token counting
  38:     "tiktoken>=0.12.0",
- 39: ]
- 40: 
- 41: [project.optional-dependencies]
- 42: dev = [
- 43:     "pytest>=9.0.2",
- 44:     "pytest-cov>=7.0.0",
- 45:     "pytest-mock>=3.15.0",
- 46:     "pytest-asyncio>=1.3.0",
- 47:     "coverage>=7.13.2",
- 48:     "black>=26.0.0",
- 49:     "ruff>=0.14.14",
- 50:     "isort>=7.0.0",
- 51:     "prek>=0.3.0",
- 52:     "faker>=40.0.0",
- 53: ]
- 54: # Data storage backends
- 55: postgres = [
- 56:     "asyncpg>=0.31.0",
- 57:     "pgvector>=0.4.2",
- 58: ]
- 59: # Neural reranking
- 60: reranking = [
- 61:     "sentence-transformers>=3.0.0",
- 62: ]
- 63: 
- 64: [project.scripts]
- 65: khora = "khora:main"
- 66: 
- 67: [build-system]
- 68: requires = ["uv_build>=0.8.17,<0.9.0"]
- 69: build-backend = "uv_build"
- 70: 
- 71: [tool.pytest.ini_options]
- 72: testpaths = ["tests"]
- 73: python_files = ["test_*.py"]
- 74: python_classes = ["Test*"]
- 75: python_functions = ["test_*"]
- 76: addopts = [
- 77:     "--strict-markers",
- 78:     "--strict-config",
- 79:     "--cov=khora",
- 80:     "--cov-branch",
- 81:     "--cov-report=term-missing",
- 82:     "--cov-fail-under=30",
- 83: ]
- 84: markers = [
- 85:     "unit: Unit tests",
- 86:     "integration: Integration tests",
- 87:     "e2e: End-to-end tests",
- 88: ]
- 89: asyncio_mode = "auto"
- 90: 
- 91: [tool.coverage.run]
- 92: source = ["src"]
- 93: omit = [
- 94:     "tests/*",
- 95:     "*/test_*.py",
- 96:     "*/__pycache__/*",
- 97: ]
- 98: 
- 99: [tool.coverage.report]
-100: exclude_lines = [
-101:     "pragma: no cover",
-102:     "def __repr__",
-103:     "raise AssertionError",
-104:     "raise NotImplementedError",
-105:     "if __name__ == .__main__.:",
-106:     "if TYPE_CHECKING:",
-107: ]
-108: 
-109: [tool.black]
-110: target-version = ["py313"]
-111: line-length = 120
-112: 
-113: [tool.isort]
-114: profile = "black"
-115: line_length = 120
-116: known_first_party = ["khora"]
-117: skip_gitignore = true
-118: 
-119: [tool.ruff]
-120: target-version = "py313"
-121: line-length = 120
-122: 
-123: [tool.ruff.lint]
-124: select = ["E", "F", "W"]
-125: ignore = ["E501"]  # Line too long - handled by black
-126: 
-127: [dependency-groups]
-128: dev = [
-129:     "prek>=0.3.0",
-130:     "pytest>=9.0.2",
-131:     "pytest-asyncio>=1.3.0",
-132:     "pytest-cov>=7.0.0",
-133:     "black>=26.0.0",
-134:     "ruff>=0.14.14",
-135:     "isort>=7.0.0",
-136: ]
+ 39:     # Neural reranking
+ 40:     "sentence-transformers>=3.0.0",
+ 41: ]
+ 42: 
+ 43: [project.optional-dependencies]
+ 44: dev = [
+ 45:     "pytest>=9.0.2",
+ 46:     "pytest-cov>=7.0.0",
+ 47:     "pytest-mock>=3.15.0",
+ 48:     "pytest-asyncio>=1.3.0",
+ 49:     "coverage>=7.13.2",
+ 50:     "black>=26.0.0",
+ 51:     "ruff>=0.14.14",
+ 52:     "isort>=7.0.0",
+ 53:     "prek>=0.3.0",
+ 54:     "faker>=40.0.0",
+ 55: ]
+ 56: # Data storage backends
+ 57: postgres = [
+ 58:     "asyncpg>=0.31.0",
+ 59:     "pgvector>=0.4.2",
+ 60: ]
+ 61: # Neural reranking
+ 62: reranking = [
+ 63:     "sentence-transformers>=3.0.0",
+ 64: ]
+ 65: 
+ 66: [project.scripts]
+ 67: khora = "khora:main"
+ 68: 
+ 69: [build-system]
+ 70: requires = ["uv_build>=0.8.17,<0.9.0"]
+ 71: build-backend = "uv_build"
+ 72: 
+ 73: [tool.pytest.ini_options]
+ 74: testpaths = ["tests"]
+ 75: python_files = ["test_*.py"]
+ 76: python_classes = ["Test*"]
+ 77: python_functions = ["test_*"]
+ 78: addopts = [
+ 79:     "--strict-markers",
+ 80:     "--strict-config",
+ 81:     "--cov=khora",
+ 82:     "--cov-branch",
+ 83:     "--cov-report=term-missing",
+ 84:     "--cov-fail-under=30",
+ 85: ]
+ 86: markers = [
+ 87:     "unit: Unit tests",
+ 88:     "integration: Integration tests",
+ 89:     "e2e: End-to-end tests",
+ 90: ]
+ 91: asyncio_mode = "auto"
+ 92: 
+ 93: [tool.coverage.run]
+ 94: source = ["src"]
+ 95: omit = [
+ 96:     "tests/*",
+ 97:     "*/test_*.py",
+ 98:     "*/__pycache__/*",
+ 99: ]
+100: 
+101: [tool.coverage.report]
+102: exclude_lines = [
+103:     "pragma: no cover",
+104:     "def __repr__",
+105:     "raise AssertionError",
+106:     "raise NotImplementedError",
+107:     "if __name__ == .__main__.:",
+108:     "if TYPE_CHECKING:",
+109: ]
+110: 
+111: [tool.black]
+112: target-version = ["py313"]
+113: line-length = 120
+114: 
+115: [tool.isort]
+116: profile = "black"
+117: line_length = 120
+118: known_first_party = ["khora"]
+119: skip_gitignore = true
+120: 
+121: [tool.ruff]
+122: target-version = "py313"
+123: line-length = 120
+124: 
+125: [tool.ruff.lint]
+126: select = ["E", "F", "W"]
+127: ignore = ["E501"]  # Line too long - handled by black
+128: 
+129: [dependency-groups]
+130: dev = [
+131:     "prek>=0.3.0",
+132:     "pytest>=9.0.2",
+133:     "pytest-asyncio>=1.3.0",
+134:     "pytest-cov>=7.0.0",
+135:     "black>=26.0.0",
+136:     "ruff>=0.14.14",
+137:     "isort>=7.0.0",
+138: ]
 ````
 
 
 
 # Git Logs
+
+## Commit: 2026-01-29 20:41:16 +0100
+**Message:** fix: safely convert Neo4j graph elements and fix pgvector method name
+
+**Files:**
+- src/khora/storage/backends/neo4j.py
+- src/khora/storage/backends/pgvector.py
+
+## Commit: 2026-01-29 12:55:39 +0100
+**Message:** chore: update packages
+
+**Files:**
+- REPOMIX.md
+- uv.lock
 
 ## Commit: 2026-01-29 10:13:27 +0100
 **Message:** feat: add Slack conversation chunker with per-message retrieval
@@ -26732,44 +26769,3 @@ README.md
 
 **Files:**
 - src/khora/extraction/expansion/rule_engine.py
-
-## Commit: 2026-01-27 20:17:09 +0100
-**Message:** docs: add comprehensive documentation
-
-**Files:**
-- README.md
-- docs/architecture/event-sourcing.md
-- docs/architecture/multi-tenancy.md
-- docs/architecture/overview.md
-- docs/architecture/storage-backends.md
-- docs/data-models/documents-chunks.md
-- docs/data-models/events.md
-- docs/data-models/knowledge-graph.md
-- docs/data-models/overview.md
-- docs/extraction/chunkers.md
-- docs/extraction/embedders.md
-- docs/extraction/expertise-system.md
-- docs/extraction/extractors.md
-- docs/extraction/ingestion-pipeline.md
-- docs/extraction/overview.md
-- docs/extraction/semantic-expansion.md
-- docs/query-engine/agentic-search.md
-- docs/query-engine/fusion.md
-- docs/query-engine/overview.md
-- docs/query-engine/query-understanding.md
-- docs/query-engine/search-modes.md
-- docs/query-engine/temporal-queries.md
-- docs/roadmap.md
-
-## Commit: 2026-01-27 18:26:41 +0100
-**Message:** Bump version to 0.0.7
-
-**Files:**
-- REPOMIX.md
-- pyproject.toml
-- src/khora/__init__.py
-- src/khora/api/app.py
-- src/khora/api/routes/status.py
-- src/khora/cli/__init__.py
-- tests/unit/test_api.py
-- uv.lock
