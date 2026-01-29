@@ -92,14 +92,25 @@ class ChatEngine:
         )
 
         # Convert to simple dict format for prompt
+        # Resolve source_system from parent documents (chunks don't store it directly)
         search_results = []
+        doc_cache: dict[str, str] = {}
         for chunk, score in recall_result.chunks[:5]:
             source = "unknown"
-            if hasattr(chunk, "metadata") and chunk.metadata:
-                if isinstance(chunk.metadata, dict):
-                    source = chunk.metadata.get("source", "unknown")
-                elif hasattr(chunk.metadata, "source"):
-                    source = chunk.metadata.source or "unknown"
+            if chunk.document_id:
+                doc_id_str = str(chunk.document_id)
+                if doc_id_str in doc_cache:
+                    source = doc_cache[doc_id_str]
+                else:
+                    try:
+                        doc = await self.lake.storage.get_document(chunk.document_id)
+                        if doc and doc.metadata:
+                            source = doc.metadata.custom.get("source_system", "")
+                            if not source:
+                                source = doc.metadata.source.split("/")[0] if doc.metadata.source else "unknown"
+                            doc_cache[doc_id_str] = source
+                    except Exception:
+                        pass
 
             search_results.append(
                 {
