@@ -94,6 +94,14 @@ class PipelineSettings(BaseModel):
     chunk_size: int = Field(default=512, description="Target chunk size in tokens")
     chunk_overlap: int = Field(default=50, description="Overlap between chunks in tokens")
 
+    # Conversation chunking settings
+    conversation_time_gap_minutes: int = Field(default=15, description="Time gap (minutes) to split conversations")
+    conversation_max_group_size: int = Field(default=50, description="Max messages per conversation chunk")
+    conversation_min_group_size: int = Field(default=2, description="Min messages per chunk (merges below this)")
+    conversation_semantic_threshold: float | None = Field(
+        default=None, description="Optional cosine similarity threshold for semantic splitting"
+    )
+
     # Extraction settings
     extract_entities: bool = Field(default=True, description="Extract entities from documents")
     entity_types: list[str] = Field(

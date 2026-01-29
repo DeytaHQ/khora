@@ -189,12 +189,38 @@ DEFAULT_SEPARATORS = [
 - Technical documentation
 - Any content with clear hierarchy
 
+### Conversation Chunker
+
+Groups Slack messages into coherent conversation chunks using thread-awareness, temporal proximity, and optional semantic similarity. Unlike text chunkers, it operates on structured `SlackMessage` objects and preserves per-message metadata (author, timestamp, character offsets) for individual message retrieval.
+
+```python
+from khora.extraction.chunkers import ConversationChunker, ConversationChunkerConfig
+
+config = ConversationChunkerConfig(time_gap_minutes=15, max_group_size=50)
+chunker = ConversationChunker(config=config)
+chunks = chunker.chunk_messages(messages)
+```
+
+**How it works:**
+
+1. **Thread grouping** — messages sharing a `thread_ts` are kept together
+2. **Temporal windowing** — top-level messages split on time gaps (default: 15 min)
+3. **Size enforcement** — groups exceeding `max_group_size` are split; tiny groups merge with neighbours
+
+**Best for:**
+- Slack messages and threads
+- Any multi-author conversation data
+- When you need individual message retrieval from search results
+
+See [Conversation Chunking](conversation-chunking.md) for full details.
+
 ## Choosing the Right Chunker
 
 | Content Type | Recommended | Why |
 |--------------|-------------|-----|
 | Blog posts, articles | Semantic | Natural language with paragraphs |
 | Technical docs | Recursive | Headers, code blocks, structure |
+| Slack conversations | Conversation | Thread-aware, per-message metadata |
 | Chat logs | Semantic | Conversational, sentence-focused |
 | Code files | Recursive | Functions, classes, blocks |
 | CSV/structured data | Fixed | No natural boundaries |

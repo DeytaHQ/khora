@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .base import Chunker, ChunkResult
+from .conversation import ConversationChunker, ConversationChunkerConfig, SlackMessage
 from .fixed import FixedChunker
 from .recursive import RecursiveChunker
 from .semantic import SemanticChunker
@@ -32,6 +33,9 @@ def create_chunker(
         return SemanticChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs)
     elif strategy == "recursive":
         return RecursiveChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs)
+    elif strategy == "conversation":
+        config = ConversationChunkerConfig(**kwargs)
+        return ConversationChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, config=config)
     else:
         raise ValueError(f"Unknown chunking strategy: {strategy}")
 
@@ -39,8 +43,11 @@ def create_chunker(
 __all__ = [
     "Chunker",
     "ChunkResult",
+    "ConversationChunker",
+    "ConversationChunkerConfig",
     "FixedChunker",
     "SemanticChunker",
+    "SlackMessage",
     "RecursiveChunker",
     "create_chunker",
 ]
