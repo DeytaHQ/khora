@@ -21,6 +21,7 @@ from .coordinator import StorageCoordinator
 from .event_store import PostgreSQLEventStore
 from .expertise_store import ExpertiseStore
 from .factory import StorageConfig, StorageFactory, create_storage_coordinator
+from .optimize import optimize_neo4j, optimize_postgresql, optimize_storage
 
 __all__ = [
     # Protocols
@@ -38,6 +39,10 @@ __all__ = [
     "StorageConfig",
     "StorageFactory",
     "create_storage_coordinator",
+    # Optimization
+    "optimize_storage",
+    "optimize_postgresql",
+    "optimize_neo4j",
     # Expertise
     "ExpertiseStore",
 ]
