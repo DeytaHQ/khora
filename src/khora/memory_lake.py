@@ -133,6 +133,16 @@ class MemoryLake:
             embedder=self._embedder,
         )
 
+        # Initialize telemetry (no-op if KHORA_TELEMETRY_DATABASE_URL not set)
+        from khora.telemetry import init_telemetry
+        from khora.telemetry.config import TelemetryConfig
+
+        telemetry_cfg = TelemetryConfig(
+            database_url=self._config.telemetry_database_url,
+            service_name=self._config.telemetry_service_name,
+        )
+        await init_telemetry(telemetry_cfg)
+
         self._connected = True
         logger.info("Memory Lake connected")
 
@@ -142,6 +152,11 @@ class MemoryLake:
             return
 
         logger.info("Disconnecting Memory Lake...")
+
+        # Shutdown telemetry
+        from khora.telemetry import shutdown_telemetry
+
+        await shutdown_telemetry()
 
         if self._storage:
             await self._storage.disconnect()

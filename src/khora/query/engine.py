@@ -499,6 +499,12 @@ class HybridQueryEngine:
 
         logger.debug(f"Executing query: {query_text[:50]}... (mode={cfg.mode.name})")
 
+        from uuid import uuid4 as _uuid4
+
+        from khora.telemetry.instrument import pipeline_stage
+
+        _run_id = _uuid4()
+
         # Initialize metrics
         metrics = SearchMetrics()
         metrics.total_timer.start()
@@ -527,12 +533,13 @@ class HybridQueryEngine:
         understanding: UnderstandingResult | None = None
         if cfg.enable_query_understanding:
             try:
-                understanding = await self._query_understanding.understand(
-                    query_text,
-                    expand_query=cfg.enable_query_expansion,
-                    extract_entities=cfg.enable_entity_extraction,
-                    detect_temporal=cfg.enable_temporal_detection,
-                )
+                async with pipeline_stage("query", "understanding", _run_id, namespace_id=namespace_id):
+                    understanding = await self._query_understanding.understand(
+                        query_text,
+                        expand_query=cfg.enable_query_expansion,
+                        extract_entities=cfg.enable_entity_extraction,
+                        detect_temporal=cfg.enable_temporal_detection,
+                    )
                 metadata["understanding"] = {
                     "intent": understanding.intent.name,
                     "answer_type": understanding.answer_type.name,
@@ -608,14 +615,15 @@ class HybridQueryEngine:
         linked_entity_ids: list[UUID] = []
         if cfg.enable_entity_linking and understanding and understanding.entities:
             try:
-                linker = EntityLinker(
-                    self._storage,
-                    self._embedder,
-                    fuzzy_threshold=cfg.entity_linking_fuzzy_threshold,
-                    embedding_threshold=cfg.entity_linking_embedding_threshold,
-                    max_candidates=cfg.entity_linking_max_candidates,
-                )
-                linking_result = await linker.link(understanding.entities, namespace_id)
+                async with pipeline_stage("query", "entity_linking", _run_id, namespace_id=namespace_id):
+                    linker = EntityLinker(
+                        self._storage,
+                        self._embedder,
+                        fuzzy_threshold=cfg.entity_linking_fuzzy_threshold,
+                        embedding_threshold=cfg.entity_linking_embedding_threshold,
+                        max_candidates=cfg.entity_linking_max_candidates,
+                    )
+                    linking_result = await linker.link(understanding.entities, namespace_id)
                 linked_entity_ids = linking_result.get_linked_entity_ids()
 
                 # Track linked entity names for graph info
@@ -764,6 +772,18 @@ class HybridQueryEngine:
         search_contributions.total_search_latency_ms = (time.perf_counter() - search_start_time) * 1000
         metrics.search_timer.stop()
 
+        # Record search stage telemetry
+        from khora.telemetry import get_collector as _get_collector
+
+        _get_collector().record_pipeline_stage(
+            pipeline="query",
+            stage="search",
+            run_id=_run_id,
+            latency_ms=search_contributions.total_search_latency_ms,
+            record_count=sum(len(v) for v in all_chunk_results.values()),
+            namespace_id=namespace_id,
+        )
+
         # Populate per-source counts into metrics
         metrics.vector_chunk_count = search_contributions.vector.chunk_count
         metrics.graph_chunk_count = search_contributions.graph.chunk_count
@@ -810,6 +830,15 @@ class HybridQueryEngine:
 
         search_contributions.fusion_latency_ms = (time.perf_counter() - fusion_start_time) * 1000
         metrics.fusion_timer.stop()
+
+        _get_collector().record_pipeline_stage(
+            pipeline="query",
+            stage="fusion",
+            run_id=_run_id,
+            latency_ms=search_contributions.fusion_latency_ms,
+            record_count=len(fused_chunks) + len(fused_entities),
+            namespace_id=namespace_id,
+        )
         metrics.fused_chunk_count = len(fused_chunks)
         metrics.fused_entity_count = len(fused_entities)
 

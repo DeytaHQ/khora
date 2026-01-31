@@ -386,6 +386,16 @@ class KhoraConfig(BaseSettings):
     # Query pipeline configuration
     query: QuerySettings = Field(default_factory=QuerySettings)
 
+    # Telemetry
+    telemetry_database_url: str | None = Field(
+        default=None,
+        description="PostgreSQL URL for telemetry database (set KHORA_TELEMETRY_DATABASE_URL to enable)",
+    )
+    telemetry_service_name: str = Field(
+        default="khora",
+        description="Service name tag for telemetry events",
+    )
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> KhoraConfig:
         """Load configuration from a YAML file.

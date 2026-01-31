@@ -1,0 +1,204 @@
+"""Tests for telemetry collector and initialization."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+import pytest
+
+from khora.telemetry import NoOpCollector, TelemetryCollector, get_collector, init_telemetry, shutdown_telemetry
+from khora.telemetry.config import TelemetryConfig
+from khora.telemetry.models import LLMEvent, PipelineEvent, StorageEvent
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+
+class TestModels:
+    def test_llm_event_defaults(self):
+        event = LLMEvent()
+        assert event.service_name == "khora"
+        assert event.status == "success"
+        assert event.prompt_tokens == 0
+
+    def test_storage_event_defaults(self):
+        event = StorageEvent()
+        assert event.backend == ""
+        assert event.record_count == 0
+
+    def test_pipeline_event_defaults(self):
+        event = PipelineEvent()
+        assert event.pipeline == ""
+        assert event.run_id is None
+
+    def test_llm_event_with_values(self):
+        event = LLMEvent(
+            operation="embedding",
+            model="text-embedding-3-small",
+            prompt_tokens=100,
+            total_tokens=100,
+            latency_ms=50.0,
+        )
+        assert event.model == "text-embedding-3-small"
+        assert event.prompt_tokens == 100
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+class TestTelemetryConfig:
+    def test_from_env_defaults(self):
+        with patch.dict("os.environ", {}, clear=True):
+            cfg = TelemetryConfig.from_env()
+            assert cfg.database_url is None
+            assert cfg.service_name == "khora"
+
+    def test_from_env_with_url(self):
+        with patch.dict("os.environ", {"KHORA_TELEMETRY_DATABASE_URL": "postgresql://localhost/telemetry"}):
+            cfg = TelemetryConfig.from_env()
+            assert cfg.database_url == "postgresql://localhost/telemetry"
+
+    def test_from_env_custom_service(self):
+        with patch.dict("os.environ", {"KHORA_TELEMETRY_SERVICE_NAME": "genesis"}):
+            cfg = TelemetryConfig.from_env()
+            assert cfg.service_name == "genesis"
+
+
+# ---------------------------------------------------------------------------
+# NoOpCollector
+# ---------------------------------------------------------------------------
+
+
+class TestNoOpCollector:
+    @pytest.mark.asyncio
+    async def test_noop_start_shutdown(self):
+        collector = NoOpCollector()
+        await collector.start()
+        await collector.shutdown()
+
+    def test_noop_record_methods(self):
+        collector = NoOpCollector()
+        collector.record_llm_call(operation="test", model="gpt-4o")
+        collector.record_storage_op(backend="postgresql", operation="create_document")
+        collector.record_pipeline_stage(pipeline="ingestion", stage="chunking")
+        # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# TelemetryCollector
+# ---------------------------------------------------------------------------
+
+
+class TestTelemetryCollector:
+    def test_record_llm_call_buffers(self):
+        engine = MagicMock()
+        collector = TelemetryCollector(engine, service_name="test")
+        collector.record_llm_call(operation="embedding", model="gpt-4o", prompt_tokens=100)
+        assert len(collector._buffer) == 1
+        kind, data = collector._buffer[0]
+        assert kind == "llm"
+        assert data["operation"] == "embedding"
+        assert data["model"] == "gpt-4o"
+
+    def test_record_storage_op_buffers(self):
+        engine = MagicMock()
+        collector = TelemetryCollector(engine, service_name="test")
+        collector.record_storage_op(backend="pgvector", operation="search_similar_chunks", record_count=10)
+        assert len(collector._buffer) == 1
+        kind, data = collector._buffer[0]
+        assert kind == "storage"
+        assert data["backend"] == "pgvector"
+        assert data["record_count"] == 10
+
+    def test_record_pipeline_stage_buffers(self):
+        engine = MagicMock()
+        collector = TelemetryCollector(engine, service_name="test")
+        run_id = uuid4()
+        collector.record_pipeline_stage(pipeline="ingestion", stage="chunking", run_id=run_id)
+        assert len(collector._buffer) == 1
+        kind, data = collector._buffer[0]
+        assert kind == "pipeline"
+        assert data["pipeline"] == "ingestion"
+
+    def test_service_name_applied(self):
+        engine = MagicMock()
+        collector = TelemetryCollector(engine, service_name="genesis")
+        collector.record_llm_call(operation="chat")
+        _, data = collector._buffer[0]
+        assert data["service_name"] == "genesis"
+
+    @pytest.mark.asyncio
+    async def test_flush_drains_buffer(self):
+        engine = AsyncMock()
+        conn = AsyncMock()
+        engine.begin.return_value.__aenter__ = AsyncMock(return_value=conn)
+        engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        collector = TelemetryCollector(engine, service_name="test")
+        collector.record_llm_call(operation="test")
+        collector.record_storage_op(backend="pg", operation="test")
+        collector.record_pipeline_stage(pipeline="test", stage="test")
+
+        assert len(collector._buffer) == 3
+        await collector._flush()
+        assert len(collector._buffer) == 0
+
+    @pytest.mark.asyncio
+    async def test_flush_handles_errors_gracefully(self):
+        engine = AsyncMock()
+        engine.begin.side_effect = Exception("connection failed")
+
+        collector = TelemetryCollector(engine, service_name="test")
+        collector.record_llm_call(operation="test")
+
+        # Should not raise
+        await collector._flush()
+        # Buffer is drained even on error (events are dropped)
+        assert len(collector._buffer) == 0
+
+
+# ---------------------------------------------------------------------------
+# init_telemetry / shutdown_telemetry
+# ---------------------------------------------------------------------------
+
+
+class TestInitTelemetry:
+    @pytest.mark.asyncio
+    async def test_init_returns_noop_when_no_url(self):
+        cfg = TelemetryConfig(database_url=None)
+        collector = await init_telemetry(cfg)
+        assert isinstance(collector, NoOpCollector)
+        assert isinstance(get_collector(), NoOpCollector)
+
+    @pytest.mark.asyncio
+    async def test_init_returns_collector_when_url_set(self):
+        cfg = TelemetryConfig(database_url="postgresql://localhost/telemetry")
+
+        with patch("khora.telemetry.session.create_telemetry_engine") as mock_engine_factory:
+            mock_engine = MagicMock()
+            # Make begin() return an async context manager
+            mock_conn = AsyncMock()
+            cm = AsyncMock()
+            cm.__aenter__ = AsyncMock(return_value=mock_conn)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            mock_engine.begin.return_value = cm
+            mock_engine.dispose = AsyncMock()
+            mock_engine_factory.return_value = mock_engine
+
+            collector = await init_telemetry(cfg)
+            assert isinstance(collector, TelemetryCollector)
+            assert isinstance(get_collector(), TelemetryCollector)
+
+            # Clean up
+            await shutdown_telemetry()
+            assert isinstance(get_collector(), NoOpCollector)
+
+    @pytest.mark.asyncio
+    async def test_init_from_env_defaults(self):
+        with patch.dict("os.environ", {}, clear=True):
+            collector = await init_telemetry()
+            assert isinstance(collector, NoOpCollector)

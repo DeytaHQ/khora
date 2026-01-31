@@ -113,15 +113,33 @@ class LiteLLMEmbedder(Embedder):
 
     async def _embed_batch_internal(self, texts: list[str]) -> list[list[float]]:
         """Internal batch embedding without chunking."""
+        import time as _time
+
         import litellm
 
         for attempt in range(self._max_retries):
             try:
+                _t0 = _time.perf_counter()
                 response = await litellm.aembedding(
                     model=self._model,
                     input=texts,
                     timeout=self._timeout,
                 )
+                _latency = (_time.perf_counter() - _t0) * 1000
+
+                # Record telemetry
+                from khora.telemetry import get_collector
+
+                usage = getattr(response, "usage", None)
+                get_collector().record_llm_call(
+                    operation="embedding",
+                    model=self._model,
+                    prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                    total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                    latency_ms=_latency,
+                    metadata={"batch_size": len(texts)},
+                )
+
                 return [item["embedding"] for item in response.data]
             except Exception as e:
                 if attempt < self._max_retries - 1:

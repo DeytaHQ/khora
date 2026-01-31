@@ -185,27 +185,41 @@ async def process_document(
     await storage.update_document(document)
 
     try:
+        from uuid import uuid4 as _uuid4
+
+        from khora.telemetry.instrument import pipeline_stage
+
+        _run_id = _uuid4()
+        _ns_id = document.namespace_id
+
         # Step 1: Chunk
-        chunks = await chunk_document(
-            document,
-            strategy=chunk_strategy,
-            chunk_size=chunk_size,
-        )
+        async with pipeline_stage("ingestion", "chunking", _run_id, namespace_id=_ns_id):
+            chunks = await chunk_document(
+                document,
+                strategy=chunk_strategy,
+                chunk_size=chunk_size,
+            )
         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
 
         # Step 2: Embed (already batched internally)
-        chunks = await embed_chunks(chunks, model=embedding_model)
+        async with pipeline_stage(
+            "ingestion", "embedding", _run_id, namespace_id=_ns_id, extra_metadata={"chunk_count": len(chunks)}
+        ):
+            chunks = await embed_chunks(chunks, model=embedding_model)
         logger.debug(f"Document {document.id}: generated embeddings")
 
         # Step 3: Extract entities (parallel extraction across chunks)
-        entities, relationships = await extract_entities(
-            chunks,
-            skill_name=skill_name,
-            expertise=resolved_expertise,
-            model=extraction_model,
-            max_concurrent=max_concurrent_extractions,
-            context=extraction_context,
-        )
+        async with pipeline_stage(
+            "ingestion", "extraction", _run_id, namespace_id=_ns_id, extra_metadata={"chunk_count": len(chunks)}
+        ):
+            entities, relationships = await extract_entities(
+                chunks,
+                skill_name=skill_name,
+                expertise=resolved_expertise,
+                model=extraction_model,
+                max_concurrent=max_concurrent_extractions,
+                context=extraction_context,
+            )
         logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
 
         # Step 4 (Optional): Semantic expansion
@@ -266,7 +280,14 @@ async def process_document(
             )
 
         # Step 4: Store chunks (batched)
-        await storage.create_chunks_batch(chunks)
+        async with pipeline_stage(
+            "ingestion",
+            "storage",
+            _run_id,
+            namespace_id=_ns_id,
+            extra_metadata={"chunk_count": len(chunks), "entity_count": len(entities)},
+        ):
+            await storage.create_chunks_batch(chunks)
 
         # Step 5: Store entities with deduplication
         # Process entities concurrently but with semaphore to avoid overwhelming the DB

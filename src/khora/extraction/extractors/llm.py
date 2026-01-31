@@ -179,6 +179,9 @@ class LLMEntityExtractor(EntityExtractor):
         async with self._semaphore:
             for attempt in range(self._max_retries):
                 try:
+                    import time as _time
+
+                    _t0 = _time.perf_counter()
                     response = await litellm.acompletion(
                         model=self._model,
                         messages=[
@@ -189,6 +192,20 @@ class LLMEntityExtractor(EntityExtractor):
                         max_tokens=self._max_tokens,
                         timeout=self._timeout,
                         response_format={"type": "json_object"},
+                    )
+                    _latency = (_time.perf_counter() - _t0) * 1000
+
+                    # Record telemetry
+                    from khora.telemetry import get_collector
+
+                    usage = getattr(response, "usage", None)
+                    get_collector().record_llm_call(
+                        operation="entity_extraction",
+                        model=self._model,
+                        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                        total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                        latency_ms=_latency,
                     )
 
                     content = response.choices[0].message.content
@@ -433,6 +450,9 @@ Return ONLY valid JSON, no other text."""
         async with self._semaphore:
             for attempt in range(self._max_retries):
                 try:
+                    import time as _time
+
+                    _t0 = _time.perf_counter()
                     response = await litellm.acompletion(
                         model=self._model,
                         messages=[
@@ -443,6 +463,21 @@ Return ONLY valid JSON, no other text."""
                         max_tokens=self._max_tokens,
                         timeout=self._timeout,
                         response_format={"type": "json_object"},
+                    )
+                    _latency = (_time.perf_counter() - _t0) * 1000
+
+                    # Record telemetry
+                    from khora.telemetry import get_collector
+
+                    usage = getattr(response, "usage", None)
+                    get_collector().record_llm_call(
+                        operation="entity_extraction_multi",
+                        model=self._model,
+                        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                        total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                        latency_ms=_latency,
+                        metadata={"batch_size": len(texts)},
                     )
 
                     content = response.choices[0].message.content

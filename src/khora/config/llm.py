@@ -248,6 +248,9 @@ async def acompletion(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    import time as _time
+
+    _t0 = _time.perf_counter()
     response = await litellm.acompletion(
         model=config.model,
         messages=messages,
@@ -256,6 +259,20 @@ async def acompletion(
         timeout=kwargs.pop("timeout", config.timeout),
         num_retries=kwargs.pop("num_retries", config.max_retries),
         **kwargs,
+    )
+    _latency = (_time.perf_counter() - _t0) * 1000
+
+    # Record telemetry
+    from khora.telemetry import get_collector
+
+    usage = getattr(response, "usage", None)
+    get_collector().record_llm_call(
+        operation=kwargs.get("_telemetry_op", "completion"),
+        model=config.model,
+        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        total_tokens=getattr(usage, "total_tokens", 0) or 0,
+        latency_ms=_latency,
     )
 
     return response.choices[0].message.content
@@ -288,11 +305,28 @@ async def aembedding(
     if isinstance(text, str):
         text = [text]
 
+    import time as _time
+
+    _t0 = _time.perf_counter()
     response = await litellm.aembedding(
         model=config.embedding_model,
         input=text,
         timeout=kwargs.pop("timeout", config.timeout),
         **kwargs,
+    )
+    _latency = (_time.perf_counter() - _t0) * 1000
+
+    # Record telemetry
+    from khora.telemetry import get_collector
+
+    usage = getattr(response, "usage", None)
+    get_collector().record_llm_call(
+        operation="embedding",
+        model=config.embedding_model,
+        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        total_tokens=getattr(usage, "total_tokens", 0) or 0,
+        latency_ms=_latency,
+        metadata={"batch_size": len(text)},
     )
 
     return [item["embedding"] for item in response.data]

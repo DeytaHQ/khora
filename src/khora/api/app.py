@@ -82,6 +82,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     logger.info("Shutting down Khora API server...")
     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
         await app.state.memory_lake.disconnect()
+    else:
+        # If MemoryLake wasn't initialized, still shut down telemetry
+        from ..telemetry import shutdown_telemetry
+
+        await shutdown_telemetry()
     await close_db()
 
 

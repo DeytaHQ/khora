@@ -135,11 +135,29 @@ class ChatEngine:
 
         # 4. Generate response
         logger.debug(f"Generating response with {self.llm_model}")
+        import time as _time
+
+        _t0 = _time.perf_counter()
         response = await litellm.acompletion(
             model=self.llm_model,
             messages=messages,
             max_tokens=self.persona.chat.response.max_tokens,
             temperature=self.persona.chat.response.temperature,
+        )
+        _latency = (_time.perf_counter() - _t0) * 1000
+
+        # Record telemetry
+        from khora.telemetry import get_collector
+
+        usage = getattr(response, "usage", None)
+        get_collector().record_llm_call(
+            operation="chat",
+            model=self.llm_model,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+            latency_ms=_latency,
+            namespace_id=namespace_id,
         )
 
         response_content = response.choices[0].message.content
