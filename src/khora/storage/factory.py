@@ -1,10 +1,12 @@
 """Storage factory for creating storage backends and coordinator.
 
 Creates and configures storage backends based on configuration.
+Supports registry-based dispatch for multiple graph and vector backend types.
 """
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -15,12 +17,46 @@ from .backends.postgresql import PostgreSQLBackend
 from .coordinator import StorageCoordinator
 
 if TYPE_CHECKING:
-    from .backends.base import EventStoreProtocol, GraphBackendProtocol
+    from .backends.base import EventStoreProtocol, GraphBackendProtocol, VectorBackendProtocol
+
+
+# ---------------------------------------------------------------------------
+# Backend registries: backend_name → (module_path, class_name)
+# ---------------------------------------------------------------------------
+
+_GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
+    "neo4j": ("khora.storage.backends.neo4j", "Neo4jBackend"),
+    "kuzu": ("khora.storage.backends.kuzu", "KuzuBackend"),
+    "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
+    "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
+}
+
+_VECTOR_REGISTRY: dict[str, tuple[str, str]] = {
+    "pgvector": ("khora.storage.backends.pgvector", "PgVectorBackend"),
+    "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
+}
+
+
+def _import_backend_class(module_path: str, class_name: str) -> type | None:
+    """Lazily import a backend class. Returns None if the dependency is missing."""
+    try:
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+    except ImportError as e:
+        logger.warning(f"Cannot import {class_name} from {module_path}: {e}")
+        return None
+    except AttributeError:
+        logger.warning(f"Class {class_name} not found in {module_path}")
+        return None
 
 
 @dataclass
 class StorageConfig:
-    """Configuration for storage backends."""
+    """Configuration for storage backends.
+
+    Supports both legacy flat fields (neo4j_url, pgvector_url, etc.) and
+    new-style discriminated union configs (graph_config, vector_config).
+    """
 
     # PostgreSQL configuration
     postgresql_url: str | None = None
@@ -28,15 +64,19 @@ class StorageConfig:
     postgresql_pool_size: int = 5
     postgresql_max_overflow: int = 10
 
-    # pgvector configuration (can share PostgreSQL URL)
+    # pgvector configuration (can share PostgreSQL URL) — legacy
     pgvector_url: str | None = None
     pgvector_embedding_dimension: int = 1536
 
-    # Neo4j configuration
+    # Neo4j configuration — legacy
     neo4j_url: str | None = None
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
+
+    # New-style backend configs (Pydantic models from config/schema.py)
+    graph_config: Any = None  # GraphConfig union type
+    vector_config: Any = None  # VectorConfig union type
 
     # Event store configuration (uses PostgreSQL by default)
     event_store_url: str | None = None
@@ -77,6 +117,10 @@ class StorageConfig:
         )
 
 
+# Cache for ArcadeDB dual-role instance sharing
+_arcadedb_instances: dict[str, Any] = {}
+
+
 @dataclass
 class StorageFactory:
     """Factory for creating storage backends."""
@@ -96,8 +140,31 @@ class StorageFactory:
             max_overflow=self.config.postgresql_max_overflow,
         )
 
-    def create_vector_backend(self) -> PgVectorBackend | None:
-        """Create the pgvector backend."""
+    def create_vector_backend(self) -> VectorBackendProtocol | None:
+        """Create the vector backend based on config."""
+        vector_config = self.config.vector_config
+
+        # New-style config dispatch
+        if vector_config is not None:
+            backend_name = getattr(vector_config, "backend", None)
+            if backend_name == "pgvector":
+                # PgVectorBackend has a specialized constructor
+                url = getattr(vector_config, "url", None)
+                if not url:
+                    logger.warning("pgvector URL not configured, vector backend disabled")
+                    return None
+                dim = getattr(vector_config, "embedding_dimension", 1536)
+                return PgVectorBackend(
+                    url,
+                    embedding_dimension=dim,
+                    echo=self.config.postgresql_echo,
+                    pool_size=self.config.postgresql_pool_size,
+                    max_overflow=self.config.postgresql_max_overflow,
+                )
+            elif backend_name and backend_name in _VECTOR_REGISTRY:
+                return self._create_from_registry(_VECTOR_REGISTRY, backend_name, vector_config, "vector")
+
+        # Legacy pgvector path
         if not self.config.pgvector_url:
             logger.warning("pgvector URL not configured, vector backend disabled")
             return None
@@ -111,12 +178,20 @@ class StorageFactory:
         )
 
     def create_graph_backend(self) -> GraphBackendProtocol | None:
-        """Create the Neo4j graph backend."""
+        """Create the graph backend based on config."""
+        graph_config = self.config.graph_config
+
+        # New-style config dispatch
+        if graph_config is not None:
+            backend_name = getattr(graph_config, "backend", None)
+            if backend_name and backend_name in _GRAPH_REGISTRY:
+                return self._create_from_registry(_GRAPH_REGISTRY, backend_name, graph_config, "graph")
+
+        # Legacy Neo4j path
         if not self.config.neo4j_url:
             logger.warning("Neo4j URL not configured, graph backend disabled")
             return None
 
-        # Import here to avoid dependency if not used
         try:
             from .backends.neo4j import Neo4jBackend
 
@@ -129,6 +204,42 @@ class StorageFactory:
         except ImportError:
             logger.warning("neo4j package not installed, graph backend disabled")
             return None
+
+    def _create_from_registry(
+        self,
+        registry: dict[str, tuple[str, str]],
+        backend_name: str,
+        config: Any,
+        role: str,
+    ) -> Any | None:
+        """Create a backend instance from registry via lazy import + from_config().
+
+        For ArcadeDB, reuses the same instance when it serves both graph and vector roles.
+        """
+        if backend_name == "arcadedb":
+            # ArcadeDB dual-role: reuse instance for same URL
+            url = getattr(config, "url", None) or ""
+            cache_key = f"arcadedb:{url}"
+            if cache_key in _arcadedb_instances:
+                logger.info(f"Reusing ArcadeDB instance for {role} role (url={url})")
+                return _arcadedb_instances[cache_key]
+
+        module_path, class_name = registry[backend_name]
+        cls = _import_backend_class(module_path, class_name)
+        if cls is None:
+            logger.warning(f"{backend_name} backend not available (missing dependency), {role} backend disabled")
+            return None
+
+        if not hasattr(cls, "from_config"):
+            raise ValueError(f"Backend class {class_name} does not implement from_config()")
+
+        instance = cls.from_config(config)
+
+        if backend_name == "arcadedb":
+            url = getattr(config, "url", None) or ""
+            _arcadedb_instances[f"arcadedb:{url}"] = instance
+
+        return instance
 
     def create_event_store(self) -> EventStoreProtocol | None:
         """Create the event store backend."""

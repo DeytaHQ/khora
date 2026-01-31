@@ -1129,7 +1129,7 @@ wheels = [
 
 [[package]]
 name = "khora"
-version = "0.0.13"
+version = "0.0.15"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -1153,6 +1153,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all-backends = [
+    { name = "asyncpg" },
+    { name = "httpx" },
+    { name = "kuzu" },
+    { name = "neo4j" },
+    { name = "pgvector" },
+]
+arcadedb = [
+    { name = "httpx" },
+]
 dev = [
     { name = "black" },
     { name = "coverage" },
@@ -1164,6 +1174,20 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-mock" },
     { name = "ruff" },
+]
+graph-all = [
+    { name = "httpx" },
+    { name = "kuzu" },
+    { name = "neo4j" },
+]
+kuzu = [
+    { name = "kuzu" },
+]
+memgraph = [
+    { name = "neo4j" },
+]
+neo4j = [
+    { name = "neo4j" },
 ]
 postgres = [
     { name = "asyncpg" },
@@ -1188,6 +1212,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.18.0" },
     { name = "asyncpg", specifier = ">=0.31.0" },
+    { name = "asyncpg", marker = "extra == 'all-backends'", specifier = ">=0.31.0" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.31.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=26.0.0" },
     { name = "click", specifier = ">=8.3.0" },
@@ -1195,12 +1220,23 @@ requires-dist = [
     { name = "faker", marker = "extra == 'dev'", specifier = ">=40.0.0" },
     { name = "fastapi", specifier = ">=0.128.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "httpx", marker = "extra == 'all-backends'", specifier = ">=0.28.0" },
+    { name = "httpx", marker = "extra == 'arcadedb'", specifier = ">=0.28.0" },
+    { name = "httpx", marker = "extra == 'graph-all'", specifier = ">=0.28.0" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "kuzu", marker = "extra == 'all-backends'", specifier = ">=0.8.0" },
+    { name = "kuzu", marker = "extra == 'graph-all'", specifier = ">=0.8.0" },
+    { name = "kuzu", marker = "extra == 'kuzu'", specifier = ">=0.8.0" },
     { name = "litellm", specifier = ">=1.81.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "neo4j", specifier = ">=6.1.0" },
+    { name = "neo4j", marker = "extra == 'all-backends'", specifier = ">=6.1.0" },
+    { name = "neo4j", marker = "extra == 'graph-all'", specifier = ">=6.1.0" },
+    { name = "neo4j", marker = "extra == 'memgraph'", specifier = ">=6.1.0" },
+    { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=6.1.0" },
     { name = "pgvector", specifier = ">=0.4.2" },
+    { name = "pgvector", marker = "extra == 'all-backends'", specifier = ">=0.4.2" },
     { name = "pgvector", marker = "extra == 'postgres'", specifier = ">=0.4.2" },
     { name = "prefect", specifier = ">=3.6.13" },
     { name = "prek", marker = "extra == 'dev'", specifier = ">=0.3.0" },
@@ -1218,7 +1254,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.40.0" },
 ]
-provides-extras = ["dev", "postgres", "reranking"]
+provides-extras = ["dev", "postgres", "neo4j", "kuzu", "memgraph", "arcadedb", "graph-all", "all-backends", "reranking"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1229,6 +1265,25 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "ruff", specifier = ">=0.14.14" },
+]
+
+[[package]]
+name = "kuzu"
+version = "0.11.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/96/0c/f141a81485729a072dc527b474e7580d5632309c68ad1a5aa6ed9ac45387/kuzu-0.11.3.tar.gz", hash = "sha256:e7bea3ca30c4bb462792eedcaa7f2125c800b243bb4a872e1eedc16917c1967a", size = 19430620, upload-time = "2025-10-10T13:36:54.984Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c9/e4/2c0e222a9b0605745234fec2774a25dd2e472699931f683f15d28ab8c076/kuzu-0.11.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e20ab3e3b20ccf75219872feb86582f959e313eeb59f51131adf4c91ebfabe30", size = 4093664, upload-time = "2025-10-10T13:36:13.116Z" },
+    { url = "https://files.pythonhosted.org/packages/88/05/3020ed9a0a7b492597f211f805233b77ef37266a23c27efc40bb7cb37402/kuzu-0.11.3-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:054479d3ce71410b8af2f5fa6aa37883db7fea5b25606af8d3bd7cf717aa5395", size = 4520498, upload-time = "2025-10-10T13:36:14.933Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/66/1a502700a7f2863f8f60621a412a7074d7eda9e92f18fd1d8d86905aa4d3/kuzu-0.11.3-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:143a37f1ae38b6b4337ccfcf42fa4f779a897223fff9c6c29f1a5a5a86911300", size = 6795804, upload-time = "2025-10-10T13:36:16.55Z" },
+    { url = "https://files.pythonhosted.org/packages/79/c2/1ea8cdc05946cb5906a7ebb451d7268e501ebb51ebecc0437969f8c07450/kuzu-0.11.3-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:548bfb3045d89bce1fbe89f4a890d636789671abfa80cbde2054c671e6069133", size = 7615668, upload-time = "2025-10-10T13:36:18.882Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/c3/336d6181f8f50126cf3d7186b3c5479f9f49d973145f79bed45cf87a9bb7/kuzu-0.11.3-cp313-cp313-win_amd64.whl", hash = "sha256:87bf6c369f182a59e5b8a38b3ca288b90fab2827577d9b0d2170a202c42bc8f5", size = 4714372, upload-time = "2025-10-10T13:36:20.877Z" },
+    { url = "https://files.pythonhosted.org/packages/94/db/e7e6cada6dc924eb8939bd35c5f724f5de4fc430a64d6d9e71b75cd0c271/kuzu-0.11.3-cp313-cp313t-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:eb5c165bc5838059e498e8325939fc6bac075e1941157e8df6ebdd710135d43b", size = 6798556, upload-time = "2025-10-10T13:36:22.472Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/68/a0fa02134cb255c80b5ed5bb5f6130fbbc75a8ae8be4fd6ea6eb6bc8014b/kuzu-0.11.3-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:88c73dfd3d6a1fb374031050b725236fa9dd9a95424b09b20086a3d274bed51f", size = 7620378, upload-time = "2025-10-10T13:36:24.453Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/b7/2a4569984995f09476dbf1ef2e0a7298aa9fdb8896f2e8195d80e11786f4/kuzu-0.11.3-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9d2752a9e37adda6aef3bf041932ae3a1cf74ca7e893bbbacdd5e62b3ac6f8c2", size = 6795649, upload-time = "2025-10-10T13:36:26.15Z" },
+    { url = "https://files.pythonhosted.org/packages/77/13/df6e06a7d7506743c3a6cfbe50ee3f9d3fc58228e2a2fcbe7e74e7c17b00/kuzu-0.11.3-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:86be7d113e4e2c6761b1701079af8aeffc04c6981517f2d6aa393e883cc46036", size = 7615882, upload-time = "2025-10-10T13:36:28.215Z" },
+    { url = "https://files.pythonhosted.org/packages/32/85/c52c3b167edcc67da3b8788a20a2fb5b4f045060cbe1aed6121ce3ce83d3/kuzu-0.11.3-cp314-cp314t-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d72ebd88e231b562e7a60ff88d200825d53e78a681bddd7f8d77b78126a5060c", size = 6798657, upload-time = "2025-10-10T13:36:29.935Z" },
+    { url = "https://files.pythonhosted.org/packages/06/be/5b4ff168718165c2ff5848ab79e22ecce72ad00522afee6820d390cb0753/kuzu-0.11.3-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:64c7ec822906bdee154eb38d93e64f184d8f94b30bbeaceaa252725f2b9efab3", size = 7620394, upload-time = "2025-10-10T13:36:31.69Z" },
 ]
 
 [[package]]

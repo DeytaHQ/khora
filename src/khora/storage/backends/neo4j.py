@@ -6,7 +6,6 @@ in Neo4j graph database.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -16,56 +15,15 @@ from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
 
 from khora.core.models import Entity, Episode, Relationship
 from khora.core.models.entity import EntityType, RelationshipType
+from khora.storage.backends.mixins import (
+    GraphBackendBase,
+)
+from khora.storage.backends.mixins import deserialize_dict as _deserialize_dict
+from khora.storage.backends.mixins import element_to_dict as _element_to_dict
+from khora.storage.backends.mixins import serialize_dict as _serialize_dict
 
 
-def _serialize_dict(value: dict[str, Any] | None) -> str | None:
-    """Serialize a dict to JSON string for Neo4j storage.
-
-    Neo4j property values can only be primitive types or arrays thereof,
-    not nested objects. We serialize dicts to JSON strings.
-    """
-    if value is None:
-        return None
-    return json.dumps(value)
-
-
-def _deserialize_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
-    """Deserialize a JSON string back to dict.
-
-    Handles both string (new format) and dict (legacy) values.
-    """
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
-
-def _element_to_dict(element: Any) -> dict[str, Any]:
-    """Safely convert a Neo4j graph element (Node, Relationship, or raw value) to a dict.
-
-    Handles Neo4j Node/Relationship objects, plain dicts, and unexpected types
-    (e.g. strings returned by some driver serialisation paths).
-    """
-    if isinstance(element, dict):
-        return element
-    # neo4j.graph.Node / Relationship expose _properties
-    if hasattr(element, "_properties"):
-        return dict(element._properties)
-    # Some driver versions make Node/Relationship a Mapping
-    if hasattr(element, "items"):
-        try:
-            return dict(element.items())
-        except Exception:
-            pass
-    # Last resort – avoid crashing on unexpected types
-    return {"_raw": str(element)}
-
-
-class Neo4jBackend:
+class Neo4jBackend(GraphBackendBase):
     """Neo4j backend for knowledge graph operations.
 
     Stores entities as nodes and relationships as edges in Neo4j,
@@ -96,6 +54,16 @@ class Neo4jBackend:
         self._database = database
         self._max_connection_pool_size = max_connection_pool_size
         self._driver: AsyncDriver | None = None
+
+    @classmethod
+    def from_config(cls, config: Any) -> Neo4jBackend:
+        """Create a Neo4jBackend from a Neo4jConfig object."""
+        return cls(
+            url=config.url or "",
+            user=config.user,
+            password=config.password,
+            database=config.database,
+        )
 
     async def connect(self) -> None:
         """Establish connection to Neo4j."""

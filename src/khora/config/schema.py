@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Discriminator, Field, Tag, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,21 +48,161 @@ class ParsedNeo4jUrl:
         return cls(url=clean_url, user=user, password=password, database=database)
 
 
+# ---------------------------------------------------------------------------
+# Graph backend configs (discriminated union on "backend" field)
+# ---------------------------------------------------------------------------
+
+
+class Neo4jConfig(BaseModel):
+    """Neo4j graph backend configuration."""
+
+    backend: Literal["neo4j"] = "neo4j"
+    url: str | None = Field(default=None, description="Neo4j connection URL (bolt:// or neo4j://)")
+    user: str = Field(default="neo4j", description="Neo4j username")
+    password: str = Field(default="", description="Neo4j password")
+    database: str = Field(default="neo4j", description="Neo4j database name")
+
+
+class KuzuConfig(BaseModel):
+    """Kùzu embedded graph backend configuration."""
+
+    backend: Literal["kuzu"] = "kuzu"
+    database_path: str = Field(default="./kuzu_db", description="Path to Kùzu database directory")
+    read_only: bool = Field(default=False, description="Open database in read-only mode")
+
+
+class MemgraphConfig(BaseModel):
+    """Memgraph graph backend configuration."""
+
+    backend: Literal["memgraph"] = "memgraph"
+    url: str | None = Field(default=None, description="Memgraph connection URL (bolt://)")
+    user: str = Field(default="memgraph", description="Memgraph username")
+    password: str = Field(default="", description="Memgraph password")
+
+
+class ArcadeDBGraphConfig(BaseModel):
+    """ArcadeDB graph backend configuration."""
+
+    backend: Literal["arcadedb"] = "arcadedb"
+    url: str | None = Field(default=None, description="ArcadeDB HTTP URL")
+    database: str = Field(default="khora", description="ArcadeDB database name")
+    user: str = Field(default="root", description="ArcadeDB username")
+    password: str = Field(default="", description="ArcadeDB password")
+    query_language: str = Field(default="cypher", description="Query language: cypher or gremlin")
+
+
+def _graph_discriminator(v: Any) -> str:
+    if isinstance(v, dict):
+        return v.get("backend", "neo4j")
+    return getattr(v, "backend", "neo4j")
+
+
+GraphConfig = Annotated[
+    Annotated[Neo4jConfig, Tag("neo4j")]
+    | Annotated[KuzuConfig, Tag("kuzu")]
+    | Annotated[MemgraphConfig, Tag("memgraph")]
+    | Annotated[ArcadeDBGraphConfig, Tag("arcadedb")],
+    Discriminator(_graph_discriminator),
+]
+
+
+# ---------------------------------------------------------------------------
+# Vector backend configs (discriminated union on "backend" field)
+# ---------------------------------------------------------------------------
+
+
+class PgVectorConfig(BaseModel):
+    """pgvector vector backend configuration."""
+
+    backend: Literal["pgvector"] = "pgvector"
+    url: str | None = Field(default=None, description="pgvector connection URL")
+    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+
+
+class ArcadeDBVectorConfig(BaseModel):
+    """ArcadeDB vector backend configuration."""
+
+    backend: Literal["arcadedb"] = "arcadedb"
+    url: str | None = Field(default=None, description="ArcadeDB HTTP URL")
+    database: str = Field(default="khora", description="ArcadeDB database name")
+    user: str = Field(default="root", description="ArcadeDB username")
+    password: str = Field(default="", description="ArcadeDB password")
+    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+
+
+def _vector_discriminator(v: Any) -> str:
+    if isinstance(v, dict):
+        return v.get("backend", "pgvector")
+    return getattr(v, "backend", "pgvector")
+
+
+VectorConfig = Annotated[
+    Annotated[PgVectorConfig, Tag("pgvector")] | Annotated[ArcadeDBVectorConfig, Tag("arcadedb")],
+    Discriminator(_vector_discriminator),
+]
+
+
+# ---------------------------------------------------------------------------
+# Storage settings
+# ---------------------------------------------------------------------------
+
+
 class StorageSettings(BaseModel):
-    """Storage backend configuration."""
+    """Storage backend configuration.
+
+    Supports both the new discriminated-union graph/vector configs and
+    the legacy flat fields (neo4j_url, pgvector_url, etc.) for backwards
+    compatibility.
+    """
 
     # PostgreSQL (relational)
     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
 
-    # pgvector
-    pgvector_url: str | None = Field(default=None, description="pgvector connection URL (defaults to postgresql_url)")
-    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    # New-style backend configs
+    graph: GraphConfig = Field(default_factory=Neo4jConfig, description="Graph backend configuration")
+    vector: VectorConfig = Field(default_factory=PgVectorConfig, description="Vector backend configuration")
 
-    # Neo4j
-    neo4j_url: str | None = Field(default=None, description="Neo4j connection URL")
-    neo4j_user: str = Field(default="neo4j", description="Neo4j username")
-    neo4j_password: str = Field(default="", description="Neo4j password")
-    neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
+    # Legacy flat fields — kept for backwards compatibility
+    pgvector_url: str | None = Field(default=None, description="[deprecated] pgvector connection URL")
+    embedding_dimension: int = Field(default=1536, description="[deprecated] Embedding vector dimension")
+    neo4j_url: str | None = Field(default=None, description="[deprecated] Neo4j connection URL")
+    neo4j_user: str = Field(default="neo4j", description="[deprecated] Neo4j username")
+    neo4j_password: str = Field(default="", description="[deprecated] Neo4j password")
+    neo4j_database: str = Field(default="neo4j", description="[deprecated] Neo4j database name")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_fields(cls, data: Any) -> Any:
+        """Migrate legacy flat fields into the new graph/vector config objects."""
+        if not isinstance(data, dict):
+            return data
+
+        # Only migrate if the new-style configs are not explicitly provided
+        if "graph" not in data:
+            neo4j_url = data.get("neo4j_url")
+            neo4j_user = data.get("neo4j_user", "neo4j")
+            neo4j_password = data.get("neo4j_password", "")
+            neo4j_database = data.get("neo4j_database", "neo4j")
+            if neo4j_url:
+                data["graph"] = {
+                    "backend": "neo4j",
+                    "url": neo4j_url,
+                    "user": neo4j_user,
+                    "password": neo4j_password,
+                    "database": neo4j_database,
+                }
+
+        if "vector" not in data:
+            pgvector_url = data.get("pgvector_url")
+            embedding_dim = data.get("embedding_dimension", 1536)
+            if pgvector_url:
+                data["vector"] = {
+                    "backend": "pgvector",
+                    "url": pgvector_url,
+                    "embedding_dimension": embedding_dim,
+                }
+
+        return data
 
 
 class LLMSettings(BaseModel):
@@ -267,6 +407,11 @@ class KhoraConfig(BaseSettings):
 
     def _get_raw_neo4j_url(self) -> str | None:
         """Get raw Neo4j URL (may contain credentials)."""
+        # Check new-style graph config first
+        graph = self.storage.graph
+        if isinstance(graph, Neo4jConfig) and graph.url:
+            return graph.url
+        # Fall back to legacy fields
         return self.storage.neo4j_url or self.neo4j_url
 
     def _parse_neo4j_url(self) -> ParsedNeo4jUrl | None:
@@ -274,11 +419,11 @@ class KhoraConfig(BaseSettings):
         raw_url = self._get_raw_neo4j_url()
         if not raw_url:
             return None
-        return ParsedNeo4jUrl.parse(
-            raw_url,
-            default_user=self.storage.neo4j_user,
-            default_database=self.storage.neo4j_database,
-        )
+        # Use graph config defaults if available
+        graph = self.storage.graph
+        default_user = graph.user if isinstance(graph, Neo4jConfig) else self.storage.neo4j_user
+        default_db = graph.database if isinstance(graph, Neo4jConfig) else self.storage.neo4j_database
+        return ParsedNeo4jUrl.parse(raw_url, default_user=default_user, default_database=default_db)
 
     def get_neo4j_url(self) -> str | None:
         """Get Neo4j URL without credentials (for driver connection).
@@ -293,6 +438,9 @@ class KhoraConfig(BaseSettings):
         parsed = self._parse_neo4j_url()
         if parsed:
             return parsed.user
+        graph = self.storage.graph
+        if isinstance(graph, Neo4jConfig):
+            return graph.user
         return self.storage.neo4j_user
 
     def get_neo4j_password(self) -> str:
@@ -300,6 +448,9 @@ class KhoraConfig(BaseSettings):
         parsed = self._parse_neo4j_url()
         if parsed:
             return parsed.password
+        graph = self.storage.graph
+        if isinstance(graph, Neo4jConfig):
+            return graph.password
         return self.storage.neo4j_password
 
     def get_neo4j_database(self) -> str:
@@ -307,4 +458,45 @@ class KhoraConfig(BaseSettings):
         parsed = self._parse_neo4j_url()
         if parsed:
             return parsed.database
+        graph = self.storage.graph
+        if isinstance(graph, Neo4jConfig):
+            return graph.database
         return self.storage.neo4j_database
+
+    def get_graph_config(self) -> GraphConfig:
+        """Get the graph backend configuration.
+
+        If using legacy config, builds a Neo4jConfig from the parsed URL.
+        """
+        graph = self.storage.graph
+        # If it's already set from new-style config with a URL, return as-is
+        if isinstance(graph, Neo4jConfig) and graph.url:
+            return graph
+        # If it's a non-Neo4j backend, return as-is
+        if not isinstance(graph, Neo4jConfig):
+            return graph
+        # Build from legacy/parsed URL
+        neo4j_url = self.get_neo4j_url()
+        if neo4j_url:
+            return Neo4jConfig(
+                url=neo4j_url,
+                user=self.get_neo4j_user(),
+                password=self.get_neo4j_password(),
+                database=self.get_neo4j_database(),
+            )
+        return graph
+
+    def get_vector_config(self) -> VectorConfig:
+        """Get the vector backend configuration.
+
+        If using legacy config, builds a PgVectorConfig from the flat fields.
+        """
+        vector = self.storage.vector
+        if isinstance(vector, PgVectorConfig) and not vector.url:
+            # Populate from legacy fields
+            url = self.storage.pgvector_url or self.get_postgresql_url()
+            return PgVectorConfig(
+                url=url,
+                embedding_dimension=self.storage.embedding_dimension,
+            )
+        return vector

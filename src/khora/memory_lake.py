@@ -84,6 +84,8 @@ class MemoryLake:
             self._storage_config = storage_config
         else:
             postgresql_url = self._config.get_postgresql_url()
+            graph_config = self._config.get_graph_config()
+            vector_config = self._config.get_vector_config()
             self._storage_config = StorageConfig(
                 postgresql_url=postgresql_url,
                 pgvector_url=postgresql_url,  # pgvector uses same database as relational
@@ -92,6 +94,8 @@ class MemoryLake:
                 neo4j_password=self._config.get_neo4j_password(),
                 neo4j_database=self._config.get_neo4j_database(),
                 pgvector_embedding_dimension=self._config.storage.embedding_dimension,
+                graph_config=graph_config,
+                vector_config=vector_config,
             )
 
         self._storage: StorageCoordinator | None = None

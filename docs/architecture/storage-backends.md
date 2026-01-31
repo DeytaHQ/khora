@@ -353,7 +353,113 @@ class GraphBackendProtocol(Protocol):
     ) -> dict[str, Any]: ...
 ```
 
-This means you could theoretically swap pgvector for Qdrant, or Neo4j for Memgraph, without changing the rest of the system. The protocols define the contract; implementations fulfill it.
+This means you can swap pgvector for ArcadeDB, or Neo4j for Kùzu/Memgraph, without changing the rest of the system. The protocols define the contract; implementations fulfill it.
+
+## Alternative Graph Backends
+
+Beyond Neo4j, Khora supports three additional graph backends:
+
+| Backend | Type | Protocol | Best For |
+|---------|------|----------|----------|
+| **Neo4j** (default) | Server | Bolt/Cypher | Production, multi-user, large graphs |
+| **Kùzu** | Embedded | Cypher | Single-process, CI/testing, edge devices |
+| **Memgraph** | Server | Bolt/Cypher | In-memory, low-latency, streaming |
+| **ArcadeDB** | Server | HTTP/Cypher+SQL | Multi-model (graph + vector in one DB) |
+
+### Kùzu (Embedded)
+
+Kùzu runs in-process — no server needed. Ideal for testing and small deployments:
+
+```yaml
+storage:
+  graph:
+    backend: kuzu
+    database_path: ./kuzu_db
+```
+
+```python
+from khora.config.schema import KuzuConfig, StorageSettings
+
+settings = StorageSettings(graph=KuzuConfig(database_path="./kuzu_db"))
+```
+
+Note: Kùzu's Python API is synchronous; all calls are wrapped in `asyncio.to_thread()`.
+
+### Memgraph
+
+Memgraph speaks the Bolt protocol using the same `neo4j` Python driver. Key differences from Neo4j: no APOC, different index syntax, no multi-database support, in-memory by default.
+
+```yaml
+storage:
+  graph:
+    backend: memgraph
+    url: bolt://localhost:7687
+    user: memgraph
+```
+
+### ArcadeDB (Multi-Model)
+
+ArcadeDB can serve as **both** graph and vector backend. When both configs point to the same instance, Khora creates one backend object for both roles:
+
+```yaml
+storage:
+  graph:
+    backend: arcadedb
+    url: http://localhost:2480
+    database: khora
+  vector:
+    backend: arcadedb
+    url: http://localhost:2480
+    database: khora
+```
+
+## Alternative Vector Backends
+
+| Backend | Type | Best For |
+|---------|------|----------|
+| **pgvector** (default) | PostgreSQL extension | Most deployments, colocated with relational data |
+| **ArcadeDB** | HTTP/REST | Multi-model single-server setup |
+
+## Configuration
+
+### New-Style (Recommended)
+
+Use discriminated union configs for explicit backend selection:
+
+```python
+from khora.config.schema import KhoraConfig, StorageSettings, KuzuConfig
+
+config = KhoraConfig(
+    storage=StorageSettings(
+        postgresql_url="postgresql://localhost:5432/khora",
+        graph=KuzuConfig(database_path="./kuzu_db"),
+    )
+)
+```
+
+### Legacy (Backwards Compatible)
+
+Flat fields continue to work and are automatically migrated:
+
+```bash
+export KHORA_DATABASE_URL="postgresql://localhost:5432/khora"
+export KHORA_NEO4J_URL="bolt://neo4j:password@localhost:7687"
+```
+
+### Install Optional Dependencies
+
+```bash
+# Install specific backend
+pip install khora[kuzu]
+pip install khora[memgraph]
+pip install khora[arcadedb]
+
+# Install all graph backends
+pip install khora[graph-all]
+
+# Install everything
+pip install khora[all-backends]
+```
 
 ## What's Next?
 

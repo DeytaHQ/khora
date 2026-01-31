@@ -172,6 +172,13 @@ class RelationalBackendProtocol(Protocol):
         """Get a document by its content checksum (for deduplication)."""
         ...
 
+    async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+        """Fetch multiple documents in a single query.
+
+        Returns dictionary mapping document ID to Document object.
+        """
+        ...
+
     # Sync checkpoint operations
     @abstractmethod
     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
@@ -296,6 +303,22 @@ class VectorBackendProtocol(Protocol):
 
         Returns list of (chunk, rank_score) tuples.
         """
+        ...
+
+    # Aggregate operations (optional — have default implementations in VectorBackendBase)
+
+    async def count_chunks(self, namespace_id: UUID) -> int:
+        """Count chunks in a namespace."""
+        ...
+
+    async def list_chunks(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Chunk]:
+        """List chunks in a namespace."""
         ...
 
 
@@ -458,6 +481,33 @@ class GraphBackendProtocol(Protocol):
         limit: int = 100,
     ) -> list[Entity]:
         """Search entities by attribute value."""
+        ...
+
+    # Batch and aggregate operations (optional — have default implementations in GraphBackendBase)
+
+    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+        """Fetch multiple entities in a single query.
+
+        Returns dictionary mapping entity ID to Entity object.
+        """
+        ...
+
+    async def get_neighborhoods_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        depth: int = 1,
+        relationship_types: list[str] | None = None,
+        limit_per_entity: int = 20,
+    ) -> dict[UUID, dict[str, Any]]:
+        """Get neighborhoods for multiple entities.
+
+        Returns dictionary mapping entity ID to neighborhood data.
+        """
+        ...
+
+    async def count_entities(self, namespace_id: UUID) -> int:
+        """Count entities in a namespace."""
         ...
 
 
