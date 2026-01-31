@@ -258,7 +258,8 @@ class EntityLinker:
         matches = []
 
         try:
-            # Get all entities of the same type
+            # Get all entities — search broadly to catch cross-type matches
+            # that we can then penalize appropriately
             entities = await self._storage.list_entities(
                 namespace_id,
                 entity_type=mention.entity_type,
@@ -276,7 +277,9 @@ class EntityLinker:
                 ).ratio()
 
                 if ratio >= self._fuzzy_threshold:
-                    matches.append((entity, ratio))
+                    # Apply type penalty so wrong-type matches score lower
+                    penalty = self._type_penalty(mention.entity_type, entity.entity_type.value)
+                    matches.append((entity, ratio * penalty))
 
             # Also try partial matching (for handling first/last name, abbreviations)
             for entity in entities:
@@ -285,14 +288,15 @@ class EntityLinker:
 
                 # Check if mention is contained in entity name or vice versa
                 entity_name_lower = entity.name.lower()
+                penalty = self._type_penalty(mention.entity_type, entity.entity_type.value)
                 if mention_name_lower in entity_name_lower:
                     ratio = len(mention_name_lower) / len(entity_name_lower)
                     if ratio >= 0.5:  # At least 50% match
-                        matches.append((entity, ratio * self._fuzzy_threshold))
+                        matches.append((entity, ratio * self._fuzzy_threshold * penalty))
                 elif entity_name_lower in mention_name_lower:
                     ratio = len(entity_name_lower) / len(mention_name_lower)
                     if ratio >= 0.5:
-                        matches.append((entity, ratio * self._fuzzy_threshold))
+                        matches.append((entity, ratio * self._fuzzy_threshold * penalty))
 
         except Exception as e:
             logger.debug(f"Fuzzy match failed: {e}")
@@ -339,7 +343,9 @@ class EntityLinker:
                 if entity:
                     # Only include entities of compatible types
                     if self._types_compatible(mention.entity_type, entity.entity_type.value):
-                        matches.append((entity, score))
+                        # Apply type penalty so exact type matches rank higher
+                        penalty = self._type_penalty(mention.entity_type, entity.entity_type.value)
+                        matches.append((entity, score * penalty))
 
         except Exception as e:
             logger.debug(f"Embedding match failed: {e}")
@@ -369,6 +375,37 @@ class EntityLinker:
             return True
 
         return False
+
+    def _type_penalty(self, mention_type: str | None, entity_type: str) -> float:
+        """Compute a score penalty based on entity type compatibility.
+
+        When the query understanding provides an entity type hint,
+        penalize matches of the wrong type. For example, a query about
+        "the company Linear" should penalize matching a PERSON named "Linear".
+
+        Args:
+            mention_type: Expected type from query mention (None = no hint)
+            entity_type: Type of the candidate entity
+
+        Returns:
+            Multiplier between 0.0 and 1.0 (1.0 = no penalty)
+        """
+        if not mention_type:
+            return 1.0  # No type info, no penalty
+
+        mention_upper = mention_type.upper()
+        entity_upper = entity_type.upper()
+
+        # Exact type match — no penalty
+        if mention_upper == entity_upper:
+            return 1.0
+
+        # Wildcards — minimal penalty
+        if mention_upper in ("CONCEPT", "CUSTOM") or entity_upper in ("CONCEPT", "CUSTOM"):
+            return 0.9
+
+        # Wrong type — heavy penalty
+        return 0.3
 
 
 async def link_query_entities(

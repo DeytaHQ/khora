@@ -36,6 +36,9 @@ class ExtractedEntity:
     # Temporal information
     temporal: TemporalInfo | None = None
 
+    # Source provenance — canonical SaaS tool that produced this entity
+    source_tool: str = ""
+
     # Source tracking
     source_text: str = ""
     start_char: int = 0

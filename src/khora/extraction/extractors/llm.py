@@ -231,6 +231,58 @@ class LLMEntityExtractor(EntityExtractor):
             logger.warning(f"Failed to render system prompt: {e}")
             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
 
+    def _build_tool_context(self, expertise: ExpertiseConfig | None, context: dict[str, Any] | None) -> str:
+        """Build tool-specific context block for the extraction prompt.
+
+        When expertise has tool_schemas populated and the context identifies
+        a source_tool, this injects structured field knowledge so the LLM
+        understands the data format it's extracting from.
+
+        Args:
+            expertise: Optional ExpertiseConfig with tool_schemas
+            context: Optional context dict with source_tool key
+
+        Returns:
+            Tool context string to prepend to the text, or empty string
+        """
+        if not expertise or not expertise.tool_schemas or not context:
+            return ""
+
+        source_tool = context.get("source_tool", "")
+        if not source_tool:
+            return ""
+
+        schema = expertise.tool_schemas.get(source_tool)
+        if not schema:
+            return ""
+
+        lines = [f"\nSOURCE CONTEXT: This content comes from {source_tool}."]
+        for obj_type, obj_schema in schema.items():
+            if not isinstance(obj_schema, dict):
+                continue
+            fields = obj_schema.get("fields", [])
+            if fields:
+                lines.append(f"  {obj_type} fields: {', '.join(str(f) for f in fields)}")
+            for key, values in obj_schema.items():
+                if key != "fields" and isinstance(values, list):
+                    lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
+
+        # Add attribute schema hints from entity types
+        if expertise.entity_types:
+            lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
+            for et in expertise.entity_types:
+                required = et.attributes.get("required", [])
+                optional = et.attributes.get("optional", [])
+                if required or optional:
+                    parts = []
+                    if required:
+                        parts.append(f"required: {', '.join(required)}")
+                    if optional:
+                        parts.append(f"optional: {', '.join(optional)}")
+                    lines.append(f"  {et.name}: {'; '.join(parts)}")
+
+        return "\n".join(lines)
+
     def _render_extraction_prompt(
         self,
         text: str,
@@ -239,25 +291,37 @@ class LLMEntityExtractor(EntityExtractor):
         context: dict[str, Any] | None,
     ) -> str:
         """Render the extraction prompt, optionally using expertise config."""
+        # Build tool context for SaaS-aware extraction
+        tool_context = self._build_tool_context(expertise, context)
+
         # If expertise has a custom extraction prompt, use it
         if expertise and expertise.extraction_prompt:
             try:
                 from khora.extraction.skills.composer import ExpertiseComposer
 
                 composer = ExpertiseComposer()
+                prompt_context = {
+                    **(context or {}),
+                    "text": text[:8000],
+                    "entity_types": entity_types,
+                    "tool_context": tool_context,
+                }
                 return composer.render_prompt(
                     expertise.extraction_prompt,
                     expertise=expertise,
-                    context={**(context or {}), "text": text[:8000], "entity_types": entity_types},
+                    context=prompt_context,
                 )
             except Exception as e:
                 logger.warning(f"Failed to render extraction prompt: {e}")
 
-        # Use default extraction prompt
-        return EXTRACTION_PROMPT.format(
+        # Use default extraction prompt with optional tool context
+        prompt = EXTRACTION_PROMPT.format(
             entity_types=", ".join(entity_types),
             text=text[:8000],  # Truncate very long texts
         )
+        if tool_context:
+            prompt = tool_context + "\n\n" + prompt
+        return prompt
 
     def _filter_by_confidence(
         self,

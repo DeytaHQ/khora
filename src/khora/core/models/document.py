@@ -29,6 +29,7 @@ class DocumentMetadata:
 
     source: str = ""  # Source identifier (URL, file path, etc.)
     source_type: str = ""  # Type of source (file, url, api, etc.)
+    source_tool: str = ""  # Canonical SaaS tool identifier (see core.models.source.SourceTool)
     content_type: str = ""  # MIME type or content classification
     title: str = ""
     author: str = ""

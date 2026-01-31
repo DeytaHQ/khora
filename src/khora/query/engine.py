@@ -813,6 +813,19 @@ class HybridQueryEngine:
         metrics.fused_chunk_count = len(fused_chunks)
         metrics.fused_entity_count = len(fused_entities)
 
+        # Apply source priority boosting from query understanding
+        if understanding and understanding.source_priority:
+            fused_chunks = self._apply_source_priority(fused_chunks, understanding)
+            fused_entities = self._apply_source_priority_entities(fused_entities, understanding)
+
+        # Apply attribute-aware scoring boost for entities
+        if understanding and understanding.keywords and fused_entities:
+            fused_entities = [
+                (entity, score + self._attribute_relevance_boost(entity, understanding.keywords))
+                for entity, score in fused_entities
+            ]
+            fused_entities.sort(key=lambda x: x[1], reverse=True)
+
         # Boost linked entities
         if linked_entity_ids:
             boosted_entities = []
@@ -1178,6 +1191,110 @@ class HybridQueryEngine:
         except Exception as e:
             logger.warning(f"Full-text search failed: {e}")
             return {"source": "keyword", "chunks": [], "entities": []}
+
+    def _apply_source_priority(
+        self,
+        results: list[tuple[Any, float]],
+        understanding: UnderstandingResult,
+    ) -> list[tuple[Any, float]]:
+        """Boost or demote chunk results based on source priority weights.
+
+        Reads source_tool from chunk -> document metadata and applies
+        a multiplicative boost based on the query understanding's source_priority.
+
+        Args:
+            results: List of (chunk, score) tuples
+            understanding: Query understanding with source_priority
+
+        Returns:
+            Re-sorted list of (chunk, score) tuples
+        """
+        sp = understanding.source_priority
+        source_filters = set(understanding.source_filters)
+
+        boosted = []
+        for chunk, score in results:
+            source_tool = ""
+            if hasattr(chunk, "metadata") and hasattr(chunk.metadata, "custom"):
+                source_tool = chunk.metadata.custom.get("source_tool", "")
+
+            if not source_tool:
+                boosted.append((chunk, score))
+                continue
+
+            # Filter out results from excluded sources
+            if source_tool in source_filters:
+                continue
+
+            weight = getattr(sp, source_tool, 1.0) if hasattr(sp, source_tool) else 1.0
+            # Apply as multiplicative boost — never fully zero out
+            adjusted_score = score * (0.5 + 0.5 * weight)
+            boosted.append((chunk, adjusted_score))
+
+        boosted.sort(key=lambda x: x[1], reverse=True)
+        return boosted
+
+    def _apply_source_priority_entities(
+        self,
+        results: list[tuple[Any, float]],
+        understanding: UnderstandingResult,
+    ) -> list[tuple[Any, float]]:
+        """Boost or demote entity results based on source priority weights.
+
+        Args:
+            results: List of (entity, score) tuples
+            understanding: Query understanding with source_priority
+
+        Returns:
+            Re-sorted list of (entity, score) tuples
+        """
+        sp = understanding.source_priority
+        source_filters = set(understanding.source_filters)
+
+        boosted = []
+        for entity, score in results:
+            source_tool = getattr(entity, "source_tool", "")
+
+            if not source_tool:
+                boosted.append((entity, score))
+                continue
+
+            if source_tool in source_filters:
+                continue
+
+            weight = getattr(sp, source_tool, 1.0) if hasattr(sp, source_tool) else 1.0
+            adjusted_score = score * (0.5 + 0.5 * weight)
+            boosted.append((entity, adjusted_score))
+
+        boosted.sort(key=lambda x: x[1], reverse=True)
+        return boosted
+
+    @staticmethod
+    def _attribute_relevance_boost(entity: Any, keywords: list[str]) -> float:
+        """Score boost based on entity attribute value matches with query keywords.
+
+        When a query like "urgent tickets assigned to Alice" matches entities
+        with priority: "urgent" and assignee: "Alice" in their attributes,
+        those entities get a relevance boost.
+
+        Args:
+            entity: Entity with attributes dict
+            keywords: Keywords from query understanding
+
+        Returns:
+            Additional score boost (0.0 to 0.3, capped)
+        """
+        attributes = getattr(entity, "attributes", None)
+        if not attributes or not isinstance(attributes, dict):
+            return 0.0
+
+        boost = 0.0
+        for value in attributes.values():
+            value_str = str(value).lower()
+            for keyword in keywords:
+                if keyword.lower() in value_str:
+                    boost += 0.1
+        return min(boost, 0.3)  # Cap at 0.3
 
     async def find_related_entities(
         self,

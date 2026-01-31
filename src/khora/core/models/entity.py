@@ -81,6 +81,9 @@ class Entity:
     # Attributes from extraction
     attributes: dict[str, Any] = field(default_factory=dict)
 
+    # Source provenance — canonical SaaS tool that produced this entity
+    source_tool: str = ""
+
     # Source tracking
     source_document_ids: list[UUID] = field(default_factory=list)
     source_chunk_ids: list[UUID] = field(default_factory=list)
@@ -100,6 +103,12 @@ class Entity:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def validate(self) -> None:
+        """Validate and clean attributes using the registered schema for this entity type."""
+        from khora.core.models.schemas import validate_attributes
+
+        self.attributes = validate_attributes(self.entity_type.value, self.attributes)
 
     def merge_with(self, other: Entity) -> None:
         """Merge another entity into this one (deduplication)."""

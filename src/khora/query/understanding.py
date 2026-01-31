@@ -160,6 +160,9 @@ class UnderstandingResult:
     source_priority: SourcePriority = field(default_factory=SourcePriority)
     search_strategy: SearchStrategy = field(default_factory=SearchStrategy)
 
+    # Source-aware filtering — tools with priority < 0.1 are actively excluded
+    source_filters: list[str] = field(default_factory=list)
+
     # Agentic search support
     follow_up_queries: list[FollowUpQuery] = field(default_factory=list)
     requires_multi_step: bool = False
@@ -550,6 +553,21 @@ class QueryUnderstanding:
                 )
             )
 
+        # Compute source_filters — tools with priority < 0.1 should be excluded
+        source_filters = []
+        sp_fields = {
+            "slack": source_priority.slack,
+            "linear": source_priority.linear,
+            "notion": source_priority.notion,
+            "attio": source_priority.attio,
+            "gong": source_priority.gong,
+            "github": source_priority.github,
+            "bamboohr": source_priority.bamboohr,
+        }
+        for tool_name, weight in sp_fields.items():
+            if weight < 0.1:
+                source_filters.append(tool_name)
+
         return UnderstandingResult(
             original_query=original_query,
             intent=intent,
@@ -561,6 +579,7 @@ class QueryUnderstanding:
             keywords=data.get("keywords", []),
             source_priority=source_priority,
             search_strategy=search_strategy,
+            source_filters=source_filters,
             follow_up_queries=follow_ups,
             requires_multi_step=data.get("requires_multi_step", False),
             complexity_score=float(data.get("complexity_score", 0.5)),

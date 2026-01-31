@@ -147,6 +147,7 @@ class ExpertiseComposer:
         try:
             from jinja2 import Template
 
+            user_ctx = context or {}
             ctx = {
                 "expertise": expertise,
                 "entity_types": expertise.entity_types if expertise else [],
@@ -154,7 +155,9 @@ class ExpertiseComposer:
                 "tool_schemas": expertise.tool_schemas if expertise else {},
                 "tools": list(expertise.tool_schemas.keys()) if expertise else [],
                 "parent_prompt": parent_prompt or "",
-                **(context or {}),
+                "source_tool": user_ctx.get("source_tool", ""),
+                "tool_context": user_ctx.get("tool_context", ""),
+                **user_ctx,
             }
 
             jinja_template = Template(template)
