@@ -389,6 +389,8 @@ class LLMEntityExtractor(EntityExtractor):
         texts: list[str],
         *,
         entity_types: list[str] | None = None,
+        expertise: ExpertiseConfig | None = None,
+        context: dict[str, Any] | None = None,
         batch_size: int = 5,
     ) -> list[ExtractionResult]:
         """Extract entities from multiple texts in grouped LLM calls.
@@ -399,6 +401,8 @@ class LLMEntityExtractor(EntityExtractor):
         Args:
             texts: List of texts to extract from
             entity_types: Optional list of entity types to extract
+            expertise: Optional ExpertiseConfig for domain-specific extraction
+            context: Optional context dict for prompt template rendering
             batch_size: Number of texts per LLM call
 
         Returns:
@@ -407,7 +411,10 @@ class LLMEntityExtractor(EntityExtractor):
         if not texts:
             return []
 
-        entity_types = entity_types or DEFAULT_ENTITY_TYPES
+        if expertise:
+            entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+        else:
+            entity_types = entity_types or DEFAULT_ENTITY_TYPES
 
         try:
             import litellm
@@ -417,8 +424,21 @@ class LLMEntityExtractor(EntityExtractor):
         batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
         all_results: list[ExtractionResult] = []
 
+        # Build system prompt from expertise if available
+        system_prompt = self._render_system_prompt(expertise, context)
+        tool_context = self._build_tool_context(expertise, context)
+
         for batch in batches:
-            results = await self._extract_multi_batch(batch, entity_types, litellm)
+            results = await self._extract_multi_batch(
+                batch,
+                entity_types,
+                litellm,
+                system_prompt=system_prompt,
+                tool_context=tool_context,
+            )
+            # Apply confidence filtering from expertise
+            if expertise:
+                results = [self._filter_by_confidence(r, expertise) for r in results]
             all_results.extend(results)
 
         return all_results
@@ -428,11 +448,15 @@ class LLMEntityExtractor(EntityExtractor):
         texts: list[str],
         entity_types: list[str],
         litellm: Any,
+        *,
+        system_prompt: str | None = None,
+        tool_context: str | None = None,
     ) -> list[ExtractionResult]:
         """Extract from a batch of texts in a single LLM call."""
         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
 
-        prompt = f"""Extract entities, relationships, and events from each text section below.
+        tool_prefix = f"{tool_context}\n\n" if tool_context else ""
+        prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 
 Entity types to find: {", ".join(entity_types)}
 
@@ -456,7 +480,7 @@ Return ONLY valid JSON, no other text."""
                     response = await litellm.acompletion(
                         model=self._model,
                         messages=[
-                            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                            {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
                             {"role": "user", "content": prompt},
                         ],
                         temperature=self._temperature,

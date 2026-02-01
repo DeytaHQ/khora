@@ -220,6 +220,13 @@ class LLMSettings(BaseModel):
     embedding_model: str = Field(default="text-embedding-3-small", description="Embedding model")
     embedding_dimension: int = Field(default=1536, description="Embedding dimension")
 
+    # Extraction model (defaults to primary model if not set)
+    extraction_model: str | None = Field(
+        default=None,
+        description="Model for entity extraction (defaults to primary model). "
+        "Smaller/faster models like claude-3-5-haiku or gemini-2.0-flash work well for extraction.",
+    )
+
     # Router configuration
     config_file: str | None = Field(default=None, description="Path to LiteLLM config YAML")
     model_list: list[dict[str, Any]] | None = Field(default=None, description="Model list for router")
@@ -373,6 +380,13 @@ class KhoraConfig(BaseSettings):
         description="Neo4j URL for graph storage (shortcut for storage.neo4j_url)",
     )
 
+    # LLM extraction model shortcut (single-underscore env var: KHORA_LLM_EXTRACTION_MODEL)
+    # Propagated to llm.extraction_model — see model_validator below.
+    llm_extraction_model: str | None = Field(
+        default=None,
+        description="Model for entity extraction (shortcut for llm.extraction_model)",
+    )
+
     # Storage configuration
     storage: StorageSettings = Field(default_factory=StorageSettings)
 
@@ -397,6 +411,13 @@ class KhoraConfig(BaseSettings):
         default="khora",
         description="Service name tag for telemetry events",
     )
+
+    @model_validator(mode="after")
+    def _propagate_shortcuts(self) -> KhoraConfig:
+        """Propagate top-level shortcut fields into nested configs."""
+        if self.llm_extraction_model and not self.llm.extraction_model:
+            self.llm.extraction_model = self.llm_extraction_model
+        return self
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> KhoraConfig:

@@ -232,6 +232,7 @@ class AgenticSearchAgent:
             query,
             namespace_id,
             config=config,
+            _lightweight_understanding=False,  # Full prompt for agentic step 1 (needs follow-ups)
         )
 
         # Extract understanding from result metadata
@@ -366,7 +367,7 @@ class AgenticSearchAgent:
 
         # Step 1: Initial search (triggers query understanding)
         logger.info(f"Speculative search step 1: '{query[:50]}...'")
-        step1_result = await self._engine.query(query, namespace_id, config=config)
+        step1_result = await self._engine.query(query, namespace_id, config=config, _lightweight_understanding=False)
 
         if "understanding" in step1_result.metadata:
             ud = step1_result.metadata["understanding"]
@@ -486,7 +487,7 @@ class AgenticSearchAgent:
 
         # Step 1: Initial search
         logger.info(f"Agentic stream step 1: '{query[:50]}...'")
-        step1_result = await self._engine.query(query, namespace_id, config=config)
+        step1_result = await self._engine.query(query, namespace_id, config=config, _lightweight_understanding=False)
 
         chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
         for chunk, score in step1_result.chunks:

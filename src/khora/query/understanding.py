@@ -329,6 +329,64 @@ GUIDELINES:
 
 Respond with ONLY the JSON object, no markdown, no explanation."""
 
+# Lightweight prompt for non-agentic queries that skips follow-ups, source priority detail,
+# and agentic exploration hints. Cuts token usage ~50% for typical recall queries.
+LIGHTWEIGHT_UNDERSTANDING_PROMPT = """You are a query understanding system for a memory lake.
+
+CURRENT DATETIME: {current_datetime}
+
+QUERY: {query}
+
+Analyze this query and return a JSON object:
+
+{{
+    "intent": "search|question|temporal|comparison|navigation|aggregation",
+    "answer_type": "list|summary|fact|explanation|comparison|timeline",
+    "entities": [
+        {{
+            "name": "exact name",
+            "type": "PERSON|ORGANIZATION|PRODUCT|PROJECT|TECHNOLOGY|CONCEPT|LOCATION|EVENT|TEAM",
+            "confidence": 0.0-1.0,
+            "aliases": ["alternative names"]
+        }}
+    ],
+    "relationships": [
+        {{
+            "from_entity": "entity name",
+            "relationship_type": "WORKS_ON|MENTIONED_IN|RELATED_TO|CREATED|OWNS|MANAGES",
+            "to_entity": "target entity or null",
+            "importance": 0.0-1.0
+        }}
+    ],
+    "temporal": [
+        {{
+            "type": "relative|absolute|range",
+            "text": "original temporal phrase",
+            "start_date": "ISO 8601 or null",
+            "end_date": "ISO 8601 or null"
+        }}
+    ],
+    "expanded_queries": ["rephrasing 1", "rephrasing 2"],
+    "keywords": ["important", "search", "terms"],
+    "search_strategy": {{
+        "vector_weight": 0.0-1.0,
+        "graph_weight": 0.0-1.0,
+        "keyword_weight": 0.0-1.0,
+        "graph_depth": 1-3,
+        "reasoning": "brief strategy note"
+    }},
+    "complexity_score": 0.0-1.0,
+    "reasoning": "brief analysis"
+}}
+
+GUIDELINES:
+- Extract ALL mentioned entities with aliases
+- Compute ISO dates from current datetime for temporal references
+- Entity-heavy queries -> higher graph_weight; semantic queries -> higher vector_weight
+- Weights should roughly sum to 1.0
+
+Respond with ONLY the JSON object."""
+
 
 class QueryUnderstanding:
     """Comprehensive LLM-based query understanding.
@@ -363,6 +421,7 @@ class QueryUnderstanding:
         expand_query: bool = True,
         extract_entities: bool = True,
         detect_temporal: bool = True,
+        lightweight: bool = False,
     ) -> UnderstandingResult:
         """Understand a query comprehensively using a single LLM call.
 
@@ -371,6 +430,7 @@ class QueryUnderstanding:
             expand_query: Whether to include query expansions in result
             extract_entities: Whether to include entity mentions in result
             detect_temporal: Whether to include temporal references in result
+            lightweight: Use a smaller prompt that skips follow-ups/source priority
 
         Returns:
             UnderstandingResult with all extracted information
@@ -380,16 +440,20 @@ class QueryUnderstanding:
         config = self._llm_config or LiteLLMConfig()
         model = self._model or config.model
 
+        # Lightweight mode uses fewer tokens for the prompt and response
+        max_tokens = 1200 if lightweight else 2000
+
         # Use appropriate settings for structured extraction
         extraction_config = LiteLLMConfig(
             model=model,
             temperature=0.1,  # Low temperature for consistent extraction
-            max_tokens=2000,  # More tokens for comprehensive response
+            max_tokens=max_tokens,
         )
 
         try:
             current_dt = datetime.utcnow().isoformat() + "Z"
-            prompt = COMPREHENSIVE_UNDERSTANDING_PROMPT.format(
+            template = LIGHTWEIGHT_UNDERSTANDING_PROMPT if lightweight else COMPREHENSIVE_UNDERSTANDING_PROMPT
+            prompt = template.format(
                 query=query,
                 current_datetime=current_dt,
             )

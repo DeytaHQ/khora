@@ -116,6 +116,9 @@ class EntityLinker:
     ) -> LinkingResult:
         """Link entity mentions to stored entities.
 
+        Pre-computes embeddings for all mentions in a single batch call,
+        then runs linking in parallel using the cached embeddings.
+
         Args:
             mentions: List of entity mentions to link
             namespace_id: Namespace to search in
@@ -126,8 +129,23 @@ class EntityLinker:
         if not mentions:
             return LinkingResult(total_mentions=0)
 
+        # Pre-compute all mention embeddings in a single batch call
+        # This avoids N individual embed() calls (each ~418ms) in favor of
+        # one batch call (~500ms total for typical mention counts).
+        mention_embeddings: dict[str, list[float]] = {}
+        if self._embedding_match and self._embedder:
+            mention_texts = [f"{m.entity_type}: {m.name}" for m in mentions]
+            try:
+                embeddings = await self._embedder.embed_batch(mention_texts)
+                for text, embedding in zip(mention_texts, embeddings):
+                    mention_embeddings[text] = embedding
+            except Exception as e:
+                logger.warning(f"Batch mention embedding failed, falling back to per-mention: {e}")
+
         # Parallelize linking across all mentions
-        linked_entities = await asyncio.gather(*[self._link_single(m, namespace_id) for m in mentions])
+        linked_entities = await asyncio.gather(
+            *[self._link_single(m, namespace_id, mention_embeddings) for m in mentions]
+        )
         unlinked_count = sum(1 for le in linked_entities if not le.is_linked)
 
         return LinkingResult(
@@ -140,12 +158,14 @@ class EntityLinker:
         self,
         mention: EntityMention,
         namespace_id: UUID,
+        precomputed_embeddings: dict[str, list[float]] | None = None,
     ) -> LinkedEntity:
         """Link a single entity mention.
 
         Args:
             mention: Entity mention to link
             namespace_id: Namespace to search in
+            precomputed_embeddings: Pre-computed embeddings keyed by mention text
 
         Returns:
             LinkedEntity with match result
@@ -168,7 +188,7 @@ class EntityLinker:
         if self._fuzzy_match:
             tasks["fuzzy"] = self._fuzzy_name_match(mention, namespace_id)
         if self._embedding_match and self._embedder:
-            tasks["embedding"] = self._embedding_match_entities(mention, namespace_id)
+            tasks["embedding"] = self._embedding_match_entities(mention, namespace_id, precomputed_embeddings)
 
         if tasks:
             results = await asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -309,12 +329,14 @@ class EntityLinker:
         self,
         mention: EntityMention,
         namespace_id: UUID,
+        precomputed_embeddings: dict[str, list[float]] | None = None,
     ) -> list[tuple[Entity, float]]:
         """Find entities using embedding similarity.
 
         Args:
             mention: Entity mention
             namespace_id: Namespace to search
+            precomputed_embeddings: Pre-computed embeddings keyed by mention text
 
         Returns:
             List of (entity, score) tuples
@@ -325,9 +347,12 @@ class EntityLinker:
         matches = []
 
         try:
-            # Embed the mention name (with context)
+            # Use pre-computed embedding if available, otherwise compute on the fly
             mention_text = f"{mention.entity_type}: {mention.name}"
-            embedding = await self._embedder.embed(mention_text)
+            if precomputed_embeddings and mention_text in precomputed_embeddings:
+                embedding = precomputed_embeddings[mention_text]
+            else:
+                embedding = await self._embedder.embed(mention_text)
 
             # Search for similar entities
             results = await self._storage.search_similar_entities(

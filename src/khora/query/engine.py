@@ -11,6 +11,9 @@ with configurable fusion weights. Now enhanced with:
 from __future__ import annotations
 
 import asyncio
+
+# Regex for simple-query detection heuristic
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -26,6 +29,13 @@ from .metrics import SearchMetrics
 from .reranking import RerankCandidate, create_reranker
 from .temporal import TemporalFilter, TemporalQuery
 from .understanding import QueryUnderstanding, UnderstandingResult
+
+_TEMPORAL_PATTERN = re.compile(
+    r"\b(yesterday|today|last\s+\w+|this\s+\w+|ago|since|before|after|"
+    r"recent(?:ly)?|q[1-4]|20\d{2}|january|february|march|april|may|june|"
+    r"july|august|september|october|november|december)\b",
+    re.IGNORECASE,
+)
 
 if TYPE_CHECKING:
     from khora.acl import ACLContext
@@ -432,6 +442,9 @@ class HybridQueryEngine:
 
         self._cache = QueryCache()
 
+        # Understanding cache (keyed by normalized query + namespace)
+        self._understanding_cache = QueryCache(max_size=500, ttl_seconds=120)
+
         # Keyword searcher (built per namespace)
         self._keyword_searchers: dict[str, KeywordSearcher] = {}
 
@@ -447,6 +460,7 @@ class HybridQueryEngine:
         temporal_filter: TemporalFilter | None = None,
         context: ACLContext | None = None,
         agentic: bool = False,
+        _lightweight_understanding: bool | None = None,
     ) -> QueryResult:
         """Execute a hybrid query with optional enhanced pipeline.
 
@@ -531,15 +545,31 @@ class HybridQueryEngine:
         # Step 1: Query Understanding
         metrics.understanding_timer.start()
         understanding: UnderstandingResult | None = None
-        if cfg.enable_query_understanding:
-            try:
-                async with pipeline_stage("query", "understanding", _run_id, namespace_id=namespace_id):
-                    understanding = await self._query_understanding.understand(
-                        query_text,
-                        expand_query=cfg.enable_query_expansion,
-                        extract_entities=cfg.enable_entity_extraction,
-                        detect_temporal=cfg.enable_temporal_detection,
-                    )
+        if cfg.enable_query_understanding and not self._is_simple_query(query_text):
+            # Check understanding cache first
+            cached_understanding = await self._understanding_cache.get(query_text, namespace_id, "understanding")
+            if cached_understanding is not None:
+                understanding = cached_understanding
+                logger.debug(f"Understanding cache hit for: {query_text[:50]}...")
+            else:
+                try:
+                    # Use lightweight prompt unless caller explicitly opted out
+                    use_lightweight = _lightweight_understanding if _lightweight_understanding is not None else True
+                    async with pipeline_stage("query", "understanding", _run_id, namespace_id=namespace_id):
+                        understanding = await self._query_understanding.understand(
+                            query_text,
+                            expand_query=cfg.enable_query_expansion,
+                            extract_entities=cfg.enable_entity_extraction,
+                            detect_temporal=cfg.enable_temporal_detection,
+                            lightweight=use_lightweight,
+                        )
+                    # Cache the understanding result
+                    await self._understanding_cache.set(query_text, namespace_id, "understanding", understanding)
+                except Exception as e:
+                    logger.warning(f"Query understanding failed: {e}")
+
+            # Apply understanding results (works for both cached and fresh)
+            if understanding is not None:
                 metadata["understanding"] = {
                     "intent": understanding.intent.name,
                     "answer_type": understanding.answer_type.name,
@@ -603,9 +633,6 @@ class HybridQueryEngine:
                         )
                         temporal_info.filter_applied = True
                         logger.debug(f"Temporal filter applied: {temporal_info.time_start} to {temporal_info.time_end}")
-
-            except Exception as e:
-                logger.warning(f"Query understanding failed: {e}")
 
         metrics.understanding_timer.stop()
 
@@ -1355,6 +1382,38 @@ class HybridQueryEngine:
 
         boosted.sort(key=lambda x: x[1], reverse=True)
         return boosted
+
+    @staticmethod
+    def _is_simple_query(query_text: str) -> bool:
+        """Check if a query is simple enough to skip LLM understanding.
+
+        Simple queries are short, lack temporal references, and don't contain
+        complex entity mentions. Skipping understanding saves ~14s per query.
+
+        Args:
+            query_text: The query text
+
+        Returns:
+            True if the query should skip understanding
+        """
+        words = query_text.split()
+        if len(words) > 8:
+            return False
+
+        # Has temporal references
+        if _TEMPORAL_PATTERN.search(query_text):
+            return False
+
+        # Contains quoted phrases (specific entity searches)
+        if '"' in query_text or "'" in query_text:
+            return False
+
+        # Contains comparison words
+        comparison_words = {"compare", "versus", "vs", "difference", "between", "similar"}
+        if comparison_words & {w.lower().strip("?.,!") for w in words}:
+            return False
+
+        return True
 
     @staticmethod
     def _attribute_relevance_boost(entity: Any, keywords: list[str]) -> float:

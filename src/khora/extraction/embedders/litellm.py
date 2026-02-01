@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -18,6 +20,9 @@ class LiteLLMEmbedder(Embedder):
 
     Uses LiteLLM to generate embeddings from various providers
     (OpenAI, Cohere, etc.) through a unified interface.
+
+    Includes an in-memory embedding cache to avoid re-embedding
+    identical texts (e.g. entity mentions that recur across queries).
     """
 
     def __init__(
@@ -28,6 +33,7 @@ class LiteLLMEmbedder(Embedder):
         timeout: int = 30,
         max_retries: int = 3,
         batch_size: int = 100,
+        cache_max_size: int = 10000,
     ) -> None:
         """Initialize the LiteLLM embedder.
 
@@ -37,12 +43,52 @@ class LiteLLMEmbedder(Embedder):
             timeout: Request timeout in seconds
             max_retries: Maximum retries on failure
             batch_size: Maximum batch size for embed_batch
+            cache_max_size: Maximum cached embeddings (0 to disable)
         """
         self._model = model
         self._dimension = dimension
         self._timeout = timeout
         self._max_retries = max_retries
         self._batch_size = batch_size
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._cache_max_size = cache_max_size
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+    def _cache_key(self, text: str) -> str:
+        """Generate a cache key for a text."""
+        return sha256(f"{self._model}:{text}".encode()).hexdigest()
+
+    def _cache_get(self, text: str) -> list[float] | None:
+        """Look up a cached embedding."""
+        if not self._cache_max_size:
+            return None
+        key = self._cache_key(text)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            self._cache_hits += 1
+            return self._cache[key]
+        self._cache_misses += 1
+        return None
+
+    def _cache_put(self, text: str, embedding: list[float]) -> None:
+        """Store an embedding in the cache."""
+        if not self._cache_max_size:
+            return
+        key = self._cache_key(text)
+        self._cache[key] = embedding
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._cache_max_size:
+            self._cache.popitem(last=False)
+
+    @property
+    def cache_stats(self) -> dict[str, int]:
+        """Return cache hit/miss statistics."""
+        return {
+            "size": len(self._cache),
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+        }
 
     @classmethod
     def from_config(cls, config: LiteLLMConfig) -> LiteLLMEmbedder:
@@ -80,11 +126,16 @@ class LiteLLMEmbedder(Embedder):
         Returns:
             Embedding vector
         """
+        cached = self._cache_get(text)
+        if cached is not None:
+            return cached
         embeddings = await self.embed_batch([text])
         return embeddings[0]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for multiple texts.
+
+        Uses an in-memory cache to skip API calls for previously seen texts.
 
         Args:
             texts: List of texts to embed
@@ -100,16 +151,36 @@ class LiteLLMEmbedder(Embedder):
         except ImportError:
             raise RuntimeError("litellm package not installed. Run: pip install litellm")
 
-        # Process in batches if needed
-        if len(texts) > self._batch_size:
-            all_embeddings = []
-            for i in range(0, len(texts), self._batch_size):
-                batch = texts[i : i + self._batch_size]
-                batch_embeddings = await self._embed_batch_internal(batch)
-                all_embeddings.extend(batch_embeddings)
-            return all_embeddings
+        # Separate cached vs uncached texts
+        results: list[list[float] | None] = [None] * len(texts)
+        uncached_indices: list[int] = []
+        uncached_texts: list[str] = []
 
-        return await self._embed_batch_internal(texts)
+        for i, text in enumerate(texts):
+            cached = self._cache_get(text)
+            if cached is not None:
+                results[i] = cached
+            else:
+                uncached_indices.append(i)
+                uncached_texts.append(text)
+
+        # Fetch uncached embeddings
+        if uncached_texts:
+            if len(uncached_texts) > self._batch_size:
+                all_embeddings: list[list[float]] = []
+                for i in range(0, len(uncached_texts), self._batch_size):
+                    batch = uncached_texts[i : i + self._batch_size]
+                    batch_embeddings = await self._embed_batch_internal(batch)
+                    all_embeddings.extend(batch_embeddings)
+            else:
+                all_embeddings = await self._embed_batch_internal(uncached_texts)
+
+            # Populate results and cache
+            for idx, embedding in zip(uncached_indices, all_embeddings):
+                results[idx] = embedding
+                self._cache_put(texts[idx], embedding)
+
+        return results  # type: ignore[return-value]
 
     async def _embed_batch_internal(self, texts: list[str]) -> list[list[float]]:
         """Internal batch embedding without chunking."""

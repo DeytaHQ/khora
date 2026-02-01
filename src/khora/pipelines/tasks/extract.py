@@ -77,19 +77,23 @@ async def extract_entities(
     # Create extractor with concurrency limit
     extractor = LLMEntityExtractor(model=model, max_concurrent=max_concurrent)
 
-    # Extract from all chunks in parallel using batch extraction
+    # Extract from all chunks using grouped multi-extraction (fewer LLM calls)
+    # Groups 3-5 chunks per LLM call, reducing API round-trips proportionally
     texts = [chunk.content for chunk in chunks]
 
     if resolved_expertise:
-        # Use expertise-based extraction
-        results = await extractor.extract_batch(
+        results = await extractor.extract_multi(
             texts,
             expertise=resolved_expertise,
             context=context,
+            batch_size=3,
         )
     else:
-        # Use legacy skill-based extraction
-        results = await extractor.extract_batch(texts, entity_types=skill.entity_types)
+        results = await extractor.extract_multi(
+            texts,
+            entity_types=skill.entity_types,
+            batch_size=3,
+        )
 
     # Process results
     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)

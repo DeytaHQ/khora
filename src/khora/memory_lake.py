@@ -340,7 +340,7 @@ class MemoryLake:
             self.storage,
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
-            extraction_model=self._config.llm.model,
+            extraction_model=self._config.llm.extraction_model or self._config.llm.model,
         )
 
         return RememberResult(
