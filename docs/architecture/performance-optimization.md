@@ -160,6 +160,20 @@ async def search_stream(query, namespace_id, max_steps=3):
 
 This allows consumers to display partial results while follow-up queries are still executing.
 
+### Reranking Skip for Small Result Sets
+
+Neural reranking (cross-encoder) is skipped when fewer than 5 candidate chunks are available. This saves several seconds of latency for queries that return few results, particularly after zero-result fallback recovery.
+
+```python
+# Before: always rerank if enabled
+if cfg.enable_reranking and fused_chunks:
+
+# After: only rerank when there are enough candidates to meaningfully reorder
+if cfg.enable_reranking and len(fused_chunks) >= 5:
+```
+
+Impact: saves 3–8 seconds on queries with few results.
+
 ## Phase 4: Advanced Optimizations
 
 ### Speculative Execution

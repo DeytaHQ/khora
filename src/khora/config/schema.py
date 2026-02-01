@@ -266,8 +266,10 @@ class QuerySettings(BaseModel):
 
     # Basic search settings
     default_mode: str = Field(default="hybrid", description="Default search mode: vector, graph, hybrid, all")
-    min_chunk_similarity: float = Field(default=0.3, ge=0.0, le=1.0, description="Minimum chunk similarity threshold")
-    min_entity_similarity: float = Field(default=0.3, ge=0.0, le=1.0, description="Minimum entity similarity threshold")
+    min_chunk_similarity: float = Field(default=0.05, ge=0.0, le=1.0, description="Minimum chunk similarity threshold")
+    min_entity_similarity: float = Field(
+        default=0.05, ge=0.0, le=1.0, description="Minimum entity similarity threshold"
+    )
 
     # Fusion weights
     vector_weight: float = Field(default=0.5, ge=0.0, le=1.0, description="Weight for vector search in fusion")
@@ -293,9 +295,9 @@ class QuerySettings(BaseModel):
     entity_linking_exact_match: bool = Field(default=True, description="Use exact name matching")
     entity_linking_fuzzy_match: bool = Field(default=True, description="Use fuzzy name matching")
     entity_linking_embedding_match: bool = Field(default=True, description="Use embedding similarity matching")
-    entity_linking_fuzzy_threshold: float = Field(default=0.8, ge=0.0, le=1.0, description="Minimum fuzzy match ratio")
+    entity_linking_fuzzy_threshold: float = Field(default=0.6, ge=0.0, le=1.0, description="Minimum fuzzy match ratio")
     entity_linking_embedding_threshold: float = Field(
-        default=0.7, ge=0.0, le=1.0, description="Minimum embedding similarity"
+        default=0.4, ge=0.0, le=1.0, description="Minimum embedding similarity"
     )
     entity_linking_max_candidates: int = Field(default=5, ge=1, description="Maximum entity candidates per mention")
 

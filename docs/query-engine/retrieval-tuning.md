@@ -1,0 +1,183 @@
+# Retrieval Tuning
+
+This document explains changes made to Khora's retrieval pipeline in response to benchmark analysis against Cognee, Graphiti, and Mem0. The short version: Khora's query pipeline was too aggressive at filtering results, causing 25% of queries to return nothing. The fixes are mostly about lowering thresholds and adding fallback paths.
+
+## Background: What the Benchmarks Showed
+
+We ran the `retrieval_basic` benchmark (120 documents, 55 queries across 3 difficulty levels) against four systems. Khora had a serious problem: **25.5% of queries returned zero results**. Not low-quality results — literally nothing.
+
+The strangest finding was that Khora performed *worst on the easiest queries*. Simple factual lookups like "wrought-iron tower built for the 1889 World's Fair in Paris" (expecting the Eiffel Tower document) returned nothing, while complex multi-concept queries like "quantum mechanical effects near black hole event horizons" returned perfect results.
+
+Every other system found the Eiffel Tower document. Khora didn't.
+
+## The Three Compounding Problems
+
+The zero-result failures weren't caused by a single bug. Three independent issues compounded to create a retrieval dead zone for paraphrased and descriptive queries.
+
+### Problem 1: Similarity Threshold Too High
+
+The most impactful issue. When you called `lake.recall("some query")`, the default `min_similarity` was `0.5`. This value propagated down to pgvector as a hard `WHERE similarity >= 0.5` filter at the database level. Any chunk with cosine similarity below 0.5 was silently discarded before Khora even had a chance to rank it.
+
+For a descriptive query like "wrought-iron tower built for the 1889 World's Fair in Paris", the embedding similarity to a document about the Eiffel Tower might be 0.35–0.49. That's clearly relevant — a human would call it a match — but the threshold threw it away.
+
+The threshold chain was:
+
+```
+MemoryLake.recall(min_similarity=0.5)        # caller-facing default
+    → QueryConfig(min_chunk_similarity=0.3)   # internal default
+    → pgvector WHERE similarity >= 0.3        # DB-level filter
+```
+
+When using `MemoryLake.recall()` without arguments, the `0.5` default overrode the `QueryConfig` default of `0.3`, making things even worse.
+
+For comparison: Cognee applies no threshold at all — it returns whatever pgvector finds, ranked by distance, and lets the caller decide what's "good enough."
+
+### Problem 2: No Keyword Search in HYBRID Mode
+
+The default search mode is `HYBRID`, which runs vector search and graph search in parallel. Keyword search (PostgreSQL full-text search via `tsvector`/`tsquery`) was only activated in `ALL` mode:
+
+```python
+# Before: keyword search gated behind ALL mode
+if cfg.mode == SearchMode.ALL and cfg.enable_keyword_search:
+```
+
+This meant that for a query like "Eiffel Tower 1889 Paris", there was no keyword/full-text fallback. If vector similarity was below the threshold and entity linking found nothing, the query had no other path to find results.
+
+Keyword search is exactly the safety net you want for queries containing proper nouns, dates, and specific terms. It works on a completely different principle (term frequency, not embedding similarity), so it catches cases that vector search misses.
+
+### Problem 3: Graph Search Cascading Failure
+
+Graph search works by finding entities first, then traversing their relationships to discover connected chunks. It finds entities through two paths:
+
+1. **Entity linking**: Matches query mentions to stored entities (exact, fuzzy, or embedding match)
+2. **Entity embedding search**: Finds entities with similar embeddings
+
+Both paths had the same high thresholds. Entity linking required 0.8 fuzzy match ratio and 0.7 embedding similarity. Entity embedding search used the same `min_entity_similarity` as vector search.
+
+For paraphrased queries, entity linking often found nothing (no exact or fuzzy match), and entity embedding search filtered out candidates below the threshold. When graph search has zero entities to start from, it returns zero chunks. This meant both vector *and* graph returned nothing simultaneously.
+
+## What Changed
+
+### Similarity Thresholds (P0)
+
+The `MemoryLake.recall()` default `min_similarity` changed from `0.5` to `0.0`. The `QueryConfig` defaults for `min_chunk_similarity` and `min_entity_similarity` changed from `0.3` to `0.05`.
+
+Setting `min_similarity=0.0` at the `MemoryLake` level means: don't filter at the database level, let the ranking pipeline (RRF fusion, reranking) decide what's relevant. The small `0.05` default in `QueryConfig` is a noise floor — it filters out truly random matches without discarding anything a human might consider relevant.
+
+If you have a use case where you want strict filtering (e.g., only returning very confident matches), you can still pass `min_similarity=0.7` explicitly. The change only affects the default behavior.
+
+Files changed:
+- `memory_lake.py`: `min_similarity` parameter default `0.5` → `0.0`
+- `query/engine.py`: `QueryConfig.min_chunk_similarity` default `0.3` → `0.05`
+- `query/engine.py`: `QueryConfig.min_entity_similarity` default `0.3` → `0.05`
+- `config/schema.py`: `QuerySettings.min_chunk_similarity` default `0.3` → `0.05`
+- `config/schema.py`: `QuerySettings.min_entity_similarity` default `0.3` → `0.05`
+
+### Keyword Search in HYBRID Mode (P0)
+
+Keyword search now runs alongside vector and graph search in `HYBRID` mode, not just `ALL` mode:
+
+```python
+# After: keyword search runs in HYBRID and ALL
+if cfg.mode in (SearchMode.HYBRID, SearchMode.ALL) and cfg.enable_keyword_search:
+```
+
+This means the default `HYBRID` mode now uses all three search methods: vector similarity, graph traversal, and keyword/full-text matching. The existing RRF fusion weights still apply (vector: 0.5, graph: 0.3, keyword: 0.2), so keyword results contribute without dominating.
+
+This is arguably what `HYBRID` should have always meant. The previous behavior (vector + graph only) is now what you'd get with `SearchMode.HYBRID` and `enable_keyword_search=False`.
+
+File changed: `query/engine.py`
+
+### Zero-Result Fallback (P0)
+
+After the fusion step, if no chunks were found, the engine now retries with relaxed parameters:
+
+1. **Vector search with `min_similarity=0.0`** — in case the configured threshold filtered out borderline results
+2. **Keyword/full-text search** — if it wasn't already part of the search (e.g., `VECTOR` or `GRAPH` mode)
+
+Fallback results go through the same RRF fusion, so they're properly ranked. This is a safety net, not the primary path — with the lowered thresholds, most queries should find results on the first pass.
+
+The fallback only fires when the initial search returns literally nothing. It doesn't activate for low-quality results or few results.
+
+File changed: `query/engine.py` (in the `query()` method, after RRF fusion)
+
+### Reranking Skip for Small Result Sets (P1)
+
+Neural reranking (cross-encoder) now only runs when there are 5 or more candidate chunks. When fewer than 5 results are available, the existing RRF scores are already a reasonable ranking, and the cross-encoder adds several seconds of latency for minimal benefit.
+
+This matters most for the zero-result fallback path, where recovery might produce only 2-3 chunks. Without this change, those 2-3 chunks would still go through the full cross-encoder pipeline.
+
+File changed: `query/engine.py`
+
+### Entity Linking Thresholds (P2)
+
+The fuzzy matching threshold dropped from 0.8 to 0.6, and the embedding similarity threshold from 0.7 to 0.4.
+
+The previous 0.8 fuzzy threshold required near-exact string matches (e.g., "Einstein" would match "Einstien" but not "Albert Einstein"). At 0.6, more reasonable variations get through to the linking step, where further disambiguation happens.
+
+The 0.7 embedding threshold for entity linking was stricter than the chunk similarity threshold, which made no sense — if you're willing to consider a chunk at 0.3 similarity, you should be willing to consider an entity match at 0.4.
+
+Files changed:
+- `query/engine.py`: `QueryConfig` defaults
+- `config/schema.py`: `QuerySettings` defaults
+
+### Graph Search Entity Fallback (P2)
+
+When graph search finds no entities via embedding similarity (using the configured threshold), it now retries with `min_similarity=0.0` to find the top 3 closest entities regardless of distance. This prevents the cascading failure where graph search contributes nothing because it couldn't find a starting entity.
+
+The fallback entities will have lower similarity scores, which propagates through to their chunk scores, so they won't unfairly dominate the fusion results.
+
+File changed: `query/engine.py` (in `_graph_search()`)
+
+## Threshold Philosophy
+
+The old approach was: filter aggressively at each stage, trusting that only high-similarity results are relevant. This works when queries closely match document content (exact entity names, similar vocabulary), but fails for paraphrased or descriptive queries.
+
+The new approach is: cast a wide net at the retrieval stage, and rely on the ranking pipeline (RRF fusion, source priority boosting, neural reranking) to surface the best results. This matches what Cognee and Graphiti do — they retrieve broadly and rank carefully.
+
+The ranking pipeline is Khora's strength. Query understanding adjusts fusion weights per query. Entity linking boosts chunks connected to recognized entities. Cross-encoder reranking considers query-document pairs holistically. All of these work *better* when they have more candidates to work with. A 0.35-similarity chunk that's the right answer is better than zero results.
+
+There's a trade-off: lower thresholds mean more candidates pass through the pipeline, which adds some latency. In practice, pgvector returns results in distance order, so you're adding a few more low-scoring candidates to the tail — the fusion step is O(n) and fast. The reranking skip for small result sets also helps offset this.
+
+## Configuration Reference
+
+All thresholds can be overridden per-query or via environment variables:
+
+```python
+# Per-query override
+result = await lake.recall(
+    "specific query",
+    min_similarity=0.3,  # stricter than default
+)
+
+# Or via QueryConfig for full control
+config = QueryConfig(
+    min_chunk_similarity=0.2,
+    min_entity_similarity=0.2,
+    entity_linking_fuzzy_threshold=0.7,
+    entity_linking_embedding_threshold=0.5,
+)
+```
+
+Environment variables:
+```bash
+KHORA_QUERY__MIN_CHUNK_SIMILARITY=0.05     # default
+KHORA_QUERY__MIN_ENTITY_SIMILARITY=0.05    # default
+KHORA_QUERY__ENTITY_LINKING_FUZZY_THRESHOLD=0.6
+KHORA_QUERY__ENTITY_LINKING_EMBEDDING_THRESHOLD=0.4
+```
+
+## What's Next
+
+These changes should eliminate the zero-result problem and significantly improve retrieval quality on descriptive/paraphrased queries. The benchmark should be re-run to validate the expected impact:
+
+- Zero-result rate: 25.5% → near 0%
+- MRR: 0.736 → estimated 0.85–0.95
+- Hit rate: 74.5% → near 100%
+- Easy query MRR: 0.433 → estimated 0.90+
+- Latency: some improvement from reranking skip, but the main latency contributors (query understanding, reranking) are unchanged
+
+Further improvements to consider:
+- **HyDE (Hypothetical Document Embeddings)**: Generating a hypothetical document for the query would improve embedding similarity for descriptive queries. Already implemented but disabled by default (`enable_hyde=False`).
+- **Adaptive pipeline complexity**: Using the `complexity_score` from query understanding to skip expensive steps for simple queries.
+- **SearchMode.ALL as default**: Now that keyword search runs in HYBRID, the distinction between HYBRID and ALL is smaller — HYBRID is effectively ALL.

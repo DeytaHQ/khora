@@ -269,11 +269,13 @@ The `ChatEngine` provides conversational access to the memory lake:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `KHORA_QUERY__DEFAULT_MODE` | Default search mode: `vector`, `graph`, `hybrid`, `all` | `hybrid` |
+| `KHORA_QUERY__MIN_CHUNK_SIMILARITY` | Minimum chunk similarity threshold (0.0 = no filtering) | `0.05` |
+| `KHORA_QUERY__MIN_ENTITY_SIMILARITY` | Minimum entity similarity threshold | `0.05` |
 | `KHORA_QUERY__ENABLE_UNDERSTANDING` | Enable LLM query understanding | `true` |
 | `KHORA_QUERY__ENABLE_ENTITY_LINKING` | Enable entity linking | `true` |
 | `KHORA_QUERY__ENABLE_RERANKING` | Enable neural reranking | `true` |
 | `KHORA_QUERY__RERANKING_METHOD` | Reranking method: `cross_encoder`, `llm` | `cross_encoder` |
-| `KHORA_QUERY__ENABLE_KEYWORD_SEARCH` | Enable keyword search | `true` |
+| `KHORA_QUERY__ENABLE_KEYWORD_SEARCH` | Enable keyword search (runs in hybrid and all modes) | `true` |
 | `KHORA_QUERY__ENABLE_HYDE` | Enable HyDE query expansion | `false` |
 | `KHORA_QUERY__VECTOR_WEIGHT` | Weight for vector search in fusion | `0.5` |
 | `KHORA_QUERY__GRAPH_WEIGHT` | Weight for graph search in fusion | `0.3` |

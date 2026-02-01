@@ -100,33 +100,37 @@ results = await lake.recall(
 
 ## Hybrid Search (Default)
 
-**What it does**: Runs Vector and Graph search in parallel, then intelligently combines results.
+**What it does**: Runs Vector, Graph, and Keyword search in parallel, then intelligently combines results.
 
 **How it works**:
 1. Execute vector search → ranked list A
 2. Execute graph search → ranked list B
-3. Combine using Reciprocal Rank Fusion (RRF)
-4. Documents appearing in both lists get boosted
+3. Execute keyword/full-text search → ranked list C
+4. Combine using Reciprocal Rank Fusion (RRF)
+5. Documents appearing in multiple lists get boosted
 
 **When to use it**:
 - General queries (this is the default for a reason)
-- When you want both semantic and relationship context
+- When you want semantic, relationship, and keyword coverage
 - When you're not sure which mode would work best
 
 **Example**:
 ```python
-# Gets the best of both worlds
+# Gets the best of all three methods
 results = await lake.recall(
     "quarterly planning with the product team",
     mode=SearchMode.HYBRID
 )
 ```
 
-**The magic**: A document ranked #5 in vector and #3 in graph will beat one ranked #1 in vector alone. Consensus across methods signals relevance.
+**The magic**: A document ranked #5 in vector and #3 in graph will beat one ranked #1 in vector alone. Consensus across methods signals relevance. Keyword search catches exact terms that vector search might miss.
 
 Default weights:
 - Vector: 50% (semantic similarity usually matters most)
 - Graph: 30% (relationships add important context)
+- Keyword: 20% (catches exact terms, proper nouns, dates)
+
+> **Note**: HYBRID previously only ran vector + graph. Keyword search was added to HYBRID after [benchmark analysis](retrieval-tuning.md) showed that the missing keyword fallback caused 25% of descriptive queries to return zero results. You can disable it with `enable_keyword_search=False` if you want the old behavior.
 
 ## All Sources
 
@@ -169,7 +173,7 @@ Default weights:
 | "What is X?" | `VECTOR` | Conceptual understanding |
 | "Who works with X?" | `GRAPH` | Relationship traversal |
 | "Error: connection refused" | `KEYWORD` | Exact phrase matching |
-| "Project updates" | `HYBRID` | Balanced (default) |
+| "Project updates" | `HYBRID` | Balanced, all three methods (default) |
 | "Everything about the merger" | `ALL` | Comprehensive |
 
 ## Tuning Weights

@@ -426,7 +426,7 @@ class MemoryLake:
         namespace: str | UUID | None = None,
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
-        min_similarity: float = 0.5,
+        min_similarity: float = 0.0,
         agentic: bool = False,
     ) -> RecallResult:
         """Recall memories relevant to a query.

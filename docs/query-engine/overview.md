@@ -251,9 +251,9 @@ from khora.query.temporal import TemporalFilter
 results = await lake.recall(
     "product updates",
     config=QueryConfig(
-        mode=SearchMode.ALL,
+        mode=SearchMode.HYBRID,
         limit=20,
-        min_similarity=0.3,
+        min_similarity=0.1,
         vector_weight=0.6,
         graph_weight=0.2,
         keyword_weight=0.2,
@@ -285,12 +285,13 @@ print(results.trace)  # See the full exploration path
 | `VECTOR` | Semantic similarity only | "What's similar to X?" |
 | `GRAPH` | Entity relationships only | "Who works with X?" |
 | `KEYWORD` | Exact term matching only | Technical terms, names |
-| `HYBRID` | Vector + Graph | Default, balanced |
-| `ALL` | All three methods | Comprehensive search |
+| `HYBRID` | Vector + Graph + Keyword | Default, balanced |
+| `ALL` | All three methods | Same as HYBRID (legacy distinction) |
 
 ## What's Next?
 
 - **[Search Modes](search-modes.md)** - When to use each mode
+- **[Retrieval Tuning](retrieval-tuning.md)** - Threshold changes, fallbacks, and benchmark-driven improvements
 - **[Query Understanding](query-understanding.md)** - How the LLM analyzes queries
 - **[Fusion](fusion.md)** - Deep dive into RRF
 - **[Temporal Queries](temporal-queries.md)** - Time-based filtering

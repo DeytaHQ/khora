@@ -283,8 +283,8 @@ class QueryConfig:
     max_graph_depth: int = 2
 
     # Similarity thresholds
-    min_chunk_similarity: float = 0.3
-    min_entity_similarity: float = 0.3
+    min_chunk_similarity: float = 0.05
+    min_entity_similarity: float = 0.05
 
     # Fusion weights
     vector_weight: float = 0.5
@@ -307,8 +307,8 @@ class QueryConfig:
 
     # Entity linking settings
     enable_entity_linking: bool = True
-    entity_linking_fuzzy_threshold: float = 0.8
-    entity_linking_embedding_threshold: float = 0.7
+    entity_linking_fuzzy_threshold: float = 0.6
+    entity_linking_embedding_threshold: float = 0.4
     entity_linking_max_candidates: int = 5
 
     # Reranking settings
@@ -685,7 +685,7 @@ class HybridQueryEngine:
                 )
                 task_types.append("graph")
 
-            if cfg.mode == SearchMode.ALL and cfg.enable_keyword_search:
+            if cfg.mode in (SearchMode.HYBRID, SearchMode.ALL) and cfg.enable_keyword_search:
                 keywords = understanding.keywords if understanding else None
                 if cfg.keyword_search_method == "fulltext":
                     tasks.append(self._timed_search(self._keyword_search_fulltext(namespace_id, q, cfg), "keyword"))
@@ -842,6 +842,50 @@ class HybridQueryEngine:
         metrics.fused_chunk_count = len(fused_chunks)
         metrics.fused_entity_count = len(fused_entities)
 
+        # Zero-result fallback: retry with no threshold and keyword search
+        if not fused_chunks:
+            logger.info("Zero results after fusion — attempting fallback search")
+            fallback_chunks: dict[str, list[tuple[Any, float]]] = {}
+
+            # Fallback 1: vector search with no similarity threshold
+            if query_embedding is not None:
+                try:
+                    fb_vector = await self._vector_search(
+                        namespace_id,
+                        query_embedding,
+                        QueryConfig(
+                            max_chunks=cfg.max_chunks,
+                            max_entities=cfg.max_entities,
+                            min_chunk_similarity=0.0,
+                            min_entity_similarity=0.0,
+                        ),
+                    )
+                    if fb_vector["chunks"]:
+                        fallback_chunks["vector"] = fb_vector["chunks"]
+                        if fb_vector.get("entities"):
+                            all_entity_results["vector_fallback"] = fb_vector["entities"]
+                except Exception as e:
+                    logger.warning(f"Fallback vector search failed: {e}")
+
+            # Fallback 2: keyword search (if not already run)
+            if not search_contributions.keyword.chunk_count:
+                try:
+                    fb_keyword = await self._keyword_search_fulltext(namespace_id, query_text, cfg)
+                    if fb_keyword["chunks"]:
+                        fallback_chunks["keyword"] = fb_keyword["chunks"]
+                except Exception as e:
+                    logger.warning(f"Fallback keyword search failed: {e}")
+
+            if fallback_chunks:
+                fused_chunks = reciprocal_rank_fusion(
+                    fallback_chunks,
+                    k=cfg.rrf_k,
+                    weights={"vector": cfg.vector_weight, "keyword": cfg.keyword_weight},
+                    id_extractor=lambda c: str(c.id),
+                )
+                metrics.fused_chunk_count = len(fused_chunks)
+                logger.info(f"Fallback recovered {len(fused_chunks)} chunks")
+
         # Apply source priority boosting from query understanding
         if understanding and understanding.source_priority:
             fused_chunks = self._apply_source_priority(fused_chunks, understanding)
@@ -878,9 +922,9 @@ class HybridQueryEngine:
             fused_chunks = [(c, s * temporal_query.calculate_recency_score(c.created_at)) for c, s in fused_chunks]
             fused_chunks.sort(key=lambda x: x[1], reverse=True)
 
-        # Step 6: Reranking (optional)
+        # Step 6: Reranking (optional, skip for small result sets)
         metrics.reranking_timer.start()
-        if cfg.enable_reranking and fused_chunks:
+        if cfg.enable_reranking and len(fused_chunks) >= 5:
             try:
                 if cfg.reranking_method not in self._rerankers:
                     self._rerankers[cfg.reranking_method] = create_reranker(
@@ -1051,6 +1095,20 @@ class HybridQueryEngine:
                     all_entity_ids_to_fetch.append(entity_id)
                     similar_scores[entity_id] = score
                     seen_entity_ids.add(entity_id)
+
+            # Fallback: if no entities found, retry with no threshold
+            if not all_entity_ids_to_fetch and config.min_entity_similarity > 0:
+                entity_ids_scores = await self._storage.search_similar_entities(
+                    namespace_id,
+                    query_embedding,
+                    limit=3,
+                    min_similarity=0.0,
+                )
+                for entity_id, score in entity_ids_scores[:3]:
+                    if entity_id not in seen_entity_ids:
+                        all_entity_ids_to_fetch.append(entity_id)
+                        similar_scores[entity_id] = score
+                        seen_entity_ids.add(entity_id)
 
         # Batch fetch all entities and neighborhoods in parallel
         if all_entity_ids_to_fetch:
