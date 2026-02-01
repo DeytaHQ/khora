@@ -169,6 +169,7 @@ class TelemetryCollector:
             elif kind == "pipeline":
                 pipeline_rows.append(row)
 
+        total = len(llm_rows) + len(storage_rows) + len(pipeline_rows)
         try:
             async with self._engine.begin() as conn:
                 if llm_rows:
@@ -177,7 +178,10 @@ class TelemetryCollector:
                     await conn.execute(storage_events.insert(), storage_rows)
                 if pipeline_rows:
                     await conn.execute(pipeline_events.insert(), pipeline_rows)
-            total = len(llm_rows) + len(storage_rows) + len(pipeline_rows)
             logger.debug(f"Telemetry flushed {total} events")
         except Exception as exc:
-            logger.warning(f"Telemetry flush failed (events dropped): {exc}")
+            # Truncate error to avoid dumping huge SQL with embedding vectors
+            err_str = str(exc)
+            if len(err_str) > 300:
+                err_str = err_str[:300] + "..."
+            logger.warning(f"Telemetry flush failed ({total} events dropped): {err_str}")
