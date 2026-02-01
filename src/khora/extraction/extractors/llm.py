@@ -559,13 +559,13 @@ Return ONLY valid JSON, no other text."""
 
                 entities.append(
                     ExtractedEntity(
-                        name=e.get("name", ""),
-                        entity_type=e.get("entity_type", "CONCEPT"),
-                        description=e.get("description", ""),
+                        name=e.get("name") or "",
+                        entity_type=e.get("entity_type") or "CONCEPT",
+                        description=e.get("description") or "",
                         attributes=attrs,
-                        aliases=e.get("aliases", []),
+                        aliases=e.get("aliases") or [],
                         temporal=temporal,
-                        confidence=e.get("confidence", 0.9),
+                        confidence=e.get("confidence") or 0.9,
                     )
                 )
 
@@ -583,13 +583,13 @@ Return ONLY valid JSON, no other text."""
 
                 relationships.append(
                     ExtractedRelationship(
-                        source_entity=r.get("source_entity", ""),
-                        target_entity=r.get("target_entity", ""),
-                        relationship_type=r.get("relationship_type", "RELATES_TO"),
-                        description=r.get("description", ""),
-                        properties=r.get("properties", {}),
+                        source_entity=r.get("source_entity") or "",
+                        target_entity=r.get("target_entity") or "",
+                        relationship_type=r.get("relationship_type") or "RELATES_TO",
+                        description=r.get("description") or "",
+                        properties=r.get("properties") or {},
                         temporal=temporal,
-                        confidence=r.get("confidence", 0.9),
+                        confidence=r.get("confidence") or 0.9,
                     )
                 )
 
@@ -597,11 +597,11 @@ Return ONLY valid JSON, no other text."""
             for ev in data.get("events", []):
                 events.append(
                     ExtractedEvent(
-                        description=ev.get("description", ""),
-                        event_type=ev.get("event_type", "EVENT"),
+                        description=ev.get("description") or "",
+                        event_type=ev.get("event_type") or "EVENT",
                         occurred_at=ev.get("occurred_at"),
-                        participants=ev.get("participants", []),
-                        confidence=ev.get("confidence", 0.9),
+                        participants=ev.get("participants") or [],
+                        confidence=ev.get("confidence") or 0.9,
                     )
                 )
 

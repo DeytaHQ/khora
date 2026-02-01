@@ -96,7 +96,7 @@ addopts = [
     "--cov=khora",
     "--cov-branch",
     "--cov-report=term-missing",
-    "--cov-fail-under=30",
+    "--cov-fail-under=60",
 ]
 markers = [
     "unit: Unit tests",

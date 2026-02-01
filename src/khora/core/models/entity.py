@@ -104,6 +104,15 @@ class Entity:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    def __post_init__(self) -> None:
+        """Sanitize fields that must not be None (LLM sometimes returns null)."""
+        if self.name is None:
+            self.name = ""
+        if self.description is None:
+            self.description = ""
+        if self.source_tool is None:
+            self.source_tool = ""
+
     def validate(self) -> None:
         """Validate and clean attributes using the registered schema for this entity type."""
         from khora.core.models.schemas import validate_attributes

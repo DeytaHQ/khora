@@ -210,12 +210,16 @@ class LiteLLMEmbedder(Embedder):
 
         import litellm
 
+        # Sanitize inputs: replace None/empty strings with a placeholder to avoid
+        # OpenAI '$.input' is invalid errors
+        sanitized = [t if t and t.strip() else " " for t in texts]
+
         for attempt in range(self._max_retries):
             try:
                 _t0 = _time.perf_counter()
                 response = await litellm.aembedding(
                     model=self._model,
-                    input=texts,
+                    input=sanitized,
                     timeout=self._timeout,
                 )
                 _latency = (_time.perf_counter() - _t0) * 1000
