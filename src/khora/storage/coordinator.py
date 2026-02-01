@@ -584,13 +584,13 @@ class StorageCoordinator:
         if has_graph and has_vector:
             graph_results, _ = await asyncio.gather(
                 self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
-                self.vector.upsert_entities_batch(namespace_id, entities),
+                self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
             )
             results = graph_results
         elif has_graph:
             results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
         elif has_vector:
-            await self.vector.upsert_entities_batch(namespace_id, entities)
+            await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
 
         from khora.telemetry import get_collector
 

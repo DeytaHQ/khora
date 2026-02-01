@@ -414,10 +414,11 @@ class PgVectorBackend:
             updated_at=model.updated_at,
         )
 
-    async def upsert_entities_batch(self, namespace_id: UUID, entities: list) -> list[tuple]:
+    async def upsert_entities_batch(self, namespace_id: UUID, entities: list, *, batch_size: int = 50) -> list[tuple]:
         """Batch upsert entity records in PostgreSQL.
 
-        Uses a single multi-row INSERT ... ON CONFLICT DO UPDATE statement.
+        Uses multi-row INSERT ... ON CONFLICT DO UPDATE statements, chunked
+        into sub-batches to stay within asyncpg's parameter limit.
         Returns list of (entity, is_new) tuples (is_new is approximate).
         """
         if not entities:
@@ -425,51 +426,55 @@ class PgVectorBackend:
 
         from sqlalchemy.dialects.postgresql import insert
 
-        values = [
-            {
-                "id": str(entity.id),
-                "namespace_id": str(entity.namespace_id),
-                "name": entity.name,
-                "entity_type": entity.entity_type,
-                "description": entity.description,
-                "attributes": entity.attributes,
-                "source_document_ids": [str(d) for d in entity.source_document_ids],
-                "source_chunk_ids": [str(c) for c in entity.source_chunk_ids],
-                "mention_count": entity.mention_count,
-                "embedding": entity.embedding,
-                "embedding_model": entity.embedding_model,
-                "valid_from": entity.valid_from,
-                "valid_until": entity.valid_until,
-                "confidence": entity.confidence,
-                "metadata_": entity.metadata,
-                "created_at": entity.created_at,
-                "updated_at": entity.updated_at,
-            }
-            for entity in entities
-        ]
+        # Process in sub-batches to avoid exceeding parameter limits
+        # (17 columns × batch_size parameters per statement)
+        for i in range(0, len(entities), batch_size):
+            batch = entities[i : i + batch_size]
+            values = [
+                {
+                    "id": str(entity.id),
+                    "namespace_id": str(entity.namespace_id),
+                    "name": entity.name,
+                    "entity_type": entity.entity_type,
+                    "description": entity.description,
+                    "attributes": entity.attributes,
+                    "source_document_ids": [str(d) for d in entity.source_document_ids],
+                    "source_chunk_ids": [str(c) for c in entity.source_chunk_ids],
+                    "mention_count": entity.mention_count,
+                    "embedding": entity.embedding,
+                    "embedding_model": entity.embedding_model,
+                    "valid_from": entity.valid_from,
+                    "valid_until": entity.valid_until,
+                    "confidence": entity.confidence,
+                    "metadata_": entity.metadata,
+                    "created_at": entity.created_at,
+                    "updated_at": entity.updated_at,
+                }
+                for entity in batch
+            ]
 
-        async with self._get_session() as session:
-            stmt = insert(EntityModel).values(values)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["id"],
-                set_={
-                    "name": stmt.excluded.name,
-                    "description": stmt.excluded.description,
-                    "attributes": stmt.excluded.attributes,
-                    "source_document_ids": stmt.excluded.source_document_ids,
-                    "source_chunk_ids": stmt.excluded.source_chunk_ids,
-                    "mention_count": stmt.excluded.mention_count,
-                    "embedding": stmt.excluded.embedding,
-                    "embedding_model": stmt.excluded.embedding_model,
-                    "valid_from": stmt.excluded.valid_from,
-                    "valid_until": stmt.excluded.valid_until,
-                    "confidence": stmt.excluded.confidence,
-                    "metadata": stmt.excluded.metadata,
-                    "updated_at": stmt.excluded.updated_at,
-                },
-            )
-            await session.execute(stmt)
-            await session.commit()
+            async with self._get_session() as session:
+                stmt = insert(EntityModel).values(values)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={
+                        "name": stmt.excluded.name,
+                        "description": stmt.excluded.description,
+                        "attributes": stmt.excluded.attributes,
+                        "source_document_ids": stmt.excluded.source_document_ids,
+                        "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                        "mention_count": stmt.excluded.mention_count,
+                        "embedding": stmt.excluded.embedding,
+                        "embedding_model": stmt.excluded.embedding_model,
+                        "valid_from": stmt.excluded.valid_from,
+                        "valid_until": stmt.excluded.valid_until,
+                        "confidence": stmt.excluded.confidence,
+                        "metadata": stmt.excluded.metadata,
+                        "updated_at": stmt.excluded.updated_at,
+                    },
+                )
+                await session.execute(stmt)
+                await session.commit()
 
         return [(entity, True) for entity in entities]
 
