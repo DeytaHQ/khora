@@ -142,7 +142,9 @@ class TestLLMReranker:
             results = await reranker.rerank("query", candidates)
 
         assert len(results) == 2
-        assert results[0].final_score == 0.9
+        # On error, score_batch returns 5.0 (default), normalized to 0.5
+        # final = 0.7 * 0.5 + 0.3 * 0.9 = 0.62
+        assert results[0].final_score == pytest.approx(0.62)
 
 
 class TestCreateReranker:

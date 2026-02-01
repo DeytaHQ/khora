@@ -128,7 +128,7 @@ class TestQueryCache:
 
     def test_record_cache_event(self) -> None:
         """Telemetry recording doesn't raise."""
-        with patch("khora.query.cache.get_collector") as mock_collector:
+        with patch("khora.telemetry.get_collector") as mock_collector:
             mock_collector.return_value.record_llm_call = lambda **kwargs: None
             QueryCache._record_cache_event(True, uuid4())
             QueryCache._record_cache_event(False, uuid4())

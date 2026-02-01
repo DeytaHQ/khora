@@ -55,23 +55,27 @@ class TelemetryCollector:
         self._flush_task = asyncio.create_task(self._flush_loop(), name="telemetry-flush")
 
     async def _migrate_schema(self) -> None:
-        """Detect schema version and recreate tables if needed."""
+        """Detect schema version and recreate tables if needed.
+
+        Uses separate connections for probing and DDL to avoid aborted
+        transaction issues with asyncpg.
+        """
         import sqlalchemy as sa
 
-        async with self._engine.begin() as conn:
-            # Check if llm_events table exists and has trace_id column
-            needs_recreate = False
+        # Step 1: probe whether the current schema is up-to-date
+        needs_recreate = False
+        async with self._engine.connect() as conn:
             try:
                 result = await conn.execute(sa.text("SELECT trace_id FROM llm_events LIMIT 0"))
                 result.close()
             except Exception:
-                # Column doesn't exist or table doesn't exist — need to recreate
                 needs_recreate = True
-                # Rollback any failed transaction state
+            finally:
                 await conn.rollback()
 
-            if needs_recreate:
-                # Check if old tables exist at all
+        # Step 2: drop old tables if they exist but are outdated
+        if needs_recreate:
+            async with self._engine.begin() as conn:
                 try:
                     await conn.execute(sa.text("SELECT 1 FROM llm_events LIMIT 0"))
                     # Old table exists without trace_id — drop all
@@ -81,6 +85,8 @@ class TelemetryCollector:
                     # Tables don't exist at all — fine, create_all will handle it
                     await conn.rollback()
 
+        # Step 3: create tables (no-op if already up-to-date)
+        async with self._engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
 
     async def shutdown(self) -> None:

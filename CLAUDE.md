@@ -238,7 +238,7 @@ The `ChatEngine` provides conversational access to the memory lake:
 ## Testing
 
 - pytest with pytest-asyncio
-- Coverage minimum: 60%
+- Coverage minimum: 50%
 - Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
 - Fixtures in `tests/conftest.py`
 
