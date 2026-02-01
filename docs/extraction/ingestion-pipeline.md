@@ -188,18 +188,20 @@ await storage.create_chunks_batch(chunks)
 
 **Entities → Neo4j + pgvector:**
 ```python
+# Per-entity approach (incremental/batch modes):
 for entity in entities:
-    # Check if we already have this entity
     existing = await storage.get_entity_by_name(
         namespace_id, entity.name, entity.entity_type
     )
     if existing:
-        # Merge: combine attributes, add source references
         existing.merge_with(entity)
         await storage.update_entity(existing)
     else:
-        # Create in both Neo4j (graph) and pgvector (embeddings)
         await storage.create_entity(entity)
+
+# Batch approach (smart mode post-resolution):
+await storage.upsert_entities_batch(namespace_id, resolved_entities, batch_size=50)
+# Uses UNWIND + MERGE in Neo4j, INSERT ... ON CONFLICT in PostgreSQL
 ```
 
 **Entity Embeddings → pgvector:**
@@ -214,8 +216,12 @@ for entity, embedding in zip(entities, embeddings):
 
 **Relationships → Neo4j:**
 ```python
+# Per-relationship approach:
 for relationship in relationships:
     await storage.create_relationship(relationship)
+
+# Batch approach (smart mode):
+await storage.create_relationships_batch(relationships, batch_size=50)
 ```
 
 ### Entity ID Remapping
@@ -267,7 +273,7 @@ Document 2: "Microsoft"
 Document 3: "MSFT"
 ```
 
-The unifier recognizes these as the same entity:
+The unifier recognizes these as the same entity using three matching strategies:
 
 ```python
 expander = SemanticExpander(expertise=expertise)
@@ -280,7 +286,8 @@ expander = SemanticExpander(expertise=expertise)
 result = await expander.expand(
     entities=entities,
     relationships=relationships,
-    namespace_id=namespace_id
+    namespace_id=namespace_id,
+    entity_index=entity_index,  # Optional: enables efficient blocked matching
 )
 ```
 
@@ -300,20 +307,38 @@ Inference rules are defined in the expertise configuration.
 
 ### Inference Modes
 
-Three modes control when inference runs:
+Four modes control when inference runs:
 
-| Mode | When It Runs | Use Case |
-|------|-------------|----------|
-| `none` | Never | Unification only |
-| `incremental` | Per document, with existing graph context | Real-time, smaller graphs |
-| `batch` | After all documents, on full graph | Large initial imports |
+| Mode | When It Runs | Complexity | Use Case |
+|------|-------------|-----------|----------|
+| `smart` (default) | Per-doc dedup during ingestion, full resolution once after all docs | O(n * k) | Large imports, production use |
+| `incremental` | Per document, with existing graph context | O(n^2) per doc | Small graphs, trickle feeds |
+| `batch` | After all documents, on full graph | O(n^2) once | Legacy bulk imports |
+| `none` | Never | O(1) | Unification only |
+
+**Smart mode** (the default) uses a shared in-memory `EntityIndex` that grows as documents are processed. During ingestion, each entity gets an O(1) exact-match check against the index. After all documents are processed, a single cross-document resolution pass runs with token-blocked fuzzy and embedding matching -- O(n * k) instead of O(n^2).
 
 ```python
-# Incremental: fetch existing graph for context
+# Smart mode is the default:
+result = await ingest_documents(
+    namespace_id, documents, storage,
+    expertise="saas_expert",
+    enable_expansion=True,
+    # inference_mode="smart" is the default
+)
+```
+
+**Incremental mode** fetches the existing graph for context on each document:
+
+```python
 if inference_mode == "incremental":
     existing = await storage.list_entities(namespace_id)
     expansion_context.extend(existing)
 ```
+
+This works well for small graphs but becomes slow as entity counts grow, since every document triggers O(n^2) pairwise comparisons.
+
+See [Semantic Expansion](semantic-expansion.md) for full details on each mode and the `EntityIndex`.
 
 ## Concurrency Control
 
@@ -429,7 +454,7 @@ result = await ingest_documents(
     max_concurrent_documents=5,
     max_concurrent_extractions=10,
     enable_expansion=True,
-    inference_mode="batch"
+    inference_mode="smart"   # default; also "incremental", "batch", "none"
 )
 ```
 

@@ -16,11 +16,12 @@ These improvements are focused on making Khora faster and more reliable for prod
 
 ### Ingestion Performance
 
-| Item | Why It Matters |
-|------|----------------|
-| **Streaming Ingestion** | Process documents as they arrive rather than waiting for batches. Critical for real-time applications. |
-| **Distributed Workers** | Scale extraction across multiple machines. Currently limited by single-process throughput. |
-| **GPU-Accelerated Embedding** | Local embedding models can be 10-100x faster on GPU. Important for cost-sensitive deployments. |
+| Item | Status | Why It Matters |
+|------|--------|----------------|
+| **Smart Entity Resolution** | Done | Two-phase architecture with token-blocked matching. Replaces O(n^2) per-document entity resolution with O(1) per-doc dedup + single O(n*k) post-ingestion pass. Batch storage operations reduce N+1 queries. See [Performance Optimization](architecture/performance-optimization.md). |
+| **Streaming Ingestion** | Planned | Process documents as they arrive rather than waiting for batches. Critical for real-time applications. |
+| **Distributed Workers** | Planned | Scale extraction across multiple machines. Currently limited by single-process throughput. |
+| **GPU-Accelerated Embedding** | Planned | Local embedding models can be 10-100x faster on GPU. Important for cost-sensitive deployments. |
 
 ### Storage Efficiency
 

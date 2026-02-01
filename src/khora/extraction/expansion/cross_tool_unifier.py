@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from khora.core.models import Entity, Relationship
     from khora.extraction.skills import ExpertiseConfig
 
+    from .entity_index import EntityIndex
+
 
 @dataclass
 class UnificationResult:
@@ -77,6 +79,7 @@ class CrossToolUnifier:
         *,
         use_embeddings: bool = True,
         use_fuzzy: bool = True,
+        entity_index: EntityIndex | None = None,
     ) -> UnificationResult:
         """Unify entities and update relationships.
 
@@ -98,7 +101,7 @@ class CrossToolUnifier:
         context = RuleEvaluationContext.from_data(entities, relationships)
 
         # Find entity groups that should be merged
-        merge_groups = self._find_merge_groups(entities, context, use_embeddings, use_fuzzy)
+        merge_groups = self._find_merge_groups(entities, context, use_embeddings, use_fuzzy, entity_index=entity_index)
 
         if not merge_groups:
             # No merging needed
@@ -155,6 +158,8 @@ class CrossToolUnifier:
         context: RuleEvaluationContext,
         use_embeddings: bool,
         use_fuzzy: bool,
+        *,
+        entity_index: EntityIndex | None = None,
     ) -> list[set[UUID]]:
         """Find groups of entities that should be merged."""
         # Use Union-Find to track merge groups
@@ -183,13 +188,13 @@ class CrossToolUnifier:
 
         # Optional: Embedding similarity matching
         if use_embeddings:
-            embedding_matches = self._find_embedding_matches(entities)
+            embedding_matches = self._find_embedding_matches(entities, entity_index=entity_index)
             for e1_id, e2_id in embedding_matches:
                 union(e1_id, e2_id)
 
         # Optional: Fuzzy string matching
         if use_fuzzy:
-            fuzzy_matches = self._find_fuzzy_matches(entities)
+            fuzzy_matches = self._find_fuzzy_matches(entities, entity_index=entity_index)
             for e1_id, e2_id in fuzzy_matches:
                 union(e1_id, e2_id)
 
@@ -272,8 +277,15 @@ class CrossToolUnifier:
     def _find_embedding_matches(
         self,
         entities: list[Entity],
+        *,
+        entity_index: EntityIndex | None = None,
     ) -> list[tuple[UUID, UUID]]:
-        """Find entity pairs with similar embeddings."""
+        """Find entity pairs with similar embeddings.
+
+        When *entity_index* is provided, uses token blocking to reduce the
+        candidate set from O(n^2) to O(n*k) where k is ~10-20 candidates
+        per entity.
+        """
         pairs = []
 
         # Filter to entities with embeddings
@@ -281,7 +293,20 @@ class CrossToolUnifier:
         if len(with_embeddings) < 2:
             return pairs
 
-        # Compare embeddings (O(n^2) - could be optimized with approximate nearest neighbors)
+        if entity_index is not None:
+            # Blocked matching: O(n*k) via entity_index
+            seen: set[tuple[UUID, UUID]] = set()
+            for entity in with_embeddings:
+                for candidate, similarity in entity_index.find_embedding_candidates(
+                    entity, threshold=self._embedding_threshold
+                ):
+                    pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
+                    if pair not in seen:
+                        seen.add(pair)
+                        pairs.append((entity.id, candidate.id))
+            return pairs
+
+        # Fallback: O(n^2) pairwise comparison
         for i, e1 in enumerate(with_embeddings):
             for e2 in with_embeddings[i + 1 :]:
                 # Only compare same type
@@ -297,11 +322,30 @@ class CrossToolUnifier:
     def _find_fuzzy_matches(
         self,
         entities: list[Entity],
+        *,
+        entity_index: EntityIndex | None = None,
     ) -> list[tuple[UUID, UUID]]:
-        """Find entity pairs with similar names (fuzzy matching)."""
+        """Find entity pairs with similar names (fuzzy matching).
+
+        When *entity_index* is provided, uses token blocking to reduce the
+        candidate set from O(n^2) to O(n*k).
+        """
         pairs = []
 
-        # Group by entity type first
+        if entity_index is not None:
+            # Blocked matching: O(n*k)
+            seen: set[tuple[UUID, UUID]] = set()
+            for entity in entities:
+                for candidate, similarity in entity_index.find_fuzzy_candidates(
+                    entity, threshold=self._fuzzy_threshold
+                ):
+                    pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
+                    if pair not in seen:
+                        seen.add(pair)
+                        pairs.append((entity.id, candidate.id))
+            return pairs
+
+        # Fallback: O(n^2) pairwise within type groups
         type_groups: dict[str, list[Entity]] = {}
         for entity in entities:
             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
@@ -309,7 +353,6 @@ class CrossToolUnifier:
                 type_groups[type_key] = []
             type_groups[type_key].append(entity)
 
-        # Fuzzy match within each type group
         for group in type_groups.values():
             if len(group) < 2:
                 continue

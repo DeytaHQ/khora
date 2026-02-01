@@ -79,6 +79,8 @@ Your Content
 |                                            |
 |   - Merge duplicate entities               |
 |   - Infer new relationships                |
+|   - Smart mode: O(1) per-doc dedup,        |
+|     single post-ingestion resolution pass  |
 +--------------------------------------------+
 ```
 

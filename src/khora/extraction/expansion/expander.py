@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from khora.core.models import Entity, Relationship
     from khora.extraction.skills import ExpertiseConfig
 
+    from .entity_index import EntityIndex
+
 
 @dataclass
 class ExpansionResult:
@@ -132,6 +134,7 @@ class SemanticExpander:
         relationships: list[Relationship],
         *,
         namespace_id: UUID | None = None,
+        entity_index: EntityIndex | None = None,
     ) -> ExpansionResult:
         """Expand the knowledge graph.
 
@@ -171,6 +174,7 @@ class SemanticExpander:
                 current_relationships,
                 use_embeddings=True,
                 use_fuzzy=True,
+                entity_index=entity_index,
             )
 
             current_entities = unification_result.unified_entities

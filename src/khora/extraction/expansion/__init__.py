@@ -23,6 +23,7 @@ Example usage:
 from __future__ import annotations
 
 from .cross_tool_unifier import CrossToolUnifier, UnificationResult
+from .entity_index import EntityIndex
 from .expander import ExpansionResult, SemanticExpander
 from .relationship_inferrer import InferredRelationship, RelationshipInferrer
 from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
@@ -31,6 +32,8 @@ __all__ = [
     # Main expander
     "SemanticExpander",
     "ExpansionResult",
+    # Entity index (smart mode)
+    "EntityIndex",
     # Cross-tool unification
     "CrossToolUnifier",
     "UnificationResult",

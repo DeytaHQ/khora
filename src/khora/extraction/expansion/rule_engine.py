@@ -92,6 +92,52 @@ class RuleEvaluationContext:
 
         return ctx
 
+    def update(
+        self,
+        new_entities: list[Entity],
+        new_relationships: list[Relationship],
+    ) -> None:
+        """Incrementally add new entities and relationships to the context.
+
+        Avoids a full rebuild when only a few items have been added.
+        """
+        for entity in new_entities:
+            if entity not in self.entities:
+                self.entities.append(entity)
+
+                name_key = entity.name.lower()
+                if name_key not in self.entity_index:
+                    self.entity_index[name_key] = []
+                self.entity_index[name_key].append(entity)
+
+                type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+                if type_key not in self.type_index:
+                    self.type_index[type_key] = []
+                self.type_index[type_key].append(entity)
+
+                self.entity_by_id[str(entity.id)] = entity
+
+        for rel in new_relationships:
+            if rel not in self.relationships:
+                self.relationships.append(rel)
+
+                rel_type = str(
+                    rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+                )
+                if rel_type not in self.relationship_index:
+                    self.relationship_index[rel_type] = []
+                self.relationship_index[rel_type].append(rel)
+
+                source_key = str(rel.source_entity_id)
+                if source_key not in self.rels_by_source:
+                    self.rels_by_source[source_key] = []
+                self.rels_by_source[source_key].append(rel)
+
+                target_key = str(rel.target_entity_id)
+                if target_key not in self.rels_by_target:
+                    self.rels_by_target[target_key] = []
+                self.rels_by_target[target_key].append(rel)
+
 
 # Type hierarchy for flexible matching
 # Child types can match parent types in inference rules

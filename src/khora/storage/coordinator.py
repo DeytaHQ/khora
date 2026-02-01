@@ -536,6 +536,79 @@ class StorageCoordinator:
         )
         return result
 
+    async def upsert_entities_batch(
+        self,
+        namespace_id: UUID,
+        entities: list[Entity],
+        *,
+        batch_size: int = 50,
+    ) -> list[tuple[Entity, bool]]:
+        """Batch upsert entities across graph and vector backends.
+
+        Uses MERGE semantics: creates new entities, updates existing ones
+        matched by (namespace_id, name, entity_type).
+
+        Returns list of (entity, is_new) tuples.
+        """
+        if not entities:
+            return []
+
+        import time as _time
+
+        _t0 = _time.perf_counter()
+
+        results: list[tuple[Entity, bool]] = []
+
+        # Upsert in graph backend (primary)
+        if self.graph and hasattr(self.graph, "upsert_entities_batch"):
+            results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+
+        # Also upsert in vector backend for embedding search
+        if self.vector and hasattr(self.vector, "upsert_entities_batch"):
+            await self.vector.upsert_entities_batch(namespace_id, entities)
+
+        from khora.telemetry import get_collector
+
+        get_collector().record_storage_op(
+            backend="graph+vector",
+            operation="upsert_entities_batch",
+            latency_ms=(_time.perf_counter() - _t0) * 1000,
+            record_count=len(entities),
+            namespace_id=namespace_id,
+        )
+        return results
+
+    async def create_relationships_batch(
+        self,
+        relationships: list[Relationship],
+        *,
+        batch_size: int = 50,
+    ) -> int:
+        """Batch create relationships in the graph backend.
+
+        Returns the number of relationships created.
+        """
+        if not relationships:
+            return 0
+
+        import time as _time
+
+        _t0 = _time.perf_counter()
+
+        count = 0
+        if self.graph and hasattr(self.graph, "create_relationships_batch"):
+            count = await self.graph.create_relationships_batch(relationships, batch_size=batch_size)
+
+        from khora.telemetry import get_collector
+
+        get_collector().record_storage_op(
+            backend="graph",
+            operation="create_relationships_batch",
+            latency_ms=(_time.perf_counter() - _t0) * 1000,
+            record_count=count,
+        )
+        return count
+
     # =========================================================================
     # Relationship operations (delegated to graph)
     # =========================================================================

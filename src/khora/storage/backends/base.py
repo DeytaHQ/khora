@@ -510,6 +510,30 @@ class GraphBackendProtocol(Protocol):
         """Count entities in a namespace."""
         ...
 
+    async def upsert_entities_batch(
+        self,
+        namespace_id: UUID,
+        entities: list[Entity],
+    ) -> list[tuple[Entity, bool]]:
+        """Batch upsert entities using MERGE semantics.
+
+        For each entity, creates it if new or updates if existing
+        (matched by name + type within namespace).
+
+        Returns list of (entity, is_new) tuples.
+        """
+        ...
+
+    async def create_relationships_batch(
+        self,
+        relationships: list[Relationship],
+    ) -> int:
+        """Batch create relationships.
+
+        Returns the number of relationships created.
+        """
+        ...
+
 
 @runtime_checkable
 class EventStoreProtocol(Protocol):

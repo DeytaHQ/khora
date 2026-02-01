@@ -218,9 +218,26 @@ class ExpansionConfig:
     relationship_inference: bool = True   # Enable inference?
     max_entities_per_expansion: int = 100 # Entity limit
 
-    # "batch" (after all docs), "incremental" (per doc), "none"
-    inference_mode: str = "incremental"
+    # "smart" (recommended), "batch", "incremental", "none"
+    inference_mode: str = "smart"
+
+    # Smart mode settings:
+    preload_existing: bool = True         # Pre-load existing entities into index
+    batch_storage_size: int = 50          # Entities per batch upsert
 ```
+
+`inference_mode` controls when entity resolution and relationship inference happen:
+
+| Mode | Description |
+|------|-------------|
+| `smart` | Per-doc O(1) dedup during ingestion, single O(n*k) resolution pass after all docs. Uses token-blocked `EntityIndex`. |
+| `incremental` | Full expansion per document, fetching existing graph context each time. O(n^2) per doc. |
+| `batch` | Skip inference during ingestion, run once on full graph afterward. O(n^2) once. |
+| `none` | Unification only, no inference. |
+
+`preload_existing` (smart mode only): When `true`, existing entities from the database are loaded into the in-memory `EntityIndex` before processing new documents. This ensures dedup works against stored entities, not just new ones. Set to `false` for clean namespaces.
+
+`batch_storage_size` (smart mode only): Number of entities per database batch operation during post-ingestion resolution. Larger values reduce round-trips.
 
 ## YAML Configuration
 
@@ -290,7 +307,9 @@ confidence:
 expansion:
   enabled: true
   depth: 2
-  inference_mode: incremental
+  inference_mode: smart            # "smart", "incremental", "batch", "none"
+  preload_existing: true           # Load existing entities into index
+  batch_storage_size: 50           # Entities per batch upsert
 ```
 
 ## Loading Expertise

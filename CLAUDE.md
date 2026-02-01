@@ -78,7 +78,8 @@ src/khora/
 │   │   └── llm.py               # LLM entity extraction (single + multi-batch)
 │   ├── expansion/               # Knowledge graph enrichment
 │   │   ├── expander.py          # SemanticExpander (orchestrates expansion)
-│   │   ├── cross_tool_unifier.py # Cross-tool entity unification
+│   │   ├── entity_index.py      # EntityIndex — in-memory blocking index for entity resolution
+│   │   ├── cross_tool_unifier.py # Cross-tool entity unification (supports blocked matching)
 │   │   ├── relationship_inferrer.py # Infer implicit relationships
 │   │   └── rule_engine.py       # Configurable rule-based expansion
 │   └── skills/                  # Extraction skill system
@@ -203,12 +204,13 @@ Each namespace isolates documents, chunks, entities, and relationships. Namespac
 
 **Skills**: YAML-configured extraction profiles defining entity types, relationship types, and extraction prompts. Skills are composable and stored per-namespace via `ExpertiseStore`. Default: `general_entities`.
 
-**Entity resolution**: Deduplication of extracted entities across documents.
+**Entity resolution**: Deduplication of extracted entities across documents. Default mode is `smart`: per-document O(1) exact dedup via `EntityIndex`, single post-ingestion O(n*k) resolution pass with token-blocked matching. Legacy modes: `incremental`, `batch`, `none`.
 
 **Expansion** (`SemanticExpander`):
-- `CrossToolUnifier`: Merges entities from different extraction tools/runs
+- `EntityIndex`: In-memory blocking index for O(1) exact dedup and O(k) fuzzy/embedding candidate retrieval
+- `CrossToolUnifier`: Merges entities from different extraction tools/runs (supports blocked matching via EntityIndex)
 - `RelationshipInferrer`: Infers implicit relationships from entity co-occurrence and attributes
-- `RuleEngine`: Configurable rules for domain-specific graph enrichment
+- `RuleEngine`: Configurable rules for domain-specific graph enrichment (supports incremental context updates)
 
 **Attribute schemas**: Pydantic-validated attribute schemas per entity type (Person, Organization, Location, etc.). Extensible via `register_attribute_schema()`.
 

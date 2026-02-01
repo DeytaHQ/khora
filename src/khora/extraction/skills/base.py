@@ -238,8 +238,12 @@ class ExpansionConfig:
     cross_tool_unification: bool = True
     relationship_inference: bool = True
     max_entities_per_expansion: int = 100
-    # Inference mode: "batch" (after all docs), "incremental" (per doc with graph query), "none"
-    inference_mode: str = "incremental"
+    # Inference mode: "smart" (recommended), "batch", "incremental", "none"
+    inference_mode: str = "smart"
+    # Smart mode: pre-load existing entities into the in-memory index
+    preload_existing: bool = True
+    # Smart mode: entities per batch upsert
+    batch_storage_size: int = 50
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation."""
@@ -250,6 +254,8 @@ class ExpansionConfig:
             "relationship_inference": self.relationship_inference,
             "max_entities_per_expansion": self.max_entities_per_expansion,
             "inference_mode": self.inference_mode,
+            "preload_existing": self.preload_existing,
+            "batch_storage_size": self.batch_storage_size,
         }
 
     @classmethod
@@ -261,7 +267,9 @@ class ExpansionConfig:
             cross_tool_unification=data.get("cross_tool_unification", True),
             relationship_inference=data.get("relationship_inference", True),
             max_entities_per_expansion=data.get("max_entities_per_expansion", 100),
-            inference_mode=data.get("inference_mode", "incremental"),
+            inference_mode=data.get("inference_mode", "smart"),
+            preload_existing=data.get("preload_existing", True),
+            batch_storage_size=data.get("batch_storage_size", 50),
         )
 
 

@@ -437,10 +437,11 @@ await lake.storage.create_entity(entity)
 
 ## Deduplication
 
-Entities are deduplicated during ingestion:
+Entities are deduplicated during ingestion. The approach depends on the inference mode.
+
+### Per-Entity Dedup (Incremental/Batch Modes)
 
 ```python
-# Check for existing entity
 existing = await storage.get_entity_by_name(
     namespace_id,
     entity.name,
@@ -448,15 +449,31 @@ existing = await storage.get_entity_by_name(
 )
 
 if existing:
-    # Merge into existing
     existing.merge_with(entity)
     await storage.update_entity(existing)
 else:
-    # Create new entity
     await storage.create_entity(entity)
 ```
 
-See [Semantic Expansion](../extraction/semantic-expansion.md) for advanced deduplication.
+### Index-Based Dedup (Smart Mode)
+
+In smart mode (the default), a shared in-memory `EntityIndex` handles dedup without database round-trips:
+
+```python
+from khora.extraction.expansion import EntityIndex
+
+index = EntityIndex()
+
+for entity in extracted_entities:
+    existing = index.add(entity)      # O(1) exact match
+    if existing is not None:
+        existing.merge_with(entity)   # Merge in-memory
+    # No database call needed per entity
+```
+
+After all documents are processed, entities are written to storage in batches using `upsert_entities_batch()`, and cross-document fuzzy/embedding resolution runs via token-blocked candidate matching.
+
+See [Semantic Expansion](../extraction/semantic-expansion.md) for full details on the `EntityIndex`, token blocking, and the smart mode resolution pipeline.
 
 ## Next Steps
 

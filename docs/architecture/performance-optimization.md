@@ -222,8 +222,92 @@ metrics = result.metadata["metrics"]
 
 Use these metrics to identify regressions and verify optimization impact.
 
+## Phase 5: Ingestion Performance -- Entity Resolution
+
+The query pipeline isn't the only place where performance matters. The ingestion pipeline had a critical bottleneck: entity resolution during expansion was O(n^2) and degraded severely as the knowledge graph grew. At around 12,000 documents the pipeline would stall for over an hour.
+
+### The Problem
+
+In `incremental` inference mode (the previous default), every document triggered:
+
+1. **Full namespace reload** -- `list_entities(limit=1000)` + `list_relationships(limit=5000)` from storage
+2. **O(n^2) pairwise matching** -- Cosine similarity on all entity embeddings + Levenshtein on all same-type entity names
+3. **N+1 entity writes** -- Each entity did individual `get_entity_by_name()` + create/update
+4. **Context rebuild** -- `RuleEvaluationContext.from_data()` rebuilt all indices every inference pass
+
+For 16,000 documents with 5,000 entities, this meant ~16,000 database reloads and ~16,000 O(n^2) comparisons.
+
+### The Solution: Smart Mode
+
+Smart mode (`inference_mode="smart"`, now the default) separates entity resolution into two phases:
+
+| Phase | When | What | Complexity |
+|-------|------|------|-----------|
+| **Phase 1** | Per document | Extract, within-doc exact dedup via `EntityIndex` | O(1) per entity lookup |
+| **Phase 2** | After all docs | Cross-document resolution via token blocking, relationship inference on full graph | O(n * k), k ~ 10-20 |
+
+### Complexity Comparison
+
+| Operation | Before (incremental) | After (smart) |
+|-----------|---------------------|---------------|
+| Per-doc entity dedup | Load 1K entities from DB + O(n^2) unify | O(1) index lookup |
+| Per-doc relationships | Load 5K rels from DB | Skip entirely |
+| Embedding matching (total) | O(n^2) * num_docs | O(n * k) * 1 pass |
+| Fuzzy matching (total) | O(n^2) * num_docs | O(n * k) * 1 pass |
+| Entity storage | 2 queries per entity | 1 batch per 50 entities |
+| Relationship inference | Per-doc context rebuild * 2 passes | 1 context build * 2 passes total |
+
+Where k is the token-blocked candidate set size per entity, typically 10-20.
+
+### Token Blocking
+
+The key technique behind the improvement. Instead of comparing every entity to every other entity, token blocking requires at least one shared name token before running expensive similarity computations:
+
+```
+"Microsoft Corporation"  ->  tokens: {microsoft, corporation}
+"Microsoft Corp"         ->  tokens: {microsoft, corp}
+"Apple Inc"              ->  tokens: {apple, inc}
+
+Candidates for "Microsoft Corporation":
+  Token "microsoft" -> {Microsoft Corp}    (shared token)
+  "Apple Inc" never enters the candidate set.
+```
+
+This reduces the number of Levenshtein distance computations from O(n^2) to O(n * k), where k is the number of entities sharing at least one token. For typical knowledge graphs this means 10-20 candidates per entity instead of thousands.
+
+For embedding-based matching, the candidate set also includes all same-type entities (since embeddings can match semantically similar entities with completely different names). This is still a significant reduction from full pairwise comparison.
+
+### Batch Storage Operations
+
+Smart mode also reduces database round-trips through batch operations:
+
+| Method | Backend | Implementation |
+|--------|---------|---------------|
+| `upsert_entities_batch()` | Neo4j | `UNWIND + MERGE` with ON CREATE SET / ON MATCH SET |
+| `upsert_entities_batch()` | PostgreSQL | `INSERT ... ON CONFLICT DO UPDATE` |
+| `create_relationships_batch()` | Neo4j | `UNWIND + CREATE` grouped by relationship type |
+
+Default batch size is 50 entities per batch, configurable via `ExpansionConfig.batch_storage_size`.
+
+### Configuration
+
+```yaml
+expansion:
+  inference_mode: smart        # "smart", "incremental", "batch", "none"
+  preload_existing: true       # Load existing entities into index before processing
+  batch_storage_size: 50       # Entities per batch upsert
+```
+
+See [Semantic Expansion](../extraction/semantic-expansion.md) for full details on the `EntityIndex` and resolution pipeline.
+
+### References
+
+- Papadakis, G., et al. "Blocking and Filtering Techniques for Entity Resolution." *ACM Computing Surveys*, 2020. [doi:10.1145/3377455](https://dl.acm.org/doi/abs/10.1145/3377455)
+- Microsoft GraphRAG. "Default Dataflow." [Documentation](https://microsoft.github.io/graphrag/index/default_dataflow/)
+
 ## What's Next
 
-- **[Query Engine Overview](../query-engine/overview.md)** — how the full search pipeline works
-- **[Agentic Search](../query-engine/agentic-search.md)** — multi-step search with follow-ups
-- **[Storage Backends](storage-backends.md)** — PostgreSQL, pgvector, and Neo4j details
+- **[Query Engine Overview](../query-engine/overview.md)** -- How the full search pipeline works
+- **[Agentic Search](../query-engine/agentic-search.md)** -- Multi-step search with follow-ups
+- **[Storage Backends](storage-backends.md)** -- PostgreSQL, pgvector, and Neo4j details
+- **[Semantic Expansion](../extraction/semantic-expansion.md)** -- Entity resolution and inference details

@@ -163,7 +163,7 @@ Each piece of knowledge goes to its optimal storage backend:
 
 ## Phase 3: Expansion (Optional)
 
-After basic enrichment, we can enhance the knowledge graph:
+After basic enrichment, we can enhance the knowledge graph.
 
 ### Entity Unification
 
@@ -188,6 +188,8 @@ Document 3: "MSFT"
     with merged attributes and sources
 ```
 
+In smart mode (the default), within-document dedup happens during ingestion via an in-memory `EntityIndex` with O(1) lookups. Cross-document resolution runs once after all documents are processed, using token blocking to reduce pairwise comparisons from O(n^2) to O(n * k).
+
 ### Relationship Inference
 
 Some relationships can be inferred from existing data:
@@ -200,7 +202,7 @@ Known:     Alice WORKS_FOR Acme Corp
 Inferred:  Alice COLLEAGUE_OF Bob
 ```
 
-Inference rules are configurable through the expertise system.
+Inference rules are configurable through the expertise system. In smart mode, inference runs once on the fully resolved entity graph rather than per-document.
 
 ## Putting It Together
 

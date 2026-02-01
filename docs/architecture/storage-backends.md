@@ -330,6 +330,53 @@ print(f"Neo4j: {'OK' if health.graph else 'DOWN'}")
 print(f"Overall: {'healthy' if health.is_healthy else 'degraded'}")
 ```
 
+## Batch Operations
+
+For bulk ingestion, batch methods significantly reduce database round-trips. These are used by smart mode's post-ingestion resolution but are available for any bulk workflow.
+
+### Entity Batch Upsert
+
+```python
+# Upsert up to 50 entities per batch
+results = await coordinator.upsert_entities_batch(
+    namespace_id,
+    entities,
+    batch_size=50,
+)
+# Returns: list of (entity, is_new) tuples
+```
+
+**Neo4j implementation** uses `UNWIND + MERGE`:
+```cypher
+UNWIND $entities AS e
+MERGE (n:Entity {namespace_id: e.namespace_id, name: e.name, entity_type: e.entity_type})
+ON CREATE SET n.id = e.id, n.description = e.description, ...
+ON MATCH SET n.description = e.description, n.updated_at = e.updated_at, ...
+```
+
+**PostgreSQL implementation** uses `INSERT ... ON CONFLICT DO UPDATE` for each entity in a single session.
+
+### Relationship Batch Create
+
+```python
+# Create relationships in batches, grouped by type
+count = await coordinator.create_relationships_batch(
+    relationships,
+    batch_size=50,
+)
+# Returns: number of relationships created
+```
+
+**Neo4j implementation** groups relationships by type and uses `UNWIND + CREATE` with dynamic relationship types.
+
+### When Batch Operations Are Used
+
+| Context | Method | Why |
+|---------|--------|-----|
+| Smart mode post-resolution | `upsert_entities_batch()` | Write resolved entities after cross-document unification |
+| Smart mode post-inference | `create_relationships_batch()` | Write inferred relationships in bulk |
+| Any bulk workflow | Both methods | Reduce N+1 query patterns to ceil(N/batch_size) queries |
+
 ## Protocol-Based Design
 
 Each backend implements a protocol (Python's version of an interface):
@@ -351,6 +398,18 @@ class GraphBackendProtocol(Protocol):
         entity_id: UUID,
         depth: int
     ) -> dict[str, Any]: ...
+    # Batch operations
+    async def upsert_entities_batch(
+        self,
+        namespace_id: UUID,
+        entities: list[Entity],
+        batch_size: int = 50,
+    ) -> list[tuple[Entity, bool]]: ...
+    async def create_relationships_batch(
+        self,
+        relationships: list[Relationship],
+        batch_size: int = 50,
+    ) -> int: ...
 ```
 
 This means you can swap pgvector for ArcadeDB, or Neo4j for Kùzu/Memgraph, without changing the rest of the system. The protocols define the contract; implementations fulfill it.

@@ -334,6 +334,174 @@ class Neo4jBackend(GraphBackendBase):
             records = await result.data()
             return [self._record_to_entity(r["e"]) for r in records]
 
+    async def upsert_entities_batch(
+        self,
+        namespace_id: UUID,
+        entities: list[Entity],
+        *,
+        batch_size: int = 50,
+    ) -> list[tuple[Entity, bool]]:
+        """Batch upsert entities using UNWIND + MERGE.
+
+        Matches on (namespace_id, name, entity_type).  Creates if new,
+        updates if existing.  Returns (entity, is_new) tuples.
+        """
+        if not entities:
+            return []
+
+        driver = self._get_driver()
+        results: list[tuple[Entity, bool]] = []
+
+        for start in range(0, len(entities), batch_size):
+            batch = entities[start : start + batch_size]
+            rows = [
+                {
+                    "id": str(e.id),
+                    "namespace_id": str(e.namespace_id),
+                    "name": e.name,
+                    "entity_type": (e.entity_type.value if isinstance(e.entity_type, EntityType) else e.entity_type),
+                    "description": e.description,
+                    "attributes": _serialize_dict(e.attributes),
+                    "source_document_ids": [str(d) for d in e.source_document_ids],
+                    "source_chunk_ids": [str(c) for c in e.source_chunk_ids],
+                    "mention_count": e.mention_count,
+                    "valid_from": e.valid_from.isoformat() if e.valid_from else None,
+                    "valid_until": e.valid_until.isoformat() if e.valid_until else None,
+                    "confidence": e.confidence,
+                    "metadata": _serialize_dict(e.metadata),
+                    "created_at": e.created_at.isoformat(),
+                    "updated_at": e.updated_at.isoformat(),
+                }
+                for e in batch
+            ]
+
+            async def _upsert_batch(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+                result = await tx.run(
+                    """
+                    UNWIND $rows AS row
+                    MERGE (e:Entity {namespace_id: row.namespace_id, name: row.name, entity_type: row.entity_type})
+                    ON CREATE SET
+                        e.id = row.id,
+                        e.description = row.description,
+                        e.attributes = row.attributes,
+                        e.source_document_ids = row.source_document_ids,
+                        e.source_chunk_ids = row.source_chunk_ids,
+                        e.mention_count = row.mention_count,
+                        e.valid_from = row.valid_from,
+                        e.valid_until = row.valid_until,
+                        e.confidence = row.confidence,
+                        e.metadata = row.metadata,
+                        e.created_at = row.created_at,
+                        e.updated_at = row.updated_at
+                    ON MATCH SET
+                        e.description = CASE WHEN size(row.description) > size(coalesce(e.description, ''))
+                            THEN row.description ELSE e.description END,
+                        e.attributes = row.attributes,
+                        e.source_document_ids = e.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN e.source_document_ids],
+                        e.source_chunk_ids = e.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN e.source_chunk_ids],
+                        e.mention_count = e.mention_count + row.mention_count,
+                        e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
+                        e.updated_at = row.updated_at
+                    RETURN e.id AS id, e.name AS name, row.id AS input_id,
+                           CASE WHEN e.id = row.id THEN true ELSE false END AS is_new
+                    """,
+                    rows=rows,
+                )
+                return await result.data()
+
+            async with driver.session(database=self._database) as session:
+                records = await session.execute_write(_upsert_batch)
+
+            # Build result mapping
+            input_id_to_entity = {str(e.id): e for e in batch}
+            for record in records:
+                entity = input_id_to_entity.get(record["input_id"])
+                if entity is not None:
+                    results.append((entity, record["is_new"]))
+
+        logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
+        return results
+
+    async def create_relationships_batch(
+        self,
+        relationships: list[Relationship],
+        *,
+        batch_size: int = 50,
+    ) -> int:
+        """Batch create relationships using UNWIND."""
+        if not relationships:
+            return 0
+
+        driver = self._get_driver()
+        total_created = 0
+
+        # Group by relationship type (required for dynamic rel type in Cypher)
+        type_groups: dict[str, list[Relationship]] = {}
+        for rel in relationships:
+            rel_type = (
+                rel.relationship_type.value
+                if isinstance(rel.relationship_type, RelationshipType)
+                else rel.relationship_type
+            )
+            type_groups.setdefault(rel_type, []).append(rel)
+
+        for rel_type, rels in type_groups.items():
+            for start in range(0, len(rels), batch_size):
+                batch = rels[start : start + batch_size]
+                rows = [
+                    {
+                        "id": str(r.id),
+                        "namespace_id": str(r.namespace_id),
+                        "source_id": str(r.source_entity_id),
+                        "target_id": str(r.target_entity_id),
+                        "description": r.description,
+                        "properties": _serialize_dict(r.properties),
+                        "source_document_ids": [str(d) for d in r.source_document_ids],
+                        "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
+                        "valid_from": r.valid_from.isoformat() if r.valid_from else None,
+                        "valid_until": r.valid_until.isoformat() if r.valid_until else None,
+                        "confidence": r.confidence,
+                        "weight": r.weight,
+                        "metadata": _serialize_dict(r.metadata),
+                        "created_at": r.created_at.isoformat(),
+                        "updated_at": r.updated_at.isoformat(),
+                    }
+                    for r in batch
+                ]
+
+                async def _create_batch(tx: AsyncManagedTransaction) -> int:
+                    query = f"""
+                    UNWIND $rows AS row
+                    MATCH (source:Entity {{id: row.source_id}})
+                    MATCH (target:Entity {{id: row.target_id}})
+                    CREATE (source)-[r:{rel_type} {{
+                        id: row.id,
+                        namespace_id: row.namespace_id,
+                        description: row.description,
+                        properties: row.properties,
+                        source_document_ids: row.source_document_ids,
+                        source_chunk_ids: row.source_chunk_ids,
+                        valid_from: row.valid_from,
+                        valid_until: row.valid_until,
+                        confidence: row.confidence,
+                        weight: row.weight,
+                        metadata: row.metadata,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at
+                    }}]->(target)
+                    RETURN count(r) AS created
+                    """
+                    result = await tx.run(query, rows=rows)
+                    record = await result.single()
+                    return record["created"] if record else 0
+
+                async with driver.session(database=self._database) as session:
+                    created = await session.execute_write(_create_batch)
+                    total_created += created
+
+        logger.debug(f"Batch created {total_created} relationships")
+        return total_created
+
     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
         """Convert a Neo4j node to a domain Entity."""
         return Entity(

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from khora.core.models import Document, Entity
+    from khora.extraction.expansion.entity_index import EntityIndex
     from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
 
@@ -137,6 +138,7 @@ async def process_document(
     max_concurrent_extractions: int = 10,
     enable_expansion: bool = False,
     extraction_context: dict[str, Any] | None = None,
+    entity_index: EntityIndex | None = None,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -146,6 +148,11 @@ async def process_document(
     3. Extract entities and relationships (parallel)
     4. (Optional) Semantic expansion - unify entities, infer relationships
     5. Store everything (batched)
+
+    When *entity_index* is provided (smart mode), skips per-document DB
+    fetches and O(n^2) cross-document unification.  Instead, does O(1)
+    within-doc exact dedup via the shared index.  Cross-document resolution
+    and inference are deferred to ``run_smart_resolution``.
 
     Args:
         document: Document to process
@@ -159,6 +166,7 @@ async def process_document(
         max_concurrent_extractions: Maximum concurrent LLM extractions
         enable_expansion: Whether to run semantic expansion
         extraction_context: Context dict for prompt template rendering
+        entity_index: Shared EntityIndex for smart mode (skip per-doc DB loads)
     """
     from ..tasks import chunk_document, embed_chunks, extract_entities
 
@@ -224,11 +232,25 @@ async def process_document(
 
         # Step 4 (Optional): Semantic expansion
         inferred_relationships = []
-        if enable_expansion and resolved_expertise:
-            from khora.extraction.expansion import SemanticExpander
+        inference_mode = resolved_expertise.expansion.inference_mode if resolved_expertise else "none"
 
-            # Determine inference mode from expertise config
-            inference_mode = resolved_expertise.expansion.inference_mode
+        if entity_index is not None and inference_mode == "smart":
+            # Smart mode: within-doc exact dedup via shared EntityIndex.
+            # Cross-document resolution + inference deferred to run_smart_resolution().
+            deduped_entities = []
+            for entity in entities:
+                existing = entity_index.add(entity)
+                if existing is not None:
+                    # Merge into existing (already in index)
+                    existing.merge_with(entity)
+                else:
+                    deduped_entities.append(entity)
+            if len(entities) != len(deduped_entities):
+                logger.debug(f"Document {document.id}: smart dedup {len(entities)} -> {len(deduped_entities)} entities")
+            entities = deduped_entities
+
+        elif enable_expansion and resolved_expertise:
+            from khora.extraction.expansion import SemanticExpander
 
             # For incremental mode, fetch existing entities/relationships from storage
             # to enable cross-document inference
@@ -446,6 +468,36 @@ async def ingest_documents(
 
     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
 
+    # Resolve expertise early to determine inference mode
+    resolved_expertise: ExpertiseConfig | None = None
+    if expertise is not None:
+        from khora.extraction.skills import ExpertiseConfig as EC
+        from khora.extraction.skills import load_expertise
+
+        if isinstance(expertise, EC):
+            resolved_expertise = expertise
+        elif isinstance(expertise, str):
+            try:
+                resolved_expertise = load_expertise(expertise)
+            except Exception:
+                pass
+
+    inference_mode = resolved_expertise.expansion.inference_mode if resolved_expertise else "none"
+    is_smart = inference_mode == "smart"
+
+    # Smart mode: create shared EntityIndex, optionally pre-load existing entities
+    shared_entity_index: EntityIndex | None = None
+    if is_smart and resolved_expertise:
+        from khora.extraction.expansion.entity_index import EntityIndex as EI
+
+        shared_entity_index = EI()
+        if resolved_expertise.expansion.preload_existing:
+            existing_entities = await storage.list_entities(namespace_id, limit=50000)
+            for e in existing_entities:
+                shared_entity_index.add(e)
+            if existing_entities:
+                logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
+
     # Phase 1: Stage documents (can run in parallel too)
     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
 
@@ -485,6 +537,7 @@ async def ingest_documents(
                 max_concurrent_extractions=max_concurrent_extractions,
                 enable_expansion=enable_expansion,
                 extraction_context=extraction_context,
+                entity_index=shared_entity_index,
             )
 
     results = await asyncio.gather(
@@ -508,6 +561,20 @@ async def ingest_documents(
     total_relationships = sum(r["relationships"] for r in successful_results)
     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
 
+    # Phase 3 (Smart mode): Post-ingestion cross-document resolution + inference
+    smart_resolution_result: dict[str, Any] = {}
+    if is_smart and shared_entity_index and resolved_expertise and successful_results:
+        logger.info("Starting smart post-ingestion resolution...")
+        smart_resolution_result = await run_smart_resolution(
+            namespace_id,
+            storage,
+            shared_entity_index,
+            resolved_expertise,
+            embedding_model=embedding_model,
+        )
+        total_entities = smart_resolution_result.get("entities_resolved", total_entities)
+        total_inferred = smart_resolution_result.get("inferred_relationships", total_inferred)
+
     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
 
     return {
@@ -519,6 +586,125 @@ async def ingest_documents(
         "total_entities": total_entities,
         "total_relationships": total_relationships,
         "total_inferred_relationships": total_inferred,
+        **({"smart_resolution": smart_resolution_result} if smart_resolution_result else {}),
+    }
+
+
+@task(name="run_smart_resolution", cache_policy=NO_CACHE)
+async def run_smart_resolution(
+    namespace_id: UUID,
+    storage: StorageCoordinator,
+    entity_index: EntityIndex,
+    expertise: ExpertiseConfig,
+    *,
+    embedding_model: str = "text-embedding-3-small",
+) -> dict[str, Any]:
+    """Post-ingestion cross-document entity resolution and relationship inference.
+
+    Called once after all documents have been processed in smart mode.
+    Uses the shared EntityIndex for blocked (O(n*k)) matching instead
+    of O(n^2) pairwise comparisons.
+
+    Steps:
+        1. Run CrossToolUnifier with token blocking via EntityIndex
+        2. Apply merge results to storage (batch upsert)
+        3. Load all relationships once
+        4. Run RelationshipInferrer on the full resolved graph
+        5. Store inferred relationships (batch)
+
+    Args:
+        namespace_id: Namespace to resolve
+        storage: Storage coordinator
+        entity_index: Populated EntityIndex from ingestion
+        expertise: ExpertiseConfig with rules
+        embedding_model: Model name for entity embeddings
+
+    Returns:
+        Summary of resolution results
+    """
+    from khora.extraction.expansion import SemanticExpander
+    from khora.extraction.expansion.relationship_inferrer import to_relationship
+
+    all_entities = entity_index.get_all_entities()
+    logger.info(f"Smart resolution: {len(all_entities)} entities in index " f"({entity_index.stats()})")
+
+    if not all_entities:
+        return {"entities_resolved": 0, "entities_merged": 0, "inferred_relationships": 0}
+
+    # Phase 1: Cross-document entity unification with blocking
+    expander = SemanticExpander(
+        expertise=expertise,
+        enable_unification=True,
+        enable_inference=False,  # Inference done separately below
+    )
+    expansion_result = await expander.expand(
+        entities=all_entities,
+        relationships=[],  # No relationships needed for unification
+        namespace_id=namespace_id,
+        entity_index=entity_index,
+    )
+
+    resolved_entities = expansion_result.entities
+    entity_mapping = expansion_result.entity_mapping
+    entities_merged = expansion_result.merged_entity_count
+
+    logger.info(
+        f"Smart resolution: unified {len(all_entities)} -> {len(resolved_entities)} " f"({entities_merged} merged)"
+    )
+
+    # Phase 2: Batch upsert resolved entities to storage
+    batch_size = expertise.expansion.batch_storage_size
+    await storage.upsert_entities_batch(namespace_id, resolved_entities, batch_size=batch_size)
+
+    # Generate embeddings for entities missing them
+    entities_needing_embeddings = [e for e in resolved_entities if not e.embedding]
+    if entities_needing_embeddings:
+        from khora.extraction.embedders import LiteLLMEmbedder
+
+        embedder = LiteLLMEmbedder(model=embedding_model)
+        entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings]
+        entity_embeddings = await embedder.embed_batch(entity_texts)
+        for entity, embedding in zip(entities_needing_embeddings, entity_embeddings):
+            await storage.update_entity_embedding(entity.id, embedding, embedding_model)
+        logger.debug(f"Smart resolution: generated embeddings for {len(entities_needing_embeddings)} entities")
+
+    # Phase 3: Load all relationships and remap merged entity IDs
+    relationships = await storage.list_relationships(namespace_id, limit=50000)
+    if entity_mapping:
+        for rel in relationships:
+            new_source = entity_mapping.get(rel.source_entity_id, rel.source_entity_id)
+            new_target = entity_mapping.get(rel.target_entity_id, rel.target_entity_id)
+            rel.source_entity_id = new_source
+            rel.target_entity_id = new_target
+
+    # Phase 4: Relationship inference on full resolved graph (single pass)
+    from khora.extraction.expansion.relationship_inferrer import RelationshipInferrer
+
+    inferrer = RelationshipInferrer(
+        expertise=expertise,
+        min_confidence=expertise.confidence.min_inferred,
+    )
+    inferred = inferrer.infer(
+        resolved_entities,
+        relationships,
+        depth=expertise.expansion.depth,
+    )
+
+    # Phase 5: Store inferred relationships (batch)
+    inferred_count = 0
+    if inferred:
+        inferred_rels = [to_relationship(inf, namespace_id) for inf in inferred]
+        inferred_count = await storage.create_relationships_batch(inferred_rels, batch_size=batch_size)
+
+    logger.info(
+        f"Smart resolution complete: {len(resolved_entities)} entities, "
+        f"{entities_merged} merged, {inferred_count} inferred relationships"
+    )
+
+    return {
+        "entities_resolved": len(resolved_entities),
+        "entities_merged": entities_merged,
+        "inferred_relationships": inferred_count,
     }
 
 
