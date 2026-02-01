@@ -75,15 +75,15 @@ class TelemetryCollector:
 
         # Step 2: drop old tables if they exist but are outdated
         if needs_recreate:
-            async with self._engine.begin() as conn:
-                try:
+            try:
+                async with self._engine.begin() as conn:
                     await conn.execute(sa.text("SELECT 1 FROM llm_events LIMIT 0"))
                     # Old table exists without trace_id — drop all
                     logger.info(f"Telemetry schema v{SCHEMA_VERSION}: dropping old tables for migration")
                     await conn.run_sync(metadata.drop_all)
-                except Exception:
-                    # Tables don't exist at all — fine, create_all will handle it
-                    await conn.rollback()
+            except Exception:
+                # Tables don't exist at all — fine, create_all will handle it
+                pass
 
         # Step 3: create tables (no-op if already up-to-date)
         async with self._engine.begin() as conn:

@@ -6,6 +6,7 @@ using pgvector extension in PostgreSQL.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -19,6 +20,23 @@ from khora.db.models import Base, ChunkModel, EntityModel
 
 if TYPE_CHECKING:
     pass
+
+
+_DEADLOCK_MAX_RETRIES = 3
+
+
+async def _retry_on_deadlock(coro_fn, *args, **kwargs):
+    """Retry an async operation on deadlock with exponential backoff."""
+    for attempt in range(_DEADLOCK_MAX_RETRIES):
+        try:
+            return await coro_fn(*args, **kwargs)
+        except Exception as e:
+            if "deadlock" in str(e).lower() and attempt < _DEADLOCK_MAX_RETRIES - 1:
+                wait = 0.1 * (2**attempt)
+                logger.warning(f"Deadlock detected (attempt {attempt + 1}), retrying in {wait}s")
+                await asyncio.sleep(wait)
+            else:
+                raise
 
 
 class PgVectorBackend:
@@ -300,50 +318,7 @@ class PgVectorBackend:
 
         Uses upsert pattern: if entity already exists, updates it instead.
         """
-        from sqlalchemy.dialects.postgresql import insert
-
-        async with self._get_session() as session:
-            stmt = insert(EntityModel).values(
-                id=str(entity.id),
-                namespace_id=str(entity.namespace_id),
-                name=entity.name,
-                entity_type=entity.entity_type,
-                description=entity.description,
-                attributes=entity.attributes,
-                source_document_ids=[str(d) for d in entity.source_document_ids],
-                source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-                mention_count=entity.mention_count,
-                embedding=entity.embedding,
-                embedding_model=entity.embedding_model,
-                valid_from=entity.valid_from,
-                valid_until=entity.valid_until,
-                confidence=entity.confidence,
-                metadata_=entity.metadata,
-                created_at=entity.created_at,
-                updated_at=entity.updated_at,
-            )
-            # On conflict (entity already exists), update all fields
-            # Note: use database column name "metadata" not Python attribute "metadata_"
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["id"],
-                set_={
-                    "name": stmt.excluded.name,
-                    "description": stmt.excluded.description,
-                    "attributes": stmt.excluded.attributes,
-                    "source_document_ids": stmt.excluded.source_document_ids,
-                    "source_chunk_ids": stmt.excluded.source_chunk_ids,
-                    "mention_count": stmt.excluded.mention_count,
-                    "embedding": stmt.excluded.embedding,
-                    "embedding_model": stmt.excluded.embedding_model,
-                    "valid_from": stmt.excluded.valid_from,
-                    "valid_until": stmt.excluded.valid_until,
-                    "confidence": stmt.excluded.confidence,
-                    "metadata": stmt.excluded.metadata,
-                    "updated_at": stmt.excluded.updated_at,
-                },
-            )
-            await session.execute(stmt)
-            await session.commit()
+        await _retry_on_deadlock(self._upsert_entity, entity)
 
     async def update_entity(self, entity) -> None:
         """Update an entity record in PostgreSQL.
@@ -351,6 +326,10 @@ class PgVectorBackend:
         Uses upsert to handle race conditions and entities created before
         dual-storage was implemented.
         """
+        await _retry_on_deadlock(self._upsert_entity, entity)
+
+    async def _upsert_entity(self, entity) -> None:
+        """Internal upsert used by both create_entity and update_entity."""
         from sqlalchemy.dialects.postgresql import insert
 
         async with self._get_session() as session:
@@ -373,7 +352,6 @@ class PgVectorBackend:
                 created_at=entity.created_at,
                 updated_at=entity.updated_at,
             )
-            # On conflict, update all fields
             stmt = stmt.on_conflict_do_update(
                 index_elements=["id"],
                 set_={
@@ -524,16 +502,22 @@ class PgVectorBackend:
         """
         if not updates:
             return 0
-        now = datetime.now(UTC)
-        async with self._get_session() as session:
-            for entity_id, embedding, model in updates:
-                await session.execute(
-                    update(EntityModel)
-                    .where(EntityModel.id == str(entity_id))
-                    .values(embedding=embedding, embedding_model=model, updated_at=now)
-                )
-            await session.commit()
-        return len(updates)
+
+        async def _do_batch():
+            # Sort by entity_id for consistent lock ordering across concurrent batches
+            sorted_updates = sorted(updates, key=lambda u: str(u[0]))
+            now = datetime.now(UTC)
+            async with self._get_session() as session:
+                for entity_id, embedding, model in sorted_updates:
+                    await session.execute(
+                        update(EntityModel)
+                        .where(EntityModel.id == str(entity_id))
+                        .values(embedding=embedding, embedding_model=model, updated_at=now)
+                    )
+                await session.commit()
+            return len(sorted_updates)
+
+        return await _retry_on_deadlock(_do_batch)
 
     async def search_similar_entities(
         self,
