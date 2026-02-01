@@ -35,6 +35,15 @@ repos:
       - id: ruff
         args: [--line-length=120]
 
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty
+        entry: uv run ty check src/
+        language: system
+        pass_filenames: false
+        types: [python]
+
   # Generate REPOMIX.md for AI-assisted development
   # This hook runs at the end to include all formatted/linted code
   - repo: local

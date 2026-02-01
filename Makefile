@@ -7,7 +7,7 @@
 #   make dev               # Start development environment
 #   make test              # Run tests with coverage
 
-.PHONY: help dev dev-down serve test lint format prek clean \
+.PHONY: help dev dev-down serve test lint format typecheck prek clean \
         docker-build docker-run docker-down docker-clean
 
 # Default target
@@ -20,7 +20,8 @@ help:
 	@echo "  make dev-down         Stop databases"
 	@echo "  make serve            Start API with hot-reload (requires databases)"
 	@echo "  make test             Run tests with coverage"
-	@echo "  make lint             Run linting (ruff, black, isort)"
+	@echo "  make lint             Run linting (ruff, black, isort, ty)"
+	@echo "  make typecheck        Run type checking (ty)"
 	@echo "  make format           Format code (black, isort, ruff)"
 	@echo "  make prek             Run pre-commit hooks"
 	@echo "  make clean            Clean build artifacts"
@@ -67,11 +68,16 @@ serve:
 test:
 	uv run pytest --cov=src/khora --cov-branch --cov-report=term-missing --cov-fail-under=30
 
+# Run type checking
+typecheck:
+	uv run ty check src/
+
 # Run linting
 lint:
 	uv run ruff check .
 	uv run black --check .
 	uv run isort --check .
+	uv run ty check src/
 
 # Format code
 format:

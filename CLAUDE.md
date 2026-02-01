@@ -12,7 +12,8 @@ uv run khora serve --no-auth     # Start without authentication
 make test                         # Run tests with coverage
 make prek                         # Run pre-commit hooks
 make format                       # Format code (black, isort, ruff)
-make lint                         # Check linting
+make lint                         # Check linting (includes ty)
+make typecheck                    # Run type checking (ty)
 make dev                          # Start development databases
 make down                         # Stop development databases
 
@@ -228,6 +229,7 @@ The `ChatEngine` provides conversational access to the memory lake:
 - Black for formatting
 - isort with black profile
 - ruff for linting
+- ty for type checking (config in `pyproject.toml` under `[tool.ty]`)
 - Type hints throughout
 
 ## Testing

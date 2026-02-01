@@ -51,7 +51,7 @@ dev = [
     "ruff>=0.14.14",
     "isort>=7.0.0",
     "prek>=0.3.0",
-    "faker>=40.0.0",
+    "ty>=0.0.1a1",
 ]
 # Data storage backends
 postgres = [
@@ -141,6 +141,28 @@ line-length = 120
 select = ["E", "F", "W"]
 ignore = ["E501"]  # Line too long - handled by black
 
+[tool.ty.environment]
+python-version = "3.13"
+extra-paths = ["src"]
+
+[tool.ty.rules]
+# Suppress noisy rules to start green; tighten incrementally
+invalid-argument-type = "ignore"       # 58 errors, mostly third-party stubs (FastAPI/Starlette/SQLAlchemy)
+invalid-method-override = "ignore"     # 4 errors, str(Enum) LSP violations in Permission
+possibly-missing-attribute = "ignore"  # 10 warnings, protocol/union narrowing gaps
+unsupported-operator = "ignore"        # 7 errors, dict typed as dict[str, Any] += int
+call-non-callable = "ignore"           # 2 errors, dynamic factory patterns
+invalid-type-form = "ignore"           # 3 errors, advanced generics
+unknown-argument = "ignore"            # 3 errors, third-party keyword args
+deprecated = "ignore"                  # 6 warnings, third-party deprecations
+unresolved-attribute = "warn"          # 6 errors, protocol/model attribute gaps
+unresolved-reference = "warn"          # 2 errors, forward references
+unresolved-import = "warn"             # 1 error, optional dependency (kuzu)
+invalid-assignment = "warn"            # 2 errors, third-party stub mismatches
+invalid-return-type = "warn"           # 2 errors, implicit None returns
+not-iterable = "warn"                  # 1 error, exception unpacking pattern
+unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
+
 [dependency-groups]
 dev = [
     "prek>=0.3.0",
@@ -150,4 +172,5 @@ dev = [
     "black>=26.0.0",
     "ruff>=0.14.14",
     "isort>=7.0.0",
+    "ty>=0.0.1a1",
 ]
