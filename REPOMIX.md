@@ -15656,613 +15656,6 @@ README.md
 462:         assert ns.sync_checkpoints["source1"] == "checkpoint123"
 ````
 
-## File: tests/unit/test_pipelines_ingest.py
-````python
-  1: """Unit tests for pipelines/flows/ingest.py — Document ingestion.
-  2: 
-  3: Tests exercise checksum and timestamp logic directly, and test
-  4: stage_document by reimplementing its logic without Prefect task
-  5: wrappers to avoid server startup overhead.
-  6: """
-  7: 
-  8: from __future__ import annotations
-  9: 
- 10: import hashlib
- 11: from datetime import UTC, datetime
- 12: from unittest.mock import AsyncMock, MagicMock
- 13: from uuid import uuid4
- 14: 
- 15: import pytest
- 16: 
- 17: from khora.pipelines.flows.ingest import _extract_source_timestamp
- 18: 
- 19: 
- 20: def _compute_checksum(content: str) -> str:
- 21:     """SHA-256 checksum — mirrors compute_checksum without Prefect."""
- 22:     return hashlib.sha256(content.encode("utf-8")).hexdigest()
- 23: 
- 24: 
- 25: class TestComputeChecksum:
- 26:     """Tests for compute_checksum."""
- 27: 
- 28:     def test_deterministic(self) -> None:
- 29:         """Same content produces same checksum."""
- 30:         c1 = _compute_checksum("hello world")
- 31:         c2 = _compute_checksum("hello world")
- 32:         assert c1 == c2
- 33: 
- 34:     def test_different_content(self) -> None:
- 35:         """Different content produces different checksum."""
- 36:         c1 = _compute_checksum("hello")
- 37:         c2 = _compute_checksum("world")
- 38:         assert c1 != c2
- 39: 
- 40:     def test_sha256_format(self) -> None:
- 41:         """Checksum is a 64-char hex string (SHA-256)."""
- 42:         c = _compute_checksum("test")
- 43:         assert len(c) == 64
- 44:         assert all(ch in "0123456789abcdef" for ch in c)
- 45: 
- 46: 
- 47: class TestExtractSourceTimestamp:
- 48:     """Tests for _extract_source_timestamp."""
- 49: 
- 50:     def test_sent_at_iso(self) -> None:
- 51:         """sent_at field in ISO format is parsed."""
- 52:         ts = _extract_source_timestamp({"sent_at": "2024-01-15T10:30:00Z"})
- 53:         assert ts is not None
- 54:         assert ts.year == 2024
- 55:         assert ts.month == 1
- 56:         assert ts.day == 15
- 57: 
- 58:     def test_created_at(self) -> None:
- 59:         """created_at field is parsed."""
- 60:         ts = _extract_source_timestamp({"created_at": "2024-06-01T12:00:00+00:00"})
- 61:         assert ts is not None
- 62:         assert ts.year == 2024
- 63: 
- 64:     def test_date_only(self) -> None:
- 65:         """Date-only format is parsed."""
- 66:         ts = _extract_source_timestamp({"timestamp": "2024-03-15"})
- 67:         assert ts is not None
- 68:         assert ts.year == 2024
- 69:         assert ts.month == 3
- 70: 
- 71:     def test_datetime_passthrough(self) -> None:
- 72:         """datetime objects pass through directly."""
- 73:         dt = datetime(2024, 5, 1, 12, 0, 0)
- 74:         ts = _extract_source_timestamp({"sent_at": dt})
- 75:         assert ts is dt
- 76: 
- 77:     def test_no_timestamp(self) -> None:
- 78:         """No matching fields returns None."""
- 79:         ts = _extract_source_timestamp({"title": "doc", "author": "me"})
- 80:         assert ts is None
- 81: 
- 82:     def test_empty_metadata(self) -> None:
- 83:         """Empty metadata returns None."""
- 84:         ts = _extract_source_timestamp({})
- 85:         assert ts is None
- 86: 
- 87:     def test_priority_order(self) -> None:
- 88:         """sent_at has priority over created_at."""
- 89:         ts = _extract_source_timestamp(
- 90:             {
- 91:                 "sent_at": "2024-01-01T00:00:00Z",
- 92:                 "created_at": "2024-06-01T00:00:00Z",
- 93:             }
- 94:         )
- 95:         assert ts is not None
- 96:         assert ts.month == 1  # sent_at wins
- 97: 
- 98:     def test_invalid_format_skipped(self) -> None:
- 99:         """Invalid format is skipped, next field tried."""
-100:         ts = _extract_source_timestamp(
-101:             {
-102:                 "sent_at": "not-a-date",
-103:                 "created_at": "2024-06-01T12:00:00+00:00",
-104:             }
-105:         )
-106:         assert ts is not None
-107:         assert ts.month == 6
-108: 
-109:     def test_falsy_values_skipped(self) -> None:
-110:         """None and empty string values are skipped."""
-111:         ts = _extract_source_timestamp({"sent_at": None, "created_at": ""})
-112:         assert ts is None
-113: 
-114: 
-115: class TestStageDocument:
-116:     """Tests for stage_document logic without Prefect runtime."""
-117: 
-118:     @pytest.mark.asyncio
-119:     async def test_new_document_created(self) -> None:
-120:         """New document is created when no checksum match."""
-121:         from khora.core.models import Document, DocumentMetadata
-122: 
-123:         ns_id = uuid4()
-124:         storage = MagicMock()
-125:         storage.get_document_by_checksum = AsyncMock(return_value=None)
-126:         storage.create_document = AsyncMock(side_effect=lambda doc: doc)
-127: 
-128:         content = "hello world"
-129:         checksum = _compute_checksum(content)
-130: 
-131:         metadata = DocumentMetadata(
-132:             source="api",
-133:             title="Test",
-134:             checksum=checksum,
-135:             size_bytes=len(content.encode("utf-8")),
-136:             custom={},
-137:         )
-138:         doc = Document(namespace_id=ns_id, content=content, metadata=metadata, created_at=datetime.now(UTC))
-139:         created = await storage.create_document(doc)
-140: 
-141:         assert created is not None
-142:         storage.create_document.assert_awaited_once()
-143: 
-144:     @pytest.mark.asyncio
-145:     async def test_duplicate_skipped(self) -> None:
-146:         """Existing document (checksum match) returns None."""
-147:         ns_id = uuid4()
-148:         existing = MagicMock()
-149:         existing.status = "completed"
-150:         storage = MagicMock()
-151:         storage.get_document_by_checksum = AsyncMock(return_value=existing)
-152: 
-153:         content = "hello world"
-154:         checksum = _compute_checksum(content)
-155: 
-156:         result = await storage.get_document_by_checksum(ns_id, checksum)
-157:         assert result is not None  # existing doc found, would skip
-158: 
-159:     @pytest.mark.asyncio
-160:     async def test_source_timestamp_used(self) -> None:
-161:         """Source timestamp from metadata is used for created_at."""
-162:         from khora.core.models import Document, DocumentMetadata
-163: 
-164:         ns_id = uuid4()
-165:         custom_metadata = {"sent_at": "2024-01-15T10:00:00Z"}
-166:         source_timestamp = _extract_source_timestamp(custom_metadata)
-167:         created_at = source_timestamp or datetime.now(UTC)
-168: 
-169:         content = "test content"
-170:         checksum = _compute_checksum(content)
-171: 
-172:         metadata = DocumentMetadata(
-173:             source="",
-174:             title="",
-175:             checksum=checksum,
-176:             size_bytes=len(content.encode("utf-8")),
-177:             custom=custom_metadata,
-178:         )
-179:         doc = Document(namespace_id=ns_id, content=content, metadata=metadata, created_at=created_at)
-180: 
-181:         assert doc.created_at.year == 2024
-182:         assert doc.created_at.month == 1
-````
-
-## File: tests/unit/test_pipelines_tasks.py
-````python
-  1: """Unit tests for pipelines/tasks/ — chunk, embed, extract logic.
-  2: 
-  3: These tests exercise the underlying logic of the pipeline tasks without
-  4: going through Prefect's task runtime, which introduces server overhead
-  5: and event-loop conflicts in unit tests.
-  6: """
-  7: 
-  8: from __future__ import annotations
-  9: 
- 10: import json
- 11: from datetime import UTC, datetime
- 12: from unittest.mock import AsyncMock, MagicMock, patch
- 13: from uuid import uuid4
- 14: 
- 15: import pytest
- 16: 
- 17: from khora.core.models import Chunk, Document
- 18: from khora.core.models.document import ChunkMetadata, DocumentMetadata
- 19: from khora.extraction.chunkers import create_chunker
- 20: 
- 21: 
- 22: def _make_document(content: str = "test content") -> Document:
- 23:     """Create a Document with sensible defaults."""
- 24:     return Document(
- 25:         namespace_id=uuid4(),
- 26:         content=content,
- 27:         metadata=DocumentMetadata(
- 28:             title="Test",
- 29:             source="test",
- 30:             checksum="abc123",
- 31:             size_bytes=len(content),
- 32:             custom={"key": "value"},
- 33:         ),
- 34:         created_at=datetime(2024, 6, 1, tzinfo=UTC),
- 35:     )
- 36: 
- 37: 
- 38: def _make_chunk(content: str = "chunk text", ns_id=None) -> Chunk:
- 39:     """Create a Chunk with sensible defaults."""
- 40:     return Chunk(
- 41:         namespace_id=ns_id or uuid4(),
- 42:         document_id=uuid4(),
- 43:         content=content,
- 44:         metadata=ChunkMetadata(document_id=uuid4(), chunk_index=0),
- 45:         created_at=datetime(2024, 6, 1, tzinfo=UTC),
- 46:     )
- 47: 
- 48: 
- 49: # ---------------------------------------------------------------------------
- 50: # Chunking logic (mirrors pipelines/tasks/chunk.py without Prefect)
- 51: # ---------------------------------------------------------------------------
- 52: 
- 53: 
- 54: def _chunk_document(document: Document, strategy: str = "fixed", chunk_size: int = 512, chunk_overlap: int = 10):
- 55:     """Reproduce chunk_document task logic without Prefect."""
- 56:     chunker = create_chunker(strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
- 57:     chunk_results = chunker.chunk(document.content)
- 58: 
- 59:     doc_custom = document.metadata.custom if document.metadata else {}
- 60:     chunks = []
- 61:     for result in chunk_results:
- 62:         custom = {**doc_custom, **result.metadata} if doc_custom else result.metadata
- 63:         chunk = Chunk(
- 64:             namespace_id=document.namespace_id,
- 65:             document_id=document.id,
- 66:             content=result.content,
- 67:             metadata=ChunkMetadata(
- 68:                 document_id=document.id,
- 69:                 chunk_index=result.index,
- 70:                 start_char=result.start_char,
- 71:                 end_char=result.end_char,
- 72:                 token_count=result.token_count,
- 73:                 custom=custom,
- 74:             ),
- 75:             created_at=document.created_at,
- 76:         )
- 77:         chunks.append(chunk)
- 78:     return chunks
- 79: 
- 80: 
- 81: class TestChunkDocument:
- 82:     """Tests for chunk_document logic."""
- 83: 
- 84:     def test_chunk_document(self) -> None:
- 85:         """chunk_document creates Chunk objects from document."""
- 86:         doc = _make_document("This is a test document with some content for chunking. " * 20)
- 87:         chunks = _chunk_document(doc, strategy="fixed", chunk_size=50)
- 88: 
- 89:         assert len(chunks) >= 1
- 90:         for chunk in chunks:
- 91:             assert chunk.namespace_id == doc.namespace_id
- 92:             assert chunk.document_id == doc.id
- 93:             assert len(chunk.content) > 0
- 94: 
- 95:     def test_timestamp_inheritance(self) -> None:
- 96:         """Chunks inherit document's created_at timestamp."""
- 97:         doc = _make_document("Some content for testing timestamp inheritance.")
- 98:         chunks = _chunk_document(doc, strategy="fixed", chunk_size=500)
- 99:         assert len(chunks) >= 1
-100:         assert chunks[0].created_at == doc.created_at
-101: 
-102:     def test_metadata_propagation(self) -> None:
-103:         """Document custom metadata propagates to chunks."""
-104:         doc = _make_document("Content with metadata")
-105:         chunks = _chunk_document(doc, strategy="fixed", chunk_size=500)
-106:         assert len(chunks) >= 1
-107:         assert chunks[0].metadata.custom.get("key") == "value"
-108: 
-109: 
-110: # ---------------------------------------------------------------------------
-111: # Embed logic (mirrors pipelines/tasks/embed.py without Prefect)
-112: # ---------------------------------------------------------------------------
-113: 
-114: 
-115: class TestEmbedChunks:
-116:     """Tests for the embed_chunks logic."""
-117: 
-118:     @pytest.mark.asyncio
-119:     async def test_empty_chunks(self) -> None:
-120:         """Empty list returns empty list."""
-121:         # Inline the logic: if not chunks: return []
-122:         chunks: list[Chunk] = []
-123:         assert chunks == []
-124: 
-125:     @pytest.mark.asyncio
-126:     async def test_embed_chunks(self) -> None:
-127:         """Chunks get embeddings assigned via LiteLLMEmbedder."""
-128:         from khora.extraction.embedders import LiteLLMEmbedder
-129: 
-130:         chunks = [_make_chunk("text1"), _make_chunk("text2")]
-131: 
-132:         mock_response = MagicMock()
-133:         mock_response.data = [
-134:             {"embedding": [0.1, 0.2]},
-135:             {"embedding": [0.3, 0.4]},
-136:         ]
-137:         mock_response.usage = MagicMock(prompt_tokens=20, total_tokens=20)
-138: 
-139:         with (
-140:             patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
-141:             patch("khora.telemetry.get_collector") as mock_telem,
-142:         ):
-143:             mock_telem.return_value.record_llm_call = MagicMock()
-144:             embedder = LiteLLMEmbedder(model="test-model", batch_size=100)
-145:             texts = [c.content for c in chunks]
-146:             embeddings = await embedder.embed_batch(texts)
-147:             for chunk, emb in zip(chunks, embeddings):
-148:                 chunk.embedding = emb
-149:                 chunk.embedding_model = "test-model"
-150: 
-151:         assert len(chunks) == 2
-152:         assert chunks[0].embedding == [0.1, 0.2]
-153:         assert chunks[0].embedding_model == "test-model"
-154: 
-155: 
-156: # ---------------------------------------------------------------------------
-157: # Extract logic (mirrors pipelines/tasks/extract.py without Prefect)
-158: # ---------------------------------------------------------------------------
-159: 
-160: 
-161: class TestExtractEntities:
-162:     """Tests for the extract_entities logic."""
-163: 
-164:     @pytest.mark.asyncio
-165:     async def test_empty_chunks(self) -> None:
-166:         """Empty chunks returns empty entities and relationships."""
-167:         # extract_entities returns ([], []) for empty input
-168:         entities: list = []
-169:         relationships: list = []
-170:         assert entities == []
-171:         assert relationships == []
-172: 
-173:     @pytest.mark.asyncio
-174:     async def test_entity_dedup(self) -> None:
-175:         """Same entity name+type from different chunks is deduped."""
-176:         from khora.extraction.extractors import LLMEntityExtractor
-177: 
-178:         ns_id = uuid4()
-179:         doc_id = uuid4()
-180:         chunk1 = _make_chunk("Alice is an engineer", ns_id)
-181:         chunk1.document_id = doc_id
-182:         chunk2 = _make_chunk("Alice works at Acme", ns_id)
-183:         chunk2.document_id = doc_id
-184: 
-185:         section_data = {
-186:             "sections": [
-187:                 {
-188:                     "entities": [{"name": "Alice", "entity_type": "PERSON", "description": "An engineer"}],
-189:                     "relationships": [],
-190:                 },
-191:                 {
-192:                     "entities": [{"name": "Alice", "entity_type": "PERSON", "description": "Works at Acme"}],
-193:                     "relationships": [],
-194:                 },
-195:             ]
-196:         }
-197:         mock_response = MagicMock()
-198:         mock_response.choices = [MagicMock()]
-199:         mock_response.choices[0].message.content = json.dumps(section_data)
-200:         mock_response.usage = MagicMock(prompt_tokens=200, completion_tokens=100, total_tokens=300)
-201: 
-202:         with (
-203:             patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
-204:             patch("khora.telemetry.get_collector") as mock_telem,
-205:         ):
-206:             mock_telem.return_value.record_llm_call = MagicMock()
-207: 
-208:             extractor = LLMEntityExtractor(model="test-model")
-209:             texts = [chunk1.content, chunk2.content]
-210:             results = await extractor.extract_multi(texts, batch_size=3)
-211: 
-212:         # Collect entities across results and dedup by name:type
-213:         from khora.core.models import Entity
-214:         from khora.core.models.entity import EntityType
-215: 
-216:         all_entities: dict[str, Entity] = {}
-217:         for chunk, result in zip([chunk1, chunk2], results):
-218:             for extracted in result.entities:
-219:                 key = f"{extracted.name}:{extracted.entity_type}"
-220:                 if key in all_entities:
-221:                     all_entities[key].mention_count += 1
-222:                 else:
-223:                     entity_type = EntityType.CONCEPT
-224:                     try:
-225:                         entity_type = EntityType(extracted.entity_type)
-226:                     except ValueError:
-227:                         pass
-228:                     entity = Entity(
-229:                         namespace_id=chunk.namespace_id,
-230:                         name=extracted.name,
-231:                         entity_type=entity_type,
-232:                         description=extracted.description,
-233:                         source_document_ids=[chunk.document_id],
-234:                         source_chunk_ids=[chunk.id],
-235:                         confidence=extracted.confidence,
-236:                     )
-237:                     all_entities[key] = entity
-238: 
-239:         entities = list(all_entities.values())
-240:         assert len(entities) == 1
-241:         assert entities[0].name == "Alice"
-242:         assert entities[0].mention_count == 2
-243: 
-244:     @pytest.mark.asyncio
-245:     async def test_confidence_filtering(self) -> None:
-246:         """Low-confidence entities are filtered by threshold."""
-247:         from khora.extraction.extractors import LLMEntityExtractor
-248: 
-249:         chunk = _make_chunk("test content")
-250: 
-251:         section_data = {
-252:             "sections": [
-253:                 {
-254:                     "entities": [
-255:                         {"name": "High", "entity_type": "PERSON", "confidence": 0.9},
-256:                         {"name": "Low", "entity_type": "PERSON", "confidence": 0.1},
-257:                     ],
-258:                     "relationships": [],
-259:                 }
-260:             ]
-261:         }
-262:         mock_response = MagicMock()
-263:         mock_response.choices = [MagicMock()]
-264:         mock_response.choices[0].message.content = json.dumps(section_data)
-265:         mock_response.usage = MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150)
-266: 
-267:         with (
-268:             patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
-269:             patch("khora.telemetry.get_collector") as mock_telem,
-270:         ):
-271:             mock_telem.return_value.record_llm_call = MagicMock()
-272:             extractor = LLMEntityExtractor(model="test-model")
-273:             results = await extractor.extract_multi([chunk.content], batch_size=3)
-274: 
-275:         # Filter with 0.5 threshold
-276:         entities = [e for e in results[0].entities if e.confidence >= 0.5]
-277:         names = [e.name for e in entities]
-278:         assert "High" in names
-279:         assert "Low" not in names
-````
-
-## File: tests/unit/test_query_cache.py
-````python
-  1: """Unit tests for query/cache.py — QueryCache with TTL."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from datetime import datetime, timedelta
-  6: from unittest.mock import patch
-  7: from uuid import uuid4
-  8: 
-  9: import pytest
- 10: 
- 11: from khora.query.cache import QueryCache
- 12: 
- 13: 
- 14: class TestQueryCache:
- 15:     """Tests for QueryCache."""
- 16: 
- 17:     def test_init_defaults(self) -> None:
- 18:         """Test default initialization."""
- 19:         cache = QueryCache()
- 20:         assert cache._max_size == 1000
- 21:         assert cache._ttl == timedelta(seconds=300)
- 22:         assert cache._hits == 0
- 23:         assert cache._misses == 0
- 24: 
- 25:     def test_init_custom(self) -> None:
- 26:         """Test custom initialization parameters."""
- 27:         cache = QueryCache(max_size=50, ttl_seconds=60)
- 28:         assert cache._max_size == 50
- 29:         assert cache._ttl == timedelta(seconds=60)
- 30: 
- 31:     def test_make_key_deterministic(self) -> None:
- 32:         """Same inputs produce same key."""
- 33:         ns = uuid4()
- 34:         key1 = QueryCache._make_key("hello", ns, "hybrid")
- 35:         key2 = QueryCache._make_key("hello", ns, "hybrid")
- 36:         assert key1 == key2
- 37: 
- 38:     def test_make_key_different_inputs(self) -> None:
- 39:         """Different inputs produce different keys."""
- 40:         ns = uuid4()
- 41:         key1 = QueryCache._make_key("hello", ns, "hybrid")
- 42:         key2 = QueryCache._make_key("world", ns, "hybrid")
- 43:         assert key1 != key2
- 44: 
- 45:     @pytest.mark.asyncio
- 46:     async def test_get_miss(self) -> None:
- 47:         """Cache miss returns None."""
- 48:         cache = QueryCache()
- 49:         with patch.object(QueryCache, "_record_cache_event"):
- 50:             result = await cache.get("query", uuid4(), "hybrid")
- 51:         assert result is None
- 52:         assert cache._misses == 1
- 53: 
- 54:     @pytest.mark.asyncio
- 55:     async def test_set_and_get_roundtrip(self) -> None:
- 56:         """Set then get returns the cached value."""
- 57:         cache = QueryCache()
- 58:         ns = uuid4()
- 59:         with patch.object(QueryCache, "_record_cache_event"):
- 60:             await cache.set("query", ns, "hybrid", {"data": [1, 2, 3]})
- 61:             result = await cache.get("query", ns, "hybrid")
- 62:         assert result == {"data": [1, 2, 3]}
- 63:         assert cache._hits == 1
- 64: 
- 65:     @pytest.mark.asyncio
- 66:     async def test_get_expired(self) -> None:
- 67:         """Expired entries return None."""
- 68:         cache = QueryCache(ttl_seconds=1)
- 69:         ns = uuid4()
- 70:         # Manually insert an expired entry
- 71:         key = cache._make_key("query", ns, "hybrid")
- 72:         cache._cache[key] = (datetime.now() - timedelta(seconds=10), "old_result")
- 73: 
- 74:         with patch.object(QueryCache, "_record_cache_event"):
- 75:             result = await cache.get("query", ns, "hybrid")
- 76:         assert result is None
- 77:         assert key not in cache._cache  # Expired entry removed
- 78: 
- 79:     @pytest.mark.asyncio
- 80:     async def test_lru_eviction(self) -> None:
- 81:         """Oldest entry is evicted when max_size is reached."""
- 82:         cache = QueryCache(max_size=2)
- 83:         ns = uuid4()
- 84: 
- 85:         with patch.object(QueryCache, "_record_cache_event"):
- 86:             await cache.set("q1", ns, "hybrid", "r1")
- 87:             await cache.set("q2", ns, "hybrid", "r2")
- 88:             # This should evict q1
- 89:             await cache.set("q3", ns, "hybrid", "r3")
- 90: 
- 91:         assert len(cache._cache) == 2
- 92:         # q1 should be evicted
- 93:         with patch.object(QueryCache, "_record_cache_event"):
- 94:             result = await cache.get("q1", ns, "hybrid")
- 95:         assert result is None
- 96: 
- 97:     def test_stats(self) -> None:
- 98:         """Stats return correct counters."""
- 99:         cache = QueryCache()
-100:         cache._hits = 10
-101:         cache._misses = 5
-102:         cache._cache["key"] = (datetime.now(), "val")
-103:         stats = cache.stats
-104:         assert stats == {"size": 1, "hits": 10, "misses": 5}
-105: 
-106:     @pytest.mark.asyncio
-107:     async def test_invalidate_all(self) -> None:
-108:         """Invalidate with no namespace clears entire cache."""
-109:         cache = QueryCache()
-110:         ns = uuid4()
-111:         with patch.object(QueryCache, "_record_cache_event"):
-112:             await cache.set("q1", ns, "hybrid", "r1")
-113:             await cache.set("q2", ns, "hybrid", "r2")
-114:         count = await cache.invalidate()
-115:         assert count == 2
-116:         assert len(cache._cache) == 0
-117: 
-118:     @pytest.mark.asyncio
-119:     async def test_invalidate_namespace(self) -> None:
-120:         """Invalidate with namespace clears cache (safe fallback)."""
-121:         cache = QueryCache()
-122:         ns = uuid4()
-123:         with patch.object(QueryCache, "_record_cache_event"):
-124:             await cache.set("q1", ns, "hybrid", "r1")
-125:         count = await cache.invalidate(namespace_id=ns)
-126:         assert count == 1
-127:         assert len(cache._cache) == 0
-128: 
-129:     def test_record_cache_event(self) -> None:
-130:         """Telemetry recording doesn't raise."""
-131:         with patch("khora.telemetry.get_collector") as mock_collector:
-132:             mock_collector.return_value.record_llm_call = lambda **kwargs: None
-133:             QueryCache._record_cache_event(True, uuid4())
-134:             QueryCache._record_cache_event(False, uuid4())
-````
-
 ## File: tests/unit/test_query_engine.py
 ````python
   1: """Unit tests for query/engine.py — HybridQueryEngine."""
@@ -17589,196 +16982,6 @@ README.md
 259:             result = await link_query_entities(mentions, uuid4(), storage)
 260: 
 261:         assert result.linked_count == 1
-````
-
-## File: tests/unit/test_query_reranking.py
-````python
-  1: """Unit tests for query/reranking.py — Neural reranking."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from unittest.mock import AsyncMock, MagicMock, patch
-  6: 
-  7: import pytest
-  8: 
-  9: from khora.query.reranking import (
- 10:     CrossEncoderReranker,
- 11:     LLMReranker,
- 12:     RerankCandidate,
- 13:     RerankResult,
- 14:     create_reranker,
- 15:     rerank_chunks,
- 16:     rerank_entities,
- 17: )
- 18: 
- 19: 
- 20: def _make_candidate(content: str = "test", score: float = 0.5) -> RerankCandidate:
- 21:     """Create a RerankCandidate."""
- 22:     return RerankCandidate(item=content, original_score=score, content=content)
- 23: 
- 24: 
- 25: class TestRerankCandidate:
- 26:     """Tests for RerankCandidate dataclass."""
- 27: 
- 28:     def test_create(self) -> None:
- 29:         """Basic creation."""
- 30:         c = _make_candidate("doc text", 0.8)
- 31:         assert c.item == "doc text"
- 32:         assert c.original_score == 0.8
- 33:         assert c.content == "doc text"
- 34:         assert c.metadata == {}
- 35: 
- 36: 
- 37: class TestRerankResult:
- 38:     """Tests for RerankResult dataclass."""
- 39: 
- 40:     def test_create(self) -> None:
- 41:         """Basic creation."""
- 42:         r = RerankResult(item="doc", original_score=0.5, rerank_score=0.8, final_score=0.71)
- 43:         assert r.item == "doc"
- 44:         assert r.final_score == 0.71
- 45: 
- 46: 
- 47: class TestCrossEncoderReranker:
- 48:     """Tests for CrossEncoderReranker."""
- 49: 
- 50:     @pytest.mark.asyncio
- 51:     async def test_empty_candidates(self) -> None:
- 52:         """Empty candidates returns empty results."""
- 53:         reranker = CrossEncoderReranker()
- 54:         results = await reranker.rerank("query", [])
- 55:         assert results == []
- 56: 
- 57:     @pytest.mark.asyncio
- 58:     async def test_rerank_with_mock_model(self) -> None:
- 59:         """Rerank with mocked cross-encoder model."""
- 60:         reranker = CrossEncoderReranker()
- 61: 
- 62:         mock_model = MagicMock()
- 63:         mock_model.predict.return_value = [0.9, 0.3]
- 64:         reranker._model = mock_model
- 65: 
- 66:         candidates = [_make_candidate("relevant doc", 0.5), _make_candidate("irrelevant", 0.5)]
- 67:         results = await reranker.rerank("query", candidates, top_k=2)
- 68: 
- 69:         assert len(results) == 2
- 70:         # Higher rerank score should rank first
- 71:         assert results[0].rerank_score > results[1].rerank_score
- 72: 
- 73:     @pytest.mark.asyncio
- 74:     async def test_top_k_limit(self) -> None:
- 75:         """Results are limited to top_k."""
- 76:         reranker = CrossEncoderReranker()
- 77:         mock_model = MagicMock()
- 78:         mock_model.predict.return_value = [0.9, 0.8, 0.7]
- 79:         reranker._model = mock_model
- 80: 
- 81:         candidates = [_make_candidate(f"doc{i}", 0.5) for i in range(3)]
- 82:         results = await reranker.rerank("query", candidates, top_k=2)
- 83:         assert len(results) == 2
- 84: 
- 85:     @pytest.mark.asyncio
- 86:     async def test_fallback_on_error(self) -> None:
- 87:         """Falls back to original ranking on error."""
- 88:         reranker = CrossEncoderReranker()
- 89:         reranker._model = MagicMock()
- 90:         reranker._model.predict.side_effect = Exception("model error")
- 91: 
- 92:         candidates = [_make_candidate("a", 0.9), _make_candidate("b", 0.3)]
- 93:         results = await reranker.rerank("query", candidates)
- 94: 
- 95:         # Should fall back to original scores
- 96:         assert len(results) == 2
- 97:         assert results[0].final_score == 0.9
- 98: 
- 99: 
-100: class TestLLMReranker:
-101:     """Tests for LLMReranker."""
-102: 
-103:     @pytest.mark.asyncio
-104:     async def test_empty_candidates(self) -> None:
-105:         """Empty candidates returns empty results."""
-106:         reranker = LLMReranker()
-107:         results = await reranker.rerank("query", [])
-108:         assert results == []
-109: 
-110:     @pytest.mark.asyncio
-111:     async def test_rerank_with_mock_llm(self) -> None:
-112:         """LLM reranker with mocked response."""
-113:         reranker = LLMReranker(batch_size=10)
-114: 
-115:         candidates = [_make_candidate("good doc", 0.5), _make_candidate("bad doc", 0.5)]
-116: 
-117:         with (
-118:             patch(
-119:                 "khora.config.llm.acompletion",
-120:                 new_callable=AsyncMock,
-121:                 return_value='{"scores": [9.0, 2.0]}',
-122:             ),
-123:         ):
-124:             results = await reranker.rerank("query", candidates, top_k=2)
-125: 
-126:         assert len(results) == 2
-127:         # Higher LLM score should rank first
-128:         assert results[0].rerank_score > results[1].rerank_score
-129: 
-130:     @pytest.mark.asyncio
-131:     async def test_fallback_on_error(self) -> None:
-132:         """Falls back to original ranking on outer error."""
-133:         reranker = LLMReranker()
-134: 
-135:         candidates = [_make_candidate("a", 0.9), _make_candidate("b", 0.3)]
-136: 
-137:         with patch(
-138:             "khora.config.llm.acompletion",
-139:             new_callable=AsyncMock,
-140:             side_effect=Exception("API error"),
-141:         ):
-142:             results = await reranker.rerank("query", candidates)
-143: 
-144:         assert len(results) == 2
-145:         # On error, score_batch returns 5.0 (default), normalized to 0.5
-146:         # final = 0.7 * 0.5 + 0.3 * 0.9 = 0.62
-147:         assert results[0].final_score == pytest.approx(0.62)
-148: 
-149: 
-150: class TestCreateReranker:
-151:     """Tests for the create_reranker factory."""
-152: 
-153:     def test_cross_encoder(self) -> None:
-154:         """Creates CrossEncoderReranker."""
-155:         r = create_reranker("cross_encoder")
-156:         assert isinstance(r, CrossEncoderReranker)
-157: 
-158:     def test_llm(self) -> None:
-159:         """Creates LLMReranker."""
-160:         r = create_reranker("llm")
-161:         assert isinstance(r, LLMReranker)
-162: 
-163:     def test_unknown_method(self) -> None:
-164:         """Unknown method raises ValueError."""
-165:         with pytest.raises(ValueError, match="Unknown reranking method"):
-166:             create_reranker("unknown")
-167: 
-168: 
-169: class TestRerankChunks:
-170:     """Tests for the rerank_chunks convenience function."""
-171: 
-172:     @pytest.mark.asyncio
-173:     async def test_empty_chunks(self) -> None:
-174:         """Empty chunks returns empty."""
-175:         result = await rerank_chunks("query", [])
-176:         assert result == []
-177: 
-178: 
-179: class TestRerankEntities:
-180:     """Tests for the rerank_entities convenience function."""
-181: 
-182:     @pytest.mark.asyncio
-183:     async def test_empty_entities(self) -> None:
-184:         """Empty entities returns empty."""
-185:         result = await rerank_entities("query", [])
-186:         assert result == []
 ````
 
 ## File: tests/unit/test_query_temporal.py
@@ -23452,6 +22655,803 @@ README.md
 81:     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 ````
 
+## File: tests/unit/test_pipelines_ingest.py
+````python
+  1: """Unit tests for pipelines/flows/ingest.py — Document ingestion.
+  2: 
+  3: Tests exercise checksum and timestamp logic directly, and test
+  4: stage_document by reimplementing its logic without Prefect task
+  5: wrappers to avoid server startup overhead.
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: import hashlib
+ 11: from datetime import UTC, datetime
+ 12: from unittest.mock import AsyncMock, MagicMock
+ 13: from uuid import uuid4
+ 14: 
+ 15: import pytest
+ 16: 
+ 17: from khora.pipelines.flows.ingest import _extract_source_timestamp
+ 18: 
+ 19: 
+ 20: def _compute_checksum(content: str) -> str:
+ 21:     """SHA-256 checksum — mirrors compute_checksum without Prefect."""
+ 22:     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+ 23: 
+ 24: 
+ 25: class TestComputeChecksum:
+ 26:     """Tests for compute_checksum."""
+ 27: 
+ 28:     def test_deterministic(self) -> None:
+ 29:         """Same content produces same checksum."""
+ 30:         c1 = _compute_checksum("hello world")
+ 31:         c2 = _compute_checksum("hello world")
+ 32:         assert c1 == c2
+ 33: 
+ 34:     def test_different_content(self) -> None:
+ 35:         """Different content produces different checksum."""
+ 36:         c1 = _compute_checksum("hello")
+ 37:         c2 = _compute_checksum("world")
+ 38:         assert c1 != c2
+ 39: 
+ 40:     def test_sha256_format(self) -> None:
+ 41:         """Checksum is a 64-char hex string (SHA-256)."""
+ 42:         c = _compute_checksum("test")
+ 43:         assert len(c) == 64
+ 44:         assert all(ch in "0123456789abcdef" for ch in c)
+ 45: 
+ 46: 
+ 47: class TestExtractSourceTimestamp:
+ 48:     """Tests for _extract_source_timestamp."""
+ 49: 
+ 50:     def test_sent_at_iso(self) -> None:
+ 51:         """sent_at field in ISO format is parsed."""
+ 52:         ts = _extract_source_timestamp({"sent_at": "2024-01-15T10:30:00Z"})
+ 53:         assert ts is not None
+ 54:         assert ts.year == 2024
+ 55:         assert ts.month == 1
+ 56:         assert ts.day == 15
+ 57: 
+ 58:     def test_created_at(self) -> None:
+ 59:         """created_at field is parsed."""
+ 60:         ts = _extract_source_timestamp({"created_at": "2024-06-01T12:00:00+00:00"})
+ 61:         assert ts is not None
+ 62:         assert ts.year == 2024
+ 63: 
+ 64:     def test_date_only(self) -> None:
+ 65:         """Date-only format is parsed."""
+ 66:         ts = _extract_source_timestamp({"timestamp": "2024-03-15"})
+ 67:         assert ts is not None
+ 68:         assert ts.year == 2024
+ 69:         assert ts.month == 3
+ 70: 
+ 71:     def test_datetime_passthrough(self) -> None:
+ 72:         """datetime objects pass through directly."""
+ 73:         dt = datetime(2024, 5, 1, 12, 0, 0)
+ 74:         ts = _extract_source_timestamp({"sent_at": dt})
+ 75:         assert ts is dt
+ 76: 
+ 77:     def test_no_timestamp(self) -> None:
+ 78:         """No matching fields returns None."""
+ 79:         ts = _extract_source_timestamp({"title": "doc", "author": "me"})
+ 80:         assert ts is None
+ 81: 
+ 82:     def test_empty_metadata(self) -> None:
+ 83:         """Empty metadata returns None."""
+ 84:         ts = _extract_source_timestamp({})
+ 85:         assert ts is None
+ 86: 
+ 87:     def test_priority_order(self) -> None:
+ 88:         """sent_at has priority over created_at."""
+ 89:         ts = _extract_source_timestamp(
+ 90:             {
+ 91:                 "sent_at": "2024-01-01T00:00:00Z",
+ 92:                 "created_at": "2024-06-01T00:00:00Z",
+ 93:             }
+ 94:         )
+ 95:         assert ts is not None
+ 96:         assert ts.month == 1  # sent_at wins
+ 97: 
+ 98:     def test_invalid_format_skipped(self) -> None:
+ 99:         """Invalid format is skipped, next field tried."""
+100:         ts = _extract_source_timestamp(
+101:             {
+102:                 "sent_at": "not-a-date",
+103:                 "created_at": "2024-06-01T12:00:00+00:00",
+104:             }
+105:         )
+106:         assert ts is not None
+107:         assert ts.month == 6
+108: 
+109:     def test_falsy_values_skipped(self) -> None:
+110:         """None and empty string values are skipped."""
+111:         ts = _extract_source_timestamp({"sent_at": None, "created_at": ""})
+112:         assert ts is None
+113: 
+114: 
+115: class TestStageDocument:
+116:     """Tests for stage_document logic without Prefect runtime."""
+117: 
+118:     @pytest.mark.asyncio
+119:     async def test_new_document_created(self) -> None:
+120:         """New document is created when no checksum match."""
+121:         from khora.core.models import Document, DocumentMetadata
+122: 
+123:         ns_id = uuid4()
+124:         storage = MagicMock()
+125:         storage.get_document_by_checksum = AsyncMock(return_value=None)
+126:         storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+127: 
+128:         content = "hello world"
+129:         checksum = _compute_checksum(content)
+130: 
+131:         metadata = DocumentMetadata(
+132:             source="api",
+133:             title="Test",
+134:             checksum=checksum,
+135:             size_bytes=len(content.encode("utf-8")),
+136:             custom={},
+137:         )
+138:         doc = Document(namespace_id=ns_id, content=content, metadata=metadata, created_at=datetime.now(UTC))
+139:         created = await storage.create_document(doc)
+140: 
+141:         assert created is not None
+142:         storage.create_document.assert_awaited_once()
+143: 
+144:     @pytest.mark.asyncio
+145:     async def test_duplicate_skipped(self) -> None:
+146:         """Existing document (checksum match) returns None."""
+147:         ns_id = uuid4()
+148:         existing = MagicMock()
+149:         existing.status = "completed"
+150:         storage = MagicMock()
+151:         storage.get_document_by_checksum = AsyncMock(return_value=existing)
+152: 
+153:         content = "hello world"
+154:         checksum = _compute_checksum(content)
+155: 
+156:         result = await storage.get_document_by_checksum(ns_id, checksum)
+157:         assert result is not None  # existing doc found, would skip
+158: 
+159:     @pytest.mark.asyncio
+160:     async def test_source_timestamp_used(self) -> None:
+161:         """Source timestamp from metadata is used for created_at."""
+162:         from khora.core.models import Document, DocumentMetadata
+163: 
+164:         ns_id = uuid4()
+165:         custom_metadata = {"sent_at": "2024-01-15T10:00:00Z"}
+166:         source_timestamp = _extract_source_timestamp(custom_metadata)
+167:         created_at = source_timestamp or datetime.now(UTC)
+168: 
+169:         content = "test content"
+170:         checksum = _compute_checksum(content)
+171: 
+172:         metadata = DocumentMetadata(
+173:             source="",
+174:             title="",
+175:             checksum=checksum,
+176:             size_bytes=len(content.encode("utf-8")),
+177:             custom=custom_metadata,
+178:         )
+179:         doc = Document(namespace_id=ns_id, content=content, metadata=metadata, created_at=created_at)
+180: 
+181:         assert doc.created_at.year == 2024
+182:         assert doc.created_at.month == 1
+````
+
+## File: tests/unit/test_pipelines_tasks.py
+````python
+  1: """Unit tests for pipelines/tasks/ — chunk, embed, extract logic.
+  2: 
+  3: These tests exercise the underlying logic of the pipeline tasks without
+  4: going through Prefect's task runtime, which introduces server overhead
+  5: and event-loop conflicts in unit tests.
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: import json
+ 11: from datetime import UTC, datetime
+ 12: from unittest.mock import AsyncMock, MagicMock, patch
+ 13: from uuid import uuid4
+ 14: 
+ 15: import pytest
+ 16: 
+ 17: from khora.core.models import Chunk, Document
+ 18: from khora.core.models.document import ChunkMetadata, DocumentMetadata
+ 19: from khora.extraction.chunkers import create_chunker
+ 20: 
+ 21: 
+ 22: def _make_document(content: str = "test content") -> Document:
+ 23:     """Create a Document with sensible defaults."""
+ 24:     return Document(
+ 25:         namespace_id=uuid4(),
+ 26:         content=content,
+ 27:         metadata=DocumentMetadata(
+ 28:             title="Test",
+ 29:             source="test",
+ 30:             checksum="abc123",
+ 31:             size_bytes=len(content),
+ 32:             custom={"key": "value"},
+ 33:         ),
+ 34:         created_at=datetime(2024, 6, 1, tzinfo=UTC),
+ 35:     )
+ 36: 
+ 37: 
+ 38: def _make_chunk(content: str = "chunk text", ns_id=None) -> Chunk:
+ 39:     """Create a Chunk with sensible defaults."""
+ 40:     return Chunk(
+ 41:         namespace_id=ns_id or uuid4(),
+ 42:         document_id=uuid4(),
+ 43:         content=content,
+ 44:         metadata=ChunkMetadata(document_id=uuid4(), chunk_index=0),
+ 45:         created_at=datetime(2024, 6, 1, tzinfo=UTC),
+ 46:     )
+ 47: 
+ 48: 
+ 49: # ---------------------------------------------------------------------------
+ 50: # Chunking logic (mirrors pipelines/tasks/chunk.py without Prefect)
+ 51: # ---------------------------------------------------------------------------
+ 52: 
+ 53: 
+ 54: def _chunk_document(document: Document, strategy: str = "fixed", chunk_size: int = 512, chunk_overlap: int = 10):
+ 55:     """Reproduce chunk_document task logic without Prefect."""
+ 56:     chunker = create_chunker(strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+ 57:     chunk_results = chunker.chunk(document.content)
+ 58: 
+ 59:     doc_custom = document.metadata.custom if document.metadata else {}
+ 60:     chunks = []
+ 61:     for result in chunk_results:
+ 62:         custom = {**doc_custom, **result.metadata} if doc_custom else result.metadata
+ 63:         chunk = Chunk(
+ 64:             namespace_id=document.namespace_id,
+ 65:             document_id=document.id,
+ 66:             content=result.content,
+ 67:             metadata=ChunkMetadata(
+ 68:                 document_id=document.id,
+ 69:                 chunk_index=result.index,
+ 70:                 start_char=result.start_char,
+ 71:                 end_char=result.end_char,
+ 72:                 token_count=result.token_count,
+ 73:                 custom=custom,
+ 74:             ),
+ 75:             created_at=document.created_at,
+ 76:         )
+ 77:         chunks.append(chunk)
+ 78:     return chunks
+ 79: 
+ 80: 
+ 81: class TestChunkDocument:
+ 82:     """Tests for chunk_document logic."""
+ 83: 
+ 84:     def test_chunk_document(self) -> None:
+ 85:         """chunk_document creates Chunk objects from document."""
+ 86:         doc = _make_document("This is a test document with some content for chunking. " * 20)
+ 87:         chunks = _chunk_document(doc, strategy="fixed", chunk_size=50)
+ 88: 
+ 89:         assert len(chunks) >= 1
+ 90:         for chunk in chunks:
+ 91:             assert chunk.namespace_id == doc.namespace_id
+ 92:             assert chunk.document_id == doc.id
+ 93:             assert len(chunk.content) > 0
+ 94: 
+ 95:     def test_timestamp_inheritance(self) -> None:
+ 96:         """Chunks inherit document's created_at timestamp."""
+ 97:         doc = _make_document("Some content for testing timestamp inheritance.")
+ 98:         chunks = _chunk_document(doc, strategy="fixed", chunk_size=500)
+ 99:         assert len(chunks) >= 1
+100:         assert chunks[0].created_at == doc.created_at
+101: 
+102:     def test_metadata_propagation(self) -> None:
+103:         """Document custom metadata propagates to chunks."""
+104:         doc = _make_document("Content with metadata")
+105:         chunks = _chunk_document(doc, strategy="fixed", chunk_size=500)
+106:         assert len(chunks) >= 1
+107:         assert chunks[0].metadata.custom.get("key") == "value"
+108: 
+109: 
+110: # ---------------------------------------------------------------------------
+111: # Embed logic (mirrors pipelines/tasks/embed.py without Prefect)
+112: # ---------------------------------------------------------------------------
+113: 
+114: 
+115: class TestEmbedChunks:
+116:     """Tests for the embed_chunks logic."""
+117: 
+118:     @pytest.mark.asyncio
+119:     async def test_empty_chunks(self) -> None:
+120:         """Empty list returns empty list."""
+121:         # Inline the logic: if not chunks: return []
+122:         chunks: list[Chunk] = []
+123:         assert chunks == []
+124: 
+125:     @pytest.mark.asyncio
+126:     async def test_embed_chunks(self) -> None:
+127:         """Chunks get embeddings assigned via LiteLLMEmbedder."""
+128:         from khora.extraction.embedders import LiteLLMEmbedder
+129: 
+130:         chunks = [_make_chunk("text1"), _make_chunk("text2")]
+131: 
+132:         mock_response = MagicMock()
+133:         mock_response.data = [
+134:             {"embedding": [0.1, 0.2]},
+135:             {"embedding": [0.3, 0.4]},
+136:         ]
+137:         mock_response.usage = MagicMock(prompt_tokens=20, total_tokens=20)
+138: 
+139:         with (
+140:             patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
+141:             patch("khora.telemetry.get_collector") as mock_telem,
+142:         ):
+143:             mock_telem.return_value.record_llm_call = MagicMock()
+144:             embedder = LiteLLMEmbedder(model="test-model", batch_size=100)
+145:             texts = [c.content for c in chunks]
+146:             embeddings = await embedder.embed_batch(texts)
+147:             for chunk, emb in zip(chunks, embeddings):
+148:                 chunk.embedding = emb
+149:                 chunk.embedding_model = "test-model"
+150: 
+151:         assert len(chunks) == 2
+152:         assert chunks[0].embedding == [0.1, 0.2]
+153:         assert chunks[0].embedding_model == "test-model"
+154: 
+155: 
+156: # ---------------------------------------------------------------------------
+157: # Extract logic (mirrors pipelines/tasks/extract.py without Prefect)
+158: # ---------------------------------------------------------------------------
+159: 
+160: 
+161: class TestExtractEntities:
+162:     """Tests for the extract_entities logic."""
+163: 
+164:     @pytest.mark.asyncio
+165:     async def test_empty_chunks(self) -> None:
+166:         """Empty chunks returns empty entities and relationships."""
+167:         # extract_entities returns ([], []) for empty input
+168:         entities: list = []
+169:         relationships: list = []
+170:         assert entities == []
+171:         assert relationships == []
+172: 
+173:     @pytest.mark.asyncio
+174:     async def test_entity_dedup(self) -> None:
+175:         """Same entity name+type from different chunks is deduped."""
+176:         from khora.extraction.extractors import LLMEntityExtractor
+177: 
+178:         ns_id = uuid4()
+179:         doc_id = uuid4()
+180:         chunk1 = _make_chunk("Alice is an engineer", ns_id)
+181:         chunk1.document_id = doc_id
+182:         chunk2 = _make_chunk("Alice works at Acme", ns_id)
+183:         chunk2.document_id = doc_id
+184: 
+185:         section_data = {
+186:             "sections": [
+187:                 {
+188:                     "entities": [{"name": "Alice", "entity_type": "PERSON", "description": "An engineer"}],
+189:                     "relationships": [],
+190:                 },
+191:                 {
+192:                     "entities": [{"name": "Alice", "entity_type": "PERSON", "description": "Works at Acme"}],
+193:                     "relationships": [],
+194:                 },
+195:             ]
+196:         }
+197:         mock_response = MagicMock()
+198:         mock_response.choices = [MagicMock()]
+199:         mock_response.choices[0].message.content = json.dumps(section_data)
+200:         mock_response.usage = MagicMock(prompt_tokens=200, completion_tokens=100, total_tokens=300)
+201: 
+202:         with (
+203:             patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+204:             patch("khora.telemetry.get_collector") as mock_telem,
+205:         ):
+206:             mock_telem.return_value.record_llm_call = MagicMock()
+207: 
+208:             extractor = LLMEntityExtractor(model="test-model")
+209:             texts = [chunk1.content, chunk2.content]
+210:             results = await extractor.extract_multi(texts, batch_size=3)
+211: 
+212:         # Collect entities across results and dedup by name:type
+213:         from khora.core.models import Entity
+214:         from khora.core.models.entity import EntityType
+215: 
+216:         all_entities: dict[str, Entity] = {}
+217:         for chunk, result in zip([chunk1, chunk2], results):
+218:             for extracted in result.entities:
+219:                 key = f"{extracted.name}:{extracted.entity_type}"
+220:                 if key in all_entities:
+221:                     all_entities[key].mention_count += 1
+222:                 else:
+223:                     entity_type = EntityType.CONCEPT
+224:                     try:
+225:                         entity_type = EntityType(extracted.entity_type)
+226:                     except ValueError:
+227:                         pass
+228:                     entity = Entity(
+229:                         namespace_id=chunk.namespace_id,
+230:                         name=extracted.name,
+231:                         entity_type=entity_type,
+232:                         description=extracted.description,
+233:                         source_document_ids=[chunk.document_id],
+234:                         source_chunk_ids=[chunk.id],
+235:                         confidence=extracted.confidence,
+236:                     )
+237:                     all_entities[key] = entity
+238: 
+239:         entities = list(all_entities.values())
+240:         assert len(entities) == 1
+241:         assert entities[0].name == "Alice"
+242:         assert entities[0].mention_count == 2
+243: 
+244:     @pytest.mark.asyncio
+245:     async def test_confidence_filtering(self) -> None:
+246:         """Low-confidence entities are filtered by threshold."""
+247:         from khora.extraction.extractors import LLMEntityExtractor
+248: 
+249:         chunk = _make_chunk("test content")
+250: 
+251:         section_data = {
+252:             "sections": [
+253:                 {
+254:                     "entities": [
+255:                         {"name": "High", "entity_type": "PERSON", "confidence": 0.9},
+256:                         {"name": "Low", "entity_type": "PERSON", "confidence": 0.1},
+257:                     ],
+258:                     "relationships": [],
+259:                 }
+260:             ]
+261:         }
+262:         mock_response = MagicMock()
+263:         mock_response.choices = [MagicMock()]
+264:         mock_response.choices[0].message.content = json.dumps(section_data)
+265:         mock_response.usage = MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+266: 
+267:         with (
+268:             patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+269:             patch("khora.telemetry.get_collector") as mock_telem,
+270:         ):
+271:             mock_telem.return_value.record_llm_call = MagicMock()
+272:             extractor = LLMEntityExtractor(model="test-model")
+273:             results = await extractor.extract_multi([chunk.content], batch_size=3)
+274: 
+275:         # Filter with 0.5 threshold
+276:         entities = [e for e in results[0].entities if e.confidence >= 0.5]
+277:         names = [e.name for e in entities]
+278:         assert "High" in names
+279:         assert "Low" not in names
+````
+
+## File: tests/unit/test_query_cache.py
+````python
+  1: """Unit tests for query/cache.py — QueryCache with TTL."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from datetime import datetime, timedelta
+  6: from unittest.mock import patch
+  7: from uuid import uuid4
+  8: 
+  9: import pytest
+ 10: 
+ 11: from khora.query.cache import QueryCache
+ 12: 
+ 13: 
+ 14: class TestQueryCache:
+ 15:     """Tests for QueryCache."""
+ 16: 
+ 17:     def test_init_defaults(self) -> None:
+ 18:         """Test default initialization."""
+ 19:         cache = QueryCache()
+ 20:         assert cache._max_size == 1000
+ 21:         assert cache._ttl == timedelta(seconds=300)
+ 22:         assert cache._hits == 0
+ 23:         assert cache._misses == 0
+ 24: 
+ 25:     def test_init_custom(self) -> None:
+ 26:         """Test custom initialization parameters."""
+ 27:         cache = QueryCache(max_size=50, ttl_seconds=60)
+ 28:         assert cache._max_size == 50
+ 29:         assert cache._ttl == timedelta(seconds=60)
+ 30: 
+ 31:     def test_make_key_deterministic(self) -> None:
+ 32:         """Same inputs produce same key."""
+ 33:         ns = uuid4()
+ 34:         key1 = QueryCache._make_key("hello", ns, "hybrid")
+ 35:         key2 = QueryCache._make_key("hello", ns, "hybrid")
+ 36:         assert key1 == key2
+ 37: 
+ 38:     def test_make_key_different_inputs(self) -> None:
+ 39:         """Different inputs produce different keys."""
+ 40:         ns = uuid4()
+ 41:         key1 = QueryCache._make_key("hello", ns, "hybrid")
+ 42:         key2 = QueryCache._make_key("world", ns, "hybrid")
+ 43:         assert key1 != key2
+ 44: 
+ 45:     @pytest.mark.asyncio
+ 46:     async def test_get_miss(self) -> None:
+ 47:         """Cache miss returns None."""
+ 48:         cache = QueryCache()
+ 49:         with patch.object(QueryCache, "_record_cache_event"):
+ 50:             result = await cache.get("query", uuid4(), "hybrid")
+ 51:         assert result is None
+ 52:         assert cache._misses == 1
+ 53: 
+ 54:     @pytest.mark.asyncio
+ 55:     async def test_set_and_get_roundtrip(self) -> None:
+ 56:         """Set then get returns the cached value."""
+ 57:         cache = QueryCache()
+ 58:         ns = uuid4()
+ 59:         with patch.object(QueryCache, "_record_cache_event"):
+ 60:             await cache.set("query", ns, "hybrid", {"data": [1, 2, 3]})
+ 61:             result = await cache.get("query", ns, "hybrid")
+ 62:         assert result == {"data": [1, 2, 3]}
+ 63:         assert cache._hits == 1
+ 64: 
+ 65:     @pytest.mark.asyncio
+ 66:     async def test_get_expired(self) -> None:
+ 67:         """Expired entries return None."""
+ 68:         cache = QueryCache(ttl_seconds=1)
+ 69:         ns = uuid4()
+ 70:         # Manually insert an expired entry
+ 71:         key = cache._make_key("query", ns, "hybrid")
+ 72:         cache._cache[key] = (datetime.now() - timedelta(seconds=10), "old_result")
+ 73: 
+ 74:         with patch.object(QueryCache, "_record_cache_event"):
+ 75:             result = await cache.get("query", ns, "hybrid")
+ 76:         assert result is None
+ 77:         assert key not in cache._cache  # Expired entry removed
+ 78: 
+ 79:     @pytest.mark.asyncio
+ 80:     async def test_lru_eviction(self) -> None:
+ 81:         """Oldest entry is evicted when max_size is reached."""
+ 82:         cache = QueryCache(max_size=2)
+ 83:         ns = uuid4()
+ 84: 
+ 85:         with patch.object(QueryCache, "_record_cache_event"):
+ 86:             await cache.set("q1", ns, "hybrid", "r1")
+ 87:             await cache.set("q2", ns, "hybrid", "r2")
+ 88:             # This should evict q1
+ 89:             await cache.set("q3", ns, "hybrid", "r3")
+ 90: 
+ 91:         assert len(cache._cache) == 2
+ 92:         # q1 should be evicted
+ 93:         with patch.object(QueryCache, "_record_cache_event"):
+ 94:             result = await cache.get("q1", ns, "hybrid")
+ 95:         assert result is None
+ 96: 
+ 97:     def test_stats(self) -> None:
+ 98:         """Stats return correct counters."""
+ 99:         cache = QueryCache()
+100:         cache._hits = 10
+101:         cache._misses = 5
+102:         cache._cache["key"] = (datetime.now(), "val")
+103:         stats = cache.stats
+104:         assert stats == {"size": 1, "hits": 10, "misses": 5}
+105: 
+106:     @pytest.mark.asyncio
+107:     async def test_invalidate_all(self) -> None:
+108:         """Invalidate with no namespace clears entire cache."""
+109:         cache = QueryCache()
+110:         ns = uuid4()
+111:         with patch.object(QueryCache, "_record_cache_event"):
+112:             await cache.set("q1", ns, "hybrid", "r1")
+113:             await cache.set("q2", ns, "hybrid", "r2")
+114:         count = await cache.invalidate()
+115:         assert count == 2
+116:         assert len(cache._cache) == 0
+117: 
+118:     @pytest.mark.asyncio
+119:     async def test_invalidate_namespace(self) -> None:
+120:         """Invalidate with namespace clears cache (safe fallback)."""
+121:         cache = QueryCache()
+122:         ns = uuid4()
+123:         with patch.object(QueryCache, "_record_cache_event"):
+124:             await cache.set("q1", ns, "hybrid", "r1")
+125:         count = await cache.invalidate(namespace_id=ns)
+126:         assert count == 1
+127:         assert len(cache._cache) == 0
+128: 
+129:     def test_record_cache_event(self) -> None:
+130:         """Telemetry recording doesn't raise."""
+131:         with patch("khora.telemetry.get_collector") as mock_collector:
+132:             mock_collector.return_value.record_llm_call = lambda **kwargs: None
+133:             QueryCache._record_cache_event(True, uuid4())
+134:             QueryCache._record_cache_event(False, uuid4())
+````
+
+## File: tests/unit/test_query_reranking.py
+````python
+  1: """Unit tests for query/reranking.py — Neural reranking."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from unittest.mock import AsyncMock, MagicMock, patch
+  6: 
+  7: import pytest
+  8: 
+  9: from khora.query.reranking import (
+ 10:     CrossEncoderReranker,
+ 11:     LLMReranker,
+ 12:     RerankCandidate,
+ 13:     RerankResult,
+ 14:     create_reranker,
+ 15:     rerank_chunks,
+ 16:     rerank_entities,
+ 17: )
+ 18: 
+ 19: 
+ 20: def _make_candidate(content: str = "test", score: float = 0.5) -> RerankCandidate:
+ 21:     """Create a RerankCandidate."""
+ 22:     return RerankCandidate(item=content, original_score=score, content=content)
+ 23: 
+ 24: 
+ 25: class TestRerankCandidate:
+ 26:     """Tests for RerankCandidate dataclass."""
+ 27: 
+ 28:     def test_create(self) -> None:
+ 29:         """Basic creation."""
+ 30:         c = _make_candidate("doc text", 0.8)
+ 31:         assert c.item == "doc text"
+ 32:         assert c.original_score == 0.8
+ 33:         assert c.content == "doc text"
+ 34:         assert c.metadata == {}
+ 35: 
+ 36: 
+ 37: class TestRerankResult:
+ 38:     """Tests for RerankResult dataclass."""
+ 39: 
+ 40:     def test_create(self) -> None:
+ 41:         """Basic creation."""
+ 42:         r = RerankResult(item="doc", original_score=0.5, rerank_score=0.8, final_score=0.71)
+ 43:         assert r.item == "doc"
+ 44:         assert r.final_score == 0.71
+ 45: 
+ 46: 
+ 47: class TestCrossEncoderReranker:
+ 48:     """Tests for CrossEncoderReranker."""
+ 49: 
+ 50:     @pytest.mark.asyncio
+ 51:     async def test_empty_candidates(self) -> None:
+ 52:         """Empty candidates returns empty results."""
+ 53:         reranker = CrossEncoderReranker()
+ 54:         results = await reranker.rerank("query", [])
+ 55:         assert results == []
+ 56: 
+ 57:     @pytest.mark.asyncio
+ 58:     async def test_rerank_with_mock_model(self) -> None:
+ 59:         """Rerank with mocked cross-encoder model."""
+ 60:         reranker = CrossEncoderReranker()
+ 61: 
+ 62:         mock_model = MagicMock()
+ 63:         mock_model.predict.return_value = [0.9, 0.3]
+ 64:         reranker._model = mock_model
+ 65: 
+ 66:         candidates = [_make_candidate("relevant doc", 0.5), _make_candidate("irrelevant", 0.5)]
+ 67:         results = await reranker.rerank("query", candidates, top_k=2)
+ 68: 
+ 69:         assert len(results) == 2
+ 70:         # Higher rerank score should rank first
+ 71:         assert results[0].rerank_score > results[1].rerank_score
+ 72: 
+ 73:     @pytest.mark.asyncio
+ 74:     async def test_top_k_limit(self) -> None:
+ 75:         """Results are limited to top_k."""
+ 76:         reranker = CrossEncoderReranker()
+ 77:         mock_model = MagicMock()
+ 78:         mock_model.predict.return_value = [0.9, 0.8, 0.7]
+ 79:         reranker._model = mock_model
+ 80: 
+ 81:         candidates = [_make_candidate(f"doc{i}", 0.5) for i in range(3)]
+ 82:         results = await reranker.rerank("query", candidates, top_k=2)
+ 83:         assert len(results) == 2
+ 84: 
+ 85:     @pytest.mark.asyncio
+ 86:     async def test_fallback_on_error(self) -> None:
+ 87:         """Falls back to original ranking on error."""
+ 88:         reranker = CrossEncoderReranker()
+ 89:         reranker._model = MagicMock()
+ 90:         reranker._model.predict.side_effect = Exception("model error")
+ 91: 
+ 92:         candidates = [_make_candidate("a", 0.9), _make_candidate("b", 0.3)]
+ 93:         results = await reranker.rerank("query", candidates)
+ 94: 
+ 95:         # Should fall back to original scores
+ 96:         assert len(results) == 2
+ 97:         assert results[0].final_score == 0.9
+ 98: 
+ 99: 
+100: class TestLLMReranker:
+101:     """Tests for LLMReranker."""
+102: 
+103:     @pytest.mark.asyncio
+104:     async def test_empty_candidates(self) -> None:
+105:         """Empty candidates returns empty results."""
+106:         reranker = LLMReranker()
+107:         results = await reranker.rerank("query", [])
+108:         assert results == []
+109: 
+110:     @pytest.mark.asyncio
+111:     async def test_rerank_with_mock_llm(self) -> None:
+112:         """LLM reranker with mocked response."""
+113:         reranker = LLMReranker(batch_size=10)
+114: 
+115:         candidates = [_make_candidate("good doc", 0.5), _make_candidate("bad doc", 0.5)]
+116: 
+117:         with (
+118:             patch(
+119:                 "khora.config.llm.acompletion",
+120:                 new_callable=AsyncMock,
+121:                 return_value='{"scores": [9.0, 2.0]}',
+122:             ),
+123:         ):
+124:             results = await reranker.rerank("query", candidates, top_k=2)
+125: 
+126:         assert len(results) == 2
+127:         # Higher LLM score should rank first
+128:         assert results[0].rerank_score > results[1].rerank_score
+129: 
+130:     @pytest.mark.asyncio
+131:     async def test_fallback_on_error(self) -> None:
+132:         """Falls back to original ranking on outer error."""
+133:         reranker = LLMReranker()
+134: 
+135:         candidates = [_make_candidate("a", 0.9), _make_candidate("b", 0.3)]
+136: 
+137:         with patch(
+138:             "khora.config.llm.acompletion",
+139:             new_callable=AsyncMock,
+140:             side_effect=Exception("API error"),
+141:         ):
+142:             results = await reranker.rerank("query", candidates)
+143: 
+144:         assert len(results) == 2
+145:         # On error, score_batch returns 5.0 (default), normalized to 0.5
+146:         # final = 0.7 * 0.5 + 0.3 * 0.9 = 0.62
+147:         assert results[0].final_score == pytest.approx(0.62)
+148: 
+149: 
+150: class TestCreateReranker:
+151:     """Tests for the create_reranker factory."""
+152: 
+153:     def test_cross_encoder(self) -> None:
+154:         """Creates CrossEncoderReranker."""
+155:         r = create_reranker("cross_encoder")
+156:         assert isinstance(r, CrossEncoderReranker)
+157: 
+158:     def test_llm(self) -> None:
+159:         """Creates LLMReranker."""
+160:         r = create_reranker("llm")
+161:         assert isinstance(r, LLMReranker)
+162: 
+163:     def test_unknown_method(self) -> None:
+164:         """Unknown method raises ValueError."""
+165:         with pytest.raises(ValueError, match="Unknown reranking method"):
+166:             create_reranker("unknown")
+167: 
+168: 
+169: class TestRerankChunks:
+170:     """Tests for the rerank_chunks convenience function."""
+171: 
+172:     @pytest.mark.asyncio
+173:     async def test_empty_chunks(self) -> None:
+174:         """Empty chunks returns empty."""
+175:         result = await rerank_chunks("query", [])
+176:         assert result == []
+177: 
+178: 
+179: class TestRerankEntities:
+180:     """Tests for the rerank_entities convenience function."""
+181: 
+182:     @pytest.mark.asyncio
+183:     async def test_empty_entities(self) -> None:
+184:         """Empty entities returns empty."""
+185:         result = await rerank_entities("query", [])
+186:         assert result == []
+````
+
 ## File: src/khora/pipelines/flows/__init__.py
 ````python
  1: """Prefect flows for Khora Memory Lake."""
@@ -23753,193 +23753,6 @@ README.md
 210:         if self.context_window_days is None:
 211:             return None
 212:         return TemporalFilter.last_days(self.context_window_days)
-````
-
-## File: src/khora/telemetry/collector.py
-````python
-  1: """TelemetryCollector -- async buffered writer for telemetry events."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import asyncio
-  6: from collections import deque
-  7: from typing import Any
-  8: 
-  9: from loguru import logger
- 10: from sqlalchemy.ext.asyncio import AsyncEngine
- 11: 
- 12: from .models import LLMEvent, PipelineEvent, StorageEvent
- 13: from .tables import SCHEMA_VERSION, llm_events, metadata, pipeline_events, storage_events
- 14: 
- 15: 
- 16: class TelemetryCollector:
- 17:     """Buffers telemetry events and periodically flushes them to PostgreSQL.
- 18: 
- 19:     All ``record_*`` methods are **synchronous** -- they append to an in-memory
- 20:     deque so callers never block on I/O.  A background ``asyncio.Task`` drains
- 21:     the buffer every *flush_interval* seconds or when the buffer exceeds
- 22:     *flush_threshold* events.
- 23:     """
- 24: 
- 25:     def __init__(
- 26:         self,
- 27:         engine: AsyncEngine,
- 28:         service_name: str = "khora",
- 29:         flush_interval: float = 5.0,
- 30:         flush_threshold: int = 100,
- 31:     ) -> None:
- 32:         self._engine = engine
- 33:         self._service_name = service_name
- 34:         self._flush_interval = flush_interval
- 35:         self._flush_threshold = flush_threshold
- 36:         self._buffer: deque[tuple[str, dict[str, Any]]] = deque()
- 37:         self._flush_task: asyncio.Task[None] | None = None
- 38: 
- 39:     # ------------------------------------------------------------------
- 40:     # Lifecycle
- 41:     # ------------------------------------------------------------------
- 42: 
- 43:     async def start(self) -> None:
- 44:         """Create tables (if missing) and start the background flush loop.
- 45: 
- 46:         On startup, checks if the schema version has changed.  If so,
- 47:         drops the old tables and recreates them with the new schema.
- 48:         """
- 49:         try:
- 50:             await self._migrate_schema()
- 51:             logger.info("Telemetry tables ensured")
- 52:         except Exception as exc:
- 53:             logger.warning(f"Telemetry table creation failed (non-fatal): {exc}")
- 54: 
- 55:         self._flush_task = asyncio.create_task(self._flush_loop(), name="telemetry-flush")
- 56: 
- 57:     async def _migrate_schema(self) -> None:
- 58:         """Detect schema version and recreate tables if needed.
- 59: 
- 60:         Uses separate connections for probing and DDL to avoid aborted
- 61:         transaction issues with asyncpg.
- 62:         """
- 63:         import sqlalchemy as sa
- 64: 
- 65:         # Step 1: probe whether the current schema is up-to-date
- 66:         needs_recreate = False
- 67:         async with self._engine.connect() as conn:
- 68:             try:
- 69:                 result = await conn.execute(sa.text("SELECT trace_id FROM llm_events LIMIT 0"))
- 70:                 result.close()
- 71:             except Exception:
- 72:                 needs_recreate = True
- 73:             finally:
- 74:                 await conn.rollback()
- 75: 
- 76:         # Step 2: drop old tables if they exist but are outdated
- 77:         if needs_recreate:
- 78:             async with self._engine.begin() as conn:
- 79:                 try:
- 80:                     await conn.execute(sa.text("SELECT 1 FROM llm_events LIMIT 0"))
- 81:                     # Old table exists without trace_id — drop all
- 82:                     logger.info(f"Telemetry schema v{SCHEMA_VERSION}: dropping old tables for migration")
- 83:                     await conn.run_sync(metadata.drop_all)
- 84:                 except Exception:
- 85:                     # Tables don't exist at all — fine, create_all will handle it
- 86:                     await conn.rollback()
- 87: 
- 88:         # Step 3: create tables (no-op if already up-to-date)
- 89:         async with self._engine.begin() as conn:
- 90:             await conn.run_sync(metadata.create_all)
- 91: 
- 92:     async def shutdown(self) -> None:
- 93:         """Cancel the flush loop, do a final flush, and dispose the engine."""
- 94:         if self._flush_task and not self._flush_task.done():
- 95:             self._flush_task.cancel()
- 96:             try:
- 97:                 await self._flush_task
- 98:             except asyncio.CancelledError:
- 99:                 pass
-100: 
-101:         # Final drain
-102:         await self._flush()
-103: 
-104:         await self._engine.dispose()
-105:         logger.info("Telemetry collector shut down")
-106: 
-107:     # ------------------------------------------------------------------
-108:     # Record helpers (sync -- safe to call from anywhere)
-109:     # ------------------------------------------------------------------
-110: 
-111:     def _inject_trace_context(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-112:         """Auto-populate trace_id and parent_event_id from context vars."""
-113:         from .context import get_parent_event_id, get_trace_id
-114: 
-115:         if "trace_id" not in kwargs or kwargs["trace_id"] is None:
-116:             kwargs["trace_id"] = get_trace_id()
-117:         if "parent_event_id" not in kwargs or kwargs["parent_event_id"] is None:
-118:             kwargs["parent_event_id"] = get_parent_event_id()
-119:         return kwargs
-120: 
-121:     def record_llm_call(self, **kwargs: Any) -> None:
-122:         kwargs = self._inject_trace_context(kwargs)
-123:         event = LLMEvent(service_name=self._service_name, **kwargs)
-124:         self._buffer.append(("llm", event.model_dump()))
-125: 
-126:     def record_storage_op(self, **kwargs: Any) -> None:
-127:         kwargs = self._inject_trace_context(kwargs)
-128:         event = StorageEvent(service_name=self._service_name, **kwargs)
-129:         self._buffer.append(("storage", event.model_dump()))
-130: 
-131:     def record_pipeline_stage(self, **kwargs: Any) -> None:
-132:         kwargs = self._inject_trace_context(kwargs)
-133:         event = PipelineEvent(service_name=self._service_name, **kwargs)
-134:         self._buffer.append(("pipeline", event.model_dump()))
-135: 
-136:     # ------------------------------------------------------------------
-137:     # Internal flush machinery
-138:     # ------------------------------------------------------------------
-139: 
-140:     async def _flush_loop(self) -> None:
-141:         """Background loop that flushes periodically or when threshold hit."""
-142:         try:
-143:             while True:
-144:                 await asyncio.sleep(self._flush_interval)
-145:                 if self._buffer:
-146:                     await self._flush()
-147:         except asyncio.CancelledError:
-148:             return
-149: 
-150:     async def _flush(self) -> None:
-151:         """Batch-insert all buffered events.  Errors are logged, never raised."""
-152:         if not self._buffer:
-153:             return
-154: 
-155:         # Drain the buffer into local lists
-156:         llm_rows: list[dict[str, Any]] = []
-157:         storage_rows: list[dict[str, Any]] = []
-158:         pipeline_rows: list[dict[str, Any]] = []
-159: 
-160:         while self._buffer:
-161:             kind, data = self._buffer.popleft()
-162:             row = dict(data)
-163:             meta_value = row.pop("metadata", None)
-164:             row["metadata"] = meta_value
-165:             if kind == "llm":
-166:                 llm_rows.append(row)
-167:             elif kind == "storage":
-168:                 storage_rows.append(row)
-169:             elif kind == "pipeline":
-170:                 pipeline_rows.append(row)
-171: 
-172:         try:
-173:             async with self._engine.begin() as conn:
-174:                 if llm_rows:
-175:                     await conn.execute(llm_events.insert(), llm_rows)
-176:                 if storage_rows:
-177:                     await conn.execute(storage_events.insert(), storage_rows)
-178:                 if pipeline_rows:
-179:                     await conn.execute(pipeline_events.insert(), pipeline_rows)
-180:             total = len(llm_rows) + len(storage_rows) + len(pipeline_rows)
-181:             logger.debug(f"Telemetry flushed {total} events")
-182:         except Exception as exc:
-183:             logger.warning(f"Telemetry flush failed (events dropped): {exc}")
 ````
 
 ## File: src/khora/config/__init__.py
@@ -30259,6 +30072,193 @@ README.md
 484:     return await linker.link(mentions, namespace_id)
 ````
 
+## File: src/khora/telemetry/collector.py
+````python
+  1: """TelemetryCollector -- async buffered writer for telemetry events."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import asyncio
+  6: from collections import deque
+  7: from typing import Any
+  8: 
+  9: from loguru import logger
+ 10: from sqlalchemy.ext.asyncio import AsyncEngine
+ 11: 
+ 12: from .models import LLMEvent, PipelineEvent, StorageEvent
+ 13: from .tables import SCHEMA_VERSION, llm_events, metadata, pipeline_events, storage_events
+ 14: 
+ 15: 
+ 16: class TelemetryCollector:
+ 17:     """Buffers telemetry events and periodically flushes them to PostgreSQL.
+ 18: 
+ 19:     All ``record_*`` methods are **synchronous** -- they append to an in-memory
+ 20:     deque so callers never block on I/O.  A background ``asyncio.Task`` drains
+ 21:     the buffer every *flush_interval* seconds or when the buffer exceeds
+ 22:     *flush_threshold* events.
+ 23:     """
+ 24: 
+ 25:     def __init__(
+ 26:         self,
+ 27:         engine: AsyncEngine,
+ 28:         service_name: str = "khora",
+ 29:         flush_interval: float = 5.0,
+ 30:         flush_threshold: int = 100,
+ 31:     ) -> None:
+ 32:         self._engine = engine
+ 33:         self._service_name = service_name
+ 34:         self._flush_interval = flush_interval
+ 35:         self._flush_threshold = flush_threshold
+ 36:         self._buffer: deque[tuple[str, dict[str, Any]]] = deque()
+ 37:         self._flush_task: asyncio.Task[None] | None = None
+ 38: 
+ 39:     # ------------------------------------------------------------------
+ 40:     # Lifecycle
+ 41:     # ------------------------------------------------------------------
+ 42: 
+ 43:     async def start(self) -> None:
+ 44:         """Create tables (if missing) and start the background flush loop.
+ 45: 
+ 46:         On startup, checks if the schema version has changed.  If so,
+ 47:         drops the old tables and recreates them with the new schema.
+ 48:         """
+ 49:         try:
+ 50:             await self._migrate_schema()
+ 51:             logger.info("Telemetry tables ensured")
+ 52:         except Exception as exc:
+ 53:             logger.warning(f"Telemetry table creation failed (non-fatal): {exc}")
+ 54: 
+ 55:         self._flush_task = asyncio.create_task(self._flush_loop(), name="telemetry-flush")
+ 56: 
+ 57:     async def _migrate_schema(self) -> None:
+ 58:         """Detect schema version and recreate tables if needed.
+ 59: 
+ 60:         Uses separate connections for probing and DDL to avoid aborted
+ 61:         transaction issues with asyncpg.
+ 62:         """
+ 63:         import sqlalchemy as sa
+ 64: 
+ 65:         # Step 1: probe whether the current schema is up-to-date
+ 66:         needs_recreate = False
+ 67:         async with self._engine.connect() as conn:
+ 68:             try:
+ 69:                 result = await conn.execute(sa.text("SELECT trace_id FROM llm_events LIMIT 0"))
+ 70:                 result.close()
+ 71:             except Exception:
+ 72:                 needs_recreate = True
+ 73:             finally:
+ 74:                 await conn.rollback()
+ 75: 
+ 76:         # Step 2: drop old tables if they exist but are outdated
+ 77:         if needs_recreate:
+ 78:             try:
+ 79:                 async with self._engine.begin() as conn:
+ 80:                     await conn.execute(sa.text("SELECT 1 FROM llm_events LIMIT 0"))
+ 81:                     # Old table exists without trace_id — drop all
+ 82:                     logger.info(f"Telemetry schema v{SCHEMA_VERSION}: dropping old tables for migration")
+ 83:                     await conn.run_sync(metadata.drop_all)
+ 84:             except Exception:
+ 85:                 # Tables don't exist at all — fine, create_all will handle it
+ 86:                 pass
+ 87: 
+ 88:         # Step 3: create tables (no-op if already up-to-date)
+ 89:         async with self._engine.begin() as conn:
+ 90:             await conn.run_sync(metadata.create_all)
+ 91: 
+ 92:     async def shutdown(self) -> None:
+ 93:         """Cancel the flush loop, do a final flush, and dispose the engine."""
+ 94:         if self._flush_task and not self._flush_task.done():
+ 95:             self._flush_task.cancel()
+ 96:             try:
+ 97:                 await self._flush_task
+ 98:             except asyncio.CancelledError:
+ 99:                 pass
+100: 
+101:         # Final drain
+102:         await self._flush()
+103: 
+104:         await self._engine.dispose()
+105:         logger.info("Telemetry collector shut down")
+106: 
+107:     # ------------------------------------------------------------------
+108:     # Record helpers (sync -- safe to call from anywhere)
+109:     # ------------------------------------------------------------------
+110: 
+111:     def _inject_trace_context(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+112:         """Auto-populate trace_id and parent_event_id from context vars."""
+113:         from .context import get_parent_event_id, get_trace_id
+114: 
+115:         if "trace_id" not in kwargs or kwargs["trace_id"] is None:
+116:             kwargs["trace_id"] = get_trace_id()
+117:         if "parent_event_id" not in kwargs or kwargs["parent_event_id"] is None:
+118:             kwargs["parent_event_id"] = get_parent_event_id()
+119:         return kwargs
+120: 
+121:     def record_llm_call(self, **kwargs: Any) -> None:
+122:         kwargs = self._inject_trace_context(kwargs)
+123:         event = LLMEvent(service_name=self._service_name, **kwargs)
+124:         self._buffer.append(("llm", event.model_dump()))
+125: 
+126:     def record_storage_op(self, **kwargs: Any) -> None:
+127:         kwargs = self._inject_trace_context(kwargs)
+128:         event = StorageEvent(service_name=self._service_name, **kwargs)
+129:         self._buffer.append(("storage", event.model_dump()))
+130: 
+131:     def record_pipeline_stage(self, **kwargs: Any) -> None:
+132:         kwargs = self._inject_trace_context(kwargs)
+133:         event = PipelineEvent(service_name=self._service_name, **kwargs)
+134:         self._buffer.append(("pipeline", event.model_dump()))
+135: 
+136:     # ------------------------------------------------------------------
+137:     # Internal flush machinery
+138:     # ------------------------------------------------------------------
+139: 
+140:     async def _flush_loop(self) -> None:
+141:         """Background loop that flushes periodically or when threshold hit."""
+142:         try:
+143:             while True:
+144:                 await asyncio.sleep(self._flush_interval)
+145:                 if self._buffer:
+146:                     await self._flush()
+147:         except asyncio.CancelledError:
+148:             return
+149: 
+150:     async def _flush(self) -> None:
+151:         """Batch-insert all buffered events.  Errors are logged, never raised."""
+152:         if not self._buffer:
+153:             return
+154: 
+155:         # Drain the buffer into local lists
+156:         llm_rows: list[dict[str, Any]] = []
+157:         storage_rows: list[dict[str, Any]] = []
+158:         pipeline_rows: list[dict[str, Any]] = []
+159: 
+160:         while self._buffer:
+161:             kind, data = self._buffer.popleft()
+162:             row = dict(data)
+163:             meta_value = row.pop("metadata", None)
+164:             row["metadata"] = meta_value
+165:             if kind == "llm":
+166:                 llm_rows.append(row)
+167:             elif kind == "storage":
+168:                 storage_rows.append(row)
+169:             elif kind == "pipeline":
+170:                 pipeline_rows.append(row)
+171: 
+172:         try:
+173:             async with self._engine.begin() as conn:
+174:                 if llm_rows:
+175:                     await conn.execute(llm_events.insert(), llm_rows)
+176:                 if storage_rows:
+177:                     await conn.execute(storage_events.insert(), storage_rows)
+178:                 if pipeline_rows:
+179:                     await conn.execute(pipeline_events.insert(), pipeline_rows)
+180:             total = len(llm_rows) + len(storage_rows) + len(pipeline_rows)
+181:             logger.debug(f"Telemetry flushed {total} events")
+182:         except Exception as exc:
+183:             logger.warning(f"Telemetry flush failed (events dropped): {exc}")
+````
+
 ## File: README.md
 ````markdown
   1: # Khora
@@ -32762,445 +32762,6 @@ README.md
 81:         assert config.environment == "staging"
 ````
 
-## File: CLAUDE.md
-````markdown
-  1: # Khora - Development Guide
-  2: 
-  3: Khora is Deyta's Memory Lake - a system combining knowledge graphs, vector database (pgvector), and relational database (PostgreSQL) for unified knowledge storage and retrieval. Supports multiple graph backends (Neo4j, Kuzu, Memgraph, ArcadeDB) and vector backends (pgvector, ArcadeDB).
-  4: 
-  5: ## Quick Reference
-  6: 
-  7: ### Commands
-  8: ```bash
-  9: # Development
- 10: uv run khora serve --reload      # Start dev server with hot-reload
- 11: uv run khora serve --no-auth     # Start without authentication
- 12: make test                         # Run tests with coverage
- 13: make prek                         # Run pre-commit hooks
- 14: make format                       # Format code (black, isort, ruff)
- 15: make lint                         # Check linting (includes ty)
- 16: make typecheck                    # Run type checking (ty)
- 17: make dev                          # Start development databases
- 18: make down                         # Stop development databases
- 19: 
- 20: # Database
- 21: uv run alembic upgrade head       # Run migrations
- 22: uv run alembic revision --autogenerate -m "description"  # Create migration
- 23: ```
- 24: 
- 25: ### Project Structure
- 26: ```
- 27: src/khora/
- 28: ├── __init__.py                  # Package exports (MemoryLake, SearchMode)
- 29: ├── __main__.py                  # Entry point
- 30: ├── memory_lake.py               # Primary MemoryLake class (remember/recall/forget/remember_batch)
- 31: ├── logging_config.py            # Loguru setup
- 32: ├── api/                         # FastAPI application
- 33: │   ├── app.py                   # App factory with lifespan
- 34: │   ├── deps.py                  # Dependency injection
- 35: │   └── routes/
- 36: │       ├── memory.py            # Remember/recall/forget + entity CRUD
- 37: │       ├── namespaces.py        # Org/workspace/namespace management
- 38: │       ├── sync.py              # Ingestion pipelines + sync checkpoints
- 39: │       └── status.py            # Health checks (status, health, ready, live)
- 40: ├── acl/                         # Access control
- 41: │   ├── checker.py               # Permission checking with inheritance
- 42: │   └── enforcer.py              # Cross-layer enforcement
- 43: ├── chat/                        # Conversational interface
- 44: │   ├── engine.py                # ChatEngine (persona-driven responses)
- 45: │   ├── history.py               # HistoryManager (turn management + compression)
- 46: │   ├── persona.py               # PersonaConfig (behavior, style, chat settings)
- 47: │   └── prompt.py                # PromptGenerator (system prompt construction)
- 48: ├── cli/
- 49: │   ├── __init__.py              # Click CLI group
- 50: │   └── server.py                # `khora serve` command
- 51: ├── config/
- 52: │   ├── schema.py                # KhoraConfig + StorageSettings + GraphConfig union + QuerySettings
- 53: │   ├── llm.py                   # LiteLLM wrapper (acompletion, aembedding, router)
- 54: │   └── resolver.py              # Hierarchical config resolution
- 55: ├── core/models/                 # Domain models
- 56: │   ├── document.py              # Document, Chunk, DocumentMetadata, DocumentStatus
- 57: │   ├── entity.py                # Entity, Relationship, Episode, EntityType
- 58: │   ├── event.py                 # MemoryEvent (event sourcing)
- 59: │   ├── schemas.py               # Extensible attribute schemas (Person, Organization, etc.)
- 60: │   ├── source.py                # Source taxonomy (SourceTool, aliases, registry)
- 61: │   └── tenancy.py               # Organization, Workspace, MemoryNamespace
- 62: ├── db/
- 63: │   ├── models.py                # SQLAlchemy ORM models
- 64: │   └── session.py               # Async session management (asyncpg)
- 65: ├── extraction/                  # Content processing
- 66: │   ├── entity_resolution.py     # Entity deduplication and resolution
- 67: │   ├── chunkers/
- 68: │   │   ├── base.py              # Chunker base class
- 69: │   │   ├── fixed.py             # Fixed-size token chunking
- 70: │   │   ├── semantic.py          # Embedding-based semantic chunking
- 71: │   │   ├── recursive.py         # Recursive text splitting
- 72: │   │   └── conversation.py      # Conversation-aware chunking (time gaps, message groups)
- 73: │   ├── embedders/
- 74: │   │   ├── base.py              # Embedder base class
- 75: │   │   └── litellm.py           # LiteLLM embedding (batched, with telemetry)
- 76: │   ├── extractors/
- 77: │   │   ├── base.py              # Extractor base class
- 78: │   │   └── llm.py               # LLM entity extraction (single + multi-batch)
- 79: │   ├── expansion/               # Knowledge graph enrichment
- 80: │   │   ├── expander.py          # SemanticExpander (orchestrates expansion)
- 81: │   │   ├── entity_index.py      # EntityIndex — in-memory blocking index for entity resolution
- 82: │   │   ├── cross_tool_unifier.py # Cross-tool entity unification (supports blocked matching)
- 83: │   │   ├── relationship_inferrer.py # Infer implicit relationships
- 84: │   │   └── rule_engine.py       # Configurable rule-based expansion
- 85: │   └── skills/                  # Extraction skill system
- 86: │       ├── base.py              # ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig
- 87: │       ├── registry.py          # Skill registry (get/register skills)
- 88: │       ├── loader.py            # YAML skill loader
- 89: │       └── composer.py          # Skill composition
- 90: ├── pipelines/                   # Processing pipelines
- 91: │   ├── manager.py               # PipelineManager (ingestion orchestration)
- 92: │   ├── registry.py              # Pipeline registration
- 93: │   ├── incremental.py           # Incremental sync support
- 94: │   ├── flows/
- 95: │   │   ├── ingest.py            # Document ingestion flow (chunk → embed‖extract → expand → store)
- 96: │   │   ├── expansion.py         # Post-extraction graph expansion flow
- 97: │   │   └── sync.py              # External source sync flow
- 98: │   └── tasks/
- 99: │       ├── chunk.py             # Chunking task
-100: │       ├── embed.py             # Embedding task
-101: │       └── extract.py           # Entity extraction task
-102: ├── query/                       # Search engine
-103: │   ├── engine.py                # HybridQueryEngine (orchestrates all search)
-104: │   ├── understanding.py         # LLM query understanding (entities, temporal, expansion)
-105: │   ├── linking.py               # Entity linking (exact, fuzzy, embedding match)
-106: │   ├── keyword.py               # BM25/fulltext keyword search
-107: │   ├── fusion.py                # Reciprocal Rank Fusion
-108: │   ├── reranking.py             # Neural reranking (cross-encoder, LLM)
-109: │   ├── hyde.py                  # Hypothetical Document Embeddings
-110: │   ├── agentic.py               # Multi-step agentic search
-111: │   ├── temporal.py              # Time-based query filters
-112: │   ├── metrics.py               # SearchMetrics (per-query performance stats)
-113: │   ├── cache.py                 # Query result caching
-114: │   └── message_extract.py       # Message content extraction
-115: ├── storage/                     # Storage backends
-116: │   ├── coordinator.py           # StorageCoordinator (backend orchestration)
-117: │   ├── factory.py               # Storage initialization + backend selection
-118: │   ├── event_store.py           # Event sourcing (immutable event log)
-119: │   ├── expertise_store.py       # Expertise definition CRUD
-120: │   ├── optimize.py              # Post-ingestion index optimization
-121: │   └── backends/
-122: │       ├── base.py              # GraphBackend + VectorBackend base classes
-123: │       ├── mixins.py            # Shared backend mixins
-124: │       ├── postgresql.py        # PostgreSQL (documents, events, tenancy, metadata)
-125: │       ├── pgvector.py          # pgvector (embeddings, vector similarity search)
-126: │       ├── neo4j.py             # Neo4j graph backend
-127: │       ├── kuzu.py              # Kuzu embedded graph backend
-128: │       ├── memgraph.py          # Memgraph graph backend
-129: │       └── arcadedb.py          # ArcadeDB graph + vector backend
-130: └── telemetry/                   # Internal telemetry
-131:     ├── __init__.py              # init_telemetry/shutdown_telemetry/get_collector
-132:     ├── config.py                # TelemetryConfig (from env)
-133:     ├── models.py                # LLMEvent, StorageEvent, PipelineEvent
-134:     ├── tables.py                # SQLAlchemy Core table definitions
-135:     ├── session.py               # Separate async engine for telemetry DB
-136:     ├── collector.py             # TelemetryCollector (async buffer + flush loop)
-137:     ├── noop.py                  # NoOpCollector (zero-cost when disabled)
-138:     └── instrument.py            # Decorators: @instrument_llm, @instrument_storage, pipeline_stage
-139: ```
-140: 
-141: ## Architecture
-142: 
-143: ### Core Components
-144: - **MemoryLake**: Primary API for `remember()` / `recall()` / `forget()` / `remember_batch()` operations
-145: - **StorageCoordinator**: Orchestrates PostgreSQL, pgvector, and the active graph backend
-146: - **HybridQueryEngine**: Multi-stage query pipeline (understanding → linking → search → fusion → reranking)
-147: - **ChatEngine**: Persona-driven conversational interface over MemoryLake
-148: - **PipelineManager**: Manages ingestion and sync flows
-149: - **SemanticExpander**: Post-extraction knowledge graph enrichment (relationship inference, cross-tool unification, rule engine)
-150: - **ACLEnforcer**: Cross-layer permission enforcement with hierarchical inheritance
-151: 
-152: ### Storage Backends
-153: 
-154: **Relational (always PostgreSQL):**
-155: - Documents, events, permissions, tenancy hierarchy, sync checkpoints
-156: 
-157: **Vector (selectable):**
-158: - **pgvector** (default): Embeddings and vector similarity search via PostgreSQL extension
-159: - **ArcadeDB**: Vector storage via ArcadeDB's embedding support
-160: 
-161: **Graph (selectable via `storage.graph.backend`):**
-162: - **Neo4j** (default): Client-server graph database (bolt:// protocol)
-163: - **Kuzu**: Embedded graph database (local directory, no server needed)
-164: - **Memgraph**: In-memory graph database (bolt:// protocol)
-165: - **ArcadeDB**: Multi-model database (HTTP API, supports Cypher or Gremlin)
-166: 
-167: All graph backends implement a common `GraphBackend` interface: entity/relationship CRUD, neighborhood traversal, fulltext search.
-168: 
-169: ### Multi-Tenancy Model
-170: 
-171: ```
-172: Organization (tenancy_mode: shared|isolated)
-173:   └── Workspace
-174:         └── MemoryNamespace (config_overrides, versioning)
-175: ```
-176: 
-177: Each namespace isolates documents, chunks, entities, and relationships. Namespaces support per-namespace configuration overrides and custom expertise definitions.
-178: 
-179: ### Data Flow
-180: 
-181: **Ingestion pipeline** (`remember()` / `remember_batch()` / `POST /sync/ingest`):
-182: 1. **Document creation** — checksum-based deduplication
-183: 2. **Chunking** — fixed, semantic, recursive, or conversation-aware
-184: 3. **Embedding + Entity extraction** (concurrent) — batched LiteLLM embedding and LLM-based extraction run in parallel via `asyncio.gather`
-185: 4. **Storage** — chunks → pgvector, entities/relationships → graph backend (batch writes), entity embeddings → pgvector (batch transaction), documents → PostgreSQL
-186: 5. **Expansion** — relationship inference, cross-tool unification, rule engine
-187: 6. **Index optimization** — post-ingestion index maintenance
-188: 
-189: `remember_batch()` delegates to `ingest_documents` for shared EntityIndex and cross-document entity dedup.
-190: 
-191: **Query pipeline** (`recall()` / `POST /memory/recall`):
-192: 1. **Query understanding** — LLM analyzes query for entities, temporal refs, and generates expansions
-193: 2. **Entity linking** — matches extracted entity mentions to stored entities (exact, fuzzy, embedding)
-194: 3. **HyDE** (optional) — generates hypothetical documents for improved embedding search
-195: 4. **Parallel search** — vector similarity + graph traversal + keyword (BM25/fulltext)
-196: 5. **Reciprocal Rank Fusion** — weighted fusion of search results
-197: 6. **Reranking** — cross-encoder or LLM-based reranking of fused candidates
-198: 7. **Agentic search** (optional) — multi-step exploration with follow-up queries
-199: 
-200: **Event sourcing**: Immutable `MemoryEvent` log in PostgreSQL for temporal queries and audit.
-201: 
-202: ### Extraction System
-203: 
-204: **Chunkers**: `fixed` (token count), `semantic` (embedding similarity boundaries), `recursive` (text splitting), `conversation` (time-gap and message-group aware).
-205: 
-206: **Skills**: YAML-configured extraction profiles defining entity types, relationship types, and extraction prompts. Skills are composable and stored per-namespace via `ExpertiseStore`. Default: `general_entities`.
-207: 
-208: **Entity resolution**: Deduplication of extracted entities across documents. Default mode is `smart`: per-document O(1) exact dedup via `EntityIndex`, single post-ingestion O(n*k) resolution pass with token-blocked matching. Legacy modes: `incremental`, `batch`, `none`.
-209: 
-210: **Expansion** (`SemanticExpander`):
-211: - `EntityIndex`: In-memory blocking index for O(1) exact dedup and O(k) fuzzy/embedding candidate retrieval
-212: - `CrossToolUnifier`: Merges entities from different extraction tools/runs (supports blocked matching via EntityIndex)
-213: - `RelationshipInferrer`: Infers implicit relationships from entity co-occurrence and attributes
-214: - `RuleEngine`: Configurable rules for domain-specific graph enrichment (supports incremental context updates)
-215: 
-216: **Attribute schemas**: Pydantic-validated attribute schemas per entity type (Person, Organization, Location, etc.). Extensible via `register_attribute_schema()`.
-217: 
-218: **Source taxonomy**: Controlled vocabulary for source types (`SourceTool` enum + dynamic registry). Downstream projects register domain-specific tools via `register_source_type()`.
-219: 
-220: ### Chat Engine
-221: 
-222: The `ChatEngine` provides conversational access to the memory lake:
-223: - **PersonaConfig**: Defines behavior, response style, and chat parameters
-224: - **HistoryManager**: Turn management with compression for long conversations
-225: - **PromptGenerator**: Constructs system prompts from persona config + retrieved context
-226: - Supports agentic search mode for deeper exploration during conversations
-227: 
-228: ## Code Style
-229: 
-230: - Python 3.13+
-231: - Line length: 120 characters
-232: - Black for formatting
-233: - isort with black profile
-234: - ruff for linting
-235: - ty for type checking (config in `pyproject.toml` under `[tool.ty]`)
-236: - Type hints throughout
-237: 
-238: ## Testing
-239: 
-240: - pytest with pytest-asyncio
-241: - Coverage minimum: 50%
-242: - Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
-243: - Fixtures in `tests/conftest.py`
-244: 
-245: ## Environment Variables
-246: 
-247: ### Core
-248: | Variable | Description | Default |
-249: |----------|-------------|---------|
-250: | `KHORA_DATABASE_URL` | PostgreSQL/pgvector connection URL | Required |
-251: | `KHORA_NEO4J_URL` | Neo4j connection URL (bolt://user:pass@host:port) | - |
-252: | `KHORA_DEBUG` | Enable debug mode | `false` |
-253: | `KHORA_ENVIRONMENT` | Environment: development, staging, production | `development` |
-254: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
-255: | `KHORA_API_PORT` | API server port | `8000` |
-256: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
-257: 
-258: ### LLM
-259: | Variable | Description | Default |
-260: |----------|-------------|---------|
-261: | `OPENAI_API_KEY` | OpenAI API key (for embeddings/LLM) | - |
-262: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
-263: | `KHORA_LLM__MODEL` | Primary LLM model | `gpt-4o-mini` |
-264: | `KHORA_LLM__EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
-265: | `KHORA_LLM__EMBEDDING_DIMENSION` | Embedding vector dimension | `1536` |
-266: 
-267: ### Storage (new-style backend configs)
-268: | Variable | Description | Default |
-269: |----------|-------------|---------|
-270: | `KHORA_STORAGE__GRAPH__BACKEND` | Graph backend: `neo4j`, `kuzu`, `memgraph`, `arcadedb` | `neo4j` |
-271: | `KHORA_STORAGE__VECTOR__BACKEND` | Vector backend: `pgvector`, `arcadedb` | `pgvector` |
-272: 
-273: ### Query Pipeline
-274: | Variable | Description | Default |
-275: |----------|-------------|---------|
-276: | `KHORA_QUERY__DEFAULT_MODE` | Default search mode: `vector`, `graph`, `hybrid`, `all` | `hybrid` |
-277: | `KHORA_QUERY__MIN_CHUNK_SIMILARITY` | Minimum chunk similarity threshold (0.0 = no filtering) | `0.05` |
-278: | `KHORA_QUERY__MIN_ENTITY_SIMILARITY` | Minimum entity similarity threshold | `0.05` |
-279: | `KHORA_QUERY__ENABLE_UNDERSTANDING` | Enable LLM query understanding | `true` |
-280: | `KHORA_QUERY__ENABLE_ENTITY_LINKING` | Enable entity linking | `true` |
-281: | `KHORA_QUERY__ENABLE_RERANKING` | Enable neural reranking | `true` |
-282: | `KHORA_QUERY__RERANKING_METHOD` | Reranking method: `cross_encoder`, `llm` | `cross_encoder` |
-283: | `KHORA_QUERY__ENABLE_KEYWORD_SEARCH` | Enable keyword search (runs in hybrid and all modes) | `true` |
-284: | `KHORA_QUERY__ENABLE_HYDE` | Enable HyDE query expansion | `false` |
-285: | `KHORA_QUERY__VECTOR_WEIGHT` | Weight for vector search in fusion | `0.5` |
-286: | `KHORA_QUERY__GRAPH_WEIGHT` | Weight for graph search in fusion | `0.3` |
-287: | `KHORA_QUERY__KEYWORD_WEIGHT` | Weight for keyword search in fusion | `0.2` |
-288: 
-289: ### Pipelines
-290: | Variable | Description | Default |
-291: |----------|-------------|---------|
-292: | `KHORA_PIPELINES__CHUNKING_STRATEGY` | Chunking strategy: `fixed`, `semantic`, `recursive` | `semantic` |
-293: | `KHORA_PIPELINES__CHUNK_SIZE` | Target chunk size in tokens | `512` |
-294: | `KHORA_PIPELINES__EXTRACT_ENTITIES` | Extract entities from documents | `true` |
-295: 
-296: ### Telemetry
-297: | Variable | Description | Default |
-298: |----------|-------------|---------|
-299: | `KHORA_TELEMETRY_DATABASE_URL` | PostgreSQL URL for telemetry DB (enables telemetry when set) | - |
-300: | `KHORA_TELEMETRY_SERVICE_NAME` | Service name tag in telemetry events | `khora` |
-301: 
-302: **URL formats:**
-303: - PostgreSQL: `postgresql://user:password@host:port/database`
-304: - Neo4j: `bolt://user:password@host:port` or `bolt://user:password@host:port/database`
-305: - Kuzu: Local directory path (e.g., `./kuzu_db`)
-306: - Memgraph: `bolt://user:password@host:port`
-307: - ArcadeDB: `http://user:password@host:port`
-308: 
-309: **Note:** Programmatic configuration takes priority over environment variables. Nested config uses `__` delimiter (e.g., `KHORA_QUERY__ENABLE_HYDE=true`).
-310: 
-311: ## Library Usage
-312: 
-313: ```python
-314: from khora import MemoryLake, SearchMode
-315: 
-316: # Simple usage - uses KHORA_DATABASE_URL and KHORA_NEO4J_URL env vars
-317: async with MemoryLake() as lake:
-318:     # Store a memory
-319:     result = await lake.remember("Content to store", title="Title")
-320: 
-321:     # Recall memories (hybrid search with query understanding, entity linking, reranking)
-322:     memories = await lake.recall("query", mode=SearchMode.HYBRID)
-323: 
-324:     # Agentic recall (multi-step exploration with follow-up queries)
-325:     memories = await lake.recall("complex query", agentic=True)
-326: 
-327:     # Batch ingestion
-328:     results = await lake.remember_batch([
-329:         {"content": "Doc 1", "title": "First"},
-330:         {"content": "Doc 2", "title": "Second"},
-331:     ], max_concurrent=5)
-332: 
-333:     # Forget a memory
-334:     await lake.forget(result.document_id)
-335: 
-336:     # Entity operations
-337:     entities = await lake.list_entities(entity_type="PERSON")
-338:     related = await lake.find_related_entities(entity_id, max_depth=2)
-339: 
-340: # Programmatic configuration with multi-backend storage
-341: from khora.config import KhoraConfig
-342: from khora.config.schema import StorageSettings, KuzuConfig, PgVectorConfig
-343: 
-344: config = KhoraConfig(
-345:     database_url="postgresql://user:pass@localhost:5432/mydb",
-346:     storage=StorageSettings(
-347:         graph=KuzuConfig(database_path="./my_kuzu_db"),
-348:         vector=PgVectorConfig(url="postgresql://user:pass@localhost:5432/mydb"),
-349:     ),
-350: )
-351: async with MemoryLake(config=config) as lake:
-352:     ...
-353: 
-354: # Chat engine with persona
-355: from khora.chat import ChatEngine
-356: from khora.chat.persona import PersonaConfig
-357: 
-358: persona = PersonaConfig(...)
-359: chat = ChatEngine(persona=persona, memory_lake=lake, agentic_search=True)
-360: response = await chat.chat("What do you know about X?", namespace_id=ns_id)
-361: ```
-362: 
-363: ## API Endpoints
-364: 
-365: ### Memory Operations
-366: - `POST /memory/remember` - Store content (with extraction skill selection)
-367: - `POST /memory/recall` - Search memories (vector/graph/hybrid/all modes)
-368: - `DELETE /memory/forget` - Remove a memory
-369: - `GET /memory/documents/{id}` - Get document details
-370: - `GET /memory/entities` - List entities (filter by type, namespace)
-371: - `GET /memory/entities/{id}` - Get entity details with attributes
-372: - `GET /memory/entities/{id}/related` - Get related entities (configurable depth)
-373: 
-374: ### Namespace Management
-375: - `POST /namespaces/organizations` - Create organization
-376: - `GET /namespaces/organizations/{id}` - Get organization
-377: - `POST /namespaces/workspaces` - Create workspace
-378: - `GET /namespaces/workspaces/{id}` - Get workspace
-379: - `GET /namespaces/organizations/{id}/workspaces` - List workspaces in org
-380: - `POST /namespaces/` - Create namespace
-381: - `GET /namespaces/{id}` - Get namespace
-382: - `GET /namespaces/workspaces/{id}/namespaces` - List namespaces in workspace
-383: 
-384: ### Sync & Pipelines
-385: - `POST /sync/ingest` - Ingest documents (full pipeline)
-386: - `POST /sync/source` - Sync from external source (incremental)
-387: - `GET /sync/checkpoint/{namespace_id}/{source}` - Get sync checkpoint
-388: - `PUT /sync/checkpoint/{namespace_id}/{source}` - Set sync checkpoint
-389: - `GET /sync/pipelines` - List registered pipelines
-390: 
-391: ### Health Checks
-392: - `GET /status` - Service status with version
-393: - `GET /health` - Health check
-394: - `GET /health/ready` - Readiness probe (component checks)
-395: - `GET /health/live` - Liveness probe
-396: 
-397: ## Telemetry
-398: 
-399: The `khora.telemetry` module records LLM usage, storage operations, and pipeline performance to a **separate** PostgreSQL database. It is enabled by setting `KHORA_TELEMETRY_DATABASE_URL`.
-400: 
-401: ### How it works
-402: 
-403: - **Disabled by default**: When the env var is unset, a zero-cost `NoOpCollector` is used — all record methods are no-ops.
-404: - **Non-blocking**: Events are buffered in memory and flushed every 5 seconds (or 100 events) via a background `asyncio.Task`.
-405: - **Separate DB**: Telemetry uses its own `AsyncEngine` and auto-creates tables on startup (no Alembic).
-406: - **Tables**: `llm_events`, `storage_events`, `pipeline_events` in the telemetry database.
-407: 
-408: ### Instrumenting new code
-409: 
-410: ```python
-411: # Record an LLM call
-412: from khora.telemetry import get_collector
-413: get_collector().record_llm_call(
-414:     operation="my_operation",
-415:     model="gpt-4o-mini",
-416:     prompt_tokens=120,
-417:     completion_tokens=350,
-418:     total_tokens=470,
-419:     latency_ms=812.3,
-420: )
-421: 
-422: # Use the pipeline_stage context manager
-423: from khora.telemetry.instrument import pipeline_stage
-424: async with pipeline_stage("my_pipeline", "my_stage", run_id):
-425:     await do_work()
-426: 
-427: # Use decorators
-428: from khora.telemetry.instrument import instrument_llm, instrument_storage
-429: 
-430: @instrument_llm("my_llm_operation")
-431: async def call_llm(): ...
-432: 
-433: @instrument_storage("postgresql", "my_storage_op")
-434: async def store_data(): ...
-435: ```
-````
-
 ## File: src/khora/extraction/extractors/llm.py
 ````python
   1: """LLM-based entity extraction using LiteLLM."""
@@ -34746,6 +34307,445 @@ README.md
 904:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
+## File: CLAUDE.md
+````markdown
+  1: # Khora - Development Guide
+  2: 
+  3: Khora is Deyta's Memory Lake - a system combining knowledge graphs, vector database (pgvector), and relational database (PostgreSQL) for unified knowledge storage and retrieval. Supports multiple graph backends (Neo4j, Kuzu, Memgraph, ArcadeDB) and vector backends (pgvector, ArcadeDB).
+  4: 
+  5: ## Quick Reference
+  6: 
+  7: ### Commands
+  8: ```bash
+  9: # Development
+ 10: uv run khora serve --reload      # Start dev server with hot-reload
+ 11: uv run khora serve --no-auth     # Start without authentication
+ 12: make test                         # Run tests with coverage
+ 13: make prek                         # Run pre-commit hooks
+ 14: make format                       # Format code (black, isort, ruff)
+ 15: make lint                         # Check linting (includes ty)
+ 16: make typecheck                    # Run type checking (ty)
+ 17: make dev                          # Start development databases
+ 18: make down                         # Stop development databases
+ 19: 
+ 20: # Database
+ 21: uv run alembic upgrade head       # Run migrations
+ 22: uv run alembic revision --autogenerate -m "description"  # Create migration
+ 23: ```
+ 24: 
+ 25: ### Project Structure
+ 26: ```
+ 27: src/khora/
+ 28: ├── __init__.py                  # Package exports (MemoryLake, SearchMode)
+ 29: ├── __main__.py                  # Entry point
+ 30: ├── memory_lake.py               # Primary MemoryLake class (remember/recall/forget/remember_batch)
+ 31: ├── logging_config.py            # Loguru setup
+ 32: ├── api/                         # FastAPI application
+ 33: │   ├── app.py                   # App factory with lifespan
+ 34: │   ├── deps.py                  # Dependency injection
+ 35: │   └── routes/
+ 36: │       ├── memory.py            # Remember/recall/forget + entity CRUD
+ 37: │       ├── namespaces.py        # Org/workspace/namespace management
+ 38: │       ├── sync.py              # Ingestion pipelines + sync checkpoints
+ 39: │       └── status.py            # Health checks (status, health, ready, live)
+ 40: ├── acl/                         # Access control
+ 41: │   ├── checker.py               # Permission checking with inheritance
+ 42: │   └── enforcer.py              # Cross-layer enforcement
+ 43: ├── chat/                        # Conversational interface
+ 44: │   ├── engine.py                # ChatEngine (persona-driven responses)
+ 45: │   ├── history.py               # HistoryManager (turn management + compression)
+ 46: │   ├── persona.py               # PersonaConfig (behavior, style, chat settings)
+ 47: │   └── prompt.py                # PromptGenerator (system prompt construction)
+ 48: ├── cli/
+ 49: │   ├── __init__.py              # Click CLI group
+ 50: │   └── server.py                # `khora serve` command
+ 51: ├── config/
+ 52: │   ├── schema.py                # KhoraConfig + StorageSettings + GraphConfig union + QuerySettings
+ 53: │   ├── llm.py                   # LiteLLM wrapper (acompletion, aembedding, router)
+ 54: │   └── resolver.py              # Hierarchical config resolution
+ 55: ├── core/models/                 # Domain models
+ 56: │   ├── document.py              # Document, Chunk, DocumentMetadata, DocumentStatus
+ 57: │   ├── entity.py                # Entity, Relationship, Episode, EntityType
+ 58: │   ├── event.py                 # MemoryEvent (event sourcing)
+ 59: │   ├── schemas.py               # Extensible attribute schemas (Person, Organization, etc.)
+ 60: │   ├── source.py                # Source taxonomy (SourceTool, aliases, registry)
+ 61: │   └── tenancy.py               # Organization, Workspace, MemoryNamespace
+ 62: ├── db/
+ 63: │   ├── models.py                # SQLAlchemy ORM models
+ 64: │   └── session.py               # Async session management (asyncpg)
+ 65: ├── extraction/                  # Content processing
+ 66: │   ├── entity_resolution.py     # Entity deduplication and resolution
+ 67: │   ├── chunkers/
+ 68: │   │   ├── base.py              # Chunker base class
+ 69: │   │   ├── fixed.py             # Fixed-size token chunking
+ 70: │   │   ├── semantic.py          # Embedding-based semantic chunking
+ 71: │   │   ├── recursive.py         # Recursive text splitting
+ 72: │   │   └── conversation.py      # Conversation-aware chunking (time gaps, message groups)
+ 73: │   ├── embedders/
+ 74: │   │   ├── base.py              # Embedder base class
+ 75: │   │   └── litellm.py           # LiteLLM embedding (batched, with telemetry)
+ 76: │   ├── extractors/
+ 77: │   │   ├── base.py              # Extractor base class
+ 78: │   │   └── llm.py               # LLM entity extraction (single + multi-batch)
+ 79: │   ├── expansion/               # Knowledge graph enrichment
+ 80: │   │   ├── expander.py          # SemanticExpander (orchestrates expansion)
+ 81: │   │   ├── entity_index.py      # EntityIndex — in-memory blocking index for entity resolution
+ 82: │   │   ├── cross_tool_unifier.py # Cross-tool entity unification (supports blocked matching)
+ 83: │   │   ├── relationship_inferrer.py # Infer implicit relationships
+ 84: │   │   └── rule_engine.py       # Configurable rule-based expansion
+ 85: │   └── skills/                  # Extraction skill system
+ 86: │       ├── base.py              # ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig
+ 87: │       ├── registry.py          # Skill registry (get/register skills)
+ 88: │       ├── loader.py            # YAML skill loader
+ 89: │       └── composer.py          # Skill composition
+ 90: ├── pipelines/                   # Processing pipelines
+ 91: │   ├── manager.py               # PipelineManager (ingestion orchestration)
+ 92: │   ├── registry.py              # Pipeline registration
+ 93: │   ├── incremental.py           # Incremental sync support
+ 94: │   ├── flows/
+ 95: │   │   ├── ingest.py            # Document ingestion flow (chunk → embed‖extract → expand → store)
+ 96: │   │   ├── expansion.py         # Post-extraction graph expansion flow
+ 97: │   │   └── sync.py              # External source sync flow
+ 98: │   └── tasks/
+ 99: │       ├── chunk.py             # Chunking task
+100: │       ├── embed.py             # Embedding task
+101: │       └── extract.py           # Entity extraction task
+102: ├── query/                       # Search engine
+103: │   ├── engine.py                # HybridQueryEngine (orchestrates all search)
+104: │   ├── understanding.py         # LLM query understanding (entities, temporal, expansion)
+105: │   ├── linking.py               # Entity linking (exact, fuzzy, embedding match)
+106: │   ├── keyword.py               # BM25/fulltext keyword search
+107: │   ├── fusion.py                # Reciprocal Rank Fusion
+108: │   ├── reranking.py             # Neural reranking (cross-encoder, LLM)
+109: │   ├── hyde.py                  # Hypothetical Document Embeddings
+110: │   ├── agentic.py               # Multi-step agentic search
+111: │   ├── temporal.py              # Time-based query filters
+112: │   ├── metrics.py               # SearchMetrics (per-query performance stats)
+113: │   ├── cache.py                 # Query result caching
+114: │   └── message_extract.py       # Message content extraction
+115: ├── storage/                     # Storage backends
+116: │   ├── coordinator.py           # StorageCoordinator (backend orchestration)
+117: │   ├── factory.py               # Storage initialization + backend selection
+118: │   ├── event_store.py           # Event sourcing (immutable event log)
+119: │   ├── expertise_store.py       # Expertise definition CRUD
+120: │   ├── optimize.py              # Post-ingestion index optimization
+121: │   └── backends/
+122: │       ├── base.py              # GraphBackend + VectorBackend base classes
+123: │       ├── mixins.py            # Shared backend mixins
+124: │       ├── postgresql.py        # PostgreSQL (documents, events, tenancy, metadata)
+125: │       ├── pgvector.py          # pgvector (embeddings, vector similarity search)
+126: │       ├── neo4j.py             # Neo4j graph backend
+127: │       ├── kuzu.py              # Kuzu embedded graph backend
+128: │       ├── memgraph.py          # Memgraph graph backend
+129: │       └── arcadedb.py          # ArcadeDB graph + vector backend
+130: └── telemetry/                   # Internal telemetry
+131:     ├── __init__.py              # init_telemetry/shutdown_telemetry/get_collector
+132:     ├── config.py                # TelemetryConfig (from env)
+133:     ├── models.py                # LLMEvent, StorageEvent, PipelineEvent
+134:     ├── tables.py                # SQLAlchemy Core table definitions
+135:     ├── session.py               # Separate async engine for telemetry DB
+136:     ├── collector.py             # TelemetryCollector (async buffer + flush loop)
+137:     ├── noop.py                  # NoOpCollector (zero-cost when disabled)
+138:     └── instrument.py            # Decorators: @instrument_llm, @instrument_storage, pipeline_stage
+139: ```
+140: 
+141: ## Architecture
+142: 
+143: ### Core Components
+144: - **MemoryLake**: Primary API for `remember()` / `recall()` / `forget()` / `remember_batch()` operations
+145: - **StorageCoordinator**: Orchestrates PostgreSQL, pgvector, and the active graph backend
+146: - **HybridQueryEngine**: Multi-stage query pipeline (understanding → linking → search → fusion → reranking)
+147: - **ChatEngine**: Persona-driven conversational interface over MemoryLake
+148: - **PipelineManager**: Manages ingestion and sync flows
+149: - **SemanticExpander**: Post-extraction knowledge graph enrichment (relationship inference, cross-tool unification, rule engine)
+150: - **ACLEnforcer**: Cross-layer permission enforcement with hierarchical inheritance
+151: 
+152: ### Storage Backends
+153: 
+154: **Relational (always PostgreSQL):**
+155: - Documents, events, permissions, tenancy hierarchy, sync checkpoints
+156: 
+157: **Vector (selectable):**
+158: - **pgvector** (default): Embeddings and vector similarity search via PostgreSQL extension
+159: - **ArcadeDB**: Vector storage via ArcadeDB's embedding support
+160: 
+161: **Graph (selectable via `storage.graph.backend`):**
+162: - **Neo4j** (default): Client-server graph database (bolt:// protocol)
+163: - **Kuzu**: Embedded graph database (local directory, no server needed)
+164: - **Memgraph**: In-memory graph database (bolt:// protocol)
+165: - **ArcadeDB**: Multi-model database (HTTP API, supports Cypher or Gremlin)
+166: 
+167: All graph backends implement a common `GraphBackend` interface: entity/relationship CRUD, neighborhood traversal, fulltext search.
+168: 
+169: ### Multi-Tenancy Model
+170: 
+171: ```
+172: Organization (tenancy_mode: shared|isolated)
+173:   └── Workspace
+174:         └── MemoryNamespace (config_overrides, versioning)
+175: ```
+176: 
+177: Each namespace isolates documents, chunks, entities, and relationships. Namespaces support per-namespace configuration overrides and custom expertise definitions.
+178: 
+179: ### Data Flow
+180: 
+181: **Ingestion pipeline** (`remember()` / `remember_batch()` / `POST /sync/ingest`):
+182: 1. **Document creation** — checksum-based deduplication
+183: 2. **Chunking** — fixed, semantic, recursive, or conversation-aware
+184: 3. **Embedding + Entity extraction** (concurrent) — batched LiteLLM embedding and LLM-based extraction run in parallel via `asyncio.gather`
+185: 4. **Storage** — chunks → pgvector, entities/relationships → graph backend (batch writes), entity embeddings → pgvector (batch transaction), documents → PostgreSQL
+186: 5. **Expansion** — relationship inference, cross-tool unification, rule engine
+187: 6. **Index optimization** — post-ingestion index maintenance
+188: 
+189: `remember_batch()` delegates to `ingest_documents` for shared EntityIndex and cross-document entity dedup.
+190: 
+191: **Query pipeline** (`recall()` / `POST /memory/recall`):
+192: 1. **Query understanding** — LLM analyzes query for entities, temporal refs, and generates expansions
+193: 2. **Entity linking** — matches extracted entity mentions to stored entities (exact, fuzzy, embedding)
+194: 3. **HyDE** (optional) — generates hypothetical documents for improved embedding search
+195: 4. **Parallel search** — vector similarity + graph traversal + keyword (BM25/fulltext)
+196: 5. **Reciprocal Rank Fusion** — weighted fusion of search results
+197: 6. **Reranking** — cross-encoder or LLM-based reranking of fused candidates
+198: 7. **Agentic search** (optional) — multi-step exploration with follow-up queries
+199: 
+200: **Event sourcing**: Immutable `MemoryEvent` log in PostgreSQL for temporal queries and audit.
+201: 
+202: ### Extraction System
+203: 
+204: **Chunkers**: `fixed` (token count), `semantic` (embedding similarity boundaries), `recursive` (text splitting), `conversation` (time-gap and message-group aware).
+205: 
+206: **Skills**: YAML-configured extraction profiles defining entity types, relationship types, and extraction prompts. Skills are composable and stored per-namespace via `ExpertiseStore`. Default: `general_entities`.
+207: 
+208: **Entity resolution**: Deduplication of extracted entities across documents. Default mode is `smart`: per-document O(1) exact dedup via `EntityIndex`, single post-ingestion O(n*k) resolution pass with token-blocked matching. Legacy modes: `incremental`, `batch`, `none`.
+209: 
+210: **Expansion** (`SemanticExpander`):
+211: - `EntityIndex`: In-memory blocking index for O(1) exact dedup and O(k) fuzzy/embedding candidate retrieval
+212: - `CrossToolUnifier`: Merges entities from different extraction tools/runs (supports blocked matching via EntityIndex)
+213: - `RelationshipInferrer`: Infers implicit relationships from entity co-occurrence and attributes
+214: - `RuleEngine`: Configurable rules for domain-specific graph enrichment (supports incremental context updates)
+215: 
+216: **Attribute schemas**: Pydantic-validated attribute schemas per entity type (Person, Organization, Location, etc.). Extensible via `register_attribute_schema()`.
+217: 
+218: **Source taxonomy**: Controlled vocabulary for source types (`SourceTool` enum + dynamic registry). Downstream projects register domain-specific tools via `register_source_type()`.
+219: 
+220: ### Chat Engine
+221: 
+222: The `ChatEngine` provides conversational access to the memory lake:
+223: - **PersonaConfig**: Defines behavior, response style, and chat parameters
+224: - **HistoryManager**: Turn management with compression for long conversations
+225: - **PromptGenerator**: Constructs system prompts from persona config + retrieved context
+226: - Supports agentic search mode for deeper exploration during conversations
+227: 
+228: ## Code Style
+229: 
+230: - Python 3.13+
+231: - Line length: 120 characters
+232: - Black for formatting
+233: - isort with black profile
+234: - ruff for linting
+235: - ty for type checking (config in `pyproject.toml` under `[tool.ty]`)
+236: - Type hints throughout
+237: 
+238: ## Testing
+239: 
+240: - pytest with pytest-asyncio
+241: - Coverage minimum: 50%
+242: - Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
+243: - Fixtures in `tests/conftest.py`
+244: 
+245: ## Environment Variables
+246: 
+247: ### Core
+248: | Variable | Description | Default |
+249: |----------|-------------|---------|
+250: | `KHORA_DATABASE_URL` | PostgreSQL/pgvector connection URL | Required |
+251: | `KHORA_NEO4J_URL` | Neo4j connection URL (bolt://user:pass@host:port) | - |
+252: | `KHORA_DEBUG` | Enable debug mode | `false` |
+253: | `KHORA_ENVIRONMENT` | Environment: development, staging, production | `development` |
+254: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
+255: | `KHORA_API_PORT` | API server port | `8000` |
+256: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
+257: 
+258: ### LLM
+259: | Variable | Description | Default |
+260: |----------|-------------|---------|
+261: | `OPENAI_API_KEY` | OpenAI API key (for embeddings/LLM) | - |
+262: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
+263: | `KHORA_LLM__MODEL` | Primary LLM model | `gpt-4o-mini` |
+264: | `KHORA_LLM__EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
+265: | `KHORA_LLM__EMBEDDING_DIMENSION` | Embedding vector dimension | `1536` |
+266: 
+267: ### Storage (new-style backend configs)
+268: | Variable | Description | Default |
+269: |----------|-------------|---------|
+270: | `KHORA_STORAGE__GRAPH__BACKEND` | Graph backend: `neo4j`, `kuzu`, `memgraph`, `arcadedb` | `neo4j` |
+271: | `KHORA_STORAGE__VECTOR__BACKEND` | Vector backend: `pgvector`, `arcadedb` | `pgvector` |
+272: 
+273: ### Query Pipeline
+274: | Variable | Description | Default |
+275: |----------|-------------|---------|
+276: | `KHORA_QUERY__DEFAULT_MODE` | Default search mode: `vector`, `graph`, `hybrid`, `all` | `hybrid` |
+277: | `KHORA_QUERY__MIN_CHUNK_SIMILARITY` | Minimum chunk similarity threshold (0.0 = no filtering) | `0.05` |
+278: | `KHORA_QUERY__MIN_ENTITY_SIMILARITY` | Minimum entity similarity threshold | `0.05` |
+279: | `KHORA_QUERY__ENABLE_UNDERSTANDING` | Enable LLM query understanding | `true` |
+280: | `KHORA_QUERY__ENABLE_ENTITY_LINKING` | Enable entity linking | `true` |
+281: | `KHORA_QUERY__ENABLE_RERANKING` | Enable neural reranking | `true` |
+282: | `KHORA_QUERY__RERANKING_METHOD` | Reranking method: `cross_encoder`, `llm` | `cross_encoder` |
+283: | `KHORA_QUERY__ENABLE_KEYWORD_SEARCH` | Enable keyword search (runs in hybrid and all modes) | `true` |
+284: | `KHORA_QUERY__ENABLE_HYDE` | Enable HyDE query expansion | `false` |
+285: | `KHORA_QUERY__VECTOR_WEIGHT` | Weight for vector search in fusion | `0.5` |
+286: | `KHORA_QUERY__GRAPH_WEIGHT` | Weight for graph search in fusion | `0.3` |
+287: | `KHORA_QUERY__KEYWORD_WEIGHT` | Weight for keyword search in fusion | `0.2` |
+288: 
+289: ### Pipelines
+290: | Variable | Description | Default |
+291: |----------|-------------|---------|
+292: | `KHORA_PIPELINES__CHUNKING_STRATEGY` | Chunking strategy: `fixed`, `semantic`, `recursive` | `semantic` |
+293: | `KHORA_PIPELINES__CHUNK_SIZE` | Target chunk size in tokens | `512` |
+294: | `KHORA_PIPELINES__EXTRACT_ENTITIES` | Extract entities from documents | `true` |
+295: 
+296: ### Telemetry
+297: | Variable | Description | Default |
+298: |----------|-------------|---------|
+299: | `KHORA_TELEMETRY_DATABASE_URL` | PostgreSQL URL for telemetry DB (enables telemetry when set) | - |
+300: | `KHORA_TELEMETRY_SERVICE_NAME` | Service name tag in telemetry events | `khora` |
+301: 
+302: **URL formats:**
+303: - PostgreSQL: `postgresql://user:password@host:port/database`
+304: - Neo4j: `bolt://user:password@host:port` or `bolt://user:password@host:port/database`
+305: - Kuzu: Local directory path (e.g., `./kuzu_db`)
+306: - Memgraph: `bolt://user:password@host:port`
+307: - ArcadeDB: `http://user:password@host:port`
+308: 
+309: **Note:** Programmatic configuration takes priority over environment variables. Nested config uses `__` delimiter (e.g., `KHORA_QUERY__ENABLE_HYDE=true`).
+310: 
+311: ## Library Usage
+312: 
+313: ```python
+314: from khora import MemoryLake, SearchMode
+315: 
+316: # Simple usage - uses KHORA_DATABASE_URL and KHORA_NEO4J_URL env vars
+317: async with MemoryLake() as lake:
+318:     # Store a memory
+319:     result = await lake.remember("Content to store", title="Title")
+320: 
+321:     # Recall memories (hybrid search with query understanding, entity linking, reranking)
+322:     memories = await lake.recall("query", mode=SearchMode.HYBRID)
+323: 
+324:     # Agentic recall (multi-step exploration with follow-up queries)
+325:     memories = await lake.recall("complex query", agentic=True)
+326: 
+327:     # Batch ingestion
+328:     results = await lake.remember_batch([
+329:         {"content": "Doc 1", "title": "First"},
+330:         {"content": "Doc 2", "title": "Second"},
+331:     ], max_concurrent=5)
+332: 
+333:     # Forget a memory
+334:     await lake.forget(result.document_id)
+335: 
+336:     # Entity operations
+337:     entities = await lake.list_entities(entity_type="PERSON")
+338:     related = await lake.find_related_entities(entity_id, max_depth=2)
+339: 
+340: # Programmatic configuration with multi-backend storage
+341: from khora.config import KhoraConfig
+342: from khora.config.schema import StorageSettings, KuzuConfig, PgVectorConfig
+343: 
+344: config = KhoraConfig(
+345:     database_url="postgresql://user:pass@localhost:5432/mydb",
+346:     storage=StorageSettings(
+347:         graph=KuzuConfig(database_path="./my_kuzu_db"),
+348:         vector=PgVectorConfig(url="postgresql://user:pass@localhost:5432/mydb"),
+349:     ),
+350: )
+351: async with MemoryLake(config=config) as lake:
+352:     ...
+353: 
+354: # Chat engine with persona
+355: from khora.chat import ChatEngine
+356: from khora.chat.persona import PersonaConfig
+357: 
+358: persona = PersonaConfig(...)
+359: chat = ChatEngine(persona=persona, memory_lake=lake, agentic_search=True)
+360: response = await chat.chat("What do you know about X?", namespace_id=ns_id)
+361: ```
+362: 
+363: ## API Endpoints
+364: 
+365: ### Memory Operations
+366: - `POST /memory/remember` - Store content (with extraction skill selection)
+367: - `POST /memory/recall` - Search memories (vector/graph/hybrid/all modes)
+368: - `DELETE /memory/forget` - Remove a memory
+369: - `GET /memory/documents/{id}` - Get document details
+370: - `GET /memory/entities` - List entities (filter by type, namespace)
+371: - `GET /memory/entities/{id}` - Get entity details with attributes
+372: - `GET /memory/entities/{id}/related` - Get related entities (configurable depth)
+373: 
+374: ### Namespace Management
+375: - `POST /namespaces/organizations` - Create organization
+376: - `GET /namespaces/organizations/{id}` - Get organization
+377: - `POST /namespaces/workspaces` - Create workspace
+378: - `GET /namespaces/workspaces/{id}` - Get workspace
+379: - `GET /namespaces/organizations/{id}/workspaces` - List workspaces in org
+380: - `POST /namespaces/` - Create namespace
+381: - `GET /namespaces/{id}` - Get namespace
+382: - `GET /namespaces/workspaces/{id}/namespaces` - List namespaces in workspace
+383: 
+384: ### Sync & Pipelines
+385: - `POST /sync/ingest` - Ingest documents (full pipeline)
+386: - `POST /sync/source` - Sync from external source (incremental)
+387: - `GET /sync/checkpoint/{namespace_id}/{source}` - Get sync checkpoint
+388: - `PUT /sync/checkpoint/{namespace_id}/{source}` - Set sync checkpoint
+389: - `GET /sync/pipelines` - List registered pipelines
+390: 
+391: ### Health Checks
+392: - `GET /status` - Service status with version
+393: - `GET /health` - Health check
+394: - `GET /health/ready` - Readiness probe (component checks)
+395: - `GET /health/live` - Liveness probe
+396: 
+397: ## Telemetry
+398: 
+399: The `khora.telemetry` module records LLM usage, storage operations, and pipeline performance to a **separate** PostgreSQL database. It is enabled by setting `KHORA_TELEMETRY_DATABASE_URL`.
+400: 
+401: ### How it works
+402: 
+403: - **Disabled by default**: When the env var is unset, a zero-cost `NoOpCollector` is used — all record methods are no-ops.
+404: - **Non-blocking**: Events are buffered in memory and flushed every 5 seconds (or 100 events) via a background `asyncio.Task`.
+405: - **Separate DB**: Telemetry uses its own `AsyncEngine` and auto-creates tables on startup (no Alembic).
+406: - **Tables**: `llm_events`, `storage_events`, `pipeline_events` in the telemetry database.
+407: 
+408: ### Instrumenting new code
+409: 
+410: ```python
+411: # Record an LLM call
+412: from khora.telemetry import get_collector
+413: get_collector().record_llm_call(
+414:     operation="my_operation",
+415:     model="gpt-4o-mini",
+416:     prompt_tokens=120,
+417:     completion_tokens=350,
+418:     total_tokens=470,
+419:     latency_ms=812.3,
+420: )
+421: 
+422: # Use the pipeline_stage context manager
+423: from khora.telemetry.instrument import pipeline_stage
+424: async with pipeline_stage("my_pipeline", "my_stage", run_id):
+425:     await do_work()
+426: 
+427: # Use decorators
+428: from khora.telemetry.instrument import instrument_llm, instrument_storage
+429: 
+430: @instrument_llm("my_llm_operation")
+431: async def call_llm(): ...
+432: 
+433: @instrument_storage("postgresql", "my_storage_op")
+434: async def store_data(): ...
+435: ```
+````
+
 ## File: src/khora/api/app.py
 ````python
   1: """FastAPI application factory for Khora."""
@@ -34892,640 +34892,6 @@ README.md
 142:     app.include_router(sync.router)
 143: 
 144:     return app
-````
-
-## File: src/khora/storage/backends/pgvector.py
-````python
-  1: """pgvector backend for vector embeddings storage.
-  2: 
-  3: Handles storage and retrieval of embeddings for semantic search
-  4: using pgvector extension in PostgreSQL.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from datetime import UTC, datetime
- 10: from typing import TYPE_CHECKING
- 11: from uuid import UUID
- 12: 
- 13: from loguru import logger
- 14: from sqlalchemy import delete, func, select, text, update
- 15: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
- 16: 
- 17: from khora.core.models import Chunk, ChunkMetadata
- 18: from khora.db.models import Base, ChunkModel, EntityModel
- 19: 
- 20: if TYPE_CHECKING:
- 21:     pass
- 22: 
- 23: 
- 24: class PgVectorBackend:
- 25:     """pgvector backend for vector embeddings.
- 26: 
- 27:     Handles all vector operations including chunk storage,
- 28:     similarity search, and entity embeddings.
- 29:     """
- 30: 
- 31:     def __init__(
- 32:         self,
- 33:         database_url: str,
- 34:         *,
- 35:         embedding_dimension: int = 1536,
- 36:         echo: bool = False,
- 37:         pool_size: int = 5,
- 38:         max_overflow: int = 10,
- 39:     ) -> None:
- 40:         """Initialize the pgvector backend.
- 41: 
- 42:         Args:
- 43:             database_url: PostgreSQL connection URL (with pgvector extension)
- 44:             embedding_dimension: Dimension of embedding vectors
- 45:             echo: Enable SQL echo logging
- 46:             pool_size: Connection pool size
- 47:             max_overflow: Maximum overflow connections
- 48:         """
- 49:         # Convert to async URL if needed
- 50:         if database_url.startswith("postgresql://"):
- 51:             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
- 52:         elif database_url.startswith("postgres://"):
- 53:             database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
- 54: 
- 55:         self._database_url = database_url
- 56:         self._embedding_dimension = embedding_dimension
- 57:         self._echo = echo
- 58:         self._pool_size = pool_size
- 59:         self._max_overflow = max_overflow
- 60:         self._engine: AsyncEngine | None = None
- 61:         self._session_factory: async_sessionmaker[AsyncSession] | None = None
- 62: 
- 63:     async def connect(self) -> None:
- 64:         """Establish connection to the database."""
- 65:         if self._engine is not None:
- 66:             return
- 67: 
- 68:         logger.info("Connecting to pgvector...")
- 69:         self._engine = create_async_engine(
- 70:             self._database_url,
- 71:             echo=self._echo,
- 72:             pool_size=self._pool_size,
- 73:             max_overflow=self._max_overflow,
- 74:         )
- 75:         self._session_factory = async_sessionmaker(
- 76:             self._engine,
- 77:             class_=AsyncSession,
- 78:             expire_on_commit=False,
- 79:         )
- 80: 
- 81:         # Ensure pgvector extension is enabled
- 82:         async with self._engine.begin() as conn:
- 83:             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
- 84: 
- 85:         logger.info("Connected to pgvector")
- 86: 
- 87:     async def disconnect(self) -> None:
- 88:         """Close database connections."""
- 89:         if self._engine is not None:
- 90:             logger.info("Disconnecting from pgvector...")
- 91:             await self._engine.dispose()
- 92:             self._engine = None
- 93:             self._session_factory = None
- 94:             logger.info("Disconnected from pgvector")
- 95: 
- 96:     async def is_healthy(self) -> bool:
- 97:         """Check if the backend is healthy and connected."""
- 98:         if self._engine is None or self._session_factory is None:
- 99:             return False
-100:         try:
-101:             async with self._session_factory() as session:
-102:                 await session.execute(select(1))
-103:             return True
-104:         except Exception as e:
-105:             logger.error(f"pgvector health check failed: {e}")
-106:             return False
-107: 
-108:     def _get_session(self) -> AsyncSession:
-109:         """Get a new database session."""
-110:         if self._session_factory is None:
-111:             raise RuntimeError("Backend not connected. Call connect() first.")
-112:         return self._session_factory()
-113: 
-114:     async def create_tables(self) -> None:
-115:         """Create all database tables (for testing/development)."""
-116:         if self._engine is None:
-117:             raise RuntimeError("Backend not connected. Call connect() first.")
-118:         async with self._engine.begin() as conn:
-119:             await conn.run_sync(Base.metadata.create_all)
-120: 
-121:     # =========================================================================
-122:     # Chunk operations
-123:     # =========================================================================
-124: 
-125:     async def create_chunk(self, chunk: Chunk) -> Chunk:
-126:         """Create a new chunk with its embedding."""
-127:         async with self._get_session() as session:
-128:             model = ChunkModel(
-129:                 id=str(chunk.id),
-130:                 namespace_id=str(chunk.namespace_id),
-131:                 document_id=str(chunk.document_id),
-132:                 content=chunk.content,
-133:                 chunk_index=chunk.metadata.chunk_index,
-134:                 start_char=chunk.metadata.start_char,
-135:                 end_char=chunk.metadata.end_char,
-136:                 token_count=chunk.metadata.token_count,
-137:                 metadata_=chunk.metadata.custom,
-138:                 embedding=chunk.embedding,
-139:                 embedding_model=chunk.embedding_model,
-140:                 created_at=chunk.created_at,
-141:             )
-142:             session.add(model)
-143:             await session.commit()
-144:             await session.refresh(model)
-145:             return self._chunk_model_to_domain(model)
-146: 
-147:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
-148:         """Create multiple chunks in a batch."""
-149:         if not chunks:
-150:             return []
-151: 
-152:         async with self._get_session() as session:
-153:             models = [
-154:                 ChunkModel(
-155:                     id=str(chunk.id),
-156:                     namespace_id=str(chunk.namespace_id),
-157:                     document_id=str(chunk.document_id),
-158:                     content=chunk.content,
-159:                     chunk_index=chunk.metadata.chunk_index,
-160:                     start_char=chunk.metadata.start_char,
-161:                     end_char=chunk.metadata.end_char,
-162:                     token_count=chunk.metadata.token_count,
-163:                     metadata_=chunk.metadata.custom,
-164:                     embedding=chunk.embedding,
-165:                     embedding_model=chunk.embedding_model,
-166:                     created_at=chunk.created_at,
-167:                 )
-168:                 for chunk in chunks
-169:             ]
-170:             session.add_all(models)
-171:             await session.commit()
-172:             return chunks
-173: 
-174:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-175:         """Get a chunk by ID."""
-176:         async with self._get_session() as session:
-177:             result = await session.execute(select(ChunkModel).where(ChunkModel.id == str(chunk_id)))
-178:             model = result.scalar_one_or_none()
-179:             return self._chunk_model_to_domain(model) if model else None
-180: 
-181:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-182:         """Get all chunks for a document."""
-183:         async with self._get_session() as session:
-184:             result = await session.execute(
-185:                 select(ChunkModel).where(ChunkModel.document_id == str(document_id)).order_by(ChunkModel.chunk_index)
-186:             )
-187:             return [self._chunk_model_to_domain(m) for m in result.scalars().all()]
-188: 
-189:     async def delete_chunks_by_document(self, document_id: UUID) -> int:
-190:         """Delete all chunks for a document."""
-191:         async with self._get_session() as session:
-192:             result = await session.execute(delete(ChunkModel).where(ChunkModel.document_id == str(document_id)))
-193:             await session.commit()
-194:             return result.rowcount
-195: 
-196:     async def search_similar(
-197:         self,
-198:         namespace_id: UUID,
-199:         query_embedding: list[float],
-200:         *,
-201:         limit: int = 10,
-202:         min_similarity: float = 0.0,
-203:         filter_document_ids: list[UUID] | None = None,
-204:     ) -> list[tuple[Chunk, float]]:
-205:         """Search for similar chunks using vector similarity.
-206: 
-207:         Uses cosine similarity for matching. Returns list of (chunk, similarity_score) tuples.
-208:         """
-209:         async with self._get_session() as session:
-210:             # Build cosine similarity expression
-211:             # pgvector uses <=> for cosine distance, so similarity = 1 - distance
-212:             similarity = 1 - ChunkModel.embedding.cosine_distance(query_embedding)
-213: 
-214:             query = (
-215:                 select(ChunkModel, similarity.label("similarity"))
-216:                 .where(
-217:                     ChunkModel.namespace_id == str(namespace_id),
-218:                     ChunkModel.embedding.is_not(None),
-219:                 )
-220:                 .order_by(similarity.desc())
-221:                 .limit(limit)
-222:             )
-223: 
-224:             if filter_document_ids:
-225:                 query = query.where(ChunkModel.document_id.in_([str(d) for d in filter_document_ids]))
-226: 
-227:             if min_similarity > 0:
-228:                 query = query.where(similarity >= min_similarity)
-229: 
-230:             result = await session.execute(query)
-231:             rows = result.all()
-232: 
-233:             return [(self._chunk_model_to_domain(row.ChunkModel), row.similarity) for row in rows]
-234: 
-235:     def _chunk_model_to_domain(self, model: ChunkModel) -> Chunk:
-236:         """Convert ChunkModel to domain Chunk."""
-237:         return Chunk(
-238:             id=UUID(model.id),
-239:             namespace_id=UUID(model.namespace_id),
-240:             document_id=UUID(model.document_id),
-241:             content=model.content,
-242:             metadata=ChunkMetadata(
-243:                 document_id=UUID(model.document_id),
-244:                 chunk_index=model.chunk_index,
-245:                 start_char=model.start_char,
-246:                 end_char=model.end_char,
-247:                 token_count=model.token_count,
-248:                 custom=model.metadata_,
-249:             ),
-250:             embedding=list(model.embedding) if model.embedding is not None else None,
-251:             embedding_model=model.embedding_model,
-252:             created_at=model.created_at,
-253:         )
-254: 
-255:     # =========================================================================
-256:     # Full-text search operations
-257:     # =========================================================================
-258: 
-259:     async def search_fulltext(
-260:         self,
-261:         namespace_id: UUID,
-262:         query_text: str,
-263:         *,
-264:         limit: int = 10,
-265:         language: str = "english",
-266:     ) -> list[tuple[Chunk, float]]:
-267:         """Search chunks using PostgreSQL full-text search with ts_rank.
-268: 
-269:         Uses the content_tsv generated column and GIN index for efficient
-270:         full-text matching.
-271:         """
-272:         async with self._get_session() as session:
-273:             tsquery = func.plainto_tsquery(language, query_text)
-274:             rank = func.ts_rank(ChunkModel.content_tsv, tsquery)
-275: 
-276:             query = (
-277:                 select(ChunkModel, rank.label("rank"))
-278:                 .where(
-279:                     ChunkModel.namespace_id == str(namespace_id),
-280:                     ChunkModel.content_tsv.op("@@")(tsquery),
-281:                 )
-282:                 .order_by(rank.desc())
-283:                 .limit(limit)
-284:             )
-285: 
-286:             result = await session.execute(query)
-287:             rows = result.all()
-288: 
-289:             return [(self._chunk_model_to_domain(row.ChunkModel), float(row.rank)) for row in rows]
-290: 
-291:     # =========================================================================
-292:     # Entity operations (for vector search via PostgreSQL)
-293:     # =========================================================================
-294: 
-295:     async def create_entity(self, entity) -> None:
-296:         """Create an entity record in PostgreSQL for vector search.
-297: 
-298:         This stores the entity metadata and embedding in PostgreSQL,
-299:         complementing the Neo4j storage for graph traversal.
-300: 
-301:         Uses upsert pattern: if entity already exists, updates it instead.
-302:         """
-303:         from sqlalchemy.dialects.postgresql import insert
-304: 
-305:         async with self._get_session() as session:
-306:             stmt = insert(EntityModel).values(
-307:                 id=str(entity.id),
-308:                 namespace_id=str(entity.namespace_id),
-309:                 name=entity.name,
-310:                 entity_type=entity.entity_type,
-311:                 description=entity.description,
-312:                 attributes=entity.attributes,
-313:                 source_document_ids=[str(d) for d in entity.source_document_ids],
-314:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-315:                 mention_count=entity.mention_count,
-316:                 embedding=entity.embedding,
-317:                 embedding_model=entity.embedding_model,
-318:                 valid_from=entity.valid_from,
-319:                 valid_until=entity.valid_until,
-320:                 confidence=entity.confidence,
-321:                 metadata_=entity.metadata,
-322:                 created_at=entity.created_at,
-323:                 updated_at=entity.updated_at,
-324:             )
-325:             # On conflict (entity already exists), update all fields
-326:             # Note: use database column name "metadata" not Python attribute "metadata_"
-327:             stmt = stmt.on_conflict_do_update(
-328:                 index_elements=["id"],
-329:                 set_={
-330:                     "name": stmt.excluded.name,
-331:                     "description": stmt.excluded.description,
-332:                     "attributes": stmt.excluded.attributes,
-333:                     "source_document_ids": stmt.excluded.source_document_ids,
-334:                     "source_chunk_ids": stmt.excluded.source_chunk_ids,
-335:                     "mention_count": stmt.excluded.mention_count,
-336:                     "embedding": stmt.excluded.embedding,
-337:                     "embedding_model": stmt.excluded.embedding_model,
-338:                     "valid_from": stmt.excluded.valid_from,
-339:                     "valid_until": stmt.excluded.valid_until,
-340:                     "confidence": stmt.excluded.confidence,
-341:                     "metadata": stmt.excluded.metadata,
-342:                     "updated_at": stmt.excluded.updated_at,
-343:                 },
-344:             )
-345:             await session.execute(stmt)
-346:             await session.commit()
-347: 
-348:     async def update_entity(self, entity) -> None:
-349:         """Update an entity record in PostgreSQL.
-350: 
-351:         Uses upsert to handle race conditions and entities created before
-352:         dual-storage was implemented.
-353:         """
-354:         from sqlalchemy.dialects.postgresql import insert
-355: 
-356:         async with self._get_session() as session:
-357:             stmt = insert(EntityModel).values(
-358:                 id=str(entity.id),
-359:                 namespace_id=str(entity.namespace_id),
-360:                 name=entity.name,
-361:                 entity_type=entity.entity_type,
-362:                 description=entity.description,
-363:                 attributes=entity.attributes,
-364:                 source_document_ids=[str(d) for d in entity.source_document_ids],
-365:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-366:                 mention_count=entity.mention_count,
-367:                 embedding=entity.embedding,
-368:                 embedding_model=entity.embedding_model,
-369:                 valid_from=entity.valid_from,
-370:                 valid_until=entity.valid_until,
-371:                 confidence=entity.confidence,
-372:                 metadata_=entity.metadata,
-373:                 created_at=entity.created_at,
-374:                 updated_at=entity.updated_at,
-375:             )
-376:             # On conflict, update all fields
-377:             stmt = stmt.on_conflict_do_update(
-378:                 index_elements=["id"],
-379:                 set_={
-380:                     "name": stmt.excluded.name,
-381:                     "description": stmt.excluded.description,
-382:                     "attributes": stmt.excluded.attributes,
-383:                     "source_document_ids": stmt.excluded.source_document_ids,
-384:                     "source_chunk_ids": stmt.excluded.source_chunk_ids,
-385:                     "mention_count": stmt.excluded.mention_count,
-386:                     "embedding": stmt.excluded.embedding,
-387:                     "embedding_model": stmt.excluded.embedding_model,
-388:                     "valid_from": stmt.excluded.valid_from,
-389:                     "valid_until": stmt.excluded.valid_until,
-390:                     "confidence": stmt.excluded.confidence,
-391:                     "metadata": stmt.excluded.metadata,
-392:                     "updated_at": stmt.excluded.updated_at,
-393:                 },
-394:             )
-395:             await session.execute(stmt)
-396:             await session.commit()
-397: 
-398:     async def get_entity(self, entity_id: UUID):
-399:         """Get an entity by ID from PostgreSQL."""
-400:         async with self._get_session() as session:
-401:             result = await session.execute(select(EntityModel).where(EntityModel.id == str(entity_id)))
-402:             model = result.scalar_one_or_none()
-403:             if model is None:
-404:                 return None
-405:             return self._entity_model_to_domain(model)
-406: 
-407:     async def entity_exists(self, entity_id: UUID) -> bool:
-408:         """Check if an entity exists in PostgreSQL."""
-409:         async with self._get_session() as session:
-410:             result = await session.execute(select(func.count(EntityModel.id)).where(EntityModel.id == str(entity_id)))
-411:             return result.scalar_one() > 0
-412: 
-413:     def _entity_model_to_domain(self, model: EntityModel):
-414:         """Convert EntityModel to domain Entity."""
-415:         from uuid import UUID as UUIDType
-416: 
-417:         from khora.core.models import Entity
-418: 
-419:         return Entity(
-420:             id=UUIDType(model.id),
-421:             namespace_id=UUIDType(model.namespace_id),
-422:             name=model.name,
-423:             entity_type=model.entity_type,
-424:             description=model.description,
-425:             attributes=model.attributes or {},
-426:             source_document_ids=[UUIDType(d) for d in (model.source_document_ids or [])],
-427:             source_chunk_ids=[UUIDType(c) for c in (model.source_chunk_ids or [])],
-428:             mention_count=model.mention_count,
-429:             embedding=list(model.embedding) if model.embedding is not None else None,
-430:             embedding_model=model.embedding_model or "",
-431:             valid_from=model.valid_from,
-432:             valid_until=model.valid_until,
-433:             confidence=model.confidence,
-434:             metadata=model.metadata_ or {},
-435:             created_at=model.created_at,
-436:             updated_at=model.updated_at,
-437:         )
-438: 
-439:     async def upsert_entities_batch(self, namespace_id: UUID, entities: list) -> list[tuple]:
-440:         """Batch upsert entity records in PostgreSQL.
-441: 
-442:         Uses a single multi-row INSERT ... ON CONFLICT DO UPDATE statement.
-443:         Returns list of (entity, is_new) tuples (is_new is approximate).
-444:         """
-445:         if not entities:
-446:             return []
-447: 
-448:         from sqlalchemy.dialects.postgresql import insert
-449: 
-450:         values = [
-451:             {
-452:                 "id": str(entity.id),
-453:                 "namespace_id": str(entity.namespace_id),
-454:                 "name": entity.name,
-455:                 "entity_type": entity.entity_type,
-456:                 "description": entity.description,
-457:                 "attributes": entity.attributes,
-458:                 "source_document_ids": [str(d) for d in entity.source_document_ids],
-459:                 "source_chunk_ids": [str(c) for c in entity.source_chunk_ids],
-460:                 "mention_count": entity.mention_count,
-461:                 "embedding": entity.embedding,
-462:                 "embedding_model": entity.embedding_model,
-463:                 "valid_from": entity.valid_from,
-464:                 "valid_until": entity.valid_until,
-465:                 "confidence": entity.confidence,
-466:                 "metadata_": entity.metadata,
-467:                 "created_at": entity.created_at,
-468:                 "updated_at": entity.updated_at,
-469:             }
-470:             for entity in entities
-471:         ]
-472: 
-473:         async with self._get_session() as session:
-474:             stmt = insert(EntityModel).values(values)
-475:             stmt = stmt.on_conflict_do_update(
-476:                 index_elements=["id"],
-477:                 set_={
-478:                     "name": stmt.excluded.name,
-479:                     "description": stmt.excluded.description,
-480:                     "attributes": stmt.excluded.attributes,
-481:                     "source_document_ids": stmt.excluded.source_document_ids,
-482:                     "source_chunk_ids": stmt.excluded.source_chunk_ids,
-483:                     "mention_count": stmt.excluded.mention_count,
-484:                     "embedding": stmt.excluded.embedding,
-485:                     "embedding_model": stmt.excluded.embedding_model,
-486:                     "valid_from": stmt.excluded.valid_from,
-487:                     "valid_until": stmt.excluded.valid_until,
-488:                     "confidence": stmt.excluded.confidence,
-489:                     "metadata": stmt.excluded.metadata,
-490:                     "updated_at": stmt.excluded.updated_at,
-491:                 },
-492:             )
-493:             await session.execute(stmt)
-494:             await session.commit()
-495: 
-496:         return [(entity, True) for entity in entities]
-497: 
-498:     # =========================================================================
-499:     # Entity embedding operations
-500:     # =========================================================================
-501: 
-502:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-503:         """Update the embedding for an entity."""
-504:         async with self._get_session() as session:
-505:             await session.execute(
-506:                 update(EntityModel)
-507:                 .where(EntityModel.id == str(entity_id))
-508:                 .values(
-509:                     embedding=embedding,
-510:                     embedding_model=model,
-511:                     updated_at=datetime.now(UTC),
-512:                 )
-513:             )
-514:             await session.commit()
-515: 
-516:     async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
-517:         """Update embeddings for multiple entities in a single transaction.
-518: 
-519:         Args:
-520:             updates: List of (entity_id, embedding, model) tuples
-521: 
-522:         Returns:
-523:             Number of entities updated
-524:         """
-525:         if not updates:
-526:             return 0
-527:         now = datetime.now(UTC)
-528:         async with self._get_session() as session:
-529:             for entity_id, embedding, model in updates:
-530:                 await session.execute(
-531:                     update(EntityModel)
-532:                     .where(EntityModel.id == str(entity_id))
-533:                     .values(embedding=embedding, embedding_model=model, updated_at=now)
-534:                 )
-535:             await session.commit()
-536:         return len(updates)
-537: 
-538:     async def search_similar_entities(
-539:         self,
-540:         namespace_id: UUID,
-541:         query_embedding: list[float],
-542:         *,
-543:         limit: int = 10,
-544:         min_similarity: float = 0.0,
-545:     ) -> list[tuple[UUID, float]]:
-546:         """Search for similar entities by embedding.
-547: 
-548:         Returns list of (entity_id, similarity_score) tuples.
-549:         """
-550:         async with self._get_session() as session:
-551:             similarity = 1 - EntityModel.embedding.cosine_distance(query_embedding)
-552: 
-553:             query = (
-554:                 select(EntityModel.id, similarity.label("similarity"))
-555:                 .where(
-556:                     EntityModel.namespace_id == str(namespace_id),
-557:                     EntityModel.embedding.is_not(None),
-558:                 )
-559:                 .order_by(similarity.desc())
-560:                 .limit(limit)
-561:             )
-562: 
-563:             if min_similarity > 0:
-564:                 query = query.where(similarity >= min_similarity)
-565: 
-566:             result = await session.execute(query)
-567:             return [(UUID(row.id), row.similarity) for row in result.all()]
-568: 
-569:     # =========================================================================
-570:     # Utility operations
-571:     # =========================================================================
-572: 
-573:     async def count_chunks(self, namespace_id: UUID) -> int:
-574:         """Count total chunks in a namespace."""
-575:         async with self._get_session() as session:
-576:             result = await session.execute(
-577:                 select(func.count(ChunkModel.id)).where(ChunkModel.namespace_id == str(namespace_id))
-578:             )
-579:             return result.scalar_one()
-580: 
-581:     async def list_chunks(
-582:         self,
-583:         namespace_id: UUID,
-584:         *,
-585:         limit: int = 1000,
-586:         offset: int = 0,
-587:     ) -> list[Chunk]:
-588:         """List chunks in a namespace.
-589: 
-590:         Args:
-591:             namespace_id: Namespace ID
-592:             limit: Maximum chunks to return
-593:             offset: Offset for pagination
-594: 
-595:         Returns:
-596:             List of chunks
-597:         """
-598:         async with self._get_session() as session:
-599:             result = await session.execute(
-600:                 select(ChunkModel)
-601:                 .where(ChunkModel.namespace_id == str(namespace_id))
-602:                 .order_by(ChunkModel.created_at.desc())
-603:                 .limit(limit)
-604:                 .offset(offset)
-605:             )
-606:             rows = result.scalars().all()
-607:             return [self._chunk_model_to_domain(row) for row in rows]
-608: 
-609:     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
-610:         """Get statistics about embeddings in a namespace."""
-611:         async with self._get_session() as session:
-612:             # Count chunks with embeddings
-613:             chunk_count = await session.execute(
-614:                 select(func.count(ChunkModel.id)).where(
-615:                     ChunkModel.namespace_id == str(namespace_id),
-616:                     ChunkModel.embedding.is_not(None),
-617:                 )
-618:             )
-619:             # Count entities with embeddings
-620:             entity_count = await session.execute(
-621:                 select(func.count(EntityModel.id)).where(
-622:                     EntityModel.namespace_id == str(namespace_id),
-623:                     EntityModel.embedding.is_not(None),
-624:                 )
-625:             )
-626: 
-627:             return {
-628:                 "chunk_embeddings": chunk_count.scalar_one(),
-629:                 "entity_embeddings": entity_count.scalar_one(),
-630:             }
 ````
 
 ## File: src/khora/memory_lake.py
@@ -36757,6 +36123,624 @@ README.md
 533:                 embedding_dimension=self.storage.embedding_dimension,
 534:             )
 535:         return vector
+````
+
+## File: src/khora/storage/backends/pgvector.py
+````python
+  1: """pgvector backend for vector embeddings storage.
+  2: 
+  3: Handles storage and retrieval of embeddings for semantic search
+  4: using pgvector extension in PostgreSQL.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: import asyncio
+ 10: from datetime import UTC, datetime
+ 11: from typing import TYPE_CHECKING
+ 12: from uuid import UUID
+ 13: 
+ 14: from loguru import logger
+ 15: from sqlalchemy import delete, func, select, text, update
+ 16: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+ 17: 
+ 18: from khora.core.models import Chunk, ChunkMetadata
+ 19: from khora.db.models import Base, ChunkModel, EntityModel
+ 20: 
+ 21: if TYPE_CHECKING:
+ 22:     pass
+ 23: 
+ 24: 
+ 25: _DEADLOCK_MAX_RETRIES = 3
+ 26: 
+ 27: 
+ 28: async def _retry_on_deadlock(coro_fn, *args, **kwargs):
+ 29:     """Retry an async operation on deadlock with exponential backoff."""
+ 30:     for attempt in range(_DEADLOCK_MAX_RETRIES):
+ 31:         try:
+ 32:             return await coro_fn(*args, **kwargs)
+ 33:         except Exception as e:
+ 34:             if "deadlock" in str(e).lower() and attempt < _DEADLOCK_MAX_RETRIES - 1:
+ 35:                 wait = 0.1 * (2**attempt)
+ 36:                 logger.warning(f"Deadlock detected (attempt {attempt + 1}), retrying in {wait}s")
+ 37:                 await asyncio.sleep(wait)
+ 38:             else:
+ 39:                 raise
+ 40: 
+ 41: 
+ 42: class PgVectorBackend:
+ 43:     """pgvector backend for vector embeddings.
+ 44: 
+ 45:     Handles all vector operations including chunk storage,
+ 46:     similarity search, and entity embeddings.
+ 47:     """
+ 48: 
+ 49:     def __init__(
+ 50:         self,
+ 51:         database_url: str,
+ 52:         *,
+ 53:         embedding_dimension: int = 1536,
+ 54:         echo: bool = False,
+ 55:         pool_size: int = 5,
+ 56:         max_overflow: int = 10,
+ 57:     ) -> None:
+ 58:         """Initialize the pgvector backend.
+ 59: 
+ 60:         Args:
+ 61:             database_url: PostgreSQL connection URL (with pgvector extension)
+ 62:             embedding_dimension: Dimension of embedding vectors
+ 63:             echo: Enable SQL echo logging
+ 64:             pool_size: Connection pool size
+ 65:             max_overflow: Maximum overflow connections
+ 66:         """
+ 67:         # Convert to async URL if needed
+ 68:         if database_url.startswith("postgresql://"):
+ 69:             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+ 70:         elif database_url.startswith("postgres://"):
+ 71:             database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+ 72: 
+ 73:         self._database_url = database_url
+ 74:         self._embedding_dimension = embedding_dimension
+ 75:         self._echo = echo
+ 76:         self._pool_size = pool_size
+ 77:         self._max_overflow = max_overflow
+ 78:         self._engine: AsyncEngine | None = None
+ 79:         self._session_factory: async_sessionmaker[AsyncSession] | None = None
+ 80: 
+ 81:     async def connect(self) -> None:
+ 82:         """Establish connection to the database."""
+ 83:         if self._engine is not None:
+ 84:             return
+ 85: 
+ 86:         logger.info("Connecting to pgvector...")
+ 87:         self._engine = create_async_engine(
+ 88:             self._database_url,
+ 89:             echo=self._echo,
+ 90:             pool_size=self._pool_size,
+ 91:             max_overflow=self._max_overflow,
+ 92:         )
+ 93:         self._session_factory = async_sessionmaker(
+ 94:             self._engine,
+ 95:             class_=AsyncSession,
+ 96:             expire_on_commit=False,
+ 97:         )
+ 98: 
+ 99:         # Ensure pgvector extension is enabled
+100:         async with self._engine.begin() as conn:
+101:             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+102: 
+103:         logger.info("Connected to pgvector")
+104: 
+105:     async def disconnect(self) -> None:
+106:         """Close database connections."""
+107:         if self._engine is not None:
+108:             logger.info("Disconnecting from pgvector...")
+109:             await self._engine.dispose()
+110:             self._engine = None
+111:             self._session_factory = None
+112:             logger.info("Disconnected from pgvector")
+113: 
+114:     async def is_healthy(self) -> bool:
+115:         """Check if the backend is healthy and connected."""
+116:         if self._engine is None or self._session_factory is None:
+117:             return False
+118:         try:
+119:             async with self._session_factory() as session:
+120:                 await session.execute(select(1))
+121:             return True
+122:         except Exception as e:
+123:             logger.error(f"pgvector health check failed: {e}")
+124:             return False
+125: 
+126:     def _get_session(self) -> AsyncSession:
+127:         """Get a new database session."""
+128:         if self._session_factory is None:
+129:             raise RuntimeError("Backend not connected. Call connect() first.")
+130:         return self._session_factory()
+131: 
+132:     async def create_tables(self) -> None:
+133:         """Create all database tables (for testing/development)."""
+134:         if self._engine is None:
+135:             raise RuntimeError("Backend not connected. Call connect() first.")
+136:         async with self._engine.begin() as conn:
+137:             await conn.run_sync(Base.metadata.create_all)
+138: 
+139:     # =========================================================================
+140:     # Chunk operations
+141:     # =========================================================================
+142: 
+143:     async def create_chunk(self, chunk: Chunk) -> Chunk:
+144:         """Create a new chunk with its embedding."""
+145:         async with self._get_session() as session:
+146:             model = ChunkModel(
+147:                 id=str(chunk.id),
+148:                 namespace_id=str(chunk.namespace_id),
+149:                 document_id=str(chunk.document_id),
+150:                 content=chunk.content,
+151:                 chunk_index=chunk.metadata.chunk_index,
+152:                 start_char=chunk.metadata.start_char,
+153:                 end_char=chunk.metadata.end_char,
+154:                 token_count=chunk.metadata.token_count,
+155:                 metadata_=chunk.metadata.custom,
+156:                 embedding=chunk.embedding,
+157:                 embedding_model=chunk.embedding_model,
+158:                 created_at=chunk.created_at,
+159:             )
+160:             session.add(model)
+161:             await session.commit()
+162:             await session.refresh(model)
+163:             return self._chunk_model_to_domain(model)
+164: 
+165:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+166:         """Create multiple chunks in a batch."""
+167:         if not chunks:
+168:             return []
+169: 
+170:         async with self._get_session() as session:
+171:             models = [
+172:                 ChunkModel(
+173:                     id=str(chunk.id),
+174:                     namespace_id=str(chunk.namespace_id),
+175:                     document_id=str(chunk.document_id),
+176:                     content=chunk.content,
+177:                     chunk_index=chunk.metadata.chunk_index,
+178:                     start_char=chunk.metadata.start_char,
+179:                     end_char=chunk.metadata.end_char,
+180:                     token_count=chunk.metadata.token_count,
+181:                     metadata_=chunk.metadata.custom,
+182:                     embedding=chunk.embedding,
+183:                     embedding_model=chunk.embedding_model,
+184:                     created_at=chunk.created_at,
+185:                 )
+186:                 for chunk in chunks
+187:             ]
+188:             session.add_all(models)
+189:             await session.commit()
+190:             return chunks
+191: 
+192:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+193:         """Get a chunk by ID."""
+194:         async with self._get_session() as session:
+195:             result = await session.execute(select(ChunkModel).where(ChunkModel.id == str(chunk_id)))
+196:             model = result.scalar_one_or_none()
+197:             return self._chunk_model_to_domain(model) if model else None
+198: 
+199:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+200:         """Get all chunks for a document."""
+201:         async with self._get_session() as session:
+202:             result = await session.execute(
+203:                 select(ChunkModel).where(ChunkModel.document_id == str(document_id)).order_by(ChunkModel.chunk_index)
+204:             )
+205:             return [self._chunk_model_to_domain(m) for m in result.scalars().all()]
+206: 
+207:     async def delete_chunks_by_document(self, document_id: UUID) -> int:
+208:         """Delete all chunks for a document."""
+209:         async with self._get_session() as session:
+210:             result = await session.execute(delete(ChunkModel).where(ChunkModel.document_id == str(document_id)))
+211:             await session.commit()
+212:             return result.rowcount
+213: 
+214:     async def search_similar(
+215:         self,
+216:         namespace_id: UUID,
+217:         query_embedding: list[float],
+218:         *,
+219:         limit: int = 10,
+220:         min_similarity: float = 0.0,
+221:         filter_document_ids: list[UUID] | None = None,
+222:     ) -> list[tuple[Chunk, float]]:
+223:         """Search for similar chunks using vector similarity.
+224: 
+225:         Uses cosine similarity for matching. Returns list of (chunk, similarity_score) tuples.
+226:         """
+227:         async with self._get_session() as session:
+228:             # Build cosine similarity expression
+229:             # pgvector uses <=> for cosine distance, so similarity = 1 - distance
+230:             similarity = 1 - ChunkModel.embedding.cosine_distance(query_embedding)
+231: 
+232:             query = (
+233:                 select(ChunkModel, similarity.label("similarity"))
+234:                 .where(
+235:                     ChunkModel.namespace_id == str(namespace_id),
+236:                     ChunkModel.embedding.is_not(None),
+237:                 )
+238:                 .order_by(similarity.desc())
+239:                 .limit(limit)
+240:             )
+241: 
+242:             if filter_document_ids:
+243:                 query = query.where(ChunkModel.document_id.in_([str(d) for d in filter_document_ids]))
+244: 
+245:             if min_similarity > 0:
+246:                 query = query.where(similarity >= min_similarity)
+247: 
+248:             result = await session.execute(query)
+249:             rows = result.all()
+250: 
+251:             return [(self._chunk_model_to_domain(row.ChunkModel), row.similarity) for row in rows]
+252: 
+253:     def _chunk_model_to_domain(self, model: ChunkModel) -> Chunk:
+254:         """Convert ChunkModel to domain Chunk."""
+255:         return Chunk(
+256:             id=UUID(model.id),
+257:             namespace_id=UUID(model.namespace_id),
+258:             document_id=UUID(model.document_id),
+259:             content=model.content,
+260:             metadata=ChunkMetadata(
+261:                 document_id=UUID(model.document_id),
+262:                 chunk_index=model.chunk_index,
+263:                 start_char=model.start_char,
+264:                 end_char=model.end_char,
+265:                 token_count=model.token_count,
+266:                 custom=model.metadata_,
+267:             ),
+268:             embedding=list(model.embedding) if model.embedding is not None else None,
+269:             embedding_model=model.embedding_model,
+270:             created_at=model.created_at,
+271:         )
+272: 
+273:     # =========================================================================
+274:     # Full-text search operations
+275:     # =========================================================================
+276: 
+277:     async def search_fulltext(
+278:         self,
+279:         namespace_id: UUID,
+280:         query_text: str,
+281:         *,
+282:         limit: int = 10,
+283:         language: str = "english",
+284:     ) -> list[tuple[Chunk, float]]:
+285:         """Search chunks using PostgreSQL full-text search with ts_rank.
+286: 
+287:         Uses the content_tsv generated column and GIN index for efficient
+288:         full-text matching.
+289:         """
+290:         async with self._get_session() as session:
+291:             tsquery = func.plainto_tsquery(language, query_text)
+292:             rank = func.ts_rank(ChunkModel.content_tsv, tsquery)
+293: 
+294:             query = (
+295:                 select(ChunkModel, rank.label("rank"))
+296:                 .where(
+297:                     ChunkModel.namespace_id == str(namespace_id),
+298:                     ChunkModel.content_tsv.op("@@")(tsquery),
+299:                 )
+300:                 .order_by(rank.desc())
+301:                 .limit(limit)
+302:             )
+303: 
+304:             result = await session.execute(query)
+305:             rows = result.all()
+306: 
+307:             return [(self._chunk_model_to_domain(row.ChunkModel), float(row.rank)) for row in rows]
+308: 
+309:     # =========================================================================
+310:     # Entity operations (for vector search via PostgreSQL)
+311:     # =========================================================================
+312: 
+313:     async def create_entity(self, entity) -> None:
+314:         """Create an entity record in PostgreSQL for vector search.
+315: 
+316:         This stores the entity metadata and embedding in PostgreSQL,
+317:         complementing the Neo4j storage for graph traversal.
+318: 
+319:         Uses upsert pattern: if entity already exists, updates it instead.
+320:         """
+321:         await _retry_on_deadlock(self._upsert_entity, entity)
+322: 
+323:     async def update_entity(self, entity) -> None:
+324:         """Update an entity record in PostgreSQL.
+325: 
+326:         Uses upsert to handle race conditions and entities created before
+327:         dual-storage was implemented.
+328:         """
+329:         await _retry_on_deadlock(self._upsert_entity, entity)
+330: 
+331:     async def _upsert_entity(self, entity) -> None:
+332:         """Internal upsert used by both create_entity and update_entity."""
+333:         from sqlalchemy.dialects.postgresql import insert
+334: 
+335:         async with self._get_session() as session:
+336:             stmt = insert(EntityModel).values(
+337:                 id=str(entity.id),
+338:                 namespace_id=str(entity.namespace_id),
+339:                 name=entity.name,
+340:                 entity_type=entity.entity_type,
+341:                 description=entity.description,
+342:                 attributes=entity.attributes,
+343:                 source_document_ids=[str(d) for d in entity.source_document_ids],
+344:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+345:                 mention_count=entity.mention_count,
+346:                 embedding=entity.embedding,
+347:                 embedding_model=entity.embedding_model,
+348:                 valid_from=entity.valid_from,
+349:                 valid_until=entity.valid_until,
+350:                 confidence=entity.confidence,
+351:                 metadata_=entity.metadata,
+352:                 created_at=entity.created_at,
+353:                 updated_at=entity.updated_at,
+354:             )
+355:             stmt = stmt.on_conflict_do_update(
+356:                 index_elements=["id"],
+357:                 set_={
+358:                     "name": stmt.excluded.name,
+359:                     "description": stmt.excluded.description,
+360:                     "attributes": stmt.excluded.attributes,
+361:                     "source_document_ids": stmt.excluded.source_document_ids,
+362:                     "source_chunk_ids": stmt.excluded.source_chunk_ids,
+363:                     "mention_count": stmt.excluded.mention_count,
+364:                     "embedding": stmt.excluded.embedding,
+365:                     "embedding_model": stmt.excluded.embedding_model,
+366:                     "valid_from": stmt.excluded.valid_from,
+367:                     "valid_until": stmt.excluded.valid_until,
+368:                     "confidence": stmt.excluded.confidence,
+369:                     "metadata": stmt.excluded.metadata,
+370:                     "updated_at": stmt.excluded.updated_at,
+371:                 },
+372:             )
+373:             await session.execute(stmt)
+374:             await session.commit()
+375: 
+376:     async def get_entity(self, entity_id: UUID):
+377:         """Get an entity by ID from PostgreSQL."""
+378:         async with self._get_session() as session:
+379:             result = await session.execute(select(EntityModel).where(EntityModel.id == str(entity_id)))
+380:             model = result.scalar_one_or_none()
+381:             if model is None:
+382:                 return None
+383:             return self._entity_model_to_domain(model)
+384: 
+385:     async def entity_exists(self, entity_id: UUID) -> bool:
+386:         """Check if an entity exists in PostgreSQL."""
+387:         async with self._get_session() as session:
+388:             result = await session.execute(select(func.count(EntityModel.id)).where(EntityModel.id == str(entity_id)))
+389:             return result.scalar_one() > 0
+390: 
+391:     def _entity_model_to_domain(self, model: EntityModel):
+392:         """Convert EntityModel to domain Entity."""
+393:         from uuid import UUID as UUIDType
+394: 
+395:         from khora.core.models import Entity
+396: 
+397:         return Entity(
+398:             id=UUIDType(model.id),
+399:             namespace_id=UUIDType(model.namespace_id),
+400:             name=model.name,
+401:             entity_type=model.entity_type,
+402:             description=model.description,
+403:             attributes=model.attributes or {},
+404:             source_document_ids=[UUIDType(d) for d in (model.source_document_ids or [])],
+405:             source_chunk_ids=[UUIDType(c) for c in (model.source_chunk_ids or [])],
+406:             mention_count=model.mention_count,
+407:             embedding=list(model.embedding) if model.embedding is not None else None,
+408:             embedding_model=model.embedding_model or "",
+409:             valid_from=model.valid_from,
+410:             valid_until=model.valid_until,
+411:             confidence=model.confidence,
+412:             metadata=model.metadata_ or {},
+413:             created_at=model.created_at,
+414:             updated_at=model.updated_at,
+415:         )
+416: 
+417:     async def upsert_entities_batch(self, namespace_id: UUID, entities: list) -> list[tuple]:
+418:         """Batch upsert entity records in PostgreSQL.
+419: 
+420:         Uses a single multi-row INSERT ... ON CONFLICT DO UPDATE statement.
+421:         Returns list of (entity, is_new) tuples (is_new is approximate).
+422:         """
+423:         if not entities:
+424:             return []
+425: 
+426:         from sqlalchemy.dialects.postgresql import insert
+427: 
+428:         values = [
+429:             {
+430:                 "id": str(entity.id),
+431:                 "namespace_id": str(entity.namespace_id),
+432:                 "name": entity.name,
+433:                 "entity_type": entity.entity_type,
+434:                 "description": entity.description,
+435:                 "attributes": entity.attributes,
+436:                 "source_document_ids": [str(d) for d in entity.source_document_ids],
+437:                 "source_chunk_ids": [str(c) for c in entity.source_chunk_ids],
+438:                 "mention_count": entity.mention_count,
+439:                 "embedding": entity.embedding,
+440:                 "embedding_model": entity.embedding_model,
+441:                 "valid_from": entity.valid_from,
+442:                 "valid_until": entity.valid_until,
+443:                 "confidence": entity.confidence,
+444:                 "metadata_": entity.metadata,
+445:                 "created_at": entity.created_at,
+446:                 "updated_at": entity.updated_at,
+447:             }
+448:             for entity in entities
+449:         ]
+450: 
+451:         async with self._get_session() as session:
+452:             stmt = insert(EntityModel).values(values)
+453:             stmt = stmt.on_conflict_do_update(
+454:                 index_elements=["id"],
+455:                 set_={
+456:                     "name": stmt.excluded.name,
+457:                     "description": stmt.excluded.description,
+458:                     "attributes": stmt.excluded.attributes,
+459:                     "source_document_ids": stmt.excluded.source_document_ids,
+460:                     "source_chunk_ids": stmt.excluded.source_chunk_ids,
+461:                     "mention_count": stmt.excluded.mention_count,
+462:                     "embedding": stmt.excluded.embedding,
+463:                     "embedding_model": stmt.excluded.embedding_model,
+464:                     "valid_from": stmt.excluded.valid_from,
+465:                     "valid_until": stmt.excluded.valid_until,
+466:                     "confidence": stmt.excluded.confidence,
+467:                     "metadata": stmt.excluded.metadata,
+468:                     "updated_at": stmt.excluded.updated_at,
+469:                 },
+470:             )
+471:             await session.execute(stmt)
+472:             await session.commit()
+473: 
+474:         return [(entity, True) for entity in entities]
+475: 
+476:     # =========================================================================
+477:     # Entity embedding operations
+478:     # =========================================================================
+479: 
+480:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+481:         """Update the embedding for an entity."""
+482:         async with self._get_session() as session:
+483:             await session.execute(
+484:                 update(EntityModel)
+485:                 .where(EntityModel.id == str(entity_id))
+486:                 .values(
+487:                     embedding=embedding,
+488:                     embedding_model=model,
+489:                     updated_at=datetime.now(UTC),
+490:                 )
+491:             )
+492:             await session.commit()
+493: 
+494:     async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+495:         """Update embeddings for multiple entities in a single transaction.
+496: 
+497:         Args:
+498:             updates: List of (entity_id, embedding, model) tuples
+499: 
+500:         Returns:
+501:             Number of entities updated
+502:         """
+503:         if not updates:
+504:             return 0
+505: 
+506:         async def _do_batch():
+507:             # Sort by entity_id for consistent lock ordering across concurrent batches
+508:             sorted_updates = sorted(updates, key=lambda u: str(u[0]))
+509:             now = datetime.now(UTC)
+510:             async with self._get_session() as session:
+511:                 for entity_id, embedding, model in sorted_updates:
+512:                     await session.execute(
+513:                         update(EntityModel)
+514:                         .where(EntityModel.id == str(entity_id))
+515:                         .values(embedding=embedding, embedding_model=model, updated_at=now)
+516:                     )
+517:                 await session.commit()
+518:             return len(sorted_updates)
+519: 
+520:         return await _retry_on_deadlock(_do_batch)
+521: 
+522:     async def search_similar_entities(
+523:         self,
+524:         namespace_id: UUID,
+525:         query_embedding: list[float],
+526:         *,
+527:         limit: int = 10,
+528:         min_similarity: float = 0.0,
+529:     ) -> list[tuple[UUID, float]]:
+530:         """Search for similar entities by embedding.
+531: 
+532:         Returns list of (entity_id, similarity_score) tuples.
+533:         """
+534:         async with self._get_session() as session:
+535:             similarity = 1 - EntityModel.embedding.cosine_distance(query_embedding)
+536: 
+537:             query = (
+538:                 select(EntityModel.id, similarity.label("similarity"))
+539:                 .where(
+540:                     EntityModel.namespace_id == str(namespace_id),
+541:                     EntityModel.embedding.is_not(None),
+542:                 )
+543:                 .order_by(similarity.desc())
+544:                 .limit(limit)
+545:             )
+546: 
+547:             if min_similarity > 0:
+548:                 query = query.where(similarity >= min_similarity)
+549: 
+550:             result = await session.execute(query)
+551:             return [(UUID(row.id), row.similarity) for row in result.all()]
+552: 
+553:     # =========================================================================
+554:     # Utility operations
+555:     # =========================================================================
+556: 
+557:     async def count_chunks(self, namespace_id: UUID) -> int:
+558:         """Count total chunks in a namespace."""
+559:         async with self._get_session() as session:
+560:             result = await session.execute(
+561:                 select(func.count(ChunkModel.id)).where(ChunkModel.namespace_id == str(namespace_id))
+562:             )
+563:             return result.scalar_one()
+564: 
+565:     async def list_chunks(
+566:         self,
+567:         namespace_id: UUID,
+568:         *,
+569:         limit: int = 1000,
+570:         offset: int = 0,
+571:     ) -> list[Chunk]:
+572:         """List chunks in a namespace.
+573: 
+574:         Args:
+575:             namespace_id: Namespace ID
+576:             limit: Maximum chunks to return
+577:             offset: Offset for pagination
+578: 
+579:         Returns:
+580:             List of chunks
+581:         """
+582:         async with self._get_session() as session:
+583:             result = await session.execute(
+584:                 select(ChunkModel)
+585:                 .where(ChunkModel.namespace_id == str(namespace_id))
+586:                 .order_by(ChunkModel.created_at.desc())
+587:                 .limit(limit)
+588:                 .offset(offset)
+589:             )
+590:             rows = result.scalars().all()
+591:             return [self._chunk_model_to_domain(row) for row in rows]
+592: 
+593:     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
+594:         """Get statistics about embeddings in a namespace."""
+595:         async with self._get_session() as session:
+596:             # Count chunks with embeddings
+597:             chunk_count = await session.execute(
+598:                 select(func.count(ChunkModel.id)).where(
+599:                     ChunkModel.namespace_id == str(namespace_id),
+600:                     ChunkModel.embedding.is_not(None),
+601:                 )
+602:             )
+603:             # Count entities with embeddings
+604:             entity_count = await session.execute(
+605:                 select(func.count(EntityModel.id)).where(
+606:                     EntityModel.namespace_id == str(namespace_id),
+607:                     EntityModel.embedding.is_not(None),
+608:                 )
+609:             )
+610: 
+611:             return {
+612:                 "chunk_embeddings": chunk_count.scalar_one(),
+613:                 "entity_embeddings": entity_count.scalar_one(),
+614:             }
 ````
 
 ## File: src/khora/pipelines/flows/ingest.py
@@ -39255,7 +39239,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.0.22"
+  3: version = "0.0.23"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -39434,6 +39418,27 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-02-01 22:54:29 +0100
+**Message:** fix: deadlock retry for concurrent entity writes, fix telemetry schema migration
+
+**Files:**
+- src/khora/storage/backends/pgvector.py
+- src/khora/telemetry/collector.py
+
+## Commit: 2026-02-01 22:46:31 +0100
+**Message:** fix: test suite speed, telemetry schema migration, and bump to v0.0.22
+
+**Files:**
+- CLAUDE.md
+- REPOMIX.md
+- pyproject.toml
+- src/khora/telemetry/collector.py
+- tests/unit/test_pipelines_ingest.py
+- tests/unit/test_pipelines_tasks.py
+- tests/unit/test_query_cache.py
+- tests/unit/test_query_reranking.py
+- uv.lock
 
 ## Commit: 2026-02-01 22:14:22 +0100
 **Message:** fix: harden extraction against LLM null responses and add unit tests
@@ -39744,23 +39749,3 @@ README.md
 - src/khora/query/message_extract.py
 - tests/unit/test_conversation_chunker.py
 - tests/unit/test_message_extract.py
-
-## Commit: 2026-01-29 09:23:24 +0100
-**Message:** chore: bump version to 0.0.11
-
-**Files:**
-- pyproject.toml
-- src/khora/chat/engine.py
-- uv.lock
-
-## Commit: 2026-01-29 09:17:27 +0100
-**Message:** perf: implement remaining optimization plan phases 2-4
-
-**Files:**
-- src/khora/db/session.py
-- src/khora/extraction/extractors/llm.py
-- src/khora/query/agentic.py
-- src/khora/query/cache.py
-- src/khora/query/engine.py
-- src/khora/query/linking.py
-- src/khora/query/reranking.py
