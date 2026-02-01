@@ -72,15 +72,15 @@ class TelemetryCollector:
 
     def record_llm_call(self, **kwargs: Any) -> None:
         event = LLMEvent(service_name=self._service_name, **kwargs)
-        self._buffer.append(("llm", event.model_dump(mode="json")))
+        self._buffer.append(("llm", event.model_dump()))
 
     def record_storage_op(self, **kwargs: Any) -> None:
         event = StorageEvent(service_name=self._service_name, **kwargs)
-        self._buffer.append(("storage", event.model_dump(mode="json")))
+        self._buffer.append(("storage", event.model_dump()))
 
     def record_pipeline_stage(self, **kwargs: Any) -> None:
         event = PipelineEvent(service_name=self._service_name, **kwargs)
-        self._buffer.append(("pipeline", event.model_dump(mode="json")))
+        self._buffer.append(("pipeline", event.model_dump()))
 
     # ------------------------------------------------------------------
     # Internal flush machinery
