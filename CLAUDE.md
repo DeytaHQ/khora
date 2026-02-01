@@ -92,7 +92,7 @@ src/khora/
 │   ├── registry.py              # Pipeline registration
 │   ├── incremental.py           # Incremental sync support
 │   ├── flows/
-│   │   ├── ingest.py            # Document ingestion flow (chunk → embed → extract → expand → store)
+│   │   ├── ingest.py            # Document ingestion flow (chunk → embed‖extract → expand → store)
 │   │   ├── expansion.py         # Post-extraction graph expansion flow
 │   │   └── sync.py              # External source sync flow
 │   └── tasks/
@@ -178,14 +178,15 @@ Each namespace isolates documents, chunks, entities, and relationships. Namespac
 
 ### Data Flow
 
-**Ingestion pipeline** (`remember()` / `POST /sync/ingest`):
+**Ingestion pipeline** (`remember()` / `remember_batch()` / `POST /sync/ingest`):
 1. **Document creation** — checksum-based deduplication
 2. **Chunking** — fixed, semantic, recursive, or conversation-aware
-3. **Embedding** — batched LiteLLM embedding generation
-4. **Entity extraction** — LLM-based extraction using configurable skills
+3. **Embedding + Entity extraction** (concurrent) — batched LiteLLM embedding and LLM-based extraction run in parallel via `asyncio.gather`
+4. **Storage** — chunks → pgvector, entities/relationships → graph backend (batch writes), entity embeddings → pgvector (batch transaction), documents → PostgreSQL
 5. **Expansion** — relationship inference, cross-tool unification, rule engine
-6. **Storage** — chunks → pgvector, entities/relationships → graph backend, documents → PostgreSQL
-7. **Index optimization** — post-ingestion index maintenance
+6. **Index optimization** — post-ingestion index maintenance
+
+`remember_batch()` delegates to `ingest_documents` for shared EntityIndex and cross-document entity dedup.
 
 **Query pipeline** (`recall()` / `POST /memory/recall`):
 1. **Query understanding** — LLM analyzes query for entities, temporal refs, and generates expansions

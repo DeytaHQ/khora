@@ -266,22 +266,20 @@ Why? Different query patterns:
 - **Neo4j**: "Who works with Einstein?" → Graph traversal
 - **pgvector**: "Find entities similar to this description" → Embedding similarity
 
-When you create an entity, the `StorageCoordinator` stores it in both places:
+When you create an entity, the `StorageCoordinator` stores it in both places. For updates and batch upserts, writes to graph and vector backends run in parallel via `asyncio.gather` — since neither backend depends on the other's result:
 
 ```python
-async def create_entity(self, entity: Entity) -> Entity:
-    # Store in Neo4j for graph queries
-    if self.graph:
-        entity = await self.graph.create_entity(entity)
-
-    # Store in pgvector for similarity search
-    if self.vector:
-        await self.vector.create_entity(entity)
-
-    return entity
+async def update_entity(self, entity: Entity) -> Entity:
+    # Graph and vector writes happen concurrently
+    if self.graph and self.vector:
+        graph_result, _ = await asyncio.gather(
+            self.graph.update_entity(entity),
+            self.vector.update_entity(entity),
+        )
+        return graph_result
 ```
 
-This redundancy is intentional - each backend serves different access patterns.
+This redundancy is intentional - each backend serves different access patterns. The parallel writes mean you don't pay a latency penalty for it.
 
 ## The StorageCoordinator
 
@@ -354,7 +352,7 @@ ON CREATE SET n.id = e.id, n.description = e.description, ...
 ON MATCH SET n.description = e.description, n.updated_at = e.updated_at, ...
 ```
 
-**PostgreSQL implementation** uses `INSERT ... ON CONFLICT DO UPDATE` for each entity in a single session.
+**PostgreSQL implementation** uses a single multi-row `INSERT ... ON CONFLICT DO UPDATE` — all entities in one SQL statement rather than individual inserts.
 
 ### Relationship Batch Create
 
@@ -373,9 +371,11 @@ count = await coordinator.create_relationships_batch(
 
 | Context | Method | Why |
 |---------|--------|-----|
+| Per-document ingestion | `create_relationships_batch()` | Store all extracted relationships in one transaction |
+| Per-document ingestion | `update_entity_embeddings_batch()` | Store all entity embeddings in one transaction |
 | Smart mode post-resolution | `upsert_entities_batch()` | Write resolved entities after cross-document unification |
 | Smart mode post-inference | `create_relationships_batch()` | Write inferred relationships in bulk |
-| Any bulk workflow | Both methods | Reduce N+1 query patterns to ceil(N/batch_size) queries |
+| Any bulk workflow | All batch methods | Reduce N+1 query patterns to ceil(N/batch_size) queries |
 
 ## Protocol-Based Design
 

@@ -325,9 +325,10 @@ curl http://localhost:8100/health/live   # Liveness probe
 
 ### Data Flow
 
-1. **Ingestion** (Two-Phase Pipeline)
-   - Phase 1: Stage documents, compute checksums, detect changes
-   - Phase 2: Chunk text, generate embeddings, extract entities
+1. **Ingestion** (Three-Phase Pipeline)
+   - Phase 1: Stage documents, compute checksums, detect duplicates
+   - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
+   - Phase 3 (optional): Cross-document entity unification and relationship inference
 
 2. **Query** (Hybrid Search)
    - Execute vector, graph, and keyword searches in parallel

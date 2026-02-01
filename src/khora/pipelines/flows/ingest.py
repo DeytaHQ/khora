@@ -209,25 +209,31 @@ async def process_document(
             )
         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
 
-        # Step 2: Embed (already batched internally)
-        async with pipeline_stage(
-            "ingestion", "embedding", _run_id, namespace_id=_ns_id, extra_metadata={"chunk_count": len(chunks)}
-        ):
-            chunks = await embed_chunks(chunks, model=embedding_model)
-        logger.debug(f"Document {document.id}: generated embeddings")
+        # Steps 2 & 3: Embed + Extract concurrently (both depend only on chunks)
+        async def _embed_with_telemetry():
+            async with pipeline_stage(
+                "ingestion", "embedding", _run_id, namespace_id=_ns_id, extra_metadata={"chunk_count": len(chunks)}
+            ):
+                return await embed_chunks(chunks, model=embedding_model)
 
-        # Step 3: Extract entities (parallel extraction across chunks)
-        async with pipeline_stage(
-            "ingestion", "extraction", _run_id, namespace_id=_ns_id, extra_metadata={"chunk_count": len(chunks)}
-        ):
-            entities, relationships = await extract_entities(
-                chunks,
-                skill_name=skill_name,
-                expertise=resolved_expertise,
-                model=extraction_model,
-                max_concurrent=max_concurrent_extractions,
-                context=extraction_context,
-            )
+        async def _extract_with_telemetry():
+            async with pipeline_stage(
+                "ingestion", "extraction", _run_id, namespace_id=_ns_id, extra_metadata={"chunk_count": len(chunks)}
+            ):
+                return await extract_entities(
+                    chunks,
+                    skill_name=skill_name,
+                    expertise=resolved_expertise,
+                    model=extraction_model,
+                    max_concurrent=max_concurrent_extractions,
+                    context=extraction_context,
+                )
+
+        embedded_chunks, (entities, relationships) = await asyncio.gather(
+            _embed_with_telemetry(), _extract_with_telemetry()
+        )
+        chunks = embedded_chunks
+        logger.debug(f"Document {document.id}: generated embeddings")
         logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
 
         # Step 4 (Optional): Semantic expansion
@@ -312,94 +318,113 @@ async def process_document(
             await storage.create_chunks_batch(chunks)
 
         # Step 5: Store entities with deduplication
-        # Process entities concurrently but with semaphore to avoid overwhelming the DB
-        entity_semaphore = asyncio.Semaphore(20)
+        async with pipeline_stage(
+            "ingestion",
+            "entity_storage",
+            _run_id,
+            namespace_id=_ns_id,
+            input_count=len(entities),
+        ) as _es_ctx:
+            # Process entities concurrently but with semaphore to avoid overwhelming the DB
+            entity_semaphore = asyncio.Semaphore(20)
 
-        # Track mapping from original entity IDs to stored entity IDs (for dedup)
-        entity_id_mapping: dict[str, str] = {}
+            # Track mapping from original entity IDs to stored entity IDs (for dedup)
+            entity_id_mapping: dict[str, str] = {}
 
-        async def store_entity(entity) -> tuple[Entity, bool]:
-            """Store entity and return (entity, needs_embedding)."""
-            async with entity_semaphore:
-                original_id = str(entity.id)
-                existing = await storage.get_entity_by_name(
-                    document.namespace_id,
-                    entity.name,
-                    entity.entity_type.value,
-                )
-                if existing:
-                    existing.merge_with(entity)
-                    await storage.update_entity(existing)
-                    # Map original ID to existing entity's ID
-                    entity_id_mapping[original_id] = str(existing.id)
-                    # Only generate embedding if not already present
-                    needs_embedding = not existing.embedding
-                    return existing, needs_embedding
-                else:
-                    await storage.create_entity(entity)
-                    # ID stays the same for new entities
-                    entity_id_mapping[original_id] = original_id
-                    # New entities always need embeddings
-                    return entity, True
+            async def store_entity(entity) -> tuple[Entity, bool]:
+                """Store entity and return (entity, needs_embedding)."""
+                async with entity_semaphore:
+                    original_id = str(entity.id)
+                    existing = await storage.get_entity_by_name(
+                        document.namespace_id,
+                        entity.name,
+                        entity.entity_type.value,
+                    )
+                    if existing:
+                        existing.merge_with(entity)
+                        await storage.update_entity(existing)
+                        # Map original ID to existing entity's ID
+                        entity_id_mapping[original_id] = str(existing.id)
+                        # Only generate embedding if not already present
+                        needs_embedding = not existing.embedding
+                        return existing, needs_embedding
+                    else:
+                        await storage.create_entity(entity)
+                        # ID stays the same for new entities
+                        entity_id_mapping[original_id] = original_id
+                        # New entities always need embeddings
+                        return entity, True
 
-        store_results = await asyncio.gather(*[store_entity(e) for e in entities])
-        # Collect entities that need embeddings
-        entities_needing_embeddings = [e for e, needs in store_results if needs]
+            store_results = await asyncio.gather(*[store_entity(e) for e in entities])
+            # Collect entities that need embeddings
+            entities_needing_embeddings = [e for e, needs in store_results if needs]
+            _es_ctx["output_count"] = len(store_results)
 
         # Step 5b: Generate and store entity embeddings
         if entities_needing_embeddings:
-            from khora.extraction.embedders import LiteLLMEmbedder
+            async with pipeline_stage(
+                "ingestion",
+                "entity_embedding",
+                _run_id,
+                namespace_id=_ns_id,
+                input_count=len(entities_needing_embeddings),
+            ) as _ee_ctx:
+                from khora.extraction.embedders import LiteLLMEmbedder
 
-            embedder = LiteLLMEmbedder(model=embedding_model)
-            # Create entity text representations for embedding
-            entity_texts = [
-                f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings
-            ]
-            # Generate embeddings in batch
-            entity_embeddings = await embedder.embed_batch(entity_texts)
-            # Update entities with embeddings
-            for entity, embedding in zip(entities_needing_embeddings, entity_embeddings):
-                await storage.update_entity_embedding(entity.id, embedding, embedding_model)
+                embedder = LiteLLMEmbedder(model=embedding_model)
+                # Create entity text representations for embedding
+                entity_texts = [
+                    f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings
+                ]
+                # Generate embeddings in batch
+                entity_embeddings = await embedder.embed_batch(entity_texts)
+                # Update entities with embeddings (single transaction)
+                updates = [
+                    (entity.id, embedding, embedding_model)
+                    for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
+                ]
+                await storage.update_entity_embeddings_batch(updates)
+                _ee_ctx["output_count"] = len(entities_needing_embeddings)
             logger.debug(
                 f"Document {document.id}: generated embeddings for {len(entities_needing_embeddings)} entities"
             )
 
-        # Step 6: Store relationships concurrently
-        # Update relationship entity IDs to use deduplicated entity IDs
-        async def store_relationship(rel):
-            async with entity_semaphore:
-                # Remap source and target entity IDs if they were deduplicated
+        # Step 6: Store relationships in batch
+        # Remap entity IDs to use deduplicated entity IDs, then batch-store
+        all_relationships = relationships + inferred_relationships
+        if all_relationships:
+            from uuid import UUID
+
+            valid_relationships = []
+            skipped = 0
+            for rel in all_relationships:
                 source_id = str(rel.source_entity_id)
                 target_id = str(rel.target_entity_id)
 
                 mapped_source = entity_id_mapping.get(source_id)
                 mapped_target = entity_id_mapping.get(target_id)
 
-                # Skip if either entity wasn't found (shouldn't happen but be safe)
                 if not mapped_source or not mapped_target:
                     logger.debug(
                         f"Skipping relationship {rel.relationship_type}: "
                         f"missing entity mapping (source={source_id}, target={target_id})"
                     )
-                    return None
-
-                # Update the relationship with mapped IDs
-                from uuid import UUID
+                    skipped += 1
+                    continue
 
                 rel.source_entity_id = UUID(mapped_source)
                 rel.target_entity_id = UUID(mapped_target)
+                valid_relationships.append(rel)
 
-                return await storage.create_relationship(rel)
+            if valid_relationships:
+                stored_count = await storage.create_relationships_batch(valid_relationships)
+            else:
+                stored_count = 0
 
-        all_relationships = relationships + inferred_relationships
-        if all_relationships:
-            results = await asyncio.gather(*[store_relationship(r) for r in all_relationships])
-            # Count successfully stored relationships
-            stored_count = sum(1 for r in results if r is not None)
-            if stored_count < len(all_relationships):
+            if skipped > 0:
                 logger.debug(
                     f"Stored {stored_count}/{len(all_relationships)} relationships "
-                    f"({len(all_relationships) - stored_count} skipped due to missing entity mappings)"
+                    f"({skipped} skipped due to missing entity mappings)"
                 )
 
         # Mark as completed
@@ -586,6 +611,7 @@ async def ingest_documents(
         "total_entities": total_entities,
         "total_relationships": total_relationships,
         "total_inferred_relationships": total_inferred,
+        "per_document_results": successful_results,
         **({"smart_resolution": smart_resolution_result} if smart_resolution_result else {}),
     }
 
@@ -624,6 +650,7 @@ async def run_smart_resolution(
     """
     from khora.extraction.expansion import SemanticExpander
     from khora.extraction.expansion.relationship_inferrer import to_relationship
+    from khora.telemetry.instrument import pipeline_stage
 
     all_entities = entity_index.get_all_entities()
     logger.info(f"Smart resolution: {len(all_entities)} entities in index " f"({entity_index.stats()})")
@@ -632,17 +659,24 @@ async def run_smart_resolution(
         return {"entities_resolved": 0, "entities_merged": 0, "inferred_relationships": 0}
 
     # Phase 1: Cross-document entity unification with blocking
-    expander = SemanticExpander(
-        expertise=expertise,
-        enable_unification=True,
-        enable_inference=False,  # Inference done separately below
-    )
-    expansion_result = await expander.expand(
-        entities=all_entities,
-        relationships=[],  # No relationships needed for unification
+    async with pipeline_stage(
+        "ingestion",
+        "smart_resolution",
         namespace_id=namespace_id,
-        entity_index=entity_index,
-    )
+        input_count=len(all_entities),
+    ) as _sr_ctx:
+        expander = SemanticExpander(
+            expertise=expertise,
+            enable_unification=True,
+            enable_inference=False,  # Inference done separately below
+        )
+        expansion_result = await expander.expand(
+            entities=all_entities,
+            relationships=[],  # No relationships needed for unification
+            namespace_id=namespace_id,
+            entity_index=entity_index,
+        )
+        _sr_ctx["output_count"] = len(expansion_result.entities)
 
     resolved_entities = expansion_result.entities
     entity_mapping = expansion_result.entity_mapping
@@ -664,8 +698,11 @@ async def run_smart_resolution(
         embedder = LiteLLMEmbedder(model=embedding_model)
         entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings]
         entity_embeddings = await embedder.embed_batch(entity_texts)
-        for entity, embedding in zip(entities_needing_embeddings, entity_embeddings):
-            await storage.update_entity_embedding(entity.id, embedding, embedding_model)
+        updates = [
+            (entity.id, embedding, embedding_model)
+            for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
+        ]
+        await storage.update_entity_embeddings_batch(updates)
         logger.debug(f"Smart resolution: generated embeddings for {len(entities_needing_embeddings)} entities")
 
     # Phase 3: Load all relationships and remap merged entity IDs
@@ -767,15 +804,13 @@ async def run_batch_inference(
     )
     logger.info(f"Expansion complete: {expansion_result.inferred_relationship_count} inferred")
 
-    # Store inferred relationships
+    # Store inferred relationships (batch)
     inferred_count = 0
     if expansion_result.inferred_relationships:
-        for rel in expansion_result.inferred_relationships:
-            try:
-                await storage.create_relationship(rel)
-                inferred_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to store inferred relationship: {e}")
+        try:
+            inferred_count = await storage.create_relationships_batch(expansion_result.inferred_relationships)
+        except Exception as e:
+            logger.warning(f"Failed to store inferred relationships in batch: {e}")
 
     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
 

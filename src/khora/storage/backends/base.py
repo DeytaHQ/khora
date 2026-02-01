@@ -276,6 +276,10 @@ class VectorBackendProtocol(Protocol):
         """Update the embedding for an entity."""
         ...
 
+    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+        """Update embeddings for multiple entities in a single transaction."""
+        ...
+
     @abstractmethod
     async def search_similar_entities(
         self,

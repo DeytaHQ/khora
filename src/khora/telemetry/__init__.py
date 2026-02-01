@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .collector import TelemetryCollector
+from .context import clear_trace_id, ensure_trace_id, get_trace_id, set_trace_id
 from .noop import NoOpCollector
 
 if TYPE_CHECKING:
@@ -34,6 +35,10 @@ __all__ = [
     "get_collector",
     "init_telemetry",
     "shutdown_telemetry",
+    "get_trace_id",
+    "set_trace_id",
+    "ensure_trace_id",
+    "clear_trace_id",
 ]
 
 _collector: TelemetryCollector | NoOpCollector = NoOpCollector()

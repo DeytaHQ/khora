@@ -110,7 +110,7 @@ Staging runs in parallel with controlled concurrency - typically `2 * max_concur
 
 ## Phase 2: Enrichment
 
-This is where content becomes knowledge. Each staged document goes through four steps.
+This is where content becomes knowledge. Each staged document goes through four steps. Notably, steps 2 and 3 (embedding and extraction) run **concurrently** since they both depend only on the chunks from step 1 — extraction doesn't need embeddings, and embedding doesn't need entities.
 
 ### Step 1: Chunking
 
@@ -129,9 +129,11 @@ Why chunk? Embedding models have token limits, and retrieval works better with f
 
 See [Chunkers](chunkers.md) for the different strategies.
 
-### Step 2: Embedding
+### Steps 2 & 3: Embedding + Extraction (Parallel)
 
-Each chunk gets converted to a vector:
+After chunking, embedding and extraction run at the same time via `asyncio.gather`. The slower operation (usually extraction) determines wall-clock time, while the faster one (usually embedding) completes "for free" in the background.
+
+**Embedding** converts each chunk to a vector:
 
 ```python
 chunks = await embed_chunks(
@@ -142,11 +144,9 @@ chunks = await embed_chunks(
 
 These vectors capture semantic meaning. Similar concepts get similar vectors, enabling "find content like this" queries.
 
-Embedding is batched internally - instead of 100 API calls for 100 chunks, we make ~3 calls with batches of 32.
+Embedding is batched internally - instead of 100 API calls for 100 chunks, we make a few concurrent calls with batches of 100. When there are more texts than the batch size, sub-batches run concurrently (up to `embed_concurrency`, default 3) rather than sequentially.
 
-### Step 3: Extraction
-
-An LLM reads each chunk and extracts structured knowledge:
+**Extraction** has an LLM read each chunk and extract structured knowledge:
 
 ```python
 entities, relationships = await extract_entities(
@@ -156,6 +156,8 @@ entities, relationships = await extract_entities(
     max_concurrent=10          # parallel LLM calls
 )
 ```
+
+When using `extract_multi` (the default for multi-chunk documents), chunks are grouped into batches of ~5 and each batch is sent as a single LLM call. All batches run concurrently (bounded by the extractor's semaphore), so 15 chunks across 3 batches complete in roughly the time of 1 batch instead of 3 sequential calls.
 
 **Entities** - Named things worth remembering:
 ```python
@@ -210,18 +212,16 @@ await storage.upsert_entities_batch(namespace_id, resolved_entities, batch_size=
 entity_texts = [f"{e.name}: {e.description}" for e in entities]
 embeddings = await embedder.embed_batch(entity_texts)
 
-for entity, embedding in zip(entities, embeddings):
-    await storage.update_entity_embedding(entity.id, embedding, model)
+# Update all embeddings in a single transaction
+updates = [(e.id, emb, model) for e, emb in zip(entities, embeddings)]
+await storage.update_entity_embeddings_batch(updates)
 ```
 
 **Relationships → Neo4j:**
 ```python
-# Per-relationship approach:
-for relationship in relationships:
-    await storage.create_relationship(relationship)
-
-# Batch approach (smart mode):
+# Batch approach (used by default):
 await storage.create_relationships_batch(relationships, batch_size=50)
+# Uses UNWIND + CREATE in Neo4j — one transaction instead of N individual writes
 ```
 
 ### Entity ID Remapping
@@ -418,10 +418,11 @@ documents = [
 
 result = await lake.remember_batch(
     documents,
-    max_concurrent_documents=5,
-    enable_expansion=True
+    max_concurrent=5,
 )
 ```
+
+`remember_batch` delegates to `ingest_documents` internally, which means batch calls get all the benefits of the full pipeline: shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing. This is a significant improvement over calling `remember()` in a loop, which would miss cross-document dedup entirely.
 
 ### With Custom Configuration
 
@@ -488,7 +489,11 @@ This is a one-time migration for existing data.
     "total_chunks": 450,
     "total_entities": 200,
     "total_relationships": 150,
-    "total_inferred_relationships": 25
+    "total_inferred_relationships": 25,
+    "per_document_results": [      # One entry per successfully processed document
+        {"document_id": "uuid", "chunks": 5, "entities": 3, "relationships": 2, ...},
+        ...
+    ]
 }
 ```
 

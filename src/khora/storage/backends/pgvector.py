@@ -439,7 +439,7 @@ class PgVectorBackend:
     async def upsert_entities_batch(self, namespace_id: UUID, entities: list) -> list[tuple]:
         """Batch upsert entity records in PostgreSQL.
 
-        Uses INSERT ... ON CONFLICT DO UPDATE for each entity.
+        Uses a single multi-row INSERT ... ON CONFLICT DO UPDATE statement.
         Returns list of (entity, is_new) tuples (is_new is approximate).
         """
         if not entities:
@@ -447,51 +447,53 @@ class PgVectorBackend:
 
         from sqlalchemy.dialects.postgresql import insert
 
-        results: list[tuple] = []
+        values = [
+            {
+                "id": str(entity.id),
+                "namespace_id": str(entity.namespace_id),
+                "name": entity.name,
+                "entity_type": entity.entity_type,
+                "description": entity.description,
+                "attributes": entity.attributes,
+                "source_document_ids": [str(d) for d in entity.source_document_ids],
+                "source_chunk_ids": [str(c) for c in entity.source_chunk_ids],
+                "mention_count": entity.mention_count,
+                "embedding": entity.embedding,
+                "embedding_model": entity.embedding_model,
+                "valid_from": entity.valid_from,
+                "valid_until": entity.valid_until,
+                "confidence": entity.confidence,
+                "metadata_": entity.metadata,
+                "created_at": entity.created_at,
+                "updated_at": entity.updated_at,
+            }
+            for entity in entities
+        ]
+
         async with self._get_session() as session:
-            for entity in entities:
-                stmt = insert(EntityModel).values(
-                    id=str(entity.id),
-                    namespace_id=str(entity.namespace_id),
-                    name=entity.name,
-                    entity_type=entity.entity_type,
-                    description=entity.description,
-                    attributes=entity.attributes,
-                    source_document_ids=[str(d) for d in entity.source_document_ids],
-                    source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-                    mention_count=entity.mention_count,
-                    embedding=entity.embedding,
-                    embedding_model=entity.embedding_model,
-                    valid_from=entity.valid_from,
-                    valid_until=entity.valid_until,
-                    confidence=entity.confidence,
-                    metadata_=entity.metadata,
-                    created_at=entity.created_at,
-                    updated_at=entity.updated_at,
-                )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["id"],
-                    set_={
-                        "name": stmt.excluded.name,
-                        "description": stmt.excluded.description,
-                        "attributes": stmt.excluded.attributes,
-                        "source_document_ids": stmt.excluded.source_document_ids,
-                        "source_chunk_ids": stmt.excluded.source_chunk_ids,
-                        "mention_count": stmt.excluded.mention_count,
-                        "embedding": stmt.excluded.embedding,
-                        "embedding_model": stmt.excluded.embedding_model,
-                        "valid_from": stmt.excluded.valid_from,
-                        "valid_until": stmt.excluded.valid_until,
-                        "confidence": stmt.excluded.confidence,
-                        "metadata": stmt.excluded.metadata,
-                        "updated_at": stmt.excluded.updated_at,
-                    },
-                )
-                await session.execute(stmt)
-                results.append((entity, True))  # Approximate — we don't know if new or updated
+            stmt = insert(EntityModel).values(values)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["id"],
+                set_={
+                    "name": stmt.excluded.name,
+                    "description": stmt.excluded.description,
+                    "attributes": stmt.excluded.attributes,
+                    "source_document_ids": stmt.excluded.source_document_ids,
+                    "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                    "mention_count": stmt.excluded.mention_count,
+                    "embedding": stmt.excluded.embedding,
+                    "embedding_model": stmt.excluded.embedding_model,
+                    "valid_from": stmt.excluded.valid_from,
+                    "valid_until": stmt.excluded.valid_until,
+                    "confidence": stmt.excluded.confidence,
+                    "metadata": stmt.excluded.metadata,
+                    "updated_at": stmt.excluded.updated_at,
+                },
+            )
+            await session.execute(stmt)
             await session.commit()
 
-        return results
+        return [(entity, True) for entity in entities]
 
     # =========================================================================
     # Entity embedding operations
@@ -510,6 +512,28 @@ class PgVectorBackend:
                 )
             )
             await session.commit()
+
+    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+        """Update embeddings for multiple entities in a single transaction.
+
+        Args:
+            updates: List of (entity_id, embedding, model) tuples
+
+        Returns:
+            Number of entities updated
+        """
+        if not updates:
+            return 0
+        now = datetime.now(UTC)
+        async with self._get_session() as session:
+            for entity_id, embedding, model in updates:
+                await session.execute(
+                    update(EntityModel)
+                    .where(EntityModel.id == str(entity_id))
+                    .values(embedding=embedding, embedding_model=model, updated_at=now)
+                )
+            await session.commit()
+        return len(updates)
 
     async def search_similar_entities(
         self,

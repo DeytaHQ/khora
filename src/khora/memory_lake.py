@@ -6,7 +6,6 @@ Provides a simple, unified interface for memory storage and retrieval.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -297,6 +296,32 @@ class MemoryLake:
         Returns:
             RememberResult with details
         """
+        from khora.telemetry.context import clear_trace_id, ensure_trace_id
+
+        ensure_trace_id()
+        try:
+            return await self._remember_inner(
+                content,
+                namespace=namespace,
+                title=title,
+                source=source,
+                metadata=metadata,
+                skill_name=skill_name,
+            )
+        finally:
+            clear_trace_id()
+
+    async def _remember_inner(
+        self,
+        content: str,
+        *,
+        namespace: str | UUID | None = None,
+        title: str = "",
+        source: str = "",
+        metadata: dict[str, Any] | None = None,
+        skill_name: str = "general_entities",
+    ) -> RememberResult:
+        """Internal remember implementation with trace context already set."""
         # Resolve namespace
         namespace_id = await self._resolve_namespace(namespace)
 
@@ -377,45 +402,85 @@ class MemoryLake:
         Returns:
             List of RememberResult objects (one per document)
         """
+        from khora.telemetry.context import clear_trace_id, ensure_trace_id
+
+        ensure_trace_id()
+        try:
+            return await self._remember_batch_inner(
+                documents,
+                namespace=namespace,
+                skill_name=skill_name,
+                max_concurrent=max_concurrent,
+            )
+        finally:
+            clear_trace_id()
+
+    async def _remember_batch_inner(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        namespace: str | UUID | None = None,
+        skill_name: str = "general_entities",
+        max_concurrent: int = 5,
+    ) -> list[RememberResult]:
+        """Internal remember_batch implementation using ingest_documents for shared EntityIndex."""
         if not documents:
             return []
 
         namespace_id = await self._resolve_namespace(namespace)
-        semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def process_single(doc_data: dict[str, Any]) -> RememberResult:
-            async with semaphore:
-                return await self.remember(
-                    content=doc_data.get("content", ""),
-                    namespace=namespace_id,
-                    title=doc_data.get("title", ""),
-                    source=doc_data.get("source", ""),
-                    metadata=doc_data.get("metadata"),
-                    skill_name=doc_data.get("skill_name", skill_name),
-                )
+        # Build doc dicts for ingest_documents
+        doc_inputs = []
+        for doc_data in documents:
+            doc_inputs.append(
+                {
+                    "content": doc_data.get("content", ""),
+                    "title": doc_data.get("title", ""),
+                    "source": doc_data.get("source", ""),
+                    "source_type": "api",
+                    "metadata": doc_data.get("metadata", {}),
+                }
+            )
 
-        results = await asyncio.gather(
-            *[process_single(doc) for doc in documents],
-            return_exceptions=True,
+        from khora.pipelines.flows.ingest import ingest_documents
+
+        result = await ingest_documents(
+            namespace_id,
+            doc_inputs,
+            self.storage,
+            skill_name=skill_name,
+            embedding_model=self._config.llm.embedding_model,
+            extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+            max_concurrent_documents=max_concurrent,
         )
 
-        # Convert exceptions to failed results
-        final_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Document {i} failed: {result}")
-                final_results.append(
-                    RememberResult(
-                        document_id=UUID("00000000-0000-0000-0000-000000000000"),
-                        namespace_id=namespace_id,
-                        chunks_created=0,
-                        entities_extracted=0,
-                        relationships_created=0,
-                        metadata={"error": str(result), "failed": True},
-                    )
+        # Convert per-document results to RememberResult objects
+        per_doc = result.get("per_document_results", [])
+        final_results: list[RememberResult] = []
+        for doc_result in per_doc:
+            final_results.append(
+                RememberResult(
+                    document_id=UUID(doc_result["document_id"]),
+                    namespace_id=namespace_id,
+                    chunks_created=doc_result.get("chunks", 0),
+                    entities_extracted=doc_result.get("entities", 0),
+                    relationships_created=doc_result.get("relationships", 0),
                 )
-            else:
-                final_results.append(result)
+            )
+
+        # Pad with error results for failed/skipped documents
+        failed_count = result.get("failed_documents", 0)
+        for _ in range(failed_count):
+            final_results.append(
+                RememberResult(
+                    document_id=UUID("00000000-0000-0000-0000-000000000000"),
+                    namespace_id=namespace_id,
+                    chunks_created=0,
+                    entities_extracted=0,
+                    relationships_created=0,
+                    metadata={"failed": True},
+                )
+            )
 
         return final_results
 
@@ -454,6 +519,32 @@ class MemoryLake:
         Returns:
             RecallResult with matched memories
         """
+        from khora.telemetry.context import clear_trace_id, ensure_trace_id
+
+        ensure_trace_id()
+        try:
+            return await self._recall_inner(
+                query,
+                namespace=namespace,
+                limit=limit,
+                mode=mode,
+                min_similarity=min_similarity,
+                agentic=agentic,
+            )
+        finally:
+            clear_trace_id()
+
+    async def _recall_inner(
+        self,
+        query: str,
+        *,
+        namespace: str | UUID | None = None,
+        limit: int = 10,
+        mode: SearchMode = SearchMode.HYBRID,
+        min_similarity: float = 0.0,
+        agentic: bool = False,
+    ) -> RecallResult:
+        """Internal recall implementation with trace context already set."""
         namespace_id = await self._resolve_namespace(namespace)
 
         config = QueryConfig(

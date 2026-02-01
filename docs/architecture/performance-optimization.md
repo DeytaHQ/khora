@@ -305,6 +305,70 @@ See [Semantic Expansion](../extraction/semantic-expansion.md) for full details o
 - Papadakis, G., et al. "Blocking and Filtering Techniques for Entity Resolution." *ACM Computing Surveys*, 2020. [doi:10.1145/3377455](https://dl.acm.org/doi/abs/10.1145/3377455)
 - Microsoft GraphRAG. "Default Dataflow." [Documentation](https://microsoft.github.io/graphrag/index/default_dataflow/)
 
+## Phase 6: Ingestion Pipeline Parallelization
+
+Beyond entity resolution, the ingestion pipeline itself had several sequential bottlenecks that left CPU and I/O idle. These changes target the per-document processing path and batch operations.
+
+### Parallel Embed + Extract
+
+Embedding and extraction both depend only on chunks (step 1 output) — neither needs the other's result. They now run concurrently via `asyncio.gather`:
+
+```python
+# Before: embed first, then extract (~25-35s total)
+chunks = await embed_chunks(chunks, model=embedding_model)
+entities, relationships = await extract_entities(chunks, ...)
+
+# After: both at once (~5-10s total, bounded by the slower operation)
+embedded_chunks, (entities, relationships) = await asyncio.gather(
+    embed_chunks(chunks, model=embedding_model),
+    extract_entities(chunks, ...),
+)
+```
+
+The slower operation (usually extraction) determines wall-clock time, while the faster one (usually embedding) completes "for free."
+
+### Concurrent LLM Extraction Batches
+
+`extract_multi` groups chunks into batches of ~5 for a single LLM call. Previously these batches ran sequentially. Now all batches run concurrently, bounded by the existing semaphore:
+
+```
+Before: batch1 → batch2 → batch3  (15-25s sequential)
+After:  batch1 ↕ batch2 ↕ batch3  (3-5s concurrent)
+```
+
+This is the single highest-impact change — 3-5x faster extraction for multi-chunk documents.
+
+### Concurrent Embedding Sub-Batches
+
+When there are more texts than the batch size (e.g., 500 chunks at batch_size=100), the embedder now runs sub-batches concurrently (up to `embed_concurrency`, default 3) instead of sequentially.
+
+### Batch Relationship Storage
+
+Per-document relationships are stored via a single `create_relationships_batch()` call instead of N individual `create_relationship()` calls gathered with a semaphore. This reduces N Neo4j transactions to one UNWIND-based transaction.
+
+### Batch Entity Embedding Updates
+
+Entity embeddings are updated in a single database transaction via `update_entity_embeddings_batch()` instead of N sequential `update_entity_embedding()` calls. This applies both during per-document processing and post-resolution in smart mode.
+
+### Parallel Graph + Vector Writes
+
+The `StorageCoordinator` now runs graph and vector backend writes concurrently for `update_entity()` and `upsert_entities_batch()`. Since neither backend depends on the other's result, this halves the write latency for dual-backend setups.
+
+### True Batch pgvector Upsert
+
+The PostgreSQL entity upsert changed from N individual INSERT statements in a single session to a single multi-row `INSERT ... ON CONFLICT DO UPDATE`. One SQL statement instead of fifty.
+
+### `remember_batch` Through `ingest_documents`
+
+`MemoryLake.remember_batch()` now delegates to `ingest_documents` instead of calling `remember()` N times. This enables the shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing — all of which were previously only available through the direct pipeline API.
+
+### Impact
+
+| Scenario | Before | After | Speedup |
+|----------|--------|-------|---------|
+| Single doc (15 chunks, 10 entities) | ~25-35s | ~5-10s | 3-5x |
+| Batch of 50 docs | ~5-7 min | ~1-2 min | 4-6x |
+
 ## What's Next
 
 - **[Query Engine Overview](../query-engine/overview.md)** -- How the full search pipeline works

@@ -77,6 +77,10 @@ class ChatEngine:
         Returns:
             ChatResponse with generated answer
         """
+        from khora.telemetry.context import clear_trace_id, ensure_trace_id
+
+        ensure_trace_id()
+
         # Get or create conversation
         conv_id = conversation_id or uuid4()
         self.history_manager.get_or_create(conv_id, namespace_id)
@@ -171,6 +175,8 @@ class ChatEngine:
             compressed = await self.history_manager.compress_if_needed(conv_id)
             if compressed:
                 logger.debug("Compressed conversation history")
+
+        clear_trace_id()
 
         return ChatResponse(
             content=response_content,

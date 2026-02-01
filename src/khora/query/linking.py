@@ -148,11 +148,28 @@ class EntityLinker:
         )
         unlinked_count = sum(1 for le in linked_entities if not le.is_linked)
 
-        return LinkingResult(
+        result = LinkingResult(
             linked_entities=list(linked_entities),
             unlinked_count=unlinked_count,
             total_mentions=len(mentions),
         )
+
+        # Record telemetry for entity linking
+        from khora.telemetry import get_collector
+
+        exact_count = sum(1 for le in linked_entities if le.match_method == "exact")
+        fuzzy_count = sum(1 for le in linked_entities if le.match_method == "fuzzy")
+        embedding_count = sum(1 for le in linked_entities if le.match_method == "embedding")
+        get_collector().record_pipeline_stage(
+            pipeline="query",
+            stage="entity_linking",
+            input_count=len(mentions),
+            output_count=result.linked_count,
+            namespace_id=namespace_id,
+            metadata={"exact": exact_count, "fuzzy": fuzzy_count, "embedding": embedding_count},
+        )
+
+        return result
 
     async def _link_single(
         self,

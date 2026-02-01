@@ -169,12 +169,26 @@ class SemanticExpander:
         # Phase 1: Cross-tool entity unification
         if self._enable_unification:
             logger.debug("Running cross-tool entity unification...")
+            import time as _time
+
+            from khora.telemetry import get_collector
+
+            _t0 = _time.perf_counter()
             unification_result = self._unifier.unify(
                 current_entities,
                 current_relationships,
                 use_embeddings=True,
                 use_fuzzy=True,
                 entity_index=entity_index,
+            )
+            get_collector().record_pipeline_stage(
+                pipeline="expansion",
+                stage="cross_tool_unification",
+                latency_ms=(_time.perf_counter() - _t0) * 1000,
+                input_count=len(current_entities),
+                output_count=len(unification_result.unified_entities),
+                namespace_id=namespace_id,
+                metadata={"merged": unification_result.entities_merged},
             )
 
             current_entities = unification_result.unified_entities
@@ -191,6 +205,7 @@ class SemanticExpander:
         inferred_relationships: list[Relationship] = []
         if self._enable_inference and self._expertise:
             logger.info(f"Running relationship inference (depth={self._inference_depth})...")
+            _t0 = _time.perf_counter()
             inferred = self._inferrer.infer(
                 current_entities,
                 current_relationships,
@@ -200,6 +215,16 @@ class SemanticExpander:
             # Convert to domain relationships
             inferred_relationships = [to_relationship(inf, namespace_id) for inf in inferred]
             result.inferred_relationship_count = len(inferred_relationships)
+
+            get_collector().record_pipeline_stage(
+                pipeline="expansion",
+                stage="relationship_inference",
+                latency_ms=(_time.perf_counter() - _t0) * 1000,
+                input_count=len(current_entities) + len(current_relationships),
+                output_count=len(inferred_relationships),
+                namespace_id=namespace_id,
+                metadata={"depth": self._inference_depth},
+            )
 
             logger.debug(f"Inferred {len(inferred_relationships)} new relationships")
 

@@ -428,7 +428,7 @@ class LLMEntityExtractor(EntityExtractor):
         system_prompt = self._render_system_prompt(expertise, context)
         tool_context = self._build_tool_context(expertise, context)
 
-        for batch in batches:
+        async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
             results = await self._extract_multi_batch(
                 batch,
                 entity_types,
@@ -436,9 +436,12 @@ class LLMEntityExtractor(EntityExtractor):
                 system_prompt=system_prompt,
                 tool_context=tool_context,
             )
-            # Apply confidence filtering from expertise
             if expertise:
                 results = [self._filter_by_confidence(r, expertise) for r in results]
+            return results
+
+        batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
+        for results in batch_results:
             all_results.extend(results)
 
         return all_results

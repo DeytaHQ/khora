@@ -19,12 +19,16 @@ class LLMEvent(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    cost_usd: float = 0.0
     latency_ms: float = 0.0
     status: str = "success"
     error_message: str | None = None
     namespace_id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Tracing
+    trace_id: UUID | None = None
+    parent_event_id: int | None = None
+    cache_hit: bool = False
+    batch_size: int = 1
 
 
 class StorageEvent(BaseModel):
@@ -40,6 +44,9 @@ class StorageEvent(BaseModel):
     error_message: str | None = None
     namespace_id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Tracing
+    trace_id: UUID | None = None
+    parent_event_id: int | None = None
 
 
 class PipelineEvent(BaseModel):
@@ -51,8 +58,12 @@ class PipelineEvent(BaseModel):
     stage: str = ""
     run_id: UUID | None = None
     latency_ms: float = 0.0
-    record_count: int = 0
+    input_count: int = 0
+    output_count: int = 0
     status: str = "success"
     error_message: str | None = None
     namespace_id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Tracing
+    trace_id: UUID | None = None
+    parent_event_id: int | None = None

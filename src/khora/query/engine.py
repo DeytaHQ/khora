@@ -509,6 +509,16 @@ class HybridQueryEngine:
         cached = await self._cache.get(query_text, namespace_id, cfg.mode.name)
         if cached is not None:
             logger.debug(f"Cache hit for query: {query_text[:50]}...")
+            from khora.telemetry import get_collector as _get_tc
+
+            _get_tc().record_pipeline_stage(
+                pipeline="query",
+                stage="cache_lookup",
+                latency_ms=0.0,
+                output_count=len(cached.chunks),
+                namespace_id=namespace_id,
+                metadata={"hit": True},
+            )
             return cached
 
         logger.debug(f"Executing query: {query_text[:50]}... (mode={cfg.mode.name})")
@@ -807,7 +817,7 @@ class HybridQueryEngine:
             stage="search",
             run_id=_run_id,
             latency_ms=search_contributions.total_search_latency_ms,
-            record_count=sum(len(v) for v in all_chunk_results.values()),
+            output_count=sum(len(v) for v in all_chunk_results.values()),
             namespace_id=namespace_id,
         )
 
@@ -863,7 +873,8 @@ class HybridQueryEngine:
             stage="fusion",
             run_id=_run_id,
             latency_ms=search_contributions.fusion_latency_ms,
-            record_count=len(fused_chunks) + len(fused_entities),
+            input_count=sum(len(v) for v in all_chunk_results.values()),
+            output_count=len(fused_chunks) + len(fused_entities),
             namespace_id=namespace_id,
         )
         metrics.fused_chunk_count = len(fused_chunks)
@@ -968,7 +979,16 @@ class HybridQueryEngine:
                     )
                     for chunk, score in fused_chunks[: cfg.reranking_top_n]
                 ]
-                reranked = await reranker.rerank(query_text, candidates, top_k=cfg.reranking_final_k)
+                async with pipeline_stage(
+                    "query",
+                    "reranking",
+                    _run_id,
+                    namespace_id=namespace_id,
+                    input_count=len(candidates),
+                    extra_metadata={"method": cfg.reranking_method},
+                ) as _rerank_ctx:
+                    reranked = await reranker.rerank(query_text, candidates, top_k=cfg.reranking_final_k)
+                    _rerank_ctx["output_count"] = len(reranked)
                 fused_chunks = [(r.item, r.final_score) for r in reranked]
                 metadata["reranking"] = {"method": cfg.reranking_method, "reranked_count": len(fused_chunks)}
                 logger.debug(f"Reranked {len(candidates)} candidates to {len(fused_chunks)} results")
@@ -1284,10 +1304,21 @@ class HybridQueryEngine:
         content_tsv column, with no chunk count limit.
         """
         try:
+            from khora.telemetry import get_collector as _get_tc
+
+            _kw_start = time.perf_counter()
             results = await self._storage.search_fulltext_chunks(
                 namespace_id,
                 query_text,
                 limit=config.max_chunks * 2,
+            )
+            _get_tc().record_pipeline_stage(
+                pipeline="query",
+                stage="keyword_search",
+                latency_ms=(time.perf_counter() - _kw_start) * 1000,
+                output_count=len(results),
+                namespace_id=namespace_id,
+                metadata={"method": "fulltext"},
             )
 
             # Normalize ts_rank scores to 0-1 range

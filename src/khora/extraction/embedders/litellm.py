@@ -34,6 +34,7 @@ class LiteLLMEmbedder(Embedder):
         max_retries: int = 3,
         batch_size: int = 100,
         cache_max_size: int = 10000,
+        embed_concurrency: int = 3,
     ) -> None:
         """Initialize the LiteLLM embedder.
 
@@ -44,12 +45,14 @@ class LiteLLMEmbedder(Embedder):
             max_retries: Maximum retries on failure
             batch_size: Maximum batch size for embed_batch
             cache_max_size: Maximum cached embeddings (0 to disable)
+            embed_concurrency: Maximum concurrent embedding sub-batch API calls
         """
         self._model = model
         self._dimension = dimension
         self._timeout = timeout
         self._max_retries = max_retries
         self._batch_size = batch_size
+        self._embed_concurrency = embed_concurrency
         self._cache: OrderedDict[str, list[float]] = OrderedDict()
         self._cache_max_size = cache_max_size
         self._cache_hits = 0
@@ -164,14 +167,33 @@ class LiteLLMEmbedder(Embedder):
                 uncached_indices.append(i)
                 uncached_texts.append(text)
 
+        # Record embedding cache statistics
+        cache_hits = len(texts) - len(uncached_texts)
+        if cache_hits > 0:
+            from khora.telemetry import get_collector
+
+            get_collector().record_llm_call(
+                operation="embedding",
+                model=self._model,
+                cache_hit=True,
+                batch_size=cache_hits,
+                latency_ms=0.0,
+            )
+
         # Fetch uncached embeddings
         if uncached_texts:
             if len(uncached_texts) > self._batch_size:
-                all_embeddings: list[list[float]] = []
-                for i in range(0, len(uncached_texts), self._batch_size):
-                    batch = uncached_texts[i : i + self._batch_size]
-                    batch_embeddings = await self._embed_batch_internal(batch)
-                    all_embeddings.extend(batch_embeddings)
+                sub_batches = [
+                    uncached_texts[i : i + self._batch_size] for i in range(0, len(uncached_texts), self._batch_size)
+                ]
+                sem = asyncio.Semaphore(self._embed_concurrency)
+
+                async def _embed_sub(batch: list[str]) -> list[list[float]]:
+                    async with sem:
+                        return await self._embed_batch_internal(batch)
+
+                sub_results = await asyncio.gather(*[_embed_sub(b) for b in sub_batches])
+                all_embeddings: list[list[float]] = [emb for result in sub_results for emb in result]
             else:
                 all_embeddings = await self._embed_batch_internal(uncached_texts)
 
@@ -208,7 +230,8 @@ class LiteLLMEmbedder(Embedder):
                     prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                     total_tokens=getattr(usage, "total_tokens", 0) or 0,
                     latency_ms=_latency,
-                    metadata={"batch_size": len(texts)},
+                    batch_size=len(texts),
+                    cache_hit=False,
                 )
 
                 return [item["embedding"] for item in response.data]

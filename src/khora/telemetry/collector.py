@@ -10,7 +10,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .models import LLMEvent, PipelineEvent, StorageEvent
-from .tables import llm_events, metadata, pipeline_events, storage_events
+from .tables import SCHEMA_VERSION, llm_events, metadata, pipeline_events, storage_events
 
 
 class TelemetryCollector:
@@ -41,15 +41,47 @@ class TelemetryCollector:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Create tables (if missing) and start the background flush loop."""
+        """Create tables (if missing) and start the background flush loop.
+
+        On startup, checks if the schema version has changed.  If so,
+        drops the old tables and recreates them with the new schema.
+        """
         try:
-            async with self._engine.begin() as conn:
-                await conn.run_sync(metadata.create_all)
+            await self._migrate_schema()
             logger.info("Telemetry tables ensured")
         except Exception as exc:
             logger.warning(f"Telemetry table creation failed (non-fatal): {exc}")
 
         self._flush_task = asyncio.create_task(self._flush_loop(), name="telemetry-flush")
+
+    async def _migrate_schema(self) -> None:
+        """Detect schema version and recreate tables if needed."""
+        import sqlalchemy as sa
+
+        async with self._engine.begin() as conn:
+            # Check if llm_events table exists and has trace_id column
+            needs_recreate = False
+            try:
+                result = await conn.execute(sa.text("SELECT trace_id FROM llm_events LIMIT 0"))
+                result.close()
+            except Exception:
+                # Column doesn't exist or table doesn't exist — need to recreate
+                needs_recreate = True
+                # Rollback any failed transaction state
+                await conn.rollback()
+
+            if needs_recreate:
+                # Check if old tables exist at all
+                try:
+                    await conn.execute(sa.text("SELECT 1 FROM llm_events LIMIT 0"))
+                    # Old table exists without trace_id — drop all
+                    logger.info(f"Telemetry schema v{SCHEMA_VERSION}: dropping old tables for migration")
+                    await conn.run_sync(metadata.drop_all)
+                except Exception:
+                    # Tables don't exist at all — fine, create_all will handle it
+                    await conn.rollback()
+
+            await conn.run_sync(metadata.create_all)
 
     async def shutdown(self) -> None:
         """Cancel the flush loop, do a final flush, and dispose the engine."""
@@ -70,15 +102,28 @@ class TelemetryCollector:
     # Record helpers (sync -- safe to call from anywhere)
     # ------------------------------------------------------------------
 
+    def _inject_trace_context(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Auto-populate trace_id and parent_event_id from context vars."""
+        from .context import get_parent_event_id, get_trace_id
+
+        if "trace_id" not in kwargs or kwargs["trace_id"] is None:
+            kwargs["trace_id"] = get_trace_id()
+        if "parent_event_id" not in kwargs or kwargs["parent_event_id"] is None:
+            kwargs["parent_event_id"] = get_parent_event_id()
+        return kwargs
+
     def record_llm_call(self, **kwargs: Any) -> None:
+        kwargs = self._inject_trace_context(kwargs)
         event = LLMEvent(service_name=self._service_name, **kwargs)
         self._buffer.append(("llm", event.model_dump()))
 
     def record_storage_op(self, **kwargs: Any) -> None:
+        kwargs = self._inject_trace_context(kwargs)
         event = StorageEvent(service_name=self._service_name, **kwargs)
         self._buffer.append(("storage", event.model_dump()))
 
     def record_pipeline_stage(self, **kwargs: Any) -> None:
+        kwargs = self._inject_trace_context(kwargs)
         event = PipelineEvent(service_name=self._service_name, **kwargs)
         self._buffer.append(("pipeline", event.model_dump()))
 
@@ -108,7 +153,6 @@ class TelemetryCollector:
 
         while self._buffer:
             kind, data = self._buffer.popleft()
-            # Rename 'metadata' key to avoid collision with SA metadata
             row = dict(data)
             meta_value = row.pop("metadata", None)
             row["metadata"] = meta_value

@@ -7,6 +7,7 @@ transaction coordination and consistency.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -322,6 +323,7 @@ class StorageCoordinator:
             operation="create_chunks_batch",
             latency_ms=(_time.perf_counter() - _t0) * 1000,
             record_count=len(chunks),
+            namespace_id=chunks[0].namespace_id if chunks else None,
         )
         return result
 
@@ -473,10 +475,15 @@ class StorageCoordinator:
         return None
 
     async def update_entity(self, entity: Entity) -> Entity:
-        """Update an entity in both graph and vector stores."""
+        """Update an entity in both graph and vector stores (parallel)."""
+        if self.graph and self.vector:
+            graph_result, _ = await asyncio.gather(
+                self.graph.update_entity(entity),
+                self.vector.update_entity(entity),
+            )
+            return graph_result
         if self.graph:
-            entity = await self.graph.update_entity(entity)
-        # Also update in vector backend for embedding search
+            return await self.graph.update_entity(entity)
         if self.vector:
             await self.vector.update_entity(entity)
         return entity
@@ -504,6 +511,17 @@ class StorageCoordinator:
         """Update the embedding for an entity."""
         if self.vector:
             await self.vector.update_entity_embedding(entity_id, embedding, model)
+
+    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+        """Update embeddings for multiple entities in a single transaction."""
+        if self.vector and hasattr(self.vector, "update_entity_embeddings_batch"):
+            return await self.vector.update_entity_embeddings_batch(updates)
+        # Fallback to individual updates
+        if self.vector:
+            for entity_id, embedding, model in updates:
+                await self.vector.update_entity_embedding(entity_id, embedding, model)
+            return len(updates)
+        return 0
 
     async def search_similar_entities(
         self,
@@ -559,12 +577,19 @@ class StorageCoordinator:
 
         results: list[tuple[Entity, bool]] = []
 
-        # Upsert in graph backend (primary)
-        if self.graph and hasattr(self.graph, "upsert_entities_batch"):
-            results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+        # Upsert in graph and vector backends in parallel
+        has_graph = self.graph and hasattr(self.graph, "upsert_entities_batch")
+        has_vector = self.vector and hasattr(self.vector, "upsert_entities_batch")
 
-        # Also upsert in vector backend for embedding search
-        if self.vector and hasattr(self.vector, "upsert_entities_batch"):
+        if has_graph and has_vector:
+            graph_results, _ = await asyncio.gather(
+                self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
+                self.vector.upsert_entities_batch(namespace_id, entities),
+            )
+            results = graph_results
+        elif has_graph:
+            results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+        elif has_vector:
             await self.vector.upsert_entities_batch(namespace_id, entities)
 
         from khora.telemetry import get_collector
@@ -606,6 +631,7 @@ class StorageCoordinator:
             operation="create_relationships_batch",
             latency_ms=(_time.perf_counter() - _t0) * 1000,
             record_count=count,
+            namespace_id=relationships[0].namespace_id if relationships else None,
         )
         return count
 
@@ -628,6 +654,7 @@ class StorageCoordinator:
             operation="create_relationship",
             latency_ms=(_time.perf_counter() - _t0) * 1000,
             record_count=1,
+            namespace_id=relationship.namespace_id,
         )
         return result
 
@@ -813,6 +840,7 @@ class StorageCoordinator:
                 operation="get_neighborhoods_batch",
                 latency_ms=(_time.perf_counter() - _t0) * 1000,
                 record_count=len(result),
+                # No namespace_id available — entity_ids don't carry namespace info
             )
             return result
         return {}

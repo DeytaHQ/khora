@@ -46,10 +46,25 @@ class QueryCache:
                 timestamp, result = entry
                 if datetime.now() - timestamp < self._ttl:
                     self._hits += 1
+                    self._record_cache_event(True, namespace_id)
                     return result
                 del self._cache[key]
             self._misses += 1
+            self._record_cache_event(False, namespace_id)
             return None
+
+    @staticmethod
+    def _record_cache_event(hit: bool, namespace_id: UUID) -> None:
+        """Record a cache hit/miss to telemetry."""
+        from khora.telemetry import get_collector
+
+        get_collector().record_llm_call(
+            operation="query_cache",
+            cache_hit=hit,
+            latency_ms=0.0,
+            namespace_id=namespace_id,
+            metadata={"cache_type": "query"},
+        )
 
     async def set(self, query: str, namespace_id: UUID, mode: str, result: Any) -> None:
         """Store a result in the cache, evicting the oldest entry if full."""

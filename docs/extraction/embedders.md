@@ -254,20 +254,36 @@ embedder = LiteLLMEmbedder(batch_size=25)
 
 ### Parallel Processing
 
-Embedding happens in parallel at the document level:
+Embedding happens in parallel at multiple levels:
 
 ```python
-# Each document's chunks embed together
-# Multiple documents process in parallel
+# Document level: multiple documents process concurrently
 results = await asyncio.gather(*[
-    process_document(doc)  # Each embeds its chunks
+    process_document(doc)
     for doc in documents
 ])
+
+# Sub-batch level: when a document has many chunks,
+# sub-batches run concurrently instead of sequentially
+embedder = LiteLLMEmbedder(
+    batch_size=100,
+    embed_concurrency=3,  # Up to 3 API calls in flight
+)
 ```
 
-### Caching (Coming Soon)
+When there are more texts than the batch size, the embedder splits them into sub-batches and runs up to `embed_concurrency` (default 3) API calls concurrently. For a document with 500 chunks and batch_size=100, that's 5 sub-batches with 3 running at a time instead of 5 sequential calls.
 
-For repeated content, embedding caching would reduce costs. Currently not implemented - each ingestion generates fresh embeddings.
+### Caching
+
+The embedder includes an in-memory LRU cache that avoids redundant API calls for repeated text:
+
+```python
+# Identical texts hit the cache automatically
+embedding1 = await embedder.embed("same text")
+embedding2 = await embedder.embed("same text")  # Cache hit, no API call
+```
+
+The cache uses an `OrderedDict` with configurable max size. Frequently embedded strings (like entity descriptions that appear across documents) benefit the most.
 
 ## Custom Embedders
 

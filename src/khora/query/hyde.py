@@ -58,22 +58,25 @@ class HyDEExpander:
 
         On any failure, returns the original embedding unchanged.
         """
+        from khora.telemetry.instrument import pipeline_stage
+
         try:
-            hypotheticals: list[str] = []
-            for _ in range(self._num_hypotheticals):
-                doc = await self.generate_hypothetical(query)
-                hypotheticals.append(doc)
+            async with pipeline_stage("query", "hyde", extra_metadata={"num_hypotheticals": self._num_hypotheticals}):
+                hypotheticals: list[str] = []
+                for _ in range(self._num_hypotheticals):
+                    doc = await self.generate_hypothetical(query)
+                    hypotheticals.append(doc)
 
-            # Embed hypothetical documents
-            hyde_embeddings: list[list[float]] = []
-            for doc in hypotheticals:
-                emb = await self._embedder.embed(doc)
-                hyde_embeddings.append(emb)
+                # Embed hypothetical documents
+                hyde_embeddings: list[list[float]] = []
+                for doc in hypotheticals:
+                    emb = await self._embedder.embed(doc)
+                    hyde_embeddings.append(emb)
 
-            # Average: original query embedding + hypothetical embeddings
-            all_embeddings = [query_embedding, *hyde_embeddings]
-            avg = np.mean(all_embeddings, axis=0)
-            return avg.tolist()
+                # Average: original query embedding + hypothetical embeddings
+                all_embeddings = [query_embedding, *hyde_embeddings]
+                avg = np.mean(all_embeddings, axis=0)
+                return avg.tolist()
 
         except Exception as e:
             logger.warning(f"HyDE expansion failed, using original embedding: {e}")
