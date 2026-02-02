@@ -402,10 +402,6 @@ async def process_document(
                 mapped_target = entity_id_mapping.get(target_id)
 
                 if not mapped_source or not mapped_target:
-                    logger.debug(
-                        f"Skipping relationship {rel.relationship_type}: "
-                        f"missing entity mapping (source={source_id}, target={target_id})"
-                    )
                     skipped += 1
                     continue
 
