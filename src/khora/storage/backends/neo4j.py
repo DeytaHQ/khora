@@ -124,10 +124,17 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX entity_namespace IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id)",
             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
             "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
+            # Composite index for MERGE pattern (namespace_id, name, entity_type)
+            "CREATE INDEX entity_ns_name_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)",
             # Episode indexes
             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
+        ]
+
+        # Relationship property indexes require Neo4j ≥5.7 or Enterprise Edition
+        rel_indexes = [
+            "CREATE INDEX rel_namespace IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.namespace_id)",
         ]
 
         async with self._driver.session(database=self._database) as session:
@@ -136,6 +143,12 @@ class Neo4jBackend(GraphBackendBase):
                     await session.run(index)
                 except Exception as e:
                     logger.debug(f"Index creation: {e}")
+
+            for index in rel_indexes:
+                try:
+                    await session.run(index)
+                except Exception as e:
+                    logger.warning(f"Relationship index creation skipped (may require Neo4j ≥5.7 or Enterprise): {e}")
 
     def _get_driver(self) -> AsyncDriver:
         """Get the Neo4j driver."""

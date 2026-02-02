@@ -11,8 +11,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
-from prefect import flow, task
-from prefect.cache_policies import NO_CACHE
 
 from ..registry import pipeline
 
@@ -23,7 +21,6 @@ if TYPE_CHECKING:
     from khora.storage import StorageCoordinator
 
 
-@task(name="load_entities", cache_policy=NO_CACHE)
 async def load_entities(
     namespace_id: UUID,
     storage: StorageCoordinator,
@@ -48,7 +45,6 @@ async def load_entities(
     return []
 
 
-@task(name="load_relationships", cache_policy=NO_CACHE)
 async def load_relationships(
     namespace_id: UUID,
     storage: StorageCoordinator,
@@ -72,7 +68,6 @@ async def load_relationships(
     return []
 
 
-@task(name="run_expansion", cache_policy=NO_CACHE)
 async def run_expansion(
     entities: list[Entity],
     relationships: list[Relationship],
@@ -107,7 +102,6 @@ async def run_expansion(
     )
 
 
-@task(name="store_expansion_results", cache_policy=NO_CACHE)
 async def store_expansion_results(
     result: ExpansionResult,
     storage: StorageCoordinator,
@@ -150,7 +144,6 @@ async def store_expansion_results(
 
 
 @pipeline("expand_knowledge", description="Semantic expansion of knowledge graph", tags=["expansion", "enrichment"])
-@flow(name="expand_knowledge_graph", log_prints=True)
 async def expand_knowledge_graph(
     namespace_id: UUID,
     storage: StorageCoordinator | None = None,
@@ -253,7 +246,6 @@ async def expand_knowledge_graph(
 
 
 @pipeline("unify_entities", description="Cross-tool entity unification only", tags=["expansion", "unification"])
-@flow(name="unify_entities", log_prints=True)
 async def unify_entities(
     namespace_id: UUID,
     storage: StorageCoordinator | None = None,

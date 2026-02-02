@@ -1,6 +1,6 @@
 """Pipeline orchestration for Khora Memory Lake.
 
-Provides Prefect-based pipelines for document ingestion,
+Provides pipelines for document ingestion,
 processing, and synchronization.
 """
 

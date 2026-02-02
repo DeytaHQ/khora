@@ -145,7 +145,6 @@ def pipeline(
 
     Usage:
         @pipeline("my_pipeline", description="My pipeline", tags=["ingestion"])
-        @flow
         async def my_pipeline(param: str):
             ...
 

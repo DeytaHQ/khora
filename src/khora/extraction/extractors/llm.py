@@ -7,6 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
+from tenacity import AsyncRetrying, before_sleep_log, stop_after_attempt, wait_exponential
 
 from .base import (
     EntityExtractor,
@@ -102,6 +103,7 @@ class LLMEntityExtractor(EntityExtractor):
         timeout: int = 60,
         max_retries: int = 3,
         max_concurrent: int = 5,
+        retry_wait: float = 1.0,
     ) -> None:
         """Initialize the LLM entity extractor.
 
@@ -112,12 +114,14 @@ class LLMEntityExtractor(EntityExtractor):
             timeout: Request timeout in seconds
             max_retries: Maximum retries on failure
             max_concurrent: Maximum concurrent extractions
+            retry_wait: Base wait time (seconds) for exponential backoff between retries
         """
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._timeout = timeout
         self._max_retries = max_retries
+        self._retry_wait = retry_wait
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
     @classmethod
@@ -137,6 +141,7 @@ class LLMEntityExtractor(EntityExtractor):
             timeout=config.timeout,
             max_retries=config.max_retries,
             max_concurrent=config.max_concurrent_llm_calls,
+            retry_wait=config.retry_wait,
         )
 
     async def extract(
@@ -176,55 +181,55 @@ class LLMEntityExtractor(EntityExtractor):
         system_prompt = self._render_system_prompt(expertise, context)
         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
 
-        for attempt in range(self._max_retries):
-            try:
-                async with self._semaphore:
-                    import time as _time
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(self._max_retries),
+                wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+                before_sleep=before_sleep_log(logger, "WARNING"),
+                reraise=True,
+            ):
+                with attempt:
+                    async with self._semaphore:
+                        import time as _time
 
-                    _t0 = _time.perf_counter()
-                    response = await litellm.acompletion(
-                        model=self._model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": extraction_prompt},
-                        ],
-                        temperature=self._temperature,
-                        max_tokens=self._max_tokens,
-                        timeout=self._timeout,
-                        response_format={"type": "json_object"},
-                    )
-                    _latency = (_time.perf_counter() - _t0) * 1000
+                        _t0 = _time.perf_counter()
+                        response = await litellm.acompletion(
+                            model=self._model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": extraction_prompt},
+                            ],
+                            temperature=self._temperature,
+                            max_tokens=self._max_tokens,
+                            timeout=self._timeout,
+                            response_format={"type": "json_object"},
+                        )
+                        _latency = (_time.perf_counter() - _t0) * 1000
 
-                    # Record telemetry
-                    from khora.telemetry import get_collector
+                        # Record telemetry
+                        from khora.telemetry import get_collector
 
-                    usage = getattr(response, "usage", None)
-                    get_collector().record_llm_call(
-                        operation="entity_extraction",
-                        model=self._model,
-                        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                        total_tokens=getattr(usage, "total_tokens", 0) or 0,
-                        latency_ms=_latency,
-                    )
+                        usage = getattr(response, "usage", None)
+                        get_collector().record_llm_call(
+                            operation="entity_extraction",
+                            model=self._model,
+                            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                            latency_ms=_latency,
+                        )
 
-                content = response.choices[0].message.content
-                result = self._parse_response(content)
+                    content = response.choices[0].message.content
+                    result = self._parse_response(content)
 
-                # Apply confidence filtering from expertise if available
-                if expertise:
-                    result = self._filter_by_confidence(result, expertise)
+                    # Apply confidence filtering from expertise if available
+                    if expertise:
+                        result = self._filter_by_confidence(result, expertise)
 
-                return result
-
-            except Exception as e:
-                if attempt < self._max_retries - 1:
-                    wait_time = 2**attempt
-                    logger.warning(f"Extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
-                    return ExtractionResult(metadata={"error": str(e)})
+                    return result
+        except Exception as e:
+            logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
+            return ExtractionResult(metadata={"error": str(e)})
 
     def _render_system_prompt(
         self,
@@ -474,62 +479,60 @@ Return a JSON object with a "sections" array, one object per section:
 Each section follows the same entity/relationship/event format.
 Return ONLY valid JSON, no other text."""
 
-        for attempt in range(self._max_retries):
-            try:
-                async with self._semaphore:
-                    import time as _time
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(self._max_retries),
+                wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+                before_sleep=before_sleep_log(logger, "WARNING"),
+                reraise=True,
+            ):
+                with attempt:
+                    async with self._semaphore:
+                        import time as _time
 
-                    _t0 = _time.perf_counter()
-                    response = await litellm.acompletion(
-                        model=self._model,
-                        messages=[
-                            {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
-                            {"role": "user", "content": prompt},
-                        ],
-                        temperature=self._temperature,
-                        max_tokens=self._max_tokens,
-                        timeout=self._timeout,
-                        response_format={"type": "json_object"},
-                    )
-                    _latency = (_time.perf_counter() - _t0) * 1000
+                        _t0 = _time.perf_counter()
+                        response = await litellm.acompletion(
+                            model=self._model,
+                            messages=[
+                                {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+                                {"role": "user", "content": prompt},
+                            ],
+                            temperature=self._temperature,
+                            max_tokens=self._max_tokens,
+                            timeout=self._timeout,
+                            response_format={"type": "json_object"},
+                        )
+                        _latency = (_time.perf_counter() - _t0) * 1000
 
-                    # Record telemetry
-                    from khora.telemetry import get_collector
+                        # Record telemetry
+                        from khora.telemetry import get_collector
 
-                    usage = getattr(response, "usage", None)
-                    get_collector().record_llm_call(
-                        operation="entity_extraction_multi",
-                        model=self._model,
-                        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                        total_tokens=getattr(usage, "total_tokens", 0) or 0,
-                        latency_ms=_latency,
-                        metadata={"batch_size": len(texts)},
-                    )
+                        usage = getattr(response, "usage", None)
+                        get_collector().record_llm_call(
+                            operation="entity_extraction_multi",
+                            model=self._model,
+                            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                            latency_ms=_latency,
+                            metadata={"batch_size": len(texts)},
+                        )
 
-                content = response.choices[0].message.content
-                data = json.loads(content)
-                sections_data = data.get("sections", [])
+                    content = response.choices[0].message.content
+                    data = json.loads(content)
+                    sections_data = data.get("sections", [])
 
-                results: list[ExtractionResult] = []
-                for i, text in enumerate(texts):
-                    if i < len(sections_data):
-                        results.append(self._parse_response(sections_data[i]))
-                    else:
-                        results.append(ExtractionResult())
+                    results: list[ExtractionResult] = []
+                    for i, text in enumerate(texts):
+                        if i < len(sections_data):
+                            results.append(self._parse_response(sections_data[i]))
+                        else:
+                            results.append(ExtractionResult())
 
-                return results
-
-            except Exception as e:
-                if attempt < self._max_retries - 1:
-                    wait_time = 2**attempt
-                    logger.warning(f"Multi-extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
-                    return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
-
-        return [ExtractionResult() for _ in texts]
+                    return results
+        except Exception as e:
+            logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
+            return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
 
     def _parse_response(self, content: str | dict) -> ExtractionResult:
         """Parse the LLM response into an ExtractionResult.

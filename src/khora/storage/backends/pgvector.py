@@ -6,7 +6,6 @@ using pgvector extension in PostgreSQL.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -14,6 +13,7 @@ from uuid import UUID
 from loguru import logger
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_after_attempt, wait_exponential
 
 from khora.core.models import Chunk, ChunkMetadata
 from khora.db.models import Base, ChunkModel, EntityModel
@@ -27,16 +27,15 @@ _DEADLOCK_MAX_RETRIES = 3
 
 async def _retry_on_deadlock(coro_fn, *args, **kwargs):
     """Retry an async operation on deadlock with exponential backoff."""
-    for attempt in range(_DEADLOCK_MAX_RETRIES):
-        try:
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(_DEADLOCK_MAX_RETRIES),
+        wait=wait_exponential(multiplier=0.1, min=0.1, max=0.4),
+        retry=retry_if_exception(lambda e: "deadlock" in str(e).lower()),
+        before_sleep=before_sleep_log(logger, "WARNING"),
+        reraise=True,
+    ):
+        with attempt:
             return await coro_fn(*args, **kwargs)
-        except Exception as e:
-            if "deadlock" in str(e).lower() and attempt < _DEADLOCK_MAX_RETRIES - 1:
-                wait = 0.1 * (2**attempt)
-                logger.warning(f"Deadlock detected (attempt {attempt + 1}), retrying in {wait}s")
-                await asyncio.sleep(wait)
-            else:
-                raise
 
 
 class PgVectorBackend:
@@ -416,7 +415,7 @@ class PgVectorBackend:
             updated_at=model.updated_at,
         )
 
-    async def upsert_entities_batch(self, namespace_id: UUID, entities: list, *, batch_size: int = 50) -> list[tuple]:
+    async def upsert_entities_batch(self, namespace_id: UUID, entities: list, *, batch_size: int = 200) -> list[tuple]:
         """Batch upsert entity records in PostgreSQL.
 
         Uses multi-row INSERT ... ON CONFLICT DO UPDATE statements, chunked
@@ -503,6 +502,9 @@ class PgVectorBackend:
     async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
         """Update embeddings for multiple entities in a single transaction.
 
+        Uses executemany semantics to send all updates in a single round-trip
+        instead of N individual UPDATE statements.
+
         Args:
             updates: List of (entity_id, embedding, model) tuples
 
@@ -513,16 +515,25 @@ class PgVectorBackend:
             return 0
 
         async def _do_batch():
+            from sqlalchemy import bindparam
+
             # Sort by entity_id for consistent lock ordering across concurrent batches
             sorted_updates = sorted(updates, key=lambda u: str(u[0]))
             now = datetime.now(UTC)
+
+            stmt = (
+                update(EntityModel)
+                .where(EntityModel.id == bindparam("eid"))
+                .values(
+                    embedding=bindparam("emb"),
+                    embedding_model=bindparam("mdl"),
+                    updated_at=bindparam("ts"),
+                )
+            )
+            params = [{"eid": str(eid), "emb": emb, "mdl": mdl, "ts": now} for eid, emb, mdl in sorted_updates]
+
             async with self._get_session() as session:
-                for entity_id, embedding, model in sorted_updates:
-                    await session.execute(
-                        update(EntityModel)
-                        .where(EntityModel.id == str(entity_id))
-                        .values(embedding=embedding, embedding_model=model, updated_at=now)
-                    )
+                await session.execute(stmt, params)
                 await session.commit()
             return len(sorted_updates)
 

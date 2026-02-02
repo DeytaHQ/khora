@@ -74,7 +74,7 @@ def setup_logging(
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
     # Suppress noisy third-party loggers
-    for logger_name in ["httpx", "httpcore", "uvicorn.error", "LiteLLM", "litellm", "prefect", "prefect.flow_runs"]:
+    for logger_name in ["httpx", "httpcore", "uvicorn.error", "LiteLLM", "litellm"]:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
 
     # Keep uvicorn access logs visible

@@ -15,8 +15,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
-from prefect import flow, task
-from prefect.cache_policies import NO_CACHE
 
 from ..registry import pipeline
 
@@ -29,7 +27,6 @@ if TYPE_CHECKING:
     from khora.storage import StorageCoordinator
 
 
-@task(name="compute_checksum")
 def compute_checksum(content: str) -> str:
     """Compute SHA-256 checksum of content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -66,7 +63,6 @@ def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
     return None
 
 
-@task(name="stage_document", cache_policy=NO_CACHE)
 async def stage_document(
     doc_input: dict[str, Any],
     namespace_id: UUID,
@@ -124,7 +120,6 @@ async def stage_document(
     return await storage.create_document(document)
 
 
-@task(name="process_document", cache_policy=NO_CACHE)
 async def process_document(
     document: Document,
     storage: StorageCoordinator,
@@ -446,7 +441,6 @@ async def process_document(
 
 
 @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
-@flow(name="ingest_documents", log_prints=True, validate_parameters=False)
 async def ingest_documents(
     namespace_id: UUID,
     documents: list[dict[str, Any]],
@@ -644,7 +638,6 @@ async def ingest_documents(
     }
 
 
-@task(name="run_smart_resolution", cache_policy=NO_CACHE)
 async def run_smart_resolution(
     namespace_id: UUID,
     storage: StorageCoordinator,
@@ -805,7 +798,6 @@ async def run_smart_resolution(
     }
 
 
-@task(name="run_batch_inference", cache_policy=NO_CACHE)
 async def run_batch_inference(
     namespace_id: UUID,
     storage: StorageCoordinator,
@@ -881,7 +873,6 @@ async def run_batch_inference(
     }
 
 
-@task(name="backfill_entity_embeddings", cache_policy=NO_CACHE)
 async def backfill_entity_embeddings(
     namespace_id: UUID,
     storage: StorageCoordinator,

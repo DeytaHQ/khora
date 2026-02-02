@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
-from prefect import flow, task
 
 from ..registry import pipeline
 
@@ -17,7 +16,6 @@ if TYPE_CHECKING:
     from khora.storage import StorageCoordinator
 
 
-@task(name="get_sync_checkpoint")
 async def get_sync_checkpoint(
     namespace_id: UUID,
     source: str,
@@ -27,7 +25,6 @@ async def get_sync_checkpoint(
     return await storage.get_sync_checkpoint(namespace_id, source)
 
 
-@task(name="set_sync_checkpoint")
 async def set_sync_checkpoint(
     namespace_id: UUID,
     source: str,
@@ -38,7 +35,6 @@ async def set_sync_checkpoint(
     await storage.set_sync_checkpoint(namespace_id, source, checkpoint)
 
 
-@task(name="fetch_from_source")
 async def fetch_from_source(
     source: str,
     connector_config: dict[str, Any],
@@ -59,7 +55,6 @@ async def fetch_from_source(
 
 
 @pipeline("sync_source", description="Sync from external source", tags=["sync"])
-@flow(name="sync_source", log_prints=True)
 async def sync_source(
     namespace_id: UUID,
     source: str,
@@ -134,7 +129,6 @@ async def sync_source(
 
 
 @pipeline("sync_all", description="Sync from all configured sources", tags=["sync"])
-@flow(name="sync_all_sources", log_prints=True)
 async def sync_all_sources(
     namespace_id: UUID,
     sources: list[dict[str, Any]],

@@ -1,4 +1,4 @@
-"""Pipeline manager for orchestrating Prefect flows."""
+"""Pipeline manager for orchestrating pipeline flows."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class PipelineRun:
 class PipelineManager:
     """Manager for running and tracking pipelines.
 
-    Orchestrates Prefect flows and tracks their execution
+    Orchestrates pipeline flows and tracks their execution
     within the context of a memory namespace.
     """
 
@@ -101,14 +101,7 @@ class PipelineManager:
 
             # Run the pipeline
             func = pipeline_info.func
-
-            # Check if it's a Prefect flow
-            if hasattr(func, "fn"):
-                # It's wrapped, call the flow directly
-                result = await func(**params)
-            else:
-                # Regular async function
-                result = await func(**params)
+            result = await func(**params)
 
             run.status = "completed"
             run.completed_at = datetime.now()

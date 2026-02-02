@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from prefect import task
-
 if TYPE_CHECKING:
     from khora.core.models import Chunk, Entity, Relationship
     from khora.extraction.skills import ExpertiseConfig
 
 
-@task(name="extract_entities", retries=2, retry_delay_seconds=10)
 async def extract_entities(
     chunks: list[Chunk],
     *,

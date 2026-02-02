@@ -472,7 +472,7 @@ class TestB8BatchRelationshipsInExpansion:
         result_obj.entity_mapping = {}
         result_obj.inferred_relationships = rels
 
-        stats = await store_expansion_results.fn(result_obj, storage)
+        stats = await store_expansion_results(result_obj, storage)
 
         storage.create_relationships_batch.assert_awaited_once_with(rels)
         assert stats["stored_relationships"] == 3
@@ -491,7 +491,7 @@ class TestB8BatchRelationshipsInExpansion:
         result_obj.entity_mapping = {}
         result_obj.inferred_relationships = []
 
-        await store_expansion_results.fn(result_obj, storage)
+        await store_expansion_results(result_obj, storage)
         storage.create_relationships_batch.assert_not_awaited()
 
 
@@ -526,7 +526,7 @@ class TestB9SelectiveEntityUpdates:
         result_obj.entities = [entity1, entity2, entity3]
         result_obj.inferred_relationships = []
 
-        await store_expansion_results.fn(result_obj, storage)
+        await store_expansion_results(result_obj, storage)
 
         # Only entity2 (the merge target) should be updated, not entity1 or entity3
         assert storage.update_entity.await_count == 1
@@ -548,7 +548,7 @@ class TestB9SelectiveEntityUpdates:
         result_obj.entities = [MagicMock(), MagicMock()]
         result_obj.inferred_relationships = []
 
-        await store_expansion_results.fn(result_obj, storage)
+        await store_expansion_results(result_obj, storage)
         storage.update_entity.assert_not_awaited()
 
 

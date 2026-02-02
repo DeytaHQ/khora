@@ -1,4 +1,4 @@
-"""Prefect tasks for Khora Memory Lake pipelines."""
+"""Pipeline tasks for Khora Memory Lake."""
 
 from __future__ import annotations
 

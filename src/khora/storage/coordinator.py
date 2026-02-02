@@ -564,7 +564,7 @@ class StorageCoordinator:
         namespace_id: UUID,
         entities: list[Entity],
         *,
-        batch_size: int = 50,
+        batch_size: int = 200,
     ) -> list[tuple[Entity, bool]]:
         """Batch upsert entities across graph and vector backends.
 

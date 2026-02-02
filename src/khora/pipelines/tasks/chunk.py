@@ -4,13 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from prefect import task
-
 if TYPE_CHECKING:
     from khora.core.models import Chunk, Document
 
 
-@task(name="chunk_document", retries=2, retry_delay_seconds=5)
 async def chunk_document(
     document: Document,
     *,

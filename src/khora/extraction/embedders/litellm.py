@@ -8,6 +8,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from loguru import logger
+from tenacity import AsyncRetrying, before_sleep_log, stop_after_attempt, wait_exponential
 
 from .base import Embedder
 
@@ -35,6 +36,7 @@ class LiteLLMEmbedder(Embedder):
         batch_size: int = 100,
         cache_max_size: int = 10000,
         embed_concurrency: int = 3,
+        retry_wait: float = 1.0,
     ) -> None:
         """Initialize the LiteLLM embedder.
 
@@ -46,6 +48,7 @@ class LiteLLMEmbedder(Embedder):
             batch_size: Maximum batch size for embed_batch
             cache_max_size: Maximum cached embeddings (0 to disable)
             embed_concurrency: Maximum concurrent embedding sub-batch API calls
+            retry_wait: Base wait time (seconds) for exponential backoff between retries
         """
         self._model = model
         self._dimension = dimension
@@ -53,6 +56,7 @@ class LiteLLMEmbedder(Embedder):
         self._max_retries = max_retries
         self._batch_size = batch_size
         self._embed_concurrency = embed_concurrency
+        self._retry_wait = retry_wait
         self._cache: OrderedDict[str, list[float]] = OrderedDict()
         self._cache_max_size = cache_max_size
         self._cache_hits = 0
@@ -108,6 +112,7 @@ class LiteLLMEmbedder(Embedder):
             dimension=config.embedding_dimension,
             timeout=config.timeout,
             max_retries=config.max_retries,
+            retry_wait=config.retry_wait,
         )
 
     @property
@@ -229,8 +234,13 @@ class LiteLLMEmbedder(Embedder):
         # OpenAI '$.input' is invalid errors
         sanitized = [t if t and t.strip() else " " for t in texts]
 
-        for attempt in range(self._max_retries):
-            try:
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(self._max_retries),
+            wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+            before_sleep=before_sleep_log(logger, "WARNING"),
+            reraise=True,
+        ):
+            with attempt:
                 _t0 = _time.perf_counter()
                 response = await litellm.aembedding(
                     model=self._model,
@@ -254,11 +264,3 @@ class LiteLLMEmbedder(Embedder):
                 )
 
                 return [item["embedding"] for item in response.data]
-            except Exception as e:
-                if attempt < self._max_retries - 1:
-                    wait_time = 2**attempt
-                    logger.warning(f"Embedding attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"Embedding failed after {self._max_retries} attempts: {e}")
-                    raise
