@@ -240,6 +240,8 @@ async def process_document(
         inferred_relationships = []
         inference_mode = resolved_expertise.expansion.inference_mode if resolved_expertise else "none"
 
+        dedup_id_mapping: dict[str, str] = {}
+
         if entity_index is not None and inference_mode == "smart":
             # Smart mode: within-doc exact dedup via shared EntityIndex.
             # Cross-document resolution + inference deferred to run_smart_resolution().
@@ -249,10 +251,15 @@ async def process_document(
                 if existing is not None:
                     # Merge into existing (already in index)
                     existing.merge_with(entity)
+                    # Map the dropped entity's ID to the surviving entity's ID
+                    dedup_id_mapping[str(entity.id)] = str(existing.id)
                 else:
                     deduped_entities.append(entity)
             if len(entities) != len(deduped_entities):
-                logger.debug(f"Document {document.id}: smart dedup {len(entities)} -> {len(deduped_entities)} entities")
+                logger.debug(
+                    f"Document {document.id}: smart dedup {len(entities)} -> {len(deduped_entities)} entities "
+                    f"({len(dedup_id_mapping)} cross-doc duplicates)"
+                )
             entities = deduped_entities
 
         elif enable_expansion and resolved_expertise:
@@ -330,6 +337,9 @@ async def process_document(
 
             # Track mapping from original entity IDs to stored entity IDs (for dedup)
             entity_id_mapping: dict[str, str] = {}
+            # Pre-seed with cross-document dedup mappings from smart mode
+            if entity_index is not None and inference_mode == "smart":
+                entity_id_mapping.update(dedup_id_mapping)
 
             async def store_entity(entity) -> tuple[Entity, bool]:
                 """Store entity and return (entity, needs_embedding)."""
@@ -393,6 +403,7 @@ async def process_document(
 
         # Step 6: Store relationships in batch
         # Remap entity IDs to use deduplicated entity IDs, then batch-store
+        stored_count = 0
         all_relationships = relationships + inferred_relationships
         if all_relationships:
             from uuid import UUID
@@ -437,7 +448,8 @@ async def process_document(
             "document_id": str(document.id),
             "chunks": len(chunks),
             "entities": len(entities),
-            "relationships": len(relationships),
+            "relationships": stored_count if all_relationships else 0,
+            "extracted_relationships": len(relationships),
             "inferred_relationships": len(inferred_relationships),
         }
 
