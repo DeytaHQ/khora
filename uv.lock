@@ -1117,7 +1117,7 @@ wheels = [
 
 [[package]]
 name = "khora"
-version = "0.0.25"
+version = "0.0.26"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
