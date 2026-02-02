@@ -162,7 +162,7 @@ class SemanticExpander:
 
         current_entities = list(entities)
         current_relationships = list(relationships)
-        logger.info(
+        logger.debug(
             f"Starting expansion with {len(current_entities)} entities, {len(current_relationships)} relationships"
         )
 
