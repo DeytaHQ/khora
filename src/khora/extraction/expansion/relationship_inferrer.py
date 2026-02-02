@@ -137,12 +137,12 @@ class RelationshipInferrer:
                 e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
             }
             if not (actual_rel_types & expected_rels):
-                logger.warning(
-                    f"No relationship type matches! Rules expect {expected_rels} but graph has {actual_rel_types}"
+                logger.debug(
+                    f"No relationship type matches: rules expect {expected_rels}, graph has {actual_rel_types}"
                 )
             if not (actual_entity_types & expected_entities):
-                logger.warning(
-                    f"No entity type matches! Rules expect {expected_entities} but graph has {actual_entity_types}"
+                logger.debug(
+                    f"No entity type matches: rules expect {expected_entities}, graph has {actual_entity_types}"
                 )
 
         all_inferred: list[InferredRelationship] = []

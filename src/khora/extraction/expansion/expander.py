@@ -204,7 +204,7 @@ class SemanticExpander:
         # Phase 2: Relationship inference
         inferred_relationships: list[Relationship] = []
         if self._enable_inference and self._expertise:
-            logger.info(f"Running relationship inference (depth={self._inference_depth})...")
+            logger.debug(f"Running relationship inference (depth={self._inference_depth})...")
             _t0 = _time.perf_counter()
             inferred = self._inferrer.infer(
                 current_entities,
