@@ -529,6 +529,7 @@ class PgVectorBackend:
                     embedding_model=bindparam("mdl"),
                     updated_at=bindparam("ts"),
                 )
+                .execution_options(synchronize_session=False)
             )
             params = [{"eid": str(eid), "emb": emb, "mdl": mdl, "ts": now} for eid, emb, mdl in sorted_updates]
 
