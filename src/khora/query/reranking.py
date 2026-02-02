@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from loguru import logger
 
+from khora.core.models.entity import entity_type_str
+
 if TYPE_CHECKING:
     from khora.config.llm import LiteLLMConfig
     from khora.core.models import Chunk, Entity
@@ -410,7 +412,7 @@ async def rerank_entities(
         RerankCandidate(
             item=entity,
             original_score=score,
-            content=f"{entity.name}: {entity.description or ''} ({entity.entity_type.value})",
+            content=f"{entity.name}: {entity.description or ''} ({entity_type_str(entity.entity_type)})",
             metadata=entity.metadata,
         )
         for entity, score in entities

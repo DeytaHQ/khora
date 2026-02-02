@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from khora.api.deps import ACLEnforcerDep, MemoryLakeDep, PrincipalDep
+from khora.core.models.entity import entity_type_str
 from khora.query import SearchMode
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -181,7 +182,7 @@ async def recall(
             EntityResult(
                 id=str(entity.id),
                 name=entity.name,
-                entity_type=entity.entity_type.value,
+                entity_type=entity_type_str(entity.entity_type),
                 description=entity.description,
                 score=score,
             )
@@ -273,7 +274,7 @@ async def list_entities(
         {
             "id": str(e.id),
             "name": e.name,
-            "entity_type": e.entity_type.value,
+            "entity_type": entity_type_str(e.entity_type),
             "description": e.description,
             "mention_count": e.mention_count,
             "confidence": e.confidence,
@@ -300,7 +301,7 @@ async def get_entity(
         "id": str(entity.id),
         "namespace_id": str(entity.namespace_id),
         "name": entity.name,
-        "entity_type": entity.entity_type.value,
+        "entity_type": entity_type_str(entity.entity_type),
         "description": entity.description,
         "attributes": entity.attributes,
         "mention_count": entity.mention_count,
@@ -329,7 +330,7 @@ async def get_related_entities(
         {
             "id": str(e.id),
             "name": e.name,
-            "entity_type": e.entity_type.value,
+            "entity_type": entity_type_str(e.entity_type),
             "relevance_score": score,
         }
         for e, score in related

@@ -61,8 +61,8 @@ class StorageConfig:
     # PostgreSQL configuration
     postgresql_url: str | None = None
     postgresql_echo: bool = False
-    postgresql_pool_size: int = 5
-    postgresql_max_overflow: int = 10
+    postgresql_pool_size: int = 10
+    postgresql_max_overflow: int = 20
 
     # pgvector configuration (can share PostgreSQL URL) — legacy
     pgvector_url: str | None = None

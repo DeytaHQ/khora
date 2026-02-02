@@ -63,6 +63,16 @@ class RelationshipType(str, Enum):
     CUSTOM = "CUSTOM"
 
 
+def entity_type_str(et: EntityType | str) -> str:
+    """Get the string value of an entity type (enum or plain string)."""
+    return et.value if isinstance(et, EntityType) else str(et)
+
+
+def relationship_type_str(rt: RelationshipType | str) -> str:
+    """Get the string value of a relationship type (enum or plain string)."""
+    return rt.value if isinstance(rt, RelationshipType) else str(rt)
+
+
 @dataclass
 class Entity:
     """An extracted entity from a document.
@@ -117,7 +127,7 @@ class Entity:
         """Validate and clean attributes using the registered schema for this entity type."""
         from khora.core.models.schemas import validate_attributes
 
-        self.attributes = validate_attributes(self.entity_type.value, self.attributes)
+        self.attributes = validate_attributes(entity_type_str(self.entity_type), self.attributes)
 
     def merge_with(self, other: Entity) -> None:
         """Merge another entity into this one (deduplication)."""

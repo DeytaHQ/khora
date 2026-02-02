@@ -17,6 +17,8 @@ from uuid import UUID
 
 from loguru import logger
 
+from khora.core.models.entity import entity_type_str
+
 if TYPE_CHECKING:
     from khora.core.models import Entity
     from khora.extraction.embedders import Embedder
@@ -191,7 +193,7 @@ class EntityResolver:
 
                 for entity_id, score in results:
                     entity = await self._storage.get_entity(entity_id)
-                    if entity and entity.entity_type.value == entity_type:
+                    if entity and entity_type_str(entity.entity_type) == entity_type:
                         # Skip if already matched
                         if entity in [c.entity for c in candidates]:
                             continue

@@ -17,6 +17,8 @@ from uuid import UUID
 
 from loguru import logger
 
+from khora.core.models.entity import entity_type_str
+
 from .understanding import EntityMention
 
 if TYPE_CHECKING:
@@ -315,7 +317,7 @@ class EntityLinker:
 
                 if ratio >= self._fuzzy_threshold:
                     # Apply type penalty so wrong-type matches score lower
-                    penalty = self._type_penalty(mention.entity_type, entity.entity_type.value)
+                    penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
                     matches.append((entity, ratio * penalty))
 
             # Also try partial matching (for handling first/last name, abbreviations)
@@ -325,7 +327,7 @@ class EntityLinker:
 
                 # Check if mention is contained in entity name or vice versa
                 entity_name_lower = entity.name.lower()
-                penalty = self._type_penalty(mention.entity_type, entity.entity_type.value)
+                penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
                 if mention_name_lower in entity_name_lower:
                     ratio = len(mention_name_lower) / len(entity_name_lower)
                     if ratio >= 0.5:  # At least 50% match
@@ -384,9 +386,9 @@ class EntityLinker:
                 entity = await self._storage.get_entity(entity_id)
                 if entity:
                     # Only include entities of compatible types
-                    if self._types_compatible(mention.entity_type, entity.entity_type.value):
+                    if self._types_compatible(mention.entity_type, entity_type_str(entity.entity_type)):
                         # Apply type penalty so exact type matches rank higher
-                        penalty = self._type_penalty(mention.entity_type, entity.entity_type.value)
+                        penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
                         matches.append((entity, score * penalty))
 
         except Exception as e:

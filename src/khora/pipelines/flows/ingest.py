@@ -326,7 +326,7 @@ async def process_document(
             input_count=len(entities),
         ) as _es_ctx:
             # Process entities concurrently but with semaphore to avoid overwhelming the DB
-            entity_semaphore = asyncio.Semaphore(20)
+            entity_semaphore = asyncio.Semaphore(5)
 
             # Track mapping from original entity IDs to stored entity IDs (for dedup)
             entity_id_mapping: dict[str, str] = {}
@@ -335,10 +335,12 @@ async def process_document(
                 """Store entity and return (entity, needs_embedding)."""
                 async with entity_semaphore:
                     original_id = str(entity.id)
+                    et = entity.entity_type
+                    et_str = et.value if hasattr(et, "value") else str(et)
                     existing = await storage.get_entity_by_name(
                         document.namespace_id,
                         entity.name,
-                        entity.entity_type.value,
+                        et_str,
                     )
                     if existing:
                         existing.merge_with(entity)

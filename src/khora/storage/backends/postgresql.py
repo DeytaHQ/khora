@@ -36,7 +36,7 @@ class PostgreSQLBackend:
     hierarchy, documents, and sync checkpoints.
     """
 
-    def __init__(self, database_url: str, *, echo: bool = False, pool_size: int = 5, max_overflow: int = 10) -> None:
+    def __init__(self, database_url: str, *, echo: bool = False, pool_size: int = 10, max_overflow: int = 20) -> None:
         """Initialize the PostgreSQL backend.
 
         Args:
