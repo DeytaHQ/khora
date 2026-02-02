@@ -521,19 +521,21 @@ class PgVectorBackend:
             sorted_updates = sorted(updates, key=lambda u: str(u[0]))
             now = datetime.now(UTC)
 
+            # Use Core table to avoid ORM bulk-update PK requirements
+            tbl = EntityModel.__table__
             stmt = (
-                update(EntityModel)
-                .where(EntityModel.id == bindparam("eid"))
+                tbl.update()
+                .where(tbl.c.id == bindparam("eid"))
                 .values(
                     embedding=bindparam("emb"),
                     embedding_model=bindparam("mdl"),
                     updated_at=bindparam("ts"),
                 )
-                .execution_options(synchronize_session=False)
             )
             params = [{"eid": str(eid), "emb": emb, "mdl": mdl, "ts": now} for eid, emb, mdl in sorted_updates]
 
             async with self._get_session() as session:
+                await session.connection()
                 await session.execute(stmt, params)
                 await session.commit()
             return len(sorted_updates)
