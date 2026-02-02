@@ -6,6 +6,7 @@ existing entities and relationships in a namespace.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -120,8 +121,6 @@ async def store_expansion_results(
     Returns:
         Statistics about stored items
     """
-    import asyncio
-
     stored_entities = 0
     stored_relationships = 0
 
@@ -135,18 +134,14 @@ async def store_expansion_results(
             stored_entities += 1
 
     if result.merged_entity_count > 0:
-        # Only update entities that were actually merged
-        await asyncio.gather(*[update_entity(e) for e in result.entities])
+        # Only update entities that were actually modified by merges
+        merged_ids = set(result.entity_mapping.values()) if result.entity_mapping else set()
+        modified_entities = [e for e in result.entities if e.id in merged_ids] if merged_ids else result.entities
+        await asyncio.gather(*[update_entity(e) for e in modified_entities])
 
-    # Store inferred relationships
-    async def store_relationship(rel):
-        nonlocal stored_relationships
-        async with entity_semaphore:
-            await storage.create_relationship(rel)
-            stored_relationships += 1
-
+    # Store inferred relationships in batch
     if result.inferred_relationships:
-        await asyncio.gather(*[store_relationship(r) for r in result.inferred_relationships])
+        stored_relationships = await storage.create_relationships_batch(result.inferred_relationships)
 
     return {
         "updated_entities": stored_entities,
@@ -204,9 +199,11 @@ async def expand_knowledge_graph(
 
     logger.info(f"Starting knowledge graph expansion for namespace {namespace_id}")
 
-    # Load existing data
-    entities = await load_entities(namespace_id, storage, limit=max_entities)
-    relationships = await load_relationships(namespace_id, storage, limit=max_relationships)
+    # Load existing data in parallel
+    entities, relationships = await asyncio.gather(
+        load_entities(namespace_id, storage, limit=max_entities),
+        load_relationships(namespace_id, storage, limit=max_relationships),
+    )
 
     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
 

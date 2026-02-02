@@ -139,6 +139,7 @@ async def process_document(
     enable_expansion: bool = False,
     extraction_context: dict[str, Any] | None = None,
     entity_index: EntityIndex | None = None,
+    shared_embedder: Any | None = None,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -332,48 +333,33 @@ async def process_document(
             namespace_id=_ns_id,
             input_count=len(entities),
         ) as _es_ctx:
-            # Process entities concurrently but with semaphore to avoid overwhelming the DB
-            entity_semaphore = asyncio.Semaphore(5)
-
             # Track mapping from original entity IDs to stored entity IDs (for dedup)
             entity_id_mapping: dict[str, str] = {}
             # Pre-seed with cross-document dedup mappings from smart mode
             if entity_index is not None and inference_mode == "smart":
                 entity_id_mapping.update(dedup_id_mapping)
 
-            async def store_entity(entity) -> tuple[Entity, bool]:
-                """Store entity and return (entity, needs_embedding)."""
-                async with entity_semaphore:
-                    original_id = str(entity.id)
-                    et = entity.entity_type
-                    et_str = et.value if hasattr(et, "value") else str(et)
-                    existing = await storage.get_entity_by_name(
-                        document.namespace_id,
-                        entity.name,
-                        et_str,
-                    )
-                    if existing:
-                        existing.merge_with(entity)
-                        await storage.update_entity(existing)
-                        # Map original ID to existing entity's ID
-                        entity_id_mapping[original_id] = str(existing.id)
-                        # Only generate embedding if not already present
-                        needs_embedding = not existing.embedding
-                        return existing, needs_embedding
-                    else:
-                        await storage.create_entity(entity)
-                        # ID stays the same for new entities
-                        entity_id_mapping[original_id] = original_id
-                        # New entities always need embeddings
-                        return entity, True
+            # Batch upsert: single MERGE operation instead of N+1 individual lookups
+            upsert_results = await storage.upsert_entities_batch(document.namespace_id, entities)
 
-            store_results = await asyncio.gather(*[store_entity(e) for e in entities])
+            store_results: list[tuple[Entity, bool]] = []
+            for entity, is_new in upsert_results:
+                original_id = str(entity.id)
+                entity_id_mapping[original_id] = original_id
+                # New entities always need embeddings; existing only if missing
+                needs_embedding = is_new or not entity.embedding
+                store_results.append((entity, needs_embedding))
             # Collect entities that need embeddings
             entities_needing_embeddings = [e for e, needs in store_results if needs]
             _es_ctx["output_count"] = len(store_results)
 
-        # Step 5b: Generate and store entity embeddings
-        if entities_needing_embeddings:
+        # Step 5b + Step 6: Entity embeddings and relationship storage run in parallel
+        # since relationships don't depend on entity embeddings
+
+        async def _embed_entities() -> int:
+            """Generate and store entity embeddings. Returns count embedded."""
+            if not entities_needing_embeddings:
+                return 0
             async with pipeline_stage(
                 "ingestion",
                 "entity_embedding",
@@ -383,14 +369,11 @@ async def process_document(
             ) as _ee_ctx:
                 from khora.extraction.embedders import LiteLLMEmbedder
 
-                embedder = LiteLLMEmbedder(model=embedding_model)
-                # Create entity text representations for embedding
+                embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
                 entity_texts = [
                     f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings
                 ]
-                # Generate embeddings in batch
                 entity_embeddings = await embedder.embed_batch(entity_texts)
-                # Update entities with embeddings (single transaction)
                 updates = [
                     (entity.id, embedding, embedding_model)
                     for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
@@ -400,12 +383,13 @@ async def process_document(
             logger.debug(
                 f"Document {document.id}: generated embeddings for {len(entities_needing_embeddings)} entities"
             )
+            return len(entities_needing_embeddings)
 
-        # Step 6: Store relationships in batch
-        # Remap entity IDs to use deduplicated entity IDs, then batch-store
-        stored_count = 0
-        all_relationships = relationships + inferred_relationships
-        if all_relationships:
+        async def _store_relationships() -> tuple[int, int]:
+            """Remap and batch-store relationships. Returns (stored_count, skipped)."""
+            all_relationships = relationships + inferred_relationships
+            if not all_relationships:
+                return 0, 0
             from uuid import UUID
 
             valid_relationships = []
@@ -429,16 +413,22 @@ async def process_document(
                 rel.target_entity_id = UUID(mapped_target)
                 valid_relationships.append(rel)
 
+            count = 0
             if valid_relationships:
-                stored_count = await storage.create_relationships_batch(valid_relationships)
-            else:
-                stored_count = 0
+                count = await storage.create_relationships_batch(valid_relationships)
 
             if skipped > 0:
                 logger.debug(
-                    f"Stored {stored_count}/{len(all_relationships)} relationships "
+                    f"Stored {count}/{len(all_relationships)} relationships "
                     f"({skipped} skipped due to missing entity mappings)"
                 )
+            return count, skipped
+
+        # Run embedding and relationship storage concurrently
+        _, (stored_count, _skipped) = await asyncio.gather(
+            _embed_entities(),
+            _store_relationships(),
+        )
 
         # Mark as completed
         document.mark_completed(len(chunks), len(entities))
@@ -448,7 +438,7 @@ async def process_document(
             "document_id": str(document.id),
             "chunks": len(chunks),
             "entities": len(entities),
-            "relationships": stored_count if all_relationships else 0,
+            "relationships": stored_count,
             "extracted_relationships": len(relationships),
             "inferred_relationships": len(inferred_relationships),
         }
@@ -560,6 +550,11 @@ async def ingest_documents(
         }
 
     # Phase 2: Process staged documents in parallel with controlled concurrency
+    # Share a single embedder across all documents to preserve the embedding cache
+    from khora.extraction.embedders import LiteLLMEmbedder
+
+    shared_embedder = LiteLLMEmbedder(model=embedding_model)
+
     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
 
     async def process_with_limit(doc):
@@ -577,6 +572,7 @@ async def ingest_documents(
                 enable_expansion=enable_expansion,
                 extraction_context=extraction_context,
                 entity_index=shared_entity_index,
+                shared_embedder=shared_embedder,
             )
 
     results = await asyncio.gather(
@@ -610,6 +606,7 @@ async def ingest_documents(
             shared_entity_index,
             resolved_expertise,
             embedding_model=embedding_model,
+            shared_embedder=shared_embedder,
         )
         total_entities = smart_resolution_result.get("entities_resolved", total_entities)
         total_inferred = smart_resolution_result.get("inferred_relationships", total_inferred)
@@ -638,6 +635,7 @@ async def run_smart_resolution(
     expertise: ExpertiseConfig,
     *,
     embedding_model: str = "text-embedding-3-small",
+    shared_embedder: Any | None = None,
 ) -> dict[str, Any]:
     """Post-ingestion cross-document entity resolution and relationship inference.
 
@@ -709,7 +707,7 @@ async def run_smart_resolution(
     if entities_needing_embeddings:
         from khora.extraction.embedders import LiteLLMEmbedder
 
-        embedder = LiteLLMEmbedder(model=embedding_model)
+        embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
         entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings]
         entity_embeddings = await embedder.embed_batch(entity_texts)
         updates = [

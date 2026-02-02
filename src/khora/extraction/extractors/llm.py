@@ -176,9 +176,9 @@ class LLMEntityExtractor(EntityExtractor):
         system_prompt = self._render_system_prompt(expertise, context)
         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
 
-        async with self._semaphore:
-            for attempt in range(self._max_retries):
-                try:
+        for attempt in range(self._max_retries):
+            try:
+                async with self._semaphore:
                     import time as _time
 
                     _t0 = _time.perf_counter()
@@ -208,23 +208,23 @@ class LLMEntityExtractor(EntityExtractor):
                         latency_ms=_latency,
                     )
 
-                    content = response.choices[0].message.content
-                    result = self._parse_response(content)
+                content = response.choices[0].message.content
+                result = self._parse_response(content)
 
-                    # Apply confidence filtering from expertise if available
-                    if expertise:
-                        result = self._filter_by_confidence(result, expertise)
+                # Apply confidence filtering from expertise if available
+                if expertise:
+                    result = self._filter_by_confidence(result, expertise)
 
-                    return result
+                return result
 
-                except Exception as e:
-                    if attempt < self._max_retries - 1:
-                        wait_time = 2**attempt
-                        logger.warning(f"Extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
-                        return ExtractionResult(metadata={"error": str(e)})
+            except Exception as e:
+                if attempt < self._max_retries - 1:
+                    wait_time = 2**attempt
+                    logger.warning(f"Extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
+                    return ExtractionResult(metadata={"error": str(e)})
 
     def _render_system_prompt(
         self,
@@ -474,9 +474,9 @@ Return a JSON object with a "sections" array, one object per section:
 Each section follows the same entity/relationship/event format.
 Return ONLY valid JSON, no other text."""
 
-        async with self._semaphore:
-            for attempt in range(self._max_retries):
-                try:
+        for attempt in range(self._max_retries):
+            try:
+                async with self._semaphore:
                     import time as _time
 
                     _t0 = _time.perf_counter()
@@ -507,38 +507,39 @@ Return ONLY valid JSON, no other text."""
                         metadata={"batch_size": len(texts)},
                     )
 
-                    content = response.choices[0].message.content
-                    data = json.loads(content)
-                    sections_data = data.get("sections", [])
+                content = response.choices[0].message.content
+                data = json.loads(content)
+                sections_data = data.get("sections", [])
 
-                    results: list[ExtractionResult] = []
-                    for i, text in enumerate(texts):
-                        if i < len(sections_data):
-                            section_json = json.dumps(sections_data[i])
-                            results.append(self._parse_response(section_json))
-                        else:
-                            results.append(ExtractionResult())
-
-                    return results
-
-                except Exception as e:
-                    if attempt < self._max_retries - 1:
-                        wait_time = 2**attempt
-                        logger.warning(
-                            f"Multi-extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s..."
-                        )
-                        await asyncio.sleep(wait_time)
+                results: list[ExtractionResult] = []
+                for i, text in enumerate(texts):
+                    if i < len(sections_data):
+                        results.append(self._parse_response(sections_data[i]))
                     else:
-                        logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
-                        return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
+                        results.append(ExtractionResult())
+
+                return results
+
+            except Exception as e:
+                if attempt < self._max_retries - 1:
+                    wait_time = 2**attempt
+                    logger.warning(f"Multi-extraction attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
+                    return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
 
         return [ExtractionResult() for _ in texts]
 
-    def _parse_response(self, content: str) -> ExtractionResult:
-        """Parse the LLM response into an ExtractionResult."""
+    def _parse_response(self, content: str | dict) -> ExtractionResult:
+        """Parse the LLM response into an ExtractionResult.
+
+        Accepts either a JSON string or a pre-parsed dict to avoid
+        unnecessary json.dumps/json.loads round-trips in batch mode.
+        """
         try:
-            # Try to parse as JSON
-            data = json.loads(content)
+            # Accept pre-parsed dict directly (from extract_multi_batch)
+            data = content if isinstance(content, dict) else json.loads(content)
 
             entities = []
             for e in data.get("entities", []):

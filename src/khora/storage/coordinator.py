@@ -441,15 +441,20 @@ class StorageCoordinator:
     # =========================================================================
 
     async def create_entity(self, entity: Entity) -> Entity:
-        """Create an entity in both graph and vector stores."""
+        """Create an entity in both graph and vector stores (parallel)."""
         import time as _time
 
         _t0 = _time.perf_counter()
-        # Store in graph for relationships and traversal
-        if self.graph:
+        # Parallel writes to graph + vector, matching update_entity pattern
+        if self.graph and self.vector:
+            graph_result, _ = await asyncio.gather(
+                self.graph.create_entity(entity),
+                self.vector.create_entity(entity),
+            )
+            entity = graph_result
+        elif self.graph:
             entity = await self.graph.create_entity(entity)
-        # Store in vector backend for embedding-based similarity search
-        if self.vector:
+        elif self.vector:
             await self.vector.create_entity(entity)
         from khora.telemetry import get_collector
 

@@ -62,11 +62,11 @@ class LiteLLMEmbedder(Embedder):
         """Generate a cache key for a text."""
         return sha256(f"{self._model}:{text}".encode()).hexdigest()
 
-    def _cache_get(self, text: str) -> list[float] | None:
+    def _cache_get(self, text: str, *, key: str | None = None) -> list[float] | None:
         """Look up a cached embedding."""
         if not self._cache_max_size:
             return None
-        key = self._cache_key(text)
+        key = key or self._cache_key(text)
         if key in self._cache:
             self._cache.move_to_end(key)
             self._cache_hits += 1
@@ -74,11 +74,11 @@ class LiteLLMEmbedder(Embedder):
         self._cache_misses += 1
         return None
 
-    def _cache_put(self, text: str, embedding: list[float]) -> None:
+    def _cache_put(self, text: str, embedding: list[float], *, key: str | None = None) -> None:
         """Store an embedding in the cache."""
         if not self._cache_max_size:
             return
-        key = self._cache_key(text)
+        key = key or self._cache_key(text)
         self._cache[key] = embedding
         self._cache.move_to_end(key)
         while len(self._cache) > self._cache_max_size:
@@ -154,18 +154,21 @@ class LiteLLMEmbedder(Embedder):
         except ImportError:
             raise RuntimeError("litellm package not installed. Run: pip install litellm")
 
-        # Separate cached vs uncached texts
+        # Separate cached vs uncached texts; compute cache keys once
         results: list[list[float] | None] = [None] * len(texts)
         uncached_indices: list[int] = []
         uncached_texts: list[str] = []
+        uncached_keys: list[str] = []
 
         for i, text in enumerate(texts):
-            cached = self._cache_get(text)
+            key = self._cache_key(text)
+            cached = self._cache_get(text, key=key)
             if cached is not None:
                 results[i] = cached
             else:
                 uncached_indices.append(i)
                 uncached_texts.append(text)
+                uncached_keys.append(key)
 
         # Record embedding cache statistics
         cache_hits = len(texts) - len(uncached_texts)
@@ -180,11 +183,22 @@ class LiteLLMEmbedder(Embedder):
                 latency_ms=0.0,
             )
 
-        # Fetch uncached embeddings
+        # Fetch uncached embeddings with deduplication
         if uncached_texts:
-            if len(uncached_texts) > self._batch_size:
+            # Deduplicate: same text appearing multiple times only needs one API call
+            unique_text_map: dict[str, int] = {}  # key -> first occurrence index in unique list
+            unique_texts: list[str] = []
+            dedup_indices: list[int] = []  # maps uncached position -> unique_texts position
+
+            for key, text in zip(uncached_keys, uncached_texts):
+                if key not in unique_text_map:
+                    unique_text_map[key] = len(unique_texts)
+                    unique_texts.append(text)
+                dedup_indices.append(unique_text_map[key])
+
+            if len(unique_texts) > self._batch_size:
                 sub_batches = [
-                    uncached_texts[i : i + self._batch_size] for i in range(0, len(uncached_texts), self._batch_size)
+                    unique_texts[i : i + self._batch_size] for i in range(0, len(unique_texts), self._batch_size)
                 ]
                 sem = asyncio.Semaphore(self._embed_concurrency)
 
@@ -193,14 +207,15 @@ class LiteLLMEmbedder(Embedder):
                         return await self._embed_batch_internal(batch)
 
                 sub_results = await asyncio.gather(*[_embed_sub(b) for b in sub_batches])
-                all_embeddings: list[list[float]] = [emb for result in sub_results for emb in result]
+                unique_embeddings: list[list[float]] = [emb for result in sub_results for emb in result]
             else:
-                all_embeddings = await self._embed_batch_internal(uncached_texts)
+                unique_embeddings = await self._embed_batch_internal(unique_texts)
 
-            # Populate results and cache
-            for idx, embedding in zip(uncached_indices, all_embeddings):
+            # Map deduplicated results back to original positions and populate cache
+            for i, (idx, key) in enumerate(zip(uncached_indices, uncached_keys)):
+                embedding = unique_embeddings[dedup_indices[i]]
                 results[idx] = embedding
-                self._cache_put(texts[idx], embedding)
+                self._cache_put(texts[idx], embedding, key=key)
 
         return results  # type: ignore[return-value]
 
