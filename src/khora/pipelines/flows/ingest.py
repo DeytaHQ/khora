@@ -446,7 +446,7 @@ async def process_document(
 
 
 @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
-@flow(name="ingest_documents", log_prints=True)
+@flow(name="ingest_documents", log_prints=True, validate_parameters=False)
 async def ingest_documents(
     namespace_id: UUID,
     documents: list[dict[str, Any]],
