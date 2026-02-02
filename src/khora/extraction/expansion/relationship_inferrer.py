@@ -87,20 +87,20 @@ class RelationshipInferrer:
             logger.debug("No expertise or inference rules configured, skipping inference")
             return []
 
-        # Diagnostic logging (debug-only to avoid overhead in production)
+        # Diagnostic logging
+        entity_types = Counter(
+            e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
+        )
+        logger.info(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
+
+        rel_types = Counter(
+            r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+            for r in relationships
+        )
+        logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
+
+        # Detailed pattern diagnostics (debug-only to avoid overhead)
         if logger._core.min_level <= 10:  # DEBUG level
-            entity_types = Counter(
-                e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
-            )
-            logger.debug(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
-
-            rel_types = Counter(
-                r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
-                for r in relationships
-            )
-            logger.debug(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
-
-            # Build entity ID to type lookup for pattern diagnostics
             entity_type_lookup = {
                 e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
             }
@@ -137,12 +137,14 @@ class RelationshipInferrer:
                 e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
             }
             if not (actual_rel_types & expected_rels):
-                logger.debug(
-                    f"No relationship type matches: rules expect {expected_rels}, graph has {actual_rel_types}"
+                logger.warning(
+                    f"No relationship type overlap: rules expect {sorted(expected_rels)}, "
+                    f"graph has {sorted(actual_rel_types)}"
                 )
             if not (actual_entity_types & expected_entities):
-                logger.debug(
-                    f"No entity type matches: rules expect {expected_entities}, graph has {actual_entity_types}"
+                logger.warning(
+                    f"No entity type overlap: rules expect {sorted(expected_entities)}, "
+                    f"graph has {sorted(actual_entity_types)}"
                 )
 
         all_inferred: list[InferredRelationship] = []
@@ -154,7 +156,7 @@ class RelationshipInferrer:
 
             # Evaluate inference rules
             matches = self._rule_engine.evaluate_inference_rules(context)
-            logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
+            logger.info(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
 
             # Log details of first few matches (debug only, avoids list() overhead)
             if logger._core.min_level <= 10:
@@ -281,7 +283,15 @@ class RelationshipInferrer:
                 return None
 
             group, position = parts
-            data = first if group == "first" else second
+            if group == "first":
+                data = first
+            elif group == "second":
+                data = second
+            else:
+                logger.warning(
+                    f"Rule '{match.rule_name}': invalid reference '{ref}' " f"(only 'first'/'second' supported)"
+                )
+                return None
 
             return data.get(position)
 

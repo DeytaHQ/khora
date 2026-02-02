@@ -463,6 +463,8 @@ async def ingest_documents(
     enable_expansion: bool = False,
     extraction_context: dict[str, Any] | None = None,
     skip_resolution: bool = False,
+    shared_embedder: Any | None = None,
+    shared_entity_index: Any | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -514,8 +516,9 @@ async def ingest_documents(
     is_smart = inference_mode == "smart"
 
     # Smart mode: create shared EntityIndex, optionally pre-load existing entities
-    shared_entity_index: EntityIndex | None = None
-    if is_smart and resolved_expertise:
+    if shared_entity_index is not None:
+        pass  # Caller provided a pre-populated index; use it as-is
+    elif is_smart and resolved_expertise:
         from khora.extraction.expansion.entity_index import EntityIndex as EI
 
         shared_entity_index = EI()
@@ -557,9 +560,10 @@ async def ingest_documents(
 
     # Phase 2: Process staged documents in parallel with controlled concurrency
     # Share a single embedder across all documents to preserve the embedding cache
-    from khora.extraction.embedders import LiteLLMEmbedder
+    if shared_embedder is None:
+        from khora.extraction.embedders import LiteLLMEmbedder
 
-    shared_embedder = LiteLLMEmbedder(model=embedding_model)
+        shared_embedder = LiteLLMEmbedder(model=embedding_model)
 
     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
 
@@ -735,6 +739,37 @@ async def run_smart_resolution(
             new_target = entity_mapping.get(rel.target_entity_id, rel.target_entity_id)
             rel.source_entity_id = new_source
             rel.target_entity_id = new_target
+
+    # --- Inference diagnostics ---
+    from collections import Counter
+
+    logger.info(f"Smart resolution: loaded {len(relationships)} relationships from storage")
+
+    if relationships:
+        rel_type_dist = Counter(
+            str(r.relationship_type.value if hasattr(r.relationship_type, "value") else r.relationship_type)
+            for r in relationships
+        )
+        logger.info(f"Smart resolution: relationship types: {dict(rel_type_dist.most_common(15))}")
+
+    if resolved_entities:
+        ent_type_dist = Counter(
+            str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) for e in resolved_entities
+        )
+        logger.info(f"Smart resolution: entity types: {dict(ent_type_dist.most_common(15))}")
+
+    # Check entity ID overlap between relationships and resolved_entities
+    rel_entity_ids = set()
+    for rel in relationships:
+        rel_entity_ids.add(str(rel.source_entity_id))
+        rel_entity_ids.add(str(rel.target_entity_id))
+    resolved_ids = {str(e.id) for e in resolved_entities}
+    matched = len(rel_entity_ids & resolved_ids)
+    unmatched = len(rel_entity_ids - resolved_ids)
+    logger.info(
+        f"Smart resolution: entity ID overlap: {matched}/{len(rel_entity_ids)} "
+        f"({unmatched} relationship entity IDs NOT in resolved entities)"
+    )
 
     # Phase 4: Relationship inference on full resolved graph (single pass)
     from khora.extraction.expansion.relationship_inferrer import RelationshipInferrer

@@ -428,6 +428,11 @@ class Neo4jBackend(GraphBackendBase):
             for record in records:
                 entity = input_id_to_entity.get(record["input_id"])
                 if entity is not None:
+                    # Sync entity ID with what Neo4j actually has
+                    neo4j_id = record["id"]
+                    if neo4j_id != record["input_id"]:
+                        entity.id = UUID(neo4j_id)
+                        logger.debug(f"Entity '{entity.name}' ID synced: {record['input_id']} -> {neo4j_id}")
                     results.append((entity, record["is_new"]))
 
         logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
