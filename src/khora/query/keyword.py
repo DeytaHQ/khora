@@ -177,6 +177,12 @@ class BM25Index:
     avg_doc_length: float = 0.0
     total_docs: int = 0
 
+    # Inverted index: term -> set of doc_ids containing that term
+    _inverted_index: dict[str, set[str]] = field(default_factory=dict)
+
+    # Running sum for O(1) average length updates
+    _total_length: int = 0
+
     # Stemming and stopwords
     use_stemming: bool = True
     remove_stopwords: bool = True
@@ -193,11 +199,15 @@ class BM25Index:
         self.doc_lengths[doc_id] = len(tokens)
         self.doc_freqs[doc_id] = Counter(tokens)
 
-        # Update term document frequencies
+        # Update term document frequencies and inverted index
         for term in set(tokens):
             self.term_doc_freqs[term] += 1
+            if term not in self._inverted_index:
+                self._inverted_index[term] = set()
+            self._inverted_index[term].add(doc_id)
 
         self.total_docs += 1
+        self._total_length += len(tokens)
         self._update_avg_length()
 
     def add_documents(self, documents: list[tuple[str, str]]) -> None:
@@ -207,12 +217,23 @@ class BM25Index:
             documents: List of (doc_id, text) tuples
         """
         for doc_id, text in documents:
-            self.add_document(doc_id, text)
+            tokens = tokenize(text, self.use_stemming, self.remove_stopwords)
+            self.doc_lengths[doc_id] = len(tokens)
+            self.doc_freqs[doc_id] = Counter(tokens)
+            for term in set(tokens):
+                self.term_doc_freqs[term] += 1
+                if term not in self._inverted_index:
+                    self._inverted_index[term] = set()
+                self._inverted_index[term].add(doc_id)
+            self.total_docs += 1
+            self._total_length += len(tokens)
+
+        self._update_avg_length()
 
     def _update_avg_length(self) -> None:
-        """Update average document length."""
-        if self.doc_lengths:
-            self.avg_doc_length = sum(self.doc_lengths.values()) / len(self.doc_lengths)
+        """Update average document length using running sum (O(1))."""
+        if self.total_docs > 0:
+            self.avg_doc_length = self._total_length / self.total_docs
 
     def _idf(self, term: str) -> float:
         """Calculate inverse document frequency for a term.
@@ -269,6 +290,10 @@ class BM25Index:
     ) -> list[tuple[str, float]]:
         """Search the index for relevant documents.
 
+        Uses the inverted index to only score documents containing at
+        least one query term, reducing complexity from O(D*Q) to
+        O(postings*Q).
+
         Args:
             query: Query text
             limit: Maximum results to return
@@ -277,12 +302,20 @@ class BM25Index:
         Returns:
             List of (doc_id, score) tuples sorted by score
         """
-        results = []
+        query_tokens = tokenize(query, self.use_stemming, self.remove_stopwords)
+        if not query_tokens:
+            return []
 
-        for doc_id in self.doc_freqs:
-            score = self.score(query, doc_id)
-            if score > min_score:
-                results.append((doc_id, score))
+        # Gather candidate doc IDs via inverted index
+        candidate_doc_ids: set[str] = set()
+        for term in query_tokens:
+            candidate_doc_ids.update(self._inverted_index.get(term, set()))
+
+        results = []
+        for doc_id in candidate_doc_ids:
+            s = self.score(query, doc_id)
+            if s > min_score:
+                results.append((doc_id, s))
 
         # Sort by score descending
         results.sort(key=lambda x: x[1], reverse=True)

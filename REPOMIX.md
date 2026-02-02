@@ -201,6 +201,7 @@ src/
       tables.py
     __init__.py
     __main__.py
+    _accel.py
     logging_config.py
     memory_lake.py
 tests/
@@ -3854,6 +3855,178 @@ README.md
 6:     main()
 ````
 
+## File: src/khora/_accel.py
+````python
+  1: """Accelerated operations with graceful fallbacks.
+  2: 
+  3: Provides optimized implementations of CPU-intensive operations using
+  4: numpy (cosine similarity) and rapidfuzz (string similarity). Falls back
+  5: to pure-Python implementations when those libraries are not available.
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: import math
+ 11: from typing import TYPE_CHECKING
+ 12: 
+ 13: if TYPE_CHECKING:
+ 14:     pass
+ 15: 
+ 16: # ---------------------------------------------------------------------------
+ 17: # Optional dependency detection
+ 18: # ---------------------------------------------------------------------------
+ 19: 
+ 20: try:
+ 21:     import numpy as np
+ 22: 
+ 23:     _HAS_NUMPY = True
+ 24: except ImportError:  # pragma: no cover
+ 25:     _HAS_NUMPY = False
+ 26: 
+ 27: try:
+ 28:     from rapidfuzz.distance import Levenshtein as _rf_lev  # type: ignore[unresolved-import]
+ 29:     from rapidfuzz.fuzz import ratio as _rf_ratio  # type: ignore[unresolved-import]
+ 30: 
+ 31:     _HAS_RAPIDFUZZ = True
+ 32: except ImportError:  # pragma: no cover
+ 33:     _HAS_RAPIDFUZZ = False
+ 34: 
+ 35: 
+ 36: # ---------------------------------------------------------------------------
+ 37: # Cosine similarity
+ 38: # ---------------------------------------------------------------------------
+ 39: 
+ 40: 
+ 41: def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+ 42:     """Compute cosine similarity between two vectors.
+ 43: 
+ 44:     Uses numpy when available (~50-200x faster for 1536-dim vectors).
+ 45:     """
+ 46:     if len(vec1) != len(vec2):
+ 47:         return 0.0
+ 48: 
+ 49:     if _HAS_NUMPY:
+ 50:         a = np.asarray(vec1, dtype=np.float32)
+ 51:         b = np.asarray(vec2, dtype=np.float32)
+ 52:         dot = float(np.dot(a, b))
+ 53:         na = float(np.linalg.norm(a))
+ 54:         nb = float(np.linalg.norm(b))
+ 55:         if na == 0.0 or nb == 0.0:
+ 56:             return 0.0
+ 57:         return dot / (na * nb)
+ 58: 
+ 59:     # Pure-Python fallback
+ 60:     dot = 0.0
+ 61:     norm1 = 0.0
+ 62:     norm2 = 0.0
+ 63:     for a, b in zip(vec1, vec2):
+ 64:         dot += a * b
+ 65:         norm1 += a * a
+ 66:         norm2 += b * b
+ 67: 
+ 68:     if norm1 == 0.0 or norm2 == 0.0:
+ 69:         return 0.0
+ 70:     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
+ 71: 
+ 72: 
+ 73: def batch_cosine_similarity(
+ 74:     query: list[float],
+ 75:     candidates: list[list[float]],
+ 76:     threshold: float = 0.0,
+ 77: ) -> list[tuple[int, float]]:
+ 78:     """Compute cosine similarity between a query vector and a matrix of candidates.
+ 79: 
+ 80:     Returns (index, similarity) pairs above threshold, sorted descending.
+ 81:     Uses numpy batch matmul when available.
+ 82:     """
+ 83:     if not candidates:
+ 84:         return []
+ 85: 
+ 86:     if _HAS_NUMPY:
+ 87:         q = np.asarray(query, dtype=np.float32)
+ 88:         mat = np.asarray(candidates, dtype=np.float32)
+ 89: 
+ 90:         q_norm = float(np.linalg.norm(q))
+ 91:         if q_norm == 0.0:
+ 92:             return []
+ 93: 
+ 94:         norms = np.linalg.norm(mat, axis=1)
+ 95:         # Avoid division by zero
+ 96:         safe_norms = np.where(norms == 0.0, 1.0, norms)
+ 97:         sims = (mat @ q) / (safe_norms * q_norm)
+ 98:         # Zero out entries where candidate norm was zero
+ 99:         sims = np.where(norms == 0.0, 0.0, sims)
+100: 
+101:         results = []
+102:         for i in range(len(sims)):
+103:             s = float(sims[i])
+104:             if s >= threshold:
+105:                 results.append((i, s))
+106:         results.sort(key=lambda x: x[1], reverse=True)
+107:         return results
+108: 
+109:     # Pure-Python fallback
+110:     results = []
+111:     for i, cand in enumerate(candidates):
+112:         s = cosine_similarity(query, cand)
+113:         if s >= threshold:
+114:             results.append((i, s))
+115:     results.sort(key=lambda x: x[1], reverse=True)
+116:     return results
+117: 
+118: 
+119: # ---------------------------------------------------------------------------
+120: # Levenshtein similarity
+121: # ---------------------------------------------------------------------------
+122: 
+123: 
+124: def levenshtein_similarity(s1: str, s2: str) -> float:
+125:     """Normalized Levenshtein similarity (1.0 = identical).
+126: 
+127:     Uses rapidfuzz when available (~5-10x faster).
+128:     """
+129:     a, b = s1.lower(), s2.lower()
+130:     if a == b:
+131:         return 1.0
+132:     if not a or not b:
+133:         return 0.0
+134: 
+135:     if _HAS_RAPIDFUZZ:
+136:         return _rf_lev.normalized_similarity(a, b)
+137: 
+138:     # Pure-Python single-row DP fallback
+139:     la, lb = len(a), len(b)
+140:     prev = list(range(lb + 1))
+141:     for i in range(1, la + 1):
+142:         curr = [i] + [0] * lb
+143:         for j in range(1, lb + 1):
+144:             cost = 0 if a[i - 1] == b[j - 1] else 1
+145:             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+146:         prev = curr
+147: 
+148:     distance = prev[lb]
+149:     return 1.0 - (distance / max(la, lb))
+150: 
+151: 
+152: # ---------------------------------------------------------------------------
+153: # Sequence matching (SequenceMatcher replacement)
+154: # ---------------------------------------------------------------------------
+155: 
+156: 
+157: def sequence_match_ratio(s1: str, s2: str) -> float:
+158:     """Compute sequence match ratio between two strings.
+159: 
+160:     Uses rapidfuzz.fuzz.ratio when available (~3-10x faster than
+161:     difflib.SequenceMatcher). Returns a float in [0.0, 1.0].
+162:     """
+163:     if _HAS_RAPIDFUZZ:
+164:         return _rf_ratio(s1, s2) / 100.0
+165: 
+166:     from difflib import SequenceMatcher
+167: 
+168:     return SequenceMatcher(None, s1, s2).ratio()
+````
+
 ## File: tests/unit/__init__.py
 ````python
 1: """Unit tests for Khora."""
@@ -6312,284 +6485,252 @@ README.md
   3: Provides an in-memory index that grows during ingestion, enabling O(1)
   4: exact dedup and O(k) fuzzy/embedding candidate retrieval via token blocking.
   5: 
-  6: No external dependencies beyond the standard library (uses numpy only if
-  7: available for faster cosine similarity).
+  6: Uses numpy (cosine similarity) and rapidfuzz (Levenshtein) when available,
+  7: with pure-Python fallbacks via ``khora._accel``.
   8: """
   9: 
  10: from __future__ import annotations
  11: 
- 12: import math
- 13: from typing import TYPE_CHECKING
- 14: from uuid import UUID
- 15: 
- 16: if TYPE_CHECKING:
- 17:     from khora.core.models import Entity
- 18: 
+ 12: from typing import TYPE_CHECKING
+ 13: from uuid import UUID
+ 14: 
+ 15: from khora._accel import batch_cosine_similarity, levenshtein_similarity
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from khora.core.models import Entity
  19: 
- 20: def _normalize_name(name: str) -> str:
- 21:     """Normalize an entity name for exact matching."""
- 22:     return name.lower().strip()
- 23: 
+ 20: 
+ 21: def _normalize_name(name: str) -> str:
+ 22:     """Normalize an entity name for exact matching."""
+ 23:     return name.lower().strip()
  24: 
- 25: def _entity_type_str(entity: Entity) -> str:
- 26:     """Get entity type as a plain string."""
- 27:     et = entity.entity_type
- 28:     return et.value if hasattr(et, "value") else str(et)
- 29: 
+ 25: 
+ 26: def _entity_type_str(entity: Entity) -> str:
+ 27:     """Get entity type as a plain string."""
+ 28:     et = entity.entity_type
+ 29:     return et.value if hasattr(et, "value") else str(et)
  30: 
- 31: def _tokenize(name: str) -> set[str]:
- 32:     """Split a name into tokens for blocking.
- 33: 
- 34:     Produces lowercase alphanumeric tokens of length >= 2.
- 35:     """
- 36:     normalized = _normalize_name(name)
- 37:     tokens: set[str] = set()
- 38:     for token in normalized.split():
- 39:         cleaned = "".join(ch for ch in token if ch.isalnum())
- 40:         if len(cleaned) >= 2:
- 41:             tokens.add(cleaned)
- 42:     return tokens
- 43: 
+ 31: 
+ 32: def _tokenize(name: str) -> set[str]:
+ 33:     """Split a name into tokens for blocking.
+ 34: 
+ 35:     Produces lowercase alphanumeric tokens of length >= 2.
+ 36:     """
+ 37:     normalized = _normalize_name(name)
+ 38:     tokens: set[str] = set()
+ 39:     for token in normalized.split():
+ 40:         cleaned = "".join(ch for ch in token if ch.isalnum())
+ 41:         if len(cleaned) >= 2:
+ 42:             tokens.add(cleaned)
+ 43:     return tokens
  44: 
- 45: def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
- 46:     """Compute cosine similarity between two vectors."""
- 47:     if len(vec1) != len(vec2):
- 48:         return 0.0
- 49: 
- 50:     dot = 0.0
- 51:     norm1 = 0.0
- 52:     norm2 = 0.0
- 53:     for a, b in zip(vec1, vec2):
- 54:         dot += a * b
- 55:         norm1 += a * a
- 56:         norm2 += b * b
- 57: 
- 58:     if norm1 == 0.0 or norm2 == 0.0:
- 59:         return 0.0
- 60: 
- 61:     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
- 62: 
+ 45: 
+ 46: class EntityIndex:
+ 47:     """Fast entity lookup and candidate blocking for entity resolution.
+ 48: 
+ 49:     Maintains several indices for O(1) exact dedup and O(k) fuzzy/embedding
+ 50:     candidate retrieval during ingestion.
+ 51: 
+ 52:     Usage::
+ 53: 
+ 54:         index = EntityIndex()
+ 55:         for entity in extracted_entities:
+ 56:             existing = index.add(entity)
+ 57:             if existing is not None:
+ 58:                 existing.merge_with(entity)
+ 59: 
+ 60:     After ingestion, use ``find_fuzzy_candidates`` and
+ 61:     ``find_embedding_candidates`` for cross-document resolution.
+ 62:     """
  63: 
- 64: def _levenshtein_similarity(s1: str, s2: str) -> float:
- 65:     """Normalized Levenshtein similarity (1.0 = identical)."""
- 66:     a, b = s1.lower(), s2.lower()
- 67:     if a == b:
- 68:         return 1.0
- 69:     la, lb = len(a), len(b)
- 70:     if la == 0 or lb == 0:
- 71:         return 0.0
- 72: 
- 73:     # Single-row DP for memory efficiency
- 74:     prev = list(range(lb + 1))
- 75:     for i in range(1, la + 1):
- 76:         curr = [i] + [0] * lb
- 77:         for j in range(1, lb + 1):
- 78:             cost = 0 if a[i - 1] == b[j - 1] else 1
- 79:             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
- 80:         prev = curr
- 81: 
- 82:     distance = prev[lb]
- 83:     return 1.0 - (distance / max(la, lb))
- 84: 
- 85: 
- 86: class EntityIndex:
- 87:     """Fast entity lookup and candidate blocking for entity resolution.
- 88: 
- 89:     Maintains several indices for O(1) exact dedup and O(k) fuzzy/embedding
- 90:     candidate retrieval during ingestion.
+ 64:     def __init__(self) -> None:
+ 65:         # (normalized_name, type_str) -> entity  —  O(1) exact dedup
+ 66:         self._exact: dict[tuple[str, str], Entity] = {}
+ 67: 
+ 68:         # name_token -> set of entity UUIDs  —  token blocking
+ 69:         self._token: dict[str, set[UUID]] = {}
+ 70: 
+ 71:         # type_str -> list of entities
+ 72:         self._type: dict[str, list[Entity]] = {}
+ 73: 
+ 74:         # entity UUID -> entity  —  master lookup
+ 75:         self._by_id: dict[UUID, Entity] = {}
+ 76: 
+ 77:     # ------------------------------------------------------------------
+ 78:     # Core operations
+ 79:     # ------------------------------------------------------------------
+ 80: 
+ 81:     def add(self, entity: Entity) -> Entity | None:
+ 82:         """Add an entity to the index.
+ 83: 
+ 84:         If an entity with the same (normalized_name, type) already exists,
+ 85:         returns the existing entity so the caller can merge.  Otherwise
+ 86:         inserts the new entity and returns ``None``.
+ 87: 
+ 88:         Complexity: O(1) amortized.
+ 89:         """
+ 90:         key = (_normalize_name(entity.name), _entity_type_str(entity))
  91: 
- 92:     Usage::
- 93: 
- 94:         index = EntityIndex()
- 95:         for entity in extracted_entities:
- 96:             existing = index.add(entity)
- 97:             if existing is not None:
- 98:                 existing.merge_with(entity)
+ 92:         existing = self._exact.get(key)
+ 93:         if existing is not None:
+ 94:             return existing
+ 95: 
+ 96:         # Insert into all indices
+ 97:         self._exact[key] = entity
+ 98:         self._by_id[entity.id] = entity
  99: 
-100:     After ingestion, use ``find_fuzzy_candidates`` and
-101:     ``find_embedding_candidates`` for cross-document resolution.
-102:     """
-103: 
-104:     def __init__(self) -> None:
-105:         # (normalized_name, type_str) -> entity  —  O(1) exact dedup
-106:         self._exact: dict[tuple[str, str], Entity] = {}
+100:         type_str = _entity_type_str(entity)
+101:         self._type.setdefault(type_str, []).append(entity)
+102: 
+103:         for token in _tokenize(entity.name):
+104:             self._token.setdefault(token, set()).add(entity.id)
+105: 
+106:         return None
 107: 
-108:         # name_token -> set of entity UUIDs  —  token blocking
-109:         self._token: dict[str, set[UUID]] = {}
-110: 
-111:         # type_str -> list of entities
-112:         self._type: dict[str, list[Entity]] = {}
-113: 
-114:         # entity UUID -> entity  —  master lookup
-115:         self._by_id: dict[UUID, Entity] = {}
-116: 
-117:     # ------------------------------------------------------------------
-118:     # Core operations
-119:     # ------------------------------------------------------------------
-120: 
-121:     def add(self, entity: Entity) -> Entity | None:
-122:         """Add an entity to the index.
-123: 
-124:         If an entity with the same (normalized_name, type) already exists,
-125:         returns the existing entity so the caller can merge.  Otherwise
-126:         inserts the new entity and returns ``None``.
-127: 
-128:         Complexity: O(1) amortized.
-129:         """
-130:         key = (_normalize_name(entity.name), _entity_type_str(entity))
-131: 
-132:         existing = self._exact.get(key)
-133:         if existing is not None:
-134:             return existing
+108:     def get(self, entity_id: UUID) -> Entity | None:
+109:         """Look up an entity by ID."""
+110:         return self._by_id.get(entity_id)
+111: 
+112:     def get_by_name(self, name: str, entity_type: str) -> Entity | None:
+113:         """Look up an entity by (name, type) — exact match."""
+114:         return self._exact.get((_normalize_name(name), entity_type))
+115: 
+116:     def __len__(self) -> int:
+117:         return len(self._by_id)
+118: 
+119:     def __contains__(self, entity_id: UUID) -> bool:
+120:         return entity_id in self._by_id
+121: 
+122:     # ------------------------------------------------------------------
+123:     # Candidate retrieval (for post-ingestion resolution)
+124:     # ------------------------------------------------------------------
+125: 
+126:     def find_fuzzy_candidates(
+127:         self,
+128:         entity: Entity,
+129:         threshold: float = 0.85,
+130:     ) -> list[tuple[Entity, float]]:
+131:         """Find entities sharing name tokens AND same type, ranked by Levenshtein.
+132: 
+133:         Only computes Levenshtein on the *blocked* candidate set (entities
+134:         sharing at least one token), giving O(k) instead of O(n).
 135: 
-136:         # Insert into all indices
-137:         self._exact[key] = entity
-138:         self._by_id[entity.id] = entity
+136:         Args:
+137:             entity: Query entity.
+138:             threshold: Minimum similarity to return.
 139: 
-140:         type_str = _entity_type_str(entity)
-141:         self._type.setdefault(type_str, []).append(entity)
-142: 
-143:         for token in _tokenize(entity.name):
-144:             self._token.setdefault(token, set()).add(entity.id)
-145: 
-146:         return None
+140:         Returns:
+141:             List of (candidate, similarity) pairs, highest first.
+142:         """
+143:         type_str = _entity_type_str(entity)
+144:         tokens = _tokenize(entity.name)
+145:         if not tokens:
+146:             return []
 147: 
-148:     def get(self, entity_id: UUID) -> Entity | None:
-149:         """Look up an entity by ID."""
-150:         return self._by_id.get(entity_id)
-151: 
-152:     def get_by_name(self, name: str, entity_type: str) -> Entity | None:
-153:         """Look up an entity by (name, type) — exact match."""
-154:         return self._exact.get((_normalize_name(name), entity_type))
+148:         # Gather candidate IDs via token blocking
+149:         candidate_ids: set[UUID] = set()
+150:         for token in tokens:
+151:             candidate_ids |= self._token.get(token, set())
+152: 
+153:         # Remove self
+154:         candidate_ids.discard(entity.id)
 155: 
-156:     def __len__(self) -> int:
-157:         return len(self._by_id)
+156:         results: list[tuple[Entity, float]] = []
+157:         normalized = _normalize_name(entity.name)
 158: 
-159:     def __contains__(self, entity_id: UUID) -> bool:
-160:         return entity_id in self._by_id
-161: 
-162:     # ------------------------------------------------------------------
-163:     # Candidate retrieval (for post-ingestion resolution)
-164:     # ------------------------------------------------------------------
-165: 
-166:     def find_fuzzy_candidates(
-167:         self,
-168:         entity: Entity,
-169:         threshold: float = 0.85,
-170:     ) -> list[tuple[Entity, float]]:
-171:         """Find entities sharing name tokens AND same type, ranked by Levenshtein.
-172: 
-173:         Only computes Levenshtein on the *blocked* candidate set (entities
-174:         sharing at least one token), giving O(k) instead of O(n).
-175: 
-176:         Args:
-177:             entity: Query entity.
-178:             threshold: Minimum similarity to return.
-179: 
-180:         Returns:
-181:             List of (candidate, similarity) pairs, highest first.
-182:         """
-183:         type_str = _entity_type_str(entity)
-184:         tokens = _tokenize(entity.name)
-185:         if not tokens:
-186:             return []
-187: 
-188:         # Gather candidate IDs via token blocking
-189:         candidate_ids: set[UUID] = set()
-190:         for token in tokens:
-191:             candidate_ids |= self._token.get(token, set())
-192: 
-193:         # Remove self
-194:         candidate_ids.discard(entity.id)
-195: 
-196:         results: list[tuple[Entity, float]] = []
-197:         normalized = _normalize_name(entity.name)
-198: 
-199:         for cid in candidate_ids:
-200:             candidate = self._by_id.get(cid)
-201:             if candidate is None:
-202:                 continue
-203:             if _entity_type_str(candidate) != type_str:
-204:                 continue
-205:             # Skip exact matches (already handled by add())
-206:             if _normalize_name(candidate.name) == normalized:
-207:                 continue
-208:             sim = _levenshtein_similarity(entity.name, candidate.name)
-209:             if sim >= threshold:
-210:                 results.append((candidate, sim))
-211: 
-212:         results.sort(key=lambda x: x[1], reverse=True)
-213:         return results
-214: 
-215:     def find_embedding_candidates(
-216:         self,
-217:         entity: Entity,
-218:         threshold: float = 0.85,
-219:     ) -> list[tuple[Entity, float]]:
-220:         """Find entities sharing name tokens AND same type, ranked by cosine similarity.
+159:         for cid in candidate_ids:
+160:             candidate = self._by_id.get(cid)
+161:             if candidate is None:
+162:                 continue
+163:             if _entity_type_str(candidate) != type_str:
+164:                 continue
+165:             # Skip exact matches (already handled by add())
+166:             if _normalize_name(candidate.name) == normalized:
+167:                 continue
+168:             sim = levenshtein_similarity(entity.name, candidate.name)
+169:             if sim >= threshold:
+170:                 results.append((candidate, sim))
+171: 
+172:         results.sort(key=lambda x: x[1], reverse=True)
+173:         return results
+174: 
+175:     def find_embedding_candidates(
+176:         self,
+177:         entity: Entity,
+178:         threshold: float = 0.85,
+179:     ) -> list[tuple[Entity, float]]:
+180:         """Find entities sharing name tokens AND same type, ranked by cosine similarity.
+181: 
+182:         Uses token blocking to reduce the candidate set, then computes
+183:         cosine similarity only within that set.
+184: 
+185:         Args:
+186:             entity: Query entity (must have a non-None embedding).
+187:             threshold: Minimum cosine similarity to return.
+188: 
+189:         Returns:
+190:             List of (candidate, similarity) pairs, highest first.
+191:         """
+192:         if not entity.embedding:
+193:             return []
+194: 
+195:         type_str = _entity_type_str(entity)
+196:         tokens = _tokenize(entity.name)
+197: 
+198:         # Gather candidate IDs via token blocking
+199:         candidate_ids: set[UUID] = set()
+200:         for token in tokens:
+201:             candidate_ids |= self._token.get(token, set())
+202: 
+203:         # Also include all same-type entities (embedding similarity
+204:         # can catch entities with completely different names)
+205:         for e in self._type.get(type_str, []):
+206:             candidate_ids.add(e.id)
+207: 
+208:         candidate_ids.discard(entity.id)
+209: 
+210:         # Collect valid candidates and their embeddings for batch comparison
+211:         valid_candidates: list[Entity] = []
+212:         candidate_embeddings: list[list[float]] = []
+213:         for cid in candidate_ids:
+214:             candidate = self._by_id.get(cid)
+215:             if candidate is None or not candidate.embedding:
+216:                 continue
+217:             if _entity_type_str(candidate) != type_str:
+218:                 continue
+219:             valid_candidates.append(candidate)
+220:             candidate_embeddings.append(candidate.embedding)
 221: 
-222:         Uses token blocking to reduce the candidate set, then computes
-223:         cosine similarity only within that set.
+222:         if not valid_candidates:
+223:             return []
 224: 
-225:         Args:
-226:             entity: Query entity (must have a non-None embedding).
-227:             threshold: Minimum cosine similarity to return.
+225:         # Batch cosine similarity (uses numpy when available)
+226:         scored = batch_cosine_similarity(entity.embedding, candidate_embeddings, threshold=threshold)
+227:         results: list[tuple[Entity, float]] = [(valid_candidates[idx], sim) for idx, sim in scored]
 228: 
-229:         Returns:
-230:             List of (candidate, similarity) pairs, highest first.
-231:         """
-232:         if not entity.embedding:
-233:             return []
-234: 
-235:         type_str = _entity_type_str(entity)
-236:         tokens = _tokenize(entity.name)
-237: 
-238:         # Gather candidate IDs via token blocking
-239:         candidate_ids: set[UUID] = set()
-240:         for token in tokens:
-241:             candidate_ids |= self._token.get(token, set())
-242: 
-243:         # Also include all same-type entities (embedding similarity
-244:         # can catch entities with completely different names)
-245:         for e in self._type.get(type_str, []):
-246:             candidate_ids.add(e.id)
-247: 
-248:         candidate_ids.discard(entity.id)
-249: 
-250:         results: list[tuple[Entity, float]] = []
-251:         for cid in candidate_ids:
-252:             candidate = self._by_id.get(cid)
-253:             if candidate is None or not candidate.embedding:
-254:                 continue
-255:             if _entity_type_str(candidate) != type_str:
-256:                 continue
-257:             sim = _cosine_similarity(entity.embedding, candidate.embedding)
-258:             if sim >= threshold:
-259:                 results.append((candidate, sim))
-260: 
-261:         results.sort(key=lambda x: x[1], reverse=True)
-262:         return results
-263: 
-264:     # ------------------------------------------------------------------
-265:     # Bulk access
-266:     # ------------------------------------------------------------------
-267: 
-268:     def get_all_entities(self) -> list[Entity]:
-269:         """Return all indexed entities (unordered)."""
-270:         return list(self._by_id.values())
-271: 
-272:     def get_entities_by_type(self, entity_type: str) -> list[Entity]:
-273:         """Return all entities of a given type."""
-274:         return list(self._type.get(entity_type, []))
-275: 
-276:     def stats(self) -> dict[str, int]:
-277:         """Return basic index statistics."""
-278:         return {
-279:             "total_entities": len(self._by_id),
-280:             "exact_keys": len(self._exact),
-281:             "token_keys": len(self._token),
-282:             "type_groups": len(self._type),
-283:         }
+229:         results.sort(key=lambda x: x[1], reverse=True)
+230:         return results
+231: 
+232:     # ------------------------------------------------------------------
+233:     # Bulk access
+234:     # ------------------------------------------------------------------
+235: 
+236:     def get_all_entities(self) -> list[Entity]:
+237:         """Return all indexed entities (unordered)."""
+238:         return list(self._by_id.values())
+239: 
+240:     def get_entities_by_type(self, entity_type: str) -> list[Entity]:
+241:         """Return all entities of a given type."""
+242:         return list(self._type.get(entity_type, []))
+243: 
+244:     def stats(self) -> dict[str, int]:
+245:         """Return basic index statistics."""
+246:         return {
+247:             "total_entities": len(self._by_id),
+248:             "exact_keys": len(self._exact),
+249:             "token_keys": len(self._token),
+250:             "type_groups": len(self._type),
+251:         }
 ````
 
 ## File: src/khora/extraction/skills/__init__.py
@@ -7779,244 +7920,277 @@ README.md
 177:     avg_doc_length: float = 0.0
 178:     total_docs: int = 0
 179: 
-180:     # Stemming and stopwords
-181:     use_stemming: bool = True
-182:     remove_stopwords: bool = True
-183: 
-184:     def add_document(self, doc_id: str, text: str) -> None:
-185:         """Add a document to the index.
-186: 
-187:         Args:
-188:             doc_id: Document identifier
-189:             text: Document text
-190:         """
-191:         tokens = tokenize(text, self.use_stemming, self.remove_stopwords)
+180:     # Inverted index: term -> set of doc_ids containing that term
+181:     _inverted_index: dict[str, set[str]] = field(default_factory=dict)
+182: 
+183:     # Running sum for O(1) average length updates
+184:     _total_length: int = 0
+185: 
+186:     # Stemming and stopwords
+187:     use_stemming: bool = True
+188:     remove_stopwords: bool = True
+189: 
+190:     def add_document(self, doc_id: str, text: str) -> None:
+191:         """Add a document to the index.
 192: 
-193:         self.doc_lengths[doc_id] = len(tokens)
-194:         self.doc_freqs[doc_id] = Counter(tokens)
-195: 
-196:         # Update term document frequencies
-197:         for term in set(tokens):
-198:             self.term_doc_freqs[term] += 1
-199: 
-200:         self.total_docs += 1
-201:         self._update_avg_length()
-202: 
-203:     def add_documents(self, documents: list[tuple[str, str]]) -> None:
-204:         """Add multiple documents to the index.
-205: 
-206:         Args:
-207:             documents: List of (doc_id, text) tuples
-208:         """
-209:         for doc_id, text in documents:
-210:             self.add_document(doc_id, text)
-211: 
-212:     def _update_avg_length(self) -> None:
-213:         """Update average document length."""
-214:         if self.doc_lengths:
-215:             self.avg_doc_length = sum(self.doc_lengths.values()) / len(self.doc_lengths)
-216: 
-217:     def _idf(self, term: str) -> float:
-218:         """Calculate inverse document frequency for a term.
-219: 
-220:         Args:
-221:             term: Term to calculate IDF for
-222: 
-223:         Returns:
-224:             IDF score
-225:         """
-226:         n = self.total_docs
-227:         df = self.term_doc_freqs.get(term, 0)
-228:         if df == 0:
-229:             return 0.0
-230:         return math.log((n - df + 0.5) / (df + 0.5) + 1)
-231: 
-232:     def score(self, query: str, doc_id: str) -> float:
-233:         """Calculate BM25 score for a query-document pair.
-234: 
-235:         Args:
-236:             query: Query text
-237:             doc_id: Document identifier
-238: 
-239:         Returns:
-240:             BM25 score
-241:         """
-242:         if doc_id not in self.doc_freqs:
-243:             return 0.0
-244: 
-245:         query_tokens = tokenize(query, self.use_stemming, self.remove_stopwords)
-246:         doc_freq = self.doc_freqs[doc_id]
-247:         doc_len = self.doc_lengths[doc_id]
-248: 
-249:         score = 0.0
-250:         for term in query_tokens:
-251:             if term not in doc_freq:
-252:                 continue
-253: 
-254:             tf = doc_freq[term]
-255:             idf = self._idf(term)
-256: 
-257:             # BM25 scoring formula
-258:             numerator = tf * (self.k1 + 1)
-259:             denominator = tf + self.k1 * (1 - self.b + self.b * doc_len / max(self.avg_doc_length, 1))
-260:             score += idf * numerator / denominator
-261: 
-262:         return score
-263: 
-264:     def search(
-265:         self,
-266:         query: str,
-267:         limit: int = 10,
-268:         min_score: float = 0.0,
-269:     ) -> list[tuple[str, float]]:
-270:         """Search the index for relevant documents.
-271: 
-272:         Args:
-273:             query: Query text
-274:             limit: Maximum results to return
-275:             min_score: Minimum score threshold
-276: 
-277:         Returns:
-278:             List of (doc_id, score) tuples sorted by score
-279:         """
-280:         results = []
-281: 
-282:         for doc_id in self.doc_freqs:
-283:             score = self.score(query, doc_id)
-284:             if score > min_score:
-285:                 results.append((doc_id, score))
-286: 
-287:         # Sort by score descending
-288:         results.sort(key=lambda x: x[1], reverse=True)
-289:         return results[:limit]
-290: 
-291: 
-292: class KeywordSearcher:
-293:     """Keyword search for chunks.
-294: 
-295:     Provides BM25-based search over chunk content.
-296:     """
-297: 
-298:     def __init__(
-299:         self,
-300:         use_stemming: bool = True,
-301:         remove_stopwords: bool = True,
-302:         k1: float = 1.5,
-303:         b: float = 0.75,
-304:     ) -> None:
-305:         """Initialize the keyword searcher.
-306: 
-307:         Args:
-308:             use_stemming: Apply stemming
-309:             remove_stopwords: Remove stopwords
-310:             k1: BM25 k1 parameter
-311:             b: BM25 b parameter
-312:         """
-313:         self._index = BM25Index(
-314:             k1=k1,
-315:             b=b,
-316:             use_stemming=use_stemming,
-317:             remove_stopwords=remove_stopwords,
-318:         )
-319:         self._chunks: dict[str, Chunk] = {}  # doc_id -> Chunk
-320: 
-321:     def index_chunks(self, chunks: list[Chunk]) -> None:
-322:         """Index chunks for keyword search.
+193:         Args:
+194:             doc_id: Document identifier
+195:             text: Document text
+196:         """
+197:         tokens = tokenize(text, self.use_stemming, self.remove_stopwords)
+198: 
+199:         self.doc_lengths[doc_id] = len(tokens)
+200:         self.doc_freqs[doc_id] = Counter(tokens)
+201: 
+202:         # Update term document frequencies and inverted index
+203:         for term in set(tokens):
+204:             self.term_doc_freqs[term] += 1
+205:             if term not in self._inverted_index:
+206:                 self._inverted_index[term] = set()
+207:             self._inverted_index[term].add(doc_id)
+208: 
+209:         self.total_docs += 1
+210:         self._total_length += len(tokens)
+211:         self._update_avg_length()
+212: 
+213:     def add_documents(self, documents: list[tuple[str, str]]) -> None:
+214:         """Add multiple documents to the index.
+215: 
+216:         Args:
+217:             documents: List of (doc_id, text) tuples
+218:         """
+219:         for doc_id, text in documents:
+220:             tokens = tokenize(text, self.use_stemming, self.remove_stopwords)
+221:             self.doc_lengths[doc_id] = len(tokens)
+222:             self.doc_freqs[doc_id] = Counter(tokens)
+223:             for term in set(tokens):
+224:                 self.term_doc_freqs[term] += 1
+225:                 if term not in self._inverted_index:
+226:                     self._inverted_index[term] = set()
+227:                 self._inverted_index[term].add(doc_id)
+228:             self.total_docs += 1
+229:             self._total_length += len(tokens)
+230: 
+231:         self._update_avg_length()
+232: 
+233:     def _update_avg_length(self) -> None:
+234:         """Update average document length using running sum (O(1))."""
+235:         if self.total_docs > 0:
+236:             self.avg_doc_length = self._total_length / self.total_docs
+237: 
+238:     def _idf(self, term: str) -> float:
+239:         """Calculate inverse document frequency for a term.
+240: 
+241:         Args:
+242:             term: Term to calculate IDF for
+243: 
+244:         Returns:
+245:             IDF score
+246:         """
+247:         n = self.total_docs
+248:         df = self.term_doc_freqs.get(term, 0)
+249:         if df == 0:
+250:             return 0.0
+251:         return math.log((n - df + 0.5) / (df + 0.5) + 1)
+252: 
+253:     def score(self, query: str, doc_id: str) -> float:
+254:         """Calculate BM25 score for a query-document pair.
+255: 
+256:         Args:
+257:             query: Query text
+258:             doc_id: Document identifier
+259: 
+260:         Returns:
+261:             BM25 score
+262:         """
+263:         if doc_id not in self.doc_freqs:
+264:             return 0.0
+265: 
+266:         query_tokens = tokenize(query, self.use_stemming, self.remove_stopwords)
+267:         doc_freq = self.doc_freqs[doc_id]
+268:         doc_len = self.doc_lengths[doc_id]
+269: 
+270:         score = 0.0
+271:         for term in query_tokens:
+272:             if term not in doc_freq:
+273:                 continue
+274: 
+275:             tf = doc_freq[term]
+276:             idf = self._idf(term)
+277: 
+278:             # BM25 scoring formula
+279:             numerator = tf * (self.k1 + 1)
+280:             denominator = tf + self.k1 * (1 - self.b + self.b * doc_len / max(self.avg_doc_length, 1))
+281:             score += idf * numerator / denominator
+282: 
+283:         return score
+284: 
+285:     def search(
+286:         self,
+287:         query: str,
+288:         limit: int = 10,
+289:         min_score: float = 0.0,
+290:     ) -> list[tuple[str, float]]:
+291:         """Search the index for relevant documents.
+292: 
+293:         Uses the inverted index to only score documents containing at
+294:         least one query term, reducing complexity from O(D*Q) to
+295:         O(postings*Q).
+296: 
+297:         Args:
+298:             query: Query text
+299:             limit: Maximum results to return
+300:             min_score: Minimum score threshold
+301: 
+302:         Returns:
+303:             List of (doc_id, score) tuples sorted by score
+304:         """
+305:         query_tokens = tokenize(query, self.use_stemming, self.remove_stopwords)
+306:         if not query_tokens:
+307:             return []
+308: 
+309:         # Gather candidate doc IDs via inverted index
+310:         candidate_doc_ids: set[str] = set()
+311:         for term in query_tokens:
+312:             candidate_doc_ids.update(self._inverted_index.get(term, set()))
+313: 
+314:         results = []
+315:         for doc_id in candidate_doc_ids:
+316:             s = self.score(query, doc_id)
+317:             if s > min_score:
+318:                 results.append((doc_id, s))
+319: 
+320:         # Sort by score descending
+321:         results.sort(key=lambda x: x[1], reverse=True)
+322:         return results[:limit]
 323: 
-324:         Args:
-325:             chunks: Chunks to index
-326:         """
-327:         for chunk in chunks:
-328:             doc_id = str(chunk.id)
-329:             self._chunks[doc_id] = chunk
-330:             self._index.add_document(doc_id, chunk.content)
-331: 
-332:         logger.debug(f"Indexed {len(chunks)} chunks for keyword search")
-333: 
-334:     def search(
-335:         self,
-336:         query: str,
-337:         limit: int = 10,
-338:         min_score: float = 0.0,
-339:     ) -> list[tuple[Chunk, float]]:
-340:         """Search for chunks matching the query.
-341: 
-342:         Args:
-343:             query: Query text
-344:             limit: Maximum results
-345:             min_score: Minimum BM25 score
-346: 
-347:         Returns:
-348:             List of (chunk, score) tuples
-349:         """
-350:         results = self._index.search(query, limit=limit, min_score=min_score)
-351: 
-352:         chunk_results = []
-353:         for doc_id, score in results:
-354:             if doc_id in self._chunks:
-355:                 chunk_results.append((self._chunks[doc_id], score))
+324: 
+325: class KeywordSearcher:
+326:     """Keyword search for chunks.
+327: 
+328:     Provides BM25-based search over chunk content.
+329:     """
+330: 
+331:     def __init__(
+332:         self,
+333:         use_stemming: bool = True,
+334:         remove_stopwords: bool = True,
+335:         k1: float = 1.5,
+336:         b: float = 0.75,
+337:     ) -> None:
+338:         """Initialize the keyword searcher.
+339: 
+340:         Args:
+341:             use_stemming: Apply stemming
+342:             remove_stopwords: Remove stopwords
+343:             k1: BM25 k1 parameter
+344:             b: BM25 b parameter
+345:         """
+346:         self._index = BM25Index(
+347:             k1=k1,
+348:             b=b,
+349:             use_stemming=use_stemming,
+350:             remove_stopwords=remove_stopwords,
+351:         )
+352:         self._chunks: dict[str, Chunk] = {}  # doc_id -> Chunk
+353: 
+354:     def index_chunks(self, chunks: list[Chunk]) -> None:
+355:         """Index chunks for keyword search.
 356: 
-357:         return chunk_results
-358: 
-359:     def search_with_keywords(
-360:         self,
-361:         keywords: list[str],
-362:         limit: int = 10,
-363:         min_score: float = 0.0,
-364:     ) -> list[tuple[Chunk, float]]:
-365:         """Search using pre-extracted keywords.
+357:         Args:
+358:             chunks: Chunks to index
+359:         """
+360:         for chunk in chunks:
+361:             doc_id = str(chunk.id)
+362:             self._chunks[doc_id] = chunk
+363:             self._index.add_document(doc_id, chunk.content)
+364: 
+365:         logger.debug(f"Indexed {len(chunks)} chunks for keyword search")
 366: 
-367:         Args:
-368:             keywords: Keywords to search for
-369:             limit: Maximum results
-370:             min_score: Minimum BM25 score
-371: 
-372:         Returns:
-373:             List of (chunk, score) tuples
-374:         """
-375:         # Join keywords into query
-376:         query = " ".join(keywords)
-377:         return self.search(query, limit=limit, min_score=min_score)
-378: 
+367:     def search(
+368:         self,
+369:         query: str,
+370:         limit: int = 10,
+371:         min_score: float = 0.0,
+372:     ) -> list[tuple[Chunk, float]]:
+373:         """Search for chunks matching the query.
+374: 
+375:         Args:
+376:             query: Query text
+377:             limit: Maximum results
+378:             min_score: Minimum BM25 score
 379: 
-380: async def build_keyword_index(
-381:     chunks: list[Chunk],
-382:     use_stemming: bool = True,
-383:     remove_stopwords: bool = True,
-384: ) -> KeywordSearcher:
-385:     """Build a keyword search index from chunks.
-386: 
-387:     Args:
-388:         chunks: Chunks to index
-389:         use_stemming: Apply stemming
-390:         remove_stopwords: Remove stopwords
+380:         Returns:
+381:             List of (chunk, score) tuples
+382:         """
+383:         results = self._index.search(query, limit=limit, min_score=min_score)
+384: 
+385:         chunk_results = []
+386:         for doc_id, score in results:
+387:             if doc_id in self._chunks:
+388:                 chunk_results.append((self._chunks[doc_id], score))
+389: 
+390:         return chunk_results
 391: 
-392:     Returns:
-393:         KeywordSearcher instance
-394:     """
-395:     searcher = KeywordSearcher(
-396:         use_stemming=use_stemming,
-397:         remove_stopwords=remove_stopwords,
-398:     )
-399:     searcher.index_chunks(chunks)
-400:     return searcher
-401: 
-402: 
-403: def normalize_bm25_score(score: float, max_score: float = 10.0) -> float:
-404:     """Normalize BM25 score to 0-1 range.
-405: 
-406:     Uses sigmoid-like normalization.
-407: 
-408:     Args:
-409:         score: Raw BM25 score
-410:         max_score: Expected max score for normalization
+392:     def search_with_keywords(
+393:         self,
+394:         keywords: list[str],
+395:         limit: int = 10,
+396:         min_score: float = 0.0,
+397:     ) -> list[tuple[Chunk, float]]:
+398:         """Search using pre-extracted keywords.
+399: 
+400:         Args:
+401:             keywords: Keywords to search for
+402:             limit: Maximum results
+403:             min_score: Minimum BM25 score
+404: 
+405:         Returns:
+406:             List of (chunk, score) tuples
+407:         """
+408:         # Join keywords into query
+409:         query = " ".join(keywords)
+410:         return self.search(query, limit=limit, min_score=min_score)
 411: 
-412:     Returns:
-413:         Normalized score between 0 and 1
-414:     """
-415:     if score <= 0:
-416:         return 0.0
-417:     return min(1.0, score / max_score)
+412: 
+413: async def build_keyword_index(
+414:     chunks: list[Chunk],
+415:     use_stemming: bool = True,
+416:     remove_stopwords: bool = True,
+417: ) -> KeywordSearcher:
+418:     """Build a keyword search index from chunks.
+419: 
+420:     Args:
+421:         chunks: Chunks to index
+422:         use_stemming: Apply stemming
+423:         remove_stopwords: Remove stopwords
+424: 
+425:     Returns:
+426:         KeywordSearcher instance
+427:     """
+428:     searcher = KeywordSearcher(
+429:         use_stemming=use_stemming,
+430:         remove_stopwords=remove_stopwords,
+431:     )
+432:     searcher.index_chunks(chunks)
+433:     return searcher
+434: 
+435: 
+436: def normalize_bm25_score(score: float, max_score: float = 10.0) -> float:
+437:     """Normalize BM25 score to 0-1 range.
+438: 
+439:     Uses sigmoid-like normalization.
+440: 
+441:     Args:
+442:         score: Raw BM25 score
+443:         max_score: Expected max score for normalization
+444: 
+445:     Returns:
+446:         Normalized score between 0 and 1
+447:     """
+448:     if score <= 0:
+449:         return 0.0
+450:     return min(1.0, score / max_score)
 ````
 
 ## File: src/khora/query/message_extract.py
@@ -9980,273 +10154,272 @@ README.md
   6: 
   7: import pytest
   8: 
-  9: from khora.core.models.entity import Entity, EntityType
- 10: from khora.extraction.expansion.entity_index import (
- 11:     EntityIndex,
- 12:     _cosine_similarity,
- 13:     _levenshtein_similarity,
- 14:     _normalize_name,
- 15:     _tokenize,
- 16: )
- 17: 
- 18: # ---------------------------------------------------------------------------
- 19: # Helpers
- 20: # ---------------------------------------------------------------------------
+  9: from khora._accel import cosine_similarity, levenshtein_similarity
+ 10: from khora.core.models.entity import Entity, EntityType
+ 11: from khora.extraction.expansion.entity_index import (
+ 12:     EntityIndex,
+ 13:     _normalize_name,
+ 14:     _tokenize,
+ 15: )
+ 16: 
+ 17: # ---------------------------------------------------------------------------
+ 18: # Helpers
+ 19: # ---------------------------------------------------------------------------
+ 20: 
  21: 
- 22: 
- 23: def _make_entity(
- 24:     name: str = "Test Entity",
- 25:     entity_type: EntityType = EntityType.PERSON,
- 26:     namespace_id=None,
- 27:     embedding: list[float] | None = None,
- 28:     confidence: float = 1.0,
- 29: ) -> Entity:
- 30:     return Entity(
- 31:         id=uuid4(),
- 32:         namespace_id=namespace_id or uuid4(),
- 33:         name=name,
- 34:         entity_type=entity_type,
- 35:         description=f"Description of {name}",
- 36:         embedding=embedding,
- 37:         confidence=confidence,
- 38:     )
+ 22: def _make_entity(
+ 23:     name: str = "Test Entity",
+ 24:     entity_type: EntityType = EntityType.PERSON,
+ 25:     namespace_id=None,
+ 26:     embedding: list[float] | None = None,
+ 27:     confidence: float = 1.0,
+ 28: ) -> Entity:
+ 29:     return Entity(
+ 30:         id=uuid4(),
+ 31:         namespace_id=namespace_id or uuid4(),
+ 32:         name=name,
+ 33:         entity_type=entity_type,
+ 34:         description=f"Description of {name}",
+ 35:         embedding=embedding,
+ 36:         confidence=confidence,
+ 37:     )
+ 38: 
  39: 
- 40: 
- 41: # ---------------------------------------------------------------------------
- 42: # Unit helpers
- 43: # ---------------------------------------------------------------------------
+ 40: # ---------------------------------------------------------------------------
+ 41: # Unit helpers
+ 42: # ---------------------------------------------------------------------------
+ 43: 
  44: 
- 45: 
- 46: class TestNormalizeName:
- 47:     def test_lowercase_strip(self):
- 48:         assert _normalize_name("  Hello World  ") == "hello world"
- 49: 
- 50:     def test_empty(self):
- 51:         assert _normalize_name("") == ""
+ 45: class TestNormalizeName:
+ 46:     def test_lowercase_strip(self):
+ 47:         assert _normalize_name("  Hello World  ") == "hello world"
+ 48: 
+ 49:     def test_empty(self):
+ 50:         assert _normalize_name("") == ""
+ 51: 
  52: 
- 53: 
- 54: class TestTokenize:
- 55:     def test_basic(self):
- 56:         tokens = _tokenize("John Smith")
- 57:         assert tokens == {"john", "smith"}
- 58: 
- 59:     def test_filters_short_tokens(self):
- 60:         tokens = _tokenize("A B CD EF")
- 61:         assert "a" not in tokens
- 62:         assert "b" not in tokens
- 63:         assert "cd" in tokens
- 64:         assert "ef" in tokens
- 65: 
- 66:     def test_strips_punctuation(self):
- 67:         tokens = _tokenize("hello-world! foo.bar")
- 68:         assert "helloworld" in tokens
- 69:         assert "foobar" in tokens
+ 53: class TestTokenize:
+ 54:     def test_basic(self):
+ 55:         tokens = _tokenize("John Smith")
+ 56:         assert tokens == {"john", "smith"}
+ 57: 
+ 58:     def test_filters_short_tokens(self):
+ 59:         tokens = _tokenize("A B CD EF")
+ 60:         assert "a" not in tokens
+ 61:         assert "b" not in tokens
+ 62:         assert "cd" in tokens
+ 63:         assert "ef" in tokens
+ 64: 
+ 65:     def test_strips_punctuation(self):
+ 66:         tokens = _tokenize("hello-world! foo.bar")
+ 67:         assert "helloworld" in tokens
+ 68:         assert "foobar" in tokens
+ 69: 
  70: 
- 71: 
- 72: class TestCosineSimilarity:
- 73:     def test_identical(self):
- 74:         v = [1.0, 2.0, 3.0]
- 75:         assert _cosine_similarity(v, v) == pytest.approx(1.0)
- 76: 
- 77:     def test_orthogonal(self):
- 78:         assert _cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
- 79: 
- 80:     def test_mismatched_length(self):
- 81:         assert _cosine_similarity([1.0], [1.0, 2.0]) == 0.0
- 82: 
- 83:     def test_zero_vector(self):
- 84:         assert _cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
+ 71: class TestCosineSimilarity:
+ 72:     def test_identical(self):
+ 73:         v = [1.0, 2.0, 3.0]
+ 74:         assert cosine_similarity(v, v) == pytest.approx(1.0)
+ 75: 
+ 76:     def test_orthogonal(self):
+ 77:         assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+ 78: 
+ 79:     def test_mismatched_length(self):
+ 80:         assert cosine_similarity([1.0], [1.0, 2.0]) == 0.0
+ 81: 
+ 82:     def test_zero_vector(self):
+ 83:         assert cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
+ 84: 
  85: 
- 86: 
- 87: class TestLevenshteinSimilarity:
- 88:     def test_identical(self):
- 89:         assert _levenshtein_similarity("hello", "hello") == 1.0
- 90: 
- 91:     def test_completely_different(self):
- 92:         sim = _levenshtein_similarity("abc", "xyz")
- 93:         assert sim < 0.5
- 94: 
- 95:     def test_close(self):
- 96:         sim = _levenshtein_similarity("kitten", "kittens")
- 97:         assert sim > 0.8
- 98: 
- 99:     def test_empty(self):
-100:         assert _levenshtein_similarity("", "abc") == 0.0
-101:         assert _levenshtein_similarity("abc", "") == 0.0
+ 86: class TestLevenshteinSimilarity:
+ 87:     def test_identical(self):
+ 88:         assert levenshtein_similarity("hello", "hello") == 1.0
+ 89: 
+ 90:     def test_completely_different(self):
+ 91:         sim = levenshtein_similarity("abc", "xyz")
+ 92:         assert sim < 0.5
+ 93: 
+ 94:     def test_close(self):
+ 95:         sim = levenshtein_similarity("kitten", "kittens")
+ 96:         assert sim > 0.8
+ 97: 
+ 98:     def test_empty(self):
+ 99:         assert levenshtein_similarity("", "abc") == 0.0
+100:         assert levenshtein_similarity("abc", "") == 0.0
+101: 
 102: 
-103: 
-104: # ---------------------------------------------------------------------------
-105: # EntityIndex core
-106: # ---------------------------------------------------------------------------
+103: # ---------------------------------------------------------------------------
+104: # EntityIndex core
+105: # ---------------------------------------------------------------------------
+106: 
 107: 
-108: 
-109: class TestEntityIndexAdd:
-110:     def test_add_new_entity(self):
-111:         idx = EntityIndex()
-112:         e = _make_entity("Alice")
-113:         result = idx.add(e)
-114:         assert result is None
-115:         assert len(idx) == 1
-116:         assert e.id in idx
-117: 
-118:     def test_add_duplicate_returns_existing(self):
-119:         idx = EntityIndex()
-120:         e1 = _make_entity("Alice", entity_type=EntityType.PERSON)
-121:         e2 = _make_entity("alice", entity_type=EntityType.PERSON)  # same name, diff case
-122:         idx.add(e1)
-123:         result = idx.add(e2)
-124:         assert result is e1
-125:         assert len(idx) == 1
-126: 
-127:     def test_different_types_not_duplicate(self):
-128:         idx = EntityIndex()
-129:         e1 = _make_entity("Mercury", entity_type=EntityType.PERSON)
-130:         e2 = _make_entity("Mercury", entity_type=EntityType.LOCATION)
-131:         idx.add(e1)
-132:         result = idx.add(e2)
-133:         assert result is None  # different type -> not a duplicate
-134:         assert len(idx) == 2
-135: 
-136:     def test_whitespace_normalization(self):
-137:         idx = EntityIndex()
-138:         e1 = _make_entity("  John Smith  ")
-139:         idx.add(e1)
-140:         e2 = _make_entity("john smith")
-141:         result = idx.add(e2)
-142:         assert result is e1
+108: class TestEntityIndexAdd:
+109:     def test_add_new_entity(self):
+110:         idx = EntityIndex()
+111:         e = _make_entity("Alice")
+112:         result = idx.add(e)
+113:         assert result is None
+114:         assert len(idx) == 1
+115:         assert e.id in idx
+116: 
+117:     def test_add_duplicate_returns_existing(self):
+118:         idx = EntityIndex()
+119:         e1 = _make_entity("Alice", entity_type=EntityType.PERSON)
+120:         e2 = _make_entity("alice", entity_type=EntityType.PERSON)  # same name, diff case
+121:         idx.add(e1)
+122:         result = idx.add(e2)
+123:         assert result is e1
+124:         assert len(idx) == 1
+125: 
+126:     def test_different_types_not_duplicate(self):
+127:         idx = EntityIndex()
+128:         e1 = _make_entity("Mercury", entity_type=EntityType.PERSON)
+129:         e2 = _make_entity("Mercury", entity_type=EntityType.LOCATION)
+130:         idx.add(e1)
+131:         result = idx.add(e2)
+132:         assert result is None  # different type -> not a duplicate
+133:         assert len(idx) == 2
+134: 
+135:     def test_whitespace_normalization(self):
+136:         idx = EntityIndex()
+137:         e1 = _make_entity("  John Smith  ")
+138:         idx.add(e1)
+139:         e2 = _make_entity("john smith")
+140:         result = idx.add(e2)
+141:         assert result is e1
+142: 
 143: 
-144: 
-145: class TestEntityIndexLookup:
-146:     def test_get_by_id(self):
-147:         idx = EntityIndex()
-148:         e = _make_entity("Alice")
-149:         idx.add(e)
-150:         assert idx.get(e.id) is e
-151: 
-152:     def test_get_by_name(self):
-153:         idx = EntityIndex()
-154:         e = _make_entity("Alice", entity_type=EntityType.PERSON)
-155:         idx.add(e)
-156:         assert idx.get_by_name("Alice", "PERSON") is e
-157:         assert idx.get_by_name("alice", "PERSON") is e
-158:         assert idx.get_by_name("Alice", "ORGANIZATION") is None
+144: class TestEntityIndexLookup:
+145:     def test_get_by_id(self):
+146:         idx = EntityIndex()
+147:         e = _make_entity("Alice")
+148:         idx.add(e)
+149:         assert idx.get(e.id) is e
+150: 
+151:     def test_get_by_name(self):
+152:         idx = EntityIndex()
+153:         e = _make_entity("Alice", entity_type=EntityType.PERSON)
+154:         idx.add(e)
+155:         assert idx.get_by_name("Alice", "PERSON") is e
+156:         assert idx.get_by_name("alice", "PERSON") is e
+157:         assert idx.get_by_name("Alice", "ORGANIZATION") is None
+158: 
 159: 
-160: 
-161: class TestFuzzyCandidates:
-162:     def test_finds_similar_names(self):
-163:         idx = EntityIndex()
-164:         ns = uuid4()
-165:         e1 = _make_entity("Microsoft Corporation", EntityType.ORGANIZATION, ns)
-166:         e2 = _make_entity("Microsoft Corp", EntityType.ORGANIZATION, ns)
-167:         e3 = _make_entity("Apple Inc", EntityType.ORGANIZATION, ns)
-168:         idx.add(e1)
-169:         idx.add(e2)
-170:         idx.add(e3)
-171: 
-172:         candidates = idx.find_fuzzy_candidates(e1, threshold=0.6)
-173:         candidate_ids = {c.id for c, _ in candidates}
-174:         assert e2.id in candidate_ids
-175:         assert e3.id not in candidate_ids  # no shared tokens
-176: 
-177:     def test_respects_type_filter(self):
-178:         idx = EntityIndex()
-179:         ns = uuid4()
-180:         e1 = _make_entity("John", EntityType.PERSON, ns)
-181:         e2 = _make_entity("Johns", EntityType.ORGANIZATION, ns)
-182:         idx.add(e1)
-183:         idx.add(e2)
-184: 
-185:         # e2 is a different type, shouldn't appear
-186:         candidates = idx.find_fuzzy_candidates(e1, threshold=0.5)
-187:         assert len(candidates) == 0
-188: 
-189:     def test_empty_index(self):
-190:         idx = EntityIndex()
-191:         e = _make_entity("Alice")
-192:         assert idx.find_fuzzy_candidates(e) == []
-193: 
-194:     def test_excludes_exact_matches(self):
-195:         idx = EntityIndex()
-196:         e = _make_entity("Alice")
-197:         idx.add(e)
-198:         # Fuzzy candidates should not include exact matches
-199:         candidates = idx.find_fuzzy_candidates(e)
-200:         assert len(candidates) == 0
+160: class TestFuzzyCandidates:
+161:     def test_finds_similar_names(self):
+162:         idx = EntityIndex()
+163:         ns = uuid4()
+164:         e1 = _make_entity("Microsoft Corporation", EntityType.ORGANIZATION, ns)
+165:         e2 = _make_entity("Microsoft Corp", EntityType.ORGANIZATION, ns)
+166:         e3 = _make_entity("Apple Inc", EntityType.ORGANIZATION, ns)
+167:         idx.add(e1)
+168:         idx.add(e2)
+169:         idx.add(e3)
+170: 
+171:         candidates = idx.find_fuzzy_candidates(e1, threshold=0.6)
+172:         candidate_ids = {c.id for c, _ in candidates}
+173:         assert e2.id in candidate_ids
+174:         assert e3.id not in candidate_ids  # no shared tokens
+175: 
+176:     def test_respects_type_filter(self):
+177:         idx = EntityIndex()
+178:         ns = uuid4()
+179:         e1 = _make_entity("John", EntityType.PERSON, ns)
+180:         e2 = _make_entity("Johns", EntityType.ORGANIZATION, ns)
+181:         idx.add(e1)
+182:         idx.add(e2)
+183: 
+184:         # e2 is a different type, shouldn't appear
+185:         candidates = idx.find_fuzzy_candidates(e1, threshold=0.5)
+186:         assert len(candidates) == 0
+187: 
+188:     def test_empty_index(self):
+189:         idx = EntityIndex()
+190:         e = _make_entity("Alice")
+191:         assert idx.find_fuzzy_candidates(e) == []
+192: 
+193:     def test_excludes_exact_matches(self):
+194:         idx = EntityIndex()
+195:         e = _make_entity("Alice")
+196:         idx.add(e)
+197:         # Fuzzy candidates should not include exact matches
+198:         candidates = idx.find_fuzzy_candidates(e)
+199:         assert len(candidates) == 0
+200: 
 201: 
-202: 
-203: class TestEmbeddingCandidates:
-204:     def test_finds_similar_embeddings(self):
-205:         idx = EntityIndex()
-206:         ns = uuid4()
-207:         emb1 = [1.0, 0.0, 0.0]
-208:         emb2 = [0.99, 0.1, 0.0]  # very similar
-209:         emb3 = [0.0, 0.0, 1.0]  # orthogonal
-210: 
-211:         e1 = _make_entity("Entity A", EntityType.CONCEPT, ns, embedding=emb1)
-212:         e2 = _make_entity("Entity B", EntityType.CONCEPT, ns, embedding=emb2)
-213:         e3 = _make_entity("Entity C", EntityType.CONCEPT, ns, embedding=emb3)
-214:         idx.add(e1)
-215:         idx.add(e2)
-216:         idx.add(e3)
-217: 
-218:         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
-219:         candidate_ids = {c.id for c, _ in candidates}
-220:         assert e2.id in candidate_ids
-221:         assert e3.id not in candidate_ids
-222: 
-223:     def test_no_embedding_returns_empty(self):
-224:         idx = EntityIndex()
-225:         e = _make_entity("Alice")  # no embedding
-226:         idx.add(e)
-227:         assert idx.find_embedding_candidates(e) == []
-228: 
-229:     def test_includes_same_type_without_shared_tokens(self):
-230:         """Embedding candidates should include same-type entities even without shared name tokens."""
-231:         idx = EntityIndex()
-232:         ns = uuid4()
-233:         emb1 = [1.0, 0.0, 0.0]
-234:         emb2 = [0.99, 0.1, 0.0]
-235: 
-236:         e1 = _make_entity("Alpha Beta", EntityType.CONCEPT, ns, embedding=emb1)
-237:         e2 = _make_entity("Gamma Delta", EntityType.CONCEPT, ns, embedding=emb2)  # no shared tokens
-238:         idx.add(e1)
-239:         idx.add(e2)
-240: 
-241:         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
-242:         candidate_ids = {c.id for c, _ in candidates}
-243:         assert e2.id in candidate_ids
+202: class TestEmbeddingCandidates:
+203:     def test_finds_similar_embeddings(self):
+204:         idx = EntityIndex()
+205:         ns = uuid4()
+206:         emb1 = [1.0, 0.0, 0.0]
+207:         emb2 = [0.99, 0.1, 0.0]  # very similar
+208:         emb3 = [0.0, 0.0, 1.0]  # orthogonal
+209: 
+210:         e1 = _make_entity("Entity A", EntityType.CONCEPT, ns, embedding=emb1)
+211:         e2 = _make_entity("Entity B", EntityType.CONCEPT, ns, embedding=emb2)
+212:         e3 = _make_entity("Entity C", EntityType.CONCEPT, ns, embedding=emb3)
+213:         idx.add(e1)
+214:         idx.add(e2)
+215:         idx.add(e3)
+216: 
+217:         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
+218:         candidate_ids = {c.id for c, _ in candidates}
+219:         assert e2.id in candidate_ids
+220:         assert e3.id not in candidate_ids
+221: 
+222:     def test_no_embedding_returns_empty(self):
+223:         idx = EntityIndex()
+224:         e = _make_entity("Alice")  # no embedding
+225:         idx.add(e)
+226:         assert idx.find_embedding_candidates(e) == []
+227: 
+228:     def test_includes_same_type_without_shared_tokens(self):
+229:         """Embedding candidates should include same-type entities even without shared name tokens."""
+230:         idx = EntityIndex()
+231:         ns = uuid4()
+232:         emb1 = [1.0, 0.0, 0.0]
+233:         emb2 = [0.99, 0.1, 0.0]
+234: 
+235:         e1 = _make_entity("Alpha Beta", EntityType.CONCEPT, ns, embedding=emb1)
+236:         e2 = _make_entity("Gamma Delta", EntityType.CONCEPT, ns, embedding=emb2)  # no shared tokens
+237:         idx.add(e1)
+238:         idx.add(e2)
+239: 
+240:         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
+241:         candidate_ids = {c.id for c, _ in candidates}
+242:         assert e2.id in candidate_ids
+243: 
 244: 
-245: 
-246: class TestEntityIndexBulk:
-247:     def test_get_all_entities(self):
-248:         idx = EntityIndex()
-249:         entities = [_make_entity(f"Entity {i}") for i in range(5)]
-250:         for e in entities:
-251:             idx.add(e)
-252:         all_ents = idx.get_all_entities()
-253:         assert len(all_ents) == 5
-254: 
-255:     def test_get_entities_by_type(self):
-256:         idx = EntityIndex()
-257:         for i in range(3):
-258:             idx.add(_make_entity(f"Person {i}", EntityType.PERSON))
-259:         for i in range(2):
-260:             idx.add(_make_entity(f"Org {i}", EntityType.ORGANIZATION))
-261: 
-262:         assert len(idx.get_entities_by_type("PERSON")) == 3
-263:         assert len(idx.get_entities_by_type("ORGANIZATION")) == 2
-264:         assert len(idx.get_entities_by_type("CONCEPT")) == 0
-265: 
-266:     def test_stats(self):
-267:         idx = EntityIndex()
-268:         idx.add(_make_entity("John Smith", EntityType.PERSON))
-269:         idx.add(_make_entity("Jane Doe", EntityType.PERSON))
-270: 
-271:         stats = idx.stats()
-272:         assert stats["total_entities"] == 2
-273:         assert stats["exact_keys"] == 2
-274:         assert stats["type_groups"] == 1
-275:         assert stats["token_keys"] > 0
+245: class TestEntityIndexBulk:
+246:     def test_get_all_entities(self):
+247:         idx = EntityIndex()
+248:         entities = [_make_entity(f"Entity {i}") for i in range(5)]
+249:         for e in entities:
+250:             idx.add(e)
+251:         all_ents = idx.get_all_entities()
+252:         assert len(all_ents) == 5
+253: 
+254:     def test_get_entities_by_type(self):
+255:         idx = EntityIndex()
+256:         for i in range(3):
+257:             idx.add(_make_entity(f"Person {i}", EntityType.PERSON))
+258:         for i in range(2):
+259:             idx.add(_make_entity(f"Org {i}", EntityType.ORGANIZATION))
+260: 
+261:         assert len(idx.get_entities_by_type("PERSON")) == 3
+262:         assert len(idx.get_entities_by_type("ORGANIZATION")) == 2
+263:         assert len(idx.get_entities_by_type("CONCEPT")) == 0
+264: 
+265:     def test_stats(self):
+266:         idx = EntityIndex()
+267:         idx.add(_make_entity("John Smith", EntityType.PERSON))
+268:         idx.add(_make_entity("Jane Doe", EntityType.PERSON))
+269: 
+270:         stats = idx.stats()
+271:         assert stats["total_entities"] == 2
+272:         assert stats["exact_keys"] == 2
+273:         assert stats["type_groups"] == 1
+274:         assert stats["token_keys"] > 0
 ````
 
 ## File: tests/unit/test_expansion.py
@@ -17522,476 +17695,419 @@ README.md
  12: 
  13: from loguru import logger
  14: 
- 15: from .rule_engine import RuleEngine, RuleEvaluationContext
+ 15: from khora._accel import cosine_similarity, levenshtein_similarity
  16: 
- 17: if TYPE_CHECKING:
- 18:     from khora.core.models import Entity, Relationship
- 19:     from khora.extraction.skills import ExpertiseConfig
- 20: 
- 21:     from .entity_index import EntityIndex
+ 17: from .rule_engine import RuleEngine, RuleEvaluationContext
+ 18: 
+ 19: if TYPE_CHECKING:
+ 20:     from khora.core.models import Entity, Relationship
+ 21:     from khora.extraction.skills import ExpertiseConfig
  22: 
- 23: 
- 24: @dataclass
- 25: class UnificationResult:
- 26:     """Result of cross-tool entity unification."""
- 27: 
- 28:     # Entities after unification (merged duplicates)
- 29:     unified_entities: list[Entity] = field(default_factory=list)
- 30: 
- 31:     # Mapping from original entity IDs to unified entity IDs
- 32:     entity_mapping: dict[UUID, UUID] = field(default_factory=dict)
- 33: 
- 34:     # Relationships updated with unified entity references
- 35:     updated_relationships: list[Relationship] = field(default_factory=list)
- 36: 
- 37:     # New relationships created by correlation rules
- 38:     new_relationships: list[Relationship] = field(default_factory=list)
- 39: 
- 40:     # Statistics
- 41:     entities_merged: int = 0
- 42:     merge_groups: list[list[UUID]] = field(default_factory=list)  # Groups of merged entity IDs
- 43: 
- 44: 
- 45: class CrossToolUnifier:
- 46:     """Unifies entities across different tools and sources.
- 47: 
- 48:     Uses correlation rules from expertise configuration to identify
- 49:     entities that should be merged:
- 50:     - Email matching for people
- 51:     - Domain matching for companies
- 52:     - Pattern matching for references (e.g., JIRA-123)
- 53:     - Embedding similarity for fuzzy matching
- 54:     """
- 55: 
- 56:     def __init__(
- 57:         self,
- 58:         expertise: ExpertiseConfig | None = None,
- 59:         *,
- 60:         embedding_threshold: float = 0.85,
- 61:         fuzzy_threshold: float = 0.85,
- 62:     ) -> None:
- 63:         """Initialize the cross-tool unifier.
- 64: 
- 65:         Args:
- 66:             expertise: ExpertiseConfig with correlation rules
- 67:             embedding_threshold: Similarity threshold for embedding matching
- 68:             fuzzy_threshold: Threshold for fuzzy string matching
- 69:         """
- 70:         self._expertise = expertise
- 71:         self._embedding_threshold = embedding_threshold
- 72:         self._fuzzy_threshold = fuzzy_threshold
- 73:         self._rule_engine = RuleEngine(expertise)
- 74: 
- 75:     def unify(
- 76:         self,
- 77:         entities: list[Entity],
- 78:         relationships: list[Relationship],
- 79:         *,
- 80:         use_embeddings: bool = True,
- 81:         use_fuzzy: bool = True,
- 82:         entity_index: EntityIndex | None = None,
- 83:     ) -> UnificationResult:
- 84:         """Unify entities and update relationships.
- 85: 
- 86:         Args:
- 87:             entities: Entities to unify
- 88:             relationships: Relationships between entities
- 89:             use_embeddings: Whether to use embedding similarity
- 90:             use_fuzzy: Whether to use fuzzy string matching
- 91: 
- 92:         Returns:
- 93:             UnificationResult with unified entities and updated relationships
- 94:         """
- 95:         result = UnificationResult()
- 96: 
- 97:         if not entities:
- 98:             return result
- 99: 
-100:         # Build evaluation context
-101:         context = RuleEvaluationContext.from_data(entities, relationships)
-102: 
-103:         # Find entity groups that should be merged
-104:         merge_groups = self._find_merge_groups(entities, context, use_embeddings, use_fuzzy, entity_index=entity_index)
-105: 
-106:         if not merge_groups:
-107:             # No merging needed
-108:             result.unified_entities = entities.copy()
-109:             result.updated_relationships = relationships.copy()
-110:             return result
-111: 
-112:         # Merge entities in each group
-113:         entity_mapping: dict[UUID, UUID] = {}
-114:         unified_entities: list[Entity] = []
-115:         processed_ids: set[UUID] = set()
-116: 
-117:         for group in merge_groups:
-118:             if len(group) < 2:
-119:                 continue
-120: 
-121:             # Merge all entities in the group
-122:             merged_entity = self._merge_entity_group([e for e in entities if e.id in group])
-123:             unified_entities.append(merged_entity)
-124: 
-125:             # Map all original IDs to the merged entity's ID
-126:             for entity_id in group:
-127:                 entity_mapping[entity_id] = merged_entity.id
-128:                 processed_ids.add(entity_id)
-129: 
-130:             result.entities_merged += len(group) - 1
-131:             result.merge_groups.append(list(group))
-132: 
-133:         # Add entities that weren't merged
-134:         for entity in entities:
-135:             if entity.id not in processed_ids:
-136:                 unified_entities.append(entity)
-137:                 entity_mapping[entity.id] = entity.id
-138: 
-139:         result.unified_entities = unified_entities
-140:         result.entity_mapping = entity_mapping
-141: 
-142:         # Update relationships with new entity IDs
-143:         result.updated_relationships = self._update_relationships(relationships, entity_mapping)
-144: 
-145:         # Find new relationships from correlation rules
-146:         result.new_relationships = self._find_new_relationships(merge_groups, entities)
-147: 
-148:         logger.debug(
-149:             f"Unified {len(entities)} entities into {len(unified_entities)} "
-150:             f"({result.entities_merged} merged in {len(merge_groups)} groups)"
-151:         )
-152: 
-153:         return result
+ 23:     from .entity_index import EntityIndex
+ 24: 
+ 25: 
+ 26: @dataclass
+ 27: class UnificationResult:
+ 28:     """Result of cross-tool entity unification."""
+ 29: 
+ 30:     # Entities after unification (merged duplicates)
+ 31:     unified_entities: list[Entity] = field(default_factory=list)
+ 32: 
+ 33:     # Mapping from original entity IDs to unified entity IDs
+ 34:     entity_mapping: dict[UUID, UUID] = field(default_factory=dict)
+ 35: 
+ 36:     # Relationships updated with unified entity references
+ 37:     updated_relationships: list[Relationship] = field(default_factory=list)
+ 38: 
+ 39:     # New relationships created by correlation rules
+ 40:     new_relationships: list[Relationship] = field(default_factory=list)
+ 41: 
+ 42:     # Statistics
+ 43:     entities_merged: int = 0
+ 44:     merge_groups: list[list[UUID]] = field(default_factory=list)  # Groups of merged entity IDs
+ 45: 
+ 46: 
+ 47: class CrossToolUnifier:
+ 48:     """Unifies entities across different tools and sources.
+ 49: 
+ 50:     Uses correlation rules from expertise configuration to identify
+ 51:     entities that should be merged:
+ 52:     - Email matching for people
+ 53:     - Domain matching for companies
+ 54:     - Pattern matching for references (e.g., JIRA-123)
+ 55:     - Embedding similarity for fuzzy matching
+ 56:     """
+ 57: 
+ 58:     def __init__(
+ 59:         self,
+ 60:         expertise: ExpertiseConfig | None = None,
+ 61:         *,
+ 62:         embedding_threshold: float = 0.85,
+ 63:         fuzzy_threshold: float = 0.85,
+ 64:     ) -> None:
+ 65:         """Initialize the cross-tool unifier.
+ 66: 
+ 67:         Args:
+ 68:             expertise: ExpertiseConfig with correlation rules
+ 69:             embedding_threshold: Similarity threshold for embedding matching
+ 70:             fuzzy_threshold: Threshold for fuzzy string matching
+ 71:         """
+ 72:         self._expertise = expertise
+ 73:         self._embedding_threshold = embedding_threshold
+ 74:         self._fuzzy_threshold = fuzzy_threshold
+ 75:         self._rule_engine = RuleEngine(expertise)
+ 76: 
+ 77:     def unify(
+ 78:         self,
+ 79:         entities: list[Entity],
+ 80:         relationships: list[Relationship],
+ 81:         *,
+ 82:         use_embeddings: bool = True,
+ 83:         use_fuzzy: bool = True,
+ 84:         entity_index: EntityIndex | None = None,
+ 85:     ) -> UnificationResult:
+ 86:         """Unify entities and update relationships.
+ 87: 
+ 88:         Args:
+ 89:             entities: Entities to unify
+ 90:             relationships: Relationships between entities
+ 91:             use_embeddings: Whether to use embedding similarity
+ 92:             use_fuzzy: Whether to use fuzzy string matching
+ 93: 
+ 94:         Returns:
+ 95:             UnificationResult with unified entities and updated relationships
+ 96:         """
+ 97:         result = UnificationResult()
+ 98: 
+ 99:         if not entities:
+100:             return result
+101: 
+102:         # Build evaluation context
+103:         context = RuleEvaluationContext.from_data(entities, relationships)
+104: 
+105:         # Find entity groups that should be merged
+106:         merge_groups = self._find_merge_groups(entities, context, use_embeddings, use_fuzzy, entity_index=entity_index)
+107: 
+108:         if not merge_groups:
+109:             # No merging needed
+110:             result.unified_entities = entities.copy()
+111:             result.updated_relationships = relationships.copy()
+112:             return result
+113: 
+114:         # Merge entities in each group
+115:         entity_mapping: dict[UUID, UUID] = {}
+116:         unified_entities: list[Entity] = []
+117:         processed_ids: set[UUID] = set()
+118: 
+119:         for group in merge_groups:
+120:             if len(group) < 2:
+121:                 continue
+122: 
+123:             # Merge all entities in the group
+124:             merged_entity = self._merge_entity_group([e for e in entities if e.id in group])
+125:             unified_entities.append(merged_entity)
+126: 
+127:             # Map all original IDs to the merged entity's ID
+128:             for entity_id in group:
+129:                 entity_mapping[entity_id] = merged_entity.id
+130:                 processed_ids.add(entity_id)
+131: 
+132:             result.entities_merged += len(group) - 1
+133:             result.merge_groups.append(list(group))
+134: 
+135:         # Add entities that weren't merged
+136:         for entity in entities:
+137:             if entity.id not in processed_ids:
+138:                 unified_entities.append(entity)
+139:                 entity_mapping[entity.id] = entity.id
+140: 
+141:         result.unified_entities = unified_entities
+142:         result.entity_mapping = entity_mapping
+143: 
+144:         # Update relationships with new entity IDs
+145:         result.updated_relationships = self._update_relationships(relationships, entity_mapping)
+146: 
+147:         # Find new relationships from correlation rules
+148:         result.new_relationships = self._find_new_relationships(merge_groups, entities)
+149: 
+150:         logger.debug(
+151:             f"Unified {len(entities)} entities into {len(unified_entities)} "
+152:             f"({result.entities_merged} merged in {len(merge_groups)} groups)"
+153:         )
 154: 
-155:     def _find_merge_groups(
-156:         self,
-157:         entities: list[Entity],
-158:         context: RuleEvaluationContext,
-159:         use_embeddings: bool,
-160:         use_fuzzy: bool,
-161:         *,
-162:         entity_index: EntityIndex | None = None,
-163:     ) -> list[set[UUID]]:
-164:         """Find groups of entities that should be merged."""
-165:         # Use Union-Find to track merge groups
-166:         parent: dict[UUID, UUID] = {e.id: e.id for e in entities}
-167: 
-168:         def find(x: UUID) -> UUID:
-169:             if parent[x] != x:
-170:                 parent[x] = find(parent[x])
-171:             return parent[x]
-172: 
-173:         def union(x: UUID, y: UUID) -> None:
-174:             px, py = find(x), find(y)
-175:             if px != py:
-176:                 parent[px] = py
-177: 
-178:         # Apply correlation rules
-179:         if self._expertise and self._expertise.correlation_rules:
-180:             for rule in self._expertise.correlation_rules:
-181:                 if rule.match_fields:
-182:                     matches = self._find_field_match_pairs(entities, rule.match_fields, rule.entity_types)
-183:                     for e1_id, e2_id in matches:
-184:                         union(e1_id, e2_id)
-185: 
-186:         # Exact name matching within same type
-187:         self._find_exact_name_matches(entities, union)
-188: 
-189:         # Optional: Embedding similarity matching
-190:         if use_embeddings:
-191:             embedding_matches = self._find_embedding_matches(entities, entity_index=entity_index)
-192:             for e1_id, e2_id in embedding_matches:
-193:                 union(e1_id, e2_id)
-194: 
-195:         # Optional: Fuzzy string matching
-196:         if use_fuzzy:
-197:             fuzzy_matches = self._find_fuzzy_matches(entities, entity_index=entity_index)
-198:             for e1_id, e2_id in fuzzy_matches:
-199:                 union(e1_id, e2_id)
-200: 
-201:         # Build groups from union-find
-202:         groups: dict[UUID, set[UUID]] = {}
-203:         for entity in entities:
-204:             root = find(entity.id)
-205:             if root not in groups:
-206:                 groups[root] = set()
-207:             groups[root].add(entity.id)
-208: 
-209:         # Return only groups with multiple entities
-210:         return [group for group in groups.values() if len(group) > 1]
-211: 
-212:     def _find_field_match_pairs(
-213:         self,
-214:         entities: list[Entity],
-215:         match_fields: list[str],
-216:         entity_types: list[str],
-217:     ) -> list[tuple[UUID, UUID]]:
-218:         """Find entity pairs that match on specified fields."""
-219:         pairs = []
-220: 
-221:         # Filter by entity types if specified
-222:         candidates = entities
-223:         if entity_types:
-224:             candidates = [
-225:                 e
-226:                 for e in entities
-227:                 if str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) in entity_types
-228:             ]
-229: 
-230:         # Group by field values
-231:         for field_name in match_fields:
-232:             field_groups: dict[Any, list[Entity]] = {}
-233:             for entity in candidates:
-234:                 field_value = entity.attributes.get(field_name)
-235:                 if field_value:
-236:                     # Normalize strings
-237:                     if isinstance(field_value, str):
-238:                         field_value = field_value.lower().strip()
-239:                     if field_value not in field_groups:
-240:                         field_groups[field_value] = []
-241:                     field_groups[field_value].append(entity)
-242: 
-243:             # Create pairs from groups
-244:             for group_entities in field_groups.values():
-245:                 if len(group_entities) > 1:
-246:                     # Add pairs for all combinations in group
-247:                     for i, e1 in enumerate(group_entities):
-248:                         for e2 in group_entities[i + 1 :]:
-249:                             pairs.append((e1.id, e2.id))
-250: 
-251:         return pairs
+155:         return result
+156: 
+157:     def _find_merge_groups(
+158:         self,
+159:         entities: list[Entity],
+160:         context: RuleEvaluationContext,
+161:         use_embeddings: bool,
+162:         use_fuzzy: bool,
+163:         *,
+164:         entity_index: EntityIndex | None = None,
+165:     ) -> list[set[UUID]]:
+166:         """Find groups of entities that should be merged."""
+167:         # Use Union-Find to track merge groups
+168:         parent: dict[UUID, UUID] = {e.id: e.id for e in entities}
+169: 
+170:         def find(x: UUID) -> UUID:
+171:             if parent[x] != x:
+172:                 parent[x] = find(parent[x])
+173:             return parent[x]
+174: 
+175:         def union(x: UUID, y: UUID) -> None:
+176:             px, py = find(x), find(y)
+177:             if px != py:
+178:                 parent[px] = py
+179: 
+180:         # Apply correlation rules
+181:         if self._expertise and self._expertise.correlation_rules:
+182:             for rule in self._expertise.correlation_rules:
+183:                 if rule.match_fields:
+184:                     matches = self._find_field_match_pairs(entities, rule.match_fields, rule.entity_types)
+185:                     for e1_id, e2_id in matches:
+186:                         union(e1_id, e2_id)
+187: 
+188:         # Exact name matching within same type
+189:         self._find_exact_name_matches(entities, union)
+190: 
+191:         # Optional: Embedding similarity matching
+192:         if use_embeddings:
+193:             embedding_matches = self._find_embedding_matches(entities, entity_index=entity_index)
+194:             for e1_id, e2_id in embedding_matches:
+195:                 union(e1_id, e2_id)
+196: 
+197:         # Optional: Fuzzy string matching
+198:         if use_fuzzy:
+199:             fuzzy_matches = self._find_fuzzy_matches(entities, entity_index=entity_index)
+200:             for e1_id, e2_id in fuzzy_matches:
+201:                 union(e1_id, e2_id)
+202: 
+203:         # Build groups from union-find
+204:         groups: dict[UUID, set[UUID]] = {}
+205:         for entity in entities:
+206:             root = find(entity.id)
+207:             if root not in groups:
+208:                 groups[root] = set()
+209:             groups[root].add(entity.id)
+210: 
+211:         # Return only groups with multiple entities
+212:         return [group for group in groups.values() if len(group) > 1]
+213: 
+214:     def _find_field_match_pairs(
+215:         self,
+216:         entities: list[Entity],
+217:         match_fields: list[str],
+218:         entity_types: list[str],
+219:     ) -> list[tuple[UUID, UUID]]:
+220:         """Find entity pairs that match on specified fields."""
+221:         pairs = []
+222: 
+223:         # Filter by entity types if specified
+224:         candidates = entities
+225:         if entity_types:
+226:             candidates = [
+227:                 e
+228:                 for e in entities
+229:                 if str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) in entity_types
+230:             ]
+231: 
+232:         # Group by field values
+233:         for field_name in match_fields:
+234:             field_groups: dict[Any, list[Entity]] = {}
+235:             for entity in candidates:
+236:                 field_value = entity.attributes.get(field_name)
+237:                 if field_value:
+238:                     # Normalize strings
+239:                     if isinstance(field_value, str):
+240:                         field_value = field_value.lower().strip()
+241:                     if field_value not in field_groups:
+242:                         field_groups[field_value] = []
+243:                     field_groups[field_value].append(entity)
+244: 
+245:             # Create pairs from groups
+246:             for group_entities in field_groups.values():
+247:                 if len(group_entities) > 1:
+248:                     # Add pairs for all combinations in group
+249:                     for i, e1 in enumerate(group_entities):
+250:                         for e2 in group_entities[i + 1 :]:
+251:                             pairs.append((e1.id, e2.id))
 252: 
-253:     def _find_exact_name_matches(
-254:         self,
-255:         entities: list[Entity],
-256:         union: Any,
-257:     ) -> None:
-258:         """Find entities with exact name matches (same type)."""
-259:         # Group by (normalized_name, type)
-260:         name_type_groups: dict[tuple[str, str], list[Entity]] = {}
-261:         for entity in entities:
-262:             key = (
-263:                 entity.name.lower().strip(),
-264:                 str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type),
-265:             )
-266:             if key not in name_type_groups:
-267:                 name_type_groups[key] = []
-268:             name_type_groups[key].append(entity)
-269: 
-270:         # Union entities in each group
-271:         for group in name_type_groups.values():
-272:             if len(group) > 1:
-273:                 first = group[0]
-274:                 for entity in group[1:]:
-275:                     union(first.id, entity.id)
-276: 
-277:     def _find_embedding_matches(
-278:         self,
-279:         entities: list[Entity],
-280:         *,
-281:         entity_index: EntityIndex | None = None,
-282:     ) -> list[tuple[UUID, UUID]]:
-283:         """Find entity pairs with similar embeddings.
-284: 
-285:         When *entity_index* is provided, uses token blocking to reduce the
-286:         candidate set from O(n^2) to O(n*k) where k is ~10-20 candidates
-287:         per entity.
-288:         """
-289:         pairs = []
-290: 
-291:         # Filter to entities with embeddings
-292:         with_embeddings = [e for e in entities if e.embedding]
-293:         if len(with_embeddings) < 2:
-294:             return pairs
-295: 
-296:         if entity_index is not None:
-297:             # Blocked matching: O(n*k) via entity_index
-298:             seen: set[tuple[UUID, UUID]] = set()
-299:             for entity in with_embeddings:
-300:                 for candidate, similarity in entity_index.find_embedding_candidates(
-301:                     entity, threshold=self._embedding_threshold
-302:                 ):
-303:                     pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
-304:                     if pair not in seen:
-305:                         seen.add(pair)
-306:                         pairs.append((entity.id, candidate.id))
-307:             return pairs
-308: 
-309:         # Fallback: O(n^2) pairwise comparison
-310:         for i, e1 in enumerate(with_embeddings):
-311:             for e2 in with_embeddings[i + 1 :]:
-312:                 # Only compare same type
-313:                 if e1.entity_type != e2.entity_type:
-314:                     continue
-315: 
-316:                 similarity = self._cosine_similarity(e1.embedding, e2.embedding)
-317:                 if similarity >= self._embedding_threshold:
-318:                     pairs.append((e1.id, e2.id))
-319: 
-320:         return pairs
+253:         return pairs
+254: 
+255:     def _find_exact_name_matches(
+256:         self,
+257:         entities: list[Entity],
+258:         union: Any,
+259:     ) -> None:
+260:         """Find entities with exact name matches (same type)."""
+261:         # Group by (normalized_name, type)
+262:         name_type_groups: dict[tuple[str, str], list[Entity]] = {}
+263:         for entity in entities:
+264:             key = (
+265:                 entity.name.lower().strip(),
+266:                 str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type),
+267:             )
+268:             if key not in name_type_groups:
+269:                 name_type_groups[key] = []
+270:             name_type_groups[key].append(entity)
+271: 
+272:         # Union entities in each group
+273:         for group in name_type_groups.values():
+274:             if len(group) > 1:
+275:                 first = group[0]
+276:                 for entity in group[1:]:
+277:                     union(first.id, entity.id)
+278: 
+279:     def _find_embedding_matches(
+280:         self,
+281:         entities: list[Entity],
+282:         *,
+283:         entity_index: EntityIndex | None = None,
+284:     ) -> list[tuple[UUID, UUID]]:
+285:         """Find entity pairs with similar embeddings.
+286: 
+287:         When *entity_index* is provided, uses token blocking to reduce the
+288:         candidate set from O(n^2) to O(n*k) where k is ~10-20 candidates
+289:         per entity.
+290:         """
+291:         pairs = []
+292: 
+293:         # Filter to entities with embeddings
+294:         with_embeddings = [e for e in entities if e.embedding]
+295:         if len(with_embeddings) < 2:
+296:             return pairs
+297: 
+298:         if entity_index is not None:
+299:             # Blocked matching: O(n*k) via entity_index
+300:             seen: set[tuple[UUID, UUID]] = set()
+301:             for entity in with_embeddings:
+302:                 for candidate, similarity in entity_index.find_embedding_candidates(
+303:                     entity, threshold=self._embedding_threshold
+304:                 ):
+305:                     pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
+306:                     if pair not in seen:
+307:                         seen.add(pair)
+308:                         pairs.append((entity.id, candidate.id))
+309:             return pairs
+310: 
+311:         # Fallback: O(n^2) pairwise comparison
+312:         for i, e1 in enumerate(with_embeddings):
+313:             for e2 in with_embeddings[i + 1 :]:
+314:                 # Only compare same type
+315:                 if e1.entity_type != e2.entity_type:
+316:                     continue
+317: 
+318:                 similarity = cosine_similarity(e1.embedding, e2.embedding)
+319:                 if similarity >= self._embedding_threshold:
+320:                     pairs.append((e1.id, e2.id))
 321: 
-322:     def _find_fuzzy_matches(
-323:         self,
-324:         entities: list[Entity],
-325:         *,
-326:         entity_index: EntityIndex | None = None,
-327:     ) -> list[tuple[UUID, UUID]]:
-328:         """Find entity pairs with similar names (fuzzy matching).
-329: 
-330:         When *entity_index* is provided, uses token blocking to reduce the
-331:         candidate set from O(n^2) to O(n*k).
-332:         """
-333:         pairs = []
-334: 
-335:         if entity_index is not None:
-336:             # Blocked matching: O(n*k)
-337:             seen: set[tuple[UUID, UUID]] = set()
-338:             for entity in entities:
-339:                 for candidate, similarity in entity_index.find_fuzzy_candidates(
-340:                     entity, threshold=self._fuzzy_threshold
-341:                 ):
-342:                     pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
-343:                     if pair not in seen:
-344:                         seen.add(pair)
-345:                         pairs.append((entity.id, candidate.id))
-346:             return pairs
-347: 
-348:         # Fallback: O(n^2) pairwise within type groups
-349:         type_groups: dict[str, list[Entity]] = {}
-350:         for entity in entities:
-351:             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
-352:             if type_key not in type_groups:
-353:                 type_groups[type_key] = []
-354:             type_groups[type_key].append(entity)
-355: 
-356:         for group in type_groups.values():
-357:             if len(group) < 2:
-358:                 continue
-359: 
-360:             for i, e1 in enumerate(group):
-361:                 for e2 in group[i + 1 :]:
-362:                     similarity = self._fuzzy_similarity(e1.name, e2.name)
-363:                     if similarity >= self._fuzzy_threshold:
-364:                         pairs.append((e1.id, e2.id))
-365: 
-366:         return pairs
+322:         return pairs
+323: 
+324:     def _find_fuzzy_matches(
+325:         self,
+326:         entities: list[Entity],
+327:         *,
+328:         entity_index: EntityIndex | None = None,
+329:     ) -> list[tuple[UUID, UUID]]:
+330:         """Find entity pairs with similar names (fuzzy matching).
+331: 
+332:         When *entity_index* is provided, uses token blocking to reduce the
+333:         candidate set from O(n^2) to O(n*k).
+334:         """
+335:         pairs = []
+336: 
+337:         if entity_index is not None:
+338:             # Blocked matching: O(n*k)
+339:             seen: set[tuple[UUID, UUID]] = set()
+340:             for entity in entities:
+341:                 for candidate, similarity in entity_index.find_fuzzy_candidates(
+342:                     entity, threshold=self._fuzzy_threshold
+343:                 ):
+344:                     pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
+345:                     if pair not in seen:
+346:                         seen.add(pair)
+347:                         pairs.append((entity.id, candidate.id))
+348:             return pairs
+349: 
+350:         # Fallback: O(n^2) pairwise within type groups
+351:         type_groups: dict[str, list[Entity]] = {}
+352:         for entity in entities:
+353:             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+354:             if type_key not in type_groups:
+355:                 type_groups[type_key] = []
+356:             type_groups[type_key].append(entity)
+357: 
+358:         for group in type_groups.values():
+359:             if len(group) < 2:
+360:                 continue
+361: 
+362:             for i, e1 in enumerate(group):
+363:                 for e2 in group[i + 1 :]:
+364:                     similarity = levenshtein_similarity(e1.name, e2.name)
+365:                     if similarity >= self._fuzzy_threshold:
+366:                         pairs.append((e1.id, e2.id))
 367: 
-368:     def _merge_entity_group(self, entities: list[Entity]) -> Entity:
-369:         """Merge a group of entities into one.
-370: 
-371:         Strategy:
-372:         - Use the entity with highest confidence as base
-373:         - Merge attributes (non-empty values preferred)
-374:         - Combine source document/chunk IDs
-375:         - Sum mention counts
-376:         - Keep earliest created_at
-377:         """
-378:         if not entities:
-379:             raise ValueError("Cannot merge empty entity list")
-380: 
-381:         if len(entities) == 1:
-382:             return entities[0]
-383: 
-384:         # Sort by confidence (highest first)
-385:         sorted_entities = sorted(entities, key=lambda e: e.confidence, reverse=True)
-386:         base = sorted_entities[0]
-387: 
-388:         # Merge in remaining entities
-389:         for entity in sorted_entities[1:]:
-390:             base.merge_with(entity)
-391: 
-392:         return base
+368:         return pairs
+369: 
+370:     def _merge_entity_group(self, entities: list[Entity]) -> Entity:
+371:         """Merge a group of entities into one.
+372: 
+373:         Strategy:
+374:         - Use the entity with highest confidence as base
+375:         - Merge attributes (non-empty values preferred)
+376:         - Combine source document/chunk IDs
+377:         - Sum mention counts
+378:         - Keep earliest created_at
+379:         """
+380:         if not entities:
+381:             raise ValueError("Cannot merge empty entity list")
+382: 
+383:         if len(entities) == 1:
+384:             return entities[0]
+385: 
+386:         # Sort by confidence (highest first)
+387:         sorted_entities = sorted(entities, key=lambda e: e.confidence, reverse=True)
+388:         base = sorted_entities[0]
+389: 
+390:         # Merge in remaining entities
+391:         for entity in sorted_entities[1:]:
+392:             base.merge_with(entity)
 393: 
-394:     def _update_relationships(
-395:         self,
-396:         relationships: list[Relationship],
-397:         entity_mapping: dict[UUID, UUID],
-398:     ) -> list[Relationship]:
-399:         """Update relationships to use unified entity IDs."""
-400:         updated = []
-401:         for rel in relationships:
-402:             # Create a copy with updated IDs
-403:             new_source = entity_mapping.get(rel.source_entity_id, rel.source_entity_id)
-404:             new_target = entity_mapping.get(rel.target_entity_id, rel.target_entity_id)
-405: 
-406:             # Skip self-referential relationships that emerged from merging
-407:             if new_source == new_target:
-408:                 continue
-409: 
-410:             # Update the relationship IDs
-411:             rel.source_entity_id = new_source
-412:             rel.target_entity_id = new_target
-413:             updated.append(rel)
-414: 
-415:         return updated
+394:         return base
+395: 
+396:     def _update_relationships(
+397:         self,
+398:         relationships: list[Relationship],
+399:         entity_mapping: dict[UUID, UUID],
+400:     ) -> list[Relationship]:
+401:         """Update relationships to use unified entity IDs."""
+402:         updated = []
+403:         for rel in relationships:
+404:             # Create a copy with updated IDs
+405:             new_source = entity_mapping.get(rel.source_entity_id, rel.source_entity_id)
+406:             new_target = entity_mapping.get(rel.target_entity_id, rel.target_entity_id)
+407: 
+408:             # Skip self-referential relationships that emerged from merging
+409:             if new_source == new_target:
+410:                 continue
+411: 
+412:             # Update the relationship IDs
+413:             rel.source_entity_id = new_source
+414:             rel.target_entity_id = new_target
+415:             updated.append(rel)
 416: 
-417:     def _find_new_relationships(
-418:         self,
-419:         merge_groups: list[set[UUID]],
-420:         entities: list[Entity],
-421:     ) -> list[Relationship]:
-422:         """Find new relationships to create based on correlation rules."""
-423:         # This would create relationships like SAME_AS or REFERENCES
-424:         # For now, return empty list - implementation depends on requirements
-425:         return []
-426: 
-427:     def _cosine_similarity(
-428:         self,
-429:         vec1: list[float] | None,
-430:         vec2: list[float] | None,
-431:     ) -> float:
-432:         """Calculate cosine similarity between two vectors."""
-433:         if not vec1 or not vec2:
-434:             return 0.0
-435: 
-436:         if len(vec1) != len(vec2):
-437:             return 0.0
-438: 
-439:         dot_product = sum(a * b for a, b in zip(vec1, vec2))
-440:         norm1 = sum(a * a for a in vec1) ** 0.5
-441:         norm2 = sum(b * b for b in vec2) ** 0.5
-442: 
-443:         if norm1 == 0 or norm2 == 0:
-444:             return 0.0
-445: 
-446:         return dot_product / (norm1 * norm2)
-447: 
-448:     def _fuzzy_similarity(self, str1: str, str2: str) -> float:
-449:         """Calculate fuzzy similarity between two strings.
-450: 
-451:         Uses Levenshtein distance normalized by max length.
-452:         """
-453:         if not str1 or not str2:
-454:             return 0.0
-455: 
-456:         s1, s2 = str1.lower(), str2.lower()
-457:         if s1 == s2:
-458:             return 1.0
-459: 
-460:         # Simple Levenshtein distance
-461:         len1, len2 = len(s1), len(s2)
-462:         if len1 == 0 or len2 == 0:
-463:             return 0.0
-464: 
-465:         # Create distance matrix
-466:         dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
-467: 
-468:         for i in range(len1 + 1):
-469:             dp[i][0] = i
-470:         for j in range(len2 + 1):
-471:             dp[0][j] = j
-472: 
-473:         for i in range(1, len1 + 1):
-474:             for j in range(1, len2 + 1):
-475:                 cost = 0 if s1[i - 1] == s2[j - 1] else 1
-476:                 dp[i][j] = min(
-477:                     dp[i - 1][j] + 1,  # deletion
-478:                     dp[i][j - 1] + 1,  # insertion
-479:                     dp[i - 1][j - 1] + cost,  # substitution
-480:                 )
-481: 
-482:         distance = dp[len1][len2]
-483:         max_len = max(len1, len2)
-484:         return 1.0 - (distance / max_len)
+417:         return updated
+418: 
+419:     def _find_new_relationships(
+420:         self,
+421:         merge_groups: list[set[UUID]],
+422:         entities: list[Entity],
+423:     ) -> list[Relationship]:
+424:         """Find new relationships to create based on correlation rules."""
+425:         # This would create relationships like SAME_AS or REFERENCES
+426:         # For now, return empty list - implementation depends on requirements
+427:         return []
 ````
 
 ## File: src/khora/extraction/skills/composer.py
@@ -23745,6 +23861,623 @@ README.md
 186:         assert result == []
 ````
 
+## File: README.md
+````markdown
+  1: # Khora
+  2: 
+  3: > *"Khora is the receptacle, the space, the matrix in which all things come to be."*
+  4: > *— Plato, Timaeus*
+  5: 
+  6: In Plato's cosmology, **Khora** (χώρα) is the primordial receptacle—neither being nor non-being, but the space that receives all forms and gives them place. It is the nurse of becoming, the womb of the cosmos where the eternal Forms find material expression. Khora does not impose form; it receives, holds, and makes manifestation possible.
+  7: 
+  8: This project embodies that philosophy: **Khora is a memory lake**—a receptacle for knowledge that receives information from disparate sources, holds it in structured form, and enables its retrieval through multiple paths of inquiry. Just as Plato's Khora mediates between the intelligible and sensible worlds, this Memory Lake bridges raw data and meaningful knowledge through semantic extraction, graph relationships, and temporal context.
+  9: 
+ 10: ---
+ 11: 
+ 12: ## Overview
+ 13: 
+ 14: Khora is a **Memory Lake** system that combines three storage paradigms:
+ 15: 
+ 16: - **Knowledge Graph** (Neo4j) — Entities and their relationships
+ 17: - **Vector Database** (pgvector) — Semantic embeddings for similarity search
+ 18: - **Relational Database** (PostgreSQL) — Documents, events, and metadata
+ 19: 
+ 20: It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
+ 21: 
+ 22: ### Key Features
+ 23: 
+ 24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
+ 25: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
+ 26: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
+ 27: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
+ 28: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
+ 29: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
+ 30: - **Semantic Extraction**: LLM-powered entity and relationship extraction
+ 31: 
+ 32: ---
+ 33: 
+ 34: ## Documentation
+ 35: 
+ 36: Comprehensive documentation is available in the [`docs/`](docs/) directory:
+ 37: 
+ 38: | Topic | Description |
+ 39: |-------|-------------|
+ 40: | **Architecture** | |
+ 41: | [Overview](docs/architecture/overview.md) | System design, components, data flow |
+ 42: | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
+ 43: | [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
+ 44: | [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
+ 45: | **Data Models** | |
+ 46: | [Overview](docs/data-models/overview.md) | Model relationships and purposes |
+ 47: | [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
+ 48: | [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
+ 49: | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
+ 50: | **Extraction Pipeline** | |
+ 51: | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
+ 52: | [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
+ 53: | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
+ 54: | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
+ 55: | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
+ 56: | [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
+ 57: | [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
+ 58: | **Query Engine** | |
+ 59: | [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
+ 60: | [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
+ 61: | [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
+ 62: | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
+ 63: | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
+ 64: | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
+ 65: | **Planning** | |
+ 66: | [Roadmap](docs/roadmap.md) | Future improvements and features |
+ 67: 
+ 68: ---
+ 69: 
+ 70: ## Installation
+ 71: 
+ 72: ### Prerequisites
+ 73: 
+ 74: - Python 3.13+
+ 75: - [uv](https://github.com/astral-sh/uv) for package management
+ 76: - PostgreSQL with pgvector extension
+ 77: - Neo4j (optional, for graph features)
+ 78: 
+ 79: ### Quick Install
+ 80: 
+ 81: ```bash
+ 82: # Clone and install
+ 83: git clone https://github.com/DeytaHQ/khora.git
+ 84: cd khora
+ 85: uv sync --all-extras
+ 86: 
+ 87: # Install pre-commit hooks
+ 88: uv run prek install
+ 89: ```
+ 90: 
+ 91: ### Start Development Databases
+ 92: 
+ 93: ```bash
+ 94: # Start PostgreSQL and Neo4j via Docker
+ 95: make dev
+ 96: 
+ 97: # Run database migrations
+ 98: uv run alembic upgrade head
+ 99: ```
+100: 
+101: ---
+102: 
+103: ## Usage
+104: 
+105: ### As a Library
+106: 
+107: The primary interface is the `MemoryLake` class:
+108: 
+109: ```python
+110: from khora import MemoryLake
+111: 
+112: async def main():
+113:     async with MemoryLake() as lake:
+114:         # Store a memory
+115:         result = await lake.remember(
+116:             "Albert Einstein developed the theory of relativity in 1905.",
+117:             title="Einstein Biography",
+118:             source="wikipedia",
+119:         )
+120:         print(f"Stored document: {result.document_id}")
+121:         print(f"Extracted {result.entities_extracted} entities")
+122: 
+123:         # Recall relevant memories
+124:         memories = await lake.recall(
+125:             "Who developed relativity?",
+126:             limit=5,
+127:             mode="hybrid",  # vector + graph + keyword
+128:         )
+129:         print(f"Found {len(memories.chunks)} relevant chunks")
+130:         print(f"Context: {memories.context_text}")
+131: 
+132:         # Explore entity relationships
+133:         entities = await lake.list_entities(entity_type="PERSON")
+134:         for entity in entities:
+135:             related = await lake.find_related_entities(entity.id, max_depth=2)
+136:             print(f"{entity.name} is related to {len(related)} entities")
+137: 
+138:         # Forget a memory
+139:         await lake.forget(result.document_id)
+140: 
+141: import asyncio
+142: asyncio.run(main())
+143: ```
+144: 
+145: ### Search Modes
+146: 
+147: ```python
+148: from khora import MemoryLake, SearchMode
+149: 
+150: async with MemoryLake() as lake:
+151:     # Vector-only search (semantic similarity)
+152:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
+153: 
+154:     # Graph-only search (entity relationships)
+155:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
+156: 
+157:     # Hybrid search (combines all sources with RRF)
+158:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
+159: 
+160:     # All sources (returns results from each separately)
+161:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
+162: ```
+163: 
+164: ### Multi-Tenancy
+165: 
+166: ```python
+167: from khora import MemoryLake
+168: 
+169: async with MemoryLake() as lake:
+170:     # Create organizational hierarchy
+171:     org = await lake.storage.create_organization(
+172:         Organization(name="Acme Corp", slug="acme")
+173:     )
+174:     workspace = await lake.storage.create_workspace(
+175:         Workspace(organization_id=org.id, name="Research", slug="research")
+176:     )
+177:     namespace = await lake.storage.create_namespace(
+178:         MemoryNamespace(workspace_id=workspace.id, name="Physics", slug="physics")
+179:     )
+180: 
+181:     # Store memories in specific namespace
+182:     await lake.remember(
+183:         "Important research findings...",
+184:         namespace=namespace.id,
+185:     )
+186: 
+187:     # Query within namespace (isolated from other namespaces)
+188:     results = await lake.recall("findings", namespace=namespace.id)
+189: ```
+190: 
+191: ### As a Service
+192: 
+193: ```bash
+194: # Start the API server
+195: uv run khora serve --reload
+196: 
+197: # Or with Docker
+198: docker compose up
+199: ```
+200: 
+201: #### API Endpoints
+202: 
+203: **Memory Operations:**
+204: ```bash
+205: # Store a memory
+206: curl -X POST http://localhost:8100/memory/remember \
+207:   -H "Content-Type: application/json" \
+208:   -d '{
+209:     "content": "Einstein developed relativity in 1905.",
+210:     "title": "Physics History",
+211:     "skill_name": "general_entities"
+212:   }'
+213: 
+214: # Recall memories
+215: curl -X POST http://localhost:8100/memory/recall \
+216:   -H "Content-Type: application/json" \
+217:   -d '{
+218:     "query": "Who developed relativity?",
+219:     "limit": 10,
+220:     "mode": "hybrid"
+221:   }'
+222: 
+223: # Get a document
+224: curl http://localhost:8100/memory/documents/{document_id}
+225: 
+226: # List entities
+227: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
+228: 
+229: # Get related entities
+230: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
+231: 
+232: # Forget a memory
+233: curl -X DELETE http://localhost:8100/memory/forget \
+234:   -H "Content-Type: application/json" \
+235:   -d '{"document_id": "uuid-here"}'
+236: ```
+237: 
+238: **Namespace Management:**
+239: ```bash
+240: # Create organization
+241: curl -X POST http://localhost:8100/namespaces/organizations \
+242:   -H "Content-Type: application/json" \
+243:   -d '{"name": "Acme Corp", "slug": "acme"}'
+244: 
+245: # Create workspace
+246: curl -X POST http://localhost:8100/namespaces/workspaces \
+247:   -H "Content-Type: application/json" \
+248:   -d '{"organization_id": "org-uuid", "name": "Research"}'
+249: 
+250: # Create namespace
+251: curl -X POST http://localhost:8100/namespaces/ \
+252:   -H "Content-Type: application/json" \
+253:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
+254: ```
+255: 
+256: **Sync & Pipelines:**
+257: ```bash
+258: # Ingest documents
+259: curl -X POST http://localhost:8100/sync/ingest \
+260:   -H "Content-Type: application/json" \
+261:   -d '{
+262:     "namespace_id": "ns-uuid",
+263:     "documents": [{"content": "Document text..."}],
+264:     "skill_name": "general_entities"
+265:   }'
+266: 
+267: # List available pipelines
+268: curl http://localhost:8100/sync/pipelines
+269: ```
+270: 
+271: **Health Checks:**
+272: ```bash
+273: curl http://localhost:8100/status        # Service status
+274: curl http://localhost:8100/health        # Health check
+275: curl http://localhost:8100/health/ready  # Readiness probe
+276: curl http://localhost:8100/health/live   # Liveness probe
+277: ```
+278: 
+279: ---
+280: 
+281: ## Architecture
+282: 
+283: ```
+284: ┌─────────────────────────────────────────────────────────────────────────────┐
+285: │                              MemoryLake API                                  │
+286: │                         (Library + FastAPI Service)                          │
+287: ├─────────────────────────────────────────────────────────────────────────────┤
+288: │                                                                              │
+289: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
+290: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
+291: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
+292: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
+293: │         │                  │                  │                  │          │
+294: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
+295: │                          Storage Coordinator                                 │
+296: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
+297: │         │                   │                   │                            │
+298: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
+299: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
+300: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
+301: │  │ Documents)  │     │             │     │            │     │            │ │
+302: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
+303: │                                                                              │
+304: └──────────────────────────────────────────────────────────────────────────────┘
+305: ```
+306: 
+307: ### Core Components
+308: 
+309: | Component | Purpose |
+310: |-----------|---------|
+311: | `MemoryLake` | Primary API for remember/recall/forget operations |
+312: | `StorageCoordinator` | Orchestrates all storage backends |
+313: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
+314: | `PipelineManager` | Manages Prefect ingestion flows |
+315: | `ACLEnforcer` | Cross-layer permission enforcement |
+316: 
+317: ### Storage Backends
+318: 
+319: | Backend | Technology | Purpose |
+320: |---------|------------|---------|
+321: | Relational | PostgreSQL | Documents, events, permissions, metadata |
+322: | Vector | pgvector | Embeddings for semantic similarity search |
+323: | Graph | Neo4j | Entity nodes and relationship edges |
+324: | Event Store | PostgreSQL | Immutable event log for sourcing |
+325: 
+326: ### Data Flow
+327: 
+328: 1. **Ingestion** (Three-Phase Pipeline)
+329:    - Phase 1: Stage documents, compute checksums, detect duplicates
+330:    - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
+331:    - Phase 3 (optional): Cross-document entity unification and relationship inference
+332: 
+333: 2. **Query** (Hybrid Search)
+334:    - Execute vector, graph, and keyword searches in parallel
+335:    - Apply Reciprocal Rank Fusion to combine results
+336:    - Filter by ACL and temporal context
+337: 
+338: 3. **Event Sourcing**
+339:    - All changes recorded as immutable events
+340:    - Enables temporal queries ("state as of date X")
+341:    - Complete audit trail for compliance
+342: 
+343: ---
+344: 
+345: ## Configuration
+346: 
+347: ### Environment Variables
+348: 
+349: | Variable | Description | Default |
+350: |----------|-------------|---------|
+351: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
+352: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
+353: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
+354: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
+355: | `KHORA_DEBUG` | Enable debug mode | `false` |
+356: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
+357: | `KHORA_API_PORT` | API server port | `8100` |
+358: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
+359: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
+360: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
+361: 
+362: ### LiteLLM Configuration
+363: 
+364: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
+365: 
+366: ```yaml
+367: # examples/config/litellm/openai.yaml
+368: model: "gpt-4o-mini"
+369: api_key_env: "OPENAI_API_KEY"
+370: temperature: 0.7
+371: max_tokens: 8192
+372: embedding_model: "text-embedding-3-small"
+373: ```
+374: 
+375: ```yaml
+376: # examples/config/litellm/claude.yaml
+377: model: "claude-sonnet-4-20250514"
+378: api_key_env: "ANTHROPIC_API_KEY"
+379: temperature: 0.7
+380: max_tokens: 8192
+381: 
+382: # Router with fallbacks
+383: model_list:
+384:   - model_name: claude-sonnet-4
+385:     litellm_params:
+386:       model: claude-sonnet-4-20250514
+387:       api_key: os.environ/ANTHROPIC_API_KEY
+388:   - model_name: claude-sonnet-4
+389:     litellm_params:
+390:       model: claude-3-5-sonnet-20241022
+391:       api_key: os.environ/ANTHROPIC_API_KEY
+392: ```
+393: 
+394: ### Extraction Skills
+395: 
+396: Configure entity extraction in your code:
+397: 
+398: ```python
+399: from khora.extraction.skills import ExtractionSkill
+400: 
+401: skill = ExtractionSkill(
+402:     name="custom_entities",
+403:     description="Extract domain-specific entities",
+404:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
+405:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
+406: )
+407: 
+408: await lake.remember(content, skill_name="custom_entities")
+409: ```
+410: 
+411: ---
+412: 
+413: ## Project Structure
+414: 
+415: ```
+416: khora/
+417: ├── src/khora/
+418: │   ├── __init__.py              # Package exports
+419: │   ├── memory_lake.py           # Primary MemoryLake class
+420: │   ├── api/                     # FastAPI application
+421: │   │   ├── app.py               # App factory with lifespan
+422: │   │   ├── deps.py              # Dependency injection
+423: │   │   └── routes/              # API endpoints
+424: │   │       ├── memory.py        # Remember/recall/forget
+425: │   │       ├── namespaces.py    # Multi-tenancy management
+426: │   │       ├── sync.py          # Ingestion pipelines
+427: │   │       └── status.py        # Health checks
+428: │   ├── acl/                     # Access control
+429: │   │   ├── checker.py           # Permission checking
+430: │   │   └── enforcer.py          # Cross-layer enforcement
+431: │   ├── cli/                     # Command-line interface
+432: │   ├── config/                  # Configuration
+433: │   │   ├── schema.py            # Pydantic settings
+434: │   │   ├── llm.py               # LiteLLM configuration
+435: │   │   └── resolver.py          # Hierarchical config
+436: │   ├── core/models/             # Domain models
+437: │   │   ├── document.py          # Document, Chunk
+438: │   │   ├── entity.py            # Entity, Relationship
+439: │   │   ├── event.py             # MemoryEvent (sourcing)
+440: │   │   └── tenancy.py           # Org, Workspace, Namespace
+441: │   ├── db/                      # Database layer
+442: │   │   ├── models.py            # SQLAlchemy ORM
+443: │   │   └── session.py           # Async session management
+444: │   ├── extraction/              # Content processing
+445: │   │   ├── chunkers/            # Text chunking strategies
+446: │   │   ├── embedders/           # Embedding generation
+447: │   │   ├── extractors/          # Entity extraction
+448: │   │   └── skills/              # Extraction configurations
+449: │   ├── pipelines/               # Prefect workflows
+450: │   │   ├── flows/               # Ingestion and sync flows
+451: │   │   ├── tasks/               # Individual pipeline tasks
+452: │   │   ├── manager.py           # Pipeline orchestration
+453: │   │   └── registry.py          # Pipeline registration
+454: │   ├── query/                   # Search engine
+455: │   │   ├── engine.py            # HybridQueryEngine
+456: │   │   ├── fusion.py            # Reciprocal Rank Fusion
+457: │   │   └── temporal.py          # Time-based queries
+458: │   └── storage/                 # Storage backends
+459: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
+460: │       ├── coordinator.py       # Backend orchestration
+461: │       ├── event_store.py       # Event sourcing
+462: │       └── factory.py           # Storage initialization
+463: ├── tests/                       # Test suite
+464: ├── alembic/                     # Database migrations
+465: ├── examples/config/             # Example configurations
+466: ├── docker-compose.yml           # Development services
+467: └── pyproject.toml               # Project configuration
+468: ```
+469: 
+470: ---
+471: 
+472: ## Development
+473: 
+474: ### Commands
+475: 
+476: ```bash
+477: # Start development server
+478: uv run khora serve --reload --no-auth
+479: 
+480: # Run tests with coverage
+481: make test
+482: 
+483: # Format code
+484: make format
+485: 
+486: # Run linting
+487: make lint
+488: 
+489: # Run all pre-commit hooks
+490: make prek
+491: 
+492: # Start development databases
+493: make dev
+494: 
+495: # Stop development databases
+496: make down
+497: ```
+498: 
+499: ### Database Migrations
+500: 
+501: ```bash
+502: # Run all migrations
+503: uv run alembic upgrade head
+504: 
+505: # Create a new migration
+506: uv run alembic revision --autogenerate -m "Add new table"
+507: 
+508: # Rollback one migration
+509: uv run alembic downgrade -1
+510: ```
+511: 
+512: ### Testing
+513: 
+514: ```bash
+515: # Run all tests
+516: make test
+517: 
+518: # Run specific test file
+519: uv run pytest tests/unit/test_api.py -v
+520: 
+521: # Run with markers
+522: uv run pytest -m unit        # Unit tests only
+523: uv run pytest -m integration # Integration tests
+524: uv run pytest -m e2e         # End-to-end tests
+525: ```
+526: 
+527: ---
+528: 
+529: ## API Reference
+530: 
+531: ### MemoryLake Class
+532: 
+533: ```python
+534: class MemoryLake:
+535:     async def remember(
+536:         self,
+537:         content: str,
+538:         *,
+539:         namespace: UUID | None = None,
+540:         title: str = "",
+541:         source: str = "",
+542:         metadata: dict = {},
+543:         skill_name: str = "general_entities",
+544:     ) -> RememberResult:
+545:         """Store content in the memory lake."""
+546: 
+547:     async def recall(
+548:         self,
+549:         query: str,
+550:         *,
+551:         namespace: UUID | None = None,
+552:         limit: int = 10,
+553:         mode: SearchMode = SearchMode.HYBRID,
+554:         min_similarity: float = 0.5,
+555:     ) -> RecallResult:
+556:         """Recall memories relevant to a query."""
+557: 
+558:     async def forget(
+559:         self,
+560:         document_id: UUID,
+561:         *,
+562:         namespace: UUID | None = None,
+563:     ) -> bool:
+564:         """Remove a memory from the lake."""
+565: 
+566:     async def list_entities(
+567:         self,
+568:         *,
+569:         namespace: UUID | None = None,
+570:         entity_type: str | None = None,
+571:         limit: int = 100,
+572:     ) -> list[Entity]:
+573:         """List entities in a namespace."""
+574: 
+575:     async def find_related_entities(
+576:         self,
+577:         entity_id: UUID,
+578:         *,
+579:         max_depth: int = 2,
+580:         limit: int = 20,
+581:     ) -> list[tuple[Entity, float]]:
+582:         """Find entities related to a given entity."""
+583: ```
+584: 
+585: ### Search Modes
+586: 
+587: | Mode | Description |
+588: |------|-------------|
+589: | `VECTOR` | Semantic similarity search using embeddings |
+590: | `GRAPH` | Entity and relationship traversal |
+591: | `KEYWORD` | Full-text keyword search |
+592: | `HYBRID` | Combined search with RRF fusion |
+593: | `ALL` | Returns results from all sources separately |
+594: 
+595: ### Entity Types
+596: 
+597: | Type | Description |
+598: |------|-------------|
+599: | `PERSON` | Individual people |
+600: | `ORGANIZATION` | Companies, institutions |
+601: | `LOCATION` | Places, addresses |
+602: | `CONCEPT` | Abstract ideas, theories |
+603: | `EVENT` | Occurrences, incidents |
+604: | `TECHNOLOGY` | Tools, platforms, languages |
+605: | `PRODUCT` | Goods, services |
+606: | `DOCUMENT` | Referenced documents |
+607: | `OTHER` | Uncategorized entities |
+608: 
+609: ---
+610: 
+611: ## License
+612: 
+613: Copyright (c) 2024-2025 Deyta. All rights reserved.
+````
+
 ## File: src/khora/extraction/extractors/base.py
 ````python
   1: """Base extractor protocol and types."""
@@ -24438,12 +25171,12 @@ README.md
  11: from __future__ import annotations
  12: 
  13: from dataclasses import dataclass
- 14: from difflib import SequenceMatcher
- 15: from typing import TYPE_CHECKING, Any
- 16: from uuid import UUID
- 17: 
- 18: from loguru import logger
- 19: 
+ 14: from typing import TYPE_CHECKING, Any
+ 15: from uuid import UUID
+ 16: 
+ 17: from loguru import logger
+ 18: 
+ 19: from khora._accel import sequence_match_ratio
  20: from khora.core.models.entity import entity_type_str
  21: 
  22: if TYPE_CHECKING:
@@ -24599,7 +25332,7 @@ README.md
 172:                 if entity in [c.entity for c in candidates]:
 173:                     continue
 174: 
-175:                 ratio = SequenceMatcher(None, name_lower, entity.name.lower()).ratio()
+175:                 ratio = sequence_match_ratio(name_lower, entity.name.lower())
 176:                 if ratio >= self._fuzzy_threshold:
 177:                     candidates.append(ResolutionCandidate(entity, "fuzzy", ratio))
 178: 
@@ -25243,623 +25976,6 @@ README.md
 49:     # Expertise
 50:     "ExpertiseStore",
 51: ]
-````
-
-## File: README.md
-````markdown
-  1: # Khora
-  2: 
-  3: > *"Khora is the receptacle, the space, the matrix in which all things come to be."*
-  4: > *— Plato, Timaeus*
-  5: 
-  6: In Plato's cosmology, **Khora** (χώρα) is the primordial receptacle—neither being nor non-being, but the space that receives all forms and gives them place. It is the nurse of becoming, the womb of the cosmos where the eternal Forms find material expression. Khora does not impose form; it receives, holds, and makes manifestation possible.
-  7: 
-  8: This project embodies that philosophy: **Khora is a memory lake**—a receptacle for knowledge that receives information from disparate sources, holds it in structured form, and enables its retrieval through multiple paths of inquiry. Just as Plato's Khora mediates between the intelligible and sensible worlds, this Memory Lake bridges raw data and meaningful knowledge through semantic extraction, graph relationships, and temporal context.
-  9: 
- 10: ---
- 11: 
- 12: ## Overview
- 13: 
- 14: Khora is a **Memory Lake** system that combines three storage paradigms:
- 15: 
- 16: - **Knowledge Graph** (Neo4j) — Entities and their relationships
- 17: - **Vector Database** (pgvector) — Semantic embeddings for similarity search
- 18: - **Relational Database** (PostgreSQL) — Documents, events, and metadata
- 19: 
- 20: It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
- 21: 
- 22: ### Key Features
- 23: 
- 24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
- 25: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
- 26: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
- 27: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
- 28: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
- 29: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
- 30: - **Semantic Extraction**: LLM-powered entity and relationship extraction
- 31: 
- 32: ---
- 33: 
- 34: ## Documentation
- 35: 
- 36: Comprehensive documentation is available in the [`docs/`](docs/) directory:
- 37: 
- 38: | Topic | Description |
- 39: |-------|-------------|
- 40: | **Architecture** | |
- 41: | [Overview](docs/architecture/overview.md) | System design, components, data flow |
- 42: | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
- 43: | [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
- 44: | [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
- 45: | **Data Models** | |
- 46: | [Overview](docs/data-models/overview.md) | Model relationships and purposes |
- 47: | [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
- 48: | [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
- 49: | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
- 50: | **Extraction Pipeline** | |
- 51: | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
- 52: | [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
- 53: | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
- 54: | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
- 55: | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
- 56: | [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
- 57: | [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
- 58: | **Query Engine** | |
- 59: | [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
- 60: | [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
- 61: | [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
- 62: | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
- 63: | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
- 64: | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
- 65: | **Planning** | |
- 66: | [Roadmap](docs/roadmap.md) | Future improvements and features |
- 67: 
- 68: ---
- 69: 
- 70: ## Installation
- 71: 
- 72: ### Prerequisites
- 73: 
- 74: - Python 3.13+
- 75: - [uv](https://github.com/astral-sh/uv) for package management
- 76: - PostgreSQL with pgvector extension
- 77: - Neo4j (optional, for graph features)
- 78: 
- 79: ### Quick Install
- 80: 
- 81: ```bash
- 82: # Clone and install
- 83: git clone https://github.com/DeytaHQ/khora.git
- 84: cd khora
- 85: uv sync --all-extras
- 86: 
- 87: # Install pre-commit hooks
- 88: uv run prek install
- 89: ```
- 90: 
- 91: ### Start Development Databases
- 92: 
- 93: ```bash
- 94: # Start PostgreSQL and Neo4j via Docker
- 95: make dev
- 96: 
- 97: # Run database migrations
- 98: uv run alembic upgrade head
- 99: ```
-100: 
-101: ---
-102: 
-103: ## Usage
-104: 
-105: ### As a Library
-106: 
-107: The primary interface is the `MemoryLake` class:
-108: 
-109: ```python
-110: from khora import MemoryLake
-111: 
-112: async def main():
-113:     async with MemoryLake() as lake:
-114:         # Store a memory
-115:         result = await lake.remember(
-116:             "Albert Einstein developed the theory of relativity in 1905.",
-117:             title="Einstein Biography",
-118:             source="wikipedia",
-119:         )
-120:         print(f"Stored document: {result.document_id}")
-121:         print(f"Extracted {result.entities_extracted} entities")
-122: 
-123:         # Recall relevant memories
-124:         memories = await lake.recall(
-125:             "Who developed relativity?",
-126:             limit=5,
-127:             mode="hybrid",  # vector + graph + keyword
-128:         )
-129:         print(f"Found {len(memories.chunks)} relevant chunks")
-130:         print(f"Context: {memories.context_text}")
-131: 
-132:         # Explore entity relationships
-133:         entities = await lake.list_entities(entity_type="PERSON")
-134:         for entity in entities:
-135:             related = await lake.find_related_entities(entity.id, max_depth=2)
-136:             print(f"{entity.name} is related to {len(related)} entities")
-137: 
-138:         # Forget a memory
-139:         await lake.forget(result.document_id)
-140: 
-141: import asyncio
-142: asyncio.run(main())
-143: ```
-144: 
-145: ### Search Modes
-146: 
-147: ```python
-148: from khora import MemoryLake, SearchMode
-149: 
-150: async with MemoryLake() as lake:
-151:     # Vector-only search (semantic similarity)
-152:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
-153: 
-154:     # Graph-only search (entity relationships)
-155:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
-156: 
-157:     # Hybrid search (combines all sources with RRF)
-158:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
-159: 
-160:     # All sources (returns results from each separately)
-161:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
-162: ```
-163: 
-164: ### Multi-Tenancy
-165: 
-166: ```python
-167: from khora import MemoryLake
-168: 
-169: async with MemoryLake() as lake:
-170:     # Create organizational hierarchy
-171:     org = await lake.storage.create_organization(
-172:         Organization(name="Acme Corp", slug="acme")
-173:     )
-174:     workspace = await lake.storage.create_workspace(
-175:         Workspace(organization_id=org.id, name="Research", slug="research")
-176:     )
-177:     namespace = await lake.storage.create_namespace(
-178:         MemoryNamespace(workspace_id=workspace.id, name="Physics", slug="physics")
-179:     )
-180: 
-181:     # Store memories in specific namespace
-182:     await lake.remember(
-183:         "Important research findings...",
-184:         namespace=namespace.id,
-185:     )
-186: 
-187:     # Query within namespace (isolated from other namespaces)
-188:     results = await lake.recall("findings", namespace=namespace.id)
-189: ```
-190: 
-191: ### As a Service
-192: 
-193: ```bash
-194: # Start the API server
-195: uv run khora serve --reload
-196: 
-197: # Or with Docker
-198: docker compose up
-199: ```
-200: 
-201: #### API Endpoints
-202: 
-203: **Memory Operations:**
-204: ```bash
-205: # Store a memory
-206: curl -X POST http://localhost:8100/memory/remember \
-207:   -H "Content-Type: application/json" \
-208:   -d '{
-209:     "content": "Einstein developed relativity in 1905.",
-210:     "title": "Physics History",
-211:     "skill_name": "general_entities"
-212:   }'
-213: 
-214: # Recall memories
-215: curl -X POST http://localhost:8100/memory/recall \
-216:   -H "Content-Type: application/json" \
-217:   -d '{
-218:     "query": "Who developed relativity?",
-219:     "limit": 10,
-220:     "mode": "hybrid"
-221:   }'
-222: 
-223: # Get a document
-224: curl http://localhost:8100/memory/documents/{document_id}
-225: 
-226: # List entities
-227: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
-228: 
-229: # Get related entities
-230: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
-231: 
-232: # Forget a memory
-233: curl -X DELETE http://localhost:8100/memory/forget \
-234:   -H "Content-Type: application/json" \
-235:   -d '{"document_id": "uuid-here"}'
-236: ```
-237: 
-238: **Namespace Management:**
-239: ```bash
-240: # Create organization
-241: curl -X POST http://localhost:8100/namespaces/organizations \
-242:   -H "Content-Type: application/json" \
-243:   -d '{"name": "Acme Corp", "slug": "acme"}'
-244: 
-245: # Create workspace
-246: curl -X POST http://localhost:8100/namespaces/workspaces \
-247:   -H "Content-Type: application/json" \
-248:   -d '{"organization_id": "org-uuid", "name": "Research"}'
-249: 
-250: # Create namespace
-251: curl -X POST http://localhost:8100/namespaces/ \
-252:   -H "Content-Type: application/json" \
-253:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
-254: ```
-255: 
-256: **Sync & Pipelines:**
-257: ```bash
-258: # Ingest documents
-259: curl -X POST http://localhost:8100/sync/ingest \
-260:   -H "Content-Type: application/json" \
-261:   -d '{
-262:     "namespace_id": "ns-uuid",
-263:     "documents": [{"content": "Document text..."}],
-264:     "skill_name": "general_entities"
-265:   }'
-266: 
-267: # List available pipelines
-268: curl http://localhost:8100/sync/pipelines
-269: ```
-270: 
-271: **Health Checks:**
-272: ```bash
-273: curl http://localhost:8100/status        # Service status
-274: curl http://localhost:8100/health        # Health check
-275: curl http://localhost:8100/health/ready  # Readiness probe
-276: curl http://localhost:8100/health/live   # Liveness probe
-277: ```
-278: 
-279: ---
-280: 
-281: ## Architecture
-282: 
-283: ```
-284: ┌─────────────────────────────────────────────────────────────────────────────┐
-285: │                              MemoryLake API                                  │
-286: │                         (Library + FastAPI Service)                          │
-287: ├─────────────────────────────────────────────────────────────────────────────┤
-288: │                                                                              │
-289: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
-290: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
-291: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
-292: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
-293: │         │                  │                  │                  │          │
-294: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
-295: │                          Storage Coordinator                                 │
-296: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
-297: │         │                   │                   │                            │
-298: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
-299: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
-300: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
-301: │  │ Documents)  │     │             │     │            │     │            │ │
-302: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
-303: │                                                                              │
-304: └──────────────────────────────────────────────────────────────────────────────┘
-305: ```
-306: 
-307: ### Core Components
-308: 
-309: | Component | Purpose |
-310: |-----------|---------|
-311: | `MemoryLake` | Primary API for remember/recall/forget operations |
-312: | `StorageCoordinator` | Orchestrates all storage backends |
-313: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
-314: | `PipelineManager` | Manages Prefect ingestion flows |
-315: | `ACLEnforcer` | Cross-layer permission enforcement |
-316: 
-317: ### Storage Backends
-318: 
-319: | Backend | Technology | Purpose |
-320: |---------|------------|---------|
-321: | Relational | PostgreSQL | Documents, events, permissions, metadata |
-322: | Vector | pgvector | Embeddings for semantic similarity search |
-323: | Graph | Neo4j | Entity nodes and relationship edges |
-324: | Event Store | PostgreSQL | Immutable event log for sourcing |
-325: 
-326: ### Data Flow
-327: 
-328: 1. **Ingestion** (Three-Phase Pipeline)
-329:    - Phase 1: Stage documents, compute checksums, detect duplicates
-330:    - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
-331:    - Phase 3 (optional): Cross-document entity unification and relationship inference
-332: 
-333: 2. **Query** (Hybrid Search)
-334:    - Execute vector, graph, and keyword searches in parallel
-335:    - Apply Reciprocal Rank Fusion to combine results
-336:    - Filter by ACL and temporal context
-337: 
-338: 3. **Event Sourcing**
-339:    - All changes recorded as immutable events
-340:    - Enables temporal queries ("state as of date X")
-341:    - Complete audit trail for compliance
-342: 
-343: ---
-344: 
-345: ## Configuration
-346: 
-347: ### Environment Variables
-348: 
-349: | Variable | Description | Default |
-350: |----------|-------------|---------|
-351: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
-352: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
-353: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
-354: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
-355: | `KHORA_DEBUG` | Enable debug mode | `false` |
-356: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
-357: | `KHORA_API_PORT` | API server port | `8100` |
-358: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
-359: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
-360: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
-361: 
-362: ### LiteLLM Configuration
-363: 
-364: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
-365: 
-366: ```yaml
-367: # examples/config/litellm/openai.yaml
-368: model: "gpt-4o-mini"
-369: api_key_env: "OPENAI_API_KEY"
-370: temperature: 0.7
-371: max_tokens: 8192
-372: embedding_model: "text-embedding-3-small"
-373: ```
-374: 
-375: ```yaml
-376: # examples/config/litellm/claude.yaml
-377: model: "claude-sonnet-4-20250514"
-378: api_key_env: "ANTHROPIC_API_KEY"
-379: temperature: 0.7
-380: max_tokens: 8192
-381: 
-382: # Router with fallbacks
-383: model_list:
-384:   - model_name: claude-sonnet-4
-385:     litellm_params:
-386:       model: claude-sonnet-4-20250514
-387:       api_key: os.environ/ANTHROPIC_API_KEY
-388:   - model_name: claude-sonnet-4
-389:     litellm_params:
-390:       model: claude-3-5-sonnet-20241022
-391:       api_key: os.environ/ANTHROPIC_API_KEY
-392: ```
-393: 
-394: ### Extraction Skills
-395: 
-396: Configure entity extraction in your code:
-397: 
-398: ```python
-399: from khora.extraction.skills import ExtractionSkill
-400: 
-401: skill = ExtractionSkill(
-402:     name="custom_entities",
-403:     description="Extract domain-specific entities",
-404:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
-405:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
-406: )
-407: 
-408: await lake.remember(content, skill_name="custom_entities")
-409: ```
-410: 
-411: ---
-412: 
-413: ## Project Structure
-414: 
-415: ```
-416: khora/
-417: ├── src/khora/
-418: │   ├── __init__.py              # Package exports
-419: │   ├── memory_lake.py           # Primary MemoryLake class
-420: │   ├── api/                     # FastAPI application
-421: │   │   ├── app.py               # App factory with lifespan
-422: │   │   ├── deps.py              # Dependency injection
-423: │   │   └── routes/              # API endpoints
-424: │   │       ├── memory.py        # Remember/recall/forget
-425: │   │       ├── namespaces.py    # Multi-tenancy management
-426: │   │       ├── sync.py          # Ingestion pipelines
-427: │   │       └── status.py        # Health checks
-428: │   ├── acl/                     # Access control
-429: │   │   ├── checker.py           # Permission checking
-430: │   │   └── enforcer.py          # Cross-layer enforcement
-431: │   ├── cli/                     # Command-line interface
-432: │   ├── config/                  # Configuration
-433: │   │   ├── schema.py            # Pydantic settings
-434: │   │   ├── llm.py               # LiteLLM configuration
-435: │   │   └── resolver.py          # Hierarchical config
-436: │   ├── core/models/             # Domain models
-437: │   │   ├── document.py          # Document, Chunk
-438: │   │   ├── entity.py            # Entity, Relationship
-439: │   │   ├── event.py             # MemoryEvent (sourcing)
-440: │   │   └── tenancy.py           # Org, Workspace, Namespace
-441: │   ├── db/                      # Database layer
-442: │   │   ├── models.py            # SQLAlchemy ORM
-443: │   │   └── session.py           # Async session management
-444: │   ├── extraction/              # Content processing
-445: │   │   ├── chunkers/            # Text chunking strategies
-446: │   │   ├── embedders/           # Embedding generation
-447: │   │   ├── extractors/          # Entity extraction
-448: │   │   └── skills/              # Extraction configurations
-449: │   ├── pipelines/               # Prefect workflows
-450: │   │   ├── flows/               # Ingestion and sync flows
-451: │   │   ├── tasks/               # Individual pipeline tasks
-452: │   │   ├── manager.py           # Pipeline orchestration
-453: │   │   └── registry.py          # Pipeline registration
-454: │   ├── query/                   # Search engine
-455: │   │   ├── engine.py            # HybridQueryEngine
-456: │   │   ├── fusion.py            # Reciprocal Rank Fusion
-457: │   │   └── temporal.py          # Time-based queries
-458: │   └── storage/                 # Storage backends
-459: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
-460: │       ├── coordinator.py       # Backend orchestration
-461: │       ├── event_store.py       # Event sourcing
-462: │       └── factory.py           # Storage initialization
-463: ├── tests/                       # Test suite
-464: ├── alembic/                     # Database migrations
-465: ├── examples/config/             # Example configurations
-466: ├── docker-compose.yml           # Development services
-467: └── pyproject.toml               # Project configuration
-468: ```
-469: 
-470: ---
-471: 
-472: ## Development
-473: 
-474: ### Commands
-475: 
-476: ```bash
-477: # Start development server
-478: uv run khora serve --reload --no-auth
-479: 
-480: # Run tests with coverage
-481: make test
-482: 
-483: # Format code
-484: make format
-485: 
-486: # Run linting
-487: make lint
-488: 
-489: # Run all pre-commit hooks
-490: make prek
-491: 
-492: # Start development databases
-493: make dev
-494: 
-495: # Stop development databases
-496: make down
-497: ```
-498: 
-499: ### Database Migrations
-500: 
-501: ```bash
-502: # Run all migrations
-503: uv run alembic upgrade head
-504: 
-505: # Create a new migration
-506: uv run alembic revision --autogenerate -m "Add new table"
-507: 
-508: # Rollback one migration
-509: uv run alembic downgrade -1
-510: ```
-511: 
-512: ### Testing
-513: 
-514: ```bash
-515: # Run all tests
-516: make test
-517: 
-518: # Run specific test file
-519: uv run pytest tests/unit/test_api.py -v
-520: 
-521: # Run with markers
-522: uv run pytest -m unit        # Unit tests only
-523: uv run pytest -m integration # Integration tests
-524: uv run pytest -m e2e         # End-to-end tests
-525: ```
-526: 
-527: ---
-528: 
-529: ## API Reference
-530: 
-531: ### MemoryLake Class
-532: 
-533: ```python
-534: class MemoryLake:
-535:     async def remember(
-536:         self,
-537:         content: str,
-538:         *,
-539:         namespace: UUID | None = None,
-540:         title: str = "",
-541:         source: str = "",
-542:         metadata: dict = {},
-543:         skill_name: str = "general_entities",
-544:     ) -> RememberResult:
-545:         """Store content in the memory lake."""
-546: 
-547:     async def recall(
-548:         self,
-549:         query: str,
-550:         *,
-551:         namespace: UUID | None = None,
-552:         limit: int = 10,
-553:         mode: SearchMode = SearchMode.HYBRID,
-554:         min_similarity: float = 0.5,
-555:     ) -> RecallResult:
-556:         """Recall memories relevant to a query."""
-557: 
-558:     async def forget(
-559:         self,
-560:         document_id: UUID,
-561:         *,
-562:         namespace: UUID | None = None,
-563:     ) -> bool:
-564:         """Remove a memory from the lake."""
-565: 
-566:     async def list_entities(
-567:         self,
-568:         *,
-569:         namespace: UUID | None = None,
-570:         entity_type: str | None = None,
-571:         limit: int = 100,
-572:     ) -> list[Entity]:
-573:         """List entities in a namespace."""
-574: 
-575:     async def find_related_entities(
-576:         self,
-577:         entity_id: UUID,
-578:         *,
-579:         max_depth: int = 2,
-580:         limit: int = 20,
-581:     ) -> list[tuple[Entity, float]]:
-582:         """Find entities related to a given entity."""
-583: ```
-584: 
-585: ### Search Modes
-586: 
-587: | Mode | Description |
-588: |------|-------------|
-589: | `VECTOR` | Semantic similarity search using embeddings |
-590: | `GRAPH` | Entity and relationship traversal |
-591: | `KEYWORD` | Full-text keyword search |
-592: | `HYBRID` | Combined search with RRF fusion |
-593: | `ALL` | Returns results from all sources separately |
-594: 
-595: ### Entity Types
-596: 
-597: | Type | Description |
-598: |------|-------------|
-599: | `PERSON` | Individual people |
-600: | `ORGANIZATION` | Companies, institutions |
-601: | `LOCATION` | Places, addresses |
-602: | `CONCEPT` | Abstract ideas, theories |
-603: | `EVENT` | Occurrences, incidents |
-604: | `TECHNOLOGY` | Tools, platforms, languages |
-605: | `PRODUCT` | Goods, services |
-606: | `DOCUMENT` | Referenced documents |
-607: | `OTHER` | Uncategorized entities |
-608: 
-609: ---
-610: 
-611: ## License
-612: 
-613: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
 ## File: src/khora/db/models.py
@@ -30230,12 +30346,12 @@ README.md
  11: 
  12: import asyncio
  13: from dataclasses import dataclass, field
- 14: from difflib import SequenceMatcher
- 15: from typing import TYPE_CHECKING, Any
- 16: from uuid import UUID
- 17: 
- 18: from loguru import logger
- 19: 
+ 14: from typing import TYPE_CHECKING, Any
+ 15: from uuid import UUID
+ 16: 
+ 17: from loguru import logger
+ 18: 
+ 19: from khora._accel import sequence_match_ratio
  20: from khora.core.models.entity import entity_type_str
  21: 
  22: from .understanding import EntityMention
@@ -30528,181 +30644,180 @@ README.md
 309: 
 310:             for entity in entities:
 311:                 # Calculate fuzzy similarity
-312:                 ratio = SequenceMatcher(
-313:                     None,
-314:                     mention_name_lower,
-315:                     entity.name.lower(),
-316:                 ).ratio()
-317: 
-318:                 if ratio >= self._fuzzy_threshold:
-319:                     # Apply type penalty so wrong-type matches score lower
-320:                     penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
-321:                     matches.append((entity, ratio * penalty))
-322: 
-323:             # Also try partial matching (for handling first/last name, abbreviations)
-324:             for entity in entities:
-325:                 if entity in [m[0] for m in matches]:
-326:                     continue
-327: 
-328:                 # Check if mention is contained in entity name or vice versa
-329:                 entity_name_lower = entity.name.lower()
-330:                 penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
-331:                 if mention_name_lower in entity_name_lower:
-332:                     ratio = len(mention_name_lower) / len(entity_name_lower)
-333:                     if ratio >= 0.5:  # At least 50% match
-334:                         matches.append((entity, ratio * self._fuzzy_threshold * penalty))
-335:                 elif entity_name_lower in mention_name_lower:
-336:                     ratio = len(entity_name_lower) / len(mention_name_lower)
-337:                     if ratio >= 0.5:
-338:                         matches.append((entity, ratio * self._fuzzy_threshold * penalty))
-339: 
-340:         except Exception as e:
-341:             logger.debug(f"Fuzzy match failed: {e}")
-342: 
-343:         # Sort by score and limit
-344:         matches.sort(key=lambda x: x[1], reverse=True)
-345:         return matches[: self._max_candidates]
-346: 
-347:     async def _embedding_match_entities(
-348:         self,
-349:         mention: EntityMention,
-350:         namespace_id: UUID,
-351:         precomputed_embeddings: dict[str, list[float]] | None = None,
-352:     ) -> list[tuple[Entity, float]]:
-353:         """Find entities using embedding similarity.
-354: 
-355:         Args:
-356:             mention: Entity mention
-357:             namespace_id: Namespace to search
-358:             precomputed_embeddings: Pre-computed embeddings keyed by mention text
-359: 
-360:         Returns:
-361:             List of (entity, score) tuples
-362:         """
-363:         if not self._embedder:
-364:             return []
-365: 
-366:         matches = []
-367: 
-368:         try:
-369:             # Use pre-computed embedding if available, otherwise compute on the fly
-370:             mention_text = f"{mention.entity_type}: {mention.name}"
-371:             if precomputed_embeddings and mention_text in precomputed_embeddings:
-372:                 embedding = precomputed_embeddings[mention_text]
-373:             else:
-374:                 embedding = await self._embedder.embed(mention_text)
-375: 
-376:             # Search for similar entities
-377:             results = await self._storage.search_similar_entities(
-378:                 namespace_id,
-379:                 embedding,
-380:                 limit=self._max_candidates * 2,
-381:                 min_similarity=self._embedding_threshold,
-382:             )
-383: 
-384:             # Fetch full entities
-385:             for entity_id, score in results:
-386:                 entity = await self._storage.get_entity(entity_id)
-387:                 if entity:
-388:                     # Only include entities of compatible types
-389:                     if self._types_compatible(mention.entity_type, entity_type_str(entity.entity_type)):
-390:                         # Apply type penalty so exact type matches rank higher
-391:                         penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
-392:                         matches.append((entity, score * penalty))
-393: 
-394:         except Exception as e:
-395:             logger.debug(f"Embedding match failed: {e}")
-396: 
-397:         return matches[: self._max_candidates]
-398: 
-399:     def _types_compatible(self, mention_type: str, entity_type: str) -> bool:
-400:         """Check if entity types are compatible for linking.
-401: 
-402:         Args:
-403:             mention_type: Type from query mention
-404:             entity_type: Type from stored entity
-405: 
-406:         Returns:
-407:             True if types are compatible
-408:         """
-409:         # Exact match
-410:         if mention_type.upper() == entity_type.upper():
-411:             return True
-412: 
-413:         # CONCEPT is compatible with most types
-414:         if mention_type.upper() == "CONCEPT" or entity_type.upper() == "CONCEPT":
-415:             return True
-416: 
-417:         # CUSTOM is a wildcard
-418:         if mention_type.upper() == "CUSTOM" or entity_type.upper() == "CUSTOM":
-419:             return True
-420: 
-421:         return False
-422: 
-423:     def _type_penalty(self, mention_type: str | None, entity_type: str) -> float:
-424:         """Compute a score penalty based on entity type compatibility.
-425: 
-426:         When the query understanding provides an entity type hint,
-427:         penalize matches of the wrong type. For example, a query about
-428:         "the company Linear" should penalize matching a PERSON named "Linear".
-429: 
-430:         Args:
-431:             mention_type: Expected type from query mention (None = no hint)
-432:             entity_type: Type of the candidate entity
-433: 
-434:         Returns:
-435:             Multiplier between 0.0 and 1.0 (1.0 = no penalty)
-436:         """
-437:         if not mention_type:
-438:             return 1.0  # No type info, no penalty
-439: 
-440:         mention_upper = mention_type.upper()
-441:         entity_upper = entity_type.upper()
-442: 
-443:         # Exact type match — no penalty
-444:         if mention_upper == entity_upper:
-445:             return 1.0
-446: 
-447:         # Wildcards — minimal penalty
-448:         if mention_upper in ("CONCEPT", "CUSTOM") or entity_upper in ("CONCEPT", "CUSTOM"):
-449:             return 0.9
-450: 
-451:         # Wrong type — heavy penalty
-452:         return 0.3
+312:                 ratio = sequence_match_ratio(
+313:                     mention_name_lower,
+314:                     entity.name.lower(),
+315:                 )
+316: 
+317:                 if ratio >= self._fuzzy_threshold:
+318:                     # Apply type penalty so wrong-type matches score lower
+319:                     penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
+320:                     matches.append((entity, ratio * penalty))
+321: 
+322:             # Also try partial matching (for handling first/last name, abbreviations)
+323:             for entity in entities:
+324:                 if entity in [m[0] for m in matches]:
+325:                     continue
+326: 
+327:                 # Check if mention is contained in entity name or vice versa
+328:                 entity_name_lower = entity.name.lower()
+329:                 penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
+330:                 if mention_name_lower in entity_name_lower:
+331:                     ratio = len(mention_name_lower) / len(entity_name_lower)
+332:                     if ratio >= 0.5:  # At least 50% match
+333:                         matches.append((entity, ratio * self._fuzzy_threshold * penalty))
+334:                 elif entity_name_lower in mention_name_lower:
+335:                     ratio = len(entity_name_lower) / len(mention_name_lower)
+336:                     if ratio >= 0.5:
+337:                         matches.append((entity, ratio * self._fuzzy_threshold * penalty))
+338: 
+339:         except Exception as e:
+340:             logger.debug(f"Fuzzy match failed: {e}")
+341: 
+342:         # Sort by score and limit
+343:         matches.sort(key=lambda x: x[1], reverse=True)
+344:         return matches[: self._max_candidates]
+345: 
+346:     async def _embedding_match_entities(
+347:         self,
+348:         mention: EntityMention,
+349:         namespace_id: UUID,
+350:         precomputed_embeddings: dict[str, list[float]] | None = None,
+351:     ) -> list[tuple[Entity, float]]:
+352:         """Find entities using embedding similarity.
+353: 
+354:         Args:
+355:             mention: Entity mention
+356:             namespace_id: Namespace to search
+357:             precomputed_embeddings: Pre-computed embeddings keyed by mention text
+358: 
+359:         Returns:
+360:             List of (entity, score) tuples
+361:         """
+362:         if not self._embedder:
+363:             return []
+364: 
+365:         matches = []
+366: 
+367:         try:
+368:             # Use pre-computed embedding if available, otherwise compute on the fly
+369:             mention_text = f"{mention.entity_type}: {mention.name}"
+370:             if precomputed_embeddings and mention_text in precomputed_embeddings:
+371:                 embedding = precomputed_embeddings[mention_text]
+372:             else:
+373:                 embedding = await self._embedder.embed(mention_text)
+374: 
+375:             # Search for similar entities
+376:             results = await self._storage.search_similar_entities(
+377:                 namespace_id,
+378:                 embedding,
+379:                 limit=self._max_candidates * 2,
+380:                 min_similarity=self._embedding_threshold,
+381:             )
+382: 
+383:             # Fetch full entities
+384:             for entity_id, score in results:
+385:                 entity = await self._storage.get_entity(entity_id)
+386:                 if entity:
+387:                     # Only include entities of compatible types
+388:                     if self._types_compatible(mention.entity_type, entity_type_str(entity.entity_type)):
+389:                         # Apply type penalty so exact type matches rank higher
+390:                         penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
+391:                         matches.append((entity, score * penalty))
+392: 
+393:         except Exception as e:
+394:             logger.debug(f"Embedding match failed: {e}")
+395: 
+396:         return matches[: self._max_candidates]
+397: 
+398:     def _types_compatible(self, mention_type: str, entity_type: str) -> bool:
+399:         """Check if entity types are compatible for linking.
+400: 
+401:         Args:
+402:             mention_type: Type from query mention
+403:             entity_type: Type from stored entity
+404: 
+405:         Returns:
+406:             True if types are compatible
+407:         """
+408:         # Exact match
+409:         if mention_type.upper() == entity_type.upper():
+410:             return True
+411: 
+412:         # CONCEPT is compatible with most types
+413:         if mention_type.upper() == "CONCEPT" or entity_type.upper() == "CONCEPT":
+414:             return True
+415: 
+416:         # CUSTOM is a wildcard
+417:         if mention_type.upper() == "CUSTOM" or entity_type.upper() == "CUSTOM":
+418:             return True
+419: 
+420:         return False
+421: 
+422:     def _type_penalty(self, mention_type: str | None, entity_type: str) -> float:
+423:         """Compute a score penalty based on entity type compatibility.
+424: 
+425:         When the query understanding provides an entity type hint,
+426:         penalize matches of the wrong type. For example, a query about
+427:         "the company Linear" should penalize matching a PERSON named "Linear".
+428: 
+429:         Args:
+430:             mention_type: Expected type from query mention (None = no hint)
+431:             entity_type: Type of the candidate entity
+432: 
+433:         Returns:
+434:             Multiplier between 0.0 and 1.0 (1.0 = no penalty)
+435:         """
+436:         if not mention_type:
+437:             return 1.0  # No type info, no penalty
+438: 
+439:         mention_upper = mention_type.upper()
+440:         entity_upper = entity_type.upper()
+441: 
+442:         # Exact type match — no penalty
+443:         if mention_upper == entity_upper:
+444:             return 1.0
+445: 
+446:         # Wildcards — minimal penalty
+447:         if mention_upper in ("CONCEPT", "CUSTOM") or entity_upper in ("CONCEPT", "CUSTOM"):
+448:             return 0.9
+449: 
+450:         # Wrong type — heavy penalty
+451:         return 0.3
+452: 
 453: 
-454: 
-455: async def link_query_entities(
-456:     mentions: list[EntityMention],
-457:     namespace_id: UUID,
-458:     storage: StorageCoordinator,
-459:     embedder: Embedder | None = None,
-460:     *,
-461:     fuzzy_threshold: float = 0.8,
-462:     embedding_threshold: float = 0.7,
-463:     max_candidates: int = 5,
-464: ) -> LinkingResult:
-465:     """Convenience function to link query entities.
-466: 
-467:     Args:
-468:         mentions: Entity mentions from query understanding
-469:         namespace_id: Namespace to search in
-470:         storage: Storage coordinator
-471:         embedder: Optional embedder for semantic matching
-472:         fuzzy_threshold: Fuzzy match threshold
-473:         embedding_threshold: Embedding similarity threshold
-474:         max_candidates: Max candidates per mention
-475: 
-476:     Returns:
-477:         LinkingResult with linked entities
-478:     """
-479:     linker = EntityLinker(
-480:         storage,
-481:         embedder,
-482:         fuzzy_threshold=fuzzy_threshold,
-483:         embedding_threshold=embedding_threshold,
-484:         max_candidates=max_candidates,
-485:     )
-486:     return await linker.link(mentions, namespace_id)
+454: async def link_query_entities(
+455:     mentions: list[EntityMention],
+456:     namespace_id: UUID,
+457:     storage: StorageCoordinator,
+458:     embedder: Embedder | None = None,
+459:     *,
+460:     fuzzy_threshold: float = 0.8,
+461:     embedding_threshold: float = 0.7,
+462:     max_candidates: int = 5,
+463: ) -> LinkingResult:
+464:     """Convenience function to link query entities.
+465: 
+466:     Args:
+467:         mentions: Entity mentions from query understanding
+468:         namespace_id: Namespace to search in
+469:         storage: Storage coordinator
+470:         embedder: Optional embedder for semantic matching
+471:         fuzzy_threshold: Fuzzy match threshold
+472:         embedding_threshold: Embedding similarity threshold
+473:         max_candidates: Max candidates per mention
+474: 
+475:     Returns:
+476:         LinkingResult with linked entities
+477:     """
+478:     linker = EntityLinker(
+479:         storage,
+480:         embedder,
+481:         fuzzy_threshold=fuzzy_threshold,
+482:         embedding_threshold=embedding_threshold,
+483:         max_candidates=max_candidates,
+484:     )
+485:     return await linker.link(mentions, namespace_id)
 ````
 
 ## File: src/khora/telemetry/collector.py
@@ -32453,154 +32568,6 @@ README.md
 81:         assert config.environment == "staging"
 ````
 
-## File: src/khora/api/app.py
-````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     else:
- 86:         # If MemoryLake wasn't initialized, still shut down telemetry
- 87:         from ..telemetry import shutdown_telemetry
- 88: 
- 89:         await shutdown_telemetry()
- 90:     await close_db()
- 91: 
- 92: 
- 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 94:     """Create and configure the FastAPI application.
- 95: 
- 96:     Args:
- 97:         config: Optional application configuration
- 98: 
- 99:     Returns:
-100:         Configured FastAPI application
-101:     """
-102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
-103:     from ..logging_config import setup_logging
-104: 
-105:     setup_logging(level="INFO")
-106: 
-107:     if config is None:
-108:         from ..config import load_config
-109: 
-110:         config = load_config()
-111: 
-112:     app = FastAPI(
-113:         title="Khora",
-114:         description="Deyta's memory lake and materialization of knowledge",
-115:         version="0.0.9",
-116:         lifespan=lifespan,
-117:         debug=config.debug,
-118:     )
-119: 
-120:     # Store config in app state
-121:     app.state.config = config
-122: 
-123:     # Configure CORS
-124:     app.add_middleware(
-125:         CORSMiddleware,
-126:         allow_origins=["*"] if config.debug else [],
-127:         allow_credentials=True,
-128:         allow_methods=["*"],
-129:         allow_headers=["*"],
-130:     )
-131: 
-132:     # Add request logging
-133:     app.add_middleware(LoggingMiddleware)
-134: 
-135:     # Register routes
-136:     # Status endpoint is public (no auth)
-137:     app.include_router(status.router, tags=["status"])
-138: 
-139:     # Memory Lake API routes
-140:     app.include_router(memory.router)
-141:     app.include_router(namespaces.router)
-142:     app.include_router(sync.router)
-143: 
-144:     return app
-````
-
 ## File: CLAUDE.md
 ````markdown
   1: # Khora - Development Guide
@@ -33038,6 +33005,154 @@ README.md
 433: @instrument_storage("postgresql", "my_storage_op")
 434: async def store_data(): ...
 435: ```
+````
+
+## File: src/khora/api/app.py
+````python
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     else:
+ 86:         # If MemoryLake wasn't initialized, still shut down telemetry
+ 87:         from ..telemetry import shutdown_telemetry
+ 88: 
+ 89:         await shutdown_telemetry()
+ 90:     await close_db()
+ 91: 
+ 92: 
+ 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 94:     """Create and configure the FastAPI application.
+ 95: 
+ 96:     Args:
+ 97:         config: Optional application configuration
+ 98: 
+ 99:     Returns:
+100:         Configured FastAPI application
+101:     """
+102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+103:     from ..logging_config import setup_logging
+104: 
+105:     setup_logging(level="INFO")
+106: 
+107:     if config is None:
+108:         from ..config import load_config
+109: 
+110:         config = load_config()
+111: 
+112:     app = FastAPI(
+113:         title="Khora",
+114:         description="Deyta's memory lake and materialization of knowledge",
+115:         version="0.0.9",
+116:         lifespan=lifespan,
+117:         debug=config.debug,
+118:     )
+119: 
+120:     # Store config in app state
+121:     app.state.config = config
+122: 
+123:     # Configure CORS
+124:     app.add_middleware(
+125:         CORSMiddleware,
+126:         allow_origins=["*"] if config.debug else [],
+127:         allow_credentials=True,
+128:         allow_methods=["*"],
+129:         allow_headers=["*"],
+130:     )
+131: 
+132:     # Add request logging
+133:     app.add_middleware(LoggingMiddleware)
+134: 
+135:     # Register routes
+136:     # Status endpoint is public (no auth)
+137:     app.include_router(status.router, tags=["status"])
+138: 
+139:     # Memory Lake API routes
+140:     app.include_router(memory.router)
+141:     app.include_router(namespaces.router)
+142:     app.include_router(sync.router)
+143: 
+144:     return app
 ````
 
 ## File: src/khora/config/schema.py
@@ -40055,7 +40170,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.0.26"
+  3: version = "0.0.27"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -40132,108 +40247,119 @@ README.md
  77: reranking = [
  78:     "sentence-transformers>=3.0.0",
  79: ]
- 80: 
- 81: [project.scripts]
- 82: khora = "khora:main"
- 83: 
- 84: [build-system]
- 85: requires = ["uv_build>=0.8.17,<0.9.0"]
- 86: build-backend = "uv_build"
+ 80: # Accelerated CPU operations (numpy for cosine sim, rapidfuzz for string matching)
+ 81: accel = [
+ 82:     "rapidfuzz>=3.0.0",
+ 83: ]
+ 84: 
+ 85: [project.scripts]
+ 86: khora = "khora:main"
  87: 
- 88: [tool.pytest.ini_options]
- 89: testpaths = ["tests"]
- 90: python_files = ["test_*.py"]
- 91: python_classes = ["Test*"]
- 92: python_functions = ["test_*"]
- 93: addopts = [
- 94:     "--strict-markers",
- 95:     "--strict-config",
- 96:     "--cov=khora",
- 97:     "--cov-branch",
- 98:     "--cov-report=term-missing",
- 99:     "--cov-fail-under=50",
-100: ]
-101: markers = [
-102:     "unit: Unit tests",
-103:     "integration: Integration tests",
-104:     "e2e: End-to-end tests",
-105: ]
-106: asyncio_mode = "auto"
-107: 
-108: [tool.coverage.run]
-109: source = ["src"]
-110: omit = [
-111:     "tests/*",
-112:     "*/test_*.py",
-113:     "*/__pycache__/*",
-114: ]
-115: 
-116: [tool.coverage.report]
-117: exclude_lines = [
-118:     "pragma: no cover",
-119:     "def __repr__",
-120:     "raise AssertionError",
-121:     "raise NotImplementedError",
-122:     "if __name__ == .__main__.:",
-123:     "if TYPE_CHECKING:",
-124: ]
-125: 
-126: [tool.black]
-127: target-version = ["py313"]
-128: line-length = 120
+ 88: [build-system]
+ 89: requires = ["uv_build>=0.8.17,<0.9.0"]
+ 90: build-backend = "uv_build"
+ 91: 
+ 92: [tool.pytest.ini_options]
+ 93: testpaths = ["tests"]
+ 94: python_files = ["test_*.py"]
+ 95: python_classes = ["Test*"]
+ 96: python_functions = ["test_*"]
+ 97: addopts = [
+ 98:     "--strict-markers",
+ 99:     "--strict-config",
+100:     "--cov=khora",
+101:     "--cov-branch",
+102:     "--cov-report=term-missing",
+103:     "--cov-fail-under=50",
+104: ]
+105: markers = [
+106:     "unit: Unit tests",
+107:     "integration: Integration tests",
+108:     "e2e: End-to-end tests",
+109: ]
+110: asyncio_mode = "auto"
+111: 
+112: [tool.coverage.run]
+113: source = ["src"]
+114: omit = [
+115:     "tests/*",
+116:     "*/test_*.py",
+117:     "*/__pycache__/*",
+118: ]
+119: 
+120: [tool.coverage.report]
+121: exclude_lines = [
+122:     "pragma: no cover",
+123:     "def __repr__",
+124:     "raise AssertionError",
+125:     "raise NotImplementedError",
+126:     "if __name__ == .__main__.:",
+127:     "if TYPE_CHECKING:",
+128: ]
 129: 
-130: [tool.isort]
-131: profile = "black"
-132: line_length = 120
-133: known_first_party = ["khora"]
-134: skip_gitignore = true
-135: 
-136: [tool.ruff]
-137: target-version = "py313"
-138: line-length = 120
+130: [tool.black]
+131: target-version = ["py313"]
+132: line-length = 120
+133: 
+134: [tool.isort]
+135: profile = "black"
+136: line_length = 120
+137: known_first_party = ["khora"]
+138: skip_gitignore = true
 139: 
-140: [tool.ruff.lint]
-141: select = ["E", "F", "W"]
-142: ignore = ["E501"]  # Line too long - handled by black
+140: [tool.ruff]
+141: target-version = "py313"
+142: line-length = 120
 143: 
-144: [tool.ty.environment]
-145: python-version = "3.13"
-146: extra-paths = ["src"]
+144: [tool.ruff.lint]
+145: select = ["E", "F", "W"]
+146: ignore = ["E501"]  # Line too long - handled by black
 147: 
-148: [tool.ty.rules]
-149: # Suppress noisy rules to start green; tighten incrementally
-150: invalid-argument-type = "ignore"       # 58 errors, mostly third-party stubs (FastAPI/Starlette/SQLAlchemy)
-151: invalid-method-override = "ignore"     # 4 errors, str(Enum) LSP violations in Permission
-152: possibly-missing-attribute = "ignore"  # 10 warnings, protocol/union narrowing gaps
-153: unsupported-operator = "ignore"        # 7 errors, dict typed as dict[str, Any] += int
-154: call-non-callable = "ignore"           # 2 errors, dynamic factory patterns
-155: invalid-type-form = "ignore"           # 3 errors, advanced generics
-156: unknown-argument = "ignore"            # 3 errors, third-party keyword args
-157: deprecated = "ignore"                  # 6 warnings, third-party deprecations
-158: unresolved-attribute = "warn"          # 6 errors, protocol/model attribute gaps
-159: unresolved-reference = "warn"          # 2 errors, forward references
-160: unresolved-import = "warn"             # 1 error, optional dependency (kuzu)
-161: invalid-assignment = "warn"            # 2 errors, third-party stub mismatches
-162: invalid-return-type = "warn"           # 2 errors, implicit None returns
-163: not-iterable = "warn"                  # 1 error, exception unpacking pattern
-164: unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
-165: 
-166: [dependency-groups]
-167: dev = [
-168:     "prek>=0.3.0",
-169:     "pytest>=9.0.2",
-170:     "pytest-asyncio>=1.3.0",
-171:     "pytest-cov>=7.0.0",
-172:     "black>=26.0.0",
-173:     "ruff>=0.14.14",
-174:     "isort>=7.0.0",
-175:     "ty>=0.0.1a1",
-176: ]
+148: [tool.ty.environment]
+149: python-version = "3.13"
+150: extra-paths = ["src"]
+151: 
+152: [tool.ty.rules]
+153: # Suppress noisy rules to start green; tighten incrementally
+154: invalid-argument-type = "ignore"       # 58 errors, mostly third-party stubs (FastAPI/Starlette/SQLAlchemy)
+155: invalid-method-override = "ignore"     # 4 errors, str(Enum) LSP violations in Permission
+156: possibly-missing-attribute = "ignore"  # 10 warnings, protocol/union narrowing gaps
+157: unsupported-operator = "ignore"        # 7 errors, dict typed as dict[str, Any] += int
+158: call-non-callable = "ignore"           # 2 errors, dynamic factory patterns
+159: invalid-type-form = "ignore"           # 3 errors, advanced generics
+160: unknown-argument = "ignore"            # 3 errors, third-party keyword args
+161: deprecated = "ignore"                  # 6 warnings, third-party deprecations
+162: unresolved-attribute = "warn"          # 6 errors, protocol/model attribute gaps
+163: unresolved-reference = "warn"          # 2 errors, forward references
+164: unresolved-import = "warn"             # 1 error, optional dependency (kuzu)
+165: invalid-assignment = "warn"            # 2 errors, third-party stub mismatches
+166: invalid-return-type = "warn"           # 2 errors, implicit None returns
+167: not-iterable = "warn"                  # 1 error, exception unpacking pattern
+168: unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
+169: 
+170: [dependency-groups]
+171: dev = [
+172:     "prek>=0.3.0",
+173:     "pytest>=9.0.2",
+174:     "pytest-asyncio>=1.3.0",
+175:     "pytest-cov>=7.0.0",
+176:     "black>=26.0.0",
+177:     "ruff>=0.14.14",
+178:     "isort>=7.0.0",
+179:     "ty>=0.0.1a1",
+180: ]
 ````
 
 
 
 # Git Logs
+
+## Commit: 2026-02-02 15:27:51 +0100
+**Message:** chore: bump version to 0.0.26
+
+**Files:**
+- REPOMIX.md
+- uv.lock
 
 ## Commit: 2026-02-02 14:55:50 +0100
 **Message:** fix: add inference diagnostics and fix zero inferred relationships
@@ -40528,12 +40654,4 @@ README.md
 - src/khora/config/schema.py
 - src/khora/memory_lake.py
 - src/khora/query/engine.py
-- uv.lock
-
-## Commit: 2026-02-01 09:52:56 +0100
-**Message:** chore: bump version to 0.0.17
-
-**Files:**
-- pyproject.toml
-- src/khora/__init__.py
 - uv.lock

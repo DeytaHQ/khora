@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
 
+from khora._accel import sequence_match_ratio
 from khora.core.models.entity import entity_type_str
 
 from .understanding import EntityMention
@@ -309,11 +309,10 @@ class EntityLinker:
 
             for entity in entities:
                 # Calculate fuzzy similarity
-                ratio = SequenceMatcher(
-                    None,
+                ratio = sequence_match_ratio(
                     mention_name_lower,
                     entity.name.lower(),
-                ).ratio()
+                )
 
                 if ratio >= self._fuzzy_threshold:
                     # Apply type penalty so wrong-type matches score lower

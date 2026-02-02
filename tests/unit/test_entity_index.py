@@ -6,11 +6,10 @@ from uuid import uuid4
 
 import pytest
 
+from khora._accel import cosine_similarity, levenshtein_similarity
 from khora.core.models.entity import Entity, EntityType
 from khora.extraction.expansion.entity_index import (
     EntityIndex,
-    _cosine_similarity,
-    _levenshtein_similarity,
     _normalize_name,
     _tokenize,
 )
@@ -72,33 +71,33 @@ class TestTokenize:
 class TestCosineSimilarity:
     def test_identical(self):
         v = [1.0, 2.0, 3.0]
-        assert _cosine_similarity(v, v) == pytest.approx(1.0)
+        assert cosine_similarity(v, v) == pytest.approx(1.0)
 
     def test_orthogonal(self):
-        assert _cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+        assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
 
     def test_mismatched_length(self):
-        assert _cosine_similarity([1.0], [1.0, 2.0]) == 0.0
+        assert cosine_similarity([1.0], [1.0, 2.0]) == 0.0
 
     def test_zero_vector(self):
-        assert _cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
+        assert cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
 
 
 class TestLevenshteinSimilarity:
     def test_identical(self):
-        assert _levenshtein_similarity("hello", "hello") == 1.0
+        assert levenshtein_similarity("hello", "hello") == 1.0
 
     def test_completely_different(self):
-        sim = _levenshtein_similarity("abc", "xyz")
+        sim = levenshtein_similarity("abc", "xyz")
         assert sim < 0.5
 
     def test_close(self):
-        sim = _levenshtein_similarity("kitten", "kittens")
+        sim = levenshtein_similarity("kitten", "kittens")
         assert sim > 0.8
 
     def test_empty(self):
-        assert _levenshtein_similarity("", "abc") == 0.0
-        assert _levenshtein_similarity("abc", "") == 0.0
+        assert levenshtein_similarity("", "abc") == 0.0
+        assert levenshtein_similarity("abc", "") == 0.0
 
 
 # ---------------------------------------------------------------------------

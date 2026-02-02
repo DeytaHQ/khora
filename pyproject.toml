@@ -1,6 +1,6 @@
 [project]
 name = "khora"
-version = "0.0.26"
+version = "0.0.27"
 description = "Khora is Memory Lake"
 readme = "README.md"
 authors = [
@@ -76,6 +76,10 @@ all-backends = [
 # Neural reranking
 reranking = [
     "sentence-transformers>=3.0.0",
+]
+# Accelerated CPU operations (numpy for cosine sim, rapidfuzz for string matching)
+accel = [
+    "rapidfuzz>=3.0.0",
 ]
 
 [project.scripts]

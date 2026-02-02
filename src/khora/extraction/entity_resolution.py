@@ -11,12 +11,12 @@ Uses multiple strategies:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
 
+from khora._accel import sequence_match_ratio
 from khora.core.models.entity import entity_type_str
 
 if TYPE_CHECKING:
@@ -172,7 +172,7 @@ class EntityResolver:
                 if entity in [c.entity for c in candidates]:
                     continue
 
-                ratio = SequenceMatcher(None, name_lower, entity.name.lower()).ratio()
+                ratio = sequence_match_ratio(name_lower, entity.name.lower())
                 if ratio >= self._fuzzy_threshold:
                     candidates.append(ResolutionCandidate(entity, "fuzzy", ratio))
 

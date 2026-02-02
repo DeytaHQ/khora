@@ -3,15 +3,16 @@
 Provides an in-memory index that grows during ingestion, enabling O(1)
 exact dedup and O(k) fuzzy/embedding candidate retrieval via token blocking.
 
-No external dependencies beyond the standard library (uses numpy only if
-available for faster cosine similarity).
+Uses numpy (cosine similarity) and rapidfuzz (Levenshtein) when available,
+with pure-Python fallbacks via ``khora._accel``.
 """
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 from uuid import UUID
+
+from khora._accel import batch_cosine_similarity, levenshtein_similarity
 
 if TYPE_CHECKING:
     from khora.core.models import Entity
@@ -40,47 +41,6 @@ def _tokenize(name: str) -> set[str]:
         if len(cleaned) >= 2:
             tokens.add(cleaned)
     return tokens
-
-
-def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    if len(vec1) != len(vec2):
-        return 0.0
-
-    dot = 0.0
-    norm1 = 0.0
-    norm2 = 0.0
-    for a, b in zip(vec1, vec2):
-        dot += a * b
-        norm1 += a * a
-        norm2 += b * b
-
-    if norm1 == 0.0 or norm2 == 0.0:
-        return 0.0
-
-    return dot / (math.sqrt(norm1) * math.sqrt(norm2))
-
-
-def _levenshtein_similarity(s1: str, s2: str) -> float:
-    """Normalized Levenshtein similarity (1.0 = identical)."""
-    a, b = s1.lower(), s2.lower()
-    if a == b:
-        return 1.0
-    la, lb = len(a), len(b)
-    if la == 0 or lb == 0:
-        return 0.0
-
-    # Single-row DP for memory efficiency
-    prev = list(range(lb + 1))
-    for i in range(1, la + 1):
-        curr = [i] + [0] * lb
-        for j in range(1, lb + 1):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-        prev = curr
-
-    distance = prev[lb]
-    return 1.0 - (distance / max(la, lb))
 
 
 class EntityIndex:
@@ -205,7 +165,7 @@ class EntityIndex:
             # Skip exact matches (already handled by add())
             if _normalize_name(candidate.name) == normalized:
                 continue
-            sim = _levenshtein_similarity(entity.name, candidate.name)
+            sim = levenshtein_similarity(entity.name, candidate.name)
             if sim >= threshold:
                 results.append((candidate, sim))
 
@@ -247,16 +207,24 @@ class EntityIndex:
 
         candidate_ids.discard(entity.id)
 
-        results: list[tuple[Entity, float]] = []
+        # Collect valid candidates and their embeddings for batch comparison
+        valid_candidates: list[Entity] = []
+        candidate_embeddings: list[list[float]] = []
         for cid in candidate_ids:
             candidate = self._by_id.get(cid)
             if candidate is None or not candidate.embedding:
                 continue
             if _entity_type_str(candidate) != type_str:
                 continue
-            sim = _cosine_similarity(entity.embedding, candidate.embedding)
-            if sim >= threshold:
-                results.append((candidate, sim))
+            valid_candidates.append(candidate)
+            candidate_embeddings.append(candidate.embedding)
+
+        if not valid_candidates:
+            return []
+
+        # Batch cosine similarity (uses numpy when available)
+        scored = batch_cosine_similarity(entity.embedding, candidate_embeddings, threshold=threshold)
+        results: list[tuple[Entity, float]] = [(valid_candidates[idx], sim) for idx, sim in scored]
 
         results.sort(key=lambda x: x[1], reverse=True)
         return results

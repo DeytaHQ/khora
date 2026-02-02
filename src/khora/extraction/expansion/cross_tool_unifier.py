@@ -12,6 +12,8 @@ from uuid import UUID
 
 from loguru import logger
 
+from khora._accel import cosine_similarity, levenshtein_similarity
+
 from .rule_engine import RuleEngine, RuleEvaluationContext
 
 if TYPE_CHECKING:
@@ -313,7 +315,7 @@ class CrossToolUnifier:
                 if e1.entity_type != e2.entity_type:
                     continue
 
-                similarity = self._cosine_similarity(e1.embedding, e2.embedding)
+                similarity = cosine_similarity(e1.embedding, e2.embedding)
                 if similarity >= self._embedding_threshold:
                     pairs.append((e1.id, e2.id))
 
@@ -359,7 +361,7 @@ class CrossToolUnifier:
 
             for i, e1 in enumerate(group):
                 for e2 in group[i + 1 :]:
-                    similarity = self._fuzzy_similarity(e1.name, e2.name)
+                    similarity = levenshtein_similarity(e1.name, e2.name)
                     if similarity >= self._fuzzy_threshold:
                         pairs.append((e1.id, e2.id))
 
@@ -423,62 +425,3 @@ class CrossToolUnifier:
         # This would create relationships like SAME_AS or REFERENCES
         # For now, return empty list - implementation depends on requirements
         return []
-
-    def _cosine_similarity(
-        self,
-        vec1: list[float] | None,
-        vec2: list[float] | None,
-    ) -> float:
-        """Calculate cosine similarity between two vectors."""
-        if not vec1 or not vec2:
-            return 0.0
-
-        if len(vec1) != len(vec2):
-            return 0.0
-
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        norm1 = sum(a * a for a in vec1) ** 0.5
-        norm2 = sum(b * b for b in vec2) ** 0.5
-
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-
-        return dot_product / (norm1 * norm2)
-
-    def _fuzzy_similarity(self, str1: str, str2: str) -> float:
-        """Calculate fuzzy similarity between two strings.
-
-        Uses Levenshtein distance normalized by max length.
-        """
-        if not str1 or not str2:
-            return 0.0
-
-        s1, s2 = str1.lower(), str2.lower()
-        if s1 == s2:
-            return 1.0
-
-        # Simple Levenshtein distance
-        len1, len2 = len(s1), len(s2)
-        if len1 == 0 or len2 == 0:
-            return 0.0
-
-        # Create distance matrix
-        dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
-
-        for i in range(len1 + 1):
-            dp[i][0] = i
-        for j in range(len2 + 1):
-            dp[0][j] = j
-
-        for i in range(1, len1 + 1):
-            for j in range(1, len2 + 1):
-                cost = 0 if s1[i - 1] == s2[j - 1] else 1
-                dp[i][j] = min(
-                    dp[i - 1][j] + 1,  # deletion
-                    dp[i][j - 1] + 1,  # insertion
-                    dp[i - 1][j - 1] + cost,  # substitution
-                )
-
-        distance = dp[len1][len2]
-        max_len = max(len1, len2)
-        return 1.0 - (distance / max_len)
