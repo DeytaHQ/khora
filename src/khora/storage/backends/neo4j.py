@@ -6,6 +6,7 @@ in Neo4j graph database.
 
 from __future__ import annotations
 
+import re as _re
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -21,6 +22,16 @@ from khora.storage.backends.mixins import (
 from khora.storage.backends.mixins import deserialize_dict as _deserialize_dict
 from khora.storage.backends.mixins import element_to_dict as _element_to_dict
 from khora.storage.backends.mixins import serialize_dict as _serialize_dict
+
+# Neo4j relationship labels must be valid identifiers: letters, digits, underscores.
+# LLM-generated types like "at-risk" or "works for" need sanitizing.
+_NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
+
+
+def _sanitize_neo4j_label(label: str) -> str:
+    """Sanitize a string for use as a Neo4j relationship type label."""
+    sanitized = _NEO4J_LABEL_RE.sub("_", label.strip())
+    return sanitized.upper() if sanitized else "RELATES_TO"
 
 
 class Neo4jBackend(GraphBackendBase):
@@ -438,7 +449,7 @@ class Neo4jBackend(GraphBackendBase):
         # Group by relationship type (required for dynamic rel type in Cypher)
         type_groups: dict[str, list[Relationship]] = {}
         for rel in relationships:
-            rel_type = (
+            rel_type = _sanitize_neo4j_label(
                 rel.relationship_type.value
                 if isinstance(rel.relationship_type, RelationshipType)
                 else rel.relationship_type
@@ -534,7 +545,7 @@ class Neo4jBackend(GraphBackendBase):
         """Create a relationship between entities."""
         driver = self._get_driver()
 
-        rel_type = (
+        rel_type = _sanitize_neo4j_label(
             relationship.relationship_type.value
             if isinstance(relationship.relationship_type, RelationshipType)
             else relationship.relationship_type
@@ -641,7 +652,7 @@ class Neo4jBackend(GraphBackendBase):
         # Build relationship type filter
         rel_filter = ""
         if relationship_types:
-            rel_filter = ":" + "|".join(relationship_types)
+            rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
         # Build direction query
         if direction == "outgoing":
@@ -700,7 +711,7 @@ class Neo4jBackend(GraphBackendBase):
         driver = self._get_driver()
 
         # Build relationship type filter
-        rel_filter = f":{relationship_type}" if relationship_type else ""
+        rel_filter = f":{_sanitize_neo4j_label(relationship_type)}" if relationship_type else ""
 
         query = f"""
         MATCH (source)-[r{rel_filter}]->(target)
@@ -865,7 +876,7 @@ class Neo4jBackend(GraphBackendBase):
 
         rel_filter = ""
         if relationship_types:
-            rel_filter = ":" + "|".join(relationship_types)
+            rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
         query = f"""
         MATCH path = shortestPath(
@@ -911,7 +922,7 @@ class Neo4jBackend(GraphBackendBase):
 
         rel_filter = ""
         if relationship_types:
-            rel_filter = ":" + "|".join(relationship_types)
+            rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
         query = f"""
         MATCH (center:Entity {{id: $entity_id}})
@@ -974,7 +985,7 @@ class Neo4jBackend(GraphBackendBase):
 
         rel_filter = ""
         if relationship_types:
-            rel_filter = ":" + "|".join(relationship_types)
+            rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
         # Use UNWIND to process all entities in a single query
         query = f"""
