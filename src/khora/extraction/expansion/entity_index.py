@@ -200,11 +200,6 @@ class EntityIndex:
         for token in tokens:
             candidate_ids |= self._token.get(token, set())
 
-        # Also include all same-type entities (embedding similarity
-        # can catch entities with completely different names)
-        for e in self._type.get(type_str, []):
-            candidate_ids.add(e.id)
-
         candidate_ids.discard(entity.id)
 
         # Collect valid candidates and their embeddings for batch comparison

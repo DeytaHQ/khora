@@ -594,6 +594,9 @@ async def ingest_documents(
         return_exceptions=True,
     )
 
+    if shared_entity_index is not None:
+        logger.info(f"Entity index size after processing: {len(shared_entity_index)} entities")
+
     # Filter out exceptions and count errors
     successful_results = []
     error_count = 0
