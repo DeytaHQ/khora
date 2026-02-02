@@ -285,8 +285,8 @@ class TestResolveAndMergeEntity:
         assert entity.description == "An engineer"
 
     @pytest.mark.asyncio
-    async def test_unknown_entity_type_fallback(self) -> None:
-        """Unknown entity type falls back to CONCEPT."""
+    async def test_unknown_entity_type_preserved(self) -> None:
+        """Unknown entity type is preserved as a string (not mapped to CONCEPT)."""
         ns_id = uuid4()
         storage = MagicMock()
         storage.list_entities = AsyncMock(return_value=[])
@@ -298,4 +298,4 @@ class TestResolveAndMergeEntity:
             storage,
         )
         assert is_new is True
-        assert entity.entity_type == EntityType.CONCEPT
+        assert entity.entity_type == "UNKNOWN_TYPE"

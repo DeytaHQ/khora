@@ -342,11 +342,11 @@ class RelationshipInferrer:
         namespace_id = entities[0].namespace_id if entities else uuid4()
 
         for inf in inferred:
-            # Try to map relationship type to enum
+            # Preserve original type string for domain-specific types
             try:
-                rel_type = RelationshipType[inf.relationship_type]
+                rel_type: RelationshipType | str = RelationshipType[inf.relationship_type]
             except (KeyError, AttributeError):
-                rel_type = RelationshipType.CUSTOM
+                rel_type = inf.relationship_type
 
             mock_rels.append(
                 Relationship(
@@ -385,11 +385,11 @@ def to_relationship(
     from khora.core.models import Relationship
     from khora.core.models.entity import RelationshipType
 
-    # Try to map relationship type to enum
+    # Preserve original type string for domain-specific types
     try:
-        rel_type = RelationshipType[inferred.relationship_type]
+        rel_type: RelationshipType | str = RelationshipType[inferred.relationship_type]
     except (KeyError, AttributeError):
-        rel_type = RelationshipType.CUSTOM
+        rel_type = inferred.relationship_type
 
     return Relationship(
         id=uuid4(),

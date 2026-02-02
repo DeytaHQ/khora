@@ -119,12 +119,11 @@ async def extract_entities(
                 if existing.valid_from and chunk.created_at < existing.valid_from:
                     existing.valid_from = chunk.created_at
             else:
-                # Create new entity
-                entity_type = EntityType.CONCEPT
+                # Create new entity — preserve original type string from LLM
                 try:
-                    entity_type = EntityType(extracted.entity_type)
+                    entity_type: EntityType | str = EntityType(extracted.entity_type)
                 except ValueError:
-                    pass
+                    entity_type = extracted.entity_type or "CONCEPT"
 
                 entity = Entity(
                     namespace_id=chunk.namespace_id,
@@ -144,11 +143,11 @@ async def extract_entities(
             if extracted_rel.confidence < min_relationship_confidence:
                 continue
 
-            rel_type = RelationshipType.RELATES_TO
+            # Preserve original type string from LLM
             try:
-                rel_type = RelationshipType(extracted_rel.relationship_type)
+                rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
             except ValueError:
-                pass
+                rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
             # Find source and target entities
             source_key = next(

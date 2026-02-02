@@ -187,7 +187,9 @@ class KuzuBackend(GraphBackendBase):
             id=parse_uuid(row["id"]),
             namespace_id=parse_uuid(row["namespace_id"]),
             name=row["name"],
-            entity_type=EntityType(row["entity_type"]),
+            entity_type=(
+                EntityType(row["entity_type"]) if row["entity_type"] in EntityType.__members__ else row["entity_type"]
+            ),
             description=row.get("description", ""),
             attributes=deserialize_dict(row.get("attributes")),
             source_document_ids=parse_uuid_list(row.get("source_document_ids")),
@@ -209,9 +211,7 @@ class KuzuBackend(GraphBackendBase):
             namespace_id=parse_uuid(row["namespace_id"]),
             source_entity_id=parse_uuid(source_id),
             target_entity_id=parse_uuid(target_id),
-            relationship_type=(
-                RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else RelationshipType.CUSTOM
-            ),
+            relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
             description=row.get("description", ""),
             properties=deserialize_dict(row.get("properties")),
             source_document_ids=parse_uuid_list(row.get("source_document_ids")),

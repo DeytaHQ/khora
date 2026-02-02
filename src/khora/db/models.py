@@ -32,7 +32,6 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from khora.core.models.document import DocumentStatus
-from khora.core.models.entity import EntityType, RelationshipType
 from khora.core.models.event import EventType
 from khora.core.models.tenancy import TenancyMode
 
@@ -294,8 +293,8 @@ class EntityModel(Base):
     )
     name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
     entity_type: Mapped[str] = mapped_column(
-        Enum(EntityType, name="entity_type", create_constraint=True),
-        default=EntityType.CONCEPT,
+        String(64),
+        default="CONCEPT",
         index=True,
     )
     description: Mapped[str] = mapped_column(Text, default="")
@@ -357,8 +356,8 @@ class RelationshipModel(Base):
         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
     )
     relationship_type: Mapped[str] = mapped_column(
-        Enum(RelationshipType, name="relationship_type", create_constraint=True),
-        default=RelationshipType.RELATES_TO,
+        String(64),
+        default="RELATES_TO",
         index=True,
     )
     description: Mapped[str] = mapped_column(Text, default="")

@@ -316,9 +316,9 @@ async def resolve_and_merge_entity(
 
     # Create new entity
     try:
-        etype = EntityType(entity_type.upper())
+        etype: EntityType | str = EntityType(entity_type.upper())
     except ValueError:
-        etype = EntityType.CONCEPT
+        etype = entity_type.upper() or "CONCEPT"
 
     new_entity = Entity(
         namespace_id=namespace_id,

@@ -508,7 +508,11 @@ class Neo4jBackend(GraphBackendBase):
             id=UUID(node["id"]),
             namespace_id=UUID(node["namespace_id"]),
             name=node["name"],
-            entity_type=EntityType(node["entity_type"]),
+            entity_type=(
+                EntityType(node["entity_type"])
+                if node["entity_type"] in EntityType.__members__
+                else node["entity_type"]
+            ),
             description=node.get("description", ""),
             attributes=_deserialize_dict(node.get("attributes")),
             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
@@ -670,9 +674,7 @@ class Neo4jBackend(GraphBackendBase):
             namespace_id=UUID(rel["namespace_id"]),
             source_entity_id=UUID(source_id),
             target_entity_id=UUID(target_id),
-            relationship_type=(
-                RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else RelationshipType.CUSTOM
-            ),
+            relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
             description=rel.get("description", ""),
             properties=_deserialize_dict(rel.get("properties")),
             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],

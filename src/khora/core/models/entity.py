@@ -75,7 +75,7 @@ class Entity:
     id: UUID = field(default_factory=uuid4)
     namespace_id: UUID = field(default_factory=uuid4)
     name: str = ""
-    entity_type: EntityType = EntityType.CONCEPT
+    entity_type: EntityType | str = EntityType.CONCEPT
     description: str = ""
 
     # Attributes from extraction
@@ -161,7 +161,7 @@ class Relationship:
     namespace_id: UUID = field(default_factory=uuid4)
     source_entity_id: UUID = field(default_factory=uuid4)
     target_entity_id: UUID = field(default_factory=uuid4)
-    relationship_type: RelationshipType = RelationshipType.RELATES_TO
+    relationship_type: RelationshipType | str = RelationshipType.RELATES_TO
     description: str = ""
 
     # Additional properties
