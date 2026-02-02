@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from prefect import task
 
@@ -16,6 +16,7 @@ async def embed_chunks(
     *,
     model: str = "text-embedding-3-small",
     batch_size: int = 100,
+    shared_embedder: Any | None = None,
 ) -> list[Chunk]:
     """Generate embeddings for chunks.
 
@@ -23,6 +24,7 @@ async def embed_chunks(
         chunks: Chunks to embed
         model: Embedding model to use
         batch_size: Batch size for embedding
+        shared_embedder: Optional shared embedder instance (preserves LRU cache across calls)
 
     Returns:
         Chunks with embeddings set
@@ -32,8 +34,8 @@ async def embed_chunks(
     if not chunks:
         return []
 
-    # Create embedder
-    embedder = LiteLLMEmbedder(model=model, batch_size=batch_size)
+    # Use shared embedder if provided, otherwise create a fresh one
+    embedder = shared_embedder or LiteLLMEmbedder(model=model, batch_size=batch_size)
 
     # Extract texts
     texts = [chunk.content for chunk in chunks]

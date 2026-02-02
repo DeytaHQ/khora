@@ -215,7 +215,7 @@ async def process_document(
             async with pipeline_stage(
                 "ingestion", "embedding", _run_id, namespace_id=_ns_id, extra_metadata={"chunk_count": len(chunks)}
             ):
-                return await embed_chunks(chunks, model=embedding_model)
+                return await embed_chunks(chunks, model=embedding_model, shared_embedder=shared_embedder)
 
         async def _extract_with_telemetry():
             async with pipeline_stage(
@@ -462,6 +462,7 @@ async def ingest_documents(
     max_concurrent_extractions: int = 10,
     enable_expansion: bool = False,
     extraction_context: dict[str, Any] | None = None,
+    skip_resolution: bool = False,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -484,6 +485,8 @@ async def ingest_documents(
         max_concurrent_extractions: Maximum concurrent LLM extractions per document
         enable_expansion: Whether to run semantic expansion
         extraction_context: Context dict for prompt template rendering
+        skip_resolution: If True, skip Phase 3 (smart resolution). Useful when the
+            caller runs resolution separately after all batches are processed.
 
     Returns:
         Summary of ingestion results
@@ -533,6 +536,13 @@ async def ingest_documents(
     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
     staged_docs = [doc for doc in staged_results if doc is not None]
 
+    # Build mapping from staged doc ID to original dict for per-doc overrides
+    # (e.g. _skill_name, _extraction_context set by callers like Genesis)
+    doc_originals: dict[UUID, dict[str, Any]] = {}
+    for orig, staged in zip(documents, staged_results):
+        if staged is not None:
+            doc_originals[staged.id] = orig
+
     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
 
     if not staged_docs:
@@ -555,6 +565,10 @@ async def ingest_documents(
 
     async def process_with_limit(doc):
         async with doc_semaphore:
+            # Check for per-doc overrides from the original document dict
+            orig = doc_originals.get(doc.id, {})
+            doc_skill = orig.get("_skill_name", skill_name)
+            doc_context = orig.get("_extraction_context", extraction_context)
             return await process_document(
                 doc,
                 storage,
@@ -562,11 +576,11 @@ async def ingest_documents(
                 chunk_size=chunk_size,
                 embedding_model=embedding_model,
                 extraction_model=extraction_model,
-                skill_name=skill_name,
+                skill_name=doc_skill,
                 expertise=expertise,
                 max_concurrent_extractions=max_concurrent_extractions,
                 enable_expansion=enable_expansion,
-                extraction_context=extraction_context,
+                extraction_context=doc_context,
                 entity_index=shared_entity_index,
                 shared_embedder=shared_embedder,
             )
@@ -594,7 +608,7 @@ async def ingest_documents(
 
     # Phase 3 (Smart mode): Post-ingestion cross-document resolution + inference
     smart_resolution_result: dict[str, Any] = {}
-    if is_smart and shared_entity_index and resolved_expertise and successful_results:
+    if is_smart and shared_entity_index and resolved_expertise and successful_results and not skip_resolution:
         logger.info("Starting smart post-ingestion resolution...")
         smart_resolution_result = await run_smart_resolution(
             namespace_id,
