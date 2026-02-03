@@ -769,11 +769,21 @@ async def run_smart_resolution(
 
     # Phase 4: Relationship inference on full resolved graph (single pass)
     from khora.extraction.expansion.relationship_inferrer import RelationshipInferrer
+    from khora.extraction.expansion.rule_engine import RuleEvaluationContext
 
     inferrer = RelationshipInferrer(
         expertise=expertise,
         min_confidence=expertise.confidence.min_inferred,
     )
+
+    # Pre-check: count rule engine matches (for diagnostics)
+    rule_engine_matches = 0
+    if expertise.inference_rules:
+        context = RuleEvaluationContext.from_data(resolved_entities, relationships)
+        matches = inferrer._rule_engine.evaluate_inference_rules(context)
+        rule_engine_matches = len(matches)
+        logger.info(f"Smart resolution: rule engine produced {rule_engine_matches} raw matches")
+
     inferred = inferrer.infer(
         resolved_entities,
         relationships,
@@ -791,10 +801,25 @@ async def run_smart_resolution(
         f"{entities_merged} merged, {inferred_count} inferred relationships"
     )
 
+    # Build diagnostics for caller
+    diagnostics = {
+        "relationships_loaded": len(relationships),
+        "entities_resolved": len(resolved_entities),
+        "relationship_types": dict(rel_type_dist) if relationships else {},
+        "entity_types": dict(ent_type_dist) if resolved_entities else {},
+        "entity_id_overlap": {
+            "matched": matched,
+            "total": len(rel_entity_ids),
+            "unmatched": unmatched,
+        },
+        "rule_engine_matches": rule_engine_matches,
+    }
+
     return {
         "entities_resolved": len(resolved_entities),
         "entities_merged": entities_merged,
         "inferred_relationships": inferred_count,
+        "diagnostics": diagnostics,
     }
 
 
