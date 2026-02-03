@@ -26,6 +26,19 @@ if TYPE_CHECKING:
 # Default entity types to extract
 DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
 
+# Default relationship types to use
+DEFAULT_RELATIONSHIP_TYPES = [
+    "WORKS_FOR",
+    "KNOWS",
+    "MANAGES",
+    "PART_OF",
+    "LOCATED_IN",
+    "DEPENDS_ON",
+    "IMPLEMENTS",
+    "RELATES_TO",
+    "ASSOCIATED_WITH",
+]
+
 # Default system prompt for extraction
 DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
 
@@ -33,6 +46,7 @@ DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract e
 EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
 
 Entity types to extract: {entity_types}
+Relationship types to use: {relationship_types}
 
 Text:
 {text}
@@ -494,10 +508,14 @@ class LLMEntityExtractor(EntityExtractor):
                 from khora.extraction.skills.composer import ExpertiseComposer
 
                 composer = ExpertiseComposer()
+                # Get relationship types from expertise
+                relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+
                 prompt_context = {
                     **(context or {}),
                     "text": text[:8000],
                     "entity_types": entity_types,
+                    "relationship_types": relationship_types,
                     "tool_context": tool_context,
                 }
                 return composer.render_prompt(
@@ -509,8 +527,15 @@ class LLMEntityExtractor(EntityExtractor):
                 logger.warning(f"Failed to render extraction prompt: {e}")
 
         # Use default extraction prompt with optional tool context
+        # Get relationship types from expertise or defaults
+        if expertise:
+            relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+        else:
+            relationship_types = DEFAULT_RELATIONSHIP_TYPES
+
         prompt = EXTRACTION_PROMPT.format(
             entity_types=", ".join(entity_types),
+            relationship_types=", ".join(relationship_types),
             text=text[:8000],  # Truncate very long texts
         )
         if tool_context:
@@ -677,10 +702,14 @@ Return a JSON object with a "sections" array, one object per input section:
 Each section follows the entity/relationship format from the instructions above."""
             )
 
+            # Get relationship types from expertise
+            relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+
             prompt_context = {
                 **(context or {}),
                 "text": multi_text,
                 "entity_types": entity_types,
+                "relationship_types": relationship_types,
                 "tool_context": tool_context or "",
             }
             try:
@@ -696,10 +725,17 @@ Each section follows the entity/relationship format from the instructions above.
 
         # Fallback to hardcoded prompt (existing behavior)
         if not expertise or not expertise.extraction_prompt:
+            # Get relationship types - expertise may exist but without custom extraction_prompt
+            if expertise:
+                relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+            else:
+                relationship_types = DEFAULT_RELATIONSHIP_TYPES
+
             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 
 Entity types to find: {", ".join(entity_types)}
+Relationship types to use: {", ".join(relationship_types)}
 
 {sections}
 

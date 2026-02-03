@@ -39,7 +39,7 @@ from .config import KhoraConfig
 from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
 from .query import SearchMode
 
-__version__ = "0.0.30"
+__version__ = "0.0.31"
 
 __all__ = [
     "main",
