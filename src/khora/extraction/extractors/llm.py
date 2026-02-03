@@ -95,9 +95,22 @@ class LLMEntityExtractor(EntityExtractor):
     """
 
     # Models that require json_schema format instead of json_object
-    # Note: gpt-5-nano was tested but hits token limits with strict schema,
-    # so it uses json_object format like other models
-    MODELS_REQUIRING_JSON_SCHEMA: set[str] = set()
+    # OpenAI models with structured output support need explicit json_schema
+    # to ensure additionalProperties: false is properly set on all nested objects
+    MODELS_REQUIRING_JSON_SCHEMA: set[str] = {
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4o-2024-05-13",
+        "gpt-4o-2024-08-06",
+        "gpt-4o-2024-11-20",
+        "gpt-4o-mini-2024-07-18",
+        "gpt-4-turbo",
+        "gpt-4-turbo-preview",
+        "o1",
+        "o1-mini",
+        "o1-preview",
+        "o3-mini",
+    }
 
     def __init__(
         self,

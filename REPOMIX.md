@@ -7315,6 +7315,551 @@ README.md
 129:         ...
 ````
 
+## File: src/khora/extraction/skills/base.py
+````python
+  1: """Base extraction skill definition and expertise configuration."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from dataclasses import dataclass, field
+  6: from enum import Enum
+  7: from typing import Any
+  8: 
+  9: 
+ 10: class ConfidenceLevel(str, Enum):
+ 11:     """Confidence level thresholds for extraction."""
+ 12: 
+ 13:     HIGH = "high"  # 0.8+
+ 14:     MEDIUM = "medium"  # 0.5-0.8
+ 15:     LOW = "low"  # 0.3-0.5
+ 16: 
+ 17: 
+ 18: @dataclass
+ 19: class EntityTypeConfig:
+ 20:     """Configurable entity type definition.
+ 21: 
+ 22:     Defines an entity type that the expertise system recognizes,
+ 23:     including its attributes and identifiers for cross-tool matching.
+ 24:     """
+ 25: 
+ 26:     name: str
+ 27:     description: str = ""
+ 28:     attributes: dict[str, list[str]] = field(default_factory=dict)  # required, optional
+ 29:     identifiers: list[str] = field(default_factory=list)  # For cross-tool matching
+ 30:     aliases: list[str] = field(default_factory=list)  # Alternative names for this type
+ 31: 
+ 32:     def to_dict(self) -> dict[str, Any]:
+ 33:         """Convert to dictionary representation."""
+ 34:         return {
+ 35:             "name": self.name,
+ 36:             "description": self.description,
+ 37:             "attributes": self.attributes,
+ 38:             "identifiers": self.identifiers,
+ 39:             "aliases": self.aliases,
+ 40:         }
+ 41: 
+ 42:     @classmethod
+ 43:     def from_dict(cls, data: dict[str, Any]) -> EntityTypeConfig:
+ 44:         """Create from dictionary."""
+ 45:         return cls(
+ 46:             name=data.get("name", ""),
+ 47:             description=data.get("description", ""),
+ 48:             attributes=data.get("attributes", {}),
+ 49:             identifiers=data.get("identifiers", []),
+ 50:             aliases=data.get("aliases", []),
+ 51:         )
+ 52: 
+ 53: 
+ 54: @dataclass
+ 55: class RelationshipTypeConfig:
+ 56:     """Configurable relationship type definition.
+ 57: 
+ 58:     Defines a relationship type with source and target entity constraints.
+ 59:     """
+ 60: 
+ 61:     name: str
+ 62:     description: str = ""
+ 63:     source_types: list[str] = field(default_factory=list)  # "*" means any
+ 64:     target_types: list[str] = field(default_factory=list)  # "*" means any
+ 65:     bidirectional: bool = False
+ 66:     properties: list[str] = field(default_factory=list)  # Expected properties
+ 67: 
+ 68:     def to_dict(self) -> dict[str, Any]:
+ 69:         """Convert to dictionary representation."""
+ 70:         return {
+ 71:             "name": self.name,
+ 72:             "description": self.description,
+ 73:             "source_types": self.source_types,
+ 74:             "target_types": self.target_types,
+ 75:             "bidirectional": self.bidirectional,
+ 76:             "properties": self.properties,
+ 77:         }
+ 78: 
+ 79:     @classmethod
+ 80:     def from_dict(cls, data: dict[str, Any]) -> RelationshipTypeConfig:
+ 81:         """Create from dictionary."""
+ 82:         return cls(
+ 83:             name=data.get("name", ""),
+ 84:             description=data.get("description", ""),
+ 85:             source_types=data.get("source_types", []),
+ 86:             target_types=data.get("target_types", []),
+ 87:             bidirectional=data.get("bidirectional", False),
+ 88:             properties=data.get("properties", []),
+ 89:         )
+ 90: 
+ 91: 
+ 92: @dataclass
+ 93: class CorrelationRule:
+ 94:     """Rule for cross-tool entity correlation.
+ 95: 
+ 96:     Defines how entities from different tools should be matched and unified.
+ 97:     """
+ 98: 
+ 99:     name: str
+100:     description: str = ""
+101:     pattern: str | None = None  # Regex pattern for matching references
+102:     match_fields: list[str] = field(default_factory=list)  # Fields to match on (e.g., email)
+103:     entity_types: list[str] = field(default_factory=list)  # Entity types this rule applies to
+104:     creates_relationship: str | None = None  # Relationship type created when matched
+105:     confidence: float = 0.9  # Confidence of matches from this rule
+106: 
+107:     def to_dict(self) -> dict[str, Any]:
+108:         """Convert to dictionary representation."""
+109:         return {
+110:             "name": self.name,
+111:             "description": self.description,
+112:             "pattern": self.pattern,
+113:             "match_fields": self.match_fields,
+114:             "entity_types": self.entity_types,
+115:             "creates_relationship": self.creates_relationship,
+116:             "confidence": self.confidence,
+117:         }
+118: 
+119:     @classmethod
+120:     def from_dict(cls, data: dict[str, Any]) -> CorrelationRule:
+121:         """Create from dictionary."""
+122:         return cls(
+123:             name=data.get("name", ""),
+124:             description=data.get("description", ""),
+125:             pattern=data.get("pattern"),
+126:             match_fields=data.get("match_fields", []),
+127:             entity_types=data.get("entity_types", []),
+128:             creates_relationship=data.get("creates_relationship"),
+129:             confidence=data.get("confidence", 0.9),
+130:         )
+131: 
+132: 
+133: @dataclass
+134: class InferenceCondition:
+135:     """Condition for relationship inference rule."""
+136: 
+137:     relationship: str  # Relationship type to match
+138:     source_type: str | None = None  # Source entity type (optional filter)
+139:     target_type: str | None = None  # Target entity type (optional filter)
+140: 
+141:     def to_dict(self) -> dict[str, Any]:
+142:         """Convert to dictionary representation."""
+143:         return {
+144:             "relationship": self.relationship,
+145:             "source_type": self.source_type,
+146:             "target_type": self.target_type,
+147:         }
+148: 
+149:     @classmethod
+150:     def from_dict(cls, data: dict[str, Any]) -> InferenceCondition:
+151:         """Create from dictionary."""
+152:         return cls(
+153:             relationship=data.get("relationship", ""),
+154:             source_type=data.get("source_type"),
+155:             target_type=data.get("target_type"),
+156:         )
+157: 
+158: 
+159: @dataclass
+160: class InferenceRule:
+161:     """Rule for relationship inference.
+162: 
+163:     Defines logical rules for inferring new relationships from existing ones.
+164:     """
+165: 
+166:     name: str
+167:     description: str = ""
+168:     when: list[InferenceCondition] = field(default_factory=list)  # Conditions that must be met
+169:     then_relationship: str = ""  # Relationship type to create
+170:     then_source: str = "first.source"  # Source entity reference (first.source, first.target, etc.)
+171:     then_target: str = "second.target"  # Target entity reference
+172:     confidence: float = 0.5  # Confidence of inferred relationships
+173: 
+174:     def to_dict(self) -> dict[str, Any]:
+175:         """Convert to dictionary representation."""
+176:         return {
+177:             "name": self.name,
+178:             "description": self.description,
+179:             "when": [c.to_dict() for c in self.when],
+180:             "then": {
+181:                 "relationship": self.then_relationship,
+182:                 "source": self.then_source,
+183:                 "target": self.then_target,
+184:             },
+185:             "confidence": self.confidence,
+186:         }
+187: 
+188:     @classmethod
+189:     def from_dict(cls, data: dict[str, Any]) -> InferenceRule:
+190:         """Create from dictionary."""
+191:         when_data = data.get("when", [])
+192:         when = [InferenceCondition.from_dict(c) if isinstance(c, dict) else c for c in when_data]
+193: 
+194:         then = data.get("then", {})
+195:         return cls(
+196:             name=data.get("name", ""),
+197:             description=data.get("description", ""),
+198:             when=when,
+199:             then_relationship=then.get("relationship", ""),
+200:             then_source=then.get("source", "first.source"),
+201:             then_target=then.get("target", "second.target"),
+202:             confidence=data.get("confidence", 0.5),
+203:         )
+204: 
+205: 
+206: @dataclass
+207: class ConfidenceConfig:
+208:     """Confidence threshold configuration."""
+209: 
+210:     min_entity: float = 0.5
+211:     min_relationship: float = 0.5
+212:     min_inferred: float = 0.3
+213: 
+214:     def to_dict(self) -> dict[str, float]:
+215:         """Convert to dictionary representation."""
+216:         return {
+217:             "min_entity": self.min_entity,
+218:             "min_relationship": self.min_relationship,
+219:             "min_inferred": self.min_inferred,
+220:         }
+221: 
+222:     @classmethod
+223:     def from_dict(cls, data: dict[str, Any]) -> ConfidenceConfig:
+224:         """Create from dictionary."""
+225:         return cls(
+226:             min_entity=data.get("min_entity", 0.5),
+227:             min_relationship=data.get("min_relationship", 0.5),
+228:             min_inferred=data.get("min_inferred", 0.3),
+229:         )
+230: 
+231: 
+232: @dataclass
+233: class ExpansionConfig:
+234:     """Configuration for semantic expansion."""
+235: 
+236:     enabled: bool = True
+237:     depth: int = 2
+238:     cross_tool_unification: bool = True
+239:     relationship_inference: bool = True
+240:     max_entities_per_expansion: int = 100
+241:     # Inference mode: "smart" (recommended), "batch", "incremental", "none"
+242:     inference_mode: str = "smart"
+243:     # Smart mode: pre-load existing entities into the in-memory index
+244:     preload_existing: bool = True
+245:     # Smart mode: entities per batch upsert
+246:     batch_storage_size: int = 50
+247: 
+248:     def to_dict(self) -> dict[str, Any]:
+249:         """Convert to dictionary representation."""
+250:         return {
+251:             "enabled": self.enabled,
+252:             "depth": self.depth,
+253:             "cross_tool_unification": self.cross_tool_unification,
+254:             "relationship_inference": self.relationship_inference,
+255:             "max_entities_per_expansion": self.max_entities_per_expansion,
+256:             "inference_mode": self.inference_mode,
+257:             "preload_existing": self.preload_existing,
+258:             "batch_storage_size": self.batch_storage_size,
+259:         }
+260: 
+261:     @classmethod
+262:     def from_dict(cls, data: dict[str, Any]) -> ExpansionConfig:
+263:         """Create from dictionary."""
+264:         return cls(
+265:             enabled=data.get("enabled", True),
+266:             depth=data.get("depth", 2),
+267:             cross_tool_unification=data.get("cross_tool_unification", True),
+268:             relationship_inference=data.get("relationship_inference", True),
+269:             max_entities_per_expansion=data.get("max_entities_per_expansion", 100),
+270:             inference_mode=data.get("inference_mode", "smart"),
+271:             preload_existing=data.get("preload_existing", True),
+272:             batch_storage_size=data.get("batch_storage_size", 50),
+273:         )
+274: 
+275: 
+276: @dataclass
+277: class ExpertiseConfig:
+278:     """Complete configurable expertise definition.
+279: 
+280:     Expertise configurations define domain-specific knowledge for entity
+281:     extraction, including entity types, relationship types, correlation rules,
+282:     and inference rules. All expertise is loaded from configuration (YAML/JSON)
+283:     or defined programmatically - no hard-coded domain knowledge.
+284: 
+285:     Example usage:
+286:         # Load from file
+287:         loader = ExpertiseLoader()
+288:         expertise = loader.load_file("saas_expert.yaml")
+289: 
+290:         # Use with MemoryLake
+291:         async with MemoryLake() as lake:
+292:             result = await lake.remember(content, expertise=expertise)
+293: 
+294:         # Or define programmatically
+295:         expertise = ExpertiseConfig(
+296:             name="custom",
+297:             system_prompt="You are an expert in...",
+298:             entity_types=[EntityTypeConfig(name="CUSTOM", description="...")],
+299:         )
+300:     """
+301: 
+302:     name: str
+303:     version: str = "1.0.0"
+304:     description: str = ""
+305:     extends: list[str] = field(default_factory=list)  # Inherit from other configs
+306: 
+307:     # LLM prompts (Jinja2 templates supported)
+308:     system_prompt: str | None = None
+309:     extraction_prompt: str | None = None
+310: 
+311:     # Type definitions
+312:     entity_types: list[EntityTypeConfig] = field(default_factory=list)
+313:     relationship_types: list[RelationshipTypeConfig] = field(default_factory=list)
+314: 
+315:     # Tool-specific knowledge (arbitrary dict for schema info)
+316:     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+317: 
+318:     # Cross-tool correlation rules
+319:     correlation_rules: list[CorrelationRule] = field(default_factory=list)
+320: 
+321:     # Inference rules for semantic expansion
+322:     inference_rules: list[InferenceRule] = field(default_factory=list)
+323: 
+324:     # Confidence thresholds
+325:     confidence: ConfidenceConfig = field(default_factory=ConfidenceConfig)
+326: 
+327:     # Expansion settings
+328:     expansion: ExpansionConfig = field(default_factory=ExpansionConfig)
+329: 
+330:     # Additional metadata
+331:     metadata: dict[str, Any] = field(default_factory=dict)
+332: 
+333:     def get_entity_type_names(self) -> list[str]:
+334:         """Get list of entity type names."""
+335:         return [et.name for et in self.entity_types]
+336: 
+337:     def get_relationship_type_names(self) -> list[str]:
+338:         """Get list of relationship type names."""
+339:         return [rt.name for rt in self.relationship_types]
+340: 
+341:     def get_entity_type(self, name: str) -> EntityTypeConfig | None:
+342:         """Get entity type config by name."""
+343:         for et in self.entity_types:
+344:             if et.name == name:
+345:                 return et
+346:         return None
+347: 
+348:     def get_relationship_type(self, name: str) -> RelationshipTypeConfig | None:
+349:         """Get relationship type config by name."""
+350:         for rt in self.relationship_types:
+351:             if rt.name == name:
+352:                 return rt
+353:         return None
+354: 
+355:     def to_dict(self) -> dict[str, Any]:
+356:         """Convert to dictionary representation."""
+357:         return {
+358:             "name": self.name,
+359:             "version": self.version,
+360:             "description": self.description,
+361:             "extends": self.extends,
+362:             "system_prompt": self.system_prompt,
+363:             "extraction_prompt": self.extraction_prompt,
+364:             "entity_types": [et.to_dict() for et in self.entity_types],
+365:             "relationship_types": [rt.to_dict() for rt in self.relationship_types],
+366:             "tool_schemas": self.tool_schemas,
+367:             "correlation_rules": [cr.to_dict() for cr in self.correlation_rules],
+368:             "inference_rules": [ir.to_dict() for ir in self.inference_rules],
+369:             "confidence": self.confidence.to_dict(),
+370:             "expansion": self.expansion.to_dict(),
+371:             "metadata": self.metadata,
+372:         }
+373: 
+374:     @classmethod
+375:     def from_dict(cls, data: dict[str, Any]) -> ExpertiseConfig:
+376:         """Create expertise config from dictionary."""
+377:         entity_types = [
+378:             EntityTypeConfig.from_dict(et) if isinstance(et, dict) else et for et in data.get("entity_types", [])
+379:         ]
+380:         relationship_types = [
+381:             RelationshipTypeConfig.from_dict(rt) if isinstance(rt, dict) else rt
+382:             for rt in data.get("relationship_types", [])
+383:         ]
+384:         correlation_rules = [
+385:             CorrelationRule.from_dict(cr) if isinstance(cr, dict) else cr for cr in data.get("correlation_rules", [])
+386:         ]
+387:         inference_rules = [
+388:             InferenceRule.from_dict(ir) if isinstance(ir, dict) else ir for ir in data.get("inference_rules", [])
+389:         ]
+390: 
+391:         confidence_data = data.get("confidence", {})
+392:         confidence = (
+393:             ConfidenceConfig.from_dict(confidence_data) if isinstance(confidence_data, dict) else confidence_data
+394:         )
+395: 
+396:         expansion_data = data.get("expansion", {})
+397:         expansion = ExpansionConfig.from_dict(expansion_data) if isinstance(expansion_data, dict) else expansion_data
+398: 
+399:         return cls(
+400:             name=data.get("name", "custom"),
+401:             version=data.get("version", "1.0.0"),
+402:             description=data.get("description", ""),
+403:             extends=data.get("extends", []),
+404:             system_prompt=data.get("system_prompt"),
+405:             extraction_prompt=data.get("extraction_prompt"),
+406:             entity_types=entity_types,
+407:             relationship_types=relationship_types,
+408:             tool_schemas=data.get("tool_schemas", {}),
+409:             correlation_rules=correlation_rules,
+410:             inference_rules=inference_rules,
+411:             confidence=confidence if isinstance(confidence, ConfidenceConfig) else ConfidenceConfig(),
+412:             expansion=expansion if isinstance(expansion, ExpansionConfig) else ExpansionConfig(),
+413:             metadata=data.get("metadata", {}),
+414:         )
+415: 
+416:     def to_extraction_skill(self) -> ExtractionSkill:
+417:         """Convert to a legacy ExtractionSkill for backward compatibility."""
+418:         return ExtractionSkill(
+419:             name=self.name,
+420:             description=self.description,
+421:             entity_types=self.get_entity_type_names(),
+422:             relationship_types=self.get_relationship_type_names(),
+423:             custom_prompt=self.extraction_prompt,
+424:             min_entity_confidence=self.confidence.min_entity,
+425:             min_relationship_confidence=self.confidence.min_relationship,
+426:             metadata=self.metadata,
+427:         )
+428: 
+429: 
+430: @dataclass
+431: class ExtractionSkill:
+432:     """Configurable extraction skill definition.
+433: 
+434:     Skills define what types of entities and relationships to extract
+435:     from documents. They can be customized per namespace or document type.
+436:     """
+437: 
+438:     name: str
+439:     description: str = ""
+440: 
+441:     # Entity extraction configuration
+442:     entity_types: list[str] = field(default_factory=list)
+443:     relationship_types: list[str] = field(default_factory=list)
+444: 
+445:     # Custom extraction prompt (optional)
+446:     custom_prompt: str | None = None
+447: 
+448:     # Processing configuration
+449:     extract_entities: bool = True
+450:     extract_relationships: bool = True
+451: 
+452:     # Confidence thresholds
+453:     min_entity_confidence: float = 0.5
+454:     min_relationship_confidence: float = 0.5
+455: 
+456:     # Additional metadata
+457:     metadata: dict[str, Any] = field(default_factory=dict)
+458: 
+459:     @classmethod
+460:     def general_entities(cls) -> ExtractionSkill:
+461:         """Create a general entity extraction skill."""
+462:         return cls(
+463:             name="general_entities",
+464:             description="Extract general entities like people, organizations, and concepts",
+465:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
+466:             relationship_types=["WORKS_FOR", "KNOWS", "RELATES_TO", "LOCATED_IN"],
+467:         )
+468: 
+469:     @classmethod
+470:     def technical_docs(cls) -> ExtractionSkill:
+471:         """Create a skill for technical documentation."""
+472:         return cls(
+473:             name="technical_docs",
+474:             description="Extract technical entities from documentation",
+475:             entity_types=["TECHNOLOGY", "CONCEPT", "PRODUCT", "ORGANIZATION"],
+476:             relationship_types=["DEPENDS_ON", "IMPLEMENTS", "PART_OF", "RELATES_TO"],
+477:         )
+478: 
+479:     @classmethod
+480:     def business_intel(cls) -> ExtractionSkill:
+481:         """Create a skill for business intelligence."""
+482:         return cls(
+483:             name="business_intel",
+484:             description="Extract business entities and relationships",
+485:             entity_types=["PERSON", "ORGANIZATION", "PRODUCT", "EVENT", "LOCATION"],
+486:             relationship_types=[
+487:                 "WORKS_FOR",
+488:                 "MANAGES",
+489:                 "OWNS",
+490:                 "COMPETES_WITH",
+491:                 "PARTNERS_WITH",
+492:                 "HEADQUARTERED_IN",
+493:             ],
+494:         )
+495: 
+496:     @classmethod
+497:     def research_papers(cls) -> ExtractionSkill:
+498:         """Create a skill for research papers."""
+499:         return cls(
+500:             name="research_papers",
+501:             description="Extract entities from academic research",
+502:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "TECHNOLOGY", "EVENT"],
+503:             relationship_types=[
+504:                 "COLLABORATES_WITH",
+505:                 "DERIVED_FROM",
+506:                 "IMPLEMENTS",
+507:                 "RELATES_TO",
+508:                 "PRECEDES",
+509:             ],
+510:         )
+511: 
+512:     def to_dict(self) -> dict[str, Any]:
+513:         """Convert skill to dictionary."""
+514:         return {
+515:             "name": self.name,
+516:             "description": self.description,
+517:             "entity_types": self.entity_types,
+518:             "relationship_types": self.relationship_types,
+519:             "custom_prompt": self.custom_prompt,
+520:             "extract_entities": self.extract_entities,
+521:             "extract_relationships": self.extract_relationships,
+522:             "min_entity_confidence": self.min_entity_confidence,
+523:             "min_relationship_confidence": self.min_relationship_confidence,
+524:             "metadata": self.metadata,
+525:         }
+526: 
+527:     @classmethod
+528:     def from_dict(cls, data: dict[str, Any]) -> ExtractionSkill:
+529:         """Create skill from dictionary."""
+530:         return cls(
+531:             name=data.get("name", "custom"),
+532:             description=data.get("description", ""),
+533:             entity_types=data.get("entity_types", []),
+534:             relationship_types=data.get("relationship_types", []),
+535:             custom_prompt=data.get("custom_prompt"),
+536:             extract_entities=data.get("extract_entities", True),
+537:             extract_relationships=data.get("extract_relationships", True),
+538:             min_entity_confidence=data.get("min_entity_confidence", 0.5),
+539:             min_relationship_confidence=data.get("min_relationship_confidence", 0.5),
+540:             metadata=data.get("metadata", {}),
+541:         )
+````
+
 ## File: src/khora/extraction/skills/composer.py
 ````python
   1: """Expertise configuration composer.
@@ -16696,551 +17241,6 @@ README.md
 427:         return []
 ````
 
-## File: src/khora/extraction/skills/base.py
-````python
-  1: """Base extraction skill definition and expertise configuration."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from dataclasses import dataclass, field
-  6: from enum import Enum
-  7: from typing import Any
-  8: 
-  9: 
- 10: class ConfidenceLevel(str, Enum):
- 11:     """Confidence level thresholds for extraction."""
- 12: 
- 13:     HIGH = "high"  # 0.8+
- 14:     MEDIUM = "medium"  # 0.5-0.8
- 15:     LOW = "low"  # 0.3-0.5
- 16: 
- 17: 
- 18: @dataclass
- 19: class EntityTypeConfig:
- 20:     """Configurable entity type definition.
- 21: 
- 22:     Defines an entity type that the expertise system recognizes,
- 23:     including its attributes and identifiers for cross-tool matching.
- 24:     """
- 25: 
- 26:     name: str
- 27:     description: str = ""
- 28:     attributes: dict[str, list[str]] = field(default_factory=dict)  # required, optional
- 29:     identifiers: list[str] = field(default_factory=list)  # For cross-tool matching
- 30:     aliases: list[str] = field(default_factory=list)  # Alternative names for this type
- 31: 
- 32:     def to_dict(self) -> dict[str, Any]:
- 33:         """Convert to dictionary representation."""
- 34:         return {
- 35:             "name": self.name,
- 36:             "description": self.description,
- 37:             "attributes": self.attributes,
- 38:             "identifiers": self.identifiers,
- 39:             "aliases": self.aliases,
- 40:         }
- 41: 
- 42:     @classmethod
- 43:     def from_dict(cls, data: dict[str, Any]) -> EntityTypeConfig:
- 44:         """Create from dictionary."""
- 45:         return cls(
- 46:             name=data.get("name", ""),
- 47:             description=data.get("description", ""),
- 48:             attributes=data.get("attributes", {}),
- 49:             identifiers=data.get("identifiers", []),
- 50:             aliases=data.get("aliases", []),
- 51:         )
- 52: 
- 53: 
- 54: @dataclass
- 55: class RelationshipTypeConfig:
- 56:     """Configurable relationship type definition.
- 57: 
- 58:     Defines a relationship type with source and target entity constraints.
- 59:     """
- 60: 
- 61:     name: str
- 62:     description: str = ""
- 63:     source_types: list[str] = field(default_factory=list)  # "*" means any
- 64:     target_types: list[str] = field(default_factory=list)  # "*" means any
- 65:     bidirectional: bool = False
- 66:     properties: list[str] = field(default_factory=list)  # Expected properties
- 67: 
- 68:     def to_dict(self) -> dict[str, Any]:
- 69:         """Convert to dictionary representation."""
- 70:         return {
- 71:             "name": self.name,
- 72:             "description": self.description,
- 73:             "source_types": self.source_types,
- 74:             "target_types": self.target_types,
- 75:             "bidirectional": self.bidirectional,
- 76:             "properties": self.properties,
- 77:         }
- 78: 
- 79:     @classmethod
- 80:     def from_dict(cls, data: dict[str, Any]) -> RelationshipTypeConfig:
- 81:         """Create from dictionary."""
- 82:         return cls(
- 83:             name=data.get("name", ""),
- 84:             description=data.get("description", ""),
- 85:             source_types=data.get("source_types", []),
- 86:             target_types=data.get("target_types", []),
- 87:             bidirectional=data.get("bidirectional", False),
- 88:             properties=data.get("properties", []),
- 89:         )
- 90: 
- 91: 
- 92: @dataclass
- 93: class CorrelationRule:
- 94:     """Rule for cross-tool entity correlation.
- 95: 
- 96:     Defines how entities from different tools should be matched and unified.
- 97:     """
- 98: 
- 99:     name: str
-100:     description: str = ""
-101:     pattern: str | None = None  # Regex pattern for matching references
-102:     match_fields: list[str] = field(default_factory=list)  # Fields to match on (e.g., email)
-103:     entity_types: list[str] = field(default_factory=list)  # Entity types this rule applies to
-104:     creates_relationship: str | None = None  # Relationship type created when matched
-105:     confidence: float = 0.9  # Confidence of matches from this rule
-106: 
-107:     def to_dict(self) -> dict[str, Any]:
-108:         """Convert to dictionary representation."""
-109:         return {
-110:             "name": self.name,
-111:             "description": self.description,
-112:             "pattern": self.pattern,
-113:             "match_fields": self.match_fields,
-114:             "entity_types": self.entity_types,
-115:             "creates_relationship": self.creates_relationship,
-116:             "confidence": self.confidence,
-117:         }
-118: 
-119:     @classmethod
-120:     def from_dict(cls, data: dict[str, Any]) -> CorrelationRule:
-121:         """Create from dictionary."""
-122:         return cls(
-123:             name=data.get("name", ""),
-124:             description=data.get("description", ""),
-125:             pattern=data.get("pattern"),
-126:             match_fields=data.get("match_fields", []),
-127:             entity_types=data.get("entity_types", []),
-128:             creates_relationship=data.get("creates_relationship"),
-129:             confidence=data.get("confidence", 0.9),
-130:         )
-131: 
-132: 
-133: @dataclass
-134: class InferenceCondition:
-135:     """Condition for relationship inference rule."""
-136: 
-137:     relationship: str  # Relationship type to match
-138:     source_type: str | None = None  # Source entity type (optional filter)
-139:     target_type: str | None = None  # Target entity type (optional filter)
-140: 
-141:     def to_dict(self) -> dict[str, Any]:
-142:         """Convert to dictionary representation."""
-143:         return {
-144:             "relationship": self.relationship,
-145:             "source_type": self.source_type,
-146:             "target_type": self.target_type,
-147:         }
-148: 
-149:     @classmethod
-150:     def from_dict(cls, data: dict[str, Any]) -> InferenceCondition:
-151:         """Create from dictionary."""
-152:         return cls(
-153:             relationship=data.get("relationship", ""),
-154:             source_type=data.get("source_type"),
-155:             target_type=data.get("target_type"),
-156:         )
-157: 
-158: 
-159: @dataclass
-160: class InferenceRule:
-161:     """Rule for relationship inference.
-162: 
-163:     Defines logical rules for inferring new relationships from existing ones.
-164:     """
-165: 
-166:     name: str
-167:     description: str = ""
-168:     when: list[InferenceCondition] = field(default_factory=list)  # Conditions that must be met
-169:     then_relationship: str = ""  # Relationship type to create
-170:     then_source: str = "first.source"  # Source entity reference (first.source, first.target, etc.)
-171:     then_target: str = "second.target"  # Target entity reference
-172:     confidence: float = 0.5  # Confidence of inferred relationships
-173: 
-174:     def to_dict(self) -> dict[str, Any]:
-175:         """Convert to dictionary representation."""
-176:         return {
-177:             "name": self.name,
-178:             "description": self.description,
-179:             "when": [c.to_dict() for c in self.when],
-180:             "then": {
-181:                 "relationship": self.then_relationship,
-182:                 "source": self.then_source,
-183:                 "target": self.then_target,
-184:             },
-185:             "confidence": self.confidence,
-186:         }
-187: 
-188:     @classmethod
-189:     def from_dict(cls, data: dict[str, Any]) -> InferenceRule:
-190:         """Create from dictionary."""
-191:         when_data = data.get("when", [])
-192:         when = [InferenceCondition.from_dict(c) if isinstance(c, dict) else c for c in when_data]
-193: 
-194:         then = data.get("then", {})
-195:         return cls(
-196:             name=data.get("name", ""),
-197:             description=data.get("description", ""),
-198:             when=when,
-199:             then_relationship=then.get("relationship", ""),
-200:             then_source=then.get("source", "first.source"),
-201:             then_target=then.get("target", "second.target"),
-202:             confidence=data.get("confidence", 0.5),
-203:         )
-204: 
-205: 
-206: @dataclass
-207: class ConfidenceConfig:
-208:     """Confidence threshold configuration."""
-209: 
-210:     min_entity: float = 0.5
-211:     min_relationship: float = 0.5
-212:     min_inferred: float = 0.3
-213: 
-214:     def to_dict(self) -> dict[str, float]:
-215:         """Convert to dictionary representation."""
-216:         return {
-217:             "min_entity": self.min_entity,
-218:             "min_relationship": self.min_relationship,
-219:             "min_inferred": self.min_inferred,
-220:         }
-221: 
-222:     @classmethod
-223:     def from_dict(cls, data: dict[str, Any]) -> ConfidenceConfig:
-224:         """Create from dictionary."""
-225:         return cls(
-226:             min_entity=data.get("min_entity", 0.5),
-227:             min_relationship=data.get("min_relationship", 0.5),
-228:             min_inferred=data.get("min_inferred", 0.3),
-229:         )
-230: 
-231: 
-232: @dataclass
-233: class ExpansionConfig:
-234:     """Configuration for semantic expansion."""
-235: 
-236:     enabled: bool = True
-237:     depth: int = 2
-238:     cross_tool_unification: bool = True
-239:     relationship_inference: bool = True
-240:     max_entities_per_expansion: int = 100
-241:     # Inference mode: "smart" (recommended), "batch", "incremental", "none"
-242:     inference_mode: str = "smart"
-243:     # Smart mode: pre-load existing entities into the in-memory index
-244:     preload_existing: bool = True
-245:     # Smart mode: entities per batch upsert
-246:     batch_storage_size: int = 50
-247: 
-248:     def to_dict(self) -> dict[str, Any]:
-249:         """Convert to dictionary representation."""
-250:         return {
-251:             "enabled": self.enabled,
-252:             "depth": self.depth,
-253:             "cross_tool_unification": self.cross_tool_unification,
-254:             "relationship_inference": self.relationship_inference,
-255:             "max_entities_per_expansion": self.max_entities_per_expansion,
-256:             "inference_mode": self.inference_mode,
-257:             "preload_existing": self.preload_existing,
-258:             "batch_storage_size": self.batch_storage_size,
-259:         }
-260: 
-261:     @classmethod
-262:     def from_dict(cls, data: dict[str, Any]) -> ExpansionConfig:
-263:         """Create from dictionary."""
-264:         return cls(
-265:             enabled=data.get("enabled", True),
-266:             depth=data.get("depth", 2),
-267:             cross_tool_unification=data.get("cross_tool_unification", True),
-268:             relationship_inference=data.get("relationship_inference", True),
-269:             max_entities_per_expansion=data.get("max_entities_per_expansion", 100),
-270:             inference_mode=data.get("inference_mode", "smart"),
-271:             preload_existing=data.get("preload_existing", True),
-272:             batch_storage_size=data.get("batch_storage_size", 50),
-273:         )
-274: 
-275: 
-276: @dataclass
-277: class ExpertiseConfig:
-278:     """Complete configurable expertise definition.
-279: 
-280:     Expertise configurations define domain-specific knowledge for entity
-281:     extraction, including entity types, relationship types, correlation rules,
-282:     and inference rules. All expertise is loaded from configuration (YAML/JSON)
-283:     or defined programmatically - no hard-coded domain knowledge.
-284: 
-285:     Example usage:
-286:         # Load from file
-287:         loader = ExpertiseLoader()
-288:         expertise = loader.load_file("saas_expert.yaml")
-289: 
-290:         # Use with MemoryLake
-291:         async with MemoryLake() as lake:
-292:             result = await lake.remember(content, expertise=expertise)
-293: 
-294:         # Or define programmatically
-295:         expertise = ExpertiseConfig(
-296:             name="custom",
-297:             system_prompt="You are an expert in...",
-298:             entity_types=[EntityTypeConfig(name="CUSTOM", description="...")],
-299:         )
-300:     """
-301: 
-302:     name: str
-303:     version: str = "1.0.0"
-304:     description: str = ""
-305:     extends: list[str] = field(default_factory=list)  # Inherit from other configs
-306: 
-307:     # LLM prompts (Jinja2 templates supported)
-308:     system_prompt: str | None = None
-309:     extraction_prompt: str | None = None
-310: 
-311:     # Type definitions
-312:     entity_types: list[EntityTypeConfig] = field(default_factory=list)
-313:     relationship_types: list[RelationshipTypeConfig] = field(default_factory=list)
-314: 
-315:     # Tool-specific knowledge (arbitrary dict for schema info)
-316:     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
-317: 
-318:     # Cross-tool correlation rules
-319:     correlation_rules: list[CorrelationRule] = field(default_factory=list)
-320: 
-321:     # Inference rules for semantic expansion
-322:     inference_rules: list[InferenceRule] = field(default_factory=list)
-323: 
-324:     # Confidence thresholds
-325:     confidence: ConfidenceConfig = field(default_factory=ConfidenceConfig)
-326: 
-327:     # Expansion settings
-328:     expansion: ExpansionConfig = field(default_factory=ExpansionConfig)
-329: 
-330:     # Additional metadata
-331:     metadata: dict[str, Any] = field(default_factory=dict)
-332: 
-333:     def get_entity_type_names(self) -> list[str]:
-334:         """Get list of entity type names."""
-335:         return [et.name for et in self.entity_types]
-336: 
-337:     def get_relationship_type_names(self) -> list[str]:
-338:         """Get list of relationship type names."""
-339:         return [rt.name for rt in self.relationship_types]
-340: 
-341:     def get_entity_type(self, name: str) -> EntityTypeConfig | None:
-342:         """Get entity type config by name."""
-343:         for et in self.entity_types:
-344:             if et.name == name:
-345:                 return et
-346:         return None
-347: 
-348:     def get_relationship_type(self, name: str) -> RelationshipTypeConfig | None:
-349:         """Get relationship type config by name."""
-350:         for rt in self.relationship_types:
-351:             if rt.name == name:
-352:                 return rt
-353:         return None
-354: 
-355:     def to_dict(self) -> dict[str, Any]:
-356:         """Convert to dictionary representation."""
-357:         return {
-358:             "name": self.name,
-359:             "version": self.version,
-360:             "description": self.description,
-361:             "extends": self.extends,
-362:             "system_prompt": self.system_prompt,
-363:             "extraction_prompt": self.extraction_prompt,
-364:             "entity_types": [et.to_dict() for et in self.entity_types],
-365:             "relationship_types": [rt.to_dict() for rt in self.relationship_types],
-366:             "tool_schemas": self.tool_schemas,
-367:             "correlation_rules": [cr.to_dict() for cr in self.correlation_rules],
-368:             "inference_rules": [ir.to_dict() for ir in self.inference_rules],
-369:             "confidence": self.confidence.to_dict(),
-370:             "expansion": self.expansion.to_dict(),
-371:             "metadata": self.metadata,
-372:         }
-373: 
-374:     @classmethod
-375:     def from_dict(cls, data: dict[str, Any]) -> ExpertiseConfig:
-376:         """Create expertise config from dictionary."""
-377:         entity_types = [
-378:             EntityTypeConfig.from_dict(et) if isinstance(et, dict) else et for et in data.get("entity_types", [])
-379:         ]
-380:         relationship_types = [
-381:             RelationshipTypeConfig.from_dict(rt) if isinstance(rt, dict) else rt
-382:             for rt in data.get("relationship_types", [])
-383:         ]
-384:         correlation_rules = [
-385:             CorrelationRule.from_dict(cr) if isinstance(cr, dict) else cr for cr in data.get("correlation_rules", [])
-386:         ]
-387:         inference_rules = [
-388:             InferenceRule.from_dict(ir) if isinstance(ir, dict) else ir for ir in data.get("inference_rules", [])
-389:         ]
-390: 
-391:         confidence_data = data.get("confidence", {})
-392:         confidence = (
-393:             ConfidenceConfig.from_dict(confidence_data) if isinstance(confidence_data, dict) else confidence_data
-394:         )
-395: 
-396:         expansion_data = data.get("expansion", {})
-397:         expansion = ExpansionConfig.from_dict(expansion_data) if isinstance(expansion_data, dict) else expansion_data
-398: 
-399:         return cls(
-400:             name=data.get("name", "custom"),
-401:             version=data.get("version", "1.0.0"),
-402:             description=data.get("description", ""),
-403:             extends=data.get("extends", []),
-404:             system_prompt=data.get("system_prompt"),
-405:             extraction_prompt=data.get("extraction_prompt"),
-406:             entity_types=entity_types,
-407:             relationship_types=relationship_types,
-408:             tool_schemas=data.get("tool_schemas", {}),
-409:             correlation_rules=correlation_rules,
-410:             inference_rules=inference_rules,
-411:             confidence=confidence if isinstance(confidence, ConfidenceConfig) else ConfidenceConfig(),
-412:             expansion=expansion if isinstance(expansion, ExpansionConfig) else ExpansionConfig(),
-413:             metadata=data.get("metadata", {}),
-414:         )
-415: 
-416:     def to_extraction_skill(self) -> ExtractionSkill:
-417:         """Convert to a legacy ExtractionSkill for backward compatibility."""
-418:         return ExtractionSkill(
-419:             name=self.name,
-420:             description=self.description,
-421:             entity_types=self.get_entity_type_names(),
-422:             relationship_types=self.get_relationship_type_names(),
-423:             custom_prompt=self.extraction_prompt,
-424:             min_entity_confidence=self.confidence.min_entity,
-425:             min_relationship_confidence=self.confidence.min_relationship,
-426:             metadata=self.metadata,
-427:         )
-428: 
-429: 
-430: @dataclass
-431: class ExtractionSkill:
-432:     """Configurable extraction skill definition.
-433: 
-434:     Skills define what types of entities and relationships to extract
-435:     from documents. They can be customized per namespace or document type.
-436:     """
-437: 
-438:     name: str
-439:     description: str = ""
-440: 
-441:     # Entity extraction configuration
-442:     entity_types: list[str] = field(default_factory=list)
-443:     relationship_types: list[str] = field(default_factory=list)
-444: 
-445:     # Custom extraction prompt (optional)
-446:     custom_prompt: str | None = None
-447: 
-448:     # Processing configuration
-449:     extract_entities: bool = True
-450:     extract_relationships: bool = True
-451: 
-452:     # Confidence thresholds
-453:     min_entity_confidence: float = 0.5
-454:     min_relationship_confidence: float = 0.5
-455: 
-456:     # Additional metadata
-457:     metadata: dict[str, Any] = field(default_factory=dict)
-458: 
-459:     @classmethod
-460:     def general_entities(cls) -> ExtractionSkill:
-461:         """Create a general entity extraction skill."""
-462:         return cls(
-463:             name="general_entities",
-464:             description="Extract general entities like people, organizations, and concepts",
-465:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
-466:             relationship_types=["WORKS_FOR", "KNOWS", "RELATES_TO", "LOCATED_IN"],
-467:         )
-468: 
-469:     @classmethod
-470:     def technical_docs(cls) -> ExtractionSkill:
-471:         """Create a skill for technical documentation."""
-472:         return cls(
-473:             name="technical_docs",
-474:             description="Extract technical entities from documentation",
-475:             entity_types=["TECHNOLOGY", "CONCEPT", "PRODUCT", "ORGANIZATION"],
-476:             relationship_types=["DEPENDS_ON", "IMPLEMENTS", "PART_OF", "RELATES_TO"],
-477:         )
-478: 
-479:     @classmethod
-480:     def business_intel(cls) -> ExtractionSkill:
-481:         """Create a skill for business intelligence."""
-482:         return cls(
-483:             name="business_intel",
-484:             description="Extract business entities and relationships",
-485:             entity_types=["PERSON", "ORGANIZATION", "PRODUCT", "EVENT", "LOCATION"],
-486:             relationship_types=[
-487:                 "WORKS_FOR",
-488:                 "MANAGES",
-489:                 "OWNS",
-490:                 "COMPETES_WITH",
-491:                 "PARTNERS_WITH",
-492:                 "HEADQUARTERED_IN",
-493:             ],
-494:         )
-495: 
-496:     @classmethod
-497:     def research_papers(cls) -> ExtractionSkill:
-498:         """Create a skill for research papers."""
-499:         return cls(
-500:             name="research_papers",
-501:             description="Extract entities from academic research",
-502:             entity_types=["PERSON", "ORGANIZATION", "CONCEPT", "TECHNOLOGY", "EVENT"],
-503:             relationship_types=[
-504:                 "COLLABORATES_WITH",
-505:                 "DERIVED_FROM",
-506:                 "IMPLEMENTS",
-507:                 "RELATES_TO",
-508:                 "PRECEDES",
-509:             ],
-510:         )
-511: 
-512:     def to_dict(self) -> dict[str, Any]:
-513:         """Convert skill to dictionary."""
-514:         return {
-515:             "name": self.name,
-516:             "description": self.description,
-517:             "entity_types": self.entity_types,
-518:             "relationship_types": self.relationship_types,
-519:             "custom_prompt": self.custom_prompt,
-520:             "extract_entities": self.extract_entities,
-521:             "extract_relationships": self.extract_relationships,
-522:             "min_entity_confidence": self.min_entity_confidence,
-523:             "min_relationship_confidence": self.min_relationship_confidence,
-524:             "metadata": self.metadata,
-525:         }
-526: 
-527:     @classmethod
-528:     def from_dict(cls, data: dict[str, Any]) -> ExtractionSkill:
-529:         """Create skill from dictionary."""
-530:         return cls(
-531:             name=data.get("name", "custom"),
-532:             description=data.get("description", ""),
-533:             entity_types=data.get("entity_types", []),
-534:             relationship_types=data.get("relationship_types", []),
-535:             custom_prompt=data.get("custom_prompt"),
-536:             extract_entities=data.get("extract_entities", True),
-537:             extract_relationships=data.get("extract_relationships", True),
-538:             min_entity_confidence=data.get("min_entity_confidence", 0.5),
-539:             min_relationship_confidence=data.get("min_relationship_confidence", 0.5),
-540:             metadata=data.get("metadata", {}),
-541:         )
-````
-
 ## File: src/khora/pipelines/flows/__init__.py
 ````python
  1: """Pipeline flows for Khora Memory Lake."""
@@ -23177,289 +23177,6 @@ README.md
 79: )
 ````
 
-## File: tests/unit/test_entity_index.py
-````python
-  1: """Tests for EntityIndex — the in-memory blocking index for entity resolution."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from uuid import uuid4
-  6: 
-  7: import pytest
-  8: 
-  9: from khora._accel import cosine_similarity, levenshtein_similarity
- 10: from khora.core.models.entity import Entity, EntityType
- 11: from khora.extraction.expansion.entity_index import (
- 12:     EntityIndex,
- 13:     _normalize_name,
- 14:     _tokenize,
- 15: )
- 16: 
- 17: # ---------------------------------------------------------------------------
- 18: # Helpers
- 19: # ---------------------------------------------------------------------------
- 20: 
- 21: 
- 22: def _make_entity(
- 23:     name: str = "Test Entity",
- 24:     entity_type: EntityType = EntityType.PERSON,
- 25:     namespace_id=None,
- 26:     embedding: list[float] | None = None,
- 27:     confidence: float = 1.0,
- 28: ) -> Entity:
- 29:     return Entity(
- 30:         id=uuid4(),
- 31:         namespace_id=namespace_id or uuid4(),
- 32:         name=name,
- 33:         entity_type=entity_type,
- 34:         description=f"Description of {name}",
- 35:         embedding=embedding,
- 36:         confidence=confidence,
- 37:     )
- 38: 
- 39: 
- 40: # ---------------------------------------------------------------------------
- 41: # Unit helpers
- 42: # ---------------------------------------------------------------------------
- 43: 
- 44: 
- 45: class TestNormalizeName:
- 46:     def test_lowercase_strip(self):
- 47:         assert _normalize_name("  Hello World  ") == "hello world"
- 48: 
- 49:     def test_empty(self):
- 50:         assert _normalize_name("") == ""
- 51: 
- 52: 
- 53: class TestTokenize:
- 54:     def test_basic(self):
- 55:         tokens = _tokenize("John Smith")
- 56:         assert tokens == {"john", "smith"}
- 57: 
- 58:     def test_filters_short_tokens(self):
- 59:         tokens = _tokenize("A B CD EF")
- 60:         assert "a" not in tokens
- 61:         assert "b" not in tokens
- 62:         assert "cd" in tokens
- 63:         assert "ef" in tokens
- 64: 
- 65:     def test_strips_punctuation(self):
- 66:         tokens = _tokenize("hello-world! foo.bar")
- 67:         assert "helloworld" in tokens
- 68:         assert "foobar" in tokens
- 69: 
- 70: 
- 71: class TestCosineSimilarity:
- 72:     def test_identical(self):
- 73:         v = [1.0, 2.0, 3.0]
- 74:         assert cosine_similarity(v, v) == pytest.approx(1.0)
- 75: 
- 76:     def test_orthogonal(self):
- 77:         assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
- 78: 
- 79:     def test_mismatched_length(self):
- 80:         assert cosine_similarity([1.0], [1.0, 2.0]) == 0.0
- 81: 
- 82:     def test_zero_vector(self):
- 83:         assert cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
- 84: 
- 85: 
- 86: class TestLevenshteinSimilarity:
- 87:     def test_identical(self):
- 88:         assert levenshtein_similarity("hello", "hello") == 1.0
- 89: 
- 90:     def test_completely_different(self):
- 91:         sim = levenshtein_similarity("abc", "xyz")
- 92:         assert sim < 0.5
- 93: 
- 94:     def test_close(self):
- 95:         sim = levenshtein_similarity("kitten", "kittens")
- 96:         assert sim > 0.8
- 97: 
- 98:     def test_empty(self):
- 99:         assert levenshtein_similarity("", "abc") == 0.0
-100:         assert levenshtein_similarity("abc", "") == 0.0
-101: 
-102: 
-103: # ---------------------------------------------------------------------------
-104: # EntityIndex core
-105: # ---------------------------------------------------------------------------
-106: 
-107: 
-108: class TestEntityIndexAdd:
-109:     def test_add_new_entity(self):
-110:         idx = EntityIndex()
-111:         e = _make_entity("Alice")
-112:         result = idx.add(e)
-113:         assert result is None
-114:         assert len(idx) == 1
-115:         assert e.id in idx
-116: 
-117:     def test_add_duplicate_returns_existing(self):
-118:         idx = EntityIndex()
-119:         e1 = _make_entity("Alice", entity_type=EntityType.PERSON)
-120:         e2 = _make_entity("alice", entity_type=EntityType.PERSON)  # same name, diff case
-121:         idx.add(e1)
-122:         result = idx.add(e2)
-123:         assert result is e1
-124:         assert len(idx) == 1
-125: 
-126:     def test_different_types_not_duplicate(self):
-127:         idx = EntityIndex()
-128:         e1 = _make_entity("Mercury", entity_type=EntityType.PERSON)
-129:         e2 = _make_entity("Mercury", entity_type=EntityType.LOCATION)
-130:         idx.add(e1)
-131:         result = idx.add(e2)
-132:         assert result is None  # different type -> not a duplicate
-133:         assert len(idx) == 2
-134: 
-135:     def test_whitespace_normalization(self):
-136:         idx = EntityIndex()
-137:         e1 = _make_entity("  John Smith  ")
-138:         idx.add(e1)
-139:         e2 = _make_entity("john smith")
-140:         result = idx.add(e2)
-141:         assert result is e1
-142: 
-143: 
-144: class TestEntityIndexLookup:
-145:     def test_get_by_id(self):
-146:         idx = EntityIndex()
-147:         e = _make_entity("Alice")
-148:         idx.add(e)
-149:         assert idx.get(e.id) is e
-150: 
-151:     def test_get_by_name(self):
-152:         idx = EntityIndex()
-153:         e = _make_entity("Alice", entity_type=EntityType.PERSON)
-154:         idx.add(e)
-155:         assert idx.get_by_name("Alice", "PERSON") is e
-156:         assert idx.get_by_name("alice", "PERSON") is e
-157:         assert idx.get_by_name("Alice", "ORGANIZATION") is None
-158: 
-159: 
-160: class TestFuzzyCandidates:
-161:     def test_finds_similar_names(self):
-162:         idx = EntityIndex()
-163:         ns = uuid4()
-164:         e1 = _make_entity("Microsoft Corporation", EntityType.ORGANIZATION, ns)
-165:         e2 = _make_entity("Microsoft Corp", EntityType.ORGANIZATION, ns)
-166:         e3 = _make_entity("Apple Inc", EntityType.ORGANIZATION, ns)
-167:         idx.add(e1)
-168:         idx.add(e2)
-169:         idx.add(e3)
-170: 
-171:         candidates = idx.find_fuzzy_candidates(e1, threshold=0.6)
-172:         candidate_ids = {c.id for c, _ in candidates}
-173:         assert e2.id in candidate_ids
-174:         assert e3.id not in candidate_ids  # no shared tokens
-175: 
-176:     def test_respects_type_filter(self):
-177:         idx = EntityIndex()
-178:         ns = uuid4()
-179:         e1 = _make_entity("John", EntityType.PERSON, ns)
-180:         e2 = _make_entity("Johns", EntityType.ORGANIZATION, ns)
-181:         idx.add(e1)
-182:         idx.add(e2)
-183: 
-184:         # e2 is a different type, shouldn't appear
-185:         candidates = idx.find_fuzzy_candidates(e1, threshold=0.5)
-186:         assert len(candidates) == 0
-187: 
-188:     def test_empty_index(self):
-189:         idx = EntityIndex()
-190:         e = _make_entity("Alice")
-191:         assert idx.find_fuzzy_candidates(e) == []
-192: 
-193:     def test_excludes_exact_matches(self):
-194:         idx = EntityIndex()
-195:         e = _make_entity("Alice")
-196:         idx.add(e)
-197:         # Fuzzy candidates should not include exact matches
-198:         candidates = idx.find_fuzzy_candidates(e)
-199:         assert len(candidates) == 0
-200: 
-201: 
-202: class TestEmbeddingCandidates:
-203:     def test_finds_similar_embeddings(self):
-204:         idx = EntityIndex()
-205:         ns = uuid4()
-206:         emb1 = [1.0, 0.0, 0.0]
-207:         emb2 = [0.99, 0.1, 0.0]  # very similar
-208:         emb3 = [0.0, 0.0, 1.0]  # orthogonal
-209: 
-210:         e1 = _make_entity("Entity A", EntityType.CONCEPT, ns, embedding=emb1)
-211:         e2 = _make_entity("Entity B", EntityType.CONCEPT, ns, embedding=emb2)
-212:         e3 = _make_entity("Entity C", EntityType.CONCEPT, ns, embedding=emb3)
-213:         idx.add(e1)
-214:         idx.add(e2)
-215:         idx.add(e3)
-216: 
-217:         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
-218:         candidate_ids = {c.id for c, _ in candidates}
-219:         assert e2.id in candidate_ids
-220:         assert e3.id not in candidate_ids
-221: 
-222:     def test_no_embedding_returns_empty(self):
-223:         idx = EntityIndex()
-224:         e = _make_entity("Alice")  # no embedding
-225:         idx.add(e)
-226:         assert idx.find_embedding_candidates(e) == []
-227: 
-228:     def test_excludes_same_type_without_shared_tokens(self):
-229:         """Embedding candidates use token blocking - entities without shared tokens are excluded.
-230: 
-231:         This is intentional: token blocking gives O(k) instead of O(n) performance.
-232:         Entities must share at least one name token to be considered as candidates.
-233:         """
-234:         idx = EntityIndex()
-235:         ns = uuid4()
-236:         emb1 = [1.0, 0.0, 0.0]
-237:         emb2 = [0.99, 0.1, 0.0]
-238: 
-239:         e1 = _make_entity("Alpha Beta", EntityType.CONCEPT, ns, embedding=emb1)
-240:         e2 = _make_entity("Gamma Delta", EntityType.CONCEPT, ns, embedding=emb2)  # no shared tokens
-241:         idx.add(e1)
-242:         idx.add(e2)
-243: 
-244:         # Token blocking excludes e2 since it shares no tokens with e1
-245:         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
-246:         candidate_ids = {c.id for c, _ in candidates}
-247:         assert e2.id not in candidate_ids
-248: 
-249: 
-250: class TestEntityIndexBulk:
-251:     def test_get_all_entities(self):
-252:         idx = EntityIndex()
-253:         entities = [_make_entity(f"Entity {i}") for i in range(5)]
-254:         for e in entities:
-255:             idx.add(e)
-256:         all_ents = idx.get_all_entities()
-257:         assert len(all_ents) == 5
-258: 
-259:     def test_get_entities_by_type(self):
-260:         idx = EntityIndex()
-261:         for i in range(3):
-262:             idx.add(_make_entity(f"Person {i}", EntityType.PERSON))
-263:         for i in range(2):
-264:             idx.add(_make_entity(f"Org {i}", EntityType.ORGANIZATION))
-265: 
-266:         assert len(idx.get_entities_by_type("PERSON")) == 3
-267:         assert len(idx.get_entities_by_type("ORGANIZATION")) == 2
-268:         assert len(idx.get_entities_by_type("CONCEPT")) == 0
-269: 
-270:     def test_stats(self):
-271:         idx = EntityIndex()
-272:         idx.add(_make_entity("John Smith", EntityType.PERSON))
-273:         idx.add(_make_entity("Jane Doe", EntityType.PERSON))
-274: 
-275:         stats = idx.stats()
-276:         assert stats["total_entities"] == 2
-277:         assert stats["exact_keys"] == 2
-278:         assert stats["type_groups"] == 1
-279:         assert stats["token_keys"] > 0
-````
-
 ## File: tests/unit/test_entity_resolution.py
 ````python
   1: """Unit tests for extraction/entity_resolution.py — Entity resolution."""
@@ -28586,6 +28303,289 @@ README.md
 79: 
 80:     # Keep uvicorn access logs visible
 81:     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+````
+
+## File: tests/unit/test_entity_index.py
+````python
+  1: """Tests for EntityIndex — the in-memory blocking index for entity resolution."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from uuid import uuid4
+  6: 
+  7: import pytest
+  8: 
+  9: from khora._accel import cosine_similarity, levenshtein_similarity
+ 10: from khora.core.models.entity import Entity, EntityType
+ 11: from khora.extraction.expansion.entity_index import (
+ 12:     EntityIndex,
+ 13:     _normalize_name,
+ 14:     _tokenize,
+ 15: )
+ 16: 
+ 17: # ---------------------------------------------------------------------------
+ 18: # Helpers
+ 19: # ---------------------------------------------------------------------------
+ 20: 
+ 21: 
+ 22: def _make_entity(
+ 23:     name: str = "Test Entity",
+ 24:     entity_type: EntityType = EntityType.PERSON,
+ 25:     namespace_id=None,
+ 26:     embedding: list[float] | None = None,
+ 27:     confidence: float = 1.0,
+ 28: ) -> Entity:
+ 29:     return Entity(
+ 30:         id=uuid4(),
+ 31:         namespace_id=namespace_id or uuid4(),
+ 32:         name=name,
+ 33:         entity_type=entity_type,
+ 34:         description=f"Description of {name}",
+ 35:         embedding=embedding,
+ 36:         confidence=confidence,
+ 37:     )
+ 38: 
+ 39: 
+ 40: # ---------------------------------------------------------------------------
+ 41: # Unit helpers
+ 42: # ---------------------------------------------------------------------------
+ 43: 
+ 44: 
+ 45: class TestNormalizeName:
+ 46:     def test_lowercase_strip(self):
+ 47:         assert _normalize_name("  Hello World  ") == "hello world"
+ 48: 
+ 49:     def test_empty(self):
+ 50:         assert _normalize_name("") == ""
+ 51: 
+ 52: 
+ 53: class TestTokenize:
+ 54:     def test_basic(self):
+ 55:         tokens = _tokenize("John Smith")
+ 56:         assert tokens == {"john", "smith"}
+ 57: 
+ 58:     def test_filters_short_tokens(self):
+ 59:         tokens = _tokenize("A B CD EF")
+ 60:         assert "a" not in tokens
+ 61:         assert "b" not in tokens
+ 62:         assert "cd" in tokens
+ 63:         assert "ef" in tokens
+ 64: 
+ 65:     def test_strips_punctuation(self):
+ 66:         tokens = _tokenize("hello-world! foo.bar")
+ 67:         assert "helloworld" in tokens
+ 68:         assert "foobar" in tokens
+ 69: 
+ 70: 
+ 71: class TestCosineSimilarity:
+ 72:     def test_identical(self):
+ 73:         v = [1.0, 2.0, 3.0]
+ 74:         assert cosine_similarity(v, v) == pytest.approx(1.0)
+ 75: 
+ 76:     def test_orthogonal(self):
+ 77:         assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+ 78: 
+ 79:     def test_mismatched_length(self):
+ 80:         assert cosine_similarity([1.0], [1.0, 2.0]) == 0.0
+ 81: 
+ 82:     def test_zero_vector(self):
+ 83:         assert cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
+ 84: 
+ 85: 
+ 86: class TestLevenshteinSimilarity:
+ 87:     def test_identical(self):
+ 88:         assert levenshtein_similarity("hello", "hello") == 1.0
+ 89: 
+ 90:     def test_completely_different(self):
+ 91:         sim = levenshtein_similarity("abc", "xyz")
+ 92:         assert sim < 0.5
+ 93: 
+ 94:     def test_close(self):
+ 95:         sim = levenshtein_similarity("kitten", "kittens")
+ 96:         assert sim > 0.8
+ 97: 
+ 98:     def test_empty(self):
+ 99:         assert levenshtein_similarity("", "abc") == 0.0
+100:         assert levenshtein_similarity("abc", "") == 0.0
+101: 
+102: 
+103: # ---------------------------------------------------------------------------
+104: # EntityIndex core
+105: # ---------------------------------------------------------------------------
+106: 
+107: 
+108: class TestEntityIndexAdd:
+109:     def test_add_new_entity(self):
+110:         idx = EntityIndex()
+111:         e = _make_entity("Alice")
+112:         result = idx.add(e)
+113:         assert result is None
+114:         assert len(idx) == 1
+115:         assert e.id in idx
+116: 
+117:     def test_add_duplicate_returns_existing(self):
+118:         idx = EntityIndex()
+119:         e1 = _make_entity("Alice", entity_type=EntityType.PERSON)
+120:         e2 = _make_entity("alice", entity_type=EntityType.PERSON)  # same name, diff case
+121:         idx.add(e1)
+122:         result = idx.add(e2)
+123:         assert result is e1
+124:         assert len(idx) == 1
+125: 
+126:     def test_different_types_not_duplicate(self):
+127:         idx = EntityIndex()
+128:         e1 = _make_entity("Mercury", entity_type=EntityType.PERSON)
+129:         e2 = _make_entity("Mercury", entity_type=EntityType.LOCATION)
+130:         idx.add(e1)
+131:         result = idx.add(e2)
+132:         assert result is None  # different type -> not a duplicate
+133:         assert len(idx) == 2
+134: 
+135:     def test_whitespace_normalization(self):
+136:         idx = EntityIndex()
+137:         e1 = _make_entity("  John Smith  ")
+138:         idx.add(e1)
+139:         e2 = _make_entity("john smith")
+140:         result = idx.add(e2)
+141:         assert result is e1
+142: 
+143: 
+144: class TestEntityIndexLookup:
+145:     def test_get_by_id(self):
+146:         idx = EntityIndex()
+147:         e = _make_entity("Alice")
+148:         idx.add(e)
+149:         assert idx.get(e.id) is e
+150: 
+151:     def test_get_by_name(self):
+152:         idx = EntityIndex()
+153:         e = _make_entity("Alice", entity_type=EntityType.PERSON)
+154:         idx.add(e)
+155:         assert idx.get_by_name("Alice", "PERSON") is e
+156:         assert idx.get_by_name("alice", "PERSON") is e
+157:         assert idx.get_by_name("Alice", "ORGANIZATION") is None
+158: 
+159: 
+160: class TestFuzzyCandidates:
+161:     def test_finds_similar_names(self):
+162:         idx = EntityIndex()
+163:         ns = uuid4()
+164:         e1 = _make_entity("Microsoft Corporation", EntityType.ORGANIZATION, ns)
+165:         e2 = _make_entity("Microsoft Corp", EntityType.ORGANIZATION, ns)
+166:         e3 = _make_entity("Apple Inc", EntityType.ORGANIZATION, ns)
+167:         idx.add(e1)
+168:         idx.add(e2)
+169:         idx.add(e3)
+170: 
+171:         candidates = idx.find_fuzzy_candidates(e1, threshold=0.6)
+172:         candidate_ids = {c.id for c, _ in candidates}
+173:         assert e2.id in candidate_ids
+174:         assert e3.id not in candidate_ids  # no shared tokens
+175: 
+176:     def test_respects_type_filter(self):
+177:         idx = EntityIndex()
+178:         ns = uuid4()
+179:         e1 = _make_entity("John", EntityType.PERSON, ns)
+180:         e2 = _make_entity("Johns", EntityType.ORGANIZATION, ns)
+181:         idx.add(e1)
+182:         idx.add(e2)
+183: 
+184:         # e2 is a different type, shouldn't appear
+185:         candidates = idx.find_fuzzy_candidates(e1, threshold=0.5)
+186:         assert len(candidates) == 0
+187: 
+188:     def test_empty_index(self):
+189:         idx = EntityIndex()
+190:         e = _make_entity("Alice")
+191:         assert idx.find_fuzzy_candidates(e) == []
+192: 
+193:     def test_excludes_exact_matches(self):
+194:         idx = EntityIndex()
+195:         e = _make_entity("Alice")
+196:         idx.add(e)
+197:         # Fuzzy candidates should not include exact matches
+198:         candidates = idx.find_fuzzy_candidates(e)
+199:         assert len(candidates) == 0
+200: 
+201: 
+202: class TestEmbeddingCandidates:
+203:     def test_finds_similar_embeddings(self):
+204:         idx = EntityIndex()
+205:         ns = uuid4()
+206:         emb1 = [1.0, 0.0, 0.0]
+207:         emb2 = [0.99, 0.1, 0.0]  # very similar
+208:         emb3 = [0.0, 0.0, 1.0]  # orthogonal
+209: 
+210:         e1 = _make_entity("Entity A", EntityType.CONCEPT, ns, embedding=emb1)
+211:         e2 = _make_entity("Entity B", EntityType.CONCEPT, ns, embedding=emb2)
+212:         e3 = _make_entity("Entity C", EntityType.CONCEPT, ns, embedding=emb3)
+213:         idx.add(e1)
+214:         idx.add(e2)
+215:         idx.add(e3)
+216: 
+217:         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
+218:         candidate_ids = {c.id for c, _ in candidates}
+219:         assert e2.id in candidate_ids
+220:         assert e3.id not in candidate_ids
+221: 
+222:     def test_no_embedding_returns_empty(self):
+223:         idx = EntityIndex()
+224:         e = _make_entity("Alice")  # no embedding
+225:         idx.add(e)
+226:         assert idx.find_embedding_candidates(e) == []
+227: 
+228:     def test_excludes_same_type_without_shared_tokens(self):
+229:         """Embedding candidates use token blocking - entities without shared tokens are excluded.
+230: 
+231:         This is intentional: token blocking gives O(k) instead of O(n) performance.
+232:         Entities must share at least one name token to be considered as candidates.
+233:         """
+234:         idx = EntityIndex()
+235:         ns = uuid4()
+236:         emb1 = [1.0, 0.0, 0.0]
+237:         emb2 = [0.99, 0.1, 0.0]
+238: 
+239:         e1 = _make_entity("Alpha Beta", EntityType.CONCEPT, ns, embedding=emb1)
+240:         e2 = _make_entity("Gamma Delta", EntityType.CONCEPT, ns, embedding=emb2)  # no shared tokens
+241:         idx.add(e1)
+242:         idx.add(e2)
+243: 
+244:         # Token blocking excludes e2 since it shares no tokens with e1
+245:         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
+246:         candidate_ids = {c.id for c, _ in candidates}
+247:         assert e2.id not in candidate_ids
+248: 
+249: 
+250: class TestEntityIndexBulk:
+251:     def test_get_all_entities(self):
+252:         idx = EntityIndex()
+253:         entities = [_make_entity(f"Entity {i}") for i in range(5)]
+254:         for e in entities:
+255:             idx.add(e)
+256:         all_ents = idx.get_all_entities()
+257:         assert len(all_ents) == 5
+258: 
+259:     def test_get_entities_by_type(self):
+260:         idx = EntityIndex()
+261:         for i in range(3):
+262:             idx.add(_make_entity(f"Person {i}", EntityType.PERSON))
+263:         for i in range(2):
+264:             idx.add(_make_entity(f"Org {i}", EntityType.ORGANIZATION))
+265: 
+266:         assert len(idx.get_entities_by_type("PERSON")) == 3
+267:         assert len(idx.get_entities_by_type("ORGANIZATION")) == 2
+268:         assert len(idx.get_entities_by_type("CONCEPT")) == 0
+269: 
+270:     def test_stats(self):
+271:         idx = EntityIndex()
+272:         idx.add(_make_entity("John Smith", EntityType.PERSON))
+273:         idx.add(_make_entity("Jane Doe", EntityType.PERSON))
+274: 
+275:         stats = idx.stats()
+276:         assert stats["total_entities"] == 2
+277:         assert stats["exact_keys"] == 2
+278:         assert stats["type_groups"] == 1
+279:         assert stats["token_keys"] > 0
 ````
 
 ## File: README.md
@@ -39140,760 +39140,773 @@ README.md
  95:     """
  96: 
  97:     # Models that require json_schema format instead of json_object
- 98:     # Note: gpt-5-nano was tested but hits token limits with strict schema,
- 99:     # so it uses json_object format like other models
-100:     MODELS_REQUIRING_JSON_SCHEMA: set[str] = set()
-101: 
-102:     def __init__(
-103:         self,
-104:         model: str = "gpt-4o-mini",
-105:         *,
-106:         temperature: float = 0.3,  # Lower for more consistent extraction
-107:         max_tokens: int = 4000,
-108:         timeout: int = 60,
-109:         max_retries: int = 3,
-110:         max_concurrent: int = 5,
-111:         retry_wait: float = 1.0,
-112:     ) -> None:
-113:         """Initialize the LLM entity extractor.
+ 98:     # OpenAI models with structured output support need explicit json_schema
+ 99:     # to ensure additionalProperties: false is properly set on all nested objects
+100:     MODELS_REQUIRING_JSON_SCHEMA: set[str] = {
+101:         "gpt-4o",
+102:         "gpt-4o-mini",
+103:         "gpt-4o-2024-05-13",
+104:         "gpt-4o-2024-08-06",
+105:         "gpt-4o-2024-11-20",
+106:         "gpt-4o-mini-2024-07-18",
+107:         "gpt-4-turbo",
+108:         "gpt-4-turbo-preview",
+109:         "o1",
+110:         "o1-mini",
+111:         "o1-preview",
+112:         "o3-mini",
+113:     }
 114: 
-115:         Args:
-116:             model: LLM model to use
-117:             temperature: Sampling temperature
-118:             max_tokens: Maximum tokens in response
-119:             timeout: Request timeout in seconds
-120:             max_retries: Maximum retries on failure
-121:             max_concurrent: Maximum concurrent extractions
-122:             retry_wait: Base wait time (seconds) for exponential backoff between retries
-123:         """
-124:         self._model = model
-125:         self._temperature = temperature
-126:         self._max_tokens = max_tokens
-127:         self._timeout = timeout
-128:         self._max_retries = max_retries
-129:         self._retry_wait = retry_wait
-130:         self._semaphore = asyncio.Semaphore(max_concurrent)
-131: 
-132:     def _get_response_format(self) -> dict[str, Any]:
-133:         """Get the appropriate response_format based on the model.
-134: 
-135:         Some models (like gpt-5-nano) require json_schema format with
-136:         strict structured outputs, while others work with json_object.
-137:         """
-138:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
-139:             return {
-140:                 "type": "json_schema",
-141:                 "json_schema": {
-142:                     "name": "extraction_result",
-143:                     "strict": True,
-144:                     "schema": {
-145:                         "type": "object",
-146:                         "properties": {
-147:                             "entities": {
-148:                                 "type": "array",
-149:                                 "items": {
-150:                                     "type": "object",
-151:                                     "properties": {
-152:                                         "name": {"type": "string"},
-153:                                         "entity_type": {"type": "string"},
-154:                                         "description": {"type": "string"},
-155:                                         "aliases": {"type": "array", "items": {"type": "string"}},
-156:                                     },
-157:                                     "required": ["name", "entity_type", "description", "aliases"],
-158:                                     "additionalProperties": False,
-159:                                 },
-160:                             },
-161:                             "relationships": {
-162:                                 "type": "array",
-163:                                 "items": {
-164:                                     "type": "object",
-165:                                     "properties": {
-166:                                         "source_entity": {"type": "string"},
-167:                                         "target_entity": {"type": "string"},
-168:                                         "relationship_type": {"type": "string"},
-169:                                         "description": {"type": "string"},
-170:                                     },
-171:                                     "required": ["source_entity", "target_entity", "relationship_type", "description"],
-172:                                     "additionalProperties": False,
-173:                                 },
-174:                             },
-175:                             "events": {
-176:                                 "type": "array",
-177:                                 "items": {
-178:                                     "type": "object",
-179:                                     "properties": {
-180:                                         "description": {"type": "string"},
-181:                                         "event_type": {"type": "string"},
-182:                                         "occurred_at": {"type": ["string", "null"]},
-183:                                         "participants": {"type": "array", "items": {"type": "string"}},
-184:                                     },
-185:                                     "required": ["description", "event_type", "occurred_at", "participants"],
-186:                                     "additionalProperties": False,
-187:                                 },
-188:                             },
-189:                         },
-190:                         "required": ["entities", "relationships", "events"],
-191:                         "additionalProperties": False,
-192:                     },
-193:                 },
-194:             }
-195:         return {"type": "json_object"}
-196: 
-197:     def _get_multi_response_format(self) -> dict[str, Any]:
-198:         """Get the appropriate response_format for multi-section batch extraction.
-199: 
-200:         Similar to _get_response_format but wraps entities/relationships/events
-201:         in a "sections" array for batch processing.
-202:         """
-203:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
-204:             section_schema = {
-205:                 "type": "object",
-206:                 "properties": {
-207:                     "entities": {
-208:                         "type": "array",
-209:                         "items": {
-210:                             "type": "object",
-211:                             "properties": {
-212:                                 "name": {"type": "string"},
-213:                                 "entity_type": {"type": "string"},
-214:                                 "description": {"type": "string"},
-215:                                 "aliases": {"type": "array", "items": {"type": "string"}},
-216:                             },
-217:                             "required": ["name", "entity_type", "description", "aliases"],
-218:                             "additionalProperties": False,
-219:                         },
-220:                     },
-221:                     "relationships": {
-222:                         "type": "array",
-223:                         "items": {
-224:                             "type": "object",
-225:                             "properties": {
-226:                                 "source_entity": {"type": "string"},
-227:                                 "target_entity": {"type": "string"},
-228:                                 "relationship_type": {"type": "string"},
-229:                                 "description": {"type": "string"},
-230:                             },
-231:                             "required": ["source_entity", "target_entity", "relationship_type", "description"],
-232:                             "additionalProperties": False,
-233:                         },
-234:                     },
-235:                     "events": {
-236:                         "type": "array",
-237:                         "items": {
-238:                             "type": "object",
-239:                             "properties": {
-240:                                 "description": {"type": "string"},
-241:                                 "event_type": {"type": "string"},
-242:                                 "occurred_at": {"type": ["string", "null"]},
-243:                                 "participants": {"type": "array", "items": {"type": "string"}},
-244:                             },
-245:                             "required": ["description", "event_type", "occurred_at", "participants"],
-246:                             "additionalProperties": False,
-247:                         },
-248:                     },
-249:                 },
-250:                 "required": ["entities", "relationships", "events"],
-251:                 "additionalProperties": False,
-252:             }
-253:             return {
-254:                 "type": "json_schema",
-255:                 "json_schema": {
-256:                     "name": "multi_extraction_result",
-257:                     "strict": True,
-258:                     "schema": {
-259:                         "type": "object",
-260:                         "properties": {
-261:                             "sections": {
-262:                                 "type": "array",
-263:                                 "items": section_schema,
-264:                             },
-265:                         },
-266:                         "required": ["sections"],
-267:                         "additionalProperties": False,
-268:                     },
-269:                 },
-270:             }
-271:         return {"type": "json_object"}
-272: 
-273:     @classmethod
-274:     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
-275:         """Create extractor from LiteLLM configuration.
-276: 
-277:         Args:
-278:             config: LiteLLMConfig instance
-279: 
-280:         Returns:
-281:             Configured LLMEntityExtractor
-282:         """
-283:         return cls(
-284:             model=config.model,
-285:             temperature=0.3,  # Override for extraction
-286:             max_tokens=config.max_tokens,
-287:             timeout=config.timeout,
-288:             max_retries=config.max_retries,
-289:             max_concurrent=config.max_concurrent_llm_calls,
-290:             retry_wait=config.retry_wait,
-291:         )
+115:     def __init__(
+116:         self,
+117:         model: str = "gpt-4o-mini",
+118:         *,
+119:         temperature: float = 0.3,  # Lower for more consistent extraction
+120:         max_tokens: int = 4000,
+121:         timeout: int = 60,
+122:         max_retries: int = 3,
+123:         max_concurrent: int = 5,
+124:         retry_wait: float = 1.0,
+125:     ) -> None:
+126:         """Initialize the LLM entity extractor.
+127: 
+128:         Args:
+129:             model: LLM model to use
+130:             temperature: Sampling temperature
+131:             max_tokens: Maximum tokens in response
+132:             timeout: Request timeout in seconds
+133:             max_retries: Maximum retries on failure
+134:             max_concurrent: Maximum concurrent extractions
+135:             retry_wait: Base wait time (seconds) for exponential backoff between retries
+136:         """
+137:         self._model = model
+138:         self._temperature = temperature
+139:         self._max_tokens = max_tokens
+140:         self._timeout = timeout
+141:         self._max_retries = max_retries
+142:         self._retry_wait = retry_wait
+143:         self._semaphore = asyncio.Semaphore(max_concurrent)
+144: 
+145:     def _get_response_format(self) -> dict[str, Any]:
+146:         """Get the appropriate response_format based on the model.
+147: 
+148:         Some models (like gpt-5-nano) require json_schema format with
+149:         strict structured outputs, while others work with json_object.
+150:         """
+151:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+152:             return {
+153:                 "type": "json_schema",
+154:                 "json_schema": {
+155:                     "name": "extraction_result",
+156:                     "strict": True,
+157:                     "schema": {
+158:                         "type": "object",
+159:                         "properties": {
+160:                             "entities": {
+161:                                 "type": "array",
+162:                                 "items": {
+163:                                     "type": "object",
+164:                                     "properties": {
+165:                                         "name": {"type": "string"},
+166:                                         "entity_type": {"type": "string"},
+167:                                         "description": {"type": "string"},
+168:                                         "aliases": {"type": "array", "items": {"type": "string"}},
+169:                                     },
+170:                                     "required": ["name", "entity_type", "description", "aliases"],
+171:                                     "additionalProperties": False,
+172:                                 },
+173:                             },
+174:                             "relationships": {
+175:                                 "type": "array",
+176:                                 "items": {
+177:                                     "type": "object",
+178:                                     "properties": {
+179:                                         "source_entity": {"type": "string"},
+180:                                         "target_entity": {"type": "string"},
+181:                                         "relationship_type": {"type": "string"},
+182:                                         "description": {"type": "string"},
+183:                                     },
+184:                                     "required": ["source_entity", "target_entity", "relationship_type", "description"],
+185:                                     "additionalProperties": False,
+186:                                 },
+187:                             },
+188:                             "events": {
+189:                                 "type": "array",
+190:                                 "items": {
+191:                                     "type": "object",
+192:                                     "properties": {
+193:                                         "description": {"type": "string"},
+194:                                         "event_type": {"type": "string"},
+195:                                         "occurred_at": {"type": ["string", "null"]},
+196:                                         "participants": {"type": "array", "items": {"type": "string"}},
+197:                                     },
+198:                                     "required": ["description", "event_type", "occurred_at", "participants"],
+199:                                     "additionalProperties": False,
+200:                                 },
+201:                             },
+202:                         },
+203:                         "required": ["entities", "relationships", "events"],
+204:                         "additionalProperties": False,
+205:                     },
+206:                 },
+207:             }
+208:         return {"type": "json_object"}
+209: 
+210:     def _get_multi_response_format(self) -> dict[str, Any]:
+211:         """Get the appropriate response_format for multi-section batch extraction.
+212: 
+213:         Similar to _get_response_format but wraps entities/relationships/events
+214:         in a "sections" array for batch processing.
+215:         """
+216:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+217:             section_schema = {
+218:                 "type": "object",
+219:                 "properties": {
+220:                     "entities": {
+221:                         "type": "array",
+222:                         "items": {
+223:                             "type": "object",
+224:                             "properties": {
+225:                                 "name": {"type": "string"},
+226:                                 "entity_type": {"type": "string"},
+227:                                 "description": {"type": "string"},
+228:                                 "aliases": {"type": "array", "items": {"type": "string"}},
+229:                             },
+230:                             "required": ["name", "entity_type", "description", "aliases"],
+231:                             "additionalProperties": False,
+232:                         },
+233:                     },
+234:                     "relationships": {
+235:                         "type": "array",
+236:                         "items": {
+237:                             "type": "object",
+238:                             "properties": {
+239:                                 "source_entity": {"type": "string"},
+240:                                 "target_entity": {"type": "string"},
+241:                                 "relationship_type": {"type": "string"},
+242:                                 "description": {"type": "string"},
+243:                             },
+244:                             "required": ["source_entity", "target_entity", "relationship_type", "description"],
+245:                             "additionalProperties": False,
+246:                         },
+247:                     },
+248:                     "events": {
+249:                         "type": "array",
+250:                         "items": {
+251:                             "type": "object",
+252:                             "properties": {
+253:                                 "description": {"type": "string"},
+254:                                 "event_type": {"type": "string"},
+255:                                 "occurred_at": {"type": ["string", "null"]},
+256:                                 "participants": {"type": "array", "items": {"type": "string"}},
+257:                             },
+258:                             "required": ["description", "event_type", "occurred_at", "participants"],
+259:                             "additionalProperties": False,
+260:                         },
+261:                     },
+262:                 },
+263:                 "required": ["entities", "relationships", "events"],
+264:                 "additionalProperties": False,
+265:             }
+266:             return {
+267:                 "type": "json_schema",
+268:                 "json_schema": {
+269:                     "name": "multi_extraction_result",
+270:                     "strict": True,
+271:                     "schema": {
+272:                         "type": "object",
+273:                         "properties": {
+274:                             "sections": {
+275:                                 "type": "array",
+276:                                 "items": section_schema,
+277:                             },
+278:                         },
+279:                         "required": ["sections"],
+280:                         "additionalProperties": False,
+281:                     },
+282:                 },
+283:             }
+284:         return {"type": "json_object"}
+285: 
+286:     @classmethod
+287:     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
+288:         """Create extractor from LiteLLM configuration.
+289: 
+290:         Args:
+291:             config: LiteLLMConfig instance
 292: 
-293:     async def extract(
-294:         self,
-295:         text: str,
-296:         *,
-297:         entity_types: list[str] | None = None,
-298:         expertise: ExpertiseConfig | None = None,
-299:         context: dict[str, Any] | None = None,
-300:     ) -> ExtractionResult:
-301:         """Extract entities and relationships from text.
-302: 
-303:         Args:
-304:             text: Text to extract from
-305:             entity_types: Optional list of entity types to extract
-306:             expertise: Optional ExpertiseConfig for domain-specific extraction
-307:             context: Optional context dict for prompt template rendering
-308: 
-309:         Returns:
-310:             ExtractionResult containing entities and relationships
-311:         """
-312:         if not text.strip():
-313:             return ExtractionResult()
-314: 
-315:         # Determine entity types from expertise or fallback
-316:         if expertise:
-317:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
-318:         else:
-319:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
-320: 
-321:         try:
-322:             import litellm
-323:         except ImportError:
-324:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
-325: 
-326:         # Render prompts based on expertise
-327:         system_prompt = self._render_system_prompt(expertise, context)
-328:         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
-329: 
-330:         try:
-331:             async for attempt in AsyncRetrying(
-332:                 stop=stop_after_attempt(self._max_retries),
-333:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
-334:                 before_sleep=before_sleep_log(logger, "WARNING"),
-335:                 reraise=True,
-336:             ):
-337:                 with attempt:
-338:                     async with self._semaphore:
-339:                         import time as _time
-340: 
-341:                         _t0 = _time.perf_counter()
-342:                         response = await litellm.acompletion(
-343:                             model=self._model,
-344:                             messages=[
-345:                                 {"role": "system", "content": system_prompt},
-346:                                 {"role": "user", "content": extraction_prompt},
-347:                             ],
-348:                             temperature=self._temperature,
-349:                             max_tokens=self._max_tokens,
-350:                             timeout=self._timeout,
-351:                             response_format=self._get_response_format(),
-352:                         )
-353:                         _latency = (_time.perf_counter() - _t0) * 1000
-354: 
-355:                         # Record telemetry
-356:                         from khora.telemetry import get_collector
-357: 
-358:                         usage = getattr(response, "usage", None)
-359:                         get_collector().record_llm_call(
-360:                             operation="entity_extraction",
-361:                             model=self._model,
-362:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-363:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-364:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
-365:                             latency_ms=_latency,
-366:                         )
+293:         Returns:
+294:             Configured LLMEntityExtractor
+295:         """
+296:         return cls(
+297:             model=config.model,
+298:             temperature=0.3,  # Override for extraction
+299:             max_tokens=config.max_tokens,
+300:             timeout=config.timeout,
+301:             max_retries=config.max_retries,
+302:             max_concurrent=config.max_concurrent_llm_calls,
+303:             retry_wait=config.retry_wait,
+304:         )
+305: 
+306:     async def extract(
+307:         self,
+308:         text: str,
+309:         *,
+310:         entity_types: list[str] | None = None,
+311:         expertise: ExpertiseConfig | None = None,
+312:         context: dict[str, Any] | None = None,
+313:     ) -> ExtractionResult:
+314:         """Extract entities and relationships from text.
+315: 
+316:         Args:
+317:             text: Text to extract from
+318:             entity_types: Optional list of entity types to extract
+319:             expertise: Optional ExpertiseConfig for domain-specific extraction
+320:             context: Optional context dict for prompt template rendering
+321: 
+322:         Returns:
+323:             ExtractionResult containing entities and relationships
+324:         """
+325:         if not text.strip():
+326:             return ExtractionResult()
+327: 
+328:         # Determine entity types from expertise or fallback
+329:         if expertise:
+330:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+331:         else:
+332:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
+333: 
+334:         try:
+335:             import litellm
+336:         except ImportError:
+337:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
+338: 
+339:         # Render prompts based on expertise
+340:         system_prompt = self._render_system_prompt(expertise, context)
+341:         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
+342: 
+343:         try:
+344:             async for attempt in AsyncRetrying(
+345:                 stop=stop_after_attempt(self._max_retries),
+346:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+347:                 before_sleep=before_sleep_log(logger, "WARNING"),
+348:                 reraise=True,
+349:             ):
+350:                 with attempt:
+351:                     async with self._semaphore:
+352:                         import time as _time
+353: 
+354:                         _t0 = _time.perf_counter()
+355:                         response = await litellm.acompletion(
+356:                             model=self._model,
+357:                             messages=[
+358:                                 {"role": "system", "content": system_prompt},
+359:                                 {"role": "user", "content": extraction_prompt},
+360:                             ],
+361:                             temperature=self._temperature,
+362:                             max_tokens=self._max_tokens,
+363:                             timeout=self._timeout,
+364:                             response_format=self._get_response_format(),
+365:                         )
+366:                         _latency = (_time.perf_counter() - _t0) * 1000
 367: 
-368:                     content = response.choices[0].message.content
-369:                     result = self._parse_response(content)
+368:                         # Record telemetry
+369:                         from khora.telemetry import get_collector
 370: 
-371:                     # Apply confidence filtering from expertise if available
-372:                     if expertise:
-373:                         result = self._filter_by_confidence(result, expertise)
-374: 
-375:                     return result
-376:         except Exception as e:
-377:             logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
-378:             return ExtractionResult(metadata={"error": str(e)})
-379: 
-380:     def _render_system_prompt(
-381:         self,
-382:         expertise: ExpertiseConfig | None,
-383:         context: dict[str, Any] | None,
-384:     ) -> str:
-385:         """Render the system prompt, optionally using expertise config."""
-386:         if not expertise or not expertise.system_prompt:
-387:             return DEFAULT_SYSTEM_PROMPT
-388: 
-389:         try:
-390:             from khora.extraction.skills.composer import ExpertiseComposer
-391: 
-392:             composer = ExpertiseComposer()
-393:             return composer.render_prompt(
-394:                 expertise.system_prompt,
-395:                 expertise=expertise,
-396:                 context=context,
-397:             )
-398:         except Exception as e:
-399:             logger.warning(f"Failed to render system prompt: {e}")
-400:             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
+371:                         usage = getattr(response, "usage", None)
+372:                         get_collector().record_llm_call(
+373:                             operation="entity_extraction",
+374:                             model=self._model,
+375:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+376:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+377:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
+378:                             latency_ms=_latency,
+379:                         )
+380: 
+381:                     content = response.choices[0].message.content
+382:                     result = self._parse_response(content)
+383: 
+384:                     # Apply confidence filtering from expertise if available
+385:                     if expertise:
+386:                         result = self._filter_by_confidence(result, expertise)
+387: 
+388:                     return result
+389:         except Exception as e:
+390:             logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
+391:             return ExtractionResult(metadata={"error": str(e)})
+392: 
+393:     def _render_system_prompt(
+394:         self,
+395:         expertise: ExpertiseConfig | None,
+396:         context: dict[str, Any] | None,
+397:     ) -> str:
+398:         """Render the system prompt, optionally using expertise config."""
+399:         if not expertise or not expertise.system_prompt:
+400:             return DEFAULT_SYSTEM_PROMPT
 401: 
-402:     def _build_tool_context(self, expertise: ExpertiseConfig | None, context: dict[str, Any] | None) -> str:
-403:         """Build tool-specific context block for the extraction prompt.
+402:         try:
+403:             from khora.extraction.skills.composer import ExpertiseComposer
 404: 
-405:         When expertise has tool_schemas populated and the context identifies
-406:         a source_tool, this injects structured field knowledge so the LLM
-407:         understands the data format it's extracting from.
-408: 
-409:         Args:
-410:             expertise: Optional ExpertiseConfig with tool_schemas
-411:             context: Optional context dict with source_tool key
-412: 
-413:         Returns:
-414:             Tool context string to prepend to the text, or empty string
-415:         """
-416:         if not expertise or not expertise.tool_schemas or not context:
-417:             return ""
-418: 
-419:         source_tool = context.get("source_tool", "")
-420:         if not source_tool:
-421:             return ""
-422: 
-423:         schema = expertise.tool_schemas.get(source_tool)
-424:         if not schema:
-425:             return ""
-426: 
-427:         lines = [f"\nSOURCE CONTEXT: This content comes from {source_tool}."]
-428:         for obj_type, obj_schema in schema.items():
-429:             if not isinstance(obj_schema, dict):
-430:                 continue
-431:             fields = obj_schema.get("fields", [])
-432:             if fields:
-433:                 lines.append(f"  {obj_type} fields: {', '.join(str(f) for f in fields)}")
-434:             for key, values in obj_schema.items():
-435:                 if key != "fields" and isinstance(values, list):
-436:                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
-437: 
-438:         # Add attribute schema hints from entity types
-439:         if expertise.entity_types:
-440:             lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
-441:             for et in expertise.entity_types:
-442:                 required = et.attributes.get("required", [])
-443:                 optional = et.attributes.get("optional", [])
-444:                 if required or optional:
-445:                     parts = []
-446:                     if required:
-447:                         parts.append(f"required: {', '.join(required)}")
-448:                     if optional:
-449:                         parts.append(f"optional: {', '.join(optional)}")
-450:                     lines.append(f"  {et.name}: {'; '.join(parts)}")
-451: 
-452:         return "\n".join(lines)
-453: 
-454:     def _render_extraction_prompt(
-455:         self,
-456:         text: str,
-457:         entity_types: list[str],
-458:         expertise: ExpertiseConfig | None,
-459:         context: dict[str, Any] | None,
-460:     ) -> str:
-461:         """Render the extraction prompt, optionally using expertise config."""
-462:         # Build tool context for SaaS-aware extraction
-463:         tool_context = self._build_tool_context(expertise, context)
+405:             composer = ExpertiseComposer()
+406:             return composer.render_prompt(
+407:                 expertise.system_prompt,
+408:                 expertise=expertise,
+409:                 context=context,
+410:             )
+411:         except Exception as e:
+412:             logger.warning(f"Failed to render system prompt: {e}")
+413:             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
+414: 
+415:     def _build_tool_context(self, expertise: ExpertiseConfig | None, context: dict[str, Any] | None) -> str:
+416:         """Build tool-specific context block for the extraction prompt.
+417: 
+418:         When expertise has tool_schemas populated and the context identifies
+419:         a source_tool, this injects structured field knowledge so the LLM
+420:         understands the data format it's extracting from.
+421: 
+422:         Args:
+423:             expertise: Optional ExpertiseConfig with tool_schemas
+424:             context: Optional context dict with source_tool key
+425: 
+426:         Returns:
+427:             Tool context string to prepend to the text, or empty string
+428:         """
+429:         if not expertise or not expertise.tool_schemas or not context:
+430:             return ""
+431: 
+432:         source_tool = context.get("source_tool", "")
+433:         if not source_tool:
+434:             return ""
+435: 
+436:         schema = expertise.tool_schemas.get(source_tool)
+437:         if not schema:
+438:             return ""
+439: 
+440:         lines = [f"\nSOURCE CONTEXT: This content comes from {source_tool}."]
+441:         for obj_type, obj_schema in schema.items():
+442:             if not isinstance(obj_schema, dict):
+443:                 continue
+444:             fields = obj_schema.get("fields", [])
+445:             if fields:
+446:                 lines.append(f"  {obj_type} fields: {', '.join(str(f) for f in fields)}")
+447:             for key, values in obj_schema.items():
+448:                 if key != "fields" and isinstance(values, list):
+449:                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
+450: 
+451:         # Add attribute schema hints from entity types
+452:         if expertise.entity_types:
+453:             lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
+454:             for et in expertise.entity_types:
+455:                 required = et.attributes.get("required", [])
+456:                 optional = et.attributes.get("optional", [])
+457:                 if required or optional:
+458:                     parts = []
+459:                     if required:
+460:                         parts.append(f"required: {', '.join(required)}")
+461:                     if optional:
+462:                         parts.append(f"optional: {', '.join(optional)}")
+463:                     lines.append(f"  {et.name}: {'; '.join(parts)}")
 464: 
-465:         # If expertise has a custom extraction prompt, use it
-466:         if expertise and expertise.extraction_prompt:
-467:             try:
-468:                 from khora.extraction.skills.composer import ExpertiseComposer
-469: 
-470:                 composer = ExpertiseComposer()
-471:                 prompt_context = {
-472:                     **(context or {}),
-473:                     "text": text[:8000],
-474:                     "entity_types": entity_types,
-475:                     "tool_context": tool_context,
-476:                 }
-477:                 return composer.render_prompt(
-478:                     expertise.extraction_prompt,
-479:                     expertise=expertise,
-480:                     context=prompt_context,
-481:                 )
-482:             except Exception as e:
-483:                 logger.warning(f"Failed to render extraction prompt: {e}")
-484: 
-485:         # Use default extraction prompt with optional tool context
-486:         prompt = EXTRACTION_PROMPT.format(
-487:             entity_types=", ".join(entity_types),
-488:             text=text[:8000],  # Truncate very long texts
-489:         )
-490:         if tool_context:
-491:             prompt = tool_context + "\n\n" + prompt
-492:         return prompt
-493: 
-494:     def _filter_by_confidence(
-495:         self,
-496:         result: ExtractionResult,
-497:         expertise: ExpertiseConfig,
-498:     ) -> ExtractionResult:
-499:         """Filter extraction results by confidence thresholds from expertise."""
-500:         min_entity = expertise.confidence.min_entity
-501:         min_relationship = expertise.confidence.min_relationship
-502: 
-503:         filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
-504:         filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
-505: 
-506:         return ExtractionResult(
-507:             entities=filtered_entities,
-508:             relationships=filtered_relationships,
-509:             events=result.events,
-510:             metadata=result.metadata,
-511:         )
-512: 
-513:     async def extract_batch(
-514:         self,
-515:         texts: list[str],
-516:         *,
-517:         entity_types: list[str] | None = None,
-518:         expertise: ExpertiseConfig | None = None,
-519:         context: dict[str, Any] | None = None,
-520:     ) -> list[ExtractionResult]:
-521:         """Extract from multiple texts concurrently.
-522: 
-523:         Args:
-524:             texts: List of texts to extract from
-525:             entity_types: Optional list of entity types to extract
-526:             expertise: Optional ExpertiseConfig for domain-specific extraction
-527:             context: Optional context dict for prompt template rendering
-528: 
-529:         Returns:
-530:             List of ExtractionResult objects
-531:         """
-532:         if not texts:
-533:             return []
-534: 
-535:         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
-536:         return await asyncio.gather(*tasks)
-537: 
-538:     async def extract_multi(
-539:         self,
-540:         texts: list[str],
-541:         *,
-542:         entity_types: list[str] | None = None,
-543:         expertise: ExpertiseConfig | None = None,
-544:         context: dict[str, Any] | None = None,
-545:         batch_size: int = 5,
-546:     ) -> list[ExtractionResult]:
-547:         """Extract entities from multiple texts in grouped LLM calls.
-548: 
-549:         Groups texts into batches and sends each batch as a single LLM call,
-550:         reducing API round-trips by up to batch_size times.
-551: 
-552:         Args:
-553:             texts: List of texts to extract from
-554:             entity_types: Optional list of entity types to extract
-555:             expertise: Optional ExpertiseConfig for domain-specific extraction
-556:             context: Optional context dict for prompt template rendering
-557:             batch_size: Number of texts per LLM call
-558: 
-559:         Returns:
-560:             List of ExtractionResult objects (one per input text)
-561:         """
-562:         if not texts:
-563:             return []
+465:         return "\n".join(lines)
+466: 
+467:     def _render_extraction_prompt(
+468:         self,
+469:         text: str,
+470:         entity_types: list[str],
+471:         expertise: ExpertiseConfig | None,
+472:         context: dict[str, Any] | None,
+473:     ) -> str:
+474:         """Render the extraction prompt, optionally using expertise config."""
+475:         # Build tool context for SaaS-aware extraction
+476:         tool_context = self._build_tool_context(expertise, context)
+477: 
+478:         # If expertise has a custom extraction prompt, use it
+479:         if expertise and expertise.extraction_prompt:
+480:             try:
+481:                 from khora.extraction.skills.composer import ExpertiseComposer
+482: 
+483:                 composer = ExpertiseComposer()
+484:                 prompt_context = {
+485:                     **(context or {}),
+486:                     "text": text[:8000],
+487:                     "entity_types": entity_types,
+488:                     "tool_context": tool_context,
+489:                 }
+490:                 return composer.render_prompt(
+491:                     expertise.extraction_prompt,
+492:                     expertise=expertise,
+493:                     context=prompt_context,
+494:                 )
+495:             except Exception as e:
+496:                 logger.warning(f"Failed to render extraction prompt: {e}")
+497: 
+498:         # Use default extraction prompt with optional tool context
+499:         prompt = EXTRACTION_PROMPT.format(
+500:             entity_types=", ".join(entity_types),
+501:             text=text[:8000],  # Truncate very long texts
+502:         )
+503:         if tool_context:
+504:             prompt = tool_context + "\n\n" + prompt
+505:         return prompt
+506: 
+507:     def _filter_by_confidence(
+508:         self,
+509:         result: ExtractionResult,
+510:         expertise: ExpertiseConfig,
+511:     ) -> ExtractionResult:
+512:         """Filter extraction results by confidence thresholds from expertise."""
+513:         min_entity = expertise.confidence.min_entity
+514:         min_relationship = expertise.confidence.min_relationship
+515: 
+516:         filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
+517:         filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
+518: 
+519:         return ExtractionResult(
+520:             entities=filtered_entities,
+521:             relationships=filtered_relationships,
+522:             events=result.events,
+523:             metadata=result.metadata,
+524:         )
+525: 
+526:     async def extract_batch(
+527:         self,
+528:         texts: list[str],
+529:         *,
+530:         entity_types: list[str] | None = None,
+531:         expertise: ExpertiseConfig | None = None,
+532:         context: dict[str, Any] | None = None,
+533:     ) -> list[ExtractionResult]:
+534:         """Extract from multiple texts concurrently.
+535: 
+536:         Args:
+537:             texts: List of texts to extract from
+538:             entity_types: Optional list of entity types to extract
+539:             expertise: Optional ExpertiseConfig for domain-specific extraction
+540:             context: Optional context dict for prompt template rendering
+541: 
+542:         Returns:
+543:             List of ExtractionResult objects
+544:         """
+545:         if not texts:
+546:             return []
+547: 
+548:         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
+549:         return await asyncio.gather(*tasks)
+550: 
+551:     async def extract_multi(
+552:         self,
+553:         texts: list[str],
+554:         *,
+555:         entity_types: list[str] | None = None,
+556:         expertise: ExpertiseConfig | None = None,
+557:         context: dict[str, Any] | None = None,
+558:         batch_size: int = 5,
+559:     ) -> list[ExtractionResult]:
+560:         """Extract entities from multiple texts in grouped LLM calls.
+561: 
+562:         Groups texts into batches and sends each batch as a single LLM call,
+563:         reducing API round-trips by up to batch_size times.
 564: 
-565:         if expertise:
-566:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
-567:         else:
-568:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
-569: 
-570:         try:
-571:             import litellm
-572:         except ImportError:
-573:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
-574: 
-575:         batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
-576:         all_results: list[ExtractionResult] = []
+565:         Args:
+566:             texts: List of texts to extract from
+567:             entity_types: Optional list of entity types to extract
+568:             expertise: Optional ExpertiseConfig for domain-specific extraction
+569:             context: Optional context dict for prompt template rendering
+570:             batch_size: Number of texts per LLM call
+571: 
+572:         Returns:
+573:             List of ExtractionResult objects (one per input text)
+574:         """
+575:         if not texts:
+576:             return []
 577: 
-578:         # Build system prompt from expertise if available
-579:         system_prompt = self._render_system_prompt(expertise, context)
-580:         tool_context = self._build_tool_context(expertise, context)
-581: 
-582:         async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
-583:             results = await self._extract_multi_batch(
-584:                 batch,
-585:                 entity_types,
-586:                 litellm,
-587:                 system_prompt=system_prompt,
-588:                 tool_context=tool_context,
-589:                 expertise=expertise,
-590:                 context=context,
-591:             )
-592:             if expertise:
-593:                 results = [self._filter_by_confidence(r, expertise) for r in results]
-594:             return results
-595: 
-596:         batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
-597:         for results in batch_results:
-598:             all_results.extend(results)
-599: 
-600:         return all_results
-601: 
-602:     async def _extract_multi_batch(
-603:         self,
-604:         texts: list[str],
-605:         entity_types: list[str],
-606:         litellm: Any,
-607:         *,
-608:         system_prompt: str | None = None,
-609:         tool_context: str | None = None,
-610:         expertise: ExpertiseConfig | None = None,
-611:         context: dict[str, Any] | None = None,
-612:     ) -> list[ExtractionResult]:
-613:         """Extract from a batch of texts in a single LLM call."""
-614:         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
-615: 
-616:         # If expertise has custom extraction prompt, use it with multi-section adaptation
-617:         if expertise and expertise.extraction_prompt:
-618:             from khora.extraction.skills.composer import ExpertiseComposer
-619: 
-620:             composer = ExpertiseComposer()
-621:             # Append multi-section response format to the text
-622:             multi_text = (
-623:                 sections
-624:                 + """
-625: 
-626: ## MULTI-SECTION RESPONSE FORMAT:
-627: Return a JSON object with a "sections" array, one object per input section:
-628: {"sections": [
-629:     {"entities": [...], "relationships": [...], "events": [...]},
-630:     ...
-631: ]}
-632: Each section follows the entity/relationship format from the instructions above."""
-633:             )
-634: 
-635:             prompt_context = {
-636:                 **(context or {}),
-637:                 "text": multi_text,
-638:                 "entity_types": entity_types,
-639:                 "tool_context": tool_context or "",
-640:             }
-641:             try:
-642:                 prompt = composer.render_prompt(
-643:                     expertise.extraction_prompt,
-644:                     expertise=expertise,
-645:                     context=prompt_context,
-646:                 )
-647:             except Exception as e:
-648:                 logger.warning(f"Failed to render extraction prompt for batch: {e}")
-649:                 # Fall through to default prompt below
-650:                 expertise = None
-651: 
-652:         # Fallback to hardcoded prompt (existing behavior)
-653:         if not expertise or not expertise.extraction_prompt:
-654:             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
-655:             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
-656: 
-657: Entity types to find: {", ".join(entity_types)}
-658: 
-659: {sections}
-660: 
-661: Return a JSON object with a "sections" array, one object per section:
-662: {{"sections": [
-663:     {{"entities": [...], "relationships": [...], "events": [...]}},
-664:     ...
-665: ]}}
-666: 
-667: Each section follows the same entity/relationship/event format.
-668: Return ONLY valid JSON, no other text."""
+578:         if expertise:
+579:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+580:         else:
+581:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
+582: 
+583:         try:
+584:             import litellm
+585:         except ImportError:
+586:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
+587: 
+588:         batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+589:         all_results: list[ExtractionResult] = []
+590: 
+591:         # Build system prompt from expertise if available
+592:         system_prompt = self._render_system_prompt(expertise, context)
+593:         tool_context = self._build_tool_context(expertise, context)
+594: 
+595:         async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
+596:             results = await self._extract_multi_batch(
+597:                 batch,
+598:                 entity_types,
+599:                 litellm,
+600:                 system_prompt=system_prompt,
+601:                 tool_context=tool_context,
+602:                 expertise=expertise,
+603:                 context=context,
+604:             )
+605:             if expertise:
+606:                 results = [self._filter_by_confidence(r, expertise) for r in results]
+607:             return results
+608: 
+609:         batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
+610:         for results in batch_results:
+611:             all_results.extend(results)
+612: 
+613:         return all_results
+614: 
+615:     async def _extract_multi_batch(
+616:         self,
+617:         texts: list[str],
+618:         entity_types: list[str],
+619:         litellm: Any,
+620:         *,
+621:         system_prompt: str | None = None,
+622:         tool_context: str | None = None,
+623:         expertise: ExpertiseConfig | None = None,
+624:         context: dict[str, Any] | None = None,
+625:     ) -> list[ExtractionResult]:
+626:         """Extract from a batch of texts in a single LLM call."""
+627:         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
+628: 
+629:         # If expertise has custom extraction prompt, use it with multi-section adaptation
+630:         if expertise and expertise.extraction_prompt:
+631:             from khora.extraction.skills.composer import ExpertiseComposer
+632: 
+633:             composer = ExpertiseComposer()
+634:             # Append multi-section response format to the text
+635:             multi_text = (
+636:                 sections
+637:                 + """
+638: 
+639: ## MULTI-SECTION RESPONSE FORMAT:
+640: Return a JSON object with a "sections" array, one object per input section:
+641: {"sections": [
+642:     {"entities": [...], "relationships": [...], "events": [...]},
+643:     ...
+644: ]}
+645: Each section follows the entity/relationship format from the instructions above."""
+646:             )
+647: 
+648:             prompt_context = {
+649:                 **(context or {}),
+650:                 "text": multi_text,
+651:                 "entity_types": entity_types,
+652:                 "tool_context": tool_context or "",
+653:             }
+654:             try:
+655:                 prompt = composer.render_prompt(
+656:                     expertise.extraction_prompt,
+657:                     expertise=expertise,
+658:                     context=prompt_context,
+659:                 )
+660:             except Exception as e:
+661:                 logger.warning(f"Failed to render extraction prompt for batch: {e}")
+662:                 # Fall through to default prompt below
+663:                 expertise = None
+664: 
+665:         # Fallback to hardcoded prompt (existing behavior)
+666:         if not expertise or not expertise.extraction_prompt:
+667:             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
+668:             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 669: 
-670:         try:
-671:             async for attempt in AsyncRetrying(
-672:                 stop=stop_after_attempt(self._max_retries),
-673:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
-674:                 before_sleep=before_sleep_log(logger, "WARNING"),
-675:                 reraise=True,
-676:             ):
-677:                 with attempt:
-678:                     async with self._semaphore:
-679:                         import time as _time
-680: 
-681:                         _t0 = _time.perf_counter()
-682:                         response = await litellm.acompletion(
-683:                             model=self._model,
-684:                             messages=[
-685:                                 {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
-686:                                 {"role": "user", "content": prompt},
-687:                             ],
-688:                             temperature=self._temperature,
-689:                             max_tokens=self._max_tokens,
-690:                             timeout=self._timeout,
-691:                             response_format=self._get_multi_response_format(),
-692:                         )
-693:                         _latency = (_time.perf_counter() - _t0) * 1000
-694: 
-695:                         # Record telemetry
-696:                         from khora.telemetry import get_collector
-697: 
-698:                         usage = getattr(response, "usage", None)
-699:                         get_collector().record_llm_call(
-700:                             operation="entity_extraction_multi",
-701:                             model=self._model,
-702:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-703:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-704:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
-705:                             latency_ms=_latency,
-706:                             metadata={"batch_size": len(texts)},
-707:                         )
-708: 
-709:                     content = response.choices[0].message.content
-710:                     if not content:
-711:                         # Log more details about the response for debugging
-712:                         finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
-713:                         model_used = getattr(response, "model", self._model)
-714:                         logger.warning(
-715:                             f"Empty response content from LLM in batch extraction. "
-716:                             f"Model: {model_used}, finish_reason: {finish_reason}, "
-717:                             f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
-718:                         )
-719:                         return [
-720:                             ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
-721:                             for _ in texts
-722:                         ]
-723:                     data = json.loads(content)
-724:                     if not isinstance(data, dict):
-725:                         logger.warning(f"Batch response is not a dict: {type(data)}")
-726:                         return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]
-727:                     sections_data = data.get("sections", [])
-728: 
-729:                     results: list[ExtractionResult] = []
-730:                     for i, text in enumerate(texts):
-731:                         if i < len(sections_data):
-732:                             results.append(self._parse_response(sections_data[i]))
-733:                         else:
-734:                             results.append(ExtractionResult())
-735: 
-736:                     return results
-737:         except Exception as e:
-738:             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
-739:             return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
-740: 
-741:     def _parse_response(self, content: str | dict | None) -> ExtractionResult:
-742:         """Parse the LLM response into an ExtractionResult.
-743: 
-744:         Accepts either a JSON string or a pre-parsed dict to avoid
-745:         unnecessary json.dumps/json.loads round-trips in batch mode.
-746:         """
-747:         try:
-748:             # Handle None or empty content
-749:             if content is None or content == "":
-750:                 logger.warning("Empty response content from LLM")
-751:                 return ExtractionResult(metadata={"error": "empty_response"})
-752: 
-753:             # Accept pre-parsed dict directly (from extract_multi_batch)
-754:             data = content if isinstance(content, dict) else json.loads(content)
-755: 
-756:             # Ensure data is actually a dict (not a string that parsed as string)
-757:             if not isinstance(data, dict):
-758:                 logger.warning(f"Response parsed but is not a dict: {type(data)}")
-759:                 return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
-760: 
-761:             entities = []
-762:             for e in data.get("entities", []):
-763:                 # Parse temporal info if present
-764:                 temporal = None
-765:                 if "temporal" in e and e["temporal"]:
-766:                     t = e["temporal"]
-767:                     temporal = TemporalInfo(
-768:                         mentioned_at=t.get("mentioned_at"),
-769:                         valid_from=t.get("valid_from"),
-770:                         valid_until=t.get("valid_until"),
-771:                     )
-772: 
-773:                 # Ensure attributes is a dict (LLM sometimes returns a list)
-774:                 attrs = e.get("attributes", {})
-775:                 if not isinstance(attrs, dict):
-776:                     attrs = {}
-777: 
-778:                 entities.append(
-779:                     ExtractedEntity(
-780:                         name=e.get("name") or "",
-781:                         entity_type=e.get("entity_type") or "CONCEPT",
-782:                         description=e.get("description") or "",
-783:                         attributes=attrs,
-784:                         aliases=e.get("aliases") or [],
-785:                         temporal=temporal,
-786:                         confidence=e.get("confidence") or 0.9,
-787:                     )
-788:                 )
-789: 
-790:             relationships = []
-791:             for r in data.get("relationships", []):
-792:                 # Parse temporal info if present
-793:                 temporal = None
-794:                 if "temporal" in r and r["temporal"]:
-795:                     t = r["temporal"]
-796:                     temporal = TemporalInfo(
-797:                         occurred_at=t.get("occurred_at"),
-798:                         valid_from=t.get("valid_from"),
-799:                         valid_until=t.get("valid_until"),
+670: Entity types to find: {", ".join(entity_types)}
+671: 
+672: {sections}
+673: 
+674: Return a JSON object with a "sections" array, one object per section:
+675: {{"sections": [
+676:     {{"entities": [...], "relationships": [...], "events": [...]}},
+677:     ...
+678: ]}}
+679: 
+680: Each section follows the same entity/relationship/event format.
+681: Return ONLY valid JSON, no other text."""
+682: 
+683:         try:
+684:             async for attempt in AsyncRetrying(
+685:                 stop=stop_after_attempt(self._max_retries),
+686:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+687:                 before_sleep=before_sleep_log(logger, "WARNING"),
+688:                 reraise=True,
+689:             ):
+690:                 with attempt:
+691:                     async with self._semaphore:
+692:                         import time as _time
+693: 
+694:                         _t0 = _time.perf_counter()
+695:                         response = await litellm.acompletion(
+696:                             model=self._model,
+697:                             messages=[
+698:                                 {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+699:                                 {"role": "user", "content": prompt},
+700:                             ],
+701:                             temperature=self._temperature,
+702:                             max_tokens=self._max_tokens,
+703:                             timeout=self._timeout,
+704:                             response_format=self._get_multi_response_format(),
+705:                         )
+706:                         _latency = (_time.perf_counter() - _t0) * 1000
+707: 
+708:                         # Record telemetry
+709:                         from khora.telemetry import get_collector
+710: 
+711:                         usage = getattr(response, "usage", None)
+712:                         get_collector().record_llm_call(
+713:                             operation="entity_extraction_multi",
+714:                             model=self._model,
+715:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+716:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+717:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
+718:                             latency_ms=_latency,
+719:                             metadata={"batch_size": len(texts)},
+720:                         )
+721: 
+722:                     content = response.choices[0].message.content
+723:                     if not content:
+724:                         # Log more details about the response for debugging
+725:                         finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+726:                         model_used = getattr(response, "model", self._model)
+727:                         logger.warning(
+728:                             f"Empty response content from LLM in batch extraction. "
+729:                             f"Model: {model_used}, finish_reason: {finish_reason}, "
+730:                             f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
+731:                         )
+732:                         return [
+733:                             ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
+734:                             for _ in texts
+735:                         ]
+736:                     data = json.loads(content)
+737:                     if not isinstance(data, dict):
+738:                         logger.warning(f"Batch response is not a dict: {type(data)}")
+739:                         return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]
+740:                     sections_data = data.get("sections", [])
+741: 
+742:                     results: list[ExtractionResult] = []
+743:                     for i, text in enumerate(texts):
+744:                         if i < len(sections_data):
+745:                             results.append(self._parse_response(sections_data[i]))
+746:                         else:
+747:                             results.append(ExtractionResult())
+748: 
+749:                     return results
+750:         except Exception as e:
+751:             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
+752:             return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
+753: 
+754:     def _parse_response(self, content: str | dict | None) -> ExtractionResult:
+755:         """Parse the LLM response into an ExtractionResult.
+756: 
+757:         Accepts either a JSON string or a pre-parsed dict to avoid
+758:         unnecessary json.dumps/json.loads round-trips in batch mode.
+759:         """
+760:         try:
+761:             # Handle None or empty content
+762:             if content is None or content == "":
+763:                 logger.warning("Empty response content from LLM")
+764:                 return ExtractionResult(metadata={"error": "empty_response"})
+765: 
+766:             # Accept pre-parsed dict directly (from extract_multi_batch)
+767:             data = content if isinstance(content, dict) else json.loads(content)
+768: 
+769:             # Ensure data is actually a dict (not a string that parsed as string)
+770:             if not isinstance(data, dict):
+771:                 logger.warning(f"Response parsed but is not a dict: {type(data)}")
+772:                 return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
+773: 
+774:             entities = []
+775:             for e in data.get("entities", []):
+776:                 # Parse temporal info if present
+777:                 temporal = None
+778:                 if "temporal" in e and e["temporal"]:
+779:                     t = e["temporal"]
+780:                     temporal = TemporalInfo(
+781:                         mentioned_at=t.get("mentioned_at"),
+782:                         valid_from=t.get("valid_from"),
+783:                         valid_until=t.get("valid_until"),
+784:                     )
+785: 
+786:                 # Ensure attributes is a dict (LLM sometimes returns a list)
+787:                 attrs = e.get("attributes", {})
+788:                 if not isinstance(attrs, dict):
+789:                     attrs = {}
+790: 
+791:                 entities.append(
+792:                     ExtractedEntity(
+793:                         name=e.get("name") or "",
+794:                         entity_type=e.get("entity_type") or "CONCEPT",
+795:                         description=e.get("description") or "",
+796:                         attributes=attrs,
+797:                         aliases=e.get("aliases") or [],
+798:                         temporal=temporal,
+799:                         confidence=e.get("confidence") or 0.9,
 800:                     )
-801: 
-802:                 relationships.append(
-803:                     ExtractedRelationship(
-804:                         source_entity=r.get("source_entity") or "",
-805:                         target_entity=r.get("target_entity") or "",
-806:                         relationship_type=r.get("relationship_type") or "RELATES_TO",
-807:                         description=r.get("description") or "",
-808:                         properties=r.get("properties") or {},
-809:                         temporal=temporal,
-810:                         confidence=r.get("confidence") or 0.9,
-811:                     )
-812:                 )
-813: 
-814:             events = []
-815:             for ev in data.get("events", []):
-816:                 events.append(
-817:                     ExtractedEvent(
-818:                         description=ev.get("description") or "",
-819:                         event_type=ev.get("event_type") or "EVENT",
-820:                         occurred_at=ev.get("occurred_at"),
-821:                         participants=ev.get("participants") or [],
-822:                         confidence=ev.get("confidence") or 0.9,
-823:                     )
-824:                 )
-825: 
-826:             return ExtractionResult(
-827:                 entities=entities,
-828:                 relationships=relationships,
-829:                 events=events,
-830:             )
-831: 
-832:         except json.JSONDecodeError as e:
-833:             logger.warning(f"Failed to parse extraction response as JSON: {e}")
-834:             # Try to extract JSON from the response
-835:             return self._extract_json_from_text(content)
-836: 
-837:     def _extract_json_from_text(self, text: str) -> ExtractionResult:
-838:         """Try to extract JSON from text that may contain other content."""
-839:         import re
-840: 
-841:         # Look for JSON object in the text
-842:         json_match = re.search(r"\{[\s\S]*\}", text)
-843:         if json_match:
-844:             try:
-845:                 data = json.loads(json_match.group())
-846:                 return self._parse_response(json.dumps(data))
-847:             except json.JSONDecodeError:
-848:                 pass
+801:                 )
+802: 
+803:             relationships = []
+804:             for r in data.get("relationships", []):
+805:                 # Parse temporal info if present
+806:                 temporal = None
+807:                 if "temporal" in r and r["temporal"]:
+808:                     t = r["temporal"]
+809:                     temporal = TemporalInfo(
+810:                         occurred_at=t.get("occurred_at"),
+811:                         valid_from=t.get("valid_from"),
+812:                         valid_until=t.get("valid_until"),
+813:                     )
+814: 
+815:                 relationships.append(
+816:                     ExtractedRelationship(
+817:                         source_entity=r.get("source_entity") or "",
+818:                         target_entity=r.get("target_entity") or "",
+819:                         relationship_type=r.get("relationship_type") or "RELATES_TO",
+820:                         description=r.get("description") or "",
+821:                         properties=r.get("properties") or {},
+822:                         temporal=temporal,
+823:                         confidence=r.get("confidence") or 0.9,
+824:                     )
+825:                 )
+826: 
+827:             events = []
+828:             for ev in data.get("events", []):
+829:                 events.append(
+830:                     ExtractedEvent(
+831:                         description=ev.get("description") or "",
+832:                         event_type=ev.get("event_type") or "EVENT",
+833:                         occurred_at=ev.get("occurred_at"),
+834:                         participants=ev.get("participants") or [],
+835:                         confidence=ev.get("confidence") or 0.9,
+836:                     )
+837:                 )
+838: 
+839:             return ExtractionResult(
+840:                 entities=entities,
+841:                 relationships=relationships,
+842:                 events=events,
+843:             )
+844: 
+845:         except json.JSONDecodeError as e:
+846:             logger.warning(f"Failed to parse extraction response as JSON: {e}")
+847:             # Try to extract JSON from the response
+848:             return self._extract_json_from_text(content)
 849: 
-850:         logger.warning("Could not extract valid JSON from response")
-851:         return ExtractionResult(metadata={"raw_response": text[:500]})
+850:     def _extract_json_from_text(self, text: str) -> ExtractionResult:
+851:         """Try to extract JSON from text that may contain other content."""
+852:         import re
+853: 
+854:         # Look for JSON object in the text
+855:         json_match = re.search(r"\{[\s\S]*\}", text)
+856:         if json_match:
+857:             try:
+858:                 data = json.loads(json_match.group())
+859:                 return self._parse_response(json.dumps(data))
+860:             except json.JSONDecodeError:
+861:                 pass
+862: 
+863:         logger.warning("Could not extract valid JSON from response")
+864:         return ExtractionResult(metadata={"raw_response": text[:500]})
 ````
 
 ## File: src/khora/storage/backends/pgvector.py
@@ -41786,6 +41799,13 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-03 17:04:35 +0100
+**Message:** fix: correct entity index test to match documented behavior
+
+**Files:**
+- REPOMIX.md
+- tests/unit/test_entity_index.py
+
 ## Commit: 2026-02-03 17:03:53 +0100
 **Message:** fix: disable json_schema for gpt-5-nano (token limit issues)
 
@@ -41980,12 +42000,3 @@ README.md
 - REPOMIX.md
 - src/khora/extraction/expansion/expander.py
 - src/khora/extraction/expansion/relationship_inferrer.py
-
-## Commit: 2026-02-02 11:32:04 +0100
-**Message:** perf: downgrade diagnostic logging to debug and suppress noisy third-party loggers
-
-**Files:**
-- REPOMIX.md
-- src/khora/extraction/expansion/relationship_inferrer.py
-- src/khora/logging_config.py
-- src/khora/pipelines/flows/ingest.py
