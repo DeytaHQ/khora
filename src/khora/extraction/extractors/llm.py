@@ -561,7 +561,13 @@ Return ONLY valid JSON, no other text."""
                         )
 
                     content = response.choices[0].message.content
+                    if not content:
+                        logger.warning("Empty response content from LLM in batch extraction")
+                        return [ExtractionResult(metadata={"error": "empty_response"}) for _ in texts]
                     data = json.loads(content)
+                    if not isinstance(data, dict):
+                        logger.warning(f"Batch response is not a dict: {type(data)}")
+                        return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]
                     sections_data = data.get("sections", [])
 
                     results: list[ExtractionResult] = []
@@ -576,15 +582,25 @@ Return ONLY valid JSON, no other text."""
             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
             return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
 
-    def _parse_response(self, content: str | dict) -> ExtractionResult:
+    def _parse_response(self, content: str | dict | None) -> ExtractionResult:
         """Parse the LLM response into an ExtractionResult.
 
         Accepts either a JSON string or a pre-parsed dict to avoid
         unnecessary json.dumps/json.loads round-trips in batch mode.
         """
         try:
+            # Handle None or empty content
+            if content is None or content == "":
+                logger.warning("Empty response content from LLM")
+                return ExtractionResult(metadata={"error": "empty_response"})
+
             # Accept pre-parsed dict directly (from extract_multi_batch)
             data = content if isinstance(content, dict) else json.loads(content)
+
+            # Ensure data is actually a dict (not a string that parsed as string)
+            if not isinstance(data, dict):
+                logger.warning(f"Response parsed but is not a dict: {type(data)}")
+                return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
 
             entities = []
             for e in data.get("entities", []):
