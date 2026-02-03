@@ -440,6 +440,8 @@ class LLMEntityExtractor(EntityExtractor):
                 litellm,
                 system_prompt=system_prompt,
                 tool_context=tool_context,
+                expertise=expertise,
+                context=context,
             )
             if expertise:
                 results = [self._filter_by_confidence(r, expertise) for r in results]
@@ -459,12 +461,52 @@ class LLMEntityExtractor(EntityExtractor):
         *,
         system_prompt: str | None = None,
         tool_context: str | None = None,
+        expertise: ExpertiseConfig | None = None,
+        context: dict[str, Any] | None = None,
     ) -> list[ExtractionResult]:
         """Extract from a batch of texts in a single LLM call."""
         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
 
-        tool_prefix = f"{tool_context}\n\n" if tool_context else ""
-        prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
+        # If expertise has custom extraction prompt, use it with multi-section adaptation
+        if expertise and expertise.extraction_prompt:
+            from khora.extraction.skills.composer import ExpertiseComposer
+
+            composer = ExpertiseComposer()
+            # Append multi-section response format to the text
+            multi_text = (
+                sections
+                + """
+
+## MULTI-SECTION RESPONSE FORMAT:
+Return a JSON object with a "sections" array, one object per input section:
+{"sections": [
+    {"entities": [...], "relationships": [...], "events": [...]},
+    ...
+]}
+Each section follows the entity/relationship format from the instructions above."""
+            )
+
+            prompt_context = {
+                **(context or {}),
+                "text": multi_text,
+                "entity_types": entity_types,
+                "tool_context": tool_context or "",
+            }
+            try:
+                prompt = composer.render_prompt(
+                    expertise.extraction_prompt,
+                    expertise=expertise,
+                    context=prompt_context,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to render extraction prompt for batch: {e}")
+                # Fall through to default prompt below
+                expertise = None
+
+        # Fallback to hardcoded prompt (existing behavior)
+        if not expertise or not expertise.extraction_prompt:
+            tool_prefix = f"{tool_context}\n\n" if tool_context else ""
+            prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 
 Entity types to find: {", ".join(entity_types)}
 
