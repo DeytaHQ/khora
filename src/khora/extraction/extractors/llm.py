@@ -94,6 +94,10 @@ class LLMEntityExtractor(EntityExtractor):
     through structured JSON output.
     """
 
+    # Models that require json_schema format instead of json_object
+    # gpt-5-nano uses strict structured outputs
+    MODELS_REQUIRING_JSON_SCHEMA = {"gpt-5-nano"}
+
     def __init__(
         self,
         model: str = "gpt-4o-mini",
@@ -123,6 +127,149 @@ class LLMEntityExtractor(EntityExtractor):
         self._max_retries = max_retries
         self._retry_wait = retry_wait
         self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    def _get_response_format(self) -> dict[str, Any]:
+        """Get the appropriate response_format based on the model.
+
+        Some models (like gpt-5-nano) require json_schema format with
+        strict structured outputs, while others work with json_object.
+        """
+        if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "extraction_result",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "entities": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "entity_type": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "attributes": {"type": "object", "additionalProperties": True},
+                                        "aliases": {"type": "array", "items": {"type": "string"}},
+                                    },
+                                    "required": ["name", "entity_type"],
+                                    "additionalProperties": True,
+                                },
+                            },
+                            "relationships": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "source_entity": {"type": "string"},
+                                        "target_entity": {"type": "string"},
+                                        "relationship_type": {"type": "string"},
+                                        "description": {"type": "string"},
+                                    },
+                                    "required": ["source_entity", "target_entity", "relationship_type"],
+                                    "additionalProperties": True,
+                                },
+                            },
+                            "events": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "description": {"type": "string"},
+                                        "event_type": {"type": "string"},
+                                        "occurred_at": {"type": ["string", "null"]},
+                                        "participants": {"type": "array", "items": {"type": "string"}},
+                                    },
+                                    "required": ["description"],
+                                    "additionalProperties": True,
+                                },
+                            },
+                        },
+                        "required": ["entities", "relationships", "events"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        return {"type": "json_object"}
+
+    def _get_multi_response_format(self) -> dict[str, Any]:
+        """Get the appropriate response_format for multi-section batch extraction.
+
+        Similar to _get_response_format but wraps entities/relationships/events
+        in a "sections" array for batch processing.
+        """
+        if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+            section_schema = {
+                "type": "object",
+                "properties": {
+                    "entities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "description": {"type": "string"},
+                                "attributes": {"type": "object", "additionalProperties": True},
+                                "aliases": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["name", "entity_type"],
+                            "additionalProperties": True,
+                        },
+                    },
+                    "relationships": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_entity": {"type": "string"},
+                                "target_entity": {"type": "string"},
+                                "relationship_type": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                            "required": ["source_entity", "target_entity", "relationship_type"],
+                            "additionalProperties": True,
+                        },
+                    },
+                    "events": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "event_type": {"type": "string"},
+                                "occurred_at": {"type": ["string", "null"]},
+                                "participants": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["description"],
+                            "additionalProperties": True,
+                        },
+                    },
+                },
+                "required": ["entities", "relationships", "events"],
+                "additionalProperties": False,
+            }
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "multi_extraction_result",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "sections": {
+                                "type": "array",
+                                "items": section_schema,
+                            },
+                        },
+                        "required": ["sections"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        return {"type": "json_object"}
 
     @classmethod
     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
@@ -202,7 +349,7 @@ class LLMEntityExtractor(EntityExtractor):
                             temperature=self._temperature,
                             max_tokens=self._max_tokens,
                             timeout=self._timeout,
-                            response_format={"type": "json_object"},
+                            response_format=self._get_response_format(),
                         )
                         _latency = (_time.perf_counter() - _t0) * 1000
 
@@ -542,7 +689,7 @@ Return ONLY valid JSON, no other text."""
                             temperature=self._temperature,
                             max_tokens=self._max_tokens,
                             timeout=self._timeout,
-                            response_format={"type": "json_object"},
+                            response_format=self._get_multi_response_format(),
                         )
                         _latency = (_time.perf_counter() - _t0) * 1000
 
@@ -562,8 +709,18 @@ Return ONLY valid JSON, no other text."""
 
                     content = response.choices[0].message.content
                     if not content:
-                        logger.warning("Empty response content from LLM in batch extraction")
-                        return [ExtractionResult(metadata={"error": "empty_response"}) for _ in texts]
+                        # Log more details about the response for debugging
+                        finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+                        model_used = getattr(response, "model", self._model)
+                        logger.warning(
+                            f"Empty response content from LLM in batch extraction. "
+                            f"Model: {model_used}, finish_reason: {finish_reason}, "
+                            f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
+                        )
+                        return [
+                            ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
+                            for _ in texts
+                        ]
                     data = json.loads(content)
                     if not isinstance(data, dict):
                         logger.warning(f"Batch response is not a dict: {type(data)}")

@@ -135,6 +135,9 @@ async def process_document(
     extraction_context: dict[str, Any] | None = None,
     entity_index: EntityIndex | None = None,
     shared_embedder: Any | None = None,
+    extraction_timeout: int = 120,
+    extraction_max_retries: int = 3,
+    extraction_retry_wait: float = 2.0,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -223,6 +226,9 @@ async def process_document(
                     model=extraction_model,
                     max_concurrent=max_concurrent_extractions,
                     context=extraction_context,
+                    timeout=extraction_timeout,
+                    max_retries=extraction_max_retries,
+                    retry_wait=extraction_retry_wait,
                 )
 
         embedded_chunks, (entities, relationships) = await asyncio.gather(
@@ -459,6 +465,9 @@ async def ingest_documents(
     skip_resolution: bool = False,
     shared_embedder: Any | None = None,
     shared_entity_index: Any | None = None,
+    extraction_timeout: int = 120,
+    extraction_max_retries: int = 3,
+    extraction_retry_wait: float = 2.0,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -582,6 +591,9 @@ async def ingest_documents(
                 extraction_context=doc_context,
                 entity_index=shared_entity_index,
                 shared_embedder=shared_embedder,
+                extraction_timeout=extraction_timeout,
+                extraction_max_retries=extraction_max_retries,
+                extraction_retry_wait=extraction_retry_wait,
             )
 
     results = await asyncio.gather(

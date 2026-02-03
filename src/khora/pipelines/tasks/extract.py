@@ -17,6 +17,9 @@ async def extract_entities(
     model: str = "gpt-4o-mini",
     max_concurrent: int = 10,
     context: dict[str, Any] | None = None,
+    timeout: int = 120,
+    max_retries: int = 3,
+    retry_wait: float = 2.0,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
 
@@ -30,6 +33,9 @@ async def extract_entities(
         model: LLM model for extraction
         max_concurrent: Maximum concurrent extractions
         context: Optional context dict for prompt template rendering
+        timeout: Request timeout in seconds
+        max_retries: Maximum retries on failure
+        retry_wait: Base wait time for exponential backoff between retries
 
     Returns:
         Tuple of (entities, relationships)
@@ -71,8 +77,14 @@ async def extract_entities(
         min_entity_confidence = skill.min_entity_confidence
         min_relationship_confidence = skill.min_relationship_confidence
 
-    # Create extractor with concurrency limit
-    extractor = LLMEntityExtractor(model=model, max_concurrent=max_concurrent)
+    # Create extractor with concurrency limit and timeout settings
+    extractor = LLMEntityExtractor(
+        model=model,
+        max_concurrent=max_concurrent,
+        timeout=timeout,
+        max_retries=max_retries,
+        retry_wait=retry_wait,
+    )
 
     # Extract from all chunks using grouped multi-extraction (fewer LLM calls)
     # Groups 3-5 chunks per LLM call, reducing API round-trips proportionally
