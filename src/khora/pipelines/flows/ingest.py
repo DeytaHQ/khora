@@ -567,13 +567,14 @@ async def ingest_documents(
             orig = doc_originals.get(doc.id, {})
             doc_skill = orig.get("_skill_name", skill_name)
             doc_context = orig.get("_extraction_context", extraction_context)
+            doc_model = orig.get("_extraction_model", extraction_model)
             return await process_document(
                 doc,
                 storage,
                 chunk_strategy=chunk_strategy,
                 chunk_size=chunk_size,
                 embedding_model=embedding_model,
-                extraction_model=extraction_model,
+                extraction_model=doc_model,
                 skill_name=doc_skill,
                 expertise=expertise,
                 max_concurrent_extractions=max_concurrent_extractions,
