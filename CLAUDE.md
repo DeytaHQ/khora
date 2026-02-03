@@ -313,31 +313,51 @@ The `ChatEngine` provides conversational access to the memory lake:
 ```python
 from khora import MemoryLake, SearchMode
 
-# Simple usage - uses KHORA_DATABASE_URL and KHORA_NEO4J_URL env vars
+# Simplest - reads KHORA_DATABASE_URL from env
 async with MemoryLake() as lake:
-    # Store a memory
-    result = await lake.remember("Content to store", title="Title")
+    await lake.remember("Content to store", title="Title")
+    memories = await lake.recall("query")
 
-    # Recall memories (hybrid search with query understanding, entity linking, reranking)
-    memories = await lake.recall("query", mode=SearchMode.HYBRID)
+# Common - explicit database URL
+async with MemoryLake("postgresql://localhost/mydb") as lake:
+    result = await lake.remember("content", title="My Document")
+    memories = await lake.recall("query", limit=20)
 
-    # Agentic recall (multi-step exploration with follow-up queries)
-    memories = await lake.recall("complex query", agentic=True)
+# With graph backend
+async with MemoryLake(
+    "postgresql://localhost/mydb",
+    graph_url="bolt://localhost:7687",
+) as lake:
+    memories = await lake.recall("query", mode=SearchMode.GRAPH)
 
-    # Batch ingestion
-    results = await lake.remember_batch([
-        {"content": "Doc 1", "title": "First"},
-        {"content": "Doc 2", "title": "Second"},
-    ], max_concurrent=5)
+# Batch ingestion with automatic orchestration
+async with MemoryLake(database_url) as lake:
+    # Returns BatchResult with aggregated stats
+    result = await lake.remember_batch(
+        documents,
+        deduplicate=True,           # Cross-doc entity deduplication
+        infer_relationships=True,   # Run inference after ingestion
+        on_progress=lambda done, total: print(f"{done}/{total}"),
+    )
+    print(f"Processed {result.processed} docs, {result.entities} entities")
 
-    # Forget a memory
-    await lake.forget(result.document_id)
+# Raw search - skip all LLM features (for benchmarks)
+async with MemoryLake(database_url) as lake:
+    results = await lake.recall(
+        query,
+        mode=SearchMode.ALL,
+        raw=True,  # Disables query understanding, entity linking, reranking, HyDE
+    )
 
-    # Entity operations
-    entities = await lake.list_entities(entity_type="PERSON")
-    related = await lake.find_related_entities(entity_id, max_depth=2)
+# Convenience methods (avoid direct storage access)
+async with MemoryLake(database_url) as lake:
+    ns_id = await lake.ensure_namespace("my-namespace", description="Test")
+    doc = await lake.get_document(doc_id)
+    docs = await lake.list_documents(namespace=ns_id, limit=100)
+    entities = await lake.search_entities("Alice", namespace=ns_id, limit=10)
+    namespace_stats = await lake.stats(namespace=ns_id)
 
-# Programmatic configuration with multi-backend storage
+# Advanced - full KhoraConfig (passed as positional argument)
 from khora.config import KhoraConfig
 from khora.config.schema import StorageSettings, KuzuConfig, PgVectorConfig
 
@@ -348,7 +368,7 @@ config = KhoraConfig(
         vector=PgVectorConfig(url="postgresql://user:pass@localhost:5432/mydb"),
     ),
 )
-async with MemoryLake(config=config) as lake:
+async with MemoryLake(config) as lake:  # KhoraConfig as first positional arg
     ...
 
 # Chat engine with persona
@@ -359,6 +379,42 @@ persona = PersonaConfig(...)
 chat = ChatEngine(persona=persona, memory_lake=lake, agentic_search=True)
 response = await chat.chat("What do you know about X?", namespace_id=ns_id)
 ```
+
+### Data Classes
+
+```python
+from khora import BatchResult, Stats, RememberResult, RecallResult
+
+# BatchResult - returned by remember_batch()
+@dataclass
+class BatchResult:
+    total: int         # Total documents submitted
+    processed: int     # Successfully processed
+    skipped: int       # Skipped (unchanged by checksum)
+    failed: int        # Failed to process
+    chunks: int        # Total chunks created
+    entities: int      # Total entities extracted
+    relationships: int # Total relationships created
+
+# Stats - returned by stats()
+@dataclass
+class Stats:
+    documents: int
+    chunks: int
+    entities: int
+    relationships: int
+```
+
+### Deprecation Notices
+
+The `storage` and `query_engine` properties are deprecated. Use the new convenience methods instead:
+
+| Deprecated | Replacement |
+|------------|-------------|
+| `lake.storage.get_document(id)` | `lake.get_document(id)` |
+| `lake.storage.list_documents(...)` | `lake.list_documents(...)` |
+| `lake.storage.search_entities(...)` | `lake.search_entities(...)` |
+| `lake.query_engine.query(...)` | `lake.recall(..., raw=True)` |
 
 ## API Endpoints
 

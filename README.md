@@ -107,9 +107,10 @@ uv run alembic upgrade head
 The primary interface is the `MemoryLake` class:
 
 ```python
-from khora import MemoryLake
+from khora import MemoryLake, SearchMode
 
 async def main():
+    # Simplest - reads KHORA_DATABASE_URL from environment
     async with MemoryLake() as lake:
         # Store a memory
         result = await lake.remember(
@@ -124,7 +125,7 @@ async def main():
         memories = await lake.recall(
             "Who developed relativity?",
             limit=5,
-            mode="hybrid",  # vector + graph + keyword
+            mode=SearchMode.HYBRID,  # vector + graph + keyword
         )
         print(f"Found {len(memories.chunks)} relevant chunks")
         print(f"Context: {memories.context_text}")
@@ -140,6 +141,77 @@ async def main():
 
 import asyncio
 asyncio.run(main())
+```
+
+### Simplified Constructor
+
+The `MemoryLake` constructor supports multiple initialization patterns:
+
+```python
+from khora import MemoryLake, KhoraConfig
+
+# 1. From environment variables (KHORA_DATABASE_URL)
+lake = MemoryLake()
+
+# 2. Explicit database URL
+lake = MemoryLake("postgresql://localhost/mydb")
+
+# 3. With graph backend
+lake = MemoryLake(
+    "postgresql://localhost/mydb",
+    graph_url="bolt://localhost:7687",
+)
+
+# 4. Custom embedding model
+lake = MemoryLake(
+    "postgresql://localhost/mydb",
+    embedding_model="text-embedding-3-large",
+)
+
+# 5. Full configuration object (for advanced use)
+config = KhoraConfig(
+    database_url="postgresql://localhost/mydb",
+    neo4j_url="bolt://localhost:7687",
+)
+lake = MemoryLake(config)
+```
+
+### Batch Ingestion
+
+For efficient bulk document ingestion:
+
+```python
+from khora import MemoryLake
+
+async with MemoryLake(database_url) as lake:
+    # Batch ingestion with automatic optimization
+    result = await lake.remember_batch(
+        [
+            {"content": "Document 1 text...", "title": "Doc 1"},
+            {"content": "Document 2 text...", "title": "Doc 2"},
+            {"content": "Document 3 text...", "title": "Doc 3"},
+        ],
+        deduplicate=True,           # Cross-document entity deduplication
+        infer_relationships=True,   # Relationship inference after ingestion
+        on_progress=lambda done, total: print(f"Progress: {done}/{total}"),
+    )
+
+    print(f"Processed: {result.processed}/{result.total} documents")
+    print(f"Chunks: {result.chunks}, Entities: {result.entities}")
+    print(f"Relationships: {result.relationships}")
+```
+
+### Raw Search (No LLM Features)
+
+For benchmarks or simple searches without LLM overhead:
+
+```python
+# Skip query understanding, entity linking, reranking, HyDE
+results = await lake.recall(
+    "search query",
+    mode=SearchMode.ALL,
+    raw=True,  # Disables all LLM features
+)
 ```
 
 ### Search Modes
@@ -167,25 +239,21 @@ async with MemoryLake() as lake:
 from khora import MemoryLake
 
 async with MemoryLake() as lake:
-    # Create organizational hierarchy
-    org = await lake.storage.create_organization(
-        Organization(name="Acme Corp", slug="acme")
-    )
-    workspace = await lake.storage.create_workspace(
-        Workspace(organization_id=org.id, name="Research", slug="research")
-    )
-    namespace = await lake.storage.create_namespace(
-        MemoryNamespace(workspace_id=workspace.id, name="Physics", slug="physics")
-    )
+    # Simple: Get or create a namespace by name
+    namespace_id = await lake.ensure_namespace("physics", description="Physics research")
 
     # Store memories in specific namespace
     await lake.remember(
         "Important research findings...",
-        namespace=namespace.id,
+        namespace=namespace_id,
     )
 
     # Query within namespace (isolated from other namespaces)
-    results = await lake.recall("findings", namespace=namespace.id)
+    results = await lake.recall("findings", namespace=namespace_id)
+
+    # Get namespace statistics
+    stats = await lake.stats(namespace=namespace_id)
+    print(f"Documents: {stats.documents}, Entities: {stats.entities}")
 ```
 
 ### As a Service
@@ -530,13 +598,34 @@ uv run pytest -m e2e         # End-to-end tests
 
 ### MemoryLake Class
 
+#### Constructor
+
 ```python
 class MemoryLake:
+    def __init__(
+        self,
+        database_url: str | KhoraConfig | None = None,
+        *,
+        graph_url: str | None = None,
+        embedding_model: str = "text-embedding-3-small",
+    ):
+        """Initialize the Memory Lake.
+
+        Args:
+            database_url: PostgreSQL URL, KhoraConfig, or None (reads from env)
+            graph_url: Optional Neo4j URL (bolt://user:pass@host:port)
+            embedding_model: Embedding model to use
+        """
+```
+
+#### Core Methods
+
+```python
     async def remember(
         self,
         content: str,
         *,
-        namespace: UUID | None = None,
+        namespace: str | UUID | None = None,
         title: str = "",
         source: str = "",
         metadata: dict = {},
@@ -544,14 +633,29 @@ class MemoryLake:
     ) -> RememberResult:
         """Store content in the memory lake."""
 
+    async def remember_batch(
+        self,
+        documents: list[dict],
+        *,
+        namespace: str | UUID | None = None,
+        skill_name: str = "general_entities",
+        max_concurrent: int = 5,
+        deduplicate: bool = True,
+        infer_relationships: bool = True,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> BatchResult:
+        """Store multiple documents with automatic optimization."""
+
     async def recall(
         self,
         query: str,
         *,
-        namespace: UUID | None = None,
+        namespace: str | UUID | None = None,
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
-        min_similarity: float = 0.5,
+        min_similarity: float = 0.0,
+        agentic: bool = False,
+        raw: bool = False,  # Skip all LLM features
     ) -> RecallResult:
         """Recall memories relevant to a query."""
 
@@ -559,14 +663,53 @@ class MemoryLake:
         self,
         document_id: UUID,
         *,
-        namespace: UUID | None = None,
+        namespace: str | UUID | None = None,
     ) -> bool:
         """Remove a memory from the lake."""
+```
+
+#### Convenience Methods
+
+```python
+    async def ensure_namespace(
+        self,
+        name: str,
+        *,
+        description: str = "",
+    ) -> UUID:
+        """Get or create a namespace by name."""
+
+    async def get_document(self, document_id: UUID) -> Document | None:
+        """Get a document by ID."""
+
+    async def list_documents(
+        self,
+        *,
+        namespace: str | UUID | None = None,
+        limit: int = 100,
+    ) -> list[Document]:
+        """List documents in a namespace."""
+
+    async def search_entities(
+        self,
+        query: str,
+        *,
+        namespace: str | UUID | None = None,
+        limit: int = 10,
+    ) -> list[Entity]:
+        """Search entities by query text using embedding similarity."""
+
+    async def stats(
+        self,
+        *,
+        namespace: str | UUID | None = None,
+    ) -> Stats:
+        """Get document/chunk/entity/relationship counts."""
 
     async def list_entities(
         self,
         *,
-        namespace: UUID | None = None,
+        namespace: str | UUID | None = None,
         entity_type: str | None = None,
         limit: int = 100,
     ) -> list[Entity]:
@@ -582,15 +725,57 @@ class MemoryLake:
         """Find entities related to a given entity."""
 ```
 
+### Data Classes
+
+```python
+@dataclass
+class RememberResult:
+    """Result of a remember() operation."""
+    document_id: UUID
+    namespace_id: UUID
+    chunks_created: int
+    entities_extracted: int
+    relationships_created: int
+    metadata: dict[str, Any]
+
+@dataclass
+class RecallResult:
+    """Result of a recall() operation."""
+    query: str
+    namespace_id: UUID
+    chunks: list[tuple[Chunk, float]]
+    entities: list[tuple[Entity, float]]
+    context_text: str
+    metadata: dict[str, Any]
+
+@dataclass
+class BatchResult:
+    """Result of remember_batch() operation."""
+    total: int        # Total documents submitted
+    processed: int    # Successfully processed
+    skipped: int      # Skipped (duplicates)
+    failed: int       # Failed to process
+    chunks: int       # Total chunks created
+    entities: int     # Total entities extracted
+    relationships: int # Total relationships created
+
+@dataclass
+class Stats:
+    """Namespace statistics from stats()."""
+    documents: int
+    chunks: int
+    entities: int
+    relationships: int
+```
+
 ### Search Modes
 
 | Mode | Description |
 |------|-------------|
 | `VECTOR` | Semantic similarity search using embeddings |
 | `GRAPH` | Entity and relationship traversal |
-| `KEYWORD` | Full-text keyword search |
-| `HYBRID` | Combined search with RRF fusion |
-| `ALL` | Returns results from all sources separately |
+| `HYBRID` | Combined vector + graph + keyword with RRF fusion |
+| `ALL` | All sources (vector, graph, keyword) |
 
 ### Entity Types
 
@@ -605,6 +790,15 @@ class MemoryLake:
 | `PRODUCT` | Goods, services |
 | `DOCUMENT` | Referenced documents |
 | `OTHER` | Uncategorized entities |
+
+### Deprecation Notices
+
+The following properties emit `DeprecationWarning` and will be removed in a future version:
+
+| Deprecated | Replacement |
+|------------|-------------|
+| `lake.storage` | Use `lake.get_document()`, `lake.list_documents()`, `lake.stats()` |
+| `lake.query_engine` | Use `lake.recall()` with `raw=True` for unprocessed search |
 
 ---
 
