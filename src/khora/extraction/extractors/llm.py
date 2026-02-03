@@ -379,6 +379,19 @@ class LLMEntityExtractor(EntityExtractor):
                         )
 
                     content = response.choices[0].message.content
+                    finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+
+                    # Check for truncated response (hit max_tokens limit)
+                    if finish_reason == "length":
+                        model_used = getattr(response, "model", self._model)
+                        logger.warning(
+                            f"LLM response truncated (finish_reason=length) in extraction. "
+                            f"Model: {model_used}. Consider increasing max_tokens."
+                        )
+                        return ExtractionResult(
+                            metadata={"error": "truncated_response", "finish_reason": finish_reason}
+                        )
+
                     result = self._parse_response(content)
 
                     # Apply confidence filtering from expertise if available
@@ -602,6 +615,25 @@ class LLMEntityExtractor(EntityExtractor):
                 expertise=expertise,
                 context=context,
             )
+
+            # Check if batch failed (all results have errors) - fallback to single extraction
+            all_failed = all(r.metadata.get("error") for r in results)
+            if all_failed and len(batch) > 1:
+                logger.info(
+                    f"Batch extraction failed for {len(batch)} texts, " f"falling back to single-document extraction"
+                )
+                # Extract documents one at a time
+                single_results = []
+                for text in batch:
+                    result = await self.extract(
+                        text,
+                        entity_types=entity_types,
+                        expertise=expertise,
+                        context=context,
+                    )
+                    single_results.append(result)
+                results = single_results
+
             if expertise:
                 results = [self._filter_by_confidence(r, expertise) for r in results]
             return results
@@ -720,10 +752,11 @@ Return ONLY valid JSON, no other text."""
                         )
 
                     content = response.choices[0].message.content
+                    finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+                    model_used = getattr(response, "model", self._model)
+
                     if not content:
                         # Log more details about the response for debugging
-                        finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
-                        model_used = getattr(response, "model", self._model)
                         logger.warning(
                             f"Empty response content from LLM in batch extraction. "
                             f"Model: {model_used}, finish_reason: {finish_reason}, "
@@ -733,7 +766,33 @@ Return ONLY valid JSON, no other text."""
                             ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
                             for _ in texts
                         ]
-                    data = json.loads(content)
+
+                    # Check for truncated response (hit max_tokens limit)
+                    if finish_reason == "length":
+                        logger.warning(
+                            f"LLM response truncated (finish_reason=length) in batch extraction. "
+                            f"Model: {model_used}, batch_size: {len(texts)}. "
+                            f"Consider increasing max_tokens or reducing batch size."
+                        )
+                        # Don't retry - truncation will happen again. Return empty results.
+                        return [
+                            ExtractionResult(metadata={"error": "truncated_response", "finish_reason": finish_reason})
+                            for _ in texts
+                        ]
+
+                    # Parse JSON with error handling - don't retry on parse errors
+                    try:
+                        data = json.loads(content)
+                    except json.JSONDecodeError as json_err:
+                        # Log details to help diagnose the issue
+                        logger.warning(
+                            f"JSON parse error in batch extraction (finish_reason={finish_reason}): {json_err}. "
+                            f"Model: {model_used}, content_length: {len(content)}, "
+                            f"content_preview: {content[:200]}..."
+                        )
+                        # Raise to trigger retry - model may produce valid JSON on next attempt
+                        raise
+
                     if not isinstance(data, dict):
                         logger.warning(f"Batch response is not a dict: {type(data)}")
                         return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]

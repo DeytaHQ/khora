@@ -52,7 +52,7 @@ class RelationshipInferrer:
         expertise: ExpertiseConfig | None = None,
         *,
         min_confidence: float = 0.3,
-        max_inferences_per_rule: int = 100,
+        max_inferences_per_rule: int = 500,
     ) -> None:
         """Initialize the relationship inferrer.
 
