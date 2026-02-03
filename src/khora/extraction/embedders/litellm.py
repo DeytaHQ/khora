@@ -35,7 +35,7 @@ class LiteLLMEmbedder(Embedder):
         max_retries: int = 3,
         batch_size: int = 100,
         cache_max_size: int = 10000,
-        embed_concurrency: int = 3,
+        embed_concurrency: int = 10,
         retry_wait: float = 1.0,
     ) -> None:
         """Initialize the LiteLLM embedder.
@@ -113,6 +113,7 @@ class LiteLLMEmbedder(Embedder):
             timeout=config.timeout,
             max_retries=config.max_retries,
             retry_wait=config.retry_wait,
+            embed_concurrency=config.embed_concurrency,
         )
 
     @property

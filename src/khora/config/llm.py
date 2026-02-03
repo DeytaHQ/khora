@@ -93,6 +93,11 @@ class LiteLLMConfig(BaseModel):
         gt=0,
         description="Embedding vector dimension",
     )
+    embed_concurrency: int = Field(
+        default=10,
+        gt=0,
+        description="Maximum concurrent embedding API calls",
+    )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
