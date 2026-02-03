@@ -225,8 +225,12 @@ class TestEmbeddingCandidates:
         idx.add(e)
         assert idx.find_embedding_candidates(e) == []
 
-    def test_includes_same_type_without_shared_tokens(self):
-        """Embedding candidates should include same-type entities even without shared name tokens."""
+    def test_excludes_same_type_without_shared_tokens(self):
+        """Embedding candidates use token blocking - entities without shared tokens are excluded.
+
+        This is intentional: token blocking gives O(k) instead of O(n) performance.
+        Entities must share at least one name token to be considered as candidates.
+        """
         idx = EntityIndex()
         ns = uuid4()
         emb1 = [1.0, 0.0, 0.0]
@@ -237,9 +241,10 @@ class TestEmbeddingCandidates:
         idx.add(e1)
         idx.add(e2)
 
+        # Token blocking excludes e2 since it shares no tokens with e1
         candidates = idx.find_embedding_candidates(e1, threshold=0.9)
         candidate_ids = {c.id for c, _ in candidates}
-        assert e2.id in candidate_ids
+        assert e2.id not in candidate_ids
 
 
 class TestEntityIndexBulk:
