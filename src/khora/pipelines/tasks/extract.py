@@ -95,13 +95,13 @@ async def extract_entities(
             texts,
             expertise=resolved_expertise,
             context=context,
-            batch_size=3,
+            batch_size=1,
         )
     else:
         results = await extractor.extract_multi(
             texts,
             entity_types=skill.entity_types,
-            batch_size=3,
+            batch_size=1,
         )
 
     # Process results
