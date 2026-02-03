@@ -767,6 +767,14 @@ async def run_smart_resolution(
         f"({unmatched} relationship entity IDs NOT in resolved entities)"
     )
 
+    # Debug: show sample IDs if overlap is suspiciously low
+    if len(rel_entity_ids) > 0 and matched / len(rel_entity_ids) < 0.5:
+        sample_rel_ids = list(rel_entity_ids)[:5]
+        sample_resolved_ids = list(resolved_ids)[:5]
+        logger.warning(
+            f"Low entity ID overlap! Sample rel IDs: {sample_rel_ids}, " f"Sample resolved IDs: {sample_resolved_ids}"
+        )
+
     # Phase 4: Relationship inference on full resolved graph (single pass)
     from khora.extraction.expansion.relationship_inferrer import RelationshipInferrer
     from khora.extraction.expansion.rule_engine import RuleEvaluationContext

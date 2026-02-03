@@ -222,24 +222,34 @@ class RelationshipInferrer:
         inferred = []
         rule_counts: dict[str, int] = {}
 
+        # Diagnostic counters
+        filtered_rule_limit = 0
+        filtered_confidence = 0
+        filtered_entity_resolution = 0
+        filtered_self_ref = 0
+
         for match in matches:
             # Check rule limit
             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
+                filtered_rule_limit += 1
                 continue
 
             # Check confidence threshold
             if match.confidence < self._min_confidence:
+                filtered_confidence += 1
                 continue
 
             # Resolve source and target from metadata
             source_entity, target_entity = self._resolve_inference_entities(match, context)
 
             if not source_entity or not target_entity:
+                filtered_entity_resolution += 1
                 continue
 
             # Skip self-referential
             if source_entity.id == target_entity.id:
+                filtered_self_ref += 1
                 continue
 
             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
@@ -254,6 +264,15 @@ class RelationshipInferrer:
                     rule_name=match.rule_name,
                     evidence=[r.id for r in match.matched_relationships],
                 )
+            )
+
+        # Log filtering breakdown
+        total_filtered = filtered_rule_limit + filtered_confidence + filtered_entity_resolution + filtered_self_ref
+        if total_filtered > 0 or len(matches) > 0:
+            logger.info(
+                f"Match filtering: {len(matches)} input -> {len(inferred)} output | "
+                f"rule_limit={filtered_rule_limit}, confidence={filtered_confidence}, "
+                f"entity_resolution={filtered_entity_resolution}, self_ref={filtered_self_ref}"
             )
 
         return inferred
