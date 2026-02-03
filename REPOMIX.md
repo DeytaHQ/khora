@@ -11995,765 +11995,1212 @@ README.md
 
 ## File: tests/unit/test_memory_lake.py
 ````python
-  1: """Unit tests for memory_lake.py — MemoryLake primary API."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from unittest.mock import AsyncMock, MagicMock, patch
-  6: from uuid import UUID, uuid4
-  7: 
-  8: import pytest
-  9: 
- 10: from khora.memory_lake import MemoryLake, RecallResult, RememberResult
- 11: 
- 12: # ---------------------------------------------------------------------------
- 13: # Helpers
- 14: # ---------------------------------------------------------------------------
- 15: 
- 16: 
- 17: def _mock_config() -> MagicMock:
- 18:     """Create a mock KhoraConfig with all required methods."""
- 19:     mock_config = MagicMock()
- 20:     mock_config.get_postgresql_url.return_value = "postgresql://test"
- 21:     mock_config.get_graph_config.return_value = None
- 22:     mock_config.get_vector_config.return_value = None
- 23:     mock_config.get_neo4j_url.return_value = None
- 24:     mock_config.get_neo4j_user.return_value = None
- 25:     mock_config.get_neo4j_password.return_value = None
- 26:     mock_config.get_neo4j_database.return_value = None
- 27:     mock_config.storage.embedding_dimension = 1536
- 28:     mock_config.llm.model = "gpt-4o-mini"
- 29:     mock_config.llm.embedding_model = "text-embedding-3-small"
- 30:     mock_config.llm.embedding_dimension = 1536
- 31:     mock_config.llm.extraction_model = None
- 32:     mock_config.llm.timeout = 30
- 33:     mock_config.llm.max_retries = 3
- 34:     mock_config.telemetry_database_url = None
- 35:     mock_config.telemetry_service_name = "khora-test"
- 36:     return mock_config
- 37: 
- 38: 
- 39: def _make_lake(*, connected: bool = False) -> MemoryLake:
- 40:     """Create a MemoryLake with mocked config, optionally pre-connected."""
- 41:     with patch("khora.memory_lake.load_config", return_value=_mock_config()):
- 42:         lake = MemoryLake()
- 43: 
- 44:     if connected:
- 45:         lake._connected = True
- 46:         lake._storage = MagicMock()
- 47:         lake._embedder = MagicMock()
- 48:         lake._query_engine = MagicMock()
- 49: 
- 50:     return lake
- 51: 
- 52: 
- 53: # ---------------------------------------------------------------------------
- 54: # RememberResult / RecallResult dataclass tests
- 55: # ---------------------------------------------------------------------------
- 56: 
- 57: 
- 58: class TestRememberResult:
- 59:     """Tests for RememberResult dataclass."""
- 60: 
- 61:     def test_fields(self) -> None:
- 62:         """All fields are accessible."""
- 63:         r = RememberResult(
- 64:             document_id=uuid4(),
- 65:             namespace_id=uuid4(),
- 66:             chunks_created=5,
- 67:             entities_extracted=3,
- 68:             relationships_created=2,
- 69:         )
- 70:         assert r.chunks_created == 5
- 71:         assert r.entities_extracted == 3
- 72:         assert r.relationships_created == 2
- 73:         assert r.metadata == {}
- 74: 
- 75:     def test_custom_metadata(self) -> None:
- 76:         """Custom metadata can be set."""
- 77:         r = RememberResult(
- 78:             document_id=uuid4(),
- 79:             namespace_id=uuid4(),
- 80:             chunks_created=0,
- 81:             entities_extracted=0,
- 82:             relationships_created=0,
- 83:             metadata={"duplicate": True},
- 84:         )
- 85:         assert r.metadata["duplicate"] is True
- 86: 
- 87: 
- 88: class TestRecallResult:
- 89:     """Tests for RecallResult dataclass."""
- 90: 
- 91:     def test_fields(self) -> None:
- 92:         """All fields are accessible."""
- 93:         ns_id = uuid4()
- 94:         r = RecallResult(
- 95:             query="test query",
- 96:             namespace_id=ns_id,
- 97:             chunks=[("chunk1", 0.9)],
- 98:             entities=[("entity1", 0.8)],
- 99:             context_text="some text",
-100:         )
-101:         assert r.query == "test query"
-102:         assert r.namespace_id == ns_id
-103:         assert len(r.chunks) == 1
-104:         assert len(r.entities) == 1
-105:         assert r.context_text == "some text"
-106: 
-107:     def test_default_metadata(self) -> None:
-108:         """Default metadata is empty dict."""
-109:         r = RecallResult(
-110:             query="q",
-111:             namespace_id=uuid4(),
-112:             chunks=[],
-113:             entities=[],
-114:             context_text="",
-115:         )
-116:         assert r.metadata == {}
-117: 
-118: 
-119: # ---------------------------------------------------------------------------
-120: # MemoryLake initialization
-121: # ---------------------------------------------------------------------------
-122: 
-123: 
-124: class TestMemoryLakeInit:
-125:     """Tests for MemoryLake initialization."""
-126: 
-127:     def test_init_default(self) -> None:
-128:         """Default init loads config from env."""
-129:         lake = _make_lake()
-130:         assert lake._connected is False
-131:         assert lake._storage is None
-132: 
-133:     def test_init_with_config(self) -> None:
-134:         """Init with explicit config skips load_config."""
-135:         cfg = _mock_config()
-136:         with patch("khora.memory_lake.load_config") as mock_load:
-137:             lake = MemoryLake(config=cfg)
-138:             mock_load.assert_not_called()
-139:         assert lake._config is cfg
-140: 
-141:     def test_init_with_storage_config(self) -> None:
-142:         """Init with explicit storage_config uses it directly."""
-143:         storage_cfg = MagicMock()
-144:         with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-145:             lake = MemoryLake(storage_config=storage_cfg)
-146:         assert lake._storage_config is storage_cfg
-147: 
-148:     def test_not_connected_properties_raise(self) -> None:
-149:         """Accessing storage/query_engine before connect raises."""
-150:         lake = _make_lake()
-151: 
-152:         with pytest.raises(RuntimeError, match="not connected"):
-153:             _ = lake.storage
-154: 
-155:         with pytest.raises(RuntimeError, match="not connected"):
-156:             _ = lake.query_engine
-157: 
-158:     def test_connected_properties_return(self) -> None:
-159:         """Accessing storage/query_engine after connect succeeds."""
-160:         lake = _make_lake(connected=True)
-161:         assert lake.storage is lake._storage
-162:         assert lake.query_engine is lake._query_engine
-163: 
-164: 
-165: # ---------------------------------------------------------------------------
-166: # connect / disconnect lifecycle
-167: # ---------------------------------------------------------------------------
-168: 
-169: 
-170: class TestConnectDisconnect:
-171:     """Tests for connect() and disconnect() lifecycle."""
-172: 
-173:     @pytest.mark.asyncio
-174:     async def test_connect(self) -> None:
-175:         """connect() creates storage, embedder, query engine and sets flag."""
-176:         lake = _make_lake()
-177: 
-178:         mock_coordinator = MagicMock()
-179:         mock_coordinator.connect = AsyncMock()
-180: 
-181:         with (
-182:             patch("khora.memory_lake.create_storage_coordinator", return_value=mock_coordinator),
-183:             patch("khora.memory_lake.LiteLLMEmbedder") as mock_embedder_cls,
-184:             patch("khora.memory_lake.HybridQueryEngine"),
-185:             patch("khora.telemetry.init_telemetry", new_callable=AsyncMock),
-186:         ):
-187:             mock_embedder_cls.from_config.return_value = MagicMock()
-188:             await lake.connect()
-189: 
-190:         assert lake._connected is True
-191:         assert lake._storage is mock_coordinator
-192:         mock_coordinator.connect.assert_awaited_once()
-193: 
-194:     @pytest.mark.asyncio
-195:     async def test_connect_idempotent(self) -> None:
-196:         """Calling connect() when already connected is a no-op."""
-197:         lake = _make_lake(connected=True)
-198:         original_storage = lake._storage
-199: 
-200:         await lake.connect()
-201: 
-202:         assert lake._storage is original_storage
-203: 
-204:     @pytest.mark.asyncio
-205:     async def test_disconnect(self) -> None:
-206:         """disconnect() tears down all components."""
-207:         lake = _make_lake(connected=True)
-208:         lake._storage.disconnect = AsyncMock()
-209: 
-210:         with patch("khora.telemetry.shutdown_telemetry", new_callable=AsyncMock):
-211:             await lake.disconnect()
-212: 
-213:         assert lake._connected is False
-214:         assert lake._storage is None
-215:         assert lake._embedder is None
-216:         assert lake._query_engine is None
-217: 
-218:     @pytest.mark.asyncio
-219:     async def test_disconnect_idempotent(self) -> None:
-220:         """Calling disconnect() when not connected is a no-op."""
-221:         lake = _make_lake()
-222:         await lake.disconnect()  # Should not raise
-223:         assert lake._connected is False
-224: 
-225:     @pytest.mark.asyncio
-226:     async def test_context_manager(self) -> None:
-227:         """async with MemoryLake() connects and disconnects."""
-228:         lake = _make_lake()
-229:         lake.connect = AsyncMock()
-230:         lake.disconnect = AsyncMock()
-231: 
-232:         async with lake as ctx:
-233:             assert ctx is lake
-234:             lake.connect.assert_awaited_once()
-235: 
-236:         lake.disconnect.assert_awaited_once()
-237: 
-238: 
-239: # ---------------------------------------------------------------------------
-240: # _resolve_namespace
-241: # ---------------------------------------------------------------------------
-242: 
-243: 
-244: class TestResolveNamespace:
-245:     """Tests for _resolve_namespace helper."""
-246: 
-247:     @pytest.mark.asyncio
-248:     async def test_uuid_passthrough(self) -> None:
-249:         """UUID passes through directly."""
-250:         lake = _make_lake(connected=True)
-251:         ns_id = uuid4()
-252:         result = await lake._resolve_namespace(ns_id)
-253:         assert result == ns_id
-254: 
-255:     @pytest.mark.asyncio
-256:     async def test_uuid_string_passthrough(self) -> None:
-257:         """UUID string is parsed and returned."""
-258:         lake = _make_lake(connected=True)
-259:         ns_id = uuid4()
-260:         result = await lake._resolve_namespace(str(ns_id))
-261:         assert result == ns_id
-262: 
-263:     @pytest.mark.asyncio
-264:     async def test_none_creates_default(self) -> None:
-265:         """None resolves to default namespace."""
-266:         lake = _make_lake(connected=True)
-267:         default_id = uuid4()
-268:         lake._default_namespace_id = default_id
-269: 
-270:         result = await lake._resolve_namespace(None)
-271:         assert result == default_id
-272: 
-273:     @pytest.mark.asyncio
-274:     async def test_slug_lookup(self) -> None:
-275:         """Non-UUID string looks up namespace by slug."""
-276:         lake = _make_lake(connected=True)
-277:         default_id = uuid4()
-278:         lake._default_namespace_id = default_id
-279: 
-280:         mock_ns = MagicMock()
-281:         mock_ns.workspace_id = uuid4()
-282: 
-283:         found_ns = MagicMock()
-284:         found_ns.id = uuid4()
-285: 
-286:         lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
-287:         lake._storage.get_namespace_by_slug = AsyncMock(return_value=found_ns)
-288: 
-289:         result = await lake._resolve_namespace("my-namespace")
-290:         assert result == found_ns.id
-291: 
-292:     @pytest.mark.asyncio
-293:     async def test_slug_not_found_raises(self) -> None:
-294:         """Non-UUID string that doesn't exist raises ValueError."""
-295:         lake = _make_lake(connected=True)
-296:         default_id = uuid4()
-297:         lake._default_namespace_id = default_id
-298: 
-299:         mock_ns = MagicMock()
-300:         mock_ns.workspace_id = uuid4()
-301: 
-302:         lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
-303:         lake._storage.get_namespace_by_slug = AsyncMock(return_value=None)
-304: 
-305:         with pytest.raises(ValueError, match="Namespace not found"):
-306:             await lake._resolve_namespace("nonexistent")
-307: 
-308: 
-309: # ---------------------------------------------------------------------------
-310: # remember
-311: # ---------------------------------------------------------------------------
-312: 
-313: 
-314: class TestRemember:
-315:     """Tests for remember() and _remember_inner()."""
-316: 
-317:     @pytest.mark.asyncio
-318:     async def test_remember_new_document(self) -> None:
-319:         """remember() creates document and processes through pipeline."""
-320:         lake = _make_lake(connected=True)
-321:         ns_id = uuid4()
-322:         lake._default_namespace_id = ns_id
-323:         lake._config = _mock_config()
-324: 
-325:         mock_doc = MagicMock()
-326:         mock_doc.id = uuid4()
-327: 
-328:         lake._storage.get_document_by_checksum = AsyncMock(return_value=None)
-329:         lake._storage.create_document = AsyncMock(return_value=mock_doc)
-330: 
-331:         pipeline_result = {"chunks": 3, "entities": 2, "relationships": 1}
-332: 
-333:         with (
-334:             patch("khora.telemetry.context.ensure_trace_id"),
-335:             patch("khora.telemetry.context.clear_trace_id"),
-336:             patch(
-337:                 "khora.pipelines.flows.ingest.process_document", new_callable=AsyncMock, return_value=pipeline_result
-338:             ),
-339:         ):
-340:             result = await lake.remember("test content", title="Test")
-341: 
-342:         assert result.document_id == mock_doc.id
-343:         assert result.namespace_id == ns_id
-344:         assert result.chunks_created == 3
-345:         assert result.entities_extracted == 2
-346:         assert result.relationships_created == 1
-347: 
-348:     @pytest.mark.asyncio
-349:     async def test_remember_duplicate_document(self) -> None:
-350:         """remember() returns early for duplicate checksum."""
-351:         lake = _make_lake(connected=True)
-352:         ns_id = uuid4()
-353:         lake._default_namespace_id = ns_id
-354:         lake._config = _mock_config()
-355: 
-356:         existing_doc = MagicMock()
-357:         existing_doc.id = uuid4()
-358:         existing_doc.chunk_count = 5
-359:         existing_doc.entity_count = 2
-360:         existing_doc.status = "completed"
-361: 
-362:         lake._storage.get_document_by_checksum = AsyncMock(return_value=existing_doc)
-363: 
-364:         with (
-365:             patch("khora.telemetry.context.ensure_trace_id"),
-366:             patch("khora.telemetry.context.clear_trace_id"),
-367:         ):
-368:             result = await lake.remember("duplicate content")
-369: 
-370:         assert result.document_id == existing_doc.id
-371:         assert result.metadata["duplicate"] is True
-372:         lake._storage.create_document.assert_not_called() if hasattr(lake._storage, "create_document") else None
-373: 
-374: 
-375: # ---------------------------------------------------------------------------
-376: # remember_batch
-377: # ---------------------------------------------------------------------------
-378: 
-379: 
-380: class TestRememberBatch:
-381:     """Tests for remember_batch()."""
-382: 
-383:     @pytest.mark.asyncio
-384:     async def test_empty_batch(self) -> None:
-385:         """Empty batch returns empty list."""
-386:         lake = _make_lake(connected=True)
-387:         lake._default_namespace_id = uuid4()
-388: 
-389:         with (
-390:             patch("khora.telemetry.context.ensure_trace_id"),
-391:             patch("khora.telemetry.context.clear_trace_id"),
-392:         ):
-393:             result = await lake.remember_batch([])
-394: 
-395:         assert result == []
-396: 
-397:     @pytest.mark.asyncio
-398:     async def test_batch_returns_results(self) -> None:
-399:         """remember_batch() returns one RememberResult per document."""
-400:         lake = _make_lake(connected=True)
-401:         ns_id = uuid4()
-402:         lake._default_namespace_id = ns_id
-403:         lake._config = _mock_config()
-404: 
-405:         doc_id_1 = str(uuid4())
-406:         doc_id_2 = str(uuid4())
-407:         ingest_result = {
-408:             "per_document_results": [
-409:                 {"document_id": doc_id_1, "chunks": 3, "entities": 1, "relationships": 0},
-410:                 {"document_id": doc_id_2, "chunks": 2, "entities": 0, "relationships": 0},
-411:             ],
-412:             "failed_documents": 0,
-413:         }
-414: 
-415:         with (
-416:             patch("khora.telemetry.context.ensure_trace_id"),
-417:             patch("khora.telemetry.context.clear_trace_id"),
-418:             patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
-419:         ):
-420:             results = await lake.remember_batch(
-421:                 [
-422:                     {"content": "Doc 1", "title": "First"},
-423:                     {"content": "Doc 2", "title": "Second"},
-424:                 ]
-425:             )
-426: 
-427:         assert len(results) == 2
-428:         assert results[0].document_id == UUID(doc_id_1)
-429:         assert results[0].chunks_created == 3
-430:         assert results[1].document_id == UUID(doc_id_2)
-431:         assert results[1].chunks_created == 2
-432: 
-433:     @pytest.mark.asyncio
-434:     async def test_batch_with_failures(self) -> None:
-435:         """Failed documents get padded with error results."""
-436:         lake = _make_lake(connected=True)
-437:         ns_id = uuid4()
-438:         lake._default_namespace_id = ns_id
-439:         lake._config = _mock_config()
-440: 
-441:         doc_id = str(uuid4())
-442:         ingest_result = {
-443:             "per_document_results": [
-444:                 {"document_id": doc_id, "chunks": 1, "entities": 0, "relationships": 0},
-445:             ],
-446:             "failed_documents": 1,
-447:         }
-448: 
-449:         with (
-450:             patch("khora.telemetry.context.ensure_trace_id"),
-451:             patch("khora.telemetry.context.clear_trace_id"),
-452:             patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
-453:         ):
-454:             results = await lake.remember_batch(
-455:                 [
-456:                     {"content": "Good doc"},
-457:                     {"content": "Bad doc"},
-458:                 ]
-459:             )
-460: 
-461:         assert len(results) == 2
-462:         assert results[1].metadata.get("failed") is True
-463:         assert results[1].chunks_created == 0
-464: 
-465: 
-466: # ---------------------------------------------------------------------------
-467: # recall
-468: # ---------------------------------------------------------------------------
-469: 
-470: 
-471: class TestRecall:
-472:     """Tests for recall()."""
-473: 
-474:     @pytest.mark.asyncio
-475:     async def test_recall_delegates_to_query_engine(self) -> None:
-476:         """recall() delegates to query_engine.query() and wraps result."""
-477:         lake = _make_lake(connected=True)
-478:         ns_id = uuid4()
-479:         lake._default_namespace_id = ns_id
-480: 
-481:         mock_chunk = MagicMock()
-482:         mock_chunk.content = "found content"
-483:         mock_entity = MagicMock()
-484: 
-485:         mock_query_result = MagicMock()
-486:         mock_query_result.chunks = [(mock_chunk, 0.9)]
-487:         mock_query_result.entities = [(mock_entity, 0.8)]
-488:         mock_query_result.get_context_text.return_value = "found content"
-489:         mock_query_result.metadata = {"mode": "HYBRID"}
-490: 
-491:         lake._query_engine.query = AsyncMock(return_value=mock_query_result)
-492: 
-493:         with (
-494:             patch("khora.telemetry.context.ensure_trace_id"),
-495:             patch("khora.telemetry.context.clear_trace_id"),
-496:         ):
-497:             result = await lake.recall("search query")
-498: 
-499:         assert isinstance(result, RecallResult)
-500:         assert result.query == "search query"
-501:         assert result.namespace_id == ns_id
-502:         assert len(result.chunks) == 1
-503:         assert result.context_text == "found content"
-504: 
-505:     @pytest.mark.asyncio
-506:     async def test_recall_passes_search_mode(self) -> None:
-507:         """recall() passes mode to QueryConfig."""
-508:         from khora.query.engine import SearchMode
-509: 
-510:         lake = _make_lake(connected=True)
-511:         lake._default_namespace_id = uuid4()
-512: 
-513:         mock_query_result = MagicMock()
-514:         mock_query_result.chunks = []
-515:         mock_query_result.entities = []
-516:         mock_query_result.get_context_text.return_value = ""
-517:         mock_query_result.metadata = {}
-518: 
-519:         lake._query_engine.query = AsyncMock(return_value=mock_query_result)
-520: 
-521:         with (
-522:             patch("khora.telemetry.context.ensure_trace_id"),
-523:             patch("khora.telemetry.context.clear_trace_id"),
-524:         ):
-525:             await lake.recall("test", mode=SearchMode.VECTOR)
-526: 
-527:         call_kwargs = lake._query_engine.query.call_args
-528:         config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
-529:         assert config.mode == SearchMode.VECTOR
-530: 
-531: 
-532: # ---------------------------------------------------------------------------
-533: # forget
-534: # ---------------------------------------------------------------------------
-535: 
-536: 
-537: class TestForget:
-538:     """Tests for forget()."""
-539: 
-540:     @pytest.mark.asyncio
-541:     async def test_forget_deletes_document(self) -> None:
-542:         """forget() calls storage.delete_document."""
-543:         lake = _make_lake(connected=True)
-544:         doc_id = uuid4()
-545: 
-546:         lake._storage.delete_document = AsyncMock(return_value=True)
-547: 
-548:         result = await lake.forget(doc_id)
-549:         assert result is True
-550:         lake._storage.delete_document.assert_awaited_once_with(doc_id)
-551: 
-552:     @pytest.mark.asyncio
-553:     async def test_forget_wrong_namespace(self) -> None:
-554:         """forget() returns False when document is in a different namespace."""
-555:         lake = _make_lake(connected=True)
-556:         doc_id = uuid4()
-557:         ns_id = uuid4()
-558:         other_ns_id = uuid4()
-559: 
-560:         mock_doc = MagicMock()
-561:         mock_doc.namespace_id = other_ns_id
-562: 
-563:         lake._storage.get_document = AsyncMock(return_value=mock_doc)
-564: 
-565:         result = await lake.forget(doc_id, namespace=ns_id)
-566:         assert result is False
-567: 
-568:     @pytest.mark.asyncio
-569:     async def test_forget_not_found(self) -> None:
-570:         """forget() returns False when document doesn't exist."""
-571:         lake = _make_lake(connected=True)
-572:         lake._storage.delete_document = AsyncMock(return_value=False)
-573: 
-574:         result = await lake.forget(uuid4())
-575:         assert result is False
-576: 
-577: 
-578: # ---------------------------------------------------------------------------
-579: # Entity operations
-580: # ---------------------------------------------------------------------------
-581: 
-582: 
-583: class TestEntityOperations:
-584:     """Tests for entity CRUD operations."""
-585: 
-586:     @pytest.mark.asyncio
-587:     async def test_get_entity(self) -> None:
-588:         """get_entity delegates to storage."""
-589:         lake = _make_lake(connected=True)
-590:         entity_id = uuid4()
-591:         mock_entity = MagicMock()
-592: 
-593:         lake._storage.get_entity = AsyncMock(return_value=mock_entity)
-594: 
-595:         result = await lake.get_entity(entity_id)
-596:         assert result is mock_entity
-597:         lake._storage.get_entity.assert_awaited_once_with(entity_id)
-598: 
-599:     @pytest.mark.asyncio
-600:     async def test_list_entities(self) -> None:
-601:         """list_entities delegates to storage with filters."""
-602:         lake = _make_lake(connected=True)
-603:         ns_id = uuid4()
-604:         lake._default_namespace_id = ns_id
-605: 
-606:         mock_entities = [MagicMock(), MagicMock()]
-607:         lake._storage.list_entities = AsyncMock(return_value=mock_entities)
-608: 
-609:         result = await lake.list_entities(entity_type="PERSON", limit=50)
-610:         assert result == mock_entities
-611:         lake._storage.list_entities.assert_awaited_once_with(ns_id, entity_type="PERSON", limit=50)
-612: 
-613:     @pytest.mark.asyncio
-614:     async def test_find_related_entities(self) -> None:
-615:         """find_related_entities delegates to query_engine."""
-616:         lake = _make_lake(connected=True)
-617:         ns_id = uuid4()
-618:         lake._default_namespace_id = ns_id
-619:         entity_id = uuid4()
-620: 
-621:         mock_related = [(MagicMock(), 0.8)]
-622:         lake._query_engine.find_related_entities = AsyncMock(return_value=mock_related)
-623: 
-624:         result = await lake.find_related_entities(entity_id, max_depth=3)
-625:         assert result == mock_related
-626: 
-627: 
-628: # ---------------------------------------------------------------------------
-629: # Namespace management
-630: # ---------------------------------------------------------------------------
-631: 
-632: 
-633: class TestNamespaceManagement:
-634:     """Tests for namespace operations."""
-635: 
-636:     @pytest.mark.asyncio
-637:     async def test_create_namespace(self) -> None:
-638:         """create_namespace creates and stores a namespace."""
-639:         lake = _make_lake(connected=True)
-640:         ws_id = uuid4()
-641: 
-642:         mock_ns = MagicMock()
-643:         lake._storage.create_namespace = AsyncMock(return_value=mock_ns)
-644: 
-645:         result = await lake.create_namespace("test-ns", ws_id, description="Test")
-646:         assert result is mock_ns
-647:         lake._storage.create_namespace.assert_awaited_once()
-648: 
-649:     @pytest.mark.asyncio
-650:     async def test_get_namespace(self) -> None:
-651:         """get_namespace delegates to storage."""
-652:         lake = _make_lake(connected=True)
-653:         ns_id = uuid4()
-654:         mock_ns = MagicMock()
-655: 
-656:         lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
-657: 
-658:         result = await lake.get_namespace(ns_id)
-659:         assert result is mock_ns
-660: 
-661:     @pytest.mark.asyncio
-662:     async def test_get_or_create_default_namespace_cached(self) -> None:
-663:         """get_or_create_default_namespace returns cached ID."""
-664:         lake = _make_lake(connected=True)
-665:         cached_id = uuid4()
-666:         lake._default_namespace_id = cached_id
-667: 
-668:         result = await lake.get_or_create_default_namespace()
-669:         assert result == cached_id
-670: 
-671:     @pytest.mark.asyncio
-672:     async def test_get_or_create_default_namespace_creates(self) -> None:
-673:         """get_or_create_default_namespace creates org/workspace/namespace."""
-674:         lake = _make_lake(connected=True)
-675: 
-676:         mock_org = MagicMock()
-677:         mock_org.id = uuid4()
-678:         mock_ws = MagicMock()
-679:         mock_ws.id = uuid4()
-680:         mock_ns = MagicMock()
-681:         mock_ns.id = uuid4()
-682: 
-683:         lake._storage.get_organization_by_slug = AsyncMock(return_value=None)
-684:         lake._storage.create_organization = AsyncMock(return_value=mock_org)
-685:         lake._storage.list_workspaces = AsyncMock(return_value=[])
-686:         lake._storage.create_workspace = AsyncMock(return_value=mock_ws)
-687:         lake._storage.list_namespaces = AsyncMock(return_value=[])
-688:         lake._storage.create_namespace = AsyncMock(return_value=mock_ns)
-689: 
-690:         result = await lake.get_or_create_default_namespace()
-691:         assert result == mock_ns.id
-692:         assert lake._default_namespace_id == mock_ns.id
-693: 
-694:     @pytest.mark.asyncio
-695:     async def test_get_or_create_default_reuses_existing(self) -> None:
-696:         """get_or_create_default_namespace reuses existing org/ws/ns."""
-697:         lake = _make_lake(connected=True)
-698: 
-699:         mock_org = MagicMock()
-700:         mock_org.id = uuid4()
-701:         mock_ws = MagicMock()
-702:         mock_ws.id = uuid4()
-703:         mock_ns = MagicMock()
-704:         mock_ns.id = uuid4()
-705: 
-706:         lake._storage.get_organization_by_slug = AsyncMock(return_value=mock_org)
-707:         lake._storage.list_workspaces = AsyncMock(return_value=[mock_ws])
-708:         lake._storage.list_namespaces = AsyncMock(return_value=[mock_ns])
-709: 
-710:         result = await lake.get_or_create_default_namespace()
-711:         assert result == mock_ns.id
-712:         (
-713:             lake._storage.create_organization.assert_not_called()
-714:             if hasattr(lake._storage.create_organization, "assert_not_called")
-715:             else None
-716:         )
-717: 
-718: 
-719: # ---------------------------------------------------------------------------
-720: # health_check
-721: # ---------------------------------------------------------------------------
-722: 
-723: 
-724: class TestHealthCheck:
-725:     """Tests for health_check."""
-726: 
-727:     @pytest.mark.asyncio
-728:     async def test_disconnected(self) -> None:
-729:         """Health check when disconnected."""
-730:         lake = _make_lake()
-731:         result = await lake.health_check()
-732:         assert result["status"] == "disconnected"
-733: 
-734:     @pytest.mark.asyncio
-735:     async def test_healthy(self) -> None:
-736:         """Health check when healthy."""
-737:         lake = _make_lake(connected=True)
-738:         mock_health = MagicMock()
-739:         mock_health.is_healthy = True
-740:         mock_health.summary = {"relational": True, "vector": True}
-741: 
-742:         lake._storage.health_check = AsyncMock(return_value=mock_health)
-743: 
-744:         result = await lake.health_check()
-745:         assert result["status"] == "healthy"
-746:         assert result["storage"] == mock_health.summary
-747: 
-748:     @pytest.mark.asyncio
-749:     async def test_degraded(self) -> None:
-750:         """Health check when degraded."""
-751:         lake = _make_lake(connected=True)
-752:         mock_health = MagicMock()
-753:         mock_health.is_healthy = False
-754:         mock_health.summary = {"relational": True, "vector": False}
-755: 
-756:         lake._storage.health_check = AsyncMock(return_value=mock_health)
-757: 
-758:         result = await lake.health_check()
-759:         assert result["status"] == "degraded"
+   1: """Unit tests for memory_lake.py — MemoryLake primary API."""
+   2: 
+   3: from __future__ import annotations
+   4: 
+   5: import warnings
+   6: from unittest.mock import AsyncMock, MagicMock, patch
+   7: from uuid import UUID, uuid4
+   8: 
+   9: import pytest
+  10: 
+  11: from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
+  12: 
+  13: # ---------------------------------------------------------------------------
+  14: # Helpers
+  15: # ---------------------------------------------------------------------------
+  16: 
+  17: 
+  18: def _mock_config() -> MagicMock:
+  19:     """Create a mock KhoraConfig with all required methods."""
+  20:     mock_config = MagicMock()
+  21:     mock_config.get_postgresql_url.return_value = "postgresql://test"
+  22:     mock_config.get_graph_config.return_value = None
+  23:     mock_config.get_vector_config.return_value = None
+  24:     mock_config.get_neo4j_url.return_value = None
+  25:     mock_config.get_neo4j_user.return_value = None
+  26:     mock_config.get_neo4j_password.return_value = None
+  27:     mock_config.get_neo4j_database.return_value = None
+  28:     mock_config.storage.embedding_dimension = 1536
+  29:     mock_config.llm.model = "gpt-4o-mini"
+  30:     mock_config.llm.embedding_model = "text-embedding-3-small"
+  31:     mock_config.llm.embedding_dimension = 1536
+  32:     mock_config.llm.extraction_model = None
+  33:     mock_config.llm.timeout = 30
+  34:     mock_config.llm.max_retries = 3
+  35:     mock_config.telemetry_database_url = None
+  36:     mock_config.telemetry_service_name = "khora-test"
+  37:     return mock_config
+  38: 
+  39: 
+  40: def _make_lake(*, connected: bool = False) -> MemoryLake:
+  41:     """Create a MemoryLake with mocked config, optionally pre-connected."""
+  42:     with patch("khora.memory_lake.load_config", return_value=_mock_config()):
+  43:         lake = MemoryLake()
+  44: 
+  45:     if connected:
+  46:         lake._connected = True
+  47:         lake._storage = MagicMock()
+  48:         lake._embedder = MagicMock()
+  49:         lake._query_engine = MagicMock()
+  50: 
+  51:     return lake
+  52: 
+  53: 
+  54: # ---------------------------------------------------------------------------
+  55: # RememberResult / RecallResult dataclass tests
+  56: # ---------------------------------------------------------------------------
+  57: 
+  58: 
+  59: class TestRememberResult:
+  60:     """Tests for RememberResult dataclass."""
+  61: 
+  62:     def test_fields(self) -> None:
+  63:         """All fields are accessible."""
+  64:         r = RememberResult(
+  65:             document_id=uuid4(),
+  66:             namespace_id=uuid4(),
+  67:             chunks_created=5,
+  68:             entities_extracted=3,
+  69:             relationships_created=2,
+  70:         )
+  71:         assert r.chunks_created == 5
+  72:         assert r.entities_extracted == 3
+  73:         assert r.relationships_created == 2
+  74:         assert r.metadata == {}
+  75: 
+  76:     def test_custom_metadata(self) -> None:
+  77:         """Custom metadata can be set."""
+  78:         r = RememberResult(
+  79:             document_id=uuid4(),
+  80:             namespace_id=uuid4(),
+  81:             chunks_created=0,
+  82:             entities_extracted=0,
+  83:             relationships_created=0,
+  84:             metadata={"duplicate": True},
+  85:         )
+  86:         assert r.metadata["duplicate"] is True
+  87: 
+  88: 
+  89: class TestRecallResult:
+  90:     """Tests for RecallResult dataclass."""
+  91: 
+  92:     def test_fields(self) -> None:
+  93:         """All fields are accessible."""
+  94:         ns_id = uuid4()
+  95:         r = RecallResult(
+  96:             query="test query",
+  97:             namespace_id=ns_id,
+  98:             chunks=[("chunk1", 0.9)],
+  99:             entities=[("entity1", 0.8)],
+ 100:             context_text="some text",
+ 101:         )
+ 102:         assert r.query == "test query"
+ 103:         assert r.namespace_id == ns_id
+ 104:         assert len(r.chunks) == 1
+ 105:         assert len(r.entities) == 1
+ 106:         assert r.context_text == "some text"
+ 107: 
+ 108:     def test_default_metadata(self) -> None:
+ 109:         """Default metadata is empty dict."""
+ 110:         r = RecallResult(
+ 111:             query="q",
+ 112:             namespace_id=uuid4(),
+ 113:             chunks=[],
+ 114:             entities=[],
+ 115:             context_text="",
+ 116:         )
+ 117:         assert r.metadata == {}
+ 118: 
+ 119: 
+ 120: # ---------------------------------------------------------------------------
+ 121: # MemoryLake initialization
+ 122: # ---------------------------------------------------------------------------
+ 123: 
+ 124: 
+ 125: class TestMemoryLakeInit:
+ 126:     """Tests for MemoryLake initialization."""
+ 127: 
+ 128:     def test_init_default(self) -> None:
+ 129:         """Default init loads config from env."""
+ 130:         lake = _make_lake()
+ 131:         assert lake._connected is False
+ 132:         assert lake._storage is None
+ 133: 
+ 134:     def test_init_with_config(self) -> None:
+ 135:         """Init with explicit config skips load_config."""
+ 136:         from khora.config import KhoraConfig
+ 137: 
+ 138:         # Create a real KhoraConfig (not a mock) to trigger the isinstance check
+ 139:         cfg = KhoraConfig(database_url="postgresql://test")
+ 140:         lake = MemoryLake(cfg)
+ 141: 
+ 142:         assert lake._config is cfg
+ 143:         assert lake._config.database_url == "postgresql://test"
+ 144: 
+ 145:     def test_init_with_storage_config(self) -> None:
+ 146:         """Init with explicit storage_config uses it directly."""
+ 147:         storage_cfg = MagicMock()
+ 148:         with patch("khora.memory_lake.load_config", return_value=_mock_config()):
+ 149:             lake = MemoryLake(storage_config=storage_cfg)
+ 150:         assert lake._storage_config is storage_cfg
+ 151: 
+ 152:     def test_not_connected_properties_raise(self) -> None:
+ 153:         """Accessing storage/query_engine before connect raises."""
+ 154:         lake = _make_lake()
+ 155: 
+ 156:         with pytest.raises(RuntimeError, match="not connected"):
+ 157:             _ = lake.storage
+ 158: 
+ 159:         with pytest.raises(RuntimeError, match="not connected"):
+ 160:             _ = lake.query_engine
+ 161: 
+ 162:     def test_connected_properties_return(self) -> None:
+ 163:         """Accessing storage/query_engine after connect succeeds."""
+ 164:         lake = _make_lake(connected=True)
+ 165:         assert lake.storage is lake._storage
+ 166:         assert lake.query_engine is lake._query_engine
+ 167: 
+ 168: 
+ 169: # ---------------------------------------------------------------------------
+ 170: # connect / disconnect lifecycle
+ 171: # ---------------------------------------------------------------------------
+ 172: 
+ 173: 
+ 174: class TestConnectDisconnect:
+ 175:     """Tests for connect() and disconnect() lifecycle."""
+ 176: 
+ 177:     @pytest.mark.asyncio
+ 178:     async def test_connect(self) -> None:
+ 179:         """connect() creates storage, embedder, query engine and sets flag."""
+ 180:         lake = _make_lake()
+ 181: 
+ 182:         mock_coordinator = MagicMock()
+ 183:         mock_coordinator.connect = AsyncMock()
+ 184: 
+ 185:         with (
+ 186:             patch("khora.memory_lake.create_storage_coordinator", return_value=mock_coordinator),
+ 187:             patch("khora.memory_lake.LiteLLMEmbedder") as mock_embedder_cls,
+ 188:             patch("khora.memory_lake.HybridQueryEngine"),
+ 189:             patch("khora.telemetry.init_telemetry", new_callable=AsyncMock),
+ 190:         ):
+ 191:             mock_embedder_cls.from_config.return_value = MagicMock()
+ 192:             await lake.connect()
+ 193: 
+ 194:         assert lake._connected is True
+ 195:         assert lake._storage is mock_coordinator
+ 196:         mock_coordinator.connect.assert_awaited_once()
+ 197: 
+ 198:     @pytest.mark.asyncio
+ 199:     async def test_connect_idempotent(self) -> None:
+ 200:         """Calling connect() when already connected is a no-op."""
+ 201:         lake = _make_lake(connected=True)
+ 202:         original_storage = lake._storage
+ 203: 
+ 204:         await lake.connect()
+ 205: 
+ 206:         assert lake._storage is original_storage
+ 207: 
+ 208:     @pytest.mark.asyncio
+ 209:     async def test_disconnect(self) -> None:
+ 210:         """disconnect() tears down all components."""
+ 211:         lake = _make_lake(connected=True)
+ 212:         lake._storage.disconnect = AsyncMock()
+ 213: 
+ 214:         with patch("khora.telemetry.shutdown_telemetry", new_callable=AsyncMock):
+ 215:             await lake.disconnect()
+ 216: 
+ 217:         assert lake._connected is False
+ 218:         assert lake._storage is None
+ 219:         assert lake._embedder is None
+ 220:         assert lake._query_engine is None
+ 221: 
+ 222:     @pytest.mark.asyncio
+ 223:     async def test_disconnect_idempotent(self) -> None:
+ 224:         """Calling disconnect() when not connected is a no-op."""
+ 225:         lake = _make_lake()
+ 226:         await lake.disconnect()  # Should not raise
+ 227:         assert lake._connected is False
+ 228: 
+ 229:     @pytest.mark.asyncio
+ 230:     async def test_context_manager(self) -> None:
+ 231:         """async with MemoryLake() connects and disconnects."""
+ 232:         lake = _make_lake()
+ 233:         lake.connect = AsyncMock()
+ 234:         lake.disconnect = AsyncMock()
+ 235: 
+ 236:         async with lake as ctx:
+ 237:             assert ctx is lake
+ 238:             lake.connect.assert_awaited_once()
+ 239: 
+ 240:         lake.disconnect.assert_awaited_once()
+ 241: 
+ 242: 
+ 243: # ---------------------------------------------------------------------------
+ 244: # _resolve_namespace
+ 245: # ---------------------------------------------------------------------------
+ 246: 
+ 247: 
+ 248: class TestResolveNamespace:
+ 249:     """Tests for _resolve_namespace helper."""
+ 250: 
+ 251:     @pytest.mark.asyncio
+ 252:     async def test_uuid_passthrough(self) -> None:
+ 253:         """UUID passes through directly."""
+ 254:         lake = _make_lake(connected=True)
+ 255:         ns_id = uuid4()
+ 256:         result = await lake._resolve_namespace(ns_id)
+ 257:         assert result == ns_id
+ 258: 
+ 259:     @pytest.mark.asyncio
+ 260:     async def test_uuid_string_passthrough(self) -> None:
+ 261:         """UUID string is parsed and returned."""
+ 262:         lake = _make_lake(connected=True)
+ 263:         ns_id = uuid4()
+ 264:         result = await lake._resolve_namespace(str(ns_id))
+ 265:         assert result == ns_id
+ 266: 
+ 267:     @pytest.mark.asyncio
+ 268:     async def test_none_creates_default(self) -> None:
+ 269:         """None resolves to default namespace."""
+ 270:         lake = _make_lake(connected=True)
+ 271:         default_id = uuid4()
+ 272:         lake._default_namespace_id = default_id
+ 273: 
+ 274:         result = await lake._resolve_namespace(None)
+ 275:         assert result == default_id
+ 276: 
+ 277:     @pytest.mark.asyncio
+ 278:     async def test_slug_lookup(self) -> None:
+ 279:         """Non-UUID string looks up namespace by slug."""
+ 280:         lake = _make_lake(connected=True)
+ 281:         default_id = uuid4()
+ 282:         lake._default_namespace_id = default_id
+ 283: 
+ 284:         mock_ns = MagicMock()
+ 285:         mock_ns.workspace_id = uuid4()
+ 286: 
+ 287:         found_ns = MagicMock()
+ 288:         found_ns.id = uuid4()
+ 289: 
+ 290:         lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
+ 291:         lake._storage.get_namespace_by_slug = AsyncMock(return_value=found_ns)
+ 292: 
+ 293:         result = await lake._resolve_namespace("my-namespace")
+ 294:         assert result == found_ns.id
+ 295: 
+ 296:     @pytest.mark.asyncio
+ 297:     async def test_slug_not_found_raises(self) -> None:
+ 298:         """Non-UUID string that doesn't exist raises ValueError."""
+ 299:         lake = _make_lake(connected=True)
+ 300:         default_id = uuid4()
+ 301:         lake._default_namespace_id = default_id
+ 302: 
+ 303:         mock_ns = MagicMock()
+ 304:         mock_ns.workspace_id = uuid4()
+ 305: 
+ 306:         lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
+ 307:         lake._storage.get_namespace_by_slug = AsyncMock(return_value=None)
+ 308: 
+ 309:         with pytest.raises(ValueError, match="Namespace not found"):
+ 310:             await lake._resolve_namespace("nonexistent")
+ 311: 
+ 312: 
+ 313: # ---------------------------------------------------------------------------
+ 314: # remember
+ 315: # ---------------------------------------------------------------------------
+ 316: 
+ 317: 
+ 318: class TestRemember:
+ 319:     """Tests for remember() and _remember_inner()."""
+ 320: 
+ 321:     @pytest.mark.asyncio
+ 322:     async def test_remember_new_document(self) -> None:
+ 323:         """remember() creates document and processes through pipeline."""
+ 324:         lake = _make_lake(connected=True)
+ 325:         ns_id = uuid4()
+ 326:         lake._default_namespace_id = ns_id
+ 327:         lake._config = _mock_config()
+ 328: 
+ 329:         mock_doc = MagicMock()
+ 330:         mock_doc.id = uuid4()
+ 331: 
+ 332:         lake._storage.get_document_by_checksum = AsyncMock(return_value=None)
+ 333:         lake._storage.create_document = AsyncMock(return_value=mock_doc)
+ 334: 
+ 335:         pipeline_result = {"chunks": 3, "entities": 2, "relationships": 1}
+ 336: 
+ 337:         with (
+ 338:             patch("khora.telemetry.context.ensure_trace_id"),
+ 339:             patch("khora.telemetry.context.clear_trace_id"),
+ 340:             patch(
+ 341:                 "khora.pipelines.flows.ingest.process_document", new_callable=AsyncMock, return_value=pipeline_result
+ 342:             ),
+ 343:         ):
+ 344:             result = await lake.remember("test content", title="Test")
+ 345: 
+ 346:         assert result.document_id == mock_doc.id
+ 347:         assert result.namespace_id == ns_id
+ 348:         assert result.chunks_created == 3
+ 349:         assert result.entities_extracted == 2
+ 350:         assert result.relationships_created == 1
+ 351: 
+ 352:     @pytest.mark.asyncio
+ 353:     async def test_remember_duplicate_document(self) -> None:
+ 354:         """remember() returns early for duplicate checksum."""
+ 355:         lake = _make_lake(connected=True)
+ 356:         ns_id = uuid4()
+ 357:         lake._default_namespace_id = ns_id
+ 358:         lake._config = _mock_config()
+ 359: 
+ 360:         existing_doc = MagicMock()
+ 361:         existing_doc.id = uuid4()
+ 362:         existing_doc.chunk_count = 5
+ 363:         existing_doc.entity_count = 2
+ 364:         existing_doc.status = "completed"
+ 365: 
+ 366:         lake._storage.get_document_by_checksum = AsyncMock(return_value=existing_doc)
+ 367: 
+ 368:         with (
+ 369:             patch("khora.telemetry.context.ensure_trace_id"),
+ 370:             patch("khora.telemetry.context.clear_trace_id"),
+ 371:         ):
+ 372:             result = await lake.remember("duplicate content")
+ 373: 
+ 374:         assert result.document_id == existing_doc.id
+ 375:         assert result.metadata["duplicate"] is True
+ 376:         lake._storage.create_document.assert_not_called() if hasattr(lake._storage, "create_document") else None
+ 377: 
+ 378: 
+ 379: # ---------------------------------------------------------------------------
+ 380: # remember_batch
+ 381: # ---------------------------------------------------------------------------
+ 382: 
+ 383: 
+ 384: class TestRememberBatchLegacy:
+ 385:     """Tests for remember_batch_legacy() which returns list[RememberResult]."""
+ 386: 
+ 387:     @pytest.mark.asyncio
+ 388:     async def test_empty_batch(self) -> None:
+ 389:         """Empty batch returns empty list."""
+ 390:         lake = _make_lake(connected=True)
+ 391:         lake._default_namespace_id = uuid4()
+ 392: 
+ 393:         with warnings.catch_warnings():
+ 394:             warnings.simplefilter("ignore", DeprecationWarning)
+ 395:             result = await lake.remember_batch_legacy([])
+ 396: 
+ 397:         assert result == []
+ 398: 
+ 399:     @pytest.mark.asyncio
+ 400:     async def test_batch_returns_results(self) -> None:
+ 401:         """remember_batch_legacy() returns one RememberResult per document."""
+ 402:         lake = _make_lake(connected=True)
+ 403:         ns_id = uuid4()
+ 404:         lake._default_namespace_id = ns_id
+ 405:         lake._config = _mock_config()
+ 406: 
+ 407:         doc_id_1 = str(uuid4())
+ 408:         doc_id_2 = str(uuid4())
+ 409:         ingest_result = {
+ 410:             "per_document_results": [
+ 411:                 {"document_id": doc_id_1, "chunks": 3, "entities": 1, "relationships": 0},
+ 412:                 {"document_id": doc_id_2, "chunks": 2, "entities": 0, "relationships": 0},
+ 413:             ],
+ 414:             "failed_documents": 0,
+ 415:         }
+ 416: 
+ 417:         with (
+ 418:             patch("khora.telemetry.context.ensure_trace_id"),
+ 419:             patch("khora.telemetry.context.clear_trace_id"),
+ 420:             patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
+ 421:             warnings.catch_warnings(),
+ 422:         ):
+ 423:             warnings.simplefilter("ignore", DeprecationWarning)
+ 424:             results = await lake.remember_batch_legacy(
+ 425:                 [
+ 426:                     {"content": "Doc 1", "title": "First"},
+ 427:                     {"content": "Doc 2", "title": "Second"},
+ 428:                 ]
+ 429:             )
+ 430: 
+ 431:         assert len(results) == 2
+ 432:         assert results[0].document_id == UUID(doc_id_1)
+ 433:         assert results[0].chunks_created == 3
+ 434:         assert results[1].document_id == UUID(doc_id_2)
+ 435:         assert results[1].chunks_created == 2
+ 436: 
+ 437:     @pytest.mark.asyncio
+ 438:     async def test_batch_with_failures(self) -> None:
+ 439:         """Failed documents get padded with error results."""
+ 440:         lake = _make_lake(connected=True)
+ 441:         ns_id = uuid4()
+ 442:         lake._default_namespace_id = ns_id
+ 443:         lake._config = _mock_config()
+ 444: 
+ 445:         doc_id = str(uuid4())
+ 446:         ingest_result = {
+ 447:             "per_document_results": [
+ 448:                 {"document_id": doc_id, "chunks": 1, "entities": 0, "relationships": 0},
+ 449:             ],
+ 450:             "failed_documents": 1,
+ 451:         }
+ 452: 
+ 453:         with (
+ 454:             patch("khora.telemetry.context.ensure_trace_id"),
+ 455:             patch("khora.telemetry.context.clear_trace_id"),
+ 456:             patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
+ 457:             warnings.catch_warnings(),
+ 458:         ):
+ 459:             warnings.simplefilter("ignore", DeprecationWarning)
+ 460:             results = await lake.remember_batch_legacy(
+ 461:                 [
+ 462:                     {"content": "Good doc"},
+ 463:                     {"content": "Bad doc"},
+ 464:                 ]
+ 465:             )
+ 466: 
+ 467:         assert len(results) == 2
+ 468:         assert results[1].metadata.get("failed") is True
+ 469:         assert results[1].chunks_created == 0
+ 470: 
+ 471: 
+ 472: # ---------------------------------------------------------------------------
+ 473: # recall
+ 474: # ---------------------------------------------------------------------------
+ 475: 
+ 476: 
+ 477: class TestRecall:
+ 478:     """Tests for recall()."""
+ 479: 
+ 480:     @pytest.mark.asyncio
+ 481:     async def test_recall_delegates_to_query_engine(self) -> None:
+ 482:         """recall() delegates to query_engine.query() and wraps result."""
+ 483:         lake = _make_lake(connected=True)
+ 484:         ns_id = uuid4()
+ 485:         lake._default_namespace_id = ns_id
+ 486: 
+ 487:         mock_chunk = MagicMock()
+ 488:         mock_chunk.content = "found content"
+ 489:         mock_entity = MagicMock()
+ 490: 
+ 491:         mock_query_result = MagicMock()
+ 492:         mock_query_result.chunks = [(mock_chunk, 0.9)]
+ 493:         mock_query_result.entities = [(mock_entity, 0.8)]
+ 494:         mock_query_result.get_context_text.return_value = "found content"
+ 495:         mock_query_result.metadata = {"mode": "HYBRID"}
+ 496: 
+ 497:         lake._query_engine.query = AsyncMock(return_value=mock_query_result)
+ 498: 
+ 499:         with (
+ 500:             patch("khora.telemetry.context.ensure_trace_id"),
+ 501:             patch("khora.telemetry.context.clear_trace_id"),
+ 502:         ):
+ 503:             result = await lake.recall("search query")
+ 504: 
+ 505:         assert isinstance(result, RecallResult)
+ 506:         assert result.query == "search query"
+ 507:         assert result.namespace_id == ns_id
+ 508:         assert len(result.chunks) == 1
+ 509:         assert result.context_text == "found content"
+ 510: 
+ 511:     @pytest.mark.asyncio
+ 512:     async def test_recall_passes_search_mode(self) -> None:
+ 513:         """recall() passes mode to QueryConfig."""
+ 514:         from khora.query.engine import SearchMode
+ 515: 
+ 516:         lake = _make_lake(connected=True)
+ 517:         lake._default_namespace_id = uuid4()
+ 518: 
+ 519:         mock_query_result = MagicMock()
+ 520:         mock_query_result.chunks = []
+ 521:         mock_query_result.entities = []
+ 522:         mock_query_result.get_context_text.return_value = ""
+ 523:         mock_query_result.metadata = {}
+ 524: 
+ 525:         lake._query_engine.query = AsyncMock(return_value=mock_query_result)
+ 526: 
+ 527:         with (
+ 528:             patch("khora.telemetry.context.ensure_trace_id"),
+ 529:             patch("khora.telemetry.context.clear_trace_id"),
+ 530:         ):
+ 531:             await lake.recall("test", mode=SearchMode.VECTOR)
+ 532: 
+ 533:         call_kwargs = lake._query_engine.query.call_args
+ 534:         config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
+ 535:         assert config.mode == SearchMode.VECTOR
+ 536: 
+ 537: 
+ 538: # ---------------------------------------------------------------------------
+ 539: # forget
+ 540: # ---------------------------------------------------------------------------
+ 541: 
+ 542: 
+ 543: class TestForget:
+ 544:     """Tests for forget()."""
+ 545: 
+ 546:     @pytest.mark.asyncio
+ 547:     async def test_forget_deletes_document(self) -> None:
+ 548:         """forget() calls storage.delete_document."""
+ 549:         lake = _make_lake(connected=True)
+ 550:         doc_id = uuid4()
+ 551: 
+ 552:         lake._storage.delete_document = AsyncMock(return_value=True)
+ 553: 
+ 554:         result = await lake.forget(doc_id)
+ 555:         assert result is True
+ 556:         lake._storage.delete_document.assert_awaited_once_with(doc_id)
+ 557: 
+ 558:     @pytest.mark.asyncio
+ 559:     async def test_forget_wrong_namespace(self) -> None:
+ 560:         """forget() returns False when document is in a different namespace."""
+ 561:         lake = _make_lake(connected=True)
+ 562:         doc_id = uuid4()
+ 563:         ns_id = uuid4()
+ 564:         other_ns_id = uuid4()
+ 565: 
+ 566:         mock_doc = MagicMock()
+ 567:         mock_doc.namespace_id = other_ns_id
+ 568: 
+ 569:         lake._storage.get_document = AsyncMock(return_value=mock_doc)
+ 570: 
+ 571:         result = await lake.forget(doc_id, namespace=ns_id)
+ 572:         assert result is False
+ 573: 
+ 574:     @pytest.mark.asyncio
+ 575:     async def test_forget_not_found(self) -> None:
+ 576:         """forget() returns False when document doesn't exist."""
+ 577:         lake = _make_lake(connected=True)
+ 578:         lake._storage.delete_document = AsyncMock(return_value=False)
+ 579: 
+ 580:         result = await lake.forget(uuid4())
+ 581:         assert result is False
+ 582: 
+ 583: 
+ 584: # ---------------------------------------------------------------------------
+ 585: # Entity operations
+ 586: # ---------------------------------------------------------------------------
+ 587: 
+ 588: 
+ 589: class TestEntityOperations:
+ 590:     """Tests for entity CRUD operations."""
+ 591: 
+ 592:     @pytest.mark.asyncio
+ 593:     async def test_get_entity(self) -> None:
+ 594:         """get_entity delegates to storage."""
+ 595:         lake = _make_lake(connected=True)
+ 596:         entity_id = uuid4()
+ 597:         mock_entity = MagicMock()
+ 598: 
+ 599:         lake._storage.get_entity = AsyncMock(return_value=mock_entity)
+ 600: 
+ 601:         result = await lake.get_entity(entity_id)
+ 602:         assert result is mock_entity
+ 603:         lake._storage.get_entity.assert_awaited_once_with(entity_id)
+ 604: 
+ 605:     @pytest.mark.asyncio
+ 606:     async def test_list_entities(self) -> None:
+ 607:         """list_entities delegates to storage with filters."""
+ 608:         lake = _make_lake(connected=True)
+ 609:         ns_id = uuid4()
+ 610:         lake._default_namespace_id = ns_id
+ 611: 
+ 612:         mock_entities = [MagicMock(), MagicMock()]
+ 613:         lake._storage.list_entities = AsyncMock(return_value=mock_entities)
+ 614: 
+ 615:         result = await lake.list_entities(entity_type="PERSON", limit=50)
+ 616:         assert result == mock_entities
+ 617:         lake._storage.list_entities.assert_awaited_once_with(ns_id, entity_type="PERSON", limit=50)
+ 618: 
+ 619:     @pytest.mark.asyncio
+ 620:     async def test_find_related_entities(self) -> None:
+ 621:         """find_related_entities delegates to query_engine."""
+ 622:         lake = _make_lake(connected=True)
+ 623:         ns_id = uuid4()
+ 624:         lake._default_namespace_id = ns_id
+ 625:         entity_id = uuid4()
+ 626: 
+ 627:         mock_related = [(MagicMock(), 0.8)]
+ 628:         lake._query_engine.find_related_entities = AsyncMock(return_value=mock_related)
+ 629: 
+ 630:         result = await lake.find_related_entities(entity_id, max_depth=3)
+ 631:         assert result == mock_related
+ 632: 
+ 633: 
+ 634: # ---------------------------------------------------------------------------
+ 635: # Namespace management
+ 636: # ---------------------------------------------------------------------------
+ 637: 
+ 638: 
+ 639: class TestNamespaceManagement:
+ 640:     """Tests for namespace operations."""
+ 641: 
+ 642:     @pytest.mark.asyncio
+ 643:     async def test_create_namespace(self) -> None:
+ 644:         """create_namespace creates and stores a namespace."""
+ 645:         lake = _make_lake(connected=True)
+ 646:         ws_id = uuid4()
+ 647: 
+ 648:         mock_ns = MagicMock()
+ 649:         lake._storage.create_namespace = AsyncMock(return_value=mock_ns)
+ 650: 
+ 651:         result = await lake.create_namespace("test-ns", ws_id, description="Test")
+ 652:         assert result is mock_ns
+ 653:         lake._storage.create_namespace.assert_awaited_once()
+ 654: 
+ 655:     @pytest.mark.asyncio
+ 656:     async def test_get_namespace(self) -> None:
+ 657:         """get_namespace delegates to storage."""
+ 658:         lake = _make_lake(connected=True)
+ 659:         ns_id = uuid4()
+ 660:         mock_ns = MagicMock()
+ 661: 
+ 662:         lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
+ 663: 
+ 664:         result = await lake.get_namespace(ns_id)
+ 665:         assert result is mock_ns
+ 666: 
+ 667:     @pytest.mark.asyncio
+ 668:     async def test_get_or_create_default_namespace_cached(self) -> None:
+ 669:         """get_or_create_default_namespace returns cached ID."""
+ 670:         lake = _make_lake(connected=True)
+ 671:         cached_id = uuid4()
+ 672:         lake._default_namespace_id = cached_id
+ 673: 
+ 674:         result = await lake.get_or_create_default_namespace()
+ 675:         assert result == cached_id
+ 676: 
+ 677:     @pytest.mark.asyncio
+ 678:     async def test_get_or_create_default_namespace_creates(self) -> None:
+ 679:         """get_or_create_default_namespace creates org/workspace/namespace."""
+ 680:         lake = _make_lake(connected=True)
+ 681: 
+ 682:         mock_org = MagicMock()
+ 683:         mock_org.id = uuid4()
+ 684:         mock_ws = MagicMock()
+ 685:         mock_ws.id = uuid4()
+ 686:         mock_ns = MagicMock()
+ 687:         mock_ns.id = uuid4()
+ 688: 
+ 689:         lake._storage.get_organization_by_slug = AsyncMock(return_value=None)
+ 690:         lake._storage.create_organization = AsyncMock(return_value=mock_org)
+ 691:         lake._storage.list_workspaces = AsyncMock(return_value=[])
+ 692:         lake._storage.create_workspace = AsyncMock(return_value=mock_ws)
+ 693:         lake._storage.list_namespaces = AsyncMock(return_value=[])
+ 694:         lake._storage.create_namespace = AsyncMock(return_value=mock_ns)
+ 695: 
+ 696:         result = await lake.get_or_create_default_namespace()
+ 697:         assert result == mock_ns.id
+ 698:         assert lake._default_namespace_id == mock_ns.id
+ 699: 
+ 700:     @pytest.mark.asyncio
+ 701:     async def test_get_or_create_default_reuses_existing(self) -> None:
+ 702:         """get_or_create_default_namespace reuses existing org/ws/ns."""
+ 703:         lake = _make_lake(connected=True)
+ 704: 
+ 705:         mock_org = MagicMock()
+ 706:         mock_org.id = uuid4()
+ 707:         mock_ws = MagicMock()
+ 708:         mock_ws.id = uuid4()
+ 709:         mock_ns = MagicMock()
+ 710:         mock_ns.id = uuid4()
+ 711: 
+ 712:         lake._storage.get_organization_by_slug = AsyncMock(return_value=mock_org)
+ 713:         lake._storage.list_workspaces = AsyncMock(return_value=[mock_ws])
+ 714:         lake._storage.list_namespaces = AsyncMock(return_value=[mock_ns])
+ 715: 
+ 716:         result = await lake.get_or_create_default_namespace()
+ 717:         assert result == mock_ns.id
+ 718:         (
+ 719:             lake._storage.create_organization.assert_not_called()
+ 720:             if hasattr(lake._storage.create_organization, "assert_not_called")
+ 721:             else None
+ 722:         )
+ 723: 
+ 724: 
+ 725: # ---------------------------------------------------------------------------
+ 726: # health_check
+ 727: # ---------------------------------------------------------------------------
+ 728: 
+ 729: 
+ 730: class TestHealthCheck:
+ 731:     """Tests for health_check."""
+ 732: 
+ 733:     @pytest.mark.asyncio
+ 734:     async def test_disconnected(self) -> None:
+ 735:         """Health check when disconnected."""
+ 736:         lake = _make_lake()
+ 737:         result = await lake.health_check()
+ 738:         assert result["status"] == "disconnected"
+ 739: 
+ 740:     @pytest.mark.asyncio
+ 741:     async def test_healthy(self) -> None:
+ 742:         """Health check when healthy."""
+ 743:         lake = _make_lake(connected=True)
+ 744:         mock_health = MagicMock()
+ 745:         mock_health.is_healthy = True
+ 746:         mock_health.summary = {"relational": True, "vector": True}
+ 747: 
+ 748:         lake._storage.health_check = AsyncMock(return_value=mock_health)
+ 749: 
+ 750:         result = await lake.health_check()
+ 751:         assert result["status"] == "healthy"
+ 752:         assert result["storage"] == mock_health.summary
+ 753: 
+ 754:     @pytest.mark.asyncio
+ 755:     async def test_degraded(self) -> None:
+ 756:         """Health check when degraded."""
+ 757:         lake = _make_lake(connected=True)
+ 758:         mock_health = MagicMock()
+ 759:         mock_health.is_healthy = False
+ 760:         mock_health.summary = {"relational": True, "vector": False}
+ 761: 
+ 762:         lake._storage.health_check = AsyncMock(return_value=mock_health)
+ 763: 
+ 764:         result = await lake.health_check()
+ 765:         assert result["status"] == "degraded"
+ 766: 
+ 767: 
+ 768: # ---------------------------------------------------------------------------
+ 769: # New API: Simplified Constructor
+ 770: # ---------------------------------------------------------------------------
+ 771: 
+ 772: 
+ 773: class TestSimplifiedConstructor:
+ 774:     """Tests for the simplified MemoryLake constructor."""
+ 775: 
+ 776:     def test_init_with_database_url_string(self) -> None:
+ 777:         """Init with database URL string creates config."""
+ 778:         with patch("khora.memory_lake.load_config") as mock_load:
+ 779:             lake = MemoryLake("postgresql://localhost/mydb")
+ 780:             mock_load.assert_not_called()
+ 781: 
+ 782:         assert lake._config.database_url == "postgresql://localhost/mydb"
+ 783: 
+ 784:     def test_init_with_database_url_and_graph_url(self) -> None:
+ 785:         """Init with both database and graph URLs."""
+ 786:         with patch("khora.memory_lake.load_config"):
+ 787:             lake = MemoryLake(
+ 788:                 "postgresql://localhost/mydb",
+ 789:                 graph_url="bolt://localhost:7687",
+ 790:             )
+ 791: 
+ 792:         assert lake._config.database_url == "postgresql://localhost/mydb"
+ 793:         assert lake._config.neo4j_url == "bolt://localhost:7687"
+ 794: 
+ 795:     def test_init_with_custom_embedding_model(self) -> None:
+ 796:         """Init with custom embedding model."""
+ 797:         with patch("khora.memory_lake.load_config"):
+ 798:             lake = MemoryLake(
+ 799:                 "postgresql://localhost/mydb",
+ 800:                 embedding_model="text-embedding-3-large",
+ 801:             )
+ 802: 
+ 803:         assert lake._config.llm.embedding_model == "text-embedding-3-large"
+ 804: 
+ 805:     def test_init_with_khora_config(self) -> None:
+ 806:         """Init with full KhoraConfig object."""
+ 807:         from khora.config import KhoraConfig
+ 808: 
+ 809:         # Create a real KhoraConfig (not a mock) to trigger the isinstance check
+ 810:         cfg = KhoraConfig(database_url="postgresql://test")
+ 811:         lake = MemoryLake(cfg)
+ 812: 
+ 813:         assert lake._config is cfg
+ 814:         assert lake._config.database_url == "postgresql://test"
+ 815: 
+ 816:     def test_init_with_none_loads_from_env(self) -> None:
+ 817:         """Init with None loads config from env/file."""
+ 818:         with patch("khora.memory_lake.load_config", return_value=_mock_config()) as mock_load:
+ 819:             lake = MemoryLake()
+ 820:             mock_load.assert_called_once()
+ 821: 
+ 822:         assert lake._config is not None
+ 823: 
+ 824:     def test_init_none_with_graph_override(self) -> None:
+ 825:         """Init with None but graph_url override."""
+ 826:         mock_cfg = _mock_config()
+ 827:         mock_cfg.neo4j_url = None
+ 828:         with patch("khora.memory_lake.load_config", return_value=mock_cfg):
+ 829:             lake = MemoryLake(graph_url="bolt://custom:7687")
+ 830: 
+ 831:         assert lake._config.neo4j_url == "bolt://custom:7687"
+ 832: 
+ 833: 
+ 834: # ---------------------------------------------------------------------------
+ 835: # New API: BatchResult and Stats dataclasses
+ 836: # ---------------------------------------------------------------------------
+ 837: 
+ 838: 
+ 839: class TestBatchResult:
+ 840:     """Tests for BatchResult dataclass."""
+ 841: 
+ 842:     def test_fields(self) -> None:
+ 843:         """All fields are accessible."""
+ 844:         r = BatchResult(
+ 845:             total=10,
+ 846:             processed=8,
+ 847:             skipped=1,
+ 848:             failed=1,
+ 849:             chunks=50,
+ 850:             entities=20,
+ 851:             relationships=15,
+ 852:         )
+ 853:         assert r.total == 10
+ 854:         assert r.processed == 8
+ 855:         assert r.skipped == 1
+ 856:         assert r.failed == 1
+ 857:         assert r.chunks == 50
+ 858:         assert r.entities == 20
+ 859:         assert r.relationships == 15
+ 860: 
+ 861: 
+ 862: class TestStats:
+ 863:     """Tests for Stats dataclass."""
+ 864: 
+ 865:     def test_fields(self) -> None:
+ 866:         """All fields are accessible."""
+ 867:         s = Stats(
+ 868:             documents=100,
+ 869:             chunks=500,
+ 870:             entities=200,
+ 871:             relationships=150,
+ 872:         )
+ 873:         assert s.documents == 100
+ 874:         assert s.chunks == 500
+ 875:         assert s.entities == 200
+ 876:         assert s.relationships == 150
+ 877: 
+ 878: 
+ 879: # ---------------------------------------------------------------------------
+ 880: # New API: Deprecation Warnings
+ 881: # ---------------------------------------------------------------------------
+ 882: 
+ 883: 
+ 884: class TestDeprecationWarnings:
+ 885:     """Tests for deprecation warnings on storage and query_engine properties."""
+ 886: 
+ 887:     def test_storage_property_warns(self) -> None:
+ 888:         """Accessing storage property emits DeprecationWarning."""
+ 889:         lake = _make_lake(connected=True)
+ 890: 
+ 891:         with warnings.catch_warnings(record=True) as w:
+ 892:             warnings.simplefilter("always")
+ 893:             _ = lake.storage
+ 894: 
+ 895:         assert len(w) == 1
+ 896:         assert issubclass(w[0].category, DeprecationWarning)
+ 897:         assert "lake.storage is deprecated" in str(w[0].message)
+ 898: 
+ 899:     def test_query_engine_property_warns(self) -> None:
+ 900:         """Accessing query_engine property emits DeprecationWarning."""
+ 901:         lake = _make_lake(connected=True)
+ 902: 
+ 903:         with warnings.catch_warnings(record=True) as w:
+ 904:             warnings.simplefilter("always")
+ 905:             _ = lake.query_engine
+ 906: 
+ 907:         assert len(w) == 1
+ 908:         assert issubclass(w[0].category, DeprecationWarning)
+ 909:         assert "lake.query_engine is deprecated" in str(w[0].message)
+ 910: 
+ 911:     def test_internal_methods_no_warning(self) -> None:
+ 912:         """Internal _get_storage/_get_query_engine don't emit warnings."""
+ 913:         lake = _make_lake(connected=True)
+ 914: 
+ 915:         with warnings.catch_warnings(record=True) as w:
+ 916:             warnings.simplefilter("always")
+ 917:             _ = lake._get_storage()
+ 918:             _ = lake._get_query_engine()
+ 919: 
+ 920:         # No deprecation warnings should be emitted
+ 921:         assert all(not issubclass(x.category, DeprecationWarning) for x in w)
+ 922: 
+ 923: 
+ 924: # ---------------------------------------------------------------------------
+ 925: # New API: Raw flag in recall
+ 926: # ---------------------------------------------------------------------------
+ 927: 
+ 928: 
+ 929: class TestRecallRawMode:
+ 930:     """Tests for raw mode in recall()."""
+ 931: 
+ 932:     @pytest.mark.asyncio
+ 933:     async def test_raw_mode_disables_llm_features(self) -> None:
+ 934:         """raw=True disables all LLM features in QueryConfig."""
+ 935:         lake = _make_lake(connected=True)
+ 936:         lake._default_namespace_id = uuid4()
+ 937: 
+ 938:         mock_query_result = MagicMock()
+ 939:         mock_query_result.chunks = []
+ 940:         mock_query_result.entities = []
+ 941:         mock_query_result.get_context_text.return_value = ""
+ 942:         mock_query_result.metadata = {}
+ 943: 
+ 944:         lake._query_engine.query = AsyncMock(return_value=mock_query_result)
+ 945: 
+ 946:         with (
+ 947:             patch("khora.telemetry.context.ensure_trace_id"),
+ 948:             patch("khora.telemetry.context.clear_trace_id"),
+ 949:         ):
+ 950:             await lake.recall("test query", raw=True)
+ 951: 
+ 952:         # Check the config passed to query_engine
+ 953:         call_kwargs = lake._query_engine.query.call_args
+ 954:         config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
+ 955: 
+ 956:         assert config.enable_query_understanding is False
+ 957:         assert config.enable_query_expansion is False
+ 958:         assert config.enable_entity_extraction is False
+ 959:         assert config.enable_temporal_detection is False
+ 960:         assert config.enable_entity_linking is False
+ 961:         assert config.enable_reranking is False
+ 962:         assert config.enable_hyde is False
+ 963: 
+ 964:     @pytest.mark.asyncio
+ 965:     async def test_raw_false_keeps_defaults(self) -> None:
+ 966:         """raw=False (default) keeps LLM features enabled."""
+ 967:         lake = _make_lake(connected=True)
+ 968:         lake._default_namespace_id = uuid4()
+ 969: 
+ 970:         mock_query_result = MagicMock()
+ 971:         mock_query_result.chunks = []
+ 972:         mock_query_result.entities = []
+ 973:         mock_query_result.get_context_text.return_value = ""
+ 974:         mock_query_result.metadata = {}
+ 975: 
+ 976:         lake._query_engine.query = AsyncMock(return_value=mock_query_result)
+ 977: 
+ 978:         with (
+ 979:             patch("khora.telemetry.context.ensure_trace_id"),
+ 980:             patch("khora.telemetry.context.clear_trace_id"),
+ 981:         ):
+ 982:             await lake.recall("test query", raw=False)
+ 983: 
+ 984:         call_kwargs = lake._query_engine.query.call_args
+ 985:         config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
+ 986: 
+ 987:         # Default values should be True
+ 988:         assert config.enable_query_understanding is True
+ 989:         assert config.enable_reranking is True
+ 990: 
+ 991: 
+ 992: # ---------------------------------------------------------------------------
+ 993: # New API: Convenience methods
+ 994: # ---------------------------------------------------------------------------
+ 995: 
+ 996: 
+ 997: class TestConvenienceMethods:
+ 998:     """Tests for convenience methods (get_document, list_documents, etc.)."""
+ 999: 
+1000:     @pytest.mark.asyncio
+1001:     async def test_get_document(self) -> None:
+1002:         """get_document delegates to storage."""
+1003:         lake = _make_lake(connected=True)
+1004:         doc_id = uuid4()
+1005:         mock_doc = MagicMock()
+1006: 
+1007:         lake._storage.get_document = AsyncMock(return_value=mock_doc)
+1008: 
+1009:         result = await lake.get_document(doc_id)
+1010:         assert result is mock_doc
+1011:         lake._storage.get_document.assert_awaited_once_with(doc_id)
+1012: 
+1013:     @pytest.mark.asyncio
+1014:     async def test_list_documents(self) -> None:
+1015:         """list_documents delegates to storage with namespace."""
+1016:         lake = _make_lake(connected=True)
+1017:         ns_id = uuid4()
+1018:         lake._default_namespace_id = ns_id
+1019: 
+1020:         mock_docs = [MagicMock(), MagicMock()]
+1021:         lake._storage.list_documents = AsyncMock(return_value=mock_docs)
+1022: 
+1023:         result = await lake.list_documents(limit=50)
+1024:         assert result == mock_docs
+1025:         lake._storage.list_documents.assert_awaited_once_with(ns_id, limit=50)
+1026: 
+1027:     @pytest.mark.asyncio
+1028:     async def test_search_entities(self) -> None:
+1029:         """search_entities uses embedder and searches similar entities."""
+1030:         lake = _make_lake(connected=True)
+1031:         ns_id = uuid4()
+1032:         lake._default_namespace_id = ns_id
+1033: 
+1034:         # Mock embedder
+1035:         lake._embedder = MagicMock()
+1036:         lake._embedder.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+1037: 
+1038:         # Mock storage
+1039:         entity_id = uuid4()
+1040:         mock_entity = MagicMock()
+1041:         lake._storage.search_similar_entities = AsyncMock(return_value=[(entity_id, 0.9)])
+1042:         lake._storage.get_entity = AsyncMock(return_value=mock_entity)
+1043: 
+1044:         result = await lake.search_entities("test query", limit=5)
+1045: 
+1046:         assert len(result) == 1
+1047:         assert result[0] is mock_entity
+1048:         lake._embedder.embed.assert_awaited_once_with("test query")
+1049: 
+1050:     @pytest.mark.asyncio
+1051:     async def test_ensure_namespace_returns_existing(self) -> None:
+1052:         """ensure_namespace returns existing namespace ID."""
+1053:         lake = _make_lake(connected=True)
+1054:         ns_id = uuid4()
+1055:         lake._default_namespace_id = ns_id
+1056: 
+1057:         mock_org = MagicMock()
+1058:         mock_org.id = uuid4()
+1059:         mock_ws = MagicMock()
+1060:         mock_ws.id = uuid4()
+1061:         mock_ns = MagicMock()
+1062:         mock_ns.id = uuid4()
+1063: 
+1064:         lake._storage.get_organization_by_slug = AsyncMock(return_value=mock_org)
+1065:         lake._storage.list_workspaces = AsyncMock(return_value=[mock_ws])
+1066:         lake._storage.get_namespace_by_slug = AsyncMock(return_value=mock_ns)
+1067: 
+1068:         result = await lake.ensure_namespace("my-namespace")
+1069:         assert result == mock_ns.id
+1070: 
+1071:     @pytest.mark.asyncio
+1072:     async def test_ensure_namespace_creates_new(self) -> None:
+1073:         """ensure_namespace creates new namespace when not found."""
+1074:         lake = _make_lake(connected=True)
+1075:         ns_id = uuid4()
+1076:         lake._default_namespace_id = ns_id
+1077: 
+1078:         mock_org = MagicMock()
+1079:         mock_org.id = uuid4()
+1080:         mock_ws = MagicMock()
+1081:         mock_ws.id = uuid4()
+1082:         mock_new_ns = MagicMock()
+1083:         mock_new_ns.id = uuid4()
+1084: 
+1085:         lake._storage.get_organization_by_slug = AsyncMock(return_value=mock_org)
+1086:         lake._storage.list_workspaces = AsyncMock(return_value=[mock_ws])
+1087:         lake._storage.get_namespace_by_slug = AsyncMock(return_value=None)
+1088:         lake._storage.create_namespace = AsyncMock(return_value=mock_new_ns)
+1089: 
+1090:         result = await lake.ensure_namespace("new-namespace", description="Test")
+1091:         assert result == mock_new_ns.id
+1092:         lake._storage.create_namespace.assert_awaited_once()
+1093: 
+1094: 
+1095: # ---------------------------------------------------------------------------
+1096: # New API: Enhanced remember_batch
+1097: # ---------------------------------------------------------------------------
+1098: 
+1099: 
+1100: class TestEnhancedRememberBatch:
+1101:     """Tests for enhanced remember_batch() with BatchResult."""
+1102: 
+1103:     @pytest.mark.asyncio
+1104:     async def test_empty_batch_returns_batch_result(self) -> None:
+1105:         """Empty batch returns BatchResult with zeros."""
+1106:         lake = _make_lake(connected=True)
+1107:         lake._default_namespace_id = uuid4()
+1108: 
+1109:         with (
+1110:             patch("khora.telemetry.context.ensure_trace_id"),
+1111:             patch("khora.telemetry.context.clear_trace_id"),
+1112:         ):
+1113:             result = await lake.remember_batch([])
+1114: 
+1115:         assert isinstance(result, BatchResult)
+1116:         assert result.total == 0
+1117:         assert result.processed == 0
+1118: 
+1119:     @pytest.mark.asyncio
+1120:     async def test_batch_returns_batch_result(self) -> None:
+1121:         """remember_batch() returns BatchResult with aggregated stats."""
+1122:         lake = _make_lake(connected=True)
+1123:         ns_id = uuid4()
+1124:         lake._default_namespace_id = ns_id
+1125:         lake._config = _mock_config()
+1126: 
+1127:         ingest_result = {
+1128:             "total_documents": 3,
+1129:             "processed_documents": 2,
+1130:             "skipped_documents": 1,
+1131:             "failed_documents": 0,
+1132:             "total_chunks": 10,
+1133:             "total_entities": 5,
+1134:             "total_relationships": 3,
+1135:             "total_inferred_relationships": 2,
+1136:             "per_document_results": [],
+1137:         }
+1138: 
+1139:         with (
+1140:             patch("khora.telemetry.context.ensure_trace_id"),
+1141:             patch("khora.telemetry.context.clear_trace_id"),
+1142:             patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
+1143:             patch("khora.memory_lake.LiteLLMEmbedder"),
+1144:             patch("khora.extraction.expansion.entity_index.EntityIndex"),
+1145:         ):
+1146:             # Mock list_entities for preload
+1147:             lake._storage.list_entities = AsyncMock(return_value=[])
+1148: 
+1149:             result = await lake.remember_batch(
+1150:                 [
+1151:                     {"content": "Doc 1"},
+1152:                     {"content": "Doc 2"},
+1153:                     {"content": "Doc 3"},
+1154:                 ]
+1155:             )
+1156: 
+1157:         assert isinstance(result, BatchResult)
+1158:         assert result.total == 3
+1159:         assert result.processed == 2
+1160:         assert result.skipped == 1
+1161:         assert result.failed == 0
+1162:         assert result.chunks == 10
+1163:         assert result.entities == 5
+1164:         assert result.relationships == 5  # 3 + 2 inferred
+1165: 
+1166:     @pytest.mark.asyncio
+1167:     async def test_batch_with_progress_callback(self) -> None:
+1168:         """remember_batch calls progress callback."""
+1169:         lake = _make_lake(connected=True)
+1170:         ns_id = uuid4()
+1171:         lake._default_namespace_id = ns_id
+1172:         lake._config = _mock_config()
+1173: 
+1174:         ingest_result = {
+1175:             "total_documents": 2,
+1176:             "processed_documents": 2,
+1177:             "skipped_documents": 0,
+1178:             "failed_documents": 0,
+1179:             "total_chunks": 5,
+1180:             "total_entities": 2,
+1181:             "total_relationships": 1,
+1182:             "total_inferred_relationships": 0,
+1183:             "per_document_results": [],
+1184:         }
+1185: 
+1186:         progress_calls = []
+1187: 
+1188:         def on_progress(done, total):
+1189:             progress_calls.append((done, total))
+1190: 
+1191:         with (
+1192:             patch("khora.telemetry.context.ensure_trace_id"),
+1193:             patch("khora.telemetry.context.clear_trace_id"),
+1194:             patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
+1195:             patch("khora.memory_lake.LiteLLMEmbedder"),
+1196:             patch("khora.extraction.expansion.entity_index.EntityIndex"),
+1197:         ):
+1198:             lake._storage.list_entities = AsyncMock(return_value=[])
+1199: 
+1200:             await lake.remember_batch(
+1201:                 [{"content": "Doc 1"}, {"content": "Doc 2"}],
+1202:                 on_progress=on_progress,
+1203:             )
+1204: 
+1205:         assert len(progress_calls) == 1
+1206:         assert progress_calls[0] == (2, 2)
 ````
 
 ## File: tests/unit/test_message_extract.py
@@ -30979,694 +31426,1118 @@ README.md
 
 ## File: src/khora/memory_lake.py
 ````python
-  1: """MemoryLake - Primary API for Khora Memory Lake.
-  2: 
-  3: This is the main entry point for using Khora as a library.
-  4: Provides a simple, unified interface for memory storage and retrieval.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import hashlib
- 10: from collections.abc import AsyncGenerator
- 11: from contextlib import asynccontextmanager
- 12: from dataclasses import dataclass, field
- 13: from typing import TYPE_CHECKING, Any
- 14: from uuid import UUID
- 15: 
- 16: from loguru import logger
- 17: 
- 18: from khora.config import KhoraConfig, LiteLLMConfig, load_config
- 19: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
- 20: from khora.extraction.embedders import LiteLLMEmbedder
- 21: from khora.query import HybridQueryEngine, QueryConfig, SearchMode
- 22: from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
- 23: 
- 24: if TYPE_CHECKING:
- 25:     pass
- 26: 
- 27: 
- 28: @dataclass
- 29: class RememberResult:
- 30:     """Result of a remember operation."""
- 31: 
- 32:     document_id: UUID
- 33:     namespace_id: UUID
- 34:     chunks_created: int
- 35:     entities_extracted: int
- 36:     relationships_created: int
- 37:     metadata: dict[str, Any] = field(default_factory=dict)
- 38: 
- 39: 
- 40: @dataclass
- 41: class RecallResult:
- 42:     """Result of a recall operation."""
- 43: 
- 44:     query: str
- 45:     namespace_id: UUID
- 46:     chunks: list[tuple[Any, float]]
- 47:     entities: list[tuple[Any, float]]
- 48:     context_text: str
- 49:     metadata: dict[str, Any] = field(default_factory=dict)
- 50: 
- 51: 
- 52: class MemoryLake:
- 53:     """Primary interface for Khora Memory Lake.
- 54: 
- 55:     Provides a simple API for storing and retrieving memories:
- 56:     - remember(): Store content in the memory lake
- 57:     - recall(): Retrieve relevant memories for a query
- 58:     - forget(): Remove memories
- 59: 
- 60:     Can be used as a context manager for automatic connection handling.
- 61: 
- 62:     Usage:
- 63:         async with MemoryLake() as lake:
- 64:             await lake.remember("Important fact...", namespace="my-ns")
- 65:             results = await lake.recall("What do I know about...", namespace="my-ns")
- 66:     """
- 67: 
- 68:     def __init__(
- 69:         self,
- 70:         config: KhoraConfig | None = None,
- 71:         storage_config: StorageConfig | None = None,
- 72:     ) -> None:
- 73:         """Initialize the Memory Lake.
- 74: 
- 75:         Args:
- 76:             config: Khora configuration (loads from env if None)
- 77:             storage_config: Storage configuration (derived from config if None)
- 78:         """
- 79:         self._config = config or load_config()
- 80: 
- 81:         # Set up storage config
- 82:         if storage_config:
- 83:             self._storage_config = storage_config
- 84:         else:
- 85:             postgresql_url = self._config.get_postgresql_url()
- 86:             graph_config = self._config.get_graph_config()
- 87:             vector_config = self._config.get_vector_config()
- 88:             self._storage_config = StorageConfig(
- 89:                 postgresql_url=postgresql_url,
- 90:                 pgvector_url=postgresql_url,  # pgvector uses same database as relational
- 91:                 neo4j_url=self._config.get_neo4j_url(),
- 92:                 neo4j_user=self._config.get_neo4j_user(),
- 93:                 neo4j_password=self._config.get_neo4j_password(),
- 94:                 neo4j_database=self._config.get_neo4j_database(),
- 95:                 pgvector_embedding_dimension=self._config.storage.embedding_dimension,
- 96:                 graph_config=graph_config,
- 97:                 vector_config=vector_config,
- 98:             )
- 99: 
-100:         self._storage: StorageCoordinator | None = None
-101:         self._embedder: LiteLLMEmbedder | None = None
-102:         self._query_engine: HybridQueryEngine | None = None
-103:         self._connected = False
-104: 
-105:         # Default namespace for simple usage
-106:         self._default_namespace_id: UUID | None = None
-107: 
-108:     async def connect(self) -> None:
-109:         """Connect to all storage backends."""
-110:         if self._connected:
-111:             return
-112: 
-113:         logger.info("Connecting Memory Lake...")
-114: 
-115:         # Create and connect storage
-116:         self._storage = create_storage_coordinator(self._storage_config)
-117:         await self._storage.connect()
-118: 
-119:         # Create embedder
-120:         llm_config = LiteLLMConfig(
-121:             model=self._config.llm.model,
-122:             embedding_model=self._config.llm.embedding_model,
-123:             embedding_dimension=self._config.llm.embedding_dimension,
-124:             timeout=self._config.llm.timeout,
-125:             max_retries=self._config.llm.max_retries,
-126:         )
-127:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
-128: 
-129:         # Create query engine
-130:         self._query_engine = HybridQueryEngine(
-131:             storage=self._storage,
-132:             embedder=self._embedder,
-133:         )
-134: 
-135:         # Initialize telemetry (no-op if KHORA_TELEMETRY_DATABASE_URL not set)
-136:         from khora.telemetry import init_telemetry
-137:         from khora.telemetry.config import TelemetryConfig
-138: 
-139:         telemetry_cfg = TelemetryConfig(
-140:             database_url=self._config.telemetry_database_url,
-141:             service_name=self._config.telemetry_service_name,
-142:         )
-143:         await init_telemetry(telemetry_cfg)
-144: 
-145:         self._connected = True
-146:         logger.info("Memory Lake connected")
-147: 
-148:     async def disconnect(self) -> None:
-149:         """Disconnect from all storage backends."""
-150:         if not self._connected:
-151:             return
-152: 
-153:         logger.info("Disconnecting Memory Lake...")
-154: 
-155:         # Shutdown telemetry
-156:         from khora.telemetry import shutdown_telemetry
-157: 
-158:         await shutdown_telemetry()
-159: 
-160:         if self._storage:
-161:             await self._storage.disconnect()
-162:             self._storage = None
-163: 
-164:         self._embedder = None
-165:         self._query_engine = None
-166:         self._connected = False
-167: 
-168:         logger.info("Memory Lake disconnected")
-169: 
-170:     async def __aenter__(self) -> MemoryLake:
-171:         """Async context manager entry."""
-172:         await self.connect()
-173:         return self
-174: 
-175:     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-176:         """Async context manager exit."""
-177:         await self.disconnect()
-178: 
-179:     @property
-180:     def storage(self) -> StorageCoordinator:
-181:         """Get the storage coordinator."""
-182:         if self._storage is None:
-183:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
-184:         return self._storage
-185: 
-186:     @property
-187:     def query_engine(self) -> HybridQueryEngine:
-188:         """Get the query engine."""
-189:         if self._query_engine is None:
-190:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
-191:         return self._query_engine
-192: 
-193:     # =========================================================================
-194:     # Namespace Management
-195:     # =========================================================================
-196: 
-197:     async def create_namespace(
-198:         self,
-199:         name: str,
-200:         workspace_id: UUID,
-201:         *,
-202:         description: str = "",
-203:         config_overrides: dict[str, Any] | None = None,
-204:     ) -> MemoryNamespace:
-205:         """Create a new memory namespace.
-206: 
-207:         Args:
-208:             name: Namespace name
-209:             workspace_id: Parent workspace ID
-210:             description: Optional description
-211:             config_overrides: Optional configuration overrides
-212: 
-213:         Returns:
-214:             Created MemoryNamespace
-215:         """
-216:         namespace = MemoryNamespace(
-217:             workspace_id=workspace_id,
-218:             name=name,
-219:             description=description,
-220:             config_overrides=config_overrides or {},
-221:         )
-222:         return await self.storage.create_namespace(namespace)
-223: 
-224:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-225:         """Get a namespace by ID."""
-226:         return await self.storage.get_namespace(namespace_id)
-227: 
-228:     async def get_or_create_default_namespace(self) -> UUID:
-229:         """Get or create a default namespace for simple usage."""
-230:         if self._default_namespace_id:
-231:             return self._default_namespace_id
-232: 
-233:         # Try to find existing default namespace
-234:         # For simplicity, we'll create a default org/workspace/namespace
-235:         default_org = await self.storage.get_organization_by_slug("default")
-236:         if not default_org:
-237:             default_org = await self.storage.create_organization(Organization(name="Default", slug="default"))
-238: 
-239:         workspaces = await self.storage.list_workspaces(default_org.id)
-240:         if workspaces:
-241:             default_workspace = workspaces[0]
-242:         else:
-243:             default_workspace = await self.storage.create_workspace(
-244:                 Workspace(
-245:                     organization_id=default_org.id,
-246:                     name="Default",
-247:                     slug="default",
-248:                 )
-249:             )
-250: 
-251:         namespaces = await self.storage.list_namespaces(default_workspace.id)
-252:         if namespaces:
-253:             default_namespace = namespaces[0]
-254:         else:
-255:             default_namespace = await self.storage.create_namespace(
-256:                 MemoryNamespace(
-257:                     workspace_id=default_workspace.id,
-258:                     name="Default",
-259:                     slug="default",
-260:                 )
-261:             )
-262: 
-263:         self._default_namespace_id = default_namespace.id
-264:         return self._default_namespace_id
-265: 
-266:     # =========================================================================
-267:     # Core API: remember, recall, forget
-268:     # =========================================================================
-269: 
-270:     async def remember(
-271:         self,
-272:         content: str,
-273:         *,
-274:         namespace: str | UUID | None = None,
-275:         title: str = "",
-276:         source: str = "",
-277:         metadata: dict[str, Any] | None = None,
-278:         skill_name: str = "general_entities",
-279:     ) -> RememberResult:
-280:         """Store content in the memory lake.
-281: 
-282:         This is the primary method for adding memories. It:
-283:         1. Creates a document
-284:         2. Chunks the content
-285:         3. Generates embeddings
-286:         4. Extracts entities and relationships
-287: 
-288:         Args:
-289:             content: Content to remember
-290:             namespace: Namespace name, ID, or None for default
-291:             title: Optional title for the content
-292:             source: Optional source identifier
-293:             metadata: Optional metadata
-294:             skill_name: Extraction skill to use
-295: 
-296:         Returns:
-297:             RememberResult with details
-298:         """
-299:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-300: 
-301:         ensure_trace_id()
-302:         try:
-303:             return await self._remember_inner(
-304:                 content,
-305:                 namespace=namespace,
-306:                 title=title,
-307:                 source=source,
-308:                 metadata=metadata,
-309:                 skill_name=skill_name,
-310:             )
-311:         finally:
-312:             clear_trace_id()
-313: 
-314:     async def _remember_inner(
-315:         self,
-316:         content: str,
-317:         *,
-318:         namespace: str | UUID | None = None,
-319:         title: str = "",
-320:         source: str = "",
-321:         metadata: dict[str, Any] | None = None,
-322:         skill_name: str = "general_entities",
-323:     ) -> RememberResult:
-324:         """Internal remember implementation with trace context already set."""
-325:         # Resolve namespace
-326:         namespace_id = await self._resolve_namespace(namespace)
-327: 
-328:         # Compute checksum
-329:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-330: 
-331:         # Check for duplicate - skip if any document with same checksum exists
-332:         existing = await self.storage.get_document_by_checksum(namespace_id, checksum)
-333:         if existing:
-334:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
-335:             return RememberResult(
-336:                 document_id=existing.id,
-337:                 namespace_id=namespace_id,
-338:                 chunks_created=existing.chunk_count,
-339:                 entities_extracted=existing.entity_count,
-340:                 relationships_created=0,
-341:                 metadata={"duplicate": True, "status": str(existing.status)},
-342:             )
-343: 
-344:         # Create document
-345:         doc_metadata = DocumentMetadata(
-346:             title=title,
-347:             source=source,
-348:             source_type="api",
-349:             checksum=checksum,
-350:             size_bytes=len(content.encode("utf-8")),
-351:             custom=metadata or {},
-352:         )
-353:         document = Document(
-354:             namespace_id=namespace_id,
-355:             content=content,
-356:             metadata=doc_metadata,
-357:         )
-358:         document = await self.storage.create_document(document)
-359: 
-360:         # Process through pipeline
-361:         from khora.pipelines.flows.ingest import process_document
-362: 
-363:         result = await process_document(
-364:             document,
-365:             self.storage,
-366:             skill_name=skill_name,
-367:             embedding_model=self._config.llm.embedding_model,
-368:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
-369:         )
-370: 
-371:         return RememberResult(
-372:             document_id=document.id,
-373:             namespace_id=namespace_id,
-374:             chunks_created=result["chunks"],
-375:             entities_extracted=result["entities"],
-376:             relationships_created=result["relationships"],
-377:         )
-378: 
-379:     async def remember_batch(
-380:         self,
-381:         documents: list[dict[str, Any]],
-382:         *,
-383:         namespace: str | UUID | None = None,
-384:         skill_name: str = "general_entities",
-385:         max_concurrent: int = 5,
-386:     ) -> list[RememberResult]:
-387:         """Store multiple documents in the memory lake concurrently.
-388: 
-389:         This is more efficient than calling remember() for each document
-390:         as it processes documents in parallel with controlled concurrency.
-391: 
-392:         Args:
-393:             documents: List of document dicts with keys:
-394:                 - content: str (required)
-395:                 - title: str (optional)
-396:                 - source: str (optional)
-397:                 - metadata: dict (optional)
-398:             namespace: Namespace name, ID, or None for default
-399:             skill_name: Extraction skill to use
-400:             max_concurrent: Maximum concurrent document processing
-401: 
-402:         Returns:
-403:             List of RememberResult objects (one per document)
-404:         """
-405:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-406: 
-407:         ensure_trace_id()
-408:         try:
-409:             return await self._remember_batch_inner(
-410:                 documents,
-411:                 namespace=namespace,
-412:                 skill_name=skill_name,
-413:                 max_concurrent=max_concurrent,
-414:             )
-415:         finally:
-416:             clear_trace_id()
-417: 
-418:     async def _remember_batch_inner(
-419:         self,
-420:         documents: list[dict[str, Any]],
-421:         *,
-422:         namespace: str | UUID | None = None,
-423:         skill_name: str = "general_entities",
-424:         max_concurrent: int = 5,
-425:     ) -> list[RememberResult]:
-426:         """Internal remember_batch implementation using ingest_documents for shared EntityIndex."""
-427:         if not documents:
-428:             return []
-429: 
-430:         namespace_id = await self._resolve_namespace(namespace)
-431: 
-432:         # Build doc dicts for ingest_documents
-433:         doc_inputs = []
-434:         for doc_data in documents:
-435:             doc_inputs.append(
-436:                 {
-437:                     "content": doc_data.get("content", ""),
-438:                     "title": doc_data.get("title", ""),
-439:                     "source": doc_data.get("source", ""),
-440:                     "source_type": "api",
-441:                     "metadata": doc_data.get("metadata", {}),
-442:                 }
-443:             )
-444: 
-445:         from khora.pipelines.flows.ingest import ingest_documents
-446: 
-447:         result = await ingest_documents(
-448:             namespace_id,
-449:             doc_inputs,
-450:             self.storage,
-451:             skill_name=skill_name,
-452:             embedding_model=self._config.llm.embedding_model,
-453:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
-454:             max_concurrent_documents=max_concurrent,
-455:         )
-456: 
-457:         # Convert per-document results to RememberResult objects
-458:         per_doc = result.get("per_document_results", [])
-459:         final_results: list[RememberResult] = []
-460:         for doc_result in per_doc:
-461:             final_results.append(
-462:                 RememberResult(
-463:                     document_id=UUID(doc_result["document_id"]),
-464:                     namespace_id=namespace_id,
-465:                     chunks_created=doc_result.get("chunks", 0),
-466:                     entities_extracted=doc_result.get("entities", 0),
-467:                     relationships_created=doc_result.get("relationships", 0),
-468:                 )
-469:             )
-470: 
-471:         # Pad with error results for failed/skipped documents
-472:         failed_count = result.get("failed_documents", 0)
-473:         for _ in range(failed_count):
-474:             final_results.append(
-475:                 RememberResult(
-476:                     document_id=UUID("00000000-0000-0000-0000-000000000000"),
-477:                     namespace_id=namespace_id,
-478:                     chunks_created=0,
-479:                     entities_extracted=0,
-480:                     relationships_created=0,
-481:                     metadata={"failed": True},
-482:                 )
-483:             )
-484: 
-485:         return final_results
-486: 
-487:     async def recall(
-488:         self,
-489:         query: str,
-490:         *,
-491:         namespace: str | UUID | None = None,
-492:         limit: int = 10,
-493:         mode: SearchMode = SearchMode.HYBRID,
-494:         min_similarity: float = 0.0,
-495:         agentic: bool = False,
-496:     ) -> RecallResult:
-497:         """Recall memories relevant to a query.
-498: 
-499:         This is the primary method for retrieving memories. It:
-500:         1. Uses LLM to understand query (entities, temporal refs, etc.)
-501:         2. Searches across vector, graph, and keyword indexes
-502:         3. Fuses results using Reciprocal Rank Fusion
-503:         4. Returns ranked results
-504: 
-505:         When agentic=True, uses multi-step exploration:
-506:         1. Initial comprehensive search with query understanding
-507:         2. Executes pre-computed follow-up queries for deeper exploration
-508:         3. Explores under-represented sources
-509:         4. Returns combined results with full trace
-510: 
-511:         Args:
-512:             query: Query text
-513:             namespace: Namespace name, ID, or None for default
-514:             limit: Maximum results to return
-515:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
-516:             min_similarity: Minimum similarity threshold
-517:             agentic: If True, use multi-step agentic search (default: False)
-518: 
-519:         Returns:
-520:             RecallResult with matched memories
-521:         """
-522:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-523: 
-524:         ensure_trace_id()
-525:         try:
-526:             return await self._recall_inner(
-527:                 query,
-528:                 namespace=namespace,
-529:                 limit=limit,
-530:                 mode=mode,
-531:                 min_similarity=min_similarity,
-532:                 agentic=agentic,
-533:             )
-534:         finally:
-535:             clear_trace_id()
-536: 
-537:     async def _recall_inner(
-538:         self,
-539:         query: str,
-540:         *,
-541:         namespace: str | UUID | None = None,
-542:         limit: int = 10,
-543:         mode: SearchMode = SearchMode.HYBRID,
-544:         min_similarity: float = 0.0,
-545:         agentic: bool = False,
-546:     ) -> RecallResult:
-547:         """Internal recall implementation with trace context already set."""
-548:         namespace_id = await self._resolve_namespace(namespace)
-549: 
-550:         config = QueryConfig(
-551:             mode=mode,
-552:             max_chunks=limit,
-553:             max_entities=limit,
-554:             min_chunk_similarity=min_similarity,
-555:             min_entity_similarity=min_similarity,
-556:         )
-557: 
-558:         result = await self.query_engine.query(query, namespace_id, config=config, agentic=agentic)
-559: 
-560:         return RecallResult(
-561:             query=query,
-562:             namespace_id=namespace_id,
-563:             chunks=result.chunks,
-564:             entities=result.entities,
-565:             context_text=result.get_context_text(max_chunks=limit),
-566:             metadata=result.metadata,
-567:         )
-568: 
-569:     async def forget(
-570:         self,
-571:         document_id: UUID,
-572:         *,
-573:         namespace: str | UUID | None = None,
-574:     ) -> bool:
-575:         """Remove a memory from the lake.
-576: 
-577:         Args:
-578:             document_id: ID of the document to remove
-579:             namespace: Namespace for verification (optional)
-580: 
-581:         Returns:
-582:             True if deleted, False if not found
-583:         """
-584:         # Verify namespace if provided
-585:         if namespace:
-586:             namespace_id = await self._resolve_namespace(namespace)
-587:             document = await self.storage.get_document(document_id)
-588:             if document and document.namespace_id != namespace_id:
-589:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-590:                 return False
-591: 
-592:         return await self.storage.delete_document(document_id)
-593: 
-594:     # =========================================================================
-595:     # Entity Operations
-596:     # =========================================================================
-597: 
-598:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-599:         """Get an entity by ID."""
-600:         return await self.storage.get_entity(entity_id)
-601: 
-602:     async def list_entities(
-603:         self,
-604:         *,
-605:         namespace: str | UUID | None = None,
-606:         entity_type: str | None = None,
-607:         limit: int = 100,
-608:     ) -> list[Entity]:
-609:         """List entities in a namespace."""
-610:         namespace_id = await self._resolve_namespace(namespace)
-611:         return await self.storage.list_entities(namespace_id, entity_type=entity_type, limit=limit)
-612: 
-613:     async def find_related_entities(
-614:         self,
-615:         entity_id: UUID,
-616:         *,
-617:         namespace: str | UUID | None = None,
-618:         max_depth: int = 2,
-619:         limit: int = 20,
-620:     ) -> list[tuple[Entity, float]]:
-621:         """Find entities related to a given entity."""
-622:         namespace_id = await self._resolve_namespace(namespace)
-623:         return await self.query_engine.find_related_entities(
-624:             entity_id,
-625:             namespace_id,
-626:             max_depth=max_depth,
-627:             limit=limit,
-628:         )
-629: 
-630:     # =========================================================================
-631:     # Helpers
-632:     # =========================================================================
-633: 
-634:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
-635:         """Resolve a namespace reference to a UUID."""
-636:         if namespace is None:
-637:             return await self.get_or_create_default_namespace()
-638: 
-639:         if isinstance(namespace, UUID):
-640:             return namespace
-641: 
-642:         # Try to parse as UUID
-643:         try:
-644:             return UUID(namespace)
-645:         except ValueError:
-646:             pass
-647: 
-648:         # Look up by slug in default workspace
-649:         default_ns_id = await self.get_or_create_default_namespace()
-650:         default_ns = await self.storage.get_namespace(default_ns_id)
-651:         if default_ns:
-652:             ns = await self.storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
-653:             if ns:
-654:                 return ns.id
-655: 
-656:         raise ValueError(f"Namespace not found: {namespace}")
-657: 
-658:     async def health_check(self) -> dict[str, Any]:
-659:         """Check health of all components."""
-660:         if not self._connected:
-661:             return {"status": "disconnected"}
-662: 
-663:         storage_health = await self.storage.health_check()
-664: 
-665:         return {
-666:             "status": "healthy" if storage_health.is_healthy else "degraded",
-667:             "storage": storage_health.summary,
-668:         }
-669: 
-670: 
-671: # Convenience function for one-off usage
-672: @asynccontextmanager
-673: async def memory_lake(
-674:     config: KhoraConfig | None = None,
-675: ) -> AsyncGenerator[MemoryLake]:
-676:     """Context manager for one-off Memory Lake usage.
-677: 
-678:     Usage:
-679:         async with memory_lake() as lake:
-680:             await lake.remember("Hello, world!")
-681:             result = await lake.recall("greeting")
-682:     """
-683:     lake = MemoryLake(config=config)
-684:     try:
-685:         await lake.connect()
-686:         yield lake
-687:     finally:
-688:         await lake.disconnect()
+   1: """MemoryLake - Primary API for Khora Memory Lake.
+   2: 
+   3: This is the main entry point for using Khora as a library.
+   4: Provides a simple, unified interface for memory storage and retrieval.
+   5: """
+   6: 
+   7: from __future__ import annotations
+   8: 
+   9: import hashlib
+  10: import warnings
+  11: from collections.abc import AsyncGenerator, Callable
+  12: from contextlib import asynccontextmanager
+  13: from dataclasses import dataclass, field
+  14: from typing import TYPE_CHECKING, Any
+  15: from uuid import UUID
+  16: 
+  17: from loguru import logger
+  18: 
+  19: from khora.config import KhoraConfig, LiteLLMConfig, load_config
+  20: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+  21: from khora.extraction.embedders import LiteLLMEmbedder
+  22: from khora.query import HybridQueryEngine, QueryConfig, SearchMode
+  23: from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+  24: 
+  25: if TYPE_CHECKING:
+  26:     pass
+  27: 
+  28: 
+  29: @dataclass
+  30: class RememberResult:
+  31:     """Result of a remember operation."""
+  32: 
+  33:     document_id: UUID
+  34:     namespace_id: UUID
+  35:     chunks_created: int
+  36:     entities_extracted: int
+  37:     relationships_created: int
+  38:     metadata: dict[str, Any] = field(default_factory=dict)
+  39: 
+  40: 
+  41: @dataclass
+  42: class BatchResult:
+  43:     """Result of remember_batch() operation."""
+  44: 
+  45:     total: int
+  46:     processed: int
+  47:     skipped: int
+  48:     failed: int
+  49:     chunks: int
+  50:     entities: int
+  51:     relationships: int
+  52: 
+  53: 
+  54: @dataclass
+  55: class Stats:
+  56:     """Namespace statistics."""
+  57: 
+  58:     documents: int
+  59:     chunks: int
+  60:     entities: int
+  61:     relationships: int
+  62: 
+  63: 
+  64: @dataclass
+  65: class RecallResult:
+  66:     """Result of a recall operation."""
+  67: 
+  68:     query: str
+  69:     namespace_id: UUID
+  70:     chunks: list[tuple[Any, float]]
+  71:     entities: list[tuple[Any, float]]
+  72:     context_text: str
+  73:     metadata: dict[str, Any] = field(default_factory=dict)
+  74: 
+  75: 
+  76: class MemoryLake:
+  77:     """Primary interface for Khora Memory Lake.
+  78: 
+  79:     Provides a simple API for storing and retrieving memories:
+  80:     - remember(): Store content in the memory lake
+  81:     - recall(): Retrieve relevant memories for a query
+  82:     - forget(): Remove memories
+  83: 
+  84:     Can be used as a context manager for automatic connection handling.
+  85: 
+  86:     Usage:
+  87:         # Simplest - from env vars (KHORA_DATABASE_URL)
+  88:         async with MemoryLake() as lake:
+  89:             await lake.remember("Important fact...", namespace="my-ns")
+  90: 
+  91:         # Common - explicit database URL
+  92:         async with MemoryLake("postgresql://localhost/mydb") as lake:
+  93:             results = await lake.recall("What do I know about...", namespace="my-ns")
+  94: 
+  95:         # With graph backend
+  96:         async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
+  97:             ...
+  98: 
+  99:         # Full config
+ 100:         async with MemoryLake(KhoraConfig(...)) as lake:
+ 101:             ...
+ 102:     """
+ 103: 
+ 104:     def __init__(
+ 105:         self,
+ 106:         database_url: str | KhoraConfig | None = None,
+ 107:         *,
+ 108:         graph_url: str | None = None,
+ 109:         embedding_model: str = "text-embedding-3-small",
+ 110:         storage_config: StorageConfig | None = None,
+ 111:     ) -> None:
+ 112:         """Initialize the Memory Lake.
+ 113: 
+ 114:         Args:
+ 115:             database_url: PostgreSQL URL, or full KhoraConfig, or None (reads KHORA_DATABASE_URL from env)
+ 116:             graph_url: Optional Neo4j/graph database URL (bolt://user:pass@host:port)
+ 117:             embedding_model: Embedding model to use (default: text-embedding-3-small)
+ 118:             storage_config: Storage configuration (derived from config if None) - deprecated
+ 119: 
+ 120:         Examples:
+ 121:             # Simplest - from env vars
+ 122:             lake = MemoryLake()
+ 123: 
+ 124:             # Common - explicit database
+ 125:             lake = MemoryLake("postgresql://localhost/mydb")
+ 126: 
+ 127:             # With graph
+ 128:             lake = MemoryLake("postgresql://...", graph_url="bolt://...")
+ 129: 
+ 130:             # Full config
+ 131:             lake = MemoryLake(KhoraConfig(...))
+ 132:         """
+ 133:         # Handle overloaded first argument
+ 134:         if isinstance(database_url, KhoraConfig):
+ 135:             self._config = database_url
+ 136:         elif isinstance(database_url, str):
+ 137:             # Build config from URL parameters
+ 138:             self._config = KhoraConfig(
+ 139:                 database_url=database_url,
+ 140:                 neo4j_url=graph_url,
+ 141:             )
+ 142:             # Override embedding model if non-default
+ 143:             if embedding_model != "text-embedding-3-small":
+ 144:                 self._config.llm.embedding_model = embedding_model
+ 145:         else:
+ 146:             # None - load from env/file
+ 147:             self._config = load_config()
+ 148:             # Apply overrides if provided
+ 149:             if graph_url:
+ 150:                 self._config.neo4j_url = graph_url
+ 151:             if embedding_model != "text-embedding-3-small":
+ 152:                 self._config.llm.embedding_model = embedding_model
+ 153: 
+ 154:         # Set up storage config
+ 155:         if storage_config:
+ 156:             self._storage_config = storage_config
+ 157:         else:
+ 158:             postgresql_url = self._config.get_postgresql_url()
+ 159:             graph_config = self._config.get_graph_config()
+ 160:             vector_config = self._config.get_vector_config()
+ 161:             self._storage_config = StorageConfig(
+ 162:                 postgresql_url=postgresql_url,
+ 163:                 pgvector_url=postgresql_url,  # pgvector uses same database as relational
+ 164:                 neo4j_url=self._config.get_neo4j_url(),
+ 165:                 neo4j_user=self._config.get_neo4j_user(),
+ 166:                 neo4j_password=self._config.get_neo4j_password(),
+ 167:                 neo4j_database=self._config.get_neo4j_database(),
+ 168:                 pgvector_embedding_dimension=self._config.storage.embedding_dimension,
+ 169:                 graph_config=graph_config,
+ 170:                 vector_config=vector_config,
+ 171:             )
+ 172: 
+ 173:         self._storage: StorageCoordinator | None = None
+ 174:         self._embedder: LiteLLMEmbedder | None = None
+ 175:         self._query_engine: HybridQueryEngine | None = None
+ 176:         self._connected = False
+ 177: 
+ 178:         # Default namespace for simple usage
+ 179:         self._default_namespace_id: UUID | None = None
+ 180: 
+ 181:     async def connect(self) -> None:
+ 182:         """Connect to all storage backends."""
+ 183:         if self._connected:
+ 184:             return
+ 185: 
+ 186:         logger.info("Connecting Memory Lake...")
+ 187: 
+ 188:         # Create and connect storage
+ 189:         self._storage = create_storage_coordinator(self._storage_config)
+ 190:         await self._storage.connect()
+ 191: 
+ 192:         # Create embedder
+ 193:         llm_config = LiteLLMConfig(
+ 194:             model=self._config.llm.model,
+ 195:             embedding_model=self._config.llm.embedding_model,
+ 196:             embedding_dimension=self._config.llm.embedding_dimension,
+ 197:             timeout=self._config.llm.timeout,
+ 198:             max_retries=self._config.llm.max_retries,
+ 199:         )
+ 200:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
+ 201: 
+ 202:         # Create query engine
+ 203:         self._query_engine = HybridQueryEngine(
+ 204:             storage=self._storage,
+ 205:             embedder=self._embedder,
+ 206:         )
+ 207: 
+ 208:         # Initialize telemetry (no-op if KHORA_TELEMETRY_DATABASE_URL not set)
+ 209:         from khora.telemetry import init_telemetry
+ 210:         from khora.telemetry.config import TelemetryConfig
+ 211: 
+ 212:         telemetry_cfg = TelemetryConfig(
+ 213:             database_url=self._config.telemetry_database_url,
+ 214:             service_name=self._config.telemetry_service_name,
+ 215:         )
+ 216:         await init_telemetry(telemetry_cfg)
+ 217: 
+ 218:         self._connected = True
+ 219:         logger.info("Memory Lake connected")
+ 220: 
+ 221:     async def disconnect(self) -> None:
+ 222:         """Disconnect from all storage backends."""
+ 223:         if not self._connected:
+ 224:             return
+ 225: 
+ 226:         logger.info("Disconnecting Memory Lake...")
+ 227: 
+ 228:         # Shutdown telemetry
+ 229:         from khora.telemetry import shutdown_telemetry
+ 230: 
+ 231:         await shutdown_telemetry()
+ 232: 
+ 233:         if self._storage:
+ 234:             await self._storage.disconnect()
+ 235:             self._storage = None
+ 236: 
+ 237:         self._embedder = None
+ 238:         self._query_engine = None
+ 239:         self._connected = False
+ 240: 
+ 241:         logger.info("Memory Lake disconnected")
+ 242: 
+ 243:     async def __aenter__(self) -> MemoryLake:
+ 244:         """Async context manager entry."""
+ 245:         await self.connect()
+ 246:         return self
+ 247: 
+ 248:     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+ 249:         """Async context manager exit."""
+ 250:         await self.disconnect()
+ 251: 
+ 252:     @property
+ 253:     def storage(self) -> StorageCoordinator:
+ 254:         """Get the storage coordinator.
+ 255: 
+ 256:         .. deprecated::
+ 257:             Direct access to storage is deprecated. Use MemoryLake methods instead:
+ 258:             - lake.get_document() instead of lake.storage.get_document()
+ 259:             - lake.list_documents() instead of lake.storage.list_documents()
+ 260:             - lake.search_entities() instead of lake.storage.search_entities()
+ 261:             - lake.stats() instead of querying storage directly
+ 262:         """
+ 263:         warnings.warn(
+ 264:             "lake.storage is deprecated. Use lake.get_document(), lake.list_documents(), "
+ 265:             "lake.search_entities(), lake.stats() instead.",
+ 266:             DeprecationWarning,
+ 267:             stacklevel=2,
+ 268:         )
+ 269:         if self._storage is None:
+ 270:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+ 271:         return self._storage
+ 272: 
+ 273:     @property
+ 274:     def query_engine(self) -> HybridQueryEngine:
+ 275:         """Get the query engine.
+ 276: 
+ 277:         .. deprecated::
+ 278:             Direct access to query_engine is deprecated. Use lake.recall() instead.
+ 279:             For unprocessed search without LLM features, use lake.recall(query, raw=True).
+ 280:         """
+ 281:         warnings.warn(
+ 282:             "lake.query_engine is deprecated. Use lake.recall() instead. "
+ 283:             "For raw search without LLM features, use lake.recall(query, raw=True).",
+ 284:             DeprecationWarning,
+ 285:             stacklevel=2,
+ 286:         )
+ 287:         if self._query_engine is None:
+ 288:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+ 289:         return self._query_engine
+ 290: 
+ 291:     def _get_storage(self) -> StorageCoordinator:
+ 292:         """Get storage coordinator (internal use, no deprecation warning)."""
+ 293:         if self._storage is None:
+ 294:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+ 295:         return self._storage
+ 296: 
+ 297:     def _get_query_engine(self) -> HybridQueryEngine:
+ 298:         """Get query engine (internal use, no deprecation warning)."""
+ 299:         if self._query_engine is None:
+ 300:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+ 301:         return self._query_engine
+ 302: 
+ 303:     # =========================================================================
+ 304:     # Namespace Management
+ 305:     # =========================================================================
+ 306: 
+ 307:     async def create_namespace(
+ 308:         self,
+ 309:         name: str,
+ 310:         workspace_id: UUID,
+ 311:         *,
+ 312:         description: str = "",
+ 313:         config_overrides: dict[str, Any] | None = None,
+ 314:     ) -> MemoryNamespace:
+ 315:         """Create a new memory namespace.
+ 316: 
+ 317:         Args:
+ 318:             name: Namespace name
+ 319:             workspace_id: Parent workspace ID
+ 320:             description: Optional description
+ 321:             config_overrides: Optional configuration overrides
+ 322: 
+ 323:         Returns:
+ 324:             Created MemoryNamespace
+ 325:         """
+ 326:         namespace = MemoryNamespace(
+ 327:             workspace_id=workspace_id,
+ 328:             name=name,
+ 329:             description=description,
+ 330:             config_overrides=config_overrides or {},
+ 331:         )
+ 332:         return await self._get_storage().create_namespace(namespace)
+ 333: 
+ 334:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+ 335:         """Get a namespace by ID."""
+ 336:         return await self._get_storage().get_namespace(namespace_id)
+ 337: 
+ 338:     async def get_or_create_default_namespace(self) -> UUID:
+ 339:         """Get or create a default namespace for simple usage."""
+ 340:         if self._default_namespace_id:
+ 341:             return self._default_namespace_id
+ 342: 
+ 343:         # Try to find existing default namespace
+ 344:         # For simplicity, we'll create a default org/workspace/namespace
+ 345:         storage = self._get_storage()
+ 346:         default_org = await storage.get_organization_by_slug("default")
+ 347:         if not default_org:
+ 348:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
+ 349: 
+ 350:         workspaces = await storage.list_workspaces(default_org.id)
+ 351:         if workspaces:
+ 352:             default_workspace = workspaces[0]
+ 353:         else:
+ 354:             default_workspace = await storage.create_workspace(
+ 355:                 Workspace(
+ 356:                     organization_id=default_org.id,
+ 357:                     name="Default",
+ 358:                     slug="default",
+ 359:                 )
+ 360:             )
+ 361: 
+ 362:         namespaces = await storage.list_namespaces(default_workspace.id)
+ 363:         if namespaces:
+ 364:             default_namespace = namespaces[0]
+ 365:         else:
+ 366:             default_namespace = await storage.create_namespace(
+ 367:                 MemoryNamespace(
+ 368:                     workspace_id=default_workspace.id,
+ 369:                     name="Default",
+ 370:                     slug="default",
+ 371:                 )
+ 372:             )
+ 373: 
+ 374:         self._default_namespace_id = default_namespace.id
+ 375:         return self._default_namespace_id
+ 376: 
+ 377:     # =========================================================================
+ 378:     # Core API: remember, recall, forget
+ 379:     # =========================================================================
+ 380: 
+ 381:     async def remember(
+ 382:         self,
+ 383:         content: str,
+ 384:         *,
+ 385:         namespace: str | UUID | None = None,
+ 386:         title: str = "",
+ 387:         source: str = "",
+ 388:         metadata: dict[str, Any] | None = None,
+ 389:         skill_name: str = "general_entities",
+ 390:     ) -> RememberResult:
+ 391:         """Store content in the memory lake.
+ 392: 
+ 393:         This is the primary method for adding memories. It:
+ 394:         1. Creates a document
+ 395:         2. Chunks the content
+ 396:         3. Generates embeddings
+ 397:         4. Extracts entities and relationships
+ 398: 
+ 399:         Args:
+ 400:             content: Content to remember
+ 401:             namespace: Namespace name, ID, or None for default
+ 402:             title: Optional title for the content
+ 403:             source: Optional source identifier
+ 404:             metadata: Optional metadata
+ 405:             skill_name: Extraction skill to use
+ 406: 
+ 407:         Returns:
+ 408:             RememberResult with details
+ 409:         """
+ 410:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+ 411: 
+ 412:         ensure_trace_id()
+ 413:         try:
+ 414:             return await self._remember_inner(
+ 415:                 content,
+ 416:                 namespace=namespace,
+ 417:                 title=title,
+ 418:                 source=source,
+ 419:                 metadata=metadata,
+ 420:                 skill_name=skill_name,
+ 421:             )
+ 422:         finally:
+ 423:             clear_trace_id()
+ 424: 
+ 425:     async def _remember_inner(
+ 426:         self,
+ 427:         content: str,
+ 428:         *,
+ 429:         namespace: str | UUID | None = None,
+ 430:         title: str = "",
+ 431:         source: str = "",
+ 432:         metadata: dict[str, Any] | None = None,
+ 433:         skill_name: str = "general_entities",
+ 434:     ) -> RememberResult:
+ 435:         """Internal remember implementation with trace context already set."""
+ 436:         # Resolve namespace
+ 437:         namespace_id = await self._resolve_namespace(namespace)
+ 438: 
+ 439:         # Compute checksum
+ 440:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+ 441: 
+ 442:         storage = self._get_storage()
+ 443: 
+ 444:         # Check for duplicate - skip if any document with same checksum exists
+ 445:         existing = await storage.get_document_by_checksum(namespace_id, checksum)
+ 446:         if existing:
+ 447:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
+ 448:             return RememberResult(
+ 449:                 document_id=existing.id,
+ 450:                 namespace_id=namespace_id,
+ 451:                 chunks_created=existing.chunk_count,
+ 452:                 entities_extracted=existing.entity_count,
+ 453:                 relationships_created=0,
+ 454:                 metadata={"duplicate": True, "status": str(existing.status)},
+ 455:             )
+ 456: 
+ 457:         # Create document
+ 458:         doc_metadata = DocumentMetadata(
+ 459:             title=title,
+ 460:             source=source,
+ 461:             source_type="api",
+ 462:             checksum=checksum,
+ 463:             size_bytes=len(content.encode("utf-8")),
+ 464:             custom=metadata or {},
+ 465:         )
+ 466:         document = Document(
+ 467:             namespace_id=namespace_id,
+ 468:             content=content,
+ 469:             metadata=doc_metadata,
+ 470:         )
+ 471:         document = await storage.create_document(document)
+ 472: 
+ 473:         # Process through pipeline
+ 474:         from khora.pipelines.flows.ingest import process_document
+ 475: 
+ 476:         result = await process_document(
+ 477:             document,
+ 478:             storage,
+ 479:             skill_name=skill_name,
+ 480:             embedding_model=self._config.llm.embedding_model,
+ 481:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+ 482:         )
+ 483: 
+ 484:         return RememberResult(
+ 485:             document_id=document.id,
+ 486:             namespace_id=namespace_id,
+ 487:             chunks_created=result["chunks"],
+ 488:             entities_extracted=result["entities"],
+ 489:             relationships_created=result["relationships"],
+ 490:         )
+ 491: 
+ 492:     async def remember_batch(
+ 493:         self,
+ 494:         documents: list[dict[str, Any]],
+ 495:         *,
+ 496:         namespace: str | UUID | None = None,
+ 497:         skill_name: str = "general_entities",
+ 498:         max_concurrent: int = 5,
+ 499:         deduplicate: bool = True,
+ 500:         infer_relationships: bool = True,
+ 501:         on_progress: Callable[[int, int], None] | None = None,
+ 502:     ) -> BatchResult:
+ 503:         """Store multiple documents with automatic optimization.
+ 504: 
+ 505:         Handles internally:
+ 506:         - Shared embedder with LRU cache (reused across batches)
+ 507:         - Entity deduplication via EntityIndex
+ 508:         - Multi-phase resolution (smart mode)
+ 509:         - Relationship inference
+ 510: 
+ 511:         This is more efficient than calling remember() for each document
+ 512:         as it processes documents in parallel with controlled concurrency
+ 513:         and shares resources across documents.
+ 514: 
+ 515:         Args:
+ 516:             documents: List of document dicts with keys:
+ 517:                 - content: str (required)
+ 518:                 - title: str (optional)
+ 519:                 - source: str (optional)
+ 520:                 - metadata: dict (optional)
+ 521:             namespace: Namespace name, ID, or None for default
+ 522:             skill_name: Extraction skill to use
+ 523:             max_concurrent: Maximum concurrent document processing
+ 524:             deduplicate: Deduplicate entities across documents (default: True)
+ 525:             infer_relationships: Infer relationships after ingestion (default: True)
+ 526:             on_progress: Callback(processed_count, total_count) for progress updates
+ 527: 
+ 528:         Returns:
+ 529:             BatchResult with aggregated statistics
+ 530:         """
+ 531:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+ 532: 
+ 533:         ensure_trace_id()
+ 534:         try:
+ 535:             return await self._remember_batch_inner(
+ 536:                 documents,
+ 537:                 namespace=namespace,
+ 538:                 skill_name=skill_name,
+ 539:                 max_concurrent=max_concurrent,
+ 540:                 deduplicate=deduplicate,
+ 541:                 infer_relationships=infer_relationships,
+ 542:                 on_progress=on_progress,
+ 543:             )
+ 544:         finally:
+ 545:             clear_trace_id()
+ 546: 
+ 547:     async def _remember_batch_inner(
+ 548:         self,
+ 549:         documents: list[dict[str, Any]],
+ 550:         *,
+ 551:         namespace: str | UUID | None = None,
+ 552:         skill_name: str = "general_entities",
+ 553:         max_concurrent: int = 5,
+ 554:         deduplicate: bool = True,
+ 555:         infer_relationships: bool = True,
+ 556:         on_progress: Callable[[int, int], None] | None = None,
+ 557:     ) -> BatchResult:
+ 558:         """Internal remember_batch implementation using ingest_documents for shared EntityIndex."""
+ 559:         if not documents:
+ 560:             return BatchResult(
+ 561:                 total=0,
+ 562:                 processed=0,
+ 563:                 skipped=0,
+ 564:                 failed=0,
+ 565:                 chunks=0,
+ 566:                 entities=0,
+ 567:                 relationships=0,
+ 568:             )
+ 569: 
+ 570:         namespace_id = await self._resolve_namespace(namespace)
+ 571: 
+ 572:         # Build doc dicts for ingest_documents
+ 573:         doc_inputs = []
+ 574:         for doc_data in documents:
+ 575:             doc_inputs.append(
+ 576:                 {
+ 577:                     "content": doc_data.get("content", ""),
+ 578:                     "title": doc_data.get("title", ""),
+ 579:                     "source": doc_data.get("source", ""),
+ 580:                     "source_type": "api",
+ 581:                     "metadata": doc_data.get("metadata", {}),
+ 582:                 }
+ 583:             )
+ 584: 
+ 585:         from khora.pipelines.flows.ingest import ingest_documents
+ 586: 
+ 587:         # Create a shared embedder for efficiency (uses LRU cache internally)
+ 588:         shared_embedder = LiteLLMEmbedder(model=self._config.llm.embedding_model)
+ 589: 
+ 590:         # Create shared EntityIndex for cross-document deduplication if enabled
+ 591:         shared_entity_index = None
+ 592:         if deduplicate:
+ 593:             from khora.extraction.expansion.entity_index import EntityIndex
+ 594: 
+ 595:             shared_entity_index = EntityIndex()
+ 596: 
+ 597:             # Optionally preload existing entities for dedup against stored data
+ 598:             existing_entities = await self._get_storage().list_entities(namespace_id, limit=50000)
+ 599:             for entity in existing_entities:
+ 600:                 shared_entity_index.add(entity)
+ 601: 
+ 602:             if existing_entities:
+ 603:                 logger.debug(f"Preloaded {len(existing_entities)} existing entities into EntityIndex")
+ 604: 
+ 605:         result = await ingest_documents(
+ 606:             namespace_id,
+ 607:             doc_inputs,
+ 608:             self._get_storage(),
+ 609:             skill_name=skill_name,
+ 610:             embedding_model=self._config.llm.embedding_model,
+ 611:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+ 612:             max_concurrent_documents=max_concurrent,
+ 613:             shared_embedder=shared_embedder,
+ 614:             shared_entity_index=shared_entity_index,
+ 615:             enable_expansion=infer_relationships,
+ 616:         )
+ 617: 
+ 618:         # Call progress callback if provided
+ 619:         if on_progress:
+ 620:             processed = result.get("processed_documents", 0)
+ 621:             total = result.get("total_documents", len(documents))
+ 622:             on_progress(processed, total)
+ 623: 
+ 624:         # Build BatchResult from aggregated stats
+ 625:         return BatchResult(
+ 626:             total=result.get("total_documents", len(documents)),
+ 627:             processed=result.get("processed_documents", 0),
+ 628:             skipped=result.get("skipped_documents", 0),
+ 629:             failed=result.get("failed_documents", 0),
+ 630:             chunks=result.get("total_chunks", 0),
+ 631:             entities=result.get("total_entities", 0),
+ 632:             relationships=result.get("total_relationships", 0) + result.get("total_inferred_relationships", 0),
+ 633:         )
+ 634: 
+ 635:     async def remember_batch_legacy(
+ 636:         self,
+ 637:         documents: list[dict[str, Any]],
+ 638:         *,
+ 639:         namespace: str | UUID | None = None,
+ 640:         skill_name: str = "general_entities",
+ 641:         max_concurrent: int = 5,
+ 642:     ) -> list[RememberResult]:
+ 643:         """Store multiple documents - legacy version returning list of RememberResult.
+ 644: 
+ 645:         .. deprecated::
+ 646:             Use remember_batch() which returns BatchResult with aggregated stats.
+ 647:             This method is kept for backwards compatibility.
+ 648:         """
+ 649:         warnings.warn(
+ 650:             "remember_batch_legacy() is deprecated. Use remember_batch() which returns BatchResult.",
+ 651:             DeprecationWarning,
+ 652:             stacklevel=2,
+ 653:         )
+ 654:         if not documents:
+ 655:             return []
+ 656: 
+ 657:         namespace_id = await self._resolve_namespace(namespace)
+ 658: 
+ 659:         doc_inputs = []
+ 660:         for doc_data in documents:
+ 661:             doc_inputs.append(
+ 662:                 {
+ 663:                     "content": doc_data.get("content", ""),
+ 664:                     "title": doc_data.get("title", ""),
+ 665:                     "source": doc_data.get("source", ""),
+ 666:                     "source_type": "api",
+ 667:                     "metadata": doc_data.get("metadata", {}),
+ 668:                 }
+ 669:             )
+ 670: 
+ 671:         from khora.pipelines.flows.ingest import ingest_documents
+ 672: 
+ 673:         result = await ingest_documents(
+ 674:             namespace_id,
+ 675:             doc_inputs,
+ 676:             self._get_storage(),
+ 677:             skill_name=skill_name,
+ 678:             embedding_model=self._config.llm.embedding_model,
+ 679:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+ 680:             max_concurrent_documents=max_concurrent,
+ 681:         )
+ 682: 
+ 683:         per_doc = result.get("per_document_results", [])
+ 684:         final_results: list[RememberResult] = []
+ 685:         for doc_result in per_doc:
+ 686:             final_results.append(
+ 687:                 RememberResult(
+ 688:                     document_id=UUID(doc_result["document_id"]),
+ 689:                     namespace_id=namespace_id,
+ 690:                     chunks_created=doc_result.get("chunks", 0),
+ 691:                     entities_extracted=doc_result.get("entities", 0),
+ 692:                     relationships_created=doc_result.get("relationships", 0),
+ 693:                 )
+ 694:             )
+ 695: 
+ 696:         failed_count = result.get("failed_documents", 0)
+ 697:         for _ in range(failed_count):
+ 698:             final_results.append(
+ 699:                 RememberResult(
+ 700:                     document_id=UUID("00000000-0000-0000-0000-000000000000"),
+ 701:                     namespace_id=namespace_id,
+ 702:                     chunks_created=0,
+ 703:                     entities_extracted=0,
+ 704:                     relationships_created=0,
+ 705:                     metadata={"failed": True},
+ 706:                 )
+ 707:             )
+ 708: 
+ 709:         return final_results
+ 710: 
+ 711:     async def recall(
+ 712:         self,
+ 713:         query: str,
+ 714:         *,
+ 715:         namespace: str | UUID | None = None,
+ 716:         limit: int = 10,
+ 717:         mode: SearchMode = SearchMode.HYBRID,
+ 718:         min_similarity: float = 0.0,
+ 719:         agentic: bool = False,
+ 720:         raw: bool = False,
+ 721:     ) -> RecallResult:
+ 722:         """Recall memories relevant to a query.
+ 723: 
+ 724:         This is the primary method for retrieving memories. It:
+ 725:         1. Uses LLM to understand query (entities, temporal refs, etc.)
+ 726:         2. Searches across vector, graph, and keyword indexes
+ 727:         3. Fuses results using Reciprocal Rank Fusion
+ 728:         4. Returns ranked results
+ 729: 
+ 730:         When agentic=True, uses multi-step exploration:
+ 731:         1. Initial comprehensive search with query understanding
+ 732:         2. Executes pre-computed follow-up queries for deeper exploration
+ 733:         3. Explores under-represented sources
+ 734:         4. Returns combined results with full trace
+ 735: 
+ 736:         When raw=True, skips all LLM features:
+ 737:         - Query understanding
+ 738:         - Entity linking
+ 739:         - Reranking
+ 740:         - HyDE expansion
+ 741:         This is useful for benchmarks and simple searches.
+ 742: 
+ 743:         Args:
+ 744:             query: Query text
+ 745:             namespace: Namespace name, ID, or None for default
+ 746:             limit: Maximum results to return
+ 747:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
+ 748:             min_similarity: Minimum similarity threshold
+ 749:             agentic: If True, use multi-step agentic search (default: False)
+ 750:             raw: If True, skip all LLM features (default: False)
+ 751: 
+ 752:         Returns:
+ 753:             RecallResult with matched memories
+ 754:         """
+ 755:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+ 756: 
+ 757:         ensure_trace_id()
+ 758:         try:
+ 759:             return await self._recall_inner(
+ 760:                 query,
+ 761:                 namespace=namespace,
+ 762:                 limit=limit,
+ 763:                 mode=mode,
+ 764:                 min_similarity=min_similarity,
+ 765:                 agentic=agentic,
+ 766:                 raw=raw,
+ 767:             )
+ 768:         finally:
+ 769:             clear_trace_id()
+ 770: 
+ 771:     async def _recall_inner(
+ 772:         self,
+ 773:         query: str,
+ 774:         *,
+ 775:         namespace: str | UUID | None = None,
+ 776:         limit: int = 10,
+ 777:         mode: SearchMode = SearchMode.HYBRID,
+ 778:         min_similarity: float = 0.0,
+ 779:         agentic: bool = False,
+ 780:         raw: bool = False,
+ 781:     ) -> RecallResult:
+ 782:         """Internal recall implementation with trace context already set."""
+ 783:         namespace_id = await self._resolve_namespace(namespace)
+ 784: 
+ 785:         config = QueryConfig(
+ 786:             mode=mode,
+ 787:             max_chunks=limit,
+ 788:             max_entities=limit,
+ 789:             min_chunk_similarity=min_similarity,
+ 790:             min_entity_similarity=min_similarity,
+ 791:         )
+ 792: 
+ 793:         # Raw mode: disable all LLM features
+ 794:         if raw:
+ 795:             config.enable_query_understanding = False
+ 796:             config.enable_query_expansion = False
+ 797:             config.enable_entity_extraction = False
+ 798:             config.enable_temporal_detection = False
+ 799:             config.enable_entity_linking = False
+ 800:             config.enable_reranking = False
+ 801:             config.enable_hyde = False
+ 802: 
+ 803:         result = await self._get_query_engine().query(query, namespace_id, config=config, agentic=agentic)
+ 804: 
+ 805:         return RecallResult(
+ 806:             query=query,
+ 807:             namespace_id=namespace_id,
+ 808:             chunks=result.chunks,
+ 809:             entities=result.entities,
+ 810:             context_text=result.get_context_text(max_chunks=limit),
+ 811:             metadata=result.metadata,
+ 812:         )
+ 813: 
+ 814:     async def forget(
+ 815:         self,
+ 816:         document_id: UUID,
+ 817:         *,
+ 818:         namespace: str | UUID | None = None,
+ 819:     ) -> bool:
+ 820:         """Remove a memory from the lake.
+ 821: 
+ 822:         Args:
+ 823:             document_id: ID of the document to remove
+ 824:             namespace: Namespace for verification (optional)
+ 825: 
+ 826:         Returns:
+ 827:             True if deleted, False if not found
+ 828:         """
+ 829:         storage = self._get_storage()
+ 830: 
+ 831:         # Verify namespace if provided
+ 832:         if namespace:
+ 833:             namespace_id = await self._resolve_namespace(namespace)
+ 834:             document = await storage.get_document(document_id)
+ 835:             if document and document.namespace_id != namespace_id:
+ 836:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
+ 837:                 return False
+ 838: 
+ 839:         return await storage.delete_document(document_id)
+ 840: 
+ 841:     # =========================================================================
+ 842:     # Entity Operations
+ 843:     # =========================================================================
+ 844: 
+ 845:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+ 846:         """Get an entity by ID."""
+ 847:         return await self._get_storage().get_entity(entity_id)
+ 848: 
+ 849:     async def list_entities(
+ 850:         self,
+ 851:         *,
+ 852:         namespace: str | UUID | None = None,
+ 853:         entity_type: str | None = None,
+ 854:         limit: int = 100,
+ 855:     ) -> list[Entity]:
+ 856:         """List entities in a namespace."""
+ 857:         namespace_id = await self._resolve_namespace(namespace)
+ 858:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+ 859: 
+ 860:     async def find_related_entities(
+ 861:         self,
+ 862:         entity_id: UUID,
+ 863:         *,
+ 864:         namespace: str | UUID | None = None,
+ 865:         max_depth: int = 2,
+ 866:         limit: int = 20,
+ 867:     ) -> list[tuple[Entity, float]]:
+ 868:         """Find entities related to a given entity."""
+ 869:         namespace_id = await self._resolve_namespace(namespace)
+ 870:         return await self._get_query_engine().find_related_entities(
+ 871:             entity_id,
+ 872:             namespace_id,
+ 873:             max_depth=max_depth,
+ 874:             limit=limit,
+ 875:         )
+ 876: 
+ 877:     # =========================================================================
+ 878:     # Document Operations (Convenience Methods)
+ 879:     # =========================================================================
+ 880: 
+ 881:     async def get_document(self, document_id: UUID) -> Document | None:
+ 882:         """Get a document by ID.
+ 883: 
+ 884:         Args:
+ 885:             document_id: Document UUID
+ 886: 
+ 887:         Returns:
+ 888:             Document or None if not found
+ 889:         """
+ 890:         return await self._get_storage().get_document(document_id)
+ 891: 
+ 892:     async def list_documents(
+ 893:         self,
+ 894:         *,
+ 895:         namespace: str | UUID | None = None,
+ 896:         limit: int = 100,
+ 897:     ) -> list[Document]:
+ 898:         """List documents in a namespace.
+ 899: 
+ 900:         Args:
+ 901:             namespace: Namespace name, ID, or None for default
+ 902:             limit: Maximum documents to return
+ 903: 
+ 904:         Returns:
+ 905:             List of Documents
+ 906:         """
+ 907:         namespace_id = await self._resolve_namespace(namespace)
+ 908:         return await self._get_storage().list_documents(namespace_id, limit=limit)
+ 909: 
+ 910:     async def search_entities(
+ 911:         self,
+ 912:         query: str,
+ 913:         *,
+ 914:         namespace: str | UUID | None = None,
+ 915:         limit: int = 10,
+ 916:     ) -> list[Entity]:
+ 917:         """Search entities by query text using embedding similarity.
+ 918: 
+ 919:         Args:
+ 920:             query: Search query text
+ 921:             namespace: Namespace name, ID, or None for default
+ 922:             limit: Maximum entities to return
+ 923: 
+ 924:         Returns:
+ 925:             List of matching Entities (most similar first)
+ 926:         """
+ 927:         namespace_id = await self._resolve_namespace(namespace)
+ 928: 
+ 929:         # Embed the query
+ 930:         if self._embedder is None:
+ 931:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+ 932: 
+ 933:         query_embedding = await self._embedder.embed(query)
+ 934: 
+ 935:         # Search similar entities
+ 936:         entity_ids_scores = await self._get_storage().search_similar_entities(
+ 937:             namespace_id,
+ 938:             query_embedding,
+ 939:             limit=limit,
+ 940:             min_similarity=0.0,
+ 941:         )
+ 942: 
+ 943:         # Fetch full entities
+ 944:         storage = self._get_storage()
+ 945:         entities = []
+ 946:         for entity_id, _score in entity_ids_scores:
+ 947:             entity = await storage.get_entity(entity_id)
+ 948:             if entity:
+ 949:                 entities.append(entity)
+ 950: 
+ 951:         return entities
+ 952: 
+ 953:     async def stats(self, *, namespace: str | UUID | None = None) -> Stats:
+ 954:         """Get document/chunk/entity/relationship counts for a namespace.
+ 955: 
+ 956:         Args:
+ 957:             namespace: Namespace name, ID, or None for default
+ 958: 
+ 959:         Returns:
+ 960:             Stats with document/chunk/entity/relationship counts
+ 961:         """
+ 962:         namespace_id = await self._resolve_namespace(namespace)
+ 963:         storage = self._get_storage()
+ 964: 
+ 965:         # Get counts
+ 966:         documents = await storage.list_documents(namespace_id, limit=0)
+ 967:         doc_count = len(documents) if documents else 0
+ 968: 
+ 969:         # For more accurate counts, query directly
+ 970:         # These may vary by backend implementation
+ 971:         try:
+ 972:             doc_count = await storage.count_documents(namespace_id)
+ 973:         except (AttributeError, NotImplementedError):
+ 974:             pass
+ 975: 
+ 976:         try:
+ 977:             chunk_count = await storage.count_chunks(namespace_id)
+ 978:         except (AttributeError, NotImplementedError):
+ 979:             chunks = await storage.list_chunks(namespace_id, limit=0)
+ 980:             chunk_count = len(chunks) if chunks else 0
+ 981: 
+ 982:         try:
+ 983:             entity_count = await storage.count_entities(namespace_id)
+ 984:         except (AttributeError, NotImplementedError):
+ 985:             entities = await storage.list_entities(namespace_id, limit=0)
+ 986:             entity_count = len(entities) if entities else 0
+ 987: 
+ 988:         try:
+ 989:             relationship_count = await storage.count_relationships(namespace_id)
+ 990:         except (AttributeError, NotImplementedError):
+ 991:             rels = await storage.list_relationships(namespace_id, limit=0)
+ 992:             relationship_count = len(rels) if rels else 0
+ 993: 
+ 994:         return Stats(
+ 995:             documents=doc_count,
+ 996:             chunks=chunk_count,
+ 997:             entities=entity_count,
+ 998:             relationships=relationship_count,
+ 999:         )
+1000: 
+1001:     async def ensure_namespace(
+1002:         self,
+1003:         name: str,
+1004:         *,
+1005:         description: str = "",
+1006:     ) -> UUID:
+1007:         """Get or create a namespace by name.
+1008: 
+1009:         Creates the default organization and workspace if they don't exist.
+1010:         This is a convenience method for simple usage where you just want
+1011:         a namespace by name without managing the full hierarchy.
+1012: 
+1013:         Args:
+1014:             name: Namespace name (will be slugified)
+1015:             description: Optional description
+1016: 
+1017:         Returns:
+1018:             Namespace UUID
+1019:         """
+1020:         storage = self._get_storage()
+1021: 
+1022:         # Ensure default org/workspace exists
+1023:         await self.get_or_create_default_namespace()
+1024: 
+1025:         # Get default workspace
+1026:         default_org = await storage.get_organization_by_slug("default")
+1027:         if not default_org:
+1028:             raise RuntimeError("Default organization not found")
+1029: 
+1030:         workspaces = await storage.list_workspaces(default_org.id)
+1031:         if not workspaces:
+1032:             raise RuntimeError("Default workspace not found")
+1033: 
+1034:         default_workspace = workspaces[0]
+1035: 
+1036:         # Try to find namespace by slug
+1037:         slug = name.lower().replace(" ", "-")
+1038:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
+1039:         if existing_ns:
+1040:             return existing_ns.id
+1041: 
+1042:         # Create new namespace
+1043:         new_ns = await storage.create_namespace(
+1044:             MemoryNamespace(
+1045:                 workspace_id=default_workspace.id,
+1046:                 name=name,
+1047:                 slug=slug,
+1048:                 description=description,
+1049:             )
+1050:         )
+1051:         return new_ns.id
+1052: 
+1053:     # =========================================================================
+1054:     # Helpers
+1055:     # =========================================================================
+1056: 
+1057:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
+1058:         """Resolve a namespace reference to a UUID."""
+1059:         if namespace is None:
+1060:             return await self.get_or_create_default_namespace()
+1061: 
+1062:         if isinstance(namespace, UUID):
+1063:             return namespace
+1064: 
+1065:         # Try to parse as UUID
+1066:         try:
+1067:             return UUID(namespace)
+1068:         except ValueError:
+1069:             pass
+1070: 
+1071:         # Look up by slug in default workspace
+1072:         storage = self._get_storage()
+1073:         default_ns_id = await self.get_or_create_default_namespace()
+1074:         default_ns = await storage.get_namespace(default_ns_id)
+1075:         if default_ns:
+1076:             ns = await storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
+1077:             if ns:
+1078:                 return ns.id
+1079: 
+1080:         raise ValueError(f"Namespace not found: {namespace}")
+1081: 
+1082:     async def health_check(self) -> dict[str, Any]:
+1083:         """Check health of all components."""
+1084:         if not self._connected:
+1085:             return {"status": "disconnected"}
+1086: 
+1087:         storage_health = await self._get_storage().health_check()
+1088: 
+1089:         return {
+1090:             "status": "healthy" if storage_health.is_healthy else "degraded",
+1091:             "storage": storage_health.summary,
+1092:         }
+1093: 
+1094: 
+1095: # Convenience function for one-off usage
+1096: @asynccontextmanager
+1097: async def memory_lake(
+1098:     config: KhoraConfig | None = None,
+1099: ) -> AsyncGenerator[MemoryLake]:
+1100:     """Context manager for one-off Memory Lake usage.
+1101: 
+1102:     Usage:
+1103:         async with memory_lake() as lake:
+1104:             await lake.remember("Hello, world!")
+1105:             result = await lake.recall("greeting")
+1106:     """
+1107:     lake = MemoryLake(config=config)
+1108:     try:
+1109:         await lake.connect()
+1110:         yield lake
+1111:     finally:
+1112:         await lake.disconnect()
 ````
 
 ## File: src/khora/extraction/expansion/expander.py
@@ -39237,26 +40108,51 @@ README.md
  6: - Building memory graphs and relationships
  7: 
  8: Example usage:
- 9:     from khora import MemoryLake
-10: 
-11:     async with MemoryLake() as lake:
-12:         await lake.remember("Important information to store")
-13:         results = await lake.recall("query about information")
-14: """
+ 9:     # Simplest - from env vars (KHORA_DATABASE_URL)
+10:     from khora import MemoryLake
+11: 
+12:     async with MemoryLake() as lake:
+13:         await lake.remember("Important information to store")
+14:         results = await lake.recall("query about information")
 15: 
-16: from .cli import main
-17: from .memory_lake import MemoryLake, RecallResult, RememberResult
-18: from .query import SearchMode
-19: 
-20: __version__ = "0.0.21"
-21: 
-22: __all__ = [
-23:     "main",
-24:     "MemoryLake",
-25:     "RememberResult",
-26:     "RecallResult",
-27:     "SearchMode",
-28: ]
+16:     # Common - explicit database URL
+17:     async with MemoryLake("postgresql://localhost/mydb") as lake:
+18:         await lake.remember("content", title="My Document")
+19:         results = await lake.recall("query", limit=20)
+20: 
+21:     # With graph backend
+22:     async with MemoryLake(
+23:         "postgresql://localhost/mydb",
+24:         graph_url="bolt://localhost:7687",
+25:     ) as lake:
+26:         results = await lake.recall("query", mode=SearchMode.GRAPH)
+27: 
+28:     # Batch ingestion with automatic optimization
+29:     async with MemoryLake(database_url) as lake:
+30:         result = await lake.remember_batch(documents)
+31:         print(f"Processed {result.processed} docs, {result.entities} entities")
+32: 
+33:     # Raw search without LLM features (for benchmarks)
+34:     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
+35: """
+36: 
+37: from .cli import main
+38: from .config import KhoraConfig
+39: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
+40: from .query import SearchMode
+41: 
+42: __version__ = "0.0.30"
+43: 
+44: __all__ = [
+45:     "main",
+46:     "MemoryLake",
+47:     "RememberResult",
+48:     "RecallResult",
+49:     "BatchResult",
+50:     "Stats",
+51:     "SearchMode",
+52:     "KhoraConfig",
+53: ]
 ````
 
 ## File: src/khora/pipelines/flows/ingest.py
@@ -40438,6 +41334,13 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-03 09:51:50 +0100
+**Message:** chore: update the packages
+
+**Files:**
+- REPOMIX.md
+- uv.lock
+
 ## Commit: 2026-02-03 09:51:00 +0100
 **Message:** fix: use custom extraction_prompt in batch extraction
 
@@ -40656,11 +41559,3 @@ README.md
 
 **Files:**
 - src/khora/telemetry/collector.py
-
-## Commit: 2026-02-01 22:56:35 +0100
-**Message:** chore: bump version to 0.0.23
-
-**Files:**
-- REPOMIX.md
-- pyproject.toml
-- uv.lock
