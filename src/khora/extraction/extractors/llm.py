@@ -95,8 +95,9 @@ class LLMEntityExtractor(EntityExtractor):
     """
 
     # Models that require json_schema format instead of json_object
-    # gpt-5-nano uses strict structured outputs
-    MODELS_REQUIRING_JSON_SCHEMA = {"gpt-5-nano"}
+    # Note: gpt-5-nano was tested but hits token limits with strict schema,
+    # so it uses json_object format like other models
+    MODELS_REQUIRING_JSON_SCHEMA: set[str] = set()
 
     def __init__(
         self,
