@@ -393,6 +393,15 @@ class RuleEngine:
                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
 
                 if source_entity and target_entity:
+                    # Resolve which entities would be used for the inferred relationship
+                    entity_map = {"first": {"source": source_entity, "target": target_entity}}
+                    inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
+                    inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
+
+                    # Skip self-referential matches early (don't count against rule limit)
+                    if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
+                        continue
+
                     matches.append(
                         RuleMatch(
                             rule_name=rule.name,
@@ -467,6 +476,18 @@ class RuleEngine:
                     target2 = self._find_entity_by_id(rel2.target_entity_id, context)
 
                     if all([source1, target1, source2, target2]):
+                        # Resolve which entities would be used for the inferred relationship
+                        entity_map = {
+                            "first": {"source": source1, "target": target1},
+                            "second": {"source": source2, "target": target2},
+                        }
+                        inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
+                        inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
+
+                        # Skip self-referential matches early (don't count against rule limit)
+                        if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
+                            continue
+
                         matches.append(
                             RuleMatch(
                                 rule_name=rule.name,
@@ -620,6 +641,31 @@ class RuleEngine:
     ) -> Entity | None:
         """Find entity by ID in context using indexed lookup."""
         return context.entity_by_id.get(str(entity_id))
+
+    def _resolve_entity_ref(
+        self,
+        ref: str,
+        entity_map: dict[str, dict[str, Entity]],
+    ) -> Entity | None:
+        """Resolve an entity reference like 'first.source' or 'second.target'.
+
+        Args:
+            ref: Reference string (e.g., 'first.source', 'second.target')
+            entity_map: Map of group name to source/target entities
+
+        Returns:
+            Resolved entity or None if reference is invalid
+        """
+        parts = ref.split(".")
+        if len(parts) != 2:
+            return None
+
+        group, position = parts
+        group_entities = entity_map.get(group)
+        if not group_entities:
+            return None
+
+        return group_entities.get(position)
 
     def _relationships_connect(
         self,
