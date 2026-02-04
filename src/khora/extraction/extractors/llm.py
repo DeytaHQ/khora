@@ -504,6 +504,10 @@ class LLMEntityExtractor(EntityExtractor):
 
         # If expertise has a custom extraction prompt, use it
         if expertise and expertise.extraction_prompt:
+            logger.debug(
+                f"Using custom extraction_prompt from expertise '{expertise.name}' "
+                f"({len(expertise.extraction_prompt)} chars)"
+            )
             try:
                 from khora.extraction.skills.composer import ExpertiseComposer
 
@@ -526,6 +530,8 @@ class LLMEntityExtractor(EntityExtractor):
             except Exception as e:
                 logger.warning(f"Failed to render extraction prompt: {e}")
 
+        # Use default extraction prompt
+        logger.debug("Using DEFAULT_EXTRACTION_PROMPT (no custom prompt in expertise)")
         # Use default extraction prompt with optional tool context
         # Get relationship types from expertise or defaults
         if expertise:
