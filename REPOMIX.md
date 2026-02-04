@@ -2082,6 +2082,119 @@ README.md
 154:         )
 ````
 
+## File: src/khora/core/models/tenancy.py
+````python
+  1: """Multi-tenancy models for Khora Memory Lake.
+  2: 
+  3: Supports two modes:
+  4: - Shared: namespace_id filtering with row-level security
+  5: - Isolated: Separate database instances per tenant
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: from dataclasses import dataclass, field
+ 11: from datetime import UTC, datetime
+ 12: from enum import Enum
+ 13: from typing import Any
+ 14: from uuid import UUID, uuid4
+ 15: 
+ 16: 
+ 17: class TenancyMode(str, Enum):
+ 18:     """Tenancy isolation mode."""
+ 19: 
+ 20:     SHARED = "shared"  # Shared database with namespace_id filtering + row-level security
+ 21:     ISOLATED = "isolated"  # Separate database instances per tenant
+ 22: 
+ 23: 
+ 24: @dataclass
+ 25: class Organization:
+ 26:     """Top-level tenant organization.
+ 27: 
+ 28:     An organization can have multiple workspaces and represents the billing
+ 29:     and administrative boundary for tenants.
+ 30:     """
+ 31: 
+ 32:     id: UUID = field(default_factory=uuid4)
+ 33:     name: str = ""
+ 34:     slug: str = ""  # URL-friendly identifier
+ 35:     tenancy_mode: TenancyMode = TenancyMode.SHARED
+ 36:     metadata: dict[str, Any] = field(default_factory=dict)
+ 37:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 38:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 39: 
+ 40:     def __post_init__(self) -> None:
+ 41:         if not self.slug and self.name:
+ 42:             self.slug = self.name.lower().replace(" ", "-")
+ 43: 
+ 44: 
+ 45: @dataclass
+ 46: class Workspace:
+ 47:     """Workspace within an organization.
+ 48: 
+ 49:     Workspaces provide logical separation of projects or teams within
+ 50:     an organization. Each workspace can have multiple memory namespaces.
+ 51:     """
+ 52: 
+ 53:     id: UUID = field(default_factory=uuid4)
+ 54:     organization_id: UUID = field(default_factory=uuid4)
+ 55:     name: str = ""
+ 56:     slug: str = ""
+ 57:     description: str = ""
+ 58:     metadata: dict[str, Any] = field(default_factory=dict)
+ 59:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 60:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 61: 
+ 62:     def __post_init__(self) -> None:
+ 63:         if not self.slug and self.name:
+ 64:             self.slug = self.name.lower().replace(" ", "-")
+ 65: 
+ 66: 
+ 67: @dataclass
+ 68: class MemoryNamespace:
+ 69:     """Memory namespace for isolating memories.
+ 70: 
+ 71:     A namespace is the primary unit of memory isolation. All memories,
+ 72:     entities, and relationships are scoped to a namespace.
+ 73:     Every query is filtered by namespace_id for multi-tenancy.
+ 74: 
+ 75:     Supports versioning for data replacement workflows:
+ 76:     - version: Incremental version number (starts at 1)
+ 77:     - is_active: Whether this is the current active version
+ 78:     - previous_version_id: Reference to the previous version (if any)
+ 79:     """
+ 80: 
+ 81:     id: UUID = field(default_factory=uuid4)
+ 82:     workspace_id: UUID = field(default_factory=uuid4)
+ 83:     name: str = ""
+ 84:     slug: str = ""
+ 85:     description: str = ""
+ 86: 
+ 87:     # Versioning fields
+ 88:     version: int = 1
+ 89:     is_active: bool = True
+ 90:     previous_version_id: UUID | None = None
+ 91: 
+ 92:     # Configuration overrides for this namespace
+ 93:     config_overrides: dict[str, Any] = field(default_factory=dict)
+ 94: 
+ 95:     # Sync checkpoints for incremental updates
+ 96:     sync_checkpoints: dict[str, str] = field(default_factory=dict)
+ 97: 
+ 98:     metadata: dict[str, Any] = field(default_factory=dict)
+ 99:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+100:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+101: 
+102:     def __post_init__(self) -> None:
+103:         if not self.slug and self.name:
+104:             self.slug = self.name.lower().replace(" ", "-")
+105: 
+106:     @property
+107:     def full_path(self) -> str:
+108:         """Get the full path identifier for this namespace."""
+109:         return f"{self.workspace_id}/{self.slug}"
+````
+
 ## File: src/khora/core/__init__.py
 ````python
  1: """Core domain models and types for Khora Memory Lake."""
@@ -8460,119 +8573,6 @@ README.md
 98:     return normalized in SOURCE_TYPE_ALIASES or normalized in _REGISTERED_SOURCE_TYPES
 ````
 
-## File: src/khora/core/models/tenancy.py
-````python
-  1: """Multi-tenancy models for Khora Memory Lake.
-  2: 
-  3: Supports two modes:
-  4: - Shared: namespace_id filtering with row-level security
-  5: - Isolated: Separate database instances per tenant
-  6: """
-  7: 
-  8: from __future__ import annotations
-  9: 
- 10: from dataclasses import dataclass, field
- 11: from datetime import UTC, datetime
- 12: from enum import Enum
- 13: from typing import Any
- 14: from uuid import UUID, uuid4
- 15: 
- 16: 
- 17: class TenancyMode(str, Enum):
- 18:     """Tenancy isolation mode."""
- 19: 
- 20:     SHARED = "shared"  # Shared database with namespace_id filtering + row-level security
- 21:     ISOLATED = "isolated"  # Separate database instances per tenant
- 22: 
- 23: 
- 24: @dataclass
- 25: class Organization:
- 26:     """Top-level tenant organization.
- 27: 
- 28:     An organization can have multiple workspaces and represents the billing
- 29:     and administrative boundary for tenants.
- 30:     """
- 31: 
- 32:     id: UUID = field(default_factory=uuid4)
- 33:     name: str = ""
- 34:     slug: str = ""  # URL-friendly identifier
- 35:     tenancy_mode: TenancyMode = TenancyMode.SHARED
- 36:     metadata: dict[str, Any] = field(default_factory=dict)
- 37:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
- 38:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
- 39: 
- 40:     def __post_init__(self) -> None:
- 41:         if not self.slug and self.name:
- 42:             self.slug = self.name.lower().replace(" ", "-")
- 43: 
- 44: 
- 45: @dataclass
- 46: class Workspace:
- 47:     """Workspace within an organization.
- 48: 
- 49:     Workspaces provide logical separation of projects or teams within
- 50:     an organization. Each workspace can have multiple memory namespaces.
- 51:     """
- 52: 
- 53:     id: UUID = field(default_factory=uuid4)
- 54:     organization_id: UUID = field(default_factory=uuid4)
- 55:     name: str = ""
- 56:     slug: str = ""
- 57:     description: str = ""
- 58:     metadata: dict[str, Any] = field(default_factory=dict)
- 59:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
- 60:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
- 61: 
- 62:     def __post_init__(self) -> None:
- 63:         if not self.slug and self.name:
- 64:             self.slug = self.name.lower().replace(" ", "-")
- 65: 
- 66: 
- 67: @dataclass
- 68: class MemoryNamespace:
- 69:     """Memory namespace for isolating memories.
- 70: 
- 71:     A namespace is the primary unit of memory isolation. All memories,
- 72:     entities, and relationships are scoped to a namespace.
- 73:     Every query is filtered by namespace_id for multi-tenancy.
- 74: 
- 75:     Supports versioning for data replacement workflows:
- 76:     - version: Incremental version number (starts at 1)
- 77:     - is_active: Whether this is the current active version
- 78:     - previous_version_id: Reference to the previous version (if any)
- 79:     """
- 80: 
- 81:     id: UUID = field(default_factory=uuid4)
- 82:     workspace_id: UUID = field(default_factory=uuid4)
- 83:     name: str = ""
- 84:     slug: str = ""
- 85:     description: str = ""
- 86: 
- 87:     # Versioning fields
- 88:     version: int = 1
- 89:     is_active: bool = True
- 90:     previous_version_id: UUID | None = None
- 91: 
- 92:     # Configuration overrides for this namespace
- 93:     config_overrides: dict[str, Any] = field(default_factory=dict)
- 94: 
- 95:     # Sync checkpoints for incremental updates
- 96:     sync_checkpoints: dict[str, str] = field(default_factory=dict)
- 97: 
- 98:     metadata: dict[str, Any] = field(default_factory=dict)
- 99:     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-100:     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-101: 
-102:     def __post_init__(self) -> None:
-103:         if not self.slug and self.name:
-104:             self.slug = self.name.lower().replace(" ", "-")
-105: 
-106:     @property
-107:     def full_path(self) -> str:
-108:         """Get the full path identifier for this namespace."""
-109:         return f"{self.workspace_id}/{self.slug}"
-````
-
 ## File: src/khora/db/session.py
 ````python
   1: """Database session management for Khora."""
@@ -11741,6 +11741,589 @@ README.md
 166:     ) -> list:
 167:         """Default implementation — subclasses should override."""
 168:         return []
+````
+
+## File: src/khora/storage/backends/postgresql.py
+````python
+  1: """PostgreSQL backend for relational data storage.
+  2: 
+  3: Handles storage of documents, tenancy data, ACLs, and sync checkpoints
+  4: using SQLAlchemy async with asyncpg.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from datetime import UTC, datetime
+ 10: from typing import TYPE_CHECKING
+ 11: from uuid import UUID
+ 12: 
+ 13: from loguru import logger
+ 14: from sqlalchemy import select, update
+ 15: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+ 16: 
+ 17: from khora.core.models import Document, DocumentMetadata, MemoryNamespace, Organization, TenancyMode, Workspace
+ 18: from khora.core.models.document import DocumentStatus
+ 19: from khora.db.models import (
+ 20:     Base,
+ 21:     DocumentModel,
+ 22:     MemoryNamespaceModel,
+ 23:     OrganizationModel,
+ 24:     SyncCheckpointModel,
+ 25:     WorkspaceModel,
+ 26: )
+ 27: 
+ 28: if TYPE_CHECKING:
+ 29:     pass
+ 30: 
+ 31: 
+ 32: class PostgreSQLBackend:
+ 33:     """PostgreSQL backend for relational data.
+ 34: 
+ 35:     Handles all relational data operations including multi-tenancy
+ 36:     hierarchy, documents, and sync checkpoints.
+ 37:     """
+ 38: 
+ 39:     def __init__(self, database_url: str, *, echo: bool = False, pool_size: int = 10, max_overflow: int = 20) -> None:
+ 40:         """Initialize the PostgreSQL backend.
+ 41: 
+ 42:         Args:
+ 43:             database_url: PostgreSQL connection URL
+ 44:             echo: Enable SQL echo logging
+ 45:             pool_size: Connection pool size
+ 46:             max_overflow: Maximum overflow connections
+ 47:         """
+ 48:         # Convert to async URL if needed
+ 49:         if database_url.startswith("postgresql://"):
+ 50:             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+ 51:         elif database_url.startswith("postgres://"):
+ 52:             database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+ 53: 
+ 54:         self._database_url = database_url
+ 55:         self._echo = echo
+ 56:         self._pool_size = pool_size
+ 57:         self._max_overflow = max_overflow
+ 58:         self._engine: AsyncEngine | None = None
+ 59:         self._session_factory: async_sessionmaker[AsyncSession] | None = None
+ 60: 
+ 61:     async def connect(self) -> None:
+ 62:         """Establish connection to the database."""
+ 63:         if self._engine is not None:
+ 64:             return
+ 65: 
+ 66:         logger.info("Connecting to PostgreSQL...")
+ 67:         self._engine = create_async_engine(
+ 68:             self._database_url,
+ 69:             echo=self._echo,
+ 70:             pool_size=self._pool_size,
+ 71:             max_overflow=self._max_overflow,
+ 72:         )
+ 73:         self._session_factory = async_sessionmaker(
+ 74:             self._engine,
+ 75:             class_=AsyncSession,
+ 76:             expire_on_commit=False,
+ 77:         )
+ 78:         logger.info("Connected to PostgreSQL")
+ 79: 
+ 80:     async def disconnect(self) -> None:
+ 81:         """Close database connections."""
+ 82:         if self._engine is not None:
+ 83:             logger.info("Disconnecting from PostgreSQL...")
+ 84:             await self._engine.dispose()
+ 85:             self._engine = None
+ 86:             self._session_factory = None
+ 87:             logger.info("Disconnected from PostgreSQL")
+ 88: 
+ 89:     async def is_healthy(self) -> bool:
+ 90:         """Check if the backend is healthy and connected."""
+ 91:         if self._engine is None or self._session_factory is None:
+ 92:             return False
+ 93:         try:
+ 94:             async with self._session_factory() as session:
+ 95:                 await session.execute(select(1))
+ 96:             return True
+ 97:         except Exception as e:
+ 98:             logger.error(f"PostgreSQL health check failed: {e}")
+ 99:             return False
+100: 
+101:     def _get_session(self) -> AsyncSession:
+102:         """Get a new database session."""
+103:         if self._session_factory is None:
+104:             raise RuntimeError("Backend not connected. Call connect() first.")
+105:         return self._session_factory()
+106: 
+107:     async def create_tables(self) -> None:
+108:         """Create all database tables (for testing/development)."""
+109:         if self._engine is None:
+110:             raise RuntimeError("Backend not connected. Call connect() first.")
+111:         async with self._engine.begin() as conn:
+112:             await conn.run_sync(Base.metadata.create_all)
+113: 
+114:     # =========================================================================
+115:     # Organization operations
+116:     # =========================================================================
+117: 
+118:     async def create_organization(self, org: Organization) -> Organization:
+119:         """Create a new organization."""
+120:         async with self._get_session() as session:
+121:             model = OrganizationModel(
+122:                 id=str(org.id),
+123:                 name=org.name,
+124:                 slug=org.slug,
+125:                 tenancy_mode=org.tenancy_mode,
+126:                 metadata_=org.metadata,
+127:                 created_at=org.created_at,
+128:                 updated_at=org.updated_at,
+129:             )
+130:             session.add(model)
+131:             await session.commit()
+132:             await session.refresh(model)
+133:             return self._org_model_to_domain(model)
+134: 
+135:     async def get_organization(self, org_id: UUID) -> Organization | None:
+136:         """Get an organization by ID."""
+137:         async with self._get_session() as session:
+138:             result = await session.execute(select(OrganizationModel).where(OrganizationModel.id == str(org_id)))
+139:             model = result.scalar_one_or_none()
+140:             return self._org_model_to_domain(model) if model else None
+141: 
+142:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
+143:         """Get an organization by slug."""
+144:         async with self._get_session() as session:
+145:             result = await session.execute(select(OrganizationModel).where(OrganizationModel.slug == slug))
+146:             model = result.scalar_one_or_none()
+147:             return self._org_model_to_domain(model) if model else None
+148: 
+149:     def _org_model_to_domain(self, model: OrganizationModel) -> Organization:
+150:         """Convert OrganizationModel to domain Organization."""
+151:         return Organization(
+152:             id=UUID(model.id),
+153:             name=model.name,
+154:             slug=model.slug,
+155:             tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
+156:             metadata=model.metadata_,
+157:             created_at=model.created_at,
+158:             updated_at=model.updated_at,
+159:         )
+160: 
+161:     # =========================================================================
+162:     # Workspace operations
+163:     # =========================================================================
+164: 
+165:     async def create_workspace(self, workspace: Workspace) -> Workspace:
+166:         """Create a new workspace."""
+167:         async with self._get_session() as session:
+168:             model = WorkspaceModel(
+169:                 id=str(workspace.id),
+170:                 organization_id=str(workspace.organization_id),
+171:                 name=workspace.name,
+172:                 slug=workspace.slug,
+173:                 description=workspace.description,
+174:                 metadata_=workspace.metadata,
+175:                 created_at=workspace.created_at,
+176:                 updated_at=workspace.updated_at,
+177:             )
+178:             session.add(model)
+179:             await session.commit()
+180:             await session.refresh(model)
+181:             return self._workspace_model_to_domain(model)
+182: 
+183:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+184:         """Get a workspace by ID."""
+185:         async with self._get_session() as session:
+186:             result = await session.execute(select(WorkspaceModel).where(WorkspaceModel.id == str(workspace_id)))
+187:             model = result.scalar_one_or_none()
+188:             return self._workspace_model_to_domain(model) if model else None
+189: 
+190:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
+191:         """List all workspaces in an organization."""
+192:         async with self._get_session() as session:
+193:             result = await session.execute(
+194:                 select(WorkspaceModel).where(WorkspaceModel.organization_id == str(organization_id))
+195:             )
+196:             return [self._workspace_model_to_domain(m) for m in result.scalars().all()]
+197: 
+198:     def _workspace_model_to_domain(self, model: WorkspaceModel) -> Workspace:
+199:         """Convert WorkspaceModel to domain Workspace."""
+200:         return Workspace(
+201:             id=UUID(model.id),
+202:             organization_id=UUID(model.organization_id),
+203:             name=model.name,
+204:             slug=model.slug,
+205:             description=model.description,
+206:             metadata=model.metadata_,
+207:             created_at=model.created_at,
+208:             updated_at=model.updated_at,
+209:         )
+210: 
+211:     # =========================================================================
+212:     # Namespace operations
+213:     # =========================================================================
+214: 
+215:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+216:         """Create a new memory namespace."""
+217:         async with self._get_session() as session:
+218:             model = MemoryNamespaceModel(
+219:                 id=str(namespace.id),
+220:                 workspace_id=str(namespace.workspace_id),
+221:                 name=namespace.name,
+222:                 slug=namespace.slug,
+223:                 description=namespace.description,
+224:                 version=namespace.version,
+225:                 is_active=namespace.is_active,
+226:                 previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
+227:                 config_overrides=namespace.config_overrides,
+228:                 sync_checkpoints=namespace.sync_checkpoints,
+229:                 metadata_=namespace.metadata,
+230:                 created_at=namespace.created_at,
+231:                 updated_at=namespace.updated_at,
+232:             )
+233:             session.add(model)
+234:             await session.commit()
+235:             await session.refresh(model)
+236:             return self._namespace_model_to_domain(model)
+237: 
+238:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+239:         """Get a namespace by ID."""
+240:         async with self._get_session() as session:
+241:             result = await session.execute(
+242:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == str(namespace_id))
+243:             )
+244:             model = result.scalar_one_or_none()
+245:             return self._namespace_model_to_domain(model) if model else None
+246: 
+247:     async def get_namespace_by_slug(
+248:         self, workspace_id: UUID, slug: str, *, active_only: bool = True
+249:     ) -> MemoryNamespace | None:
+250:         """Get a namespace by workspace ID and slug.
+251: 
+252:         Args:
+253:             workspace_id: Workspace ID
+254:             slug: Namespace slug
+255:             active_only: If True, only return active namespace (default)
+256: 
+257:         Returns:
+258:             MemoryNamespace or None if not found
+259:         """
+260:         async with self._get_session() as session:
+261:             query = select(MemoryNamespaceModel).where(
+262:                 MemoryNamespaceModel.workspace_id == str(workspace_id),
+263:                 MemoryNamespaceModel.slug == slug,
+264:             )
+265:             if active_only:
+266:                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+267:             result = await session.execute(query)
+268:             model = result.scalar_one_or_none()
+269:             return self._namespace_model_to_domain(model) if model else None
+270: 
+271:     async def list_namespaces(self, workspace_id: UUID, *, active_only: bool = True) -> list[MemoryNamespace]:
+272:         """List all namespaces in a workspace.
+273: 
+274:         Args:
+275:             workspace_id: Workspace ID
+276:             active_only: If True, only return active namespaces (default)
+277: 
+278:         Returns:
+279:             List of MemoryNamespace objects
+280:         """
+281:         async with self._get_session() as session:
+282:             query = select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
+283:             if active_only:
+284:                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+285:             result = await session.execute(query)
+286:             return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
+287: 
+288:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+289:         """Update a namespace."""
+290:         async with self._get_session() as session:
+291:             await session.execute(
+292:                 update(MemoryNamespaceModel)
+293:                 .where(MemoryNamespaceModel.id == str(namespace.id))
+294:                 .values(
+295:                     name=namespace.name,
+296:                     slug=namespace.slug,
+297:                     description=namespace.description,
+298:                     version=namespace.version,
+299:                     is_active=namespace.is_active,
+300:                     previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
+301:                     config_overrides=namespace.config_overrides,
+302:                     sync_checkpoints=namespace.sync_checkpoints,
+303:                     metadata_=namespace.metadata,
+304:                     updated_at=datetime.now(UTC),
+305:                 )
+306:             )
+307:             await session.commit()
+308:             return namespace
+309: 
+310:     def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
+311:         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
+312:         return MemoryNamespace(
+313:             id=UUID(model.id),
+314:             workspace_id=UUID(model.workspace_id),
+315:             name=model.name,
+316:             slug=model.slug,
+317:             description=model.description,
+318:             version=model.version,
+319:             is_active=model.is_active,
+320:             previous_version_id=UUID(model.previous_version_id) if model.previous_version_id else None,
+321:             config_overrides=model.config_overrides,
+322:             sync_checkpoints=model.sync_checkpoints,
+323:             metadata=model.metadata_,
+324:             created_at=model.created_at,
+325:             updated_at=model.updated_at,
+326:         )
+327: 
+328:     async def create_namespace_version(
+329:         self,
+330:         workspace_id: UUID,
+331:         slug: str,
+332:         *,
+333:         previous_version: MemoryNamespace | None = None,
+334:     ) -> MemoryNamespace:
+335:         """Create a new version of a namespace.
+336: 
+337:         If previous_version is provided, increments its version number and links to it.
+338:         The previous version is marked as inactive.
+339: 
+340:         Args:
+341:             workspace_id: Workspace ID
+342:             slug: Namespace slug
+343:             previous_version: The previous version to supersede (if any)
+344: 
+345:         Returns:
+346:             New namespace version
+347:         """
+348:         from uuid import uuid4
+349: 
+350:         new_version = 1
+351:         previous_id = None
+352: 
+353:         if previous_version:
+354:             new_version = previous_version.version + 1
+355:             previous_id = previous_version.id
+356:             # Deactivate the old version
+357:             await self.deactivate_namespace(previous_version.id)
+358: 
+359:         # Create new namespace with incremented version
+360:         namespace = MemoryNamespace(
+361:             id=uuid4(),
+362:             workspace_id=workspace_id,
+363:             name=previous_version.name if previous_version else f"Namespace {slug}",
+364:             slug=slug,
+365:             description=previous_version.description if previous_version else "",
+366:             version=new_version,
+367:             is_active=True,
+368:             previous_version_id=previous_id,
+369:             config_overrides=previous_version.config_overrides if previous_version else {},
+370:             metadata=previous_version.metadata if previous_version else {},
+371:         )
+372: 
+373:         return await self.create_namespace(namespace)
+374: 
+375:     async def deactivate_namespace(self, namespace_id: UUID) -> None:
+376:         """Mark a namespace version as inactive.
+377: 
+378:         Args:
+379:             namespace_id: ID of the namespace to deactivate
+380:         """
+381:         async with self._get_session() as session:
+382:             await session.execute(
+383:                 update(MemoryNamespaceModel)
+384:                 .where(MemoryNamespaceModel.id == str(namespace_id))
+385:                 .values(is_active=False, updated_at=datetime.now(UTC))
+386:             )
+387:             await session.commit()
+388:             logger.info(f"Deactivated namespace {namespace_id}")
+389: 
+390:     # =========================================================================
+391:     # Document operations
+392:     # =========================================================================
+393: 
+394:     async def create_document(self, document: Document) -> Document:
+395:         """Create a new document."""
+396:         async with self._get_session() as session:
+397:             model = DocumentModel(
+398:                 id=str(document.id),
+399:                 namespace_id=str(document.namespace_id),
+400:                 content=document.content,
+401:                 status=document.status,
+402:                 source=document.metadata.source,
+403:                 source_type=document.metadata.source_type,
+404:                 content_type=document.metadata.content_type,
+405:                 title=document.metadata.title,
+406:                 author=document.metadata.author,
+407:                 language=document.metadata.language,
+408:                 checksum=document.metadata.checksum,
+409:                 size_bytes=document.metadata.size_bytes,
+410:                 metadata_=document.metadata.custom,
+411:                 chunk_count=document.chunk_count,
+412:                 entity_count=document.entity_count,
+413:                 error_message=document.error_message,
+414:                 created_at=document.created_at,
+415:                 updated_at=document.updated_at,
+416:                 processed_at=document.processed_at,
+417:             )
+418:             session.add(model)
+419:             await session.commit()
+420:             await session.refresh(model)
+421:             return self._document_model_to_domain(model)
+422: 
+423:     async def get_document(self, document_id: UUID) -> Document | None:
+424:         """Get a document by ID."""
+425:         async with self._get_session() as session:
+426:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+427:             model = result.scalar_one_or_none()
+428:             return self._document_model_to_domain(model) if model else None
+429: 
+430:     async def list_documents(
+431:         self,
+432:         namespace_id: UUID,
+433:         *,
+434:         status: str | None = None,
+435:         limit: int = 100,
+436:         offset: int = 0,
+437:     ) -> list[Document]:
+438:         """List documents in a namespace."""
+439:         async with self._get_session() as session:
+440:             query = select(DocumentModel).where(DocumentModel.namespace_id == str(namespace_id))
+441:             if status:
+442:                 query = query.where(DocumentModel.status == status)
+443:             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
+444:             result = await session.execute(query)
+445:             return [self._document_model_to_domain(m) for m in result.scalars().all()]
+446: 
+447:     async def update_document(self, document: Document) -> Document:
+448:         """Update a document."""
+449:         async with self._get_session() as session:
+450:             await session.execute(
+451:                 update(DocumentModel)
+452:                 .where(DocumentModel.id == str(document.id))
+453:                 .values(
+454:                     content=document.content,
+455:                     status=document.status,
+456:                     source=document.metadata.source,
+457:                     source_type=document.metadata.source_type,
+458:                     content_type=document.metadata.content_type,
+459:                     title=document.metadata.title,
+460:                     author=document.metadata.author,
+461:                     language=document.metadata.language,
+462:                     checksum=document.metadata.checksum,
+463:                     size_bytes=document.metadata.size_bytes,
+464:                     metadata_=document.metadata.custom,
+465:                     chunk_count=document.chunk_count,
+466:                     entity_count=document.entity_count,
+467:                     error_message=document.error_message,
+468:                     updated_at=datetime.now(UTC),
+469:                     processed_at=document.processed_at,
+470:                 )
+471:             )
+472:             await session.commit()
+473:             return document
+474: 
+475:     async def delete_document(self, document_id: UUID) -> bool:
+476:         """Delete a document."""
+477:         async with self._get_session() as session:
+478:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+479:             model = result.scalar_one_or_none()
+480:             if model:
+481:                 await session.delete(model)
+482:                 await session.commit()
+483:                 return True
+484:             return False
+485: 
+486:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+487:         """Get a document by its content checksum (for deduplication).
+488: 
+489:         Returns the first matching document if multiple exist with the same checksum.
+490:         """
+491:         async with self._get_session() as session:
+492:             result = await session.execute(
+493:                 select(DocumentModel).where(
+494:                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
+495:                 )
+496:             )
+497:             model = result.scalars().first()
+498:             return self._document_model_to_domain(model) if model else None
+499: 
+500:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+501:         """Fetch multiple documents in a single query.
+502: 
+503:         Args:
+504:             document_ids: List of document IDs to fetch
+505: 
+506:         Returns:
+507:             Dictionary mapping document ID to Document object
+508:         """
+509:         if not document_ids:
+510:             return {}
+511: 
+512:         async with self._get_session() as session:
+513:             result = await session.execute(
+514:                 select(DocumentModel).where(DocumentModel.id.in_([str(did) for did in document_ids]))
+515:             )
+516:             models = result.scalars().all()
+517:             return {UUID(m.id): self._document_model_to_domain(m) for m in models}
+518: 
+519:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
+520:         """Convert DocumentModel to domain Document."""
+521:         return Document(
+522:             id=UUID(model.id),
+523:             namespace_id=UUID(model.namespace_id),
+524:             content=model.content,
+525:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
+526:             metadata=DocumentMetadata(
+527:                 source=model.source,
+528:                 source_type=model.source_type,
+529:                 content_type=model.content_type,
+530:                 title=model.title,
+531:                 author=model.author,
+532:                 language=model.language,
+533:                 checksum=model.checksum,
+534:                 size_bytes=model.size_bytes,
+535:                 custom=model.metadata_,
+536:             ),
+537:             chunk_count=model.chunk_count,
+538:             entity_count=model.entity_count,
+539:             error_message=model.error_message,
+540:             created_at=model.created_at,
+541:             updated_at=model.updated_at,
+542:             processed_at=model.processed_at,
+543:         )
+544: 
+545:     # =========================================================================
+546:     # Sync checkpoint operations
+547:     # =========================================================================
+548: 
+549:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+550:         """Get the last sync checkpoint for a source."""
+551:         async with self._get_session() as session:
+552:             result = await session.execute(
+553:                 select(SyncCheckpointModel).where(
+554:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+555:                 )
+556:             )
+557:             model = result.scalar_one_or_none()
+558:             return model.checkpoint if model else None
+559: 
+560:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+561:         """Set the sync checkpoint for a source."""
+562:         async with self._get_session() as session:
+563:             result = await session.execute(
+564:                 select(SyncCheckpointModel).where(
+565:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+566:                 )
+567:             )
+568:             model = result.scalar_one_or_none()
+569:             if model:
+570:                 model.checkpoint = checkpoint
+571:                 model.updated_at = datetime.now(UTC)
+572:             else:
+573:                 model = SyncCheckpointModel(
+574:                     namespace_id=str(namespace_id),
+575:                     source=source,
+576:                     checkpoint=checkpoint,
+577:                 )
+578:                 session.add(model)
+579:             await session.commit()
 ````
 
 ## File: src/khora/storage/optimize.py
@@ -16815,6 +17398,620 @@ README.md
 337:     return [item["embedding"] for item in response.data]
 ````
 
+## File: src/khora/db/models.py
+````python
+  1: """SQLAlchemy models for Khora Memory Lake.
+  2: 
+  3: This module defines the complete database schema including:
+  4: - Multi-tenancy (organizations, workspaces, namespaces)
+  5: - Documents and chunks with vector embeddings
+  6: - Entities, relationships, and episodes
+  7: - Event sourcing log
+  8: - ACL and permissions
+  9: """
+ 10: 
+ 11: from __future__ import annotations
+ 12: 
+ 13: from datetime import UTC, datetime
+ 14: from typing import Any
+ 15: from uuid import uuid4
+ 16: 
+ 17: from pgvector.sqlalchemy import Vector
+ 18: from sqlalchemy import (
+ 19:     Boolean,
+ 20:     Computed,
+ 21:     DateTime,
+ 22:     Enum,
+ 23:     Float,
+ 24:     ForeignKey,
+ 25:     Index,
+ 26:     Integer,
+ 27:     String,
+ 28:     Text,
+ 29:     UniqueConstraint,
+ 30: )
+ 31: from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
+ 32: from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+ 33: 
+ 34: from khora.core.models.document import DocumentStatus
+ 35: from khora.core.models.event import EventType
+ 36: from khora.core.models.tenancy import TenancyMode
+ 37: 
+ 38: 
+ 39: class Base(DeclarativeBase):
+ 40:     """Base class for all SQLAlchemy models."""
+ 41: 
+ 42:     type_annotation_map = {
+ 43:         dict[str, Any]: JSONB,
+ 44:         list[str]: ARRAY(String),
+ 45:     }
+ 46: 
+ 47: 
+ 48: # =============================================================================
+ 49: # Multi-Tenancy Models
+ 50: # =============================================================================
+ 51: 
+ 52: 
+ 53: class OrganizationModel(Base):
+ 54:     """Organization - top-level tenant."""
+ 55: 
+ 56:     __tablename__ = "organizations"
+ 57: 
+ 58:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+ 59:     name: Mapped[str] = mapped_column(String(255), nullable=False)
+ 60:     slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+ 61:     tenancy_mode: Mapped[str] = mapped_column(
+ 62:         Enum(TenancyMode, name="tenancy_mode", create_constraint=True),
+ 63:         default=TenancyMode.SHARED,
+ 64:     )
+ 65:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+ 66:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+ 67:     updated_at: Mapped[datetime] = mapped_column(
+ 68:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+ 69:     )
+ 70: 
+ 71:     # Relationships
+ 72:     workspaces: Mapped[list[WorkspaceModel]] = relationship("WorkspaceModel", back_populates="organization")
+ 73: 
+ 74:     def __repr__(self) -> str:
+ 75:         return f"<Organization(id={self.id!r}, name={self.name!r})>"
+ 76: 
+ 77: 
+ 78: class WorkspaceModel(Base):
+ 79:     """Workspace within an organization."""
+ 80: 
+ 81:     __tablename__ = "workspaces"
+ 82: 
+ 83:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+ 84:     organization_id: Mapped[str] = mapped_column(
+ 85:         UUID(as_uuid=False), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+ 86:     )
+ 87:     name: Mapped[str] = mapped_column(String(255), nullable=False)
+ 88:     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+ 89:     description: Mapped[str] = mapped_column(Text, default="")
+ 90:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+ 91:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+ 92:     updated_at: Mapped[datetime] = mapped_column(
+ 93:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+ 94:     )
+ 95: 
+ 96:     # Relationships
+ 97:     organization: Mapped[OrganizationModel] = relationship("OrganizationModel", back_populates="workspaces")
+ 98:     namespaces: Mapped[list[MemoryNamespaceModel]] = relationship("MemoryNamespaceModel", back_populates="workspace")
+ 99: 
+100:     __table_args__ = (UniqueConstraint("organization_id", "slug", name="uq_workspace_org_slug"),)
+101: 
+102:     def __repr__(self) -> str:
+103:         return f"<Workspace(id={self.id!r}, name={self.name!r})>"
+104: 
+105: 
+106: class MemoryNamespaceModel(Base):
+107:     """Memory namespace for isolating memories.
+108: 
+109:     Supports versioning for data replacement workflows:
+110:     - version: Incremental version number (starts at 1)
+111:     - is_active: Whether this is the current active version
+112:     - previous_version_id: Reference to the previous version (if any)
+113:     """
+114: 
+115:     __tablename__ = "memory_namespaces"
+116: 
+117:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+118:     workspace_id: Mapped[str] = mapped_column(
+119:         UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+120:     )
+121:     name: Mapped[str] = mapped_column(String(255), nullable=False)
+122:     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+123:     description: Mapped[str] = mapped_column(Text, default="")
+124: 
+125:     # Versioning fields
+126:     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+127:     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+128:     previous_version_id: Mapped[str | None] = mapped_column(
+129:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="SET NULL"), nullable=True
+130:     )
+131: 
+132:     config_overrides: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+133:     sync_checkpoints: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+134:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+135:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+136:     updated_at: Mapped[datetime] = mapped_column(
+137:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+138:     )
+139: 
+140:     # Relationships
+141:     workspace: Mapped[WorkspaceModel] = relationship("WorkspaceModel", back_populates="namespaces")
+142:     documents: Mapped[list[DocumentModel]] = relationship("DocumentModel", back_populates="namespace")
+143:     chunks: Mapped[list[ChunkModel]] = relationship("ChunkModel", back_populates="namespace")
+144:     entities: Mapped[list[EntityModel]] = relationship("EntityModel", back_populates="namespace")
+145:     relationships: Mapped[list[RelationshipModel]] = relationship("RelationshipModel", back_populates="namespace")
+146:     episodes: Mapped[list[EpisodeModel]] = relationship("EpisodeModel", back_populates="namespace")
+147:     events: Mapped[list[MemoryEventModel]] = relationship("MemoryEventModel", back_populates="namespace")
+148:     expertise_definitions: Mapped[list[ExpertiseDefinitionModel]] = relationship(
+149:         "ExpertiseDefinitionModel", back_populates="namespace"
+150:     )
+151: 
+152:     __table_args__ = (
+153:         # Only one active namespace per workspace/slug combination
+154:         UniqueConstraint("workspace_id", "slug", "version", name="uq_namespace_workspace_slug_version"),
+155:         # Partial index for efficient active namespace queries
+156:         Index("idx_namespace_active", "workspace_id", "slug", postgresql_where="is_active = true"),
+157:     )
+158: 
+159:     def __repr__(self) -> str:
+160:         return f"<MemoryNamespace(id={self.id!r}, name={self.name!r})>"
+161: 
+162: 
+163: # =============================================================================
+164: # Document Models
+165: # =============================================================================
+166: 
+167: 
+168: class DocumentModel(Base):
+169:     """Document to be processed and stored."""
+170: 
+171:     __tablename__ = "documents"
+172: 
+173:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+174:     namespace_id: Mapped[str] = mapped_column(
+175:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+176:     )
+177:     content: Mapped[str] = mapped_column(Text, nullable=False)
+178:     status: Mapped[str] = mapped_column(
+179:         Enum(DocumentStatus, name="document_status", create_constraint=True),
+180:         default=DocumentStatus.PENDING,
+181:         index=True,
+182:     )
+183: 
+184:     # Metadata
+185:     source: Mapped[str] = mapped_column(String(1024), default="")
+186:     source_type: Mapped[str] = mapped_column(String(64), default="")
+187:     content_type: Mapped[str] = mapped_column(String(128), default="")
+188:     title: Mapped[str] = mapped_column(String(512), default="")
+189:     author: Mapped[str] = mapped_column(String(255), default="")
+190:     language: Mapped[str] = mapped_column(String(10), default="en")
+191:     checksum: Mapped[str] = mapped_column(String(64), default="", index=True)
+192:     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+193:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+194: 
+195:     # Processing info
+196:     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+197:     entity_count: Mapped[int] = mapped_column(Integer, default=0)
+198:     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+199: 
+200:     # Timestamps
+201:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+202:     updated_at: Mapped[datetime] = mapped_column(
+203:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+204:     )
+205:     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+206: 
+207:     # Relationships
+208:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="documents")
+209:     chunks: Mapped[list[ChunkModel]] = relationship(
+210:         "ChunkModel", back_populates="document", cascade="all, delete-orphan"
+211:     )
+212: 
+213:     __table_args__ = (Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),)
+214: 
+215:     def __repr__(self) -> str:
+216:         return f"<Document(id={self.id!r}, title={self.title!r})>"
+217: 
+218: 
+219: class ChunkModel(Base):
+220:     """Chunk of text from a document with embedding."""
+221: 
+222:     __tablename__ = "chunks"
+223: 
+224:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+225:     namespace_id: Mapped[str] = mapped_column(
+226:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+227:     )
+228:     document_id: Mapped[str] = mapped_column(
+229:         UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+230:     )
+231:     content: Mapped[str] = mapped_column(Text, nullable=False)
+232: 
+233:     # Chunk metadata
+234:     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+235:     start_char: Mapped[int] = mapped_column(Integer, default=0)
+236:     end_char: Mapped[int] = mapped_column(Integer, default=0)
+237:     token_count: Mapped[int] = mapped_column(Integer, default=0)
+238:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+239: 
+240:     # Embedding (pgvector)
+241:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+242:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+243: 
+244:     # Full-text search (generated tsvector column)
+245:     content_tsv: Mapped[Any | None] = mapped_column(
+246:         TSVECTOR,
+247:         Computed("to_tsvector('english', content)", persisted=True),
+248:         nullable=True,
+249:     )
+250: 
+251:     # Timestamps
+252:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+253: 
+254:     # Relationships
+255:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="chunks")
+256:     document: Mapped[DocumentModel] = relationship("DocumentModel", back_populates="chunks")
+257: 
+258:     __table_args__ = (
+259:         Index("ix_chunks_document_index", "document_id", "chunk_index"),
+260:         # Vector similarity index (HNSW for better recall)
+261:         Index(
+262:             "ix_chunks_embedding_hnsw",
+263:             "embedding",
+264:             postgresql_using="hnsw",
+265:             postgresql_with={"m": 16, "ef_construction": 64},
+266:             postgresql_ops={"embedding": "vector_cosine_ops"},
+267:         ),
+268:         # GIN index for full-text search
+269:         Index(
+270:             "ix_chunks_content_tsv",
+271:             "content_tsv",
+272:             postgresql_using="gin",
+273:         ),
+274:     )
+275: 
+276:     def __repr__(self) -> str:
+277:         return f"<Chunk(id={self.id!r}, document_id={self.document_id!r}, index={self.chunk_index})>"
+278: 
+279: 
+280: # =============================================================================
+281: # Entity Models
+282: # =============================================================================
+283: 
+284: 
+285: class EntityModel(Base):
+286:     """Entity extracted from documents (stored in both PostgreSQL and Neo4j)."""
+287: 
+288:     __tablename__ = "entities"
+289: 
+290:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+291:     namespace_id: Mapped[str] = mapped_column(
+292:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+293:     )
+294:     name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+295:     entity_type: Mapped[str] = mapped_column(
+296:         String(64),
+297:         default="CONCEPT",
+298:         index=True,
+299:     )
+300:     description: Mapped[str] = mapped_column(Text, default="")
+301: 
+302:     # Attributes and sources
+303:     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+304:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+305:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+306:     mention_count: Mapped[int] = mapped_column(Integer, default=1)
+307: 
+308:     # Embedding for entity similarity
+309:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+310:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+311: 
+312:     # Temporal validity
+313:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+314:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+315: 
+316:     # Confidence
+317:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+318: 
+319:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+320:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+321:     updated_at: Mapped[datetime] = mapped_column(
+322:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+323:     )
+324: 
+325:     # Relationships
+326:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="entities")
+327: 
+328:     __table_args__ = (
+329:         Index("ix_entities_namespace_name_type", "namespace_id", "name", "entity_type"),
+330:         Index(
+331:             "ix_entities_embedding_hnsw",
+332:             "embedding",
+333:             postgresql_using="hnsw",
+334:             postgresql_with={"m": 16, "ef_construction": 64},
+335:             postgresql_ops={"embedding": "vector_cosine_ops"},
+336:         ),
+337:     )
+338: 
+339:     def __repr__(self) -> str:
+340:         return f"<Entity(id={self.id!r}, name={self.name!r}, type={self.entity_type})>"
+341: 
+342: 
+343: class RelationshipModel(Base):
+344:     """Relationship between entities (stored in both PostgreSQL and Neo4j)."""
+345: 
+346:     __tablename__ = "relationships"
+347: 
+348:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+349:     namespace_id: Mapped[str] = mapped_column(
+350:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+351:     )
+352:     source_entity_id: Mapped[str] = mapped_column(
+353:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+354:     )
+355:     target_entity_id: Mapped[str] = mapped_column(
+356:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+357:     )
+358:     relationship_type: Mapped[str] = mapped_column(
+359:         String(64),
+360:         default="RELATES_TO",
+361:         index=True,
+362:     )
+363:     description: Mapped[str] = mapped_column(Text, default="")
+364: 
+365:     # Properties and sources
+366:     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+367:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+368:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+369: 
+370:     # Temporal validity
+371:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+372:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+373: 
+374:     # Confidence and weight
+375:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+376:     weight: Mapped[float] = mapped_column(Float, default=1.0)
+377: 
+378:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+379:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+380:     updated_at: Mapped[datetime] = mapped_column(
+381:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+382:     )
+383: 
+384:     # Relationships
+385:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="relationships")
+386: 
+387:     __table_args__ = (Index("ix_relationships_entities", "source_entity_id", "target_entity_id"),)
+388: 
+389:     def __repr__(self) -> str:
+390:         return f"<Relationship(id={self.id!r}, type={self.relationship_type})>"
+391: 
+392: 
+393: class EpisodeModel(Base):
+394:     """Episodic memory representing a temporal event."""
+395: 
+396:     __tablename__ = "episodes"
+397: 
+398:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+399:     namespace_id: Mapped[str] = mapped_column(
+400:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+401:     )
+402:     name: Mapped[str] = mapped_column(String(512), nullable=False)
+403:     description: Mapped[str] = mapped_column(Text, default="")
+404: 
+405:     # Temporal bounds
+406:     occurred_at: Mapped[datetime] = mapped_column(
+407:         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+408:     )
+409:     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+410: 
+411:     # Associated entities
+412:     entity_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+413: 
+414:     # Sources
+415:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+416:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+417: 
+418:     # Embedding
+419:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+420:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+421: 
+422:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+423:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+424:     updated_at: Mapped[datetime] = mapped_column(
+425:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+426:     )
+427: 
+428:     # Relationships
+429:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="episodes")
+430: 
+431:     def __repr__(self) -> str:
+432:         return f"<Episode(id={self.id!r}, name={self.name!r})>"
+433: 
+434: 
+435: # =============================================================================
+436: # Event Sourcing Model
+437: # =============================================================================
+438: 
+439: 
+440: class MemoryEventModel(Base):
+441:     """Immutable event log for event sourcing."""
+442: 
+443:     __tablename__ = "memory_events"
+444: 
+445:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+446:     namespace_id: Mapped[str] = mapped_column(
+447:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+448:     )
+449:     event_type: Mapped[str] = mapped_column(
+450:         Enum(EventType, name="event_type", create_constraint=True),
+451:         nullable=False,
+452:         index=True,
+453:     )
+454:     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+455: 
+456:     # Resource reference
+457:     resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+458:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
+459: 
+460:     # Event data
+461:     data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+462:     previous_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+463: 
+464:     # Actor info
+465:     actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+466:     actor_type: Mapped[str] = mapped_column(String(64), default="system")
+467: 
+468:     # Correlation
+469:     correlation_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
+470: 
+471:     # Version
+472:     version: Mapped[int] = mapped_column(Integer, default=1)
+473: 
+474:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+475: 
+476:     # Relationships
+477:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="events")
+478: 
+479:     __table_args__ = (
+480:         Index("ix_events_resource", "resource_type", "resource_id"),
+481:         Index("ix_events_namespace_timestamp", "namespace_id", "timestamp"),
+482:     )
+483: 
+484:     def __repr__(self) -> str:
+485:         return f"<MemoryEvent(id={self.id!r}, type={self.event_type})>"
+486: 
+487: 
+488: # =============================================================================
+489: # ACL / Permissions Model
+490: # =============================================================================
+491: 
+492: 
+493: class PermissionModel(Base):
+494:     """Permission entry for ACL-based access control."""
+495: 
+496:     __tablename__ = "permissions"
+497: 
+498:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+499: 
+500:     # The principal (who has the permission)
+501:     principal_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # user, role, api_key
+502:     principal_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+503: 
+504:     # The resource (what the permission applies to)
+505:     resource_type: Mapped[str] = mapped_column(
+506:         String(64), nullable=False, index=True
+507:     )  # organization, workspace, namespace
+508:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
+509: 
+510:     # The permission level
+511:     permission: Mapped[str] = mapped_column(String(64), nullable=False)  # read, write, admin, owner
+512: 
+513:     # Inheritance
+514:     inherited_from_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+515:     inherited_from_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+516: 
+517:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+518:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+519:     updated_at: Mapped[datetime] = mapped_column(
+520:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+521:     )
+522: 
+523:     __table_args__ = (
+524:         UniqueConstraint(
+525:             "principal_type", "principal_id", "resource_type", "resource_id", "permission", name="uq_permission"
+526:         ),
+527:         Index("ix_permissions_principal", "principal_type", "principal_id"),
+528:         Index("ix_permissions_resource", "resource_type", "resource_id"),
+529:     )
+530: 
+531:     def __repr__(self) -> str:
+532:         return f"<Permission({self.principal_type}:{self.principal_id} -> {self.resource_type}:{self.resource_id} = {self.permission})>"
+533: 
+534: 
+535: # =============================================================================
+536: # Sync Checkpoint Model (for incremental updates)
+537: # =============================================================================
+538: 
+539: 
+540: class SyncCheckpointModel(Base):
+541:     """Sync checkpoint for tracking incremental updates from external sources."""
+542: 
+543:     __tablename__ = "sync_checkpoints"
+544: 
+545:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+546:     namespace_id: Mapped[str] = mapped_column(
+547:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+548:     )
+549:     source: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # e.g., "github", "notion", "slack"
+550:     checkpoint: Mapped[str] = mapped_column(Text, nullable=False)  # Source-specific checkpoint value
+551:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+552:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+553:     updated_at: Mapped[datetime] = mapped_column(
+554:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+555:     )
+556: 
+557:     __table_args__ = (UniqueConstraint("namespace_id", "source", name="uq_sync_checkpoint_namespace_source"),)
+558: 
+559:     def __repr__(self) -> str:
+560:         return f"<SyncCheckpoint(namespace_id={self.namespace_id!r}, source={self.source!r})>"
+561: 
+562: 
+563: # =============================================================================
+564: # Expertise Definition Model
+565: # =============================================================================
+566: 
+567: 
+568: class ExpertiseDefinitionModel(Base):
+569:     """Stored expertise configuration for a namespace.
+570: 
+571:     Allows namespaces to have custom expertise definitions that control
+572:     entity extraction, relationship types, correlation rules, and inference rules.
+573:     """
+574: 
+575:     __tablename__ = "expertise_definitions"
+576: 
+577:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+578:     namespace_id: Mapped[str] = mapped_column(
+579:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+580:     )
+581:     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+582:     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
+583:     description: Mapped[str] = mapped_column(Text, default="")
+584: 
+585:     # The full expertise configuration as JSONB
+586:     # Contains: entity_types, relationship_types, tool_schemas, correlation_rules,
+587:     # inference_rules, confidence, expansion, system_prompt, extraction_prompt
+588:     config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+589: 
+590:     # Status
+591:     is_active: Mapped[bool] = mapped_column(default=True, index=True)
+592: 
+593:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+594:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+595:     updated_at: Mapped[datetime] = mapped_column(
+596:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+597:     )
+598: 
+599:     # Relationships
+600:     namespace: Mapped[MemoryNamespaceModel] = relationship(
+601:         "MemoryNamespaceModel", back_populates="expertise_definitions"
+602:     )
+603: 
+604:     __table_args__ = (
+605:         UniqueConstraint("namespace_id", "name", name="uq_expertise_namespace_name"),
+606:         Index("ix_expertise_namespace_active", "namespace_id", "is_active"),
+607:     )
+608: 
+609:     def __repr__(self) -> str:
+610:         return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"
+````
+
 ## File: src/khora/extraction/expansion/cross_tool_unifier.py
 ````python
   1: """Cross-tool entity unification.
@@ -21805,589 +23002,6 @@ README.md
 758:             return [self._record_to_entity(element_to_dict(r["e"])) for r in records]
 ````
 
-## File: src/khora/storage/backends/postgresql.py
-````python
-  1: """PostgreSQL backend for relational data storage.
-  2: 
-  3: Handles storage of documents, tenancy data, ACLs, and sync checkpoints
-  4: using SQLAlchemy async with asyncpg.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from datetime import UTC, datetime
- 10: from typing import TYPE_CHECKING
- 11: from uuid import UUID
- 12: 
- 13: from loguru import logger
- 14: from sqlalchemy import select, update
- 15: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
- 16: 
- 17: from khora.core.models import Document, DocumentMetadata, MemoryNamespace, Organization, TenancyMode, Workspace
- 18: from khora.core.models.document import DocumentStatus
- 19: from khora.db.models import (
- 20:     Base,
- 21:     DocumentModel,
- 22:     MemoryNamespaceModel,
- 23:     OrganizationModel,
- 24:     SyncCheckpointModel,
- 25:     WorkspaceModel,
- 26: )
- 27: 
- 28: if TYPE_CHECKING:
- 29:     pass
- 30: 
- 31: 
- 32: class PostgreSQLBackend:
- 33:     """PostgreSQL backend for relational data.
- 34: 
- 35:     Handles all relational data operations including multi-tenancy
- 36:     hierarchy, documents, and sync checkpoints.
- 37:     """
- 38: 
- 39:     def __init__(self, database_url: str, *, echo: bool = False, pool_size: int = 10, max_overflow: int = 20) -> None:
- 40:         """Initialize the PostgreSQL backend.
- 41: 
- 42:         Args:
- 43:             database_url: PostgreSQL connection URL
- 44:             echo: Enable SQL echo logging
- 45:             pool_size: Connection pool size
- 46:             max_overflow: Maximum overflow connections
- 47:         """
- 48:         # Convert to async URL if needed
- 49:         if database_url.startswith("postgresql://"):
- 50:             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
- 51:         elif database_url.startswith("postgres://"):
- 52:             database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
- 53: 
- 54:         self._database_url = database_url
- 55:         self._echo = echo
- 56:         self._pool_size = pool_size
- 57:         self._max_overflow = max_overflow
- 58:         self._engine: AsyncEngine | None = None
- 59:         self._session_factory: async_sessionmaker[AsyncSession] | None = None
- 60: 
- 61:     async def connect(self) -> None:
- 62:         """Establish connection to the database."""
- 63:         if self._engine is not None:
- 64:             return
- 65: 
- 66:         logger.info("Connecting to PostgreSQL...")
- 67:         self._engine = create_async_engine(
- 68:             self._database_url,
- 69:             echo=self._echo,
- 70:             pool_size=self._pool_size,
- 71:             max_overflow=self._max_overflow,
- 72:         )
- 73:         self._session_factory = async_sessionmaker(
- 74:             self._engine,
- 75:             class_=AsyncSession,
- 76:             expire_on_commit=False,
- 77:         )
- 78:         logger.info("Connected to PostgreSQL")
- 79: 
- 80:     async def disconnect(self) -> None:
- 81:         """Close database connections."""
- 82:         if self._engine is not None:
- 83:             logger.info("Disconnecting from PostgreSQL...")
- 84:             await self._engine.dispose()
- 85:             self._engine = None
- 86:             self._session_factory = None
- 87:             logger.info("Disconnected from PostgreSQL")
- 88: 
- 89:     async def is_healthy(self) -> bool:
- 90:         """Check if the backend is healthy and connected."""
- 91:         if self._engine is None or self._session_factory is None:
- 92:             return False
- 93:         try:
- 94:             async with self._session_factory() as session:
- 95:                 await session.execute(select(1))
- 96:             return True
- 97:         except Exception as e:
- 98:             logger.error(f"PostgreSQL health check failed: {e}")
- 99:             return False
-100: 
-101:     def _get_session(self) -> AsyncSession:
-102:         """Get a new database session."""
-103:         if self._session_factory is None:
-104:             raise RuntimeError("Backend not connected. Call connect() first.")
-105:         return self._session_factory()
-106: 
-107:     async def create_tables(self) -> None:
-108:         """Create all database tables (for testing/development)."""
-109:         if self._engine is None:
-110:             raise RuntimeError("Backend not connected. Call connect() first.")
-111:         async with self._engine.begin() as conn:
-112:             await conn.run_sync(Base.metadata.create_all)
-113: 
-114:     # =========================================================================
-115:     # Organization operations
-116:     # =========================================================================
-117: 
-118:     async def create_organization(self, org: Organization) -> Organization:
-119:         """Create a new organization."""
-120:         async with self._get_session() as session:
-121:             model = OrganizationModel(
-122:                 id=str(org.id),
-123:                 name=org.name,
-124:                 slug=org.slug,
-125:                 tenancy_mode=org.tenancy_mode,
-126:                 metadata_=org.metadata,
-127:                 created_at=org.created_at,
-128:                 updated_at=org.updated_at,
-129:             )
-130:             session.add(model)
-131:             await session.commit()
-132:             await session.refresh(model)
-133:             return self._org_model_to_domain(model)
-134: 
-135:     async def get_organization(self, org_id: UUID) -> Organization | None:
-136:         """Get an organization by ID."""
-137:         async with self._get_session() as session:
-138:             result = await session.execute(select(OrganizationModel).where(OrganizationModel.id == str(org_id)))
-139:             model = result.scalar_one_or_none()
-140:             return self._org_model_to_domain(model) if model else None
-141: 
-142:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
-143:         """Get an organization by slug."""
-144:         async with self._get_session() as session:
-145:             result = await session.execute(select(OrganizationModel).where(OrganizationModel.slug == slug))
-146:             model = result.scalar_one_or_none()
-147:             return self._org_model_to_domain(model) if model else None
-148: 
-149:     def _org_model_to_domain(self, model: OrganizationModel) -> Organization:
-150:         """Convert OrganizationModel to domain Organization."""
-151:         return Organization(
-152:             id=UUID(model.id),
-153:             name=model.name,
-154:             slug=model.slug,
-155:             tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
-156:             metadata=model.metadata_,
-157:             created_at=model.created_at,
-158:             updated_at=model.updated_at,
-159:         )
-160: 
-161:     # =========================================================================
-162:     # Workspace operations
-163:     # =========================================================================
-164: 
-165:     async def create_workspace(self, workspace: Workspace) -> Workspace:
-166:         """Create a new workspace."""
-167:         async with self._get_session() as session:
-168:             model = WorkspaceModel(
-169:                 id=str(workspace.id),
-170:                 organization_id=str(workspace.organization_id),
-171:                 name=workspace.name,
-172:                 slug=workspace.slug,
-173:                 description=workspace.description,
-174:                 metadata_=workspace.metadata,
-175:                 created_at=workspace.created_at,
-176:                 updated_at=workspace.updated_at,
-177:             )
-178:             session.add(model)
-179:             await session.commit()
-180:             await session.refresh(model)
-181:             return self._workspace_model_to_domain(model)
-182: 
-183:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
-184:         """Get a workspace by ID."""
-185:         async with self._get_session() as session:
-186:             result = await session.execute(select(WorkspaceModel).where(WorkspaceModel.id == str(workspace_id)))
-187:             model = result.scalar_one_or_none()
-188:             return self._workspace_model_to_domain(model) if model else None
-189: 
-190:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
-191:         """List all workspaces in an organization."""
-192:         async with self._get_session() as session:
-193:             result = await session.execute(
-194:                 select(WorkspaceModel).where(WorkspaceModel.organization_id == str(organization_id))
-195:             )
-196:             return [self._workspace_model_to_domain(m) for m in result.scalars().all()]
-197: 
-198:     def _workspace_model_to_domain(self, model: WorkspaceModel) -> Workspace:
-199:         """Convert WorkspaceModel to domain Workspace."""
-200:         return Workspace(
-201:             id=UUID(model.id),
-202:             organization_id=UUID(model.organization_id),
-203:             name=model.name,
-204:             slug=model.slug,
-205:             description=model.description,
-206:             metadata=model.metadata_,
-207:             created_at=model.created_at,
-208:             updated_at=model.updated_at,
-209:         )
-210: 
-211:     # =========================================================================
-212:     # Namespace operations
-213:     # =========================================================================
-214: 
-215:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-216:         """Create a new memory namespace."""
-217:         async with self._get_session() as session:
-218:             model = MemoryNamespaceModel(
-219:                 id=str(namespace.id),
-220:                 workspace_id=str(namespace.workspace_id),
-221:                 name=namespace.name,
-222:                 slug=namespace.slug,
-223:                 description=namespace.description,
-224:                 version=namespace.version,
-225:                 is_active=namespace.is_active,
-226:                 previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
-227:                 config_overrides=namespace.config_overrides,
-228:                 sync_checkpoints=namespace.sync_checkpoints,
-229:                 metadata_=namespace.metadata,
-230:                 created_at=namespace.created_at,
-231:                 updated_at=namespace.updated_at,
-232:             )
-233:             session.add(model)
-234:             await session.commit()
-235:             await session.refresh(model)
-236:             return self._namespace_model_to_domain(model)
-237: 
-238:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-239:         """Get a namespace by ID."""
-240:         async with self._get_session() as session:
-241:             result = await session.execute(
-242:                 select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == str(namespace_id))
-243:             )
-244:             model = result.scalar_one_or_none()
-245:             return self._namespace_model_to_domain(model) if model else None
-246: 
-247:     async def get_namespace_by_slug(
-248:         self, workspace_id: UUID, slug: str, *, active_only: bool = True
-249:     ) -> MemoryNamespace | None:
-250:         """Get a namespace by workspace ID and slug.
-251: 
-252:         Args:
-253:             workspace_id: Workspace ID
-254:             slug: Namespace slug
-255:             active_only: If True, only return active namespace (default)
-256: 
-257:         Returns:
-258:             MemoryNamespace or None if not found
-259:         """
-260:         async with self._get_session() as session:
-261:             query = select(MemoryNamespaceModel).where(
-262:                 MemoryNamespaceModel.workspace_id == str(workspace_id),
-263:                 MemoryNamespaceModel.slug == slug,
-264:             )
-265:             if active_only:
-266:                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
-267:             result = await session.execute(query)
-268:             model = result.scalar_one_or_none()
-269:             return self._namespace_model_to_domain(model) if model else None
-270: 
-271:     async def list_namespaces(self, workspace_id: UUID, *, active_only: bool = True) -> list[MemoryNamespace]:
-272:         """List all namespaces in a workspace.
-273: 
-274:         Args:
-275:             workspace_id: Workspace ID
-276:             active_only: If True, only return active namespaces (default)
-277: 
-278:         Returns:
-279:             List of MemoryNamespace objects
-280:         """
-281:         async with self._get_session() as session:
-282:             query = select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
-283:             if active_only:
-284:                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
-285:             result = await session.execute(query)
-286:             return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
-287: 
-288:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-289:         """Update a namespace."""
-290:         async with self._get_session() as session:
-291:             await session.execute(
-292:                 update(MemoryNamespaceModel)
-293:                 .where(MemoryNamespaceModel.id == str(namespace.id))
-294:                 .values(
-295:                     name=namespace.name,
-296:                     slug=namespace.slug,
-297:                     description=namespace.description,
-298:                     version=namespace.version,
-299:                     is_active=namespace.is_active,
-300:                     previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
-301:                     config_overrides=namespace.config_overrides,
-302:                     sync_checkpoints=namespace.sync_checkpoints,
-303:                     metadata_=namespace.metadata,
-304:                     updated_at=datetime.now(UTC),
-305:                 )
-306:             )
-307:             await session.commit()
-308:             return namespace
-309: 
-310:     def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
-311:         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
-312:         return MemoryNamespace(
-313:             id=UUID(model.id),
-314:             workspace_id=UUID(model.workspace_id),
-315:             name=model.name,
-316:             slug=model.slug,
-317:             description=model.description,
-318:             version=model.version,
-319:             is_active=model.is_active,
-320:             previous_version_id=UUID(model.previous_version_id) if model.previous_version_id else None,
-321:             config_overrides=model.config_overrides,
-322:             sync_checkpoints=model.sync_checkpoints,
-323:             metadata=model.metadata_,
-324:             created_at=model.created_at,
-325:             updated_at=model.updated_at,
-326:         )
-327: 
-328:     async def create_namespace_version(
-329:         self,
-330:         workspace_id: UUID,
-331:         slug: str,
-332:         *,
-333:         previous_version: MemoryNamespace | None = None,
-334:     ) -> MemoryNamespace:
-335:         """Create a new version of a namespace.
-336: 
-337:         If previous_version is provided, increments its version number and links to it.
-338:         The previous version is marked as inactive.
-339: 
-340:         Args:
-341:             workspace_id: Workspace ID
-342:             slug: Namespace slug
-343:             previous_version: The previous version to supersede (if any)
-344: 
-345:         Returns:
-346:             New namespace version
-347:         """
-348:         from uuid import uuid4
-349: 
-350:         new_version = 1
-351:         previous_id = None
-352: 
-353:         if previous_version:
-354:             new_version = previous_version.version + 1
-355:             previous_id = previous_version.id
-356:             # Deactivate the old version
-357:             await self.deactivate_namespace(previous_version.id)
-358: 
-359:         # Create new namespace with incremented version
-360:         namespace = MemoryNamespace(
-361:             id=uuid4(),
-362:             workspace_id=workspace_id,
-363:             name=previous_version.name if previous_version else f"Namespace {slug}",
-364:             slug=slug,
-365:             description=previous_version.description if previous_version else "",
-366:             version=new_version,
-367:             is_active=True,
-368:             previous_version_id=previous_id,
-369:             config_overrides=previous_version.config_overrides if previous_version else {},
-370:             metadata=previous_version.metadata if previous_version else {},
-371:         )
-372: 
-373:         return await self.create_namespace(namespace)
-374: 
-375:     async def deactivate_namespace(self, namespace_id: UUID) -> None:
-376:         """Mark a namespace version as inactive.
-377: 
-378:         Args:
-379:             namespace_id: ID of the namespace to deactivate
-380:         """
-381:         async with self._get_session() as session:
-382:             await session.execute(
-383:                 update(MemoryNamespaceModel)
-384:                 .where(MemoryNamespaceModel.id == str(namespace_id))
-385:                 .values(is_active=False, updated_at=datetime.now(UTC))
-386:             )
-387:             await session.commit()
-388:             logger.info(f"Deactivated namespace {namespace_id}")
-389: 
-390:     # =========================================================================
-391:     # Document operations
-392:     # =========================================================================
-393: 
-394:     async def create_document(self, document: Document) -> Document:
-395:         """Create a new document."""
-396:         async with self._get_session() as session:
-397:             model = DocumentModel(
-398:                 id=str(document.id),
-399:                 namespace_id=str(document.namespace_id),
-400:                 content=document.content,
-401:                 status=document.status,
-402:                 source=document.metadata.source,
-403:                 source_type=document.metadata.source_type,
-404:                 content_type=document.metadata.content_type,
-405:                 title=document.metadata.title,
-406:                 author=document.metadata.author,
-407:                 language=document.metadata.language,
-408:                 checksum=document.metadata.checksum,
-409:                 size_bytes=document.metadata.size_bytes,
-410:                 metadata_=document.metadata.custom,
-411:                 chunk_count=document.chunk_count,
-412:                 entity_count=document.entity_count,
-413:                 error_message=document.error_message,
-414:                 created_at=document.created_at,
-415:                 updated_at=document.updated_at,
-416:                 processed_at=document.processed_at,
-417:             )
-418:             session.add(model)
-419:             await session.commit()
-420:             await session.refresh(model)
-421:             return self._document_model_to_domain(model)
-422: 
-423:     async def get_document(self, document_id: UUID) -> Document | None:
-424:         """Get a document by ID."""
-425:         async with self._get_session() as session:
-426:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
-427:             model = result.scalar_one_or_none()
-428:             return self._document_model_to_domain(model) if model else None
-429: 
-430:     async def list_documents(
-431:         self,
-432:         namespace_id: UUID,
-433:         *,
-434:         status: str | None = None,
-435:         limit: int = 100,
-436:         offset: int = 0,
-437:     ) -> list[Document]:
-438:         """List documents in a namespace."""
-439:         async with self._get_session() as session:
-440:             query = select(DocumentModel).where(DocumentModel.namespace_id == str(namespace_id))
-441:             if status:
-442:                 query = query.where(DocumentModel.status == status)
-443:             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
-444:             result = await session.execute(query)
-445:             return [self._document_model_to_domain(m) for m in result.scalars().all()]
-446: 
-447:     async def update_document(self, document: Document) -> Document:
-448:         """Update a document."""
-449:         async with self._get_session() as session:
-450:             await session.execute(
-451:                 update(DocumentModel)
-452:                 .where(DocumentModel.id == str(document.id))
-453:                 .values(
-454:                     content=document.content,
-455:                     status=document.status,
-456:                     source=document.metadata.source,
-457:                     source_type=document.metadata.source_type,
-458:                     content_type=document.metadata.content_type,
-459:                     title=document.metadata.title,
-460:                     author=document.metadata.author,
-461:                     language=document.metadata.language,
-462:                     checksum=document.metadata.checksum,
-463:                     size_bytes=document.metadata.size_bytes,
-464:                     metadata_=document.metadata.custom,
-465:                     chunk_count=document.chunk_count,
-466:                     entity_count=document.entity_count,
-467:                     error_message=document.error_message,
-468:                     updated_at=datetime.now(UTC),
-469:                     processed_at=document.processed_at,
-470:                 )
-471:             )
-472:             await session.commit()
-473:             return document
-474: 
-475:     async def delete_document(self, document_id: UUID) -> bool:
-476:         """Delete a document."""
-477:         async with self._get_session() as session:
-478:             result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
-479:             model = result.scalar_one_or_none()
-480:             if model:
-481:                 await session.delete(model)
-482:                 await session.commit()
-483:                 return True
-484:             return False
-485: 
-486:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-487:         """Get a document by its content checksum (for deduplication).
-488: 
-489:         Returns the first matching document if multiple exist with the same checksum.
-490:         """
-491:         async with self._get_session() as session:
-492:             result = await session.execute(
-493:                 select(DocumentModel).where(
-494:                     DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
-495:                 )
-496:             )
-497:             model = result.scalars().first()
-498:             return self._document_model_to_domain(model) if model else None
-499: 
-500:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-501:         """Fetch multiple documents in a single query.
-502: 
-503:         Args:
-504:             document_ids: List of document IDs to fetch
-505: 
-506:         Returns:
-507:             Dictionary mapping document ID to Document object
-508:         """
-509:         if not document_ids:
-510:             return {}
-511: 
-512:         async with self._get_session() as session:
-513:             result = await session.execute(
-514:                 select(DocumentModel).where(DocumentModel.id.in_([str(did) for did in document_ids]))
-515:             )
-516:             models = result.scalars().all()
-517:             return {UUID(m.id): self._document_model_to_domain(m) for m in models}
-518: 
-519:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
-520:         """Convert DocumentModel to domain Document."""
-521:         return Document(
-522:             id=UUID(model.id),
-523:             namespace_id=UUID(model.namespace_id),
-524:             content=model.content,
-525:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
-526:             metadata=DocumentMetadata(
-527:                 source=model.source,
-528:                 source_type=model.source_type,
-529:                 content_type=model.content_type,
-530:                 title=model.title,
-531:                 author=model.author,
-532:                 language=model.language,
-533:                 checksum=model.checksum,
-534:                 size_bytes=model.size_bytes,
-535:                 custom=model.metadata_,
-536:             ),
-537:             chunk_count=model.chunk_count,
-538:             entity_count=model.entity_count,
-539:             error_message=model.error_message,
-540:             created_at=model.created_at,
-541:             updated_at=model.updated_at,
-542:             processed_at=model.processed_at,
-543:         )
-544: 
-545:     # =========================================================================
-546:     # Sync checkpoint operations
-547:     # =========================================================================
-548: 
-549:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-550:         """Get the last sync checkpoint for a source."""
-551:         async with self._get_session() as session:
-552:             result = await session.execute(
-553:                 select(SyncCheckpointModel).where(
-554:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-555:                 )
-556:             )
-557:             model = result.scalar_one_or_none()
-558:             return model.checkpoint if model else None
-559: 
-560:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-561:         """Set the sync checkpoint for a source."""
-562:         async with self._get_session() as session:
-563:             result = await session.execute(
-564:                 select(SyncCheckpointModel).where(
-565:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-566:                 )
-567:             )
-568:             model = result.scalar_one_or_none()
-569:             if model:
-570:                 model.checkpoint = checkpoint
-571:                 model.updated_at = datetime.now(UTC)
-572:             else:
-573:                 model = SyncCheckpointModel(
-574:                     namespace_id=str(namespace_id),
-575:                     source=source,
-576:                     checkpoint=checkpoint,
-577:                 )
-578:                 session.add(model)
-579:             await session.commit()
-````
-
 ## File: src/khora/storage/__init__.py
 ````python
  1: """Storage layer for Khora Memory Lake.
@@ -26183,618 +26797,147 @@ README.md
 186:         assert result == []
 ````
 
-## File: src/khora/db/models.py
+## File: src/khora/api/routes/status.py
 ````python
-  1: """SQLAlchemy models for Khora Memory Lake.
-  2: 
-  3: This module defines the complete database schema including:
-  4: - Multi-tenancy (organizations, workspaces, namespaces)
-  5: - Documents and chunks with vector embeddings
-  6: - Entities, relationships, and episodes
-  7: - Event sourcing log
-  8: - ACL and permissions
-  9: """
- 10: 
- 11: from __future__ import annotations
- 12: 
- 13: from datetime import UTC, datetime
- 14: from typing import Any
- 15: from uuid import uuid4
- 16: 
- 17: from pgvector.sqlalchemy import Vector
- 18: from sqlalchemy import (
- 19:     Boolean,
- 20:     Computed,
- 21:     DateTime,
- 22:     Enum,
- 23:     Float,
- 24:     ForeignKey,
- 25:     Index,
- 26:     Integer,
- 27:     String,
- 28:     Text,
- 29:     UniqueConstraint,
- 30: )
- 31: from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
- 32: from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
- 33: 
- 34: from khora.core.models.document import DocumentStatus
- 35: from khora.core.models.event import EventType
- 36: from khora.core.models.tenancy import TenancyMode
- 37: 
- 38: 
- 39: class Base(DeclarativeBase):
- 40:     """Base class for all SQLAlchemy models."""
- 41: 
- 42:     type_annotation_map = {
- 43:         dict[str, Any]: JSONB,
- 44:         list[str]: ARRAY(String),
- 45:     }
- 46: 
- 47: 
- 48: # =============================================================================
- 49: # Multi-Tenancy Models
- 50: # =============================================================================
- 51: 
- 52: 
- 53: class OrganizationModel(Base):
- 54:     """Organization - top-level tenant."""
- 55: 
- 56:     __tablename__ = "organizations"
- 57: 
- 58:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
- 59:     name: Mapped[str] = mapped_column(String(255), nullable=False)
- 60:     slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
- 61:     tenancy_mode: Mapped[str] = mapped_column(
- 62:         Enum(TenancyMode, name="tenancy_mode", create_constraint=True),
- 63:         default=TenancyMode.SHARED,
- 64:     )
- 65:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
- 66:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
- 67:     updated_at: Mapped[datetime] = mapped_column(
- 68:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
- 69:     )
- 70: 
- 71:     # Relationships
- 72:     workspaces: Mapped[list[WorkspaceModel]] = relationship("WorkspaceModel", back_populates="organization")
- 73: 
- 74:     def __repr__(self) -> str:
- 75:         return f"<Organization(id={self.id!r}, name={self.name!r})>"
- 76: 
- 77: 
- 78: class WorkspaceModel(Base):
- 79:     """Workspace within an organization."""
- 80: 
- 81:     __tablename__ = "workspaces"
- 82: 
- 83:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
- 84:     organization_id: Mapped[str] = mapped_column(
- 85:         UUID(as_uuid=False), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
- 86:     )
- 87:     name: Mapped[str] = mapped_column(String(255), nullable=False)
- 88:     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
- 89:     description: Mapped[str] = mapped_column(Text, default="")
- 90:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
- 91:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
- 92:     updated_at: Mapped[datetime] = mapped_column(
- 93:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
- 94:     )
- 95: 
- 96:     # Relationships
- 97:     organization: Mapped[OrganizationModel] = relationship("OrganizationModel", back_populates="workspaces")
- 98:     namespaces: Mapped[list[MemoryNamespaceModel]] = relationship("MemoryNamespaceModel", back_populates="workspace")
- 99: 
-100:     __table_args__ = (UniqueConstraint("organization_id", "slug", name="uq_workspace_org_slug"),)
-101: 
-102:     def __repr__(self) -> str:
-103:         return f"<Workspace(id={self.id!r}, name={self.name!r})>"
-104: 
-105: 
-106: class MemoryNamespaceModel(Base):
-107:     """Memory namespace for isolating memories.
-108: 
-109:     Supports versioning for data replacement workflows:
-110:     - version: Incremental version number (starts at 1)
-111:     - is_active: Whether this is the current active version
-112:     - previous_version_id: Reference to the previous version (if any)
-113:     """
-114: 
-115:     __tablename__ = "memory_namespaces"
-116: 
-117:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-118:     workspace_id: Mapped[str] = mapped_column(
-119:         UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
-120:     )
-121:     name: Mapped[str] = mapped_column(String(255), nullable=False)
-122:     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-123:     description: Mapped[str] = mapped_column(Text, default="")
-124: 
-125:     # Versioning fields
-126:     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-127:     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-128:     previous_version_id: Mapped[str | None] = mapped_column(
-129:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="SET NULL"), nullable=True
-130:     )
-131: 
-132:     config_overrides: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-133:     sync_checkpoints: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-134:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-135:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-136:     updated_at: Mapped[datetime] = mapped_column(
-137:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-138:     )
-139: 
-140:     # Relationships
-141:     workspace: Mapped[WorkspaceModel] = relationship("WorkspaceModel", back_populates="namespaces")
-142:     documents: Mapped[list[DocumentModel]] = relationship("DocumentModel", back_populates="namespace")
-143:     chunks: Mapped[list[ChunkModel]] = relationship("ChunkModel", back_populates="namespace")
-144:     entities: Mapped[list[EntityModel]] = relationship("EntityModel", back_populates="namespace")
-145:     relationships: Mapped[list[RelationshipModel]] = relationship("RelationshipModel", back_populates="namespace")
-146:     episodes: Mapped[list[EpisodeModel]] = relationship("EpisodeModel", back_populates="namespace")
-147:     events: Mapped[list[MemoryEventModel]] = relationship("MemoryEventModel", back_populates="namespace")
-148:     expertise_definitions: Mapped[list[ExpertiseDefinitionModel]] = relationship(
-149:         "ExpertiseDefinitionModel", back_populates="namespace"
-150:     )
-151: 
-152:     __table_args__ = (
-153:         # Only one active namespace per workspace/slug combination
-154:         UniqueConstraint("workspace_id", "slug", "version", name="uq_namespace_workspace_slug_version"),
-155:         # Partial index for efficient active namespace queries
-156:         Index("idx_namespace_active", "workspace_id", "slug", postgresql_where="is_active = true"),
-157:     )
-158: 
-159:     def __repr__(self) -> str:
-160:         return f"<MemoryNamespace(id={self.id!r}, name={self.name!r})>"
-161: 
-162: 
-163: # =============================================================================
-164: # Document Models
-165: # =============================================================================
-166: 
-167: 
-168: class DocumentModel(Base):
-169:     """Document to be processed and stored."""
-170: 
-171:     __tablename__ = "documents"
-172: 
-173:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-174:     namespace_id: Mapped[str] = mapped_column(
-175:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-176:     )
-177:     content: Mapped[str] = mapped_column(Text, nullable=False)
-178:     status: Mapped[str] = mapped_column(
-179:         Enum(DocumentStatus, name="document_status", create_constraint=True),
-180:         default=DocumentStatus.PENDING,
-181:         index=True,
-182:     )
-183: 
-184:     # Metadata
-185:     source: Mapped[str] = mapped_column(String(1024), default="")
-186:     source_type: Mapped[str] = mapped_column(String(64), default="")
-187:     content_type: Mapped[str] = mapped_column(String(128), default="")
-188:     title: Mapped[str] = mapped_column(String(512), default="")
-189:     author: Mapped[str] = mapped_column(String(255), default="")
-190:     language: Mapped[str] = mapped_column(String(10), default="en")
-191:     checksum: Mapped[str] = mapped_column(String(64), default="", index=True)
-192:     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
-193:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-194: 
-195:     # Processing info
-196:     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
-197:     entity_count: Mapped[int] = mapped_column(Integer, default=0)
-198:     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-199: 
-200:     # Timestamps
-201:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-202:     updated_at: Mapped[datetime] = mapped_column(
-203:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-204:     )
-205:     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-206: 
-207:     # Relationships
-208:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="documents")
-209:     chunks: Mapped[list[ChunkModel]] = relationship(
-210:         "ChunkModel", back_populates="document", cascade="all, delete-orphan"
-211:     )
-212: 
-213:     __table_args__ = (Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),)
-214: 
-215:     def __repr__(self) -> str:
-216:         return f"<Document(id={self.id!r}, title={self.title!r})>"
-217: 
-218: 
-219: class ChunkModel(Base):
-220:     """Chunk of text from a document with embedding."""
-221: 
-222:     __tablename__ = "chunks"
-223: 
-224:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-225:     namespace_id: Mapped[str] = mapped_column(
-226:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-227:     )
-228:     document_id: Mapped[str] = mapped_column(
-229:         UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
-230:     )
-231:     content: Mapped[str] = mapped_column(Text, nullable=False)
-232: 
-233:     # Chunk metadata
-234:     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
-235:     start_char: Mapped[int] = mapped_column(Integer, default=0)
-236:     end_char: Mapped[int] = mapped_column(Integer, default=0)
-237:     token_count: Mapped[int] = mapped_column(Integer, default=0)
-238:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-239: 
-240:     # Embedding (pgvector)
-241:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-242:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
-243: 
-244:     # Full-text search (generated tsvector column)
-245:     content_tsv: Mapped[Any | None] = mapped_column(
-246:         TSVECTOR,
-247:         Computed("to_tsvector('english', content)", persisted=True),
-248:         nullable=True,
-249:     )
-250: 
-251:     # Timestamps
-252:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-253: 
-254:     # Relationships
-255:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="chunks")
-256:     document: Mapped[DocumentModel] = relationship("DocumentModel", back_populates="chunks")
-257: 
-258:     __table_args__ = (
-259:         Index("ix_chunks_document_index", "document_id", "chunk_index"),
-260:         # Vector similarity index (HNSW for better recall)
-261:         Index(
-262:             "ix_chunks_embedding_hnsw",
-263:             "embedding",
-264:             postgresql_using="hnsw",
-265:             postgresql_with={"m": 16, "ef_construction": 64},
-266:             postgresql_ops={"embedding": "vector_cosine_ops"},
-267:         ),
-268:         # GIN index for full-text search
-269:         Index(
-270:             "ix_chunks_content_tsv",
-271:             "content_tsv",
-272:             postgresql_using="gin",
-273:         ),
-274:     )
-275: 
-276:     def __repr__(self) -> str:
-277:         return f"<Chunk(id={self.id!r}, document_id={self.document_id!r}, index={self.chunk_index})>"
-278: 
-279: 
-280: # =============================================================================
-281: # Entity Models
-282: # =============================================================================
-283: 
-284: 
-285: class EntityModel(Base):
-286:     """Entity extracted from documents (stored in both PostgreSQL and Neo4j)."""
-287: 
-288:     __tablename__ = "entities"
-289: 
-290:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-291:     namespace_id: Mapped[str] = mapped_column(
-292:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-293:     )
-294:     name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
-295:     entity_type: Mapped[str] = mapped_column(
-296:         String(64),
-297:         default="CONCEPT",
-298:         index=True,
-299:     )
-300:     description: Mapped[str] = mapped_column(Text, default="")
-301: 
-302:     # Attributes and sources
-303:     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-304:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-305:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-306:     mention_count: Mapped[int] = mapped_column(Integer, default=1)
-307: 
-308:     # Embedding for entity similarity
-309:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-310:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
-311: 
-312:     # Temporal validity
-313:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-314:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-315: 
-316:     # Confidence
-317:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
-318: 
-319:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-320:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-321:     updated_at: Mapped[datetime] = mapped_column(
-322:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-323:     )
-324: 
-325:     # Relationships
-326:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="entities")
-327: 
-328:     __table_args__ = (
-329:         Index("ix_entities_namespace_name_type", "namespace_id", "name", "entity_type"),
-330:         Index(
-331:             "ix_entities_embedding_hnsw",
-332:             "embedding",
-333:             postgresql_using="hnsw",
-334:             postgresql_with={"m": 16, "ef_construction": 64},
-335:             postgresql_ops={"embedding": "vector_cosine_ops"},
-336:         ),
-337:     )
-338: 
-339:     def __repr__(self) -> str:
-340:         return f"<Entity(id={self.id!r}, name={self.name!r}, type={self.entity_type})>"
-341: 
-342: 
-343: class RelationshipModel(Base):
-344:     """Relationship between entities (stored in both PostgreSQL and Neo4j)."""
-345: 
-346:     __tablename__ = "relationships"
-347: 
-348:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-349:     namespace_id: Mapped[str] = mapped_column(
-350:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-351:     )
-352:     source_entity_id: Mapped[str] = mapped_column(
-353:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
-354:     )
-355:     target_entity_id: Mapped[str] = mapped_column(
-356:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
-357:     )
-358:     relationship_type: Mapped[str] = mapped_column(
-359:         String(64),
-360:         default="RELATES_TO",
-361:         index=True,
-362:     )
-363:     description: Mapped[str] = mapped_column(Text, default="")
-364: 
-365:     # Properties and sources
-366:     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-367:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-368:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-369: 
-370:     # Temporal validity
-371:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-372:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-373: 
-374:     # Confidence and weight
-375:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
-376:     weight: Mapped[float] = mapped_column(Float, default=1.0)
-377: 
-378:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-379:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-380:     updated_at: Mapped[datetime] = mapped_column(
-381:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-382:     )
-383: 
-384:     # Relationships
-385:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="relationships")
-386: 
-387:     __table_args__ = (Index("ix_relationships_entities", "source_entity_id", "target_entity_id"),)
-388: 
-389:     def __repr__(self) -> str:
-390:         return f"<Relationship(id={self.id!r}, type={self.relationship_type})>"
-391: 
-392: 
-393: class EpisodeModel(Base):
-394:     """Episodic memory representing a temporal event."""
-395: 
-396:     __tablename__ = "episodes"
-397: 
-398:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-399:     namespace_id: Mapped[str] = mapped_column(
-400:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-401:     )
-402:     name: Mapped[str] = mapped_column(String(512), nullable=False)
-403:     description: Mapped[str] = mapped_column(Text, default="")
-404: 
-405:     # Temporal bounds
-406:     occurred_at: Mapped[datetime] = mapped_column(
-407:         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
-408:     )
-409:     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
-410: 
-411:     # Associated entities
-412:     entity_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-413: 
-414:     # Sources
-415:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-416:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-417: 
-418:     # Embedding
-419:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-420:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
-421: 
-422:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-423:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-424:     updated_at: Mapped[datetime] = mapped_column(
-425:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-426:     )
-427: 
-428:     # Relationships
-429:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="episodes")
-430: 
-431:     def __repr__(self) -> str:
-432:         return f"<Episode(id={self.id!r}, name={self.name!r})>"
-433: 
-434: 
-435: # =============================================================================
-436: # Event Sourcing Model
-437: # =============================================================================
-438: 
-439: 
-440: class MemoryEventModel(Base):
-441:     """Immutable event log for event sourcing."""
-442: 
-443:     __tablename__ = "memory_events"
-444: 
-445:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-446:     namespace_id: Mapped[str] = mapped_column(
-447:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-448:     )
-449:     event_type: Mapped[str] = mapped_column(
-450:         Enum(EventType, name="event_type", create_constraint=True),
-451:         nullable=False,
-452:         index=True,
-453:     )
-454:     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
-455: 
-456:     # Resource reference
-457:     resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-458:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
-459: 
-460:     # Event data
-461:     data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-462:     previous_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-463: 
-464:     # Actor info
-465:     actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-466:     actor_type: Mapped[str] = mapped_column(String(64), default="system")
-467: 
-468:     # Correlation
-469:     correlation_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
-470: 
-471:     # Version
-472:     version: Mapped[int] = mapped_column(Integer, default=1)
-473: 
-474:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-475: 
-476:     # Relationships
-477:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="events")
-478: 
-479:     __table_args__ = (
-480:         Index("ix_events_resource", "resource_type", "resource_id"),
-481:         Index("ix_events_namespace_timestamp", "namespace_id", "timestamp"),
-482:     )
-483: 
-484:     def __repr__(self) -> str:
-485:         return f"<MemoryEvent(id={self.id!r}, type={self.event_type})>"
-486: 
-487: 
-488: # =============================================================================
-489: # ACL / Permissions Model
-490: # =============================================================================
-491: 
-492: 
-493: class PermissionModel(Base):
-494:     """Permission entry for ACL-based access control."""
-495: 
-496:     __tablename__ = "permissions"
-497: 
-498:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-499: 
-500:     # The principal (who has the permission)
-501:     principal_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # user, role, api_key
-502:     principal_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-503: 
-504:     # The resource (what the permission applies to)
-505:     resource_type: Mapped[str] = mapped_column(
-506:         String(64), nullable=False, index=True
-507:     )  # organization, workspace, namespace
-508:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
-509: 
-510:     # The permission level
-511:     permission: Mapped[str] = mapped_column(String(64), nullable=False)  # read, write, admin, owner
-512: 
-513:     # Inheritance
-514:     inherited_from_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-515:     inherited_from_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
-516: 
-517:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-518:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-519:     updated_at: Mapped[datetime] = mapped_column(
-520:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-521:     )
-522: 
-523:     __table_args__ = (
-524:         UniqueConstraint(
-525:             "principal_type", "principal_id", "resource_type", "resource_id", "permission", name="uq_permission"
-526:         ),
-527:         Index("ix_permissions_principal", "principal_type", "principal_id"),
-528:         Index("ix_permissions_resource", "resource_type", "resource_id"),
-529:     )
-530: 
-531:     def __repr__(self) -> str:
-532:         return f"<Permission({self.principal_type}:{self.principal_id} -> {self.resource_type}:{self.resource_id} = {self.permission})>"
-533: 
-534: 
-535: # =============================================================================
-536: # Sync Checkpoint Model (for incremental updates)
-537: # =============================================================================
-538: 
-539: 
-540: class SyncCheckpointModel(Base):
-541:     """Sync checkpoint for tracking incremental updates from external sources."""
-542: 
-543:     __tablename__ = "sync_checkpoints"
-544: 
-545:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-546:     namespace_id: Mapped[str] = mapped_column(
-547:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-548:     )
-549:     source: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # e.g., "github", "notion", "slack"
-550:     checkpoint: Mapped[str] = mapped_column(Text, nullable=False)  # Source-specific checkpoint value
-551:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-552:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-553:     updated_at: Mapped[datetime] = mapped_column(
-554:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-555:     )
-556: 
-557:     __table_args__ = (UniqueConstraint("namespace_id", "source", name="uq_sync_checkpoint_namespace_source"),)
-558: 
-559:     def __repr__(self) -> str:
-560:         return f"<SyncCheckpoint(namespace_id={self.namespace_id!r}, source={self.source!r})>"
-561: 
-562: 
-563: # =============================================================================
-564: # Expertise Definition Model
-565: # =============================================================================
-566: 
-567: 
-568: class ExpertiseDefinitionModel(Base):
-569:     """Stored expertise configuration for a namespace.
-570: 
-571:     Allows namespaces to have custom expertise definitions that control
-572:     entity extraction, relationship types, correlation rules, and inference rules.
-573:     """
-574: 
-575:     __tablename__ = "expertise_definitions"
-576: 
-577:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-578:     namespace_id: Mapped[str] = mapped_column(
-579:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-580:     )
-581:     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-582:     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
-583:     description: Mapped[str] = mapped_column(Text, default="")
-584: 
-585:     # The full expertise configuration as JSONB
-586:     # Contains: entity_types, relationship_types, tool_schemas, correlation_rules,
-587:     # inference_rules, confidence, expansion, system_prompt, extraction_prompt
-588:     config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-589: 
-590:     # Status
-591:     is_active: Mapped[bool] = mapped_column(default=True, index=True)
-592: 
-593:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-594:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-595:     updated_at: Mapped[datetime] = mapped_column(
-596:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-597:     )
-598: 
-599:     # Relationships
-600:     namespace: Mapped[MemoryNamespaceModel] = relationship(
-601:         "MemoryNamespaceModel", back_populates="expertise_definitions"
-602:     )
-603: 
-604:     __table_args__ = (
-605:         UniqueConstraint("namespace_id", "name", name="uq_expertise_namespace_name"),
-606:         Index("ix_expertise_namespace_active", "namespace_id", "is_active"),
-607:     )
-608: 
-609:     def __repr__(self) -> str:
-610:         return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"
+ 1: """Status endpoints for Khora API."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
+ 7: 
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: router = APIRouter()
+11: 
+12: 
+13: @router.get("/status")
+14: async def status_check(request: Request) -> dict[str, Any]:
+15:     """Basic status check endpoint.
+16: 
+17:     Returns:
+18:         Status with timestamp and version
+19:     """
+20:     return {
+21:         "status": "ok",
+22:         "timestamp": datetime.now(UTC).isoformat(),
+23:         "version": "0.0.9",
+24:         "service": "khora",
+25:     }
+26: 
+27: 
+28: @router.get("/health")
+29: async def health_check(request: Request) -> dict[str, Any]:
+30:     """Health check endpoint for orchestration systems.
+31: 
+32:     Returns:
+33:         Health status with timestamp
+34:     """
+35:     return {
+36:         "status": "healthy",
+37:         "timestamp": datetime.now(UTC).isoformat(),
+38:         "version": "0.0.9",
+39:     }
+40: 
+41: 
+42: @router.get("/health/ready")
+43: async def readiness_check(request: Request) -> dict[str, Any]:
+44:     """Readiness check for Kubernetes/orchestration.
+45: 
+46:     Checks that all required services are available.
+47: 
+48:     Returns:
+49:         Readiness status with component checks
+50:     """
+51:     config = request.app.state.config
+52:     checks: dict[str, bool] = {}
+53: 
+54:     # TODO: Add actual health checks for:
+55:     # - Database connections
+56:     # - External services
+57: 
+58:     # For now, return basic status
+59:     checks["config_loaded"] = config is not None
+60: 
+61:     all_healthy = all(checks.values())
+62: 
+63:     return {
+64:         "status": "ready" if all_healthy else "not_ready",
+65:         "timestamp": datetime.now(UTC).isoformat(),
+66:         "checks": checks,
+67:     }
+68: 
+69: 
+70: @router.get("/health/live")
+71: async def liveness_check() -> dict[str, Any]:
+72:     """Liveness check for Kubernetes/orchestration.
+73: 
+74:     Simple check that the application is running.
+75: 
+76:     Returns:
+77:         Liveness status
+78:     """
+79:     return {
+80:         "status": "alive",
+81:         "timestamp": datetime.now(UTC).isoformat(),
+82:     }
+````
+
+## File: src/khora/cli/__init__.py
+````python
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.0.9")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/extraction/expansion/entity_index.py
@@ -28310,6 +28453,91 @@ README.md
 81:     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 ````
 
+## File: tests/unit/test_api.py
+````python
+ 1: """Tests for API module."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
+ 7: 
+ 8: 
+ 9: @pytest.mark.unit
+10: class TestStatusEndpoints:
+11:     """Tests for status check endpoints."""
+12: 
+13:     def test_status_check(self, test_client: TestClient) -> None:
+14:         """Test basic status check endpoint."""
+15:         response = test_client.get("/status")
+16: 
+17:         assert response.status_code == 200
+18:         data = response.json()
+19:         assert data["status"] == "ok"
+20:         assert "timestamp" in data
+21:         assert data["version"] == "0.0.9"
+22:         assert data["service"] == "khora"
+23: 
+24:     def test_health_check(self, test_client: TestClient) -> None:
+25:         """Test health check endpoint."""
+26:         response = test_client.get("/health")
+27: 
+28:         assert response.status_code == 200
+29:         data = response.json()
+30:         assert data["status"] == "healthy"
+31:         assert "timestamp" in data
+32:         assert data["version"] == "0.0.9"
+33: 
+34:     def test_readiness_check(self, test_client: TestClient) -> None:
+35:         """Test readiness check endpoint."""
+36:         response = test_client.get("/health/ready")
+37: 
+38:         assert response.status_code == 200
+39:         data = response.json()
+40:         assert data["status"] in ["ready", "not_ready"]
+41:         assert "timestamp" in data
+42:         assert "checks" in data
+43: 
+44:     def test_liveness_check(self, test_client: TestClient) -> None:
+45:         """Test liveness check endpoint."""
+46:         response = test_client.get("/health/live")
+47: 
+48:         assert response.status_code == 200
+49:         data = response.json()
+50:         assert data["status"] == "alive"
+51:         assert "timestamp" in data
+52: 
+53: 
+54: @pytest.mark.unit
+55: class TestConfig:
+56:     """Tests for configuration."""
+57: 
+58:     def test_default_config(self) -> None:
+59:         """Test default configuration values."""
+60:         from khora.config import KhoraConfig
+61: 
+62:         config = KhoraConfig()
+63:         assert config.app_name == "khora"
+64:         assert config.environment == "development"
+65:         assert config.debug is False
+66:         assert config.api_host == "127.0.0.1"
+67:         assert config.api_port == 8000
+68:         assert config.auth_enabled is True
+69: 
+70:     def test_config_from_env(self, monkeypatch) -> None:
+71:         """Test configuration from environment variables."""
+72:         from khora.config import KhoraConfig
+73: 
+74:         monkeypatch.setenv("KHORA_DEBUG", "true")
+75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+77: 
+78:         config = KhoraConfig()
+79:         assert config.debug is True
+80:         assert config.api_port == 9000
+81:         assert config.environment == "staging"
+````
+
 ## File: tests/unit/test_entity_index.py
 ````python
   1: """Tests for EntityIndex — the in-memory blocking index for entity resolution."""
@@ -29404,147 +29632,152 @@ README.md
 807: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
-## File: src/khora/api/routes/status.py
+## File: src/khora/api/app.py
 ````python
- 1: """Status endpoints for Khora API."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: router = APIRouter()
-11: 
-12: 
-13: @router.get("/status")
-14: async def status_check(request: Request) -> dict[str, Any]:
-15:     """Basic status check endpoint.
-16: 
-17:     Returns:
-18:         Status with timestamp and version
-19:     """
-20:     return {
-21:         "status": "ok",
-22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.9",
-24:         "service": "khora",
-25:     }
-26: 
-27: 
-28: @router.get("/health")
-29: async def health_check(request: Request) -> dict[str, Any]:
-30:     """Health check endpoint for orchestration systems.
-31: 
-32:     Returns:
-33:         Health status with timestamp
-34:     """
-35:     return {
-36:         "status": "healthy",
-37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.9",
-39:     }
-40: 
-41: 
-42: @router.get("/health/ready")
-43: async def readiness_check(request: Request) -> dict[str, Any]:
-44:     """Readiness check for Kubernetes/orchestration.
-45: 
-46:     Checks that all required services are available.
-47: 
-48:     Returns:
-49:         Readiness status with component checks
-50:     """
-51:     config = request.app.state.config
-52:     checks: dict[str, bool] = {}
-53: 
-54:     # TODO: Add actual health checks for:
-55:     # - Database connections
-56:     # - External services
-57: 
-58:     # For now, return basic status
-59:     checks["config_loaded"] = config is not None
-60: 
-61:     all_healthy = all(checks.values())
-62: 
-63:     return {
-64:         "status": "ready" if all_healthy else "not_ready",
-65:         "timestamp": datetime.now(UTC).isoformat(),
-66:         "checks": checks,
-67:     }
-68: 
-69: 
-70: @router.get("/health/live")
-71: async def liveness_check() -> dict[str, Any]:
-72:     """Liveness check for Kubernetes/orchestration.
-73: 
-74:     Simple check that the application is running.
-75: 
-76:     Returns:
-77:         Liveness status
-78:     """
-79:     return {
-80:         "status": "alive",
-81:         "timestamp": datetime.now(UTC).isoformat(),
-82:     }
-````
-
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.0.9")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     else:
+ 86:         # If MemoryLake wasn't initialized, still shut down telemetry
+ 87:         from ..telemetry import shutdown_telemetry
+ 88: 
+ 89:         await shutdown_telemetry()
+ 90:     await close_db()
+ 91: 
+ 92: 
+ 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 94:     """Create and configure the FastAPI application.
+ 95: 
+ 96:     Args:
+ 97:         config: Optional application configuration
+ 98: 
+ 99:     Returns:
+100:         Configured FastAPI application
+101:     """
+102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+103:     from ..logging_config import setup_logging
+104: 
+105:     setup_logging(level="INFO")
+106: 
+107:     if config is None:
+108:         from ..config import load_config
+109: 
+110:         config = load_config()
+111: 
+112:     app = FastAPI(
+113:         title="Khora",
+114:         description="Deyta's memory lake and materialization of knowledge",
+115:         version="0.0.9",
+116:         lifespan=lifespan,
+117:         debug=config.debug,
+118:     )
+119: 
+120:     # Store config in app state
+121:     app.state.config = config
+122: 
+123:     # Configure CORS
+124:     app.add_middleware(
+125:         CORSMiddleware,
+126:         allow_origins=["*"] if config.debug else [],
+127:         allow_credentials=True,
+128:         allow_methods=["*"],
+129:         allow_headers=["*"],
+130:     )
+131: 
+132:     # Add request logging
+133:     app.add_middleware(LoggingMiddleware)
+134: 
+135:     # Register routes
+136:     # Status endpoint is public (no auth)
+137:     app.include_router(status.router, tags=["status"])
+138: 
+139:     # Memory Lake API routes
+140:     app.include_router(memory.router)
+141:     app.include_router(namespaces.router)
+142:     app.include_router(sync.router)
+143: 
+144:     return app
 ````
 
 ## File: src/khora/core/models/entity.py
@@ -29785,893 +30018,6 @@ README.md
 234: 
 235:             return self.occurred_at + timedelta(seconds=self.duration_seconds)
 236:         return None
-````
-
-## File: src/khora/extraction/expansion/rule_engine.py
-````python
-  1: """Configurable rule evaluation engine.
-  2: 
-  3: Provides a generic rule evaluation system for both correlation rules
-  4: and inference rules defined in expertise configurations.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import re
- 10: from dataclasses import dataclass, field
- 11: from typing import TYPE_CHECKING, Any
- 12: 
- 13: from loguru import logger
- 14: 
- 15: if TYPE_CHECKING:
- 16:     from khora.core.models import Entity, Relationship
- 17:     from khora.extraction.skills import CorrelationRule, ExpertiseConfig, InferenceRule
- 18: 
- 19: 
- 20: @dataclass
- 21: class RuleMatch:
- 22:     """Result of a rule match."""
- 23: 
- 24:     rule_name: str
- 25:     matched_value: str | None = None
- 26:     matched_entities: list[Entity] = field(default_factory=list)
- 27:     matched_relationships: list[Relationship] = field(default_factory=list)
- 28:     confidence: float = 1.0
- 29:     metadata: dict[str, Any] = field(default_factory=dict)
- 30: 
- 31: 
- 32: @dataclass
- 33: class RuleEvaluationContext:
- 34:     """Context for rule evaluation containing available data."""
- 35: 
- 36:     entities: list[Entity] = field(default_factory=list)
- 37:     relationships: list[Relationship] = field(default_factory=list)
- 38:     entity_index: dict[str, list[Entity]] = field(default_factory=dict)  # name -> entities
- 39:     type_index: dict[str, list[Entity]] = field(default_factory=dict)  # type -> entities
- 40:     relationship_index: dict[str, list[Relationship]] = field(default_factory=dict)  # type -> relationships
- 41:     # New: Index relationships by entity for fast chain lookups
- 42:     rels_by_source: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> outgoing rels
- 43:     rels_by_target: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> incoming rels
- 44:     entity_by_id: dict[str, Entity] = field(default_factory=dict)  # entity_id -> entity
- 45: 
- 46:     @classmethod
- 47:     def from_data(
- 48:         cls,
- 49:         entities: list[Entity],
- 50:         relationships: list[Relationship],
- 51:     ) -> RuleEvaluationContext:
- 52:         """Create context with built indices."""
- 53:         ctx = cls(entities=entities, relationships=relationships)
- 54: 
- 55:         # Build entity indices
- 56:         for entity in entities:
- 57:             # Index by name (lowercase for matching)
- 58:             name_key = entity.name.lower()
- 59:             if name_key not in ctx.entity_index:
- 60:                 ctx.entity_index[name_key] = []
- 61:             ctx.entity_index[name_key].append(entity)
- 62: 
- 63:             # Index by type
- 64:             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
- 65:             if type_key not in ctx.type_index:
- 66:                 ctx.type_index[type_key] = []
- 67:             ctx.type_index[type_key].append(entity)
- 68: 
- 69:             # Index by ID for fast lookup
- 70:             ctx.entity_by_id[str(entity.id)] = entity
- 71: 
- 72:         # Build relationship indices
- 73:         for rel in relationships:
- 74:             rel_type = str(
- 75:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
- 76:             )
- 77:             if rel_type not in ctx.relationship_index:
- 78:                 ctx.relationship_index[rel_type] = []
- 79:             ctx.relationship_index[rel_type].append(rel)
- 80: 
- 81:             # Index by source entity for fast chain lookups
- 82:             source_key = str(rel.source_entity_id)
- 83:             if source_key not in ctx.rels_by_source:
- 84:                 ctx.rels_by_source[source_key] = []
- 85:             ctx.rels_by_source[source_key].append(rel)
- 86: 
- 87:             # Index by target entity
- 88:             target_key = str(rel.target_entity_id)
- 89:             if target_key not in ctx.rels_by_target:
- 90:                 ctx.rels_by_target[target_key] = []
- 91:             ctx.rels_by_target[target_key].append(rel)
- 92: 
- 93:         return ctx
- 94: 
- 95:     def update(
- 96:         self,
- 97:         new_entities: list[Entity],
- 98:         new_relationships: list[Relationship],
- 99:     ) -> None:
-100:         """Incrementally add new entities and relationships to the context.
-101: 
-102:         Avoids a full rebuild when only a few items have been added.
-103:         """
-104:         for entity in new_entities:
-105:             if entity not in self.entities:
-106:                 self.entities.append(entity)
-107: 
-108:                 name_key = entity.name.lower()
-109:                 if name_key not in self.entity_index:
-110:                     self.entity_index[name_key] = []
-111:                 self.entity_index[name_key].append(entity)
-112: 
-113:                 type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
-114:                 if type_key not in self.type_index:
-115:                     self.type_index[type_key] = []
-116:                 self.type_index[type_key].append(entity)
-117: 
-118:                 self.entity_by_id[str(entity.id)] = entity
-119: 
-120:         for rel in new_relationships:
-121:             if rel not in self.relationships:
-122:                 self.relationships.append(rel)
-123: 
-124:                 rel_type = str(
-125:                     rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-126:                 )
-127:                 if rel_type not in self.relationship_index:
-128:                     self.relationship_index[rel_type] = []
-129:                 self.relationship_index[rel_type].append(rel)
-130: 
-131:                 source_key = str(rel.source_entity_id)
-132:                 if source_key not in self.rels_by_source:
-133:                     self.rels_by_source[source_key] = []
-134:                 self.rels_by_source[source_key].append(rel)
-135: 
-136:                 target_key = str(rel.target_entity_id)
-137:                 if target_key not in self.rels_by_target:
-138:                     self.rels_by_target[target_key] = []
-139:                 self.rels_by_target[target_key].append(rel)
-140: 
-141: 
-142: # Type hierarchy for flexible matching
-143: # Child types can match parent types in inference rules
-144: # e.g., EMPLOYEE matches rules expecting PERSON
-145: TYPE_HIERARCHY: dict[str, list[str]] = {
-146:     "EMPLOYEE": ["PERSON"],
-147:     "EXTERNAL_PERSON": ["PERSON"],
-148:     "COMPANY": ["ORGANIZATION"],
-149:     "DEPARTMENT": ["ORGANIZATION"],
-150:     "TEAM": ["ORGANIZATION"],
-151:     "MESSAGE": ["CONTENT"],
-152:     "PAGE": ["CONTENT", "DOCUMENT"],
-153:     "ISSUE": ["WORK_ITEM", "CONTENT"],
-154:     "SALES_NOTE": ["CONTENT", "NOTE"],
-155:     "CALL": ["EVENT", "MEETING"],
-156:     "DEAL": ["OPPORTUNITY"],
-157:     "PROJECT": ["WORK_ITEM"],
-158:     "CYCLE": ["WORK_ITEM", "SPRINT"],
-159: }
-160: 
-161: 
-162: def types_match(actual_type: str, expected_type: str) -> bool:
-163:     """Check if actual type matches expected, considering type hierarchy.
-164: 
-165:     Args:
-166:         actual_type: The actual entity type from the graph
-167:         expected_type: The expected type from the inference rule
-168: 
-169:     Returns:
-170:         True if types match directly or via hierarchy
-171:     """
-172:     # Direct match
-173:     if actual_type == expected_type:
-174:         return True
-175: 
-176:     # Check if actual is a subtype of expected (e.g., EMPLOYEE matches PERSON)
-177:     parents = TYPE_HIERARCHY.get(actual_type, [])
-178:     if expected_type in parents:
-179:         return True
-180: 
-181:     # Check reverse: if expected is a subtype of actual (e.g., PERSON matches EMPLOYEE)
-182:     # This allows rules written for specific types to match more generic extractions
-183:     parents_of_expected = TYPE_HIERARCHY.get(expected_type, [])
-184:     if actual_type in parents_of_expected:
-185:         return True
-186: 
-187:     return False
-188: 
-189: 
-190: class RuleEngine:
-191:     """Engine for evaluating correlation and inference rules.
-192: 
-193:     Supports:
-194:     - Pattern-based matching (regex)
-195:     - Field-based matching
-196:     - Multi-condition inference rules
-197:     - Confidence scoring
-198:     - Type hierarchy matching (EMPLOYEE matches rules expecting PERSON)
-199:     """
-200: 
-201:     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
-202:         """Initialize the rule engine.
-203: 
-204:         Args:
-205:             expertise: ExpertiseConfig with rules to evaluate
-206:         """
-207:         self._expertise = expertise
-208:         self._compiled_patterns: dict[str, re.Pattern] = {}
-209: 
-210:     def evaluate_correlation_rules(
-211:         self,
-212:         text: str,
-213:         context: RuleEvaluationContext,
-214:     ) -> list[RuleMatch]:
-215:         """Evaluate correlation rules against text and context.
-216: 
-217:         Args:
-218:             text: Text to search for patterns
-219:             context: Evaluation context with entities and relationships
-220: 
-221:         Returns:
-222:             List of rule matches
-223:         """
-224:         if not self._expertise:
-225:             return []
-226: 
-227:         matches = []
-228:         for rule in self._expertise.correlation_rules:
-229:             rule_matches = self._evaluate_correlation_rule(rule, text, context)
-230:             matches.extend(rule_matches)
-231: 
-232:         return matches
-233: 
-234:     def evaluate_inference_rules(
-235:         self,
-236:         context: RuleEvaluationContext,
-237:     ) -> list[RuleMatch]:
-238:         """Evaluate inference rules against the context.
-239: 
-240:         Inference rules create new relationships based on existing patterns.
-241: 
-242:         Args:
-243:             context: Evaluation context with entities and relationships
-244: 
-245:         Returns:
-246:             List of rule matches that would create new relationships
-247:         """
-248:         if not self._expertise:
-249:             return []
-250: 
-251:         matches = []
-252:         for rule in self._expertise.inference_rules:
-253:             rule_matches = self._evaluate_inference_rule(rule, context)
-254:             matches.extend(rule_matches)
-255: 
-256:         return matches
-257: 
-258:     def find_pattern_matches(
-259:         self,
-260:         pattern: str,
-261:         text: str,
-262:     ) -> list[tuple[str, int, int]]:
-263:         """Find all pattern matches in text.
-264: 
-265:         Args:
-266:             pattern: Regex pattern to match
-267:             text: Text to search
-268: 
-269:         Returns:
-270:             List of (matched_value, start, end) tuples
-271:         """
-272:         compiled = self._get_compiled_pattern(pattern)
-273:         if not compiled:
-274:             return []
-275: 
-276:         matches = []
-277:         for match in compiled.finditer(text):
-278:             matches.append((match.group(), match.start(), match.end()))
-279: 
-280:         return matches
-281: 
-282:     def match_entities_by_field(
-283:         self,
-284:         entities: list[Entity],
-285:         field_name: str,
-286:         field_value: Any,
-287:     ) -> list[Entity]:
-288:         """Find entities matching a field value.
-289: 
-290:         Args:
-291:             entities: Entities to search
-292:             field_name: Attribute field name
-293:             field_value: Value to match
-294: 
-295:         Returns:
-296:             Matching entities
-297:         """
-298:         matches = []
-299:         for entity in entities:
-300:             entity_value = entity.attributes.get(field_name)
-301:             if entity_value is None:
-302:                 continue
-303: 
-304:             # Normalize for comparison
-305:             if isinstance(entity_value, str) and isinstance(field_value, str):
-306:                 if entity_value.lower() == field_value.lower():
-307:                     matches.append(entity)
-308:             elif entity_value == field_value:
-309:                 matches.append(entity)
-310: 
-311:         return matches
-312: 
-313:     def _evaluate_correlation_rule(
-314:         self,
-315:         rule: CorrelationRule,
-316:         text: str,
-317:         context: RuleEvaluationContext,
-318:     ) -> list[RuleMatch]:
-319:         """Evaluate a single correlation rule."""
-320:         matches = []
-321: 
-322:         # Pattern-based matching
-323:         if rule.pattern:
-324:             pattern_matches = self.find_pattern_matches(rule.pattern, text)
-325:             for matched_value, start, end in pattern_matches:
-326:                 # Find entities that might match this value
-327:                 matched_entities = self._find_entities_for_pattern_match(matched_value, rule.entity_types, context)
-328: 
-329:                 matches.append(
-330:                     RuleMatch(
-331:                         rule_name=rule.name,
-332:                         matched_value=matched_value,
-333:                         matched_entities=matched_entities,
-334:                         confidence=rule.confidence,
-335:                         metadata={
-336:                             "start": start,
-337:                             "end": end,
-338:                             "creates_relationship": rule.creates_relationship,
-339:                         },
-340:                     )
-341:                 )
-342: 
-343:         # Field-based matching
-344:         if rule.match_fields:
-345:             # This requires comparing entities against each other
-346:             field_matches = self._find_field_matches(rule, context)
-347:             matches.extend(field_matches)
-348: 
-349:         return matches
-350: 
-351:     def _evaluate_inference_rule(
-352:         self,
-353:         rule: InferenceRule,
-354:         context: RuleEvaluationContext,
-355:         *,
-356:         max_matches: int = 1000,
-357:     ) -> list[RuleMatch]:
-358:         """Evaluate a single inference rule.
-359: 
-360:         Uses indexed lookups for O(1) entity access and O(k) chain lookups
-361:         where k is the number of relationships per entity (typically small).
-362:         """
-363:         if not rule.when or len(rule.when) < 1:
-364:             return []
-365: 
-366:         matches = []
-367: 
-368:         # Get relationships matching the first condition
-369:         first_condition = rule.when[0]
-370:         first_rels = context.relationship_index.get(first_condition.relationship, [])
-371: 
-372:         # Diagnostic: Log how many relationships match before filtering
-373:         before_filter_count = len(first_rels)
-374: 
-375:         # Filter by source/target type if specified
-376:         first_rels = self._filter_relationships_by_types(
-377:             first_rels, first_condition.source_type, first_condition.target_type, context
-378:         )
-379: 
-380:         # Diagnostic: Log filtering results for debugging
-381:         if before_filter_count > 0 and len(first_rels) == 0:
-382:             logger.debug(
-383:                 f"Rule '{rule.name}': {before_filter_count} {first_condition.relationship} rels "
-384:                 f"all filtered out by type filter (need {first_condition.source_type}->{first_condition.target_type})"
-385:             )
-386: 
-387:         if len(rule.when) == 1:
-388:             # Single condition rule
-389:             for rel in first_rels:
-390:                 if len(matches) >= max_matches:
-391:                     break
-392:                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
-393:                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
-394: 
-395:                 if source_entity and target_entity:
-396:                     matches.append(
-397:                         RuleMatch(
-398:                             rule_name=rule.name,
-399:                             matched_relationships=[rel],
-400:                             matched_entities=[source_entity, target_entity],
-401:                             confidence=rule.confidence,
-402:                             metadata={
-403:                                 "then_relationship": rule.then_relationship,
-404:                                 "then_source": rule.then_source,
-405:                                 "then_target": rule.then_target,
-406:                                 "first": {"source": source_entity, "target": target_entity},
-407:                             },
-408:                         )
-409:                     )
-410:         else:
-411:             # Multi-condition rule - use indexed lookups for O(k) instead of O(n)
-412:             second_condition = rule.when[1]
-413:             second_rel_type = second_condition.relationship
-414: 
-415:             for rel1 in first_rels:
-416:                 if len(matches) >= max_matches:
-417:                     break
-418: 
-419:                 # Get candidate second relationships connected to rel1's entities
-420:                 # Instead of iterating ALL second_rels, only check those connected to rel1
-421:                 candidate_rels: list[Relationship] = []
-422: 
-423:                 # Chain pattern: rel1.target -> rel2.source
-424:                 target_key = str(rel1.target_entity_id)
-425:                 for rel2 in context.rels_by_source.get(target_key, []):
-426:                     rel2_type = str(
-427:                         rel2.relationship_type.value
-428:                         if hasattr(rel2.relationship_type, "value")
-429:                         else rel2.relationship_type
-430:                     )
-431:                     if rel2_type == second_rel_type:
-432:                         candidate_rels.append(rel2)
-433: 
-434:                 # Shared source pattern: rel1.source == rel2.source
-435:                 source_key = str(rel1.source_entity_id)
-436:                 for rel2 in context.rels_by_source.get(source_key, []):
-437:                     rel2_type = str(
-438:                         rel2.relationship_type.value
-439:                         if hasattr(rel2.relationship_type, "value")
-440:                         else rel2.relationship_type
-441:                     )
-442:                     if rel2_type == second_rel_type and rel2 not in candidate_rels:
-443:                         candidate_rels.append(rel2)
-444: 
-445:                 # Shared target pattern: rel1.target == rel2.target
-446:                 for rel2 in context.rels_by_target.get(target_key, []):
-447:                     rel2_type = str(
-448:                         rel2.relationship_type.value
-449:                         if hasattr(rel2.relationship_type, "value")
-450:                         else rel2.relationship_type
-451:                     )
-452:                     if rel2_type == second_rel_type and rel2 not in candidate_rels:
-453:                         candidate_rels.append(rel2)
-454: 
-455:                 # Filter candidates by type
-456:                 candidate_rels = self._filter_relationships_by_types(
-457:                     candidate_rels, second_condition.source_type, second_condition.target_type, context
-458:                 )
-459: 
-460:                 # Create matches from candidates
-461:                 for rel2 in candidate_rels:
-462:                     if len(matches) >= max_matches:
-463:                         break
-464:                     source1 = self._find_entity_by_id(rel1.source_entity_id, context)
-465:                     target1 = self._find_entity_by_id(rel1.target_entity_id, context)
-466:                     source2 = self._find_entity_by_id(rel2.source_entity_id, context)
-467:                     target2 = self._find_entity_by_id(rel2.target_entity_id, context)
-468: 
-469:                     if all([source1, target1, source2, target2]):
-470:                         matches.append(
-471:                             RuleMatch(
-472:                                 rule_name=rule.name,
-473:                                 matched_relationships=[rel1, rel2],
-474:                                 matched_entities=[source1, target1, source2, target2],
-475:                                 confidence=rule.confidence,
-476:                                 metadata={
-477:                                     "then_relationship": rule.then_relationship,
-478:                                     "then_source": rule.then_source,
-479:                                     "then_target": rule.then_target,
-480:                                     "first": {"source": source1, "target": target1},
-481:                                     "second": {"source": source2, "target": target2},
-482:                                 },
-483:                             )
-484:                         )
-485: 
-486:         return matches
-487: 
-488:     def _find_entities_for_pattern_match(
-489:         self,
-490:         matched_value: str,
-491:         entity_types: list[str],
-492:         context: RuleEvaluationContext,
-493:     ) -> list[Entity]:
-494:         """Find entities that might match a pattern value.
-495: 
-496:         Uses type hierarchy matching so EMPLOYEE matches expected type PERSON.
-497:         """
-498:         candidates = []
-499: 
-500:         # Check entity names
-501:         name_key = matched_value.lower()
-502:         if name_key in context.entity_index:
-503:             candidates.extend(context.entity_index[name_key])
-504: 
-505:         # Check entity attributes for the matched value
-506:         for entity in context.entities:
-507:             for attr_value in entity.attributes.values():
-508:                 if isinstance(attr_value, str) and matched_value in attr_value:
-509:                     if entity not in candidates:
-510:                         candidates.append(entity)
-511:                     break
-512: 
-513:         # Filter by entity types if specified, using hierarchy matching
-514:         if entity_types:
-515:             filtered = []
-516:             for e in candidates:
-517:                 actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
-518:                 # Check if actual type matches any of the expected types via hierarchy
-519:                 if any(types_match(actual_type, expected_type) for expected_type in entity_types):
-520:                     filtered.append(e)
-521:             candidates = filtered
-522: 
-523:         return candidates
-524: 
-525:     def _find_field_matches(
-526:         self,
-527:         rule: CorrelationRule,
-528:         context: RuleEvaluationContext,
-529:     ) -> list[RuleMatch]:
-530:         """Find entities that match on specified fields."""
-531:         matches = []
-532: 
-533:         # Filter entities by type
-534:         candidates = []
-535:         if rule.entity_types:
-536:             for entity_type in rule.entity_types:
-537:                 candidates.extend(context.type_index.get(entity_type, []))
-538:         else:
-539:             candidates = context.entities
-540: 
-541:         # Group entities by field values
-542:         for field_name in rule.match_fields:
-543:             field_groups: dict[Any, list[Entity]] = {}
-544:             for entity in candidates:
-545:                 field_value = entity.attributes.get(field_name)
-546:                 if field_value:
-547:                     # Normalize string values
-548:                     if isinstance(field_value, str):
-549:                         field_value = field_value.lower()
-550:                     if field_value not in field_groups:
-551:                         field_groups[field_value] = []
-552:                     field_groups[field_value].append(entity)
-553: 
-554:             # Create matches for groups with multiple entities
-555:             for field_value, entities in field_groups.items():
-556:                 if len(entities) > 1:
-557:                     matches.append(
-558:                         RuleMatch(
-559:                             rule_name=rule.name,
-560:                             matched_value=str(field_value),
-561:                             matched_entities=entities,
-562:                             confidence=rule.confidence,
-563:                             metadata={
-564:                                 "match_field": field_name,
-565:                                 "creates_relationship": rule.creates_relationship,
-566:                             },
-567:                         )
-568:                     )
-569: 
-570:         return matches
-571: 
-572:     def _filter_relationships_by_types(
-573:         self,
-574:         relationships: list[Relationship],
-575:         source_type: str | None,
-576:         target_type: str | None,
-577:         context: RuleEvaluationContext,
-578:     ) -> list[Relationship]:
-579:         """Filter relationships by source and target entity types.
-580: 
-581:         Uses type hierarchy matching so EMPLOYEE matches rules expecting PERSON,
-582:         and vice versa.
-583:         """
-584:         if not source_type and not target_type:
-585:             return relationships
-586: 
-587:         filtered = []
-588:         for rel in relationships:
-589:             source_entity = self._find_entity_by_id(rel.source_entity_id, context)
-590:             target_entity = self._find_entity_by_id(rel.target_entity_id, context)
-591: 
-592:             if not source_entity or not target_entity:
-593:                 continue
-594: 
-595:             # Get actual entity types
-596:             actual_source_type = str(
-597:                 source_entity.entity_type.value
-598:                 if hasattr(source_entity.entity_type, "value")
-599:                 else source_entity.entity_type
-600:             )
-601:             actual_target_type = str(
-602:                 target_entity.entity_type.value
-603:                 if hasattr(target_entity.entity_type, "value")
-604:                 else target_entity.entity_type
-605:             )
-606: 
-607:             # Use hierarchy-aware type matching
-608:             source_matches = not source_type or types_match(actual_source_type, source_type)
-609:             target_matches = not target_type or types_match(actual_target_type, target_type)
-610: 
-611:             if source_matches and target_matches:
-612:                 filtered.append(rel)
-613: 
-614:         return filtered
-615: 
-616:     def _find_entity_by_id(
-617:         self,
-618:         entity_id: Any,
-619:         context: RuleEvaluationContext,
-620:     ) -> Entity | None:
-621:         """Find entity by ID in context using indexed lookup."""
-622:         return context.entity_by_id.get(str(entity_id))
-623: 
-624:     def _relationships_connect(
-625:         self,
-626:         rel1: Relationship,
-627:         rel2: Relationship,
-628:         context: RuleEvaluationContext,
-629:     ) -> bool:
-630:         """Check if two relationships connect (share an entity)."""
-631:         # Check if rel1's target is rel2's source (chain pattern)
-632:         if rel1.target_entity_id == rel2.source_entity_id:
-633:             return True
-634:         # Check if they share source or target
-635:         if rel1.source_entity_id == rel2.source_entity_id:
-636:             return True
-637:         if rel1.target_entity_id == rel2.target_entity_id:
-638:             return True
-639:         return False
-640: 
-641:     def _get_compiled_pattern(self, pattern: str) -> re.Pattern | None:
-642:         """Get or compile a regex pattern."""
-643:         if pattern not in self._compiled_patterns:
-644:             try:
-645:                 self._compiled_patterns[pattern] = re.compile(pattern, re.IGNORECASE)
-646:             except re.error as e:
-647:                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
-648:                 return None
-649: 
-650:         return self._compiled_patterns[pattern]
-````
-
-## File: tests/unit/test_api.py
-````python
- 1: """Tests for API module."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
- 7: 
- 8: 
- 9: @pytest.mark.unit
-10: class TestStatusEndpoints:
-11:     """Tests for status check endpoints."""
-12: 
-13:     def test_status_check(self, test_client: TestClient) -> None:
-14:         """Test basic status check endpoint."""
-15:         response = test_client.get("/status")
-16: 
-17:         assert response.status_code == 200
-18:         data = response.json()
-19:         assert data["status"] == "ok"
-20:         assert "timestamp" in data
-21:         assert data["version"] == "0.0.9"
-22:         assert data["service"] == "khora"
-23: 
-24:     def test_health_check(self, test_client: TestClient) -> None:
-25:         """Test health check endpoint."""
-26:         response = test_client.get("/health")
-27: 
-28:         assert response.status_code == 200
-29:         data = response.json()
-30:         assert data["status"] == "healthy"
-31:         assert "timestamp" in data
-32:         assert data["version"] == "0.0.9"
-33: 
-34:     def test_readiness_check(self, test_client: TestClient) -> None:
-35:         """Test readiness check endpoint."""
-36:         response = test_client.get("/health/ready")
-37: 
-38:         assert response.status_code == 200
-39:         data = response.json()
-40:         assert data["status"] in ["ready", "not_ready"]
-41:         assert "timestamp" in data
-42:         assert "checks" in data
-43: 
-44:     def test_liveness_check(self, test_client: TestClient) -> None:
-45:         """Test liveness check endpoint."""
-46:         response = test_client.get("/health/live")
-47: 
-48:         assert response.status_code == 200
-49:         data = response.json()
-50:         assert data["status"] == "alive"
-51:         assert "timestamp" in data
-52: 
-53: 
-54: @pytest.mark.unit
-55: class TestConfig:
-56:     """Tests for configuration."""
-57: 
-58:     def test_default_config(self) -> None:
-59:         """Test default configuration values."""
-60:         from khora.config import KhoraConfig
-61: 
-62:         config = KhoraConfig()
-63:         assert config.app_name == "khora"
-64:         assert config.environment == "development"
-65:         assert config.debug is False
-66:         assert config.api_host == "127.0.0.1"
-67:         assert config.api_port == 8000
-68:         assert config.auth_enabled is True
-69: 
-70:     def test_config_from_env(self, monkeypatch) -> None:
-71:         """Test configuration from environment variables."""
-72:         from khora.config import KhoraConfig
-73: 
-74:         monkeypatch.setenv("KHORA_DEBUG", "true")
-75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-77: 
-78:         config = KhoraConfig()
-79:         assert config.debug is True
-80:         assert config.api_port == 9000
-81:         assert config.environment == "staging"
-````
-
-## File: src/khora/api/app.py
-````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     else:
- 86:         # If MemoryLake wasn't initialized, still shut down telemetry
- 87:         from ..telemetry import shutdown_telemetry
- 88: 
- 89:         await shutdown_telemetry()
- 90:     await close_db()
- 91: 
- 92: 
- 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 94:     """Create and configure the FastAPI application.
- 95: 
- 96:     Args:
- 97:         config: Optional application configuration
- 98: 
- 99:     Returns:
-100:         Configured FastAPI application
-101:     """
-102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
-103:     from ..logging_config import setup_logging
-104: 
-105:     setup_logging(level="INFO")
-106: 
-107:     if config is None:
-108:         from ..config import load_config
-109: 
-110:         config = load_config()
-111: 
-112:     app = FastAPI(
-113:         title="Khora",
-114:         description="Deyta's memory lake and materialization of knowledge",
-115:         version="0.0.9",
-116:         lifespan=lifespan,
-117:         debug=config.debug,
-118:     )
-119: 
-120:     # Store config in app state
-121:     app.state.config = config
-122: 
-123:     # Configure CORS
-124:     app.add_middleware(
-125:         CORSMiddleware,
-126:         allow_origins=["*"] if config.debug else [],
-127:         allow_credentials=True,
-128:         allow_methods=["*"],
-129:         allow_headers=["*"],
-130:     )
-131: 
-132:     # Add request logging
-133:     app.add_middleware(LoggingMiddleware)
-134: 
-135:     # Register routes
-136:     # Status endpoint is public (no auth)
-137:     app.include_router(status.router, tags=["status"])
-138: 
-139:     # Memory Lake API routes
-140:     app.include_router(memory.router)
-141:     app.include_router(namespaces.router)
-142:     app.include_router(sync.router)
-143: 
-144:     return app
 ````
 
 ## File: src/khora/chat/engine.py
@@ -31165,683 +30511,704 @@ README.md
 285:         return cls.from_expertise(expertise)
 ````
 
-## File: src/khora/pipelines/tasks/extract.py
+## File: src/khora/extraction/expansion/rule_engine.py
 ````python
-  1: """Entity extraction task."""
+  1: """Configurable rule evaluation engine.
   2: 
-  3: from __future__ import annotations
-  4: 
-  5: from typing import TYPE_CHECKING, Any
+  3: Provides a generic rule evaluation system for both correlation rules
+  4: and inference rules defined in expertise configurations.
+  5: """
   6: 
-  7: if TYPE_CHECKING:
-  8:     from khora.core.models import Chunk, Entity, Relationship
-  9:     from khora.extraction.skills import ExpertiseConfig
- 10: 
- 11: 
- 12: async def extract_entities(
- 13:     chunks: list[Chunk],
- 14:     *,
- 15:     skill_name: str = "general_entities",
- 16:     expertise: ExpertiseConfig | str | None = None,
- 17:     model: str = "gpt-4o-mini",
- 18:     max_concurrent: int = 10,
- 19:     context: dict[str, Any] | None = None,
- 20:     timeout: int = 120,
- 21:     max_retries: int = 3,
- 22:     retry_wait: float = 2.0,
- 23: ) -> tuple[list[Entity], list[Relationship]]:
- 24:     """Extract entities and relationships from chunks.
- 25: 
- 26:     Uses batch extraction for parallel processing of multiple chunks.
- 27:     Supports both legacy skills and new expertise configurations.
- 28: 
- 29:     Args:
- 30:         chunks: Chunks to extract from
- 31:         skill_name: Extraction skill to use (legacy, ignored if expertise provided)
- 32:         expertise: ExpertiseConfig, expertise name string, or file path
- 33:         model: LLM model for extraction
- 34:         max_concurrent: Maximum concurrent extractions
- 35:         context: Optional context dict for prompt template rendering
- 36:         timeout: Request timeout in seconds
- 37:         max_retries: Maximum retries on failure
- 38:         retry_wait: Base wait time for exponential backoff between retries
- 39: 
- 40:     Returns:
- 41:         Tuple of (entities, relationships)
- 42:     """
- 43:     from khora.core.models import Entity, Relationship
- 44:     from khora.core.models.entity import EntityType, RelationshipType
- 45:     from khora.extraction.extractors import LLMEntityExtractor
- 46:     from khora.extraction.skills import ExpertiseConfig
- 47:     from khora.extraction.skills.registry import get_default_registry
- 48: 
- 49:     if not chunks:
- 50:         return [], []
- 51: 
- 52:     # Resolve expertise configuration
- 53:     resolved_expertise: ExpertiseConfig | None = None
- 54:     if expertise is not None:
- 55:         if isinstance(expertise, ExpertiseConfig):
- 56:             resolved_expertise = expertise
- 57:         elif isinstance(expertise, str):
- 58:             # Load from string (file path or builtin name)
- 59:             from khora.extraction.skills import load_expertise
- 60: 
- 61:             try:
- 62:                 resolved_expertise = load_expertise(expertise)
- 63:             except Exception:
- 64:                 # Fall back to registry lookup
- 65:                 registry = get_default_registry()
- 66:                 resolved_expertise = registry.get_expertise(expertise)
- 67: 
- 68:     # Get legacy skill for backward compatibility
- 69:     registry = get_default_registry()
- 70:     skill = registry.get_or_default(skill_name)
- 71: 
- 72:     # If expertise provided, use its confidence thresholds
- 73:     if resolved_expertise:
- 74:         min_entity_confidence = resolved_expertise.confidence.min_entity
- 75:         min_relationship_confidence = resolved_expertise.confidence.min_relationship
- 76:     else:
- 77:         min_entity_confidence = skill.min_entity_confidence
- 78:         min_relationship_confidence = skill.min_relationship_confidence
- 79: 
- 80:     # Create extractor with concurrency limit and timeout settings
- 81:     extractor = LLMEntityExtractor(
- 82:         model=model,
- 83:         max_concurrent=max_concurrent,
- 84:         timeout=timeout,
- 85:         max_retries=max_retries,
- 86:         retry_wait=retry_wait,
- 87:     )
- 88: 
- 89:     # Extract from all chunks using grouped multi-extraction (fewer LLM calls)
- 90:     # Groups 3-5 chunks per LLM call, reducing API round-trips proportionally
- 91:     texts = [chunk.content for chunk in chunks]
- 92: 
- 93:     if resolved_expertise:
- 94:         results = await extractor.extract_multi(
- 95:             texts,
- 96:             expertise=resolved_expertise,
- 97:             context=context,
- 98:             batch_size=1,
- 99:         )
-100:     else:
-101:         results = await extractor.extract_multi(
-102:             texts,
-103:             entity_types=skill.entity_types,
-104:             batch_size=1,
-105:         )
-106: 
-107:     # Process results
-108:     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
-109:     all_relationships: list[Relationship] = []
-110: 
-111:     for chunk, result in zip(chunks, results):
-112:         # Process entities
-113:         for extracted in result.entities:
-114:             if extracted.confidence < min_entity_confidence:
-115:                 continue
-116: 
-117:             # Deduplicate by name
-118:             key = f"{extracted.name}:{extracted.entity_type}"
-119:             if key in all_entities:
-120:                 # Merge into existing
-121:                 existing = all_entities[key]
-122:                 existing.mention_count += 1
-123:                 if chunk.document_id not in existing.source_document_ids:
-124:                     existing.source_document_ids.append(chunk.document_id)
-125:                 if chunk.id not in existing.source_chunk_ids:
-126:                     existing.source_chunk_ids.append(chunk.id)
-127:                 # Update valid_from to earliest timestamp
-128:                 if existing.valid_from and chunk.created_at < existing.valid_from:
-129:                     existing.valid_from = chunk.created_at
-130:             else:
-131:                 # Create new entity — preserve original type string from LLM
-132:                 try:
-133:                     entity_type: EntityType | str = EntityType(extracted.entity_type)
-134:                 except ValueError:
-135:                     entity_type = extracted.entity_type or "CONCEPT"
-136: 
-137:                 entity = Entity(
-138:                     namespace_id=chunk.namespace_id,
-139:                     name=extracted.name,
-140:                     entity_type=entity_type,
-141:                     description=extracted.description,
-142:                     attributes=extracted.attributes,
-143:                     source_document_ids=[chunk.document_id],
-144:                     source_chunk_ids=[chunk.id],
-145:                     confidence=extracted.confidence,
-146:                     valid_from=chunk.created_at,  # Inherit source timestamp
-147:                 )
-148:                 all_entities[key] = entity
-149: 
-150:         # Process relationships
-151:         for extracted_rel in result.relationships:
-152:             if extracted_rel.confidence < min_relationship_confidence:
-153:                 continue
-154: 
-155:             # Preserve original type string from LLM
-156:             try:
-157:                 rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
-158:             except ValueError:
-159:                 rel_type = extracted_rel.relationship_type or "RELATES_TO"
-160: 
-161:             # Find source and target entities
-162:             source_key = next(
-163:                 (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
-164:                 None,
-165:             )
-166:             target_key = next(
-167:                 (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
-168:                 None,
-169:             )
-170: 
-171:             if source_key and target_key:
-172:                 relationship = Relationship(
-173:                     namespace_id=chunk.namespace_id,
-174:                     source_entity_id=all_entities[source_key].id,
-175:                     target_entity_id=all_entities[target_key].id,
-176:                     relationship_type=rel_type,
-177:                     description=extracted_rel.description,
-178:                     properties=extracted_rel.properties,
-179:                     source_document_ids=[chunk.document_id],
-180:                     source_chunk_ids=[chunk.id],
-181:                     confidence=extracted_rel.confidence,
-182:                     valid_from=chunk.created_at,  # Inherit source timestamp
-183:                 )
-184:                 all_relationships.append(relationship)
-185: 
-186:     return list(all_entities.values()), all_relationships
-````
-
-## File: src/khora/query/linking.py
-````python
-  1: """Entity linking module for Khora Memory Lake.
-  2: 
-  3: Links entity mentions from queries to existing entities in the knowledge graph.
-  4: Uses multiple strategies:
-  5: - Exact name matching
-  6: - Fuzzy string matching
-  7: - Embedding similarity
-  8: """
-  9: 
- 10: from __future__ import annotations
- 11: 
- 12: import asyncio
- 13: from dataclasses import dataclass, field
- 14: from typing import TYPE_CHECKING, Any
- 15: from uuid import UUID
- 16: 
- 17: from loguru import logger
+  7: from __future__ import annotations
+  8: 
+  9: import re
+ 10: from dataclasses import dataclass, field
+ 11: from typing import TYPE_CHECKING, Any
+ 12: 
+ 13: from loguru import logger
+ 14: 
+ 15: if TYPE_CHECKING:
+ 16:     from khora.core.models import Entity, Relationship
+ 17:     from khora.extraction.skills import CorrelationRule, ExpertiseConfig, InferenceRule
  18: 
- 19: from khora._accel import sequence_match_ratio
- 20: from khora.core.models.entity import entity_type_str
- 21: 
- 22: from .understanding import EntityMention
+ 19: 
+ 20: @dataclass
+ 21: class RuleMatch:
+ 22:     """Result of a rule match."""
  23: 
- 24: if TYPE_CHECKING:
- 25:     from khora.core.models import Entity
- 26:     from khora.extraction.embedders import Embedder
- 27:     from khora.storage import StorageCoordinator
- 28: 
- 29: 
- 30: @dataclass
- 31: class LinkedEntity:
- 32:     """An entity mention linked to a stored entity."""
- 33: 
- 34:     mention: EntityMention
- 35:     entity: Entity | None = None
- 36:     match_method: str = ""  # exact, fuzzy, embedding
- 37:     match_score: float = 0.0
- 38:     candidates: list[tuple[Entity, float]] = field(default_factory=list)
- 39: 
- 40:     @property
- 41:     def is_linked(self) -> bool:
- 42:         """Check if the mention was successfully linked."""
- 43:         return self.entity is not None
- 44: 
+ 24:     rule_name: str
+ 25:     matched_value: str | None = None
+ 26:     matched_entities: list[Entity] = field(default_factory=list)
+ 27:     matched_relationships: list[Relationship] = field(default_factory=list)
+ 28:     confidence: float = 1.0
+ 29:     metadata: dict[str, Any] = field(default_factory=dict)
+ 30: 
+ 31: 
+ 32: @dataclass
+ 33: class RuleEvaluationContext:
+ 34:     """Context for rule evaluation containing available data."""
+ 35: 
+ 36:     entities: list[Entity] = field(default_factory=list)
+ 37:     relationships: list[Relationship] = field(default_factory=list)
+ 38:     entity_index: dict[str, list[Entity]] = field(default_factory=dict)  # name -> entities
+ 39:     type_index: dict[str, list[Entity]] = field(default_factory=dict)  # type -> entities
+ 40:     relationship_index: dict[str, list[Relationship]] = field(default_factory=dict)  # type -> relationships
+ 41:     # New: Index relationships by entity for fast chain lookups
+ 42:     rels_by_source: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> outgoing rels
+ 43:     rels_by_target: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> incoming rels
+ 44:     entity_by_id: dict[str, Entity] = field(default_factory=dict)  # entity_id -> entity
  45: 
- 46: @dataclass
- 47: class LinkingResult:
- 48:     """Result of entity linking."""
- 49: 
- 50:     linked_entities: list[LinkedEntity] = field(default_factory=list)
- 51:     unlinked_count: int = 0
- 52:     total_mentions: int = 0
- 53:     metadata: dict[str, Any] = field(default_factory=dict)
+ 46:     @classmethod
+ 47:     def from_data(
+ 48:         cls,
+ 49:         entities: list[Entity],
+ 50:         relationships: list[Relationship],
+ 51:     ) -> RuleEvaluationContext:
+ 52:         """Create context with built indices."""
+ 53:         ctx = cls(entities=entities, relationships=relationships)
  54: 
- 55:     @property
- 56:     def linked_count(self) -> int:
- 57:         """Get count of successfully linked entities."""
- 58:         return sum(1 for le in self.linked_entities if le.is_linked)
- 59: 
- 60:     @property
- 61:     def success_rate(self) -> float:
- 62:         """Get linking success rate."""
- 63:         if self.total_mentions == 0:
- 64:             return 0.0
- 65:         return self.linked_count / self.total_mentions
- 66: 
- 67:     def get_linked_entity_ids(self) -> list[UUID]:
- 68:         """Get IDs of all linked entities."""
- 69:         return [le.entity.id for le in self.linked_entities if le.entity is not None]
- 70: 
+ 55:         # Build entity indices
+ 56:         for entity in entities:
+ 57:             # Index by name (lowercase for matching)
+ 58:             name_key = entity.name.lower()
+ 59:             if name_key not in ctx.entity_index:
+ 60:                 ctx.entity_index[name_key] = []
+ 61:             ctx.entity_index[name_key].append(entity)
+ 62: 
+ 63:             # Index by type
+ 64:             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+ 65:             if type_key not in ctx.type_index:
+ 66:                 ctx.type_index[type_key] = []
+ 67:             ctx.type_index[type_key].append(entity)
+ 68: 
+ 69:             # Index by ID for fast lookup
+ 70:             ctx.entity_by_id[str(entity.id)] = entity
  71: 
- 72: class EntityLinker:
- 73:     """Links query entity mentions to stored entities.
- 74: 
- 75:     Uses multiple strategies to find matches:
- 76:     1. Exact name match (fastest, highest precision)
- 77:     2. Fuzzy string matching (handles typos, variations)
- 78:     3. Embedding similarity (semantic matching)
- 79:     """
+ 72:         # Build relationship indices
+ 73:         for rel in relationships:
+ 74:             rel_type = str(
+ 75:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+ 76:             )
+ 77:             if rel_type not in ctx.relationship_index:
+ 78:                 ctx.relationship_index[rel_type] = []
+ 79:             ctx.relationship_index[rel_type].append(rel)
  80: 
- 81:     def __init__(
- 82:         self,
- 83:         storage: StorageCoordinator,
- 84:         embedder: Embedder | None = None,
- 85:         *,
- 86:         exact_match: bool = True,
- 87:         fuzzy_match: bool = True,
- 88:         embedding_match: bool = True,
- 89:         fuzzy_threshold: float = 0.8,
- 90:         embedding_threshold: float = 0.7,
- 91:         max_candidates: int = 5,
- 92:     ) -> None:
- 93:         """Initialize the entity linker.
+ 81:             # Index by source entity for fast chain lookups
+ 82:             source_key = str(rel.source_entity_id)
+ 83:             if source_key not in ctx.rels_by_source:
+ 84:                 ctx.rels_by_source[source_key] = []
+ 85:             ctx.rels_by_source[source_key].append(rel)
+ 86: 
+ 87:             # Index by target entity
+ 88:             target_key = str(rel.target_entity_id)
+ 89:             if target_key not in ctx.rels_by_target:
+ 90:                 ctx.rels_by_target[target_key] = []
+ 91:             ctx.rels_by_target[target_key].append(rel)
+ 92: 
+ 93:         return ctx
  94: 
- 95:         Args:
- 96:             storage: Storage coordinator for entity access
- 97:             embedder: Embedder for semantic matching (optional)
- 98:             exact_match: Enable exact name matching
- 99:             fuzzy_match: Enable fuzzy string matching
-100:             embedding_match: Enable embedding-based matching
-101:             fuzzy_threshold: Minimum fuzzy match ratio (0-1)
-102:             embedding_threshold: Minimum embedding similarity (0-1)
-103:             max_candidates: Maximum candidates to return per mention
-104:         """
-105:         self._storage = storage
-106:         self._embedder = embedder
-107:         self._exact_match = exact_match
-108:         self._fuzzy_match = fuzzy_match
-109:         self._embedding_match = embedding_match
-110:         self._fuzzy_threshold = fuzzy_threshold
-111:         self._embedding_threshold = embedding_threshold
-112:         self._max_candidates = max_candidates
-113: 
-114:     async def link(
-115:         self,
-116:         mentions: list[EntityMention],
-117:         namespace_id: UUID,
-118:     ) -> LinkingResult:
-119:         """Link entity mentions to stored entities.
-120: 
-121:         Pre-computes embeddings for all mentions in a single batch call,
-122:         then runs linking in parallel using the cached embeddings.
+ 95:     def update(
+ 96:         self,
+ 97:         new_entities: list[Entity],
+ 98:         new_relationships: list[Relationship],
+ 99:     ) -> None:
+100:         """Incrementally add new entities and relationships to the context.
+101: 
+102:         Avoids a full rebuild when only a few items have been added.
+103:         """
+104:         for entity in new_entities:
+105:             if entity not in self.entities:
+106:                 self.entities.append(entity)
+107: 
+108:                 name_key = entity.name.lower()
+109:                 if name_key not in self.entity_index:
+110:                     self.entity_index[name_key] = []
+111:                 self.entity_index[name_key].append(entity)
+112: 
+113:                 type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+114:                 if type_key not in self.type_index:
+115:                     self.type_index[type_key] = []
+116:                 self.type_index[type_key].append(entity)
+117: 
+118:                 self.entity_by_id[str(entity.id)] = entity
+119: 
+120:         for rel in new_relationships:
+121:             if rel not in self.relationships:
+122:                 self.relationships.append(rel)
 123: 
-124:         Args:
-125:             mentions: List of entity mentions to link
-126:             namespace_id: Namespace to search in
-127: 
-128:         Returns:
-129:             LinkingResult with linked and unlinked entities
-130:         """
-131:         if not mentions:
-132:             return LinkingResult(total_mentions=0)
-133: 
-134:         # Pre-compute all mention embeddings in a single batch call
-135:         # This avoids N individual embed() calls (each ~418ms) in favor of
-136:         # one batch call (~500ms total for typical mention counts).
-137:         mention_embeddings: dict[str, list[float]] = {}
-138:         if self._embedding_match and self._embedder:
-139:             mention_texts = [f"{m.entity_type}: {m.name}" for m in mentions]
-140:             try:
-141:                 embeddings = await self._embedder.embed_batch(mention_texts)
-142:                 for text, embedding in zip(mention_texts, embeddings):
-143:                     mention_embeddings[text] = embedding
-144:             except Exception as e:
-145:                 logger.warning(f"Batch mention embedding failed, falling back to per-mention: {e}")
-146: 
-147:         # Parallelize linking across all mentions
-148:         linked_entities = await asyncio.gather(
-149:             *[self._link_single(m, namespace_id, mention_embeddings) for m in mentions]
-150:         )
-151:         unlinked_count = sum(1 for le in linked_entities if not le.is_linked)
-152: 
-153:         result = LinkingResult(
-154:             linked_entities=list(linked_entities),
-155:             unlinked_count=unlinked_count,
-156:             total_mentions=len(mentions),
-157:         )
-158: 
-159:         # Record telemetry for entity linking
-160:         from khora.telemetry import get_collector
+124:                 rel_type = str(
+125:                     rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+126:                 )
+127:                 if rel_type not in self.relationship_index:
+128:                     self.relationship_index[rel_type] = []
+129:                 self.relationship_index[rel_type].append(rel)
+130: 
+131:                 source_key = str(rel.source_entity_id)
+132:                 if source_key not in self.rels_by_source:
+133:                     self.rels_by_source[source_key] = []
+134:                 self.rels_by_source[source_key].append(rel)
+135: 
+136:                 target_key = str(rel.target_entity_id)
+137:                 if target_key not in self.rels_by_target:
+138:                     self.rels_by_target[target_key] = []
+139:                 self.rels_by_target[target_key].append(rel)
+140: 
+141: 
+142: # Type hierarchy for flexible matching
+143: # Child types can match parent types in inference rules
+144: # e.g., EMPLOYEE matches rules expecting PERSON
+145: TYPE_HIERARCHY: dict[str, list[str]] = {
+146:     "EMPLOYEE": ["PERSON"],
+147:     "EXTERNAL_PERSON": ["PERSON"],
+148:     "COMPANY": ["ORGANIZATION"],
+149:     "DEPARTMENT": ["ORGANIZATION"],
+150:     "TEAM": ["ORGANIZATION"],
+151:     "MESSAGE": ["CONTENT"],
+152:     "PAGE": ["CONTENT", "DOCUMENT"],
+153:     "ISSUE": ["WORK_ITEM", "CONTENT"],
+154:     "SALES_NOTE": ["CONTENT", "NOTE"],
+155:     "CALL": ["EVENT", "MEETING"],
+156:     "DEAL": ["OPPORTUNITY"],
+157:     "PROJECT": ["WORK_ITEM"],
+158:     "CYCLE": ["WORK_ITEM", "SPRINT"],
+159: }
+160: 
 161: 
-162:         exact_count = sum(1 for le in linked_entities if le.match_method == "exact")
-163:         fuzzy_count = sum(1 for le in linked_entities if le.match_method == "fuzzy")
-164:         embedding_count = sum(1 for le in linked_entities if le.match_method == "embedding")
-165:         get_collector().record_pipeline_stage(
-166:             pipeline="query",
-167:             stage="entity_linking",
-168:             input_count=len(mentions),
-169:             output_count=result.linked_count,
-170:             namespace_id=namespace_id,
-171:             metadata={"exact": exact_count, "fuzzy": fuzzy_count, "embedding": embedding_count},
-172:         )
-173: 
-174:         return result
+162: def types_match(actual_type: str, expected_type: str) -> bool:
+163:     """Check if actual type matches expected, considering type hierarchy.
+164: 
+165:     Args:
+166:         actual_type: The actual entity type from the graph
+167:         expected_type: The expected type from the inference rule
+168: 
+169:     Returns:
+170:         True if types match directly or via hierarchy
+171:     """
+172:     # Direct match
+173:     if actual_type == expected_type:
+174:         return True
 175: 
-176:     async def _link_single(
-177:         self,
-178:         mention: EntityMention,
-179:         namespace_id: UUID,
-180:         precomputed_embeddings: dict[str, list[float]] | None = None,
-181:     ) -> LinkedEntity:
-182:         """Link a single entity mention.
-183: 
-184:         Args:
-185:             mention: Entity mention to link
-186:             namespace_id: Namespace to search in
-187:             precomputed_embeddings: Pre-computed embeddings keyed by mention text
+176:     # Check if actual is a subtype of expected (e.g., EMPLOYEE matches PERSON)
+177:     parents = TYPE_HIERARCHY.get(actual_type, [])
+178:     if expected_type in parents:
+179:         return True
+180: 
+181:     # Check reverse: if expected is a subtype of actual (e.g., PERSON matches EMPLOYEE)
+182:     # This allows rules written for specific types to match more generic extractions
+183:     parents_of_expected = TYPE_HIERARCHY.get(expected_type, [])
+184:     if actual_type in parents_of_expected:
+185:         return True
+186: 
+187:     return False
 188: 
-189:         Returns:
-190:             LinkedEntity with match result
-191:         """
-192:         candidates: list[tuple[Entity, float, str]] = []  # (entity, score, method)
-193: 
-194:         # 1. Try exact match first (fastest)
-195:         if self._exact_match:
-196:             exact = await self._exact_name_match(mention, namespace_id)
-197:             if exact:
-198:                 return LinkedEntity(
-199:                     mention=mention,
-200:                     entity=exact,
-201:                     match_method="exact",
-202:                     match_score=1.0,
-203:                 )
-204: 
-205:         # 2+3. Run fuzzy and embedding matching in parallel
-206:         tasks: dict[str, Any] = {}
-207:         if self._fuzzy_match:
-208:             tasks["fuzzy"] = self._fuzzy_name_match(mention, namespace_id)
-209:         if self._embedding_match and self._embedder:
-210:             tasks["embedding"] = self._embedding_match_entities(mention, namespace_id, precomputed_embeddings)
-211: 
-212:         if tasks:
-213:             results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-214:             for method, result in zip(tasks.keys(), results):
-215:                 if isinstance(result, Exception):
-216:                     logger.debug(f"{method} match failed: {result}")
-217:                     continue
-218:                 candidates.extend([(e, s, method) for e, s in result])
-219: 
-220:         # Select best match
-221:         if candidates:
-222:             # Sort by score descending
-223:             candidates.sort(key=lambda x: x[1], reverse=True)
-224:             best_entity, best_score, best_method = candidates[0]
-225: 
-226:             # Return with candidates for context
-227:             return LinkedEntity(
-228:                 mention=mention,
-229:                 entity=best_entity,
-230:                 match_method=best_method,
-231:                 match_score=best_score,
-232:                 candidates=[(e, s) for e, s, _ in candidates[: self._max_candidates]],
-233:             )
-234: 
-235:         # No matches found
-236:         return LinkedEntity(
-237:             mention=mention,
-238:             entity=None,
-239:             match_method="",
-240:             match_score=0.0,
-241:         )
-242: 
-243:     async def _exact_name_match(
-244:         self,
-245:         mention: EntityMention,
-246:         namespace_id: UUID,
-247:     ) -> Entity | None:
-248:         """Try exact name match.
-249: 
-250:         Args:
-251:             mention: Entity mention
-252:             namespace_id: Namespace to search
-253: 
-254:         Returns:
-255:             Matched entity or None
-256:         """
-257:         try:
-258:             # Try exact match with specified type
-259:             entity = await self._storage.get_entity_by_name(
-260:                 namespace_id,
-261:                 mention.name,
-262:                 mention.entity_type,
-263:             )
-264:             if entity:
-265:                 return entity
-266: 
-267:             # Try case-insensitive match by listing and filtering
-268:             entities = await self._storage.list_entities(
-269:                 namespace_id,
-270:                 entity_type=mention.entity_type,
-271:                 limit=1000,
-272:             )
-273:             name_lower = mention.name.lower()
-274:             for entity in entities:
-275:                 if entity.name.lower() == name_lower:
-276:                     return entity
-277: 
-278:         except Exception as e:
-279:             logger.debug(f"Exact match failed: {e}")
-280: 
-281:         return None
-282: 
-283:     async def _fuzzy_name_match(
-284:         self,
-285:         mention: EntityMention,
-286:         namespace_id: UUID,
-287:     ) -> list[tuple[Entity, float]]:
-288:         """Find entities with fuzzy name matching.
+189: 
+190: class RuleEngine:
+191:     """Engine for evaluating correlation and inference rules.
+192: 
+193:     Supports:
+194:     - Pattern-based matching (regex)
+195:     - Field-based matching
+196:     - Multi-condition inference rules
+197:     - Confidence scoring
+198:     - Type hierarchy matching (EMPLOYEE matches rules expecting PERSON)
+199:     """
+200: 
+201:     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
+202:         """Initialize the rule engine.
+203: 
+204:         Args:
+205:             expertise: ExpertiseConfig with rules to evaluate
+206:         """
+207:         self._expertise = expertise
+208:         self._compiled_patterns: dict[str, re.Pattern] = {}
+209: 
+210:     def evaluate_correlation_rules(
+211:         self,
+212:         text: str,
+213:         context: RuleEvaluationContext,
+214:     ) -> list[RuleMatch]:
+215:         """Evaluate correlation rules against text and context.
+216: 
+217:         Args:
+218:             text: Text to search for patterns
+219:             context: Evaluation context with entities and relationships
+220: 
+221:         Returns:
+222:             List of rule matches
+223:         """
+224:         if not self._expertise:
+225:             return []
+226: 
+227:         matches = []
+228:         for rule in self._expertise.correlation_rules:
+229:             rule_matches = self._evaluate_correlation_rule(rule, text, context)
+230:             matches.extend(rule_matches)
+231: 
+232:         return matches
+233: 
+234:     def evaluate_inference_rules(
+235:         self,
+236:         context: RuleEvaluationContext,
+237:     ) -> list[RuleMatch]:
+238:         """Evaluate inference rules against the context.
+239: 
+240:         Inference rules create new relationships based on existing patterns.
+241: 
+242:         Args:
+243:             context: Evaluation context with entities and relationships
+244: 
+245:         Returns:
+246:             List of rule matches that would create new relationships
+247:         """
+248:         if not self._expertise:
+249:             return []
+250: 
+251:         matches = []
+252:         for rule in self._expertise.inference_rules:
+253:             rule_matches = self._evaluate_inference_rule(rule, context)
+254:             matches.extend(rule_matches)
+255: 
+256:         return matches
+257: 
+258:     def find_pattern_matches(
+259:         self,
+260:         pattern: str,
+261:         text: str,
+262:     ) -> list[tuple[str, int, int]]:
+263:         """Find all pattern matches in text.
+264: 
+265:         Args:
+266:             pattern: Regex pattern to match
+267:             text: Text to search
+268: 
+269:         Returns:
+270:             List of (matched_value, start, end) tuples
+271:         """
+272:         compiled = self._get_compiled_pattern(pattern)
+273:         if not compiled:
+274:             return []
+275: 
+276:         matches = []
+277:         for match in compiled.finditer(text):
+278:             matches.append((match.group(), match.start(), match.end()))
+279: 
+280:         return matches
+281: 
+282:     def match_entities_by_field(
+283:         self,
+284:         entities: list[Entity],
+285:         field_name: str,
+286:         field_value: Any,
+287:     ) -> list[Entity]:
+288:         """Find entities matching a field value.
 289: 
 290:         Args:
-291:             mention: Entity mention
-292:             namespace_id: Namespace to search
-293: 
-294:         Returns:
-295:             List of (entity, score) tuples
-296:         """
-297:         matches = []
-298: 
-299:         try:
-300:             # Get all entities — search broadly to catch cross-type matches
-301:             # that we can then penalize appropriately
-302:             entities = await self._storage.list_entities(
-303:                 namespace_id,
-304:                 entity_type=mention.entity_type,
-305:                 limit=1000,
-306:             )
-307: 
-308:             mention_name_lower = mention.name.lower()
-309: 
-310:             for entity in entities:
-311:                 # Calculate fuzzy similarity
-312:                 ratio = sequence_match_ratio(
-313:                     mention_name_lower,
-314:                     entity.name.lower(),
-315:                 )
-316: 
-317:                 if ratio >= self._fuzzy_threshold:
-318:                     # Apply type penalty so wrong-type matches score lower
-319:                     penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
-320:                     matches.append((entity, ratio * penalty))
+291:             entities: Entities to search
+292:             field_name: Attribute field name
+293:             field_value: Value to match
+294: 
+295:         Returns:
+296:             Matching entities
+297:         """
+298:         matches = []
+299:         for entity in entities:
+300:             entity_value = entity.attributes.get(field_name)
+301:             if entity_value is None:
+302:                 continue
+303: 
+304:             # Normalize for comparison
+305:             if isinstance(entity_value, str) and isinstance(field_value, str):
+306:                 if entity_value.lower() == field_value.lower():
+307:                     matches.append(entity)
+308:             elif entity_value == field_value:
+309:                 matches.append(entity)
+310: 
+311:         return matches
+312: 
+313:     def _evaluate_correlation_rule(
+314:         self,
+315:         rule: CorrelationRule,
+316:         text: str,
+317:         context: RuleEvaluationContext,
+318:     ) -> list[RuleMatch]:
+319:         """Evaluate a single correlation rule."""
+320:         matches = []
 321: 
-322:             # Also try partial matching (for handling first/last name, abbreviations)
-323:             for entity in entities:
-324:                 if entity in [m[0] for m in matches]:
-325:                     continue
-326: 
-327:                 # Check if mention is contained in entity name or vice versa
-328:                 entity_name_lower = entity.name.lower()
-329:                 penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
-330:                 if mention_name_lower in entity_name_lower:
-331:                     ratio = len(mention_name_lower) / len(entity_name_lower)
-332:                     if ratio >= 0.5:  # At least 50% match
-333:                         matches.append((entity, ratio * self._fuzzy_threshold * penalty))
-334:                 elif entity_name_lower in mention_name_lower:
-335:                     ratio = len(entity_name_lower) / len(mention_name_lower)
-336:                     if ratio >= 0.5:
-337:                         matches.append((entity, ratio * self._fuzzy_threshold * penalty))
-338: 
-339:         except Exception as e:
-340:             logger.debug(f"Fuzzy match failed: {e}")
-341: 
-342:         # Sort by score and limit
-343:         matches.sort(key=lambda x: x[1], reverse=True)
-344:         return matches[: self._max_candidates]
-345: 
-346:     async def _embedding_match_entities(
-347:         self,
-348:         mention: EntityMention,
-349:         namespace_id: UUID,
-350:         precomputed_embeddings: dict[str, list[float]] | None = None,
-351:     ) -> list[tuple[Entity, float]]:
-352:         """Find entities using embedding similarity.
-353: 
-354:         Args:
-355:             mention: Entity mention
-356:             namespace_id: Namespace to search
-357:             precomputed_embeddings: Pre-computed embeddings keyed by mention text
-358: 
-359:         Returns:
-360:             List of (entity, score) tuples
-361:         """
-362:         if not self._embedder:
-363:             return []
-364: 
-365:         matches = []
-366: 
-367:         try:
-368:             # Use pre-computed embedding if available, otherwise compute on the fly
-369:             mention_text = f"{mention.entity_type}: {mention.name}"
-370:             if precomputed_embeddings and mention_text in precomputed_embeddings:
-371:                 embedding = precomputed_embeddings[mention_text]
-372:             else:
-373:                 embedding = await self._embedder.embed(mention_text)
+322:         # Pattern-based matching
+323:         if rule.pattern:
+324:             pattern_matches = self.find_pattern_matches(rule.pattern, text)
+325:             for matched_value, start, end in pattern_matches:
+326:                 # Find entities that might match this value
+327:                 matched_entities = self._find_entities_for_pattern_match(matched_value, rule.entity_types, context)
+328: 
+329:                 matches.append(
+330:                     RuleMatch(
+331:                         rule_name=rule.name,
+332:                         matched_value=matched_value,
+333:                         matched_entities=matched_entities,
+334:                         confidence=rule.confidence,
+335:                         metadata={
+336:                             "start": start,
+337:                             "end": end,
+338:                             "creates_relationship": rule.creates_relationship,
+339:                         },
+340:                     )
+341:                 )
+342: 
+343:         # Field-based matching
+344:         if rule.match_fields:
+345:             # This requires comparing entities against each other
+346:             field_matches = self._find_field_matches(rule, context)
+347:             matches.extend(field_matches)
+348: 
+349:         return matches
+350: 
+351:     def _evaluate_inference_rule(
+352:         self,
+353:         rule: InferenceRule,
+354:         context: RuleEvaluationContext,
+355:         *,
+356:         max_matches: int = 1000,
+357:     ) -> list[RuleMatch]:
+358:         """Evaluate a single inference rule.
+359: 
+360:         Uses indexed lookups for O(1) entity access and O(k) chain lookups
+361:         where k is the number of relationships per entity (typically small).
+362:         """
+363:         if not rule.when or len(rule.when) < 1:
+364:             return []
+365: 
+366:         matches = []
+367: 
+368:         # Get relationships matching the first condition
+369:         first_condition = rule.when[0]
+370:         first_rels = context.relationship_index.get(first_condition.relationship, [])
+371: 
+372:         # Diagnostic: Log how many relationships match before filtering
+373:         before_filter_count = len(first_rels)
 374: 
-375:             # Search for similar entities
-376:             results = await self._storage.search_similar_entities(
-377:                 namespace_id,
-378:                 embedding,
-379:                 limit=self._max_candidates * 2,
-380:                 min_similarity=self._embedding_threshold,
-381:             )
-382: 
-383:             # Fetch full entities
-384:             for entity_id, score in results:
-385:                 entity = await self._storage.get_entity(entity_id)
-386:                 if entity:
-387:                     # Only include entities of compatible types
-388:                     if self._types_compatible(mention.entity_type, entity_type_str(entity.entity_type)):
-389:                         # Apply type penalty so exact type matches rank higher
-390:                         penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
-391:                         matches.append((entity, score * penalty))
-392: 
-393:         except Exception as e:
-394:             logger.debug(f"Embedding match failed: {e}")
-395: 
-396:         return matches[: self._max_candidates]
-397: 
-398:     def _types_compatible(self, mention_type: str, entity_type: str) -> bool:
-399:         """Check if entity types are compatible for linking.
+375:         # Filter by source/target type if specified
+376:         first_rels = self._filter_relationships_by_types(
+377:             first_rels, first_condition.source_type, first_condition.target_type, context
+378:         )
+379: 
+380:         # Diagnostic: Log filtering results for debugging
+381:         if before_filter_count > 0 and len(first_rels) == 0:
+382:             logger.debug(
+383:                 f"Rule '{rule.name}': {before_filter_count} {first_condition.relationship} rels "
+384:                 f"all filtered out by type filter (need {first_condition.source_type}->{first_condition.target_type})"
+385:             )
+386: 
+387:         if len(rule.when) == 1:
+388:             # Single condition rule
+389:             for rel in first_rels:
+390:                 if len(matches) >= max_matches:
+391:                     break
+392:                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
+393:                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
+394: 
+395:                 if source_entity and target_entity:
+396:                     # Resolve which entities would be used for the inferred relationship
+397:                     entity_map = {"first": {"source": source_entity, "target": target_entity}}
+398:                     inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
+399:                     inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
 400: 
-401:         Args:
-402:             mention_type: Type from query mention
-403:             entity_type: Type from stored entity
+401:                     # Skip self-referential matches early (don't count against rule limit)
+402:                     if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
+403:                         continue
 404: 
-405:         Returns:
-406:             True if types are compatible
-407:         """
-408:         # Exact match
-409:         if mention_type.upper() == entity_type.upper():
-410:             return True
-411: 
-412:         # CONCEPT is compatible with most types
-413:         if mention_type.upper() == "CONCEPT" or entity_type.upper() == "CONCEPT":
-414:             return True
-415: 
-416:         # CUSTOM is a wildcard
-417:         if mention_type.upper() == "CUSTOM" or entity_type.upper() == "CUSTOM":
-418:             return True
-419: 
-420:         return False
-421: 
-422:     def _type_penalty(self, mention_type: str | None, entity_type: str) -> float:
-423:         """Compute a score penalty based on entity type compatibility.
-424: 
-425:         When the query understanding provides an entity type hint,
-426:         penalize matches of the wrong type. For example, a query about
-427:         "the company Linear" should penalize matching a PERSON named "Linear".
-428: 
-429:         Args:
-430:             mention_type: Expected type from query mention (None = no hint)
-431:             entity_type: Type of the candidate entity
-432: 
-433:         Returns:
-434:             Multiplier between 0.0 and 1.0 (1.0 = no penalty)
-435:         """
-436:         if not mention_type:
-437:             return 1.0  # No type info, no penalty
-438: 
-439:         mention_upper = mention_type.upper()
-440:         entity_upper = entity_type.upper()
-441: 
-442:         # Exact type match — no penalty
-443:         if mention_upper == entity_upper:
-444:             return 1.0
-445: 
-446:         # Wildcards — minimal penalty
-447:         if mention_upper in ("CONCEPT", "CUSTOM") or entity_upper in ("CONCEPT", "CUSTOM"):
-448:             return 0.9
-449: 
-450:         # Wrong type — heavy penalty
-451:         return 0.3
-452: 
+405:                     matches.append(
+406:                         RuleMatch(
+407:                             rule_name=rule.name,
+408:                             matched_relationships=[rel],
+409:                             matched_entities=[source_entity, target_entity],
+410:                             confidence=rule.confidence,
+411:                             metadata={
+412:                                 "then_relationship": rule.then_relationship,
+413:                                 "then_source": rule.then_source,
+414:                                 "then_target": rule.then_target,
+415:                                 "first": {"source": source_entity, "target": target_entity},
+416:                             },
+417:                         )
+418:                     )
+419:         else:
+420:             # Multi-condition rule - use indexed lookups for O(k) instead of O(n)
+421:             second_condition = rule.when[1]
+422:             second_rel_type = second_condition.relationship
+423: 
+424:             for rel1 in first_rels:
+425:                 if len(matches) >= max_matches:
+426:                     break
+427: 
+428:                 # Get candidate second relationships connected to rel1's entities
+429:                 # Instead of iterating ALL second_rels, only check those connected to rel1
+430:                 candidate_rels: list[Relationship] = []
+431: 
+432:                 # Chain pattern: rel1.target -> rel2.source
+433:                 target_key = str(rel1.target_entity_id)
+434:                 for rel2 in context.rels_by_source.get(target_key, []):
+435:                     rel2_type = str(
+436:                         rel2.relationship_type.value
+437:                         if hasattr(rel2.relationship_type, "value")
+438:                         else rel2.relationship_type
+439:                     )
+440:                     if rel2_type == second_rel_type:
+441:                         candidate_rels.append(rel2)
+442: 
+443:                 # Shared source pattern: rel1.source == rel2.source
+444:                 source_key = str(rel1.source_entity_id)
+445:                 for rel2 in context.rels_by_source.get(source_key, []):
+446:                     rel2_type = str(
+447:                         rel2.relationship_type.value
+448:                         if hasattr(rel2.relationship_type, "value")
+449:                         else rel2.relationship_type
+450:                     )
+451:                     if rel2_type == second_rel_type and rel2 not in candidate_rels:
+452:                         candidate_rels.append(rel2)
 453: 
-454: async def link_query_entities(
-455:     mentions: list[EntityMention],
-456:     namespace_id: UUID,
-457:     storage: StorageCoordinator,
-458:     embedder: Embedder | None = None,
-459:     *,
-460:     fuzzy_threshold: float = 0.8,
-461:     embedding_threshold: float = 0.7,
-462:     max_candidates: int = 5,
-463: ) -> LinkingResult:
-464:     """Convenience function to link query entities.
-465: 
-466:     Args:
-467:         mentions: Entity mentions from query understanding
-468:         namespace_id: Namespace to search in
-469:         storage: Storage coordinator
-470:         embedder: Optional embedder for semantic matching
-471:         fuzzy_threshold: Fuzzy match threshold
-472:         embedding_threshold: Embedding similarity threshold
-473:         max_candidates: Max candidates per mention
-474: 
-475:     Returns:
-476:         LinkingResult with linked entities
-477:     """
-478:     linker = EntityLinker(
-479:         storage,
-480:         embedder,
-481:         fuzzy_threshold=fuzzy_threshold,
-482:         embedding_threshold=embedding_threshold,
-483:         max_candidates=max_candidates,
-484:     )
-485:     return await linker.link(mentions, namespace_id)
+454:                 # Shared target pattern: rel1.target == rel2.target
+455:                 for rel2 in context.rels_by_target.get(target_key, []):
+456:                     rel2_type = str(
+457:                         rel2.relationship_type.value
+458:                         if hasattr(rel2.relationship_type, "value")
+459:                         else rel2.relationship_type
+460:                     )
+461:                     if rel2_type == second_rel_type and rel2 not in candidate_rels:
+462:                         candidate_rels.append(rel2)
+463: 
+464:                 # Filter candidates by type
+465:                 candidate_rels = self._filter_relationships_by_types(
+466:                     candidate_rels, second_condition.source_type, second_condition.target_type, context
+467:                 )
+468: 
+469:                 # Create matches from candidates
+470:                 for rel2 in candidate_rels:
+471:                     if len(matches) >= max_matches:
+472:                         break
+473:                     source1 = self._find_entity_by_id(rel1.source_entity_id, context)
+474:                     target1 = self._find_entity_by_id(rel1.target_entity_id, context)
+475:                     source2 = self._find_entity_by_id(rel2.source_entity_id, context)
+476:                     target2 = self._find_entity_by_id(rel2.target_entity_id, context)
+477: 
+478:                     if all([source1, target1, source2, target2]):
+479:                         # Resolve which entities would be used for the inferred relationship
+480:                         entity_map = {
+481:                             "first": {"source": source1, "target": target1},
+482:                             "second": {"source": source2, "target": target2},
+483:                         }
+484:                         inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
+485:                         inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
+486: 
+487:                         # Skip self-referential matches early (don't count against rule limit)
+488:                         if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
+489:                             continue
+490: 
+491:                         matches.append(
+492:                             RuleMatch(
+493:                                 rule_name=rule.name,
+494:                                 matched_relationships=[rel1, rel2],
+495:                                 matched_entities=[source1, target1, source2, target2],
+496:                                 confidence=rule.confidence,
+497:                                 metadata={
+498:                                     "then_relationship": rule.then_relationship,
+499:                                     "then_source": rule.then_source,
+500:                                     "then_target": rule.then_target,
+501:                                     "first": {"source": source1, "target": target1},
+502:                                     "second": {"source": source2, "target": target2},
+503:                                 },
+504:                             )
+505:                         )
+506: 
+507:         return matches
+508: 
+509:     def _find_entities_for_pattern_match(
+510:         self,
+511:         matched_value: str,
+512:         entity_types: list[str],
+513:         context: RuleEvaluationContext,
+514:     ) -> list[Entity]:
+515:         """Find entities that might match a pattern value.
+516: 
+517:         Uses type hierarchy matching so EMPLOYEE matches expected type PERSON.
+518:         """
+519:         candidates = []
+520: 
+521:         # Check entity names
+522:         name_key = matched_value.lower()
+523:         if name_key in context.entity_index:
+524:             candidates.extend(context.entity_index[name_key])
+525: 
+526:         # Check entity attributes for the matched value
+527:         for entity in context.entities:
+528:             for attr_value in entity.attributes.values():
+529:                 if isinstance(attr_value, str) and matched_value in attr_value:
+530:                     if entity not in candidates:
+531:                         candidates.append(entity)
+532:                     break
+533: 
+534:         # Filter by entity types if specified, using hierarchy matching
+535:         if entity_types:
+536:             filtered = []
+537:             for e in candidates:
+538:                 actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
+539:                 # Check if actual type matches any of the expected types via hierarchy
+540:                 if any(types_match(actual_type, expected_type) for expected_type in entity_types):
+541:                     filtered.append(e)
+542:             candidates = filtered
+543: 
+544:         return candidates
+545: 
+546:     def _find_field_matches(
+547:         self,
+548:         rule: CorrelationRule,
+549:         context: RuleEvaluationContext,
+550:     ) -> list[RuleMatch]:
+551:         """Find entities that match on specified fields."""
+552:         matches = []
+553: 
+554:         # Filter entities by type
+555:         candidates = []
+556:         if rule.entity_types:
+557:             for entity_type in rule.entity_types:
+558:                 candidates.extend(context.type_index.get(entity_type, []))
+559:         else:
+560:             candidates = context.entities
+561: 
+562:         # Group entities by field values
+563:         for field_name in rule.match_fields:
+564:             field_groups: dict[Any, list[Entity]] = {}
+565:             for entity in candidates:
+566:                 field_value = entity.attributes.get(field_name)
+567:                 if field_value:
+568:                     # Normalize string values
+569:                     if isinstance(field_value, str):
+570:                         field_value = field_value.lower()
+571:                     if field_value not in field_groups:
+572:                         field_groups[field_value] = []
+573:                     field_groups[field_value].append(entity)
+574: 
+575:             # Create matches for groups with multiple entities
+576:             for field_value, entities in field_groups.items():
+577:                 if len(entities) > 1:
+578:                     matches.append(
+579:                         RuleMatch(
+580:                             rule_name=rule.name,
+581:                             matched_value=str(field_value),
+582:                             matched_entities=entities,
+583:                             confidence=rule.confidence,
+584:                             metadata={
+585:                                 "match_field": field_name,
+586:                                 "creates_relationship": rule.creates_relationship,
+587:                             },
+588:                         )
+589:                     )
+590: 
+591:         return matches
+592: 
+593:     def _filter_relationships_by_types(
+594:         self,
+595:         relationships: list[Relationship],
+596:         source_type: str | None,
+597:         target_type: str | None,
+598:         context: RuleEvaluationContext,
+599:     ) -> list[Relationship]:
+600:         """Filter relationships by source and target entity types.
+601: 
+602:         Uses type hierarchy matching so EMPLOYEE matches rules expecting PERSON,
+603:         and vice versa.
+604:         """
+605:         if not source_type and not target_type:
+606:             return relationships
+607: 
+608:         filtered = []
+609:         for rel in relationships:
+610:             source_entity = self._find_entity_by_id(rel.source_entity_id, context)
+611:             target_entity = self._find_entity_by_id(rel.target_entity_id, context)
+612: 
+613:             if not source_entity or not target_entity:
+614:                 continue
+615: 
+616:             # Get actual entity types
+617:             actual_source_type = str(
+618:                 source_entity.entity_type.value
+619:                 if hasattr(source_entity.entity_type, "value")
+620:                 else source_entity.entity_type
+621:             )
+622:             actual_target_type = str(
+623:                 target_entity.entity_type.value
+624:                 if hasattr(target_entity.entity_type, "value")
+625:                 else target_entity.entity_type
+626:             )
+627: 
+628:             # Use hierarchy-aware type matching
+629:             source_matches = not source_type or types_match(actual_source_type, source_type)
+630:             target_matches = not target_type or types_match(actual_target_type, target_type)
+631: 
+632:             if source_matches and target_matches:
+633:                 filtered.append(rel)
+634: 
+635:         return filtered
+636: 
+637:     def _find_entity_by_id(
+638:         self,
+639:         entity_id: Any,
+640:         context: RuleEvaluationContext,
+641:     ) -> Entity | None:
+642:         """Find entity by ID in context using indexed lookup."""
+643:         return context.entity_by_id.get(str(entity_id))
+644: 
+645:     def _resolve_entity_ref(
+646:         self,
+647:         ref: str,
+648:         entity_map: dict[str, dict[str, Entity]],
+649:     ) -> Entity | None:
+650:         """Resolve an entity reference like 'first.source' or 'second.target'.
+651: 
+652:         Args:
+653:             ref: Reference string (e.g., 'first.source', 'second.target')
+654:             entity_map: Map of group name to source/target entities
+655: 
+656:         Returns:
+657:             Resolved entity or None if reference is invalid
+658:         """
+659:         parts = ref.split(".")
+660:         if len(parts) != 2:
+661:             return None
+662: 
+663:         group, position = parts
+664:         group_entities = entity_map.get(group)
+665:         if not group_entities:
+666:             return None
+667: 
+668:         return group_entities.get(position)
+669: 
+670:     def _relationships_connect(
+671:         self,
+672:         rel1: Relationship,
+673:         rel2: Relationship,
+674:         context: RuleEvaluationContext,
+675:     ) -> bool:
+676:         """Check if two relationships connect (share an entity)."""
+677:         # Check if rel1's target is rel2's source (chain pattern)
+678:         if rel1.target_entity_id == rel2.source_entity_id:
+679:             return True
+680:         # Check if they share source or target
+681:         if rel1.source_entity_id == rel2.source_entity_id:
+682:             return True
+683:         if rel1.target_entity_id == rel2.target_entity_id:
+684:             return True
+685:         return False
+686: 
+687:     def _get_compiled_pattern(self, pattern: str) -> re.Pattern | None:
+688:         """Get or compile a regex pattern."""
+689:         if pattern not in self._compiled_patterns:
+690:             try:
+691:                 self._compiled_patterns[pattern] = re.compile(pattern, re.IGNORECASE)
+692:             except re.error as e:
+693:                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
+694:                 return None
+695: 
+696:         return self._compiled_patterns[pattern]
 ````
 
 ## File: src/khora/storage/backends/base.py
@@ -32465,6 +31832,495 @@ README.md
 617:     ) -> int:
 618:         """Count events matching criteria."""
 619:         ...
+````
+
+## File: src/khora/query/linking.py
+````python
+  1: """Entity linking module for Khora Memory Lake.
+  2: 
+  3: Links entity mentions from queries to existing entities in the knowledge graph.
+  4: Uses multiple strategies:
+  5: - Exact name matching
+  6: - Fuzzy string matching
+  7: - Embedding similarity
+  8: """
+  9: 
+ 10: from __future__ import annotations
+ 11: 
+ 12: import asyncio
+ 13: from dataclasses import dataclass, field
+ 14: from typing import TYPE_CHECKING, Any
+ 15: from uuid import UUID
+ 16: 
+ 17: from loguru import logger
+ 18: 
+ 19: from khora._accel import sequence_match_ratio
+ 20: from khora.core.models.entity import entity_type_str
+ 21: 
+ 22: from .understanding import EntityMention
+ 23: 
+ 24: if TYPE_CHECKING:
+ 25:     from khora.core.models import Entity
+ 26:     from khora.extraction.embedders import Embedder
+ 27:     from khora.storage import StorageCoordinator
+ 28: 
+ 29: 
+ 30: @dataclass
+ 31: class LinkedEntity:
+ 32:     """An entity mention linked to a stored entity."""
+ 33: 
+ 34:     mention: EntityMention
+ 35:     entity: Entity | None = None
+ 36:     match_method: str = ""  # exact, fuzzy, embedding
+ 37:     match_score: float = 0.0
+ 38:     candidates: list[tuple[Entity, float]] = field(default_factory=list)
+ 39: 
+ 40:     @property
+ 41:     def is_linked(self) -> bool:
+ 42:         """Check if the mention was successfully linked."""
+ 43:         return self.entity is not None
+ 44: 
+ 45: 
+ 46: @dataclass
+ 47: class LinkingResult:
+ 48:     """Result of entity linking."""
+ 49: 
+ 50:     linked_entities: list[LinkedEntity] = field(default_factory=list)
+ 51:     unlinked_count: int = 0
+ 52:     total_mentions: int = 0
+ 53:     metadata: dict[str, Any] = field(default_factory=dict)
+ 54: 
+ 55:     @property
+ 56:     def linked_count(self) -> int:
+ 57:         """Get count of successfully linked entities."""
+ 58:         return sum(1 for le in self.linked_entities if le.is_linked)
+ 59: 
+ 60:     @property
+ 61:     def success_rate(self) -> float:
+ 62:         """Get linking success rate."""
+ 63:         if self.total_mentions == 0:
+ 64:             return 0.0
+ 65:         return self.linked_count / self.total_mentions
+ 66: 
+ 67:     def get_linked_entity_ids(self) -> list[UUID]:
+ 68:         """Get IDs of all linked entities."""
+ 69:         return [le.entity.id for le in self.linked_entities if le.entity is not None]
+ 70: 
+ 71: 
+ 72: class EntityLinker:
+ 73:     """Links query entity mentions to stored entities.
+ 74: 
+ 75:     Uses multiple strategies to find matches:
+ 76:     1. Exact name match (fastest, highest precision)
+ 77:     2. Fuzzy string matching (handles typos, variations)
+ 78:     3. Embedding similarity (semantic matching)
+ 79:     """
+ 80: 
+ 81:     def __init__(
+ 82:         self,
+ 83:         storage: StorageCoordinator,
+ 84:         embedder: Embedder | None = None,
+ 85:         *,
+ 86:         exact_match: bool = True,
+ 87:         fuzzy_match: bool = True,
+ 88:         embedding_match: bool = True,
+ 89:         fuzzy_threshold: float = 0.8,
+ 90:         embedding_threshold: float = 0.7,
+ 91:         max_candidates: int = 5,
+ 92:     ) -> None:
+ 93:         """Initialize the entity linker.
+ 94: 
+ 95:         Args:
+ 96:             storage: Storage coordinator for entity access
+ 97:             embedder: Embedder for semantic matching (optional)
+ 98:             exact_match: Enable exact name matching
+ 99:             fuzzy_match: Enable fuzzy string matching
+100:             embedding_match: Enable embedding-based matching
+101:             fuzzy_threshold: Minimum fuzzy match ratio (0-1)
+102:             embedding_threshold: Minimum embedding similarity (0-1)
+103:             max_candidates: Maximum candidates to return per mention
+104:         """
+105:         self._storage = storage
+106:         self._embedder = embedder
+107:         self._exact_match = exact_match
+108:         self._fuzzy_match = fuzzy_match
+109:         self._embedding_match = embedding_match
+110:         self._fuzzy_threshold = fuzzy_threshold
+111:         self._embedding_threshold = embedding_threshold
+112:         self._max_candidates = max_candidates
+113: 
+114:     async def link(
+115:         self,
+116:         mentions: list[EntityMention],
+117:         namespace_id: UUID,
+118:     ) -> LinkingResult:
+119:         """Link entity mentions to stored entities.
+120: 
+121:         Pre-computes embeddings for all mentions in a single batch call,
+122:         then runs linking in parallel using the cached embeddings.
+123: 
+124:         Args:
+125:             mentions: List of entity mentions to link
+126:             namespace_id: Namespace to search in
+127: 
+128:         Returns:
+129:             LinkingResult with linked and unlinked entities
+130:         """
+131:         if not mentions:
+132:             return LinkingResult(total_mentions=0)
+133: 
+134:         # Pre-compute all mention embeddings in a single batch call
+135:         # This avoids N individual embed() calls (each ~418ms) in favor of
+136:         # one batch call (~500ms total for typical mention counts).
+137:         mention_embeddings: dict[str, list[float]] = {}
+138:         if self._embedding_match and self._embedder:
+139:             mention_texts = [f"{m.entity_type}: {m.name}" for m in mentions]
+140:             try:
+141:                 embeddings = await self._embedder.embed_batch(mention_texts)
+142:                 for text, embedding in zip(mention_texts, embeddings):
+143:                     mention_embeddings[text] = embedding
+144:             except Exception as e:
+145:                 logger.warning(f"Batch mention embedding failed, falling back to per-mention: {e}")
+146: 
+147:         # Parallelize linking across all mentions
+148:         linked_entities = await asyncio.gather(
+149:             *[self._link_single(m, namespace_id, mention_embeddings) for m in mentions]
+150:         )
+151:         unlinked_count = sum(1 for le in linked_entities if not le.is_linked)
+152: 
+153:         result = LinkingResult(
+154:             linked_entities=list(linked_entities),
+155:             unlinked_count=unlinked_count,
+156:             total_mentions=len(mentions),
+157:         )
+158: 
+159:         # Record telemetry for entity linking
+160:         from khora.telemetry import get_collector
+161: 
+162:         exact_count = sum(1 for le in linked_entities if le.match_method == "exact")
+163:         fuzzy_count = sum(1 for le in linked_entities if le.match_method == "fuzzy")
+164:         embedding_count = sum(1 for le in linked_entities if le.match_method == "embedding")
+165:         get_collector().record_pipeline_stage(
+166:             pipeline="query",
+167:             stage="entity_linking",
+168:             input_count=len(mentions),
+169:             output_count=result.linked_count,
+170:             namespace_id=namespace_id,
+171:             metadata={"exact": exact_count, "fuzzy": fuzzy_count, "embedding": embedding_count},
+172:         )
+173: 
+174:         return result
+175: 
+176:     async def _link_single(
+177:         self,
+178:         mention: EntityMention,
+179:         namespace_id: UUID,
+180:         precomputed_embeddings: dict[str, list[float]] | None = None,
+181:     ) -> LinkedEntity:
+182:         """Link a single entity mention.
+183: 
+184:         Args:
+185:             mention: Entity mention to link
+186:             namespace_id: Namespace to search in
+187:             precomputed_embeddings: Pre-computed embeddings keyed by mention text
+188: 
+189:         Returns:
+190:             LinkedEntity with match result
+191:         """
+192:         candidates: list[tuple[Entity, float, str]] = []  # (entity, score, method)
+193: 
+194:         # 1. Try exact match first (fastest)
+195:         if self._exact_match:
+196:             exact = await self._exact_name_match(mention, namespace_id)
+197:             if exact:
+198:                 return LinkedEntity(
+199:                     mention=mention,
+200:                     entity=exact,
+201:                     match_method="exact",
+202:                     match_score=1.0,
+203:                 )
+204: 
+205:         # 2+3. Run fuzzy and embedding matching in parallel
+206:         tasks: dict[str, Any] = {}
+207:         if self._fuzzy_match:
+208:             tasks["fuzzy"] = self._fuzzy_name_match(mention, namespace_id)
+209:         if self._embedding_match and self._embedder:
+210:             tasks["embedding"] = self._embedding_match_entities(mention, namespace_id, precomputed_embeddings)
+211: 
+212:         if tasks:
+213:             results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+214:             for method, result in zip(tasks.keys(), results):
+215:                 if isinstance(result, Exception):
+216:                     logger.debug(f"{method} match failed: {result}")
+217:                     continue
+218:                 candidates.extend([(e, s, method) for e, s in result])
+219: 
+220:         # Select best match
+221:         if candidates:
+222:             # Sort by score descending
+223:             candidates.sort(key=lambda x: x[1], reverse=True)
+224:             best_entity, best_score, best_method = candidates[0]
+225: 
+226:             # Return with candidates for context
+227:             return LinkedEntity(
+228:                 mention=mention,
+229:                 entity=best_entity,
+230:                 match_method=best_method,
+231:                 match_score=best_score,
+232:                 candidates=[(e, s) for e, s, _ in candidates[: self._max_candidates]],
+233:             )
+234: 
+235:         # No matches found
+236:         return LinkedEntity(
+237:             mention=mention,
+238:             entity=None,
+239:             match_method="",
+240:             match_score=0.0,
+241:         )
+242: 
+243:     async def _exact_name_match(
+244:         self,
+245:         mention: EntityMention,
+246:         namespace_id: UUID,
+247:     ) -> Entity | None:
+248:         """Try exact name match.
+249: 
+250:         Args:
+251:             mention: Entity mention
+252:             namespace_id: Namespace to search
+253: 
+254:         Returns:
+255:             Matched entity or None
+256:         """
+257:         try:
+258:             # Try exact match with specified type
+259:             entity = await self._storage.get_entity_by_name(
+260:                 namespace_id,
+261:                 mention.name,
+262:                 mention.entity_type,
+263:             )
+264:             if entity:
+265:                 return entity
+266: 
+267:             # Try case-insensitive match by listing and filtering
+268:             entities = await self._storage.list_entities(
+269:                 namespace_id,
+270:                 entity_type=mention.entity_type,
+271:                 limit=1000,
+272:             )
+273:             name_lower = mention.name.lower()
+274:             for entity in entities:
+275:                 if entity.name.lower() == name_lower:
+276:                     return entity
+277: 
+278:         except Exception as e:
+279:             logger.debug(f"Exact match failed: {e}")
+280: 
+281:         return None
+282: 
+283:     async def _fuzzy_name_match(
+284:         self,
+285:         mention: EntityMention,
+286:         namespace_id: UUID,
+287:     ) -> list[tuple[Entity, float]]:
+288:         """Find entities with fuzzy name matching.
+289: 
+290:         Args:
+291:             mention: Entity mention
+292:             namespace_id: Namespace to search
+293: 
+294:         Returns:
+295:             List of (entity, score) tuples
+296:         """
+297:         matches = []
+298: 
+299:         try:
+300:             # Get all entities — search broadly to catch cross-type matches
+301:             # that we can then penalize appropriately
+302:             entities = await self._storage.list_entities(
+303:                 namespace_id,
+304:                 entity_type=mention.entity_type,
+305:                 limit=1000,
+306:             )
+307: 
+308:             mention_name_lower = mention.name.lower()
+309: 
+310:             for entity in entities:
+311:                 # Calculate fuzzy similarity
+312:                 ratio = sequence_match_ratio(
+313:                     mention_name_lower,
+314:                     entity.name.lower(),
+315:                 )
+316: 
+317:                 if ratio >= self._fuzzy_threshold:
+318:                     # Apply type penalty so wrong-type matches score lower
+319:                     penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
+320:                     matches.append((entity, ratio * penalty))
+321: 
+322:             # Also try partial matching (for handling first/last name, abbreviations)
+323:             for entity in entities:
+324:                 if entity in [m[0] for m in matches]:
+325:                     continue
+326: 
+327:                 # Check if mention is contained in entity name or vice versa
+328:                 entity_name_lower = entity.name.lower()
+329:                 penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
+330:                 if mention_name_lower in entity_name_lower:
+331:                     ratio = len(mention_name_lower) / len(entity_name_lower)
+332:                     if ratio >= 0.5:  # At least 50% match
+333:                         matches.append((entity, ratio * self._fuzzy_threshold * penalty))
+334:                 elif entity_name_lower in mention_name_lower:
+335:                     ratio = len(entity_name_lower) / len(mention_name_lower)
+336:                     if ratio >= 0.5:
+337:                         matches.append((entity, ratio * self._fuzzy_threshold * penalty))
+338: 
+339:         except Exception as e:
+340:             logger.debug(f"Fuzzy match failed: {e}")
+341: 
+342:         # Sort by score and limit
+343:         matches.sort(key=lambda x: x[1], reverse=True)
+344:         return matches[: self._max_candidates]
+345: 
+346:     async def _embedding_match_entities(
+347:         self,
+348:         mention: EntityMention,
+349:         namespace_id: UUID,
+350:         precomputed_embeddings: dict[str, list[float]] | None = None,
+351:     ) -> list[tuple[Entity, float]]:
+352:         """Find entities using embedding similarity.
+353: 
+354:         Args:
+355:             mention: Entity mention
+356:             namespace_id: Namespace to search
+357:             precomputed_embeddings: Pre-computed embeddings keyed by mention text
+358: 
+359:         Returns:
+360:             List of (entity, score) tuples
+361:         """
+362:         if not self._embedder:
+363:             return []
+364: 
+365:         matches = []
+366: 
+367:         try:
+368:             # Use pre-computed embedding if available, otherwise compute on the fly
+369:             mention_text = f"{mention.entity_type}: {mention.name}"
+370:             if precomputed_embeddings and mention_text in precomputed_embeddings:
+371:                 embedding = precomputed_embeddings[mention_text]
+372:             else:
+373:                 embedding = await self._embedder.embed(mention_text)
+374: 
+375:             # Search for similar entities
+376:             results = await self._storage.search_similar_entities(
+377:                 namespace_id,
+378:                 embedding,
+379:                 limit=self._max_candidates * 2,
+380:                 min_similarity=self._embedding_threshold,
+381:             )
+382: 
+383:             # Fetch full entities
+384:             for entity_id, score in results:
+385:                 entity = await self._storage.get_entity(entity_id)
+386:                 if entity:
+387:                     # Only include entities of compatible types
+388:                     if self._types_compatible(mention.entity_type, entity_type_str(entity.entity_type)):
+389:                         # Apply type penalty so exact type matches rank higher
+390:                         penalty = self._type_penalty(mention.entity_type, entity_type_str(entity.entity_type))
+391:                         matches.append((entity, score * penalty))
+392: 
+393:         except Exception as e:
+394:             logger.debug(f"Embedding match failed: {e}")
+395: 
+396:         return matches[: self._max_candidates]
+397: 
+398:     def _types_compatible(self, mention_type: str, entity_type: str) -> bool:
+399:         """Check if entity types are compatible for linking.
+400: 
+401:         Args:
+402:             mention_type: Type from query mention
+403:             entity_type: Type from stored entity
+404: 
+405:         Returns:
+406:             True if types are compatible
+407:         """
+408:         # Exact match
+409:         if mention_type.upper() == entity_type.upper():
+410:             return True
+411: 
+412:         # CONCEPT is compatible with most types
+413:         if mention_type.upper() == "CONCEPT" or entity_type.upper() == "CONCEPT":
+414:             return True
+415: 
+416:         # CUSTOM is a wildcard
+417:         if mention_type.upper() == "CUSTOM" or entity_type.upper() == "CUSTOM":
+418:             return True
+419: 
+420:         return False
+421: 
+422:     def _type_penalty(self, mention_type: str | None, entity_type: str) -> float:
+423:         """Compute a score penalty based on entity type compatibility.
+424: 
+425:         When the query understanding provides an entity type hint,
+426:         penalize matches of the wrong type. For example, a query about
+427:         "the company Linear" should penalize matching a PERSON named "Linear".
+428: 
+429:         Args:
+430:             mention_type: Expected type from query mention (None = no hint)
+431:             entity_type: Type of the candidate entity
+432: 
+433:         Returns:
+434:             Multiplier between 0.0 and 1.0 (1.0 = no penalty)
+435:         """
+436:         if not mention_type:
+437:             return 1.0  # No type info, no penalty
+438: 
+439:         mention_upper = mention_type.upper()
+440:         entity_upper = entity_type.upper()
+441: 
+442:         # Exact type match — no penalty
+443:         if mention_upper == entity_upper:
+444:             return 1.0
+445: 
+446:         # Wildcards — minimal penalty
+447:         if mention_upper in ("CONCEPT", "CUSTOM") or entity_upper in ("CONCEPT", "CUSTOM"):
+448:             return 0.9
+449: 
+450:         # Wrong type — heavy penalty
+451:         return 0.3
+452: 
+453: 
+454: async def link_query_entities(
+455:     mentions: list[EntityMention],
+456:     namespace_id: UUID,
+457:     storage: StorageCoordinator,
+458:     embedder: Embedder | None = None,
+459:     *,
+460:     fuzzy_threshold: float = 0.8,
+461:     embedding_threshold: float = 0.7,
+462:     max_candidates: int = 5,
+463: ) -> LinkingResult:
+464:     """Convenience function to link query entities.
+465: 
+466:     Args:
+467:         mentions: Entity mentions from query understanding
+468:         namespace_id: Namespace to search in
+469:         storage: Storage coordinator
+470:         embedder: Optional embedder for semantic matching
+471:         fuzzy_threshold: Fuzzy match threshold
+472:         embedding_threshold: Embedding similarity threshold
+473:         max_candidates: Max candidates per mention
+474: 
+475:     Returns:
+476:         LinkingResult with linked entities
+477:     """
+478:     linker = EntityLinker(
+479:         storage,
+480:         embedder,
+481:         fuzzy_threshold=fuzzy_threshold,
+482:         embedding_threshold=embedding_threshold,
+483:         max_candidates=max_candidates,
+484:     )
+485:     return await linker.link(mentions, namespace_id)
 ````
 
 ## File: src/khora/telemetry/collector.py
@@ -34043,6 +33899,637 @@ README.md
 265:                 )
 266: 
 267:                 return [item["embedding"] for item in response.data]
+````
+
+## File: src/khora/extraction/expansion/relationship_inferrer.py
+````python
+  1: """Relationship inference from existing graph patterns.
+  2: 
+  3: Infers new relationships based on configurable inference rules
+  4: defined in expertise configuration.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from collections import Counter
+ 10: from dataclasses import dataclass, field
+ 11: from datetime import UTC, datetime
+ 12: from typing import TYPE_CHECKING
+ 13: from uuid import UUID, uuid4
+ 14: 
+ 15: from loguru import logger
+ 16: 
+ 17: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
+ 18: 
+ 19: if TYPE_CHECKING:
+ 20:     from khora.core.models import Entity, Relationship
+ 21:     from khora.extraction.skills import ExpertiseConfig
+ 22: 
+ 23: 
+ 24: @dataclass
+ 25: class InferredRelationship:
+ 26:     """An inferred relationship from rule evaluation."""
+ 27: 
+ 28:     source_entity_id: UUID
+ 29:     target_entity_id: UUID
+ 30:     relationship_type: str
+ 31:     description: str = ""
+ 32:     confidence: float = 0.5
+ 33:     rule_name: str = ""  # Name of inference rule that created this
+ 34:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
+ 35: 
+ 36: 
+ 37: class RelationshipInferrer:
+ 38:     """Infers new relationships based on existing graph patterns.
+ 39: 
+ 40:     Uses inference rules from expertise configuration to deduce
+ 41:     relationships that aren't explicitly stated but can be inferred
+ 42:     from existing relationships.
+ 43: 
+ 44:     Example inference rules:
+ 45:     - If A manages B and B works on project C, A is stakeholder of C
+ 46:     - If person P is mentioned in channel for project X, P is involved in X
+ 47:     - If PR author and reviewer work on same PR, they collaborate
+ 48:     """
+ 49: 
+ 50:     def __init__(
+ 51:         self,
+ 52:         expertise: ExpertiseConfig | None = None,
+ 53:         *,
+ 54:         min_confidence: float = 0.3,
+ 55:         max_inferences_per_rule: int = 500,
+ 56:     ) -> None:
+ 57:         """Initialize the relationship inferrer.
+ 58: 
+ 59:         Args:
+ 60:             expertise: ExpertiseConfig with inference rules
+ 61:             min_confidence: Minimum confidence for inferred relationships
+ 62:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
+ 63:         """
+ 64:         self._expertise = expertise
+ 65:         self._min_confidence = min_confidence
+ 66:         self._max_inferences_per_rule = max_inferences_per_rule
+ 67:         self._rule_engine = RuleEngine(expertise)
+ 68: 
+ 69:     def infer(
+ 70:         self,
+ 71:         entities: list[Entity],
+ 72:         relationships: list[Relationship],
+ 73:         *,
+ 74:         depth: int = 1,
+ 75:     ) -> list[InferredRelationship]:
+ 76:         """Infer new relationships from existing graph.
+ 77: 
+ 78:         Args:
+ 79:             entities: Existing entities
+ 80:             relationships: Existing relationships
+ 81:             depth: Number of inference passes (for transitive inference)
+ 82: 
+ 83:         Returns:
+ 84:             List of inferred relationships
+ 85:         """
+ 86:         if not self._expertise or not self._expertise.inference_rules:
+ 87:             logger.debug("No expertise or inference rules configured, skipping inference")
+ 88:             return []
+ 89: 
+ 90:         # Diagnostic logging
+ 91:         entity_types = Counter(
+ 92:             e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
+ 93:         )
+ 94:         logger.info(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
+ 95: 
+ 96:         rel_types = Counter(
+ 97:             r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+ 98:             for r in relationships
+ 99:         )
+100:         logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
+101: 
+102:         # Detailed pattern diagnostics (debug-only to avoid overhead)
+103:         if logger._core.min_level <= 10:  # DEBUG level
+104:             entity_type_lookup = {
+105:                 e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
+106:             }
+107:             rel_type_patterns: dict[str, Counter] = {}
+108:             for r in relationships:
+109:                 rt = r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+110:                 source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
+111:                 target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
+112:                 if rt not in rel_type_patterns:
+113:                     rel_type_patterns[rt] = Counter()
+114:                 rel_type_patterns[rt][f"{source_type}->{target_type}"] += 1
+115: 
+116:             for rel_type, patterns in rel_type_patterns.items():
+117:                 logger.debug(f"  {rel_type} patterns: {dict(patterns.most_common(5))}")
+118: 
+119:         # Check rule compatibility (log mismatches as warnings)
+120:         expected_rels = set()
+121:         expected_entities = set()
+122:         for rule in self._expertise.inference_rules:
+123:             for cond in rule.when:
+124:                 if hasattr(cond, "relationship"):
+125:                     expected_rels.add(cond.relationship)
+126:                 if hasattr(cond, "source_type"):
+127:                     expected_entities.add(cond.source_type)
+128:                 if hasattr(cond, "target_type"):
+129:                     expected_entities.add(cond.target_type)
+130: 
+131:         if expected_rels or expected_entities:
+132:             actual_rel_types = {
+133:                 r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+134:                 for r in relationships
+135:             }
+136:             actual_entity_types = {
+137:                 e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
+138:             }
+139:             if not (actual_rel_types & expected_rels):
+140:                 logger.warning(
+141:                     f"No relationship type overlap: rules expect {sorted(expected_rels)}, "
+142:                     f"graph has {sorted(actual_rel_types)}"
+143:                 )
+144:             if not (actual_entity_types & expected_entities):
+145:                 logger.warning(
+146:                     f"No entity type overlap: rules expect {sorted(expected_entities)}, "
+147:                     f"graph has {sorted(actual_entity_types)}"
+148:                 )
+149: 
+150:         all_inferred: list[InferredRelationship] = []
+151:         current_relationships = list(relationships)
+152: 
+153:         for pass_num in range(depth):
+154:             # Build context with current state
+155:             context = RuleEvaluationContext.from_data(entities, current_relationships)
+156: 
+157:             # Evaluate inference rules
+158:             matches = self._rule_engine.evaluate_inference_rules(context)
+159:             logger.info(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
+160: 
+161:             # Log details of first few matches (debug only, avoids list() overhead)
+162:             if logger._core.min_level <= 10:
+163:                 for i, match in enumerate(matches[:5]):
+164:                     logger.debug(
+165:                         f"  Match {i + 1}: rule={match.rule_name}, "
+166:                         f"confidence={match.confidence:.2f}, "
+167:                         f"metadata_keys={list(match.metadata.keys())}"
+168:                     )
+169: 
+170:             # Convert matches to inferred relationships
+171:             pass_inferred = self._matches_to_relationships(matches, context)
+172:             logger.debug(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
+173: 
+174:             if not pass_inferred:
+175:                 logger.debug(f"Pass {pass_num + 1}: No new inferences, stopping early")
+176:                 break
+177: 
+178:             # Filter out duplicates and already existing relationships
+179:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
+180: 
+181:             if not new_inferred:
+182:                 break
+183: 
+184:             all_inferred.extend(new_inferred)
+185: 
+186:             # Add inferred to current for next pass (as mock relationships)
+187:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
+188: 
+189:             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
+190: 
+191:         logger.debug(f"Inference complete: {len(all_inferred)} total relationships inferred")
+192:         return all_inferred
+193: 
+194:     def infer_from_pattern(
+195:         self,
+196:         entities: list[Entity],
+197:         relationships: list[Relationship],
+198:         pattern: str,
+199:     ) -> list[InferredRelationship]:
+200:         """Infer relationships matching a specific pattern.
+201: 
+202:         Args:
+203:             entities: Existing entities
+204:             relationships: Existing relationships
+205:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
+206: 
+207:         Returns:
+208:             List of inferred relationships
+209:         """
+210:         # Parse pattern and find matches
+211:         # For now, delegate to rule engine
+212:         context = RuleEvaluationContext.from_data(entities, relationships)
+213:         matches = self._rule_engine.evaluate_inference_rules(context)
+214:         return self._matches_to_relationships(matches, context)
+215: 
+216:     def _matches_to_relationships(
+217:         self,
+218:         matches: list[RuleMatch],
+219:         context: RuleEvaluationContext,
+220:     ) -> list[InferredRelationship]:
+221:         """Convert rule matches to inferred relationships."""
+222:         inferred = []
+223:         rule_counts: dict[str, int] = {}
+224: 
+225:         # Diagnostic counters
+226:         filtered_rule_limit = 0
+227:         filtered_confidence = 0
+228:         filtered_entity_resolution = 0
+229:         filtered_self_ref = 0
+230: 
+231:         for match in matches:
+232:             # Check rule limit
+233:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
+234:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
+235:                 filtered_rule_limit += 1
+236:                 continue
+237: 
+238:             # Check confidence threshold
+239:             if match.confidence < self._min_confidence:
+240:                 filtered_confidence += 1
+241:                 continue
+242: 
+243:             # Resolve source and target from metadata
+244:             source_entity, target_entity = self._resolve_inference_entities(match, context)
+245: 
+246:             if not source_entity or not target_entity:
+247:                 filtered_entity_resolution += 1
+248:                 continue
+249: 
+250:             # Skip self-referential
+251:             if source_entity.id == target_entity.id:
+252:                 filtered_self_ref += 1
+253:                 continue
+254: 
+255:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
+256: 
+257:             inferred.append(
+258:                 InferredRelationship(
+259:                     source_entity_id=source_entity.id,
+260:                     target_entity_id=target_entity.id,
+261:                     relationship_type=relationship_type,
+262:                     description=f"Inferred by rule: {match.rule_name}",
+263:                     confidence=match.confidence,
+264:                     rule_name=match.rule_name,
+265:                     evidence=[r.id for r in match.matched_relationships],
+266:                 )
+267:             )
+268: 
+269:         # Log filtering breakdown
+270:         total_filtered = filtered_rule_limit + filtered_confidence + filtered_entity_resolution + filtered_self_ref
+271:         if total_filtered > 0 or len(matches) > 0:
+272:             logger.info(
+273:                 f"Match filtering: {len(matches)} input -> {len(inferred)} output | "
+274:                 f"rule_limit={filtered_rule_limit}, confidence={filtered_confidence}, "
+275:                 f"entity_resolution={filtered_entity_resolution}, self_ref={filtered_self_ref}"
+276:             )
+277: 
+278:         return inferred
+279: 
+280:     def _resolve_inference_entities(
+281:         self,
+282:         match: RuleMatch,
+283:         context: RuleEvaluationContext,
+284:     ) -> tuple[Entity | None, Entity | None]:
+285:         """Resolve source and target entities from match metadata.
+286: 
+287:         The then_source and then_target specify which entity to use:
+288:         - "first.source": Source entity of first matched relationship
+289:         - "first.target": Target entity of first matched relationship
+290:         - "second.source": Source entity of second matched relationship
+291:         - "second.target": Target entity of second matched relationship
+292:         """
+293:         then_source = match.metadata.get("then_source", "first.source")
+294:         then_target = match.metadata.get("then_target", "second.target")
+295: 
+296:         first = match.metadata.get("first", {})
+297:         second = match.metadata.get("second", {})
+298: 
+299:         def resolve_ref(ref: str) -> Entity | None:
+300:             parts = ref.split(".")
+301:             if len(parts) != 2:
+302:                 return None
+303: 
+304:             group, position = parts
+305:             if group == "first":
+306:                 data = first
+307:             elif group == "second":
+308:                 data = second
+309:             else:
+310:                 logger.warning(
+311:                     f"Rule '{match.rule_name}': invalid reference '{ref}' " f"(only 'first'/'second' supported)"
+312:                 )
+313:                 return None
+314: 
+315:             return data.get(position)
+316: 
+317:         source = resolve_ref(then_source)
+318:         target = resolve_ref(then_target)
+319: 
+320:         return source, target
+321: 
+322:     def _filter_duplicates(
+323:         self,
+324:         new_inferred: list[InferredRelationship],
+325:         existing_relationships: list[Relationship],
+326:         already_inferred: list[InferredRelationship],
+327:     ) -> list[InferredRelationship]:
+328:         """Filter out duplicate inferences."""
+329:         # Build set of existing relationship keys
+330:         existing_keys: set[tuple[UUID, UUID, str]] = set()
+331: 
+332:         for rel in existing_relationships:
+333:             rel_type = str(
+334:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+335:             )
+336:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
+337: 
+338:         for inf in already_inferred:
+339:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
+340: 
+341:         # Filter new inferences
+342:         filtered = []
+343:         for inf in new_inferred:
+344:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
+345:             if key not in existing_keys:
+346:                 filtered.append(inf)
+347:                 existing_keys.add(key)
+348: 
+349:         return filtered
+350: 
+351:     def _to_mock_relationships(
+352:         self,
+353:         inferred: list[InferredRelationship],
+354:         entities: list[Entity],
+355:     ) -> list[Relationship]:
+356:         """Convert inferred relationships to mock Relationship objects for next pass."""
+357:         from khora.core.models import Relationship
+358:         from khora.core.models.entity import RelationshipType
+359: 
+360:         mock_rels = []
+361:         # Get namespace from first entity if available
+362:         namespace_id = entities[0].namespace_id if entities else uuid4()
+363: 
+364:         for inf in inferred:
+365:             # Preserve original type string for domain-specific types
+366:             try:
+367:                 rel_type: RelationshipType | str = RelationshipType[inf.relationship_type]
+368:             except (KeyError, AttributeError):
+369:                 rel_type = inf.relationship_type
+370: 
+371:             mock_rels.append(
+372:                 Relationship(
+373:                     id=uuid4(),
+374:                     namespace_id=namespace_id,
+375:                     source_entity_id=inf.source_entity_id,
+376:                     target_entity_id=inf.target_entity_id,
+377:                     relationship_type=rel_type,
+378:                     description=inf.description,
+379:                     properties={},
+380:                     source_document_ids=[],
+381:                     source_chunk_ids=[],
+382:                     confidence=inf.confidence,
+383:                     metadata={"inferred": True, "rule": inf.rule_name},
+384:                     created_at=datetime.now(UTC),
+385:                     updated_at=datetime.now(UTC),
+386:                 )
+387:             )
+388: 
+389:         return mock_rels
+390: 
+391: 
+392: def to_relationship(
+393:     inferred: InferredRelationship,
+394:     namespace_id: UUID,
+395: ) -> Relationship:
+396:     """Convert an InferredRelationship to a domain Relationship model.
+397: 
+398:     Args:
+399:         inferred: The inferred relationship to convert
+400:         namespace_id: Namespace ID for the relationship
+401: 
+402:     Returns:
+403:         Domain Relationship model
+404:     """
+405:     from khora.core.models import Relationship
+406:     from khora.core.models.entity import RelationshipType
+407: 
+408:     # Preserve original type string for domain-specific types
+409:     try:
+410:         rel_type: RelationshipType | str = RelationshipType[inferred.relationship_type]
+411:     except (KeyError, AttributeError):
+412:         rel_type = inferred.relationship_type
+413: 
+414:     return Relationship(
+415:         id=uuid4(),
+416:         namespace_id=namespace_id,
+417:         source_entity_id=inferred.source_entity_id,
+418:         target_entity_id=inferred.target_entity_id,
+419:         relationship_type=rel_type,
+420:         description=inferred.description,
+421:         properties={
+422:             "inferred": True,
+423:             "rule_name": inferred.rule_name,
+424:             "evidence": [str(e) for e in inferred.evidence],
+425:         },
+426:         source_document_ids=[],
+427:         source_chunk_ids=[],
+428:         confidence=inferred.confidence,
+429:         metadata={"inferred": True},
+430:         created_at=datetime.now(UTC),
+431:         updated_at=datetime.now(UTC),
+432:     )
+````
+
+## File: src/khora/pipelines/tasks/extract.py
+````python
+  1: """Entity extraction task."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from typing import TYPE_CHECKING, Any
+  6: 
+  7: if TYPE_CHECKING:
+  8:     from khora.core.models import Chunk, Entity, Relationship
+  9:     from khora.extraction.skills import ExpertiseConfig
+ 10: 
+ 11: 
+ 12: async def extract_entities(
+ 13:     chunks: list[Chunk],
+ 14:     *,
+ 15:     skill_name: str = "general_entities",
+ 16:     expertise: ExpertiseConfig | str | None = None,
+ 17:     model: str = "gpt-4o-mini",
+ 18:     max_concurrent: int = 10,
+ 19:     context: dict[str, Any] | None = None,
+ 20:     timeout: int = 120,
+ 21:     max_retries: int = 3,
+ 22:     retry_wait: float = 2.0,
+ 23: ) -> tuple[list[Entity], list[Relationship]]:
+ 24:     """Extract entities and relationships from chunks.
+ 25: 
+ 26:     Uses batch extraction for parallel processing of multiple chunks.
+ 27:     Supports both legacy skills and new expertise configurations.
+ 28: 
+ 29:     Args:
+ 30:         chunks: Chunks to extract from
+ 31:         skill_name: Extraction skill to use (legacy, ignored if expertise provided)
+ 32:         expertise: ExpertiseConfig, expertise name string, or file path
+ 33:         model: LLM model for extraction
+ 34:         max_concurrent: Maximum concurrent extractions
+ 35:         context: Optional context dict for prompt template rendering
+ 36:         timeout: Request timeout in seconds
+ 37:         max_retries: Maximum retries on failure
+ 38:         retry_wait: Base wait time for exponential backoff between retries
+ 39: 
+ 40:     Returns:
+ 41:         Tuple of (entities, relationships)
+ 42:     """
+ 43:     from khora.core.models import Entity, Relationship
+ 44:     from khora.core.models.entity import EntityType, RelationshipType
+ 45:     from khora.extraction.extractors import LLMEntityExtractor
+ 46:     from khora.extraction.skills import ExpertiseConfig
+ 47:     from khora.extraction.skills.registry import get_default_registry
+ 48: 
+ 49:     if not chunks:
+ 50:         return [], []
+ 51: 
+ 52:     # Resolve expertise configuration
+ 53:     resolved_expertise: ExpertiseConfig | None = None
+ 54:     if expertise is not None:
+ 55:         if isinstance(expertise, ExpertiseConfig):
+ 56:             resolved_expertise = expertise
+ 57:         elif isinstance(expertise, str):
+ 58:             # Load from string (file path or builtin name)
+ 59:             from khora.extraction.skills import load_expertise
+ 60: 
+ 61:             try:
+ 62:                 resolved_expertise = load_expertise(expertise)
+ 63:             except Exception:
+ 64:                 # Fall back to registry lookup
+ 65:                 registry = get_default_registry()
+ 66:                 resolved_expertise = registry.get_expertise(expertise)
+ 67: 
+ 68:     # Get legacy skill for backward compatibility
+ 69:     registry = get_default_registry()
+ 70:     skill = registry.get_or_default(skill_name)
+ 71: 
+ 72:     # If expertise provided, use its confidence thresholds
+ 73:     if resolved_expertise:
+ 74:         min_entity_confidence = resolved_expertise.confidence.min_entity
+ 75:         min_relationship_confidence = resolved_expertise.confidence.min_relationship
+ 76:     else:
+ 77:         min_entity_confidence = skill.min_entity_confidence
+ 78:         min_relationship_confidence = skill.min_relationship_confidence
+ 79: 
+ 80:     # Create extractor with concurrency limit and timeout settings
+ 81:     extractor = LLMEntityExtractor(
+ 82:         model=model,
+ 83:         max_concurrent=max_concurrent,
+ 84:         timeout=timeout,
+ 85:         max_retries=max_retries,
+ 86:         retry_wait=retry_wait,
+ 87:     )
+ 88: 
+ 89:     # Extract from all chunks using adaptive token-budget-based batching
+ 90:     # Groups chunks into batches that fit within the model's input token budget,
+ 91:     # reducing API round-trips by up to 5x while avoiding context overflow
+ 92:     texts = [chunk.content for chunk in chunks]
+ 93: 
+ 94:     # Use adaptive batching based on token budget (auto-calculated from max_tokens)
+ 95:     # batch_size=5 is the max texts per batch; actual batching respects token limits
+ 96:     if resolved_expertise:
+ 97:         results = await extractor.extract_multi(
+ 98:             texts,
+ 99:             expertise=resolved_expertise,
+100:             context=context,
+101:             batch_size=5,
+102:             max_input_tokens=None,  # Auto-calculate from model
+103:         )
+104:     else:
+105:         results = await extractor.extract_multi(
+106:             texts,
+107:             entity_types=skill.entity_types,
+108:             batch_size=5,
+109:             max_input_tokens=None,  # Auto-calculate from model
+110:         )
+111: 
+112:     # Process results
+113:     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
+114:     all_relationships: list[Relationship] = []
+115: 
+116:     for chunk, result in zip(chunks, results):
+117:         # Process entities
+118:         for extracted in result.entities:
+119:             if extracted.confidence < min_entity_confidence:
+120:                 continue
+121: 
+122:             # Deduplicate by name
+123:             key = f"{extracted.name}:{extracted.entity_type}"
+124:             if key in all_entities:
+125:                 # Merge into existing
+126:                 existing = all_entities[key]
+127:                 existing.mention_count += 1
+128:                 if chunk.document_id not in existing.source_document_ids:
+129:                     existing.source_document_ids.append(chunk.document_id)
+130:                 if chunk.id not in existing.source_chunk_ids:
+131:                     existing.source_chunk_ids.append(chunk.id)
+132:                 # Update valid_from to earliest timestamp
+133:                 if existing.valid_from and chunk.created_at < existing.valid_from:
+134:                     existing.valid_from = chunk.created_at
+135:             else:
+136:                 # Create new entity — preserve original type string from LLM
+137:                 try:
+138:                     entity_type: EntityType | str = EntityType(extracted.entity_type)
+139:                 except ValueError:
+140:                     entity_type = extracted.entity_type or "CONCEPT"
+141: 
+142:                 entity = Entity(
+143:                     namespace_id=chunk.namespace_id,
+144:                     name=extracted.name,
+145:                     entity_type=entity_type,
+146:                     description=extracted.description,
+147:                     attributes=extracted.attributes,
+148:                     source_document_ids=[chunk.document_id],
+149:                     source_chunk_ids=[chunk.id],
+150:                     confidence=extracted.confidence,
+151:                     valid_from=chunk.created_at,  # Inherit source timestamp
+152:                 )
+153:                 all_entities[key] = entity
+154: 
+155:         # Process relationships
+156:         for extracted_rel in result.relationships:
+157:             if extracted_rel.confidence < min_relationship_confidence:
+158:                 continue
+159: 
+160:             # Preserve original type string from LLM
+161:             try:
+162:                 rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
+163:             except ValueError:
+164:                 rel_type = extracted_rel.relationship_type or "RELATES_TO"
+165: 
+166:             # Find source and target entities
+167:             source_key = next(
+168:                 (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
+169:                 None,
+170:             )
+171:             target_key = next(
+172:                 (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
+173:                 None,
+174:             )
+175: 
+176:             if source_key and target_key:
+177:                 relationship = Relationship(
+178:                     namespace_id=chunk.namespace_id,
+179:                     source_entity_id=all_entities[source_key].id,
+180:                     target_entity_id=all_entities[target_key].id,
+181:                     relationship_type=rel_type,
+182:                     description=extracted_rel.description,
+183:                     properties=extracted_rel.properties,
+184:                     source_document_ids=[chunk.document_id],
+185:                     source_chunk_ids=[chunk.id],
+186:                     confidence=extracted_rel.confidence,
+187:                     valid_from=chunk.created_at,  # Inherit source timestamp
+188:                 )
+189:                 all_relationships.append(relationship)
+190: 
+191:     return list(all_entities.values()), all_relationships
 ````
 
 ## File: src/khora/storage/backends/neo4j.py
@@ -35650,937 +36137,6 @@ README.md
 535:         return vector
 ````
 
-## File: src/khora/extraction/expansion/relationship_inferrer.py
-````python
-  1: """Relationship inference from existing graph patterns.
-  2: 
-  3: Infers new relationships based on configurable inference rules
-  4: defined in expertise configuration.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from collections import Counter
- 10: from dataclasses import dataclass, field
- 11: from datetime import UTC, datetime
- 12: from typing import TYPE_CHECKING
- 13: from uuid import UUID, uuid4
- 14: 
- 15: from loguru import logger
- 16: 
- 17: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
- 18: 
- 19: if TYPE_CHECKING:
- 20:     from khora.core.models import Entity, Relationship
- 21:     from khora.extraction.skills import ExpertiseConfig
- 22: 
- 23: 
- 24: @dataclass
- 25: class InferredRelationship:
- 26:     """An inferred relationship from rule evaluation."""
- 27: 
- 28:     source_entity_id: UUID
- 29:     target_entity_id: UUID
- 30:     relationship_type: str
- 31:     description: str = ""
- 32:     confidence: float = 0.5
- 33:     rule_name: str = ""  # Name of inference rule that created this
- 34:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
- 35: 
- 36: 
- 37: class RelationshipInferrer:
- 38:     """Infers new relationships based on existing graph patterns.
- 39: 
- 40:     Uses inference rules from expertise configuration to deduce
- 41:     relationships that aren't explicitly stated but can be inferred
- 42:     from existing relationships.
- 43: 
- 44:     Example inference rules:
- 45:     - If A manages B and B works on project C, A is stakeholder of C
- 46:     - If person P is mentioned in channel for project X, P is involved in X
- 47:     - If PR author and reviewer work on same PR, they collaborate
- 48:     """
- 49: 
- 50:     def __init__(
- 51:         self,
- 52:         expertise: ExpertiseConfig | None = None,
- 53:         *,
- 54:         min_confidence: float = 0.3,
- 55:         max_inferences_per_rule: int = 500,
- 56:     ) -> None:
- 57:         """Initialize the relationship inferrer.
- 58: 
- 59:         Args:
- 60:             expertise: ExpertiseConfig with inference rules
- 61:             min_confidence: Minimum confidence for inferred relationships
- 62:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
- 63:         """
- 64:         self._expertise = expertise
- 65:         self._min_confidence = min_confidence
- 66:         self._max_inferences_per_rule = max_inferences_per_rule
- 67:         self._rule_engine = RuleEngine(expertise)
- 68: 
- 69:     def infer(
- 70:         self,
- 71:         entities: list[Entity],
- 72:         relationships: list[Relationship],
- 73:         *,
- 74:         depth: int = 1,
- 75:     ) -> list[InferredRelationship]:
- 76:         """Infer new relationships from existing graph.
- 77: 
- 78:         Args:
- 79:             entities: Existing entities
- 80:             relationships: Existing relationships
- 81:             depth: Number of inference passes (for transitive inference)
- 82: 
- 83:         Returns:
- 84:             List of inferred relationships
- 85:         """
- 86:         if not self._expertise or not self._expertise.inference_rules:
- 87:             logger.debug("No expertise or inference rules configured, skipping inference")
- 88:             return []
- 89: 
- 90:         # Diagnostic logging
- 91:         entity_types = Counter(
- 92:             e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
- 93:         )
- 94:         logger.info(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
- 95: 
- 96:         rel_types = Counter(
- 97:             r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
- 98:             for r in relationships
- 99:         )
-100:         logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
-101: 
-102:         # Detailed pattern diagnostics (debug-only to avoid overhead)
-103:         if logger._core.min_level <= 10:  # DEBUG level
-104:             entity_type_lookup = {
-105:                 e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
-106:             }
-107:             rel_type_patterns: dict[str, Counter] = {}
-108:             for r in relationships:
-109:                 rt = r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
-110:                 source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
-111:                 target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
-112:                 if rt not in rel_type_patterns:
-113:                     rel_type_patterns[rt] = Counter()
-114:                 rel_type_patterns[rt][f"{source_type}->{target_type}"] += 1
-115: 
-116:             for rel_type, patterns in rel_type_patterns.items():
-117:                 logger.debug(f"  {rel_type} patterns: {dict(patterns.most_common(5))}")
-118: 
-119:         # Check rule compatibility (log mismatches as warnings)
-120:         expected_rels = set()
-121:         expected_entities = set()
-122:         for rule in self._expertise.inference_rules:
-123:             for cond in rule.when:
-124:                 if hasattr(cond, "relationship"):
-125:                     expected_rels.add(cond.relationship)
-126:                 if hasattr(cond, "source_type"):
-127:                     expected_entities.add(cond.source_type)
-128:                 if hasattr(cond, "target_type"):
-129:                     expected_entities.add(cond.target_type)
-130: 
-131:         if expected_rels or expected_entities:
-132:             actual_rel_types = {
-133:                 r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
-134:                 for r in relationships
-135:             }
-136:             actual_entity_types = {
-137:                 e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
-138:             }
-139:             if not (actual_rel_types & expected_rels):
-140:                 logger.warning(
-141:                     f"No relationship type overlap: rules expect {sorted(expected_rels)}, "
-142:                     f"graph has {sorted(actual_rel_types)}"
-143:                 )
-144:             if not (actual_entity_types & expected_entities):
-145:                 logger.warning(
-146:                     f"No entity type overlap: rules expect {sorted(expected_entities)}, "
-147:                     f"graph has {sorted(actual_entity_types)}"
-148:                 )
-149: 
-150:         all_inferred: list[InferredRelationship] = []
-151:         current_relationships = list(relationships)
-152: 
-153:         for pass_num in range(depth):
-154:             # Build context with current state
-155:             context = RuleEvaluationContext.from_data(entities, current_relationships)
-156: 
-157:             # Evaluate inference rules
-158:             matches = self._rule_engine.evaluate_inference_rules(context)
-159:             logger.info(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
-160: 
-161:             # Log details of first few matches (debug only, avoids list() overhead)
-162:             if logger._core.min_level <= 10:
-163:                 for i, match in enumerate(matches[:5]):
-164:                     logger.debug(
-165:                         f"  Match {i + 1}: rule={match.rule_name}, "
-166:                         f"confidence={match.confidence:.2f}, "
-167:                         f"metadata_keys={list(match.metadata.keys())}"
-168:                     )
-169: 
-170:             # Convert matches to inferred relationships
-171:             pass_inferred = self._matches_to_relationships(matches, context)
-172:             logger.debug(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
-173: 
-174:             if not pass_inferred:
-175:                 logger.debug(f"Pass {pass_num + 1}: No new inferences, stopping early")
-176:                 break
-177: 
-178:             # Filter out duplicates and already existing relationships
-179:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
-180: 
-181:             if not new_inferred:
-182:                 break
-183: 
-184:             all_inferred.extend(new_inferred)
-185: 
-186:             # Add inferred to current for next pass (as mock relationships)
-187:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
-188: 
-189:             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
-190: 
-191:         logger.debug(f"Inference complete: {len(all_inferred)} total relationships inferred")
-192:         return all_inferred
-193: 
-194:     def infer_from_pattern(
-195:         self,
-196:         entities: list[Entity],
-197:         relationships: list[Relationship],
-198:         pattern: str,
-199:     ) -> list[InferredRelationship]:
-200:         """Infer relationships matching a specific pattern.
-201: 
-202:         Args:
-203:             entities: Existing entities
-204:             relationships: Existing relationships
-205:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
-206: 
-207:         Returns:
-208:             List of inferred relationships
-209:         """
-210:         # Parse pattern and find matches
-211:         # For now, delegate to rule engine
-212:         context = RuleEvaluationContext.from_data(entities, relationships)
-213:         matches = self._rule_engine.evaluate_inference_rules(context)
-214:         return self._matches_to_relationships(matches, context)
-215: 
-216:     def _matches_to_relationships(
-217:         self,
-218:         matches: list[RuleMatch],
-219:         context: RuleEvaluationContext,
-220:     ) -> list[InferredRelationship]:
-221:         """Convert rule matches to inferred relationships."""
-222:         inferred = []
-223:         rule_counts: dict[str, int] = {}
-224: 
-225:         # Diagnostic counters
-226:         filtered_rule_limit = 0
-227:         filtered_confidence = 0
-228:         filtered_entity_resolution = 0
-229:         filtered_self_ref = 0
-230: 
-231:         for match in matches:
-232:             # Check rule limit
-233:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
-234:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
-235:                 filtered_rule_limit += 1
-236:                 continue
-237: 
-238:             # Check confidence threshold
-239:             if match.confidence < self._min_confidence:
-240:                 filtered_confidence += 1
-241:                 continue
-242: 
-243:             # Resolve source and target from metadata
-244:             source_entity, target_entity = self._resolve_inference_entities(match, context)
-245: 
-246:             if not source_entity or not target_entity:
-247:                 filtered_entity_resolution += 1
-248:                 continue
-249: 
-250:             # Skip self-referential
-251:             if source_entity.id == target_entity.id:
-252:                 filtered_self_ref += 1
-253:                 continue
-254: 
-255:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
-256: 
-257:             inferred.append(
-258:                 InferredRelationship(
-259:                     source_entity_id=source_entity.id,
-260:                     target_entity_id=target_entity.id,
-261:                     relationship_type=relationship_type,
-262:                     description=f"Inferred by rule: {match.rule_name}",
-263:                     confidence=match.confidence,
-264:                     rule_name=match.rule_name,
-265:                     evidence=[r.id for r in match.matched_relationships],
-266:                 )
-267:             )
-268: 
-269:         # Log filtering breakdown
-270:         total_filtered = filtered_rule_limit + filtered_confidence + filtered_entity_resolution + filtered_self_ref
-271:         if total_filtered > 0 or len(matches) > 0:
-272:             logger.info(
-273:                 f"Match filtering: {len(matches)} input -> {len(inferred)} output | "
-274:                 f"rule_limit={filtered_rule_limit}, confidence={filtered_confidence}, "
-275:                 f"entity_resolution={filtered_entity_resolution}, self_ref={filtered_self_ref}"
-276:             )
-277: 
-278:         return inferred
-279: 
-280:     def _resolve_inference_entities(
-281:         self,
-282:         match: RuleMatch,
-283:         context: RuleEvaluationContext,
-284:     ) -> tuple[Entity | None, Entity | None]:
-285:         """Resolve source and target entities from match metadata.
-286: 
-287:         The then_source and then_target specify which entity to use:
-288:         - "first.source": Source entity of first matched relationship
-289:         - "first.target": Target entity of first matched relationship
-290:         - "second.source": Source entity of second matched relationship
-291:         - "second.target": Target entity of second matched relationship
-292:         """
-293:         then_source = match.metadata.get("then_source", "first.source")
-294:         then_target = match.metadata.get("then_target", "second.target")
-295: 
-296:         first = match.metadata.get("first", {})
-297:         second = match.metadata.get("second", {})
-298: 
-299:         def resolve_ref(ref: str) -> Entity | None:
-300:             parts = ref.split(".")
-301:             if len(parts) != 2:
-302:                 return None
-303: 
-304:             group, position = parts
-305:             if group == "first":
-306:                 data = first
-307:             elif group == "second":
-308:                 data = second
-309:             else:
-310:                 logger.warning(
-311:                     f"Rule '{match.rule_name}': invalid reference '{ref}' " f"(only 'first'/'second' supported)"
-312:                 )
-313:                 return None
-314: 
-315:             return data.get(position)
-316: 
-317:         source = resolve_ref(then_source)
-318:         target = resolve_ref(then_target)
-319: 
-320:         return source, target
-321: 
-322:     def _filter_duplicates(
-323:         self,
-324:         new_inferred: list[InferredRelationship],
-325:         existing_relationships: list[Relationship],
-326:         already_inferred: list[InferredRelationship],
-327:     ) -> list[InferredRelationship]:
-328:         """Filter out duplicate inferences."""
-329:         # Build set of existing relationship keys
-330:         existing_keys: set[tuple[UUID, UUID, str]] = set()
-331: 
-332:         for rel in existing_relationships:
-333:             rel_type = str(
-334:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-335:             )
-336:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
-337: 
-338:         for inf in already_inferred:
-339:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
-340: 
-341:         # Filter new inferences
-342:         filtered = []
-343:         for inf in new_inferred:
-344:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
-345:             if key not in existing_keys:
-346:                 filtered.append(inf)
-347:                 existing_keys.add(key)
-348: 
-349:         return filtered
-350: 
-351:     def _to_mock_relationships(
-352:         self,
-353:         inferred: list[InferredRelationship],
-354:         entities: list[Entity],
-355:     ) -> list[Relationship]:
-356:         """Convert inferred relationships to mock Relationship objects for next pass."""
-357:         from khora.core.models import Relationship
-358:         from khora.core.models.entity import RelationshipType
-359: 
-360:         mock_rels = []
-361:         # Get namespace from first entity if available
-362:         namespace_id = entities[0].namespace_id if entities else uuid4()
-363: 
-364:         for inf in inferred:
-365:             # Preserve original type string for domain-specific types
-366:             try:
-367:                 rel_type: RelationshipType | str = RelationshipType[inf.relationship_type]
-368:             except (KeyError, AttributeError):
-369:                 rel_type = inf.relationship_type
-370: 
-371:             mock_rels.append(
-372:                 Relationship(
-373:                     id=uuid4(),
-374:                     namespace_id=namespace_id,
-375:                     source_entity_id=inf.source_entity_id,
-376:                     target_entity_id=inf.target_entity_id,
-377:                     relationship_type=rel_type,
-378:                     description=inf.description,
-379:                     properties={},
-380:                     source_document_ids=[],
-381:                     source_chunk_ids=[],
-382:                     confidence=inf.confidence,
-383:                     metadata={"inferred": True, "rule": inf.rule_name},
-384:                     created_at=datetime.now(UTC),
-385:                     updated_at=datetime.now(UTC),
-386:                 )
-387:             )
-388: 
-389:         return mock_rels
-390: 
-391: 
-392: def to_relationship(
-393:     inferred: InferredRelationship,
-394:     namespace_id: UUID,
-395: ) -> Relationship:
-396:     """Convert an InferredRelationship to a domain Relationship model.
-397: 
-398:     Args:
-399:         inferred: The inferred relationship to convert
-400:         namespace_id: Namespace ID for the relationship
-401: 
-402:     Returns:
-403:         Domain Relationship model
-404:     """
-405:     from khora.core.models import Relationship
-406:     from khora.core.models.entity import RelationshipType
-407: 
-408:     # Preserve original type string for domain-specific types
-409:     try:
-410:         rel_type: RelationshipType | str = RelationshipType[inferred.relationship_type]
-411:     except (KeyError, AttributeError):
-412:         rel_type = inferred.relationship_type
-413: 
-414:     return Relationship(
-415:         id=uuid4(),
-416:         namespace_id=namespace_id,
-417:         source_entity_id=inferred.source_entity_id,
-418:         target_entity_id=inferred.target_entity_id,
-419:         relationship_type=rel_type,
-420:         description=inferred.description,
-421:         properties={
-422:             "inferred": True,
-423:             "rule_name": inferred.rule_name,
-424:             "evidence": [str(e) for e in inferred.evidence],
-425:         },
-426:         source_document_ids=[],
-427:         source_chunk_ids=[],
-428:         confidence=inferred.confidence,
-429:         metadata={"inferred": True},
-430:         created_at=datetime.now(UTC),
-431:         updated_at=datetime.now(UTC),
-432:     )
-````
-
-## File: CLAUDE.md
-````markdown
-  1: # Khora - Development Guide
-  2: 
-  3: Khora is Deyta's Memory Lake - a system combining knowledge graphs, vector database (pgvector), and relational database (PostgreSQL) for unified knowledge storage and retrieval. Supports multiple graph backends (Neo4j, Kuzu, Memgraph, ArcadeDB) and vector backends (pgvector, ArcadeDB).
-  4: 
-  5: ## Quick Reference
-  6: 
-  7: ### Commands
-  8: ```bash
-  9: # Development
- 10: uv run khora serve --reload      # Start dev server with hot-reload
- 11: uv run khora serve --no-auth     # Start without authentication
- 12: make test                         # Run tests with coverage
- 13: make prek                         # Run pre-commit hooks
- 14: make format                       # Format code (black, isort, ruff)
- 15: make lint                         # Check linting (includes ty)
- 16: make typecheck                    # Run type checking (ty)
- 17: make dev                          # Start development databases
- 18: make down                         # Stop development databases
- 19: 
- 20: # Database
- 21: uv run alembic upgrade head       # Run migrations
- 22: uv run alembic revision --autogenerate -m "description"  # Create migration
- 23: ```
- 24: 
- 25: ### Project Structure
- 26: ```
- 27: src/khora/
- 28: ├── __init__.py                  # Package exports (MemoryLake, SearchMode)
- 29: ├── __main__.py                  # Entry point
- 30: ├── memory_lake.py               # Primary MemoryLake class (remember/recall/forget/remember_batch)
- 31: ├── logging_config.py            # Loguru setup
- 32: ├── api/                         # FastAPI application
- 33: │   ├── app.py                   # App factory with lifespan
- 34: │   ├── deps.py                  # Dependency injection
- 35: │   └── routes/
- 36: │       ├── memory.py            # Remember/recall/forget + entity CRUD
- 37: │       ├── namespaces.py        # Org/workspace/namespace management
- 38: │       ├── sync.py              # Ingestion pipelines + sync checkpoints
- 39: │       └── status.py            # Health checks (status, health, ready, live)
- 40: ├── acl/                         # Access control
- 41: │   ├── checker.py               # Permission checking with inheritance
- 42: │   └── enforcer.py              # Cross-layer enforcement
- 43: ├── chat/                        # Conversational interface
- 44: │   ├── engine.py                # ChatEngine (persona-driven responses)
- 45: │   ├── history.py               # HistoryManager (turn management + compression)
- 46: │   ├── persona.py               # PersonaConfig (behavior, style, chat settings)
- 47: │   └── prompt.py                # PromptGenerator (system prompt construction)
- 48: ├── cli/
- 49: │   ├── __init__.py              # Click CLI group
- 50: │   └── server.py                # `khora serve` command
- 51: ├── config/
- 52: │   ├── schema.py                # KhoraConfig + StorageSettings + GraphConfig union + QuerySettings
- 53: │   ├── llm.py                   # LiteLLM wrapper (acompletion, aembedding, router)
- 54: │   └── resolver.py              # Hierarchical config resolution
- 55: ├── core/models/                 # Domain models
- 56: │   ├── document.py              # Document, Chunk, DocumentMetadata, DocumentStatus
- 57: │   ├── entity.py                # Entity, Relationship, Episode, EntityType
- 58: │   ├── event.py                 # MemoryEvent (event sourcing)
- 59: │   ├── schemas.py               # Extensible attribute schemas (Person, Organization, etc.)
- 60: │   ├── source.py                # Source taxonomy (SourceTool, aliases, registry)
- 61: │   └── tenancy.py               # Organization, Workspace, MemoryNamespace
- 62: ├── db/
- 63: │   ├── models.py                # SQLAlchemy ORM models
- 64: │   └── session.py               # Async session management (asyncpg)
- 65: ├── extraction/                  # Content processing
- 66: │   ├── entity_resolution.py     # Entity deduplication and resolution
- 67: │   ├── chunkers/
- 68: │   │   ├── base.py              # Chunker base class
- 69: │   │   ├── fixed.py             # Fixed-size token chunking
- 70: │   │   ├── semantic.py          # Embedding-based semantic chunking
- 71: │   │   ├── recursive.py         # Recursive text splitting
- 72: │   │   └── conversation.py      # Conversation-aware chunking (time gaps, message groups)
- 73: │   ├── embedders/
- 74: │   │   ├── base.py              # Embedder base class
- 75: │   │   └── litellm.py           # LiteLLM embedding (batched, with telemetry)
- 76: │   ├── extractors/
- 77: │   │   ├── base.py              # Extractor base class
- 78: │   │   └── llm.py               # LLM entity extraction (single + multi-batch)
- 79: │   ├── expansion/               # Knowledge graph enrichment
- 80: │   │   ├── expander.py          # SemanticExpander (orchestrates expansion)
- 81: │   │   ├── entity_index.py      # EntityIndex — in-memory blocking index for entity resolution
- 82: │   │   ├── cross_tool_unifier.py # Cross-tool entity unification (supports blocked matching)
- 83: │   │   ├── relationship_inferrer.py # Infer implicit relationships
- 84: │   │   └── rule_engine.py       # Configurable rule-based expansion
- 85: │   └── skills/                  # Extraction skill system
- 86: │       ├── base.py              # ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig
- 87: │       ├── registry.py          # Skill registry (get/register skills)
- 88: │       ├── loader.py            # YAML skill loader
- 89: │       └── composer.py          # Skill composition
- 90: ├── pipelines/                   # Processing pipelines
- 91: │   ├── manager.py               # PipelineManager (ingestion orchestration)
- 92: │   ├── registry.py              # Pipeline registration
- 93: │   ├── incremental.py           # Incremental sync support
- 94: │   ├── flows/
- 95: │   │   ├── ingest.py            # Document ingestion flow (chunk → embed‖extract → expand → store)
- 96: │   │   ├── expansion.py         # Post-extraction graph expansion flow
- 97: │   │   └── sync.py              # External source sync flow
- 98: │   └── tasks/
- 99: │       ├── chunk.py             # Chunking task
-100: │       ├── embed.py             # Embedding task
-101: │       └── extract.py           # Entity extraction task
-102: ├── query/                       # Search engine
-103: │   ├── engine.py                # HybridQueryEngine (orchestrates all search)
-104: │   ├── understanding.py         # LLM query understanding (entities, temporal, expansion)
-105: │   ├── linking.py               # Entity linking (exact, fuzzy, embedding match)
-106: │   ├── keyword.py               # BM25/fulltext keyword search
-107: │   ├── fusion.py                # Reciprocal Rank Fusion
-108: │   ├── reranking.py             # Neural reranking (cross-encoder, LLM)
-109: │   ├── hyde.py                  # Hypothetical Document Embeddings
-110: │   ├── agentic.py               # Multi-step agentic search
-111: │   ├── temporal.py              # Time-based query filters
-112: │   ├── metrics.py               # SearchMetrics (per-query performance stats)
-113: │   ├── cache.py                 # Query result caching
-114: │   └── message_extract.py       # Message content extraction
-115: ├── storage/                     # Storage backends
-116: │   ├── coordinator.py           # StorageCoordinator (backend orchestration)
-117: │   ├── factory.py               # Storage initialization + backend selection
-118: │   ├── event_store.py           # Event sourcing (immutable event log)
-119: │   ├── expertise_store.py       # Expertise definition CRUD
-120: │   ├── optimize.py              # Post-ingestion index optimization
-121: │   └── backends/
-122: │       ├── base.py              # GraphBackend + VectorBackend base classes
-123: │       ├── mixins.py            # Shared backend mixins
-124: │       ├── postgresql.py        # PostgreSQL (documents, events, tenancy, metadata)
-125: │       ├── pgvector.py          # pgvector (embeddings, vector similarity search)
-126: │       ├── neo4j.py             # Neo4j graph backend
-127: │       ├── kuzu.py              # Kuzu embedded graph backend
-128: │       ├── memgraph.py          # Memgraph graph backend
-129: │       └── arcadedb.py          # ArcadeDB graph + vector backend
-130: └── telemetry/                   # Internal telemetry
-131:     ├── __init__.py              # init_telemetry/shutdown_telemetry/get_collector
-132:     ├── config.py                # TelemetryConfig (from env)
-133:     ├── models.py                # LLMEvent, StorageEvent, PipelineEvent
-134:     ├── tables.py                # SQLAlchemy Core table definitions
-135:     ├── session.py               # Separate async engine for telemetry DB
-136:     ├── collector.py             # TelemetryCollector (async buffer + flush loop)
-137:     ├── noop.py                  # NoOpCollector (zero-cost when disabled)
-138:     └── instrument.py            # Decorators: @instrument_llm, @instrument_storage, pipeline_stage
-139: ```
-140: 
-141: ## Architecture
-142: 
-143: ### Core Components
-144: - **MemoryLake**: Primary API for `remember()` / `recall()` / `forget()` / `remember_batch()` operations
-145: - **StorageCoordinator**: Orchestrates PostgreSQL, pgvector, and the active graph backend
-146: - **HybridQueryEngine**: Multi-stage query pipeline (understanding → linking → search → fusion → reranking)
-147: - **ChatEngine**: Persona-driven conversational interface over MemoryLake
-148: - **PipelineManager**: Manages ingestion and sync flows
-149: - **SemanticExpander**: Post-extraction knowledge graph enrichment (relationship inference, cross-tool unification, rule engine)
-150: - **ACLEnforcer**: Cross-layer permission enforcement with hierarchical inheritance
-151: 
-152: ### Storage Backends
-153: 
-154: **Relational (always PostgreSQL):**
-155: - Documents, events, permissions, tenancy hierarchy, sync checkpoints
-156: 
-157: **Vector (selectable):**
-158: - **pgvector** (default): Embeddings and vector similarity search via PostgreSQL extension
-159: - **ArcadeDB**: Vector storage via ArcadeDB's embedding support
-160: 
-161: **Graph (selectable via `storage.graph.backend`):**
-162: - **Neo4j** (default): Client-server graph database (bolt:// protocol)
-163: - **Kuzu**: Embedded graph database (local directory, no server needed)
-164: - **Memgraph**: In-memory graph database (bolt:// protocol)
-165: - **ArcadeDB**: Multi-model database (HTTP API, supports Cypher or Gremlin)
-166: 
-167: All graph backends implement a common `GraphBackend` interface: entity/relationship CRUD, neighborhood traversal, fulltext search.
-168: 
-169: ### Multi-Tenancy Model
-170: 
-171: ```
-172: Organization (tenancy_mode: shared|isolated)
-173:   └── Workspace
-174:         └── MemoryNamespace (config_overrides, versioning)
-175: ```
-176: 
-177: Each namespace isolates documents, chunks, entities, and relationships. Namespaces support per-namespace configuration overrides and custom expertise definitions.
-178: 
-179: ### Data Flow
-180: 
-181: **Ingestion pipeline** (`remember()` / `remember_batch()` / `POST /sync/ingest`):
-182: 1. **Document creation** — checksum-based deduplication
-183: 2. **Chunking** — fixed, semantic, recursive, or conversation-aware
-184: 3. **Embedding + Entity extraction** (concurrent) — batched LiteLLM embedding and LLM-based extraction run in parallel via `asyncio.gather`
-185: 4. **Storage** — chunks → pgvector, entities/relationships → graph backend (batch writes), entity embeddings → pgvector (batch transaction), documents → PostgreSQL
-186: 5. **Expansion** — relationship inference, cross-tool unification, rule engine
-187: 6. **Index optimization** — post-ingestion index maintenance
-188: 
-189: `remember_batch()` delegates to `ingest_documents` for shared EntityIndex and cross-document entity dedup.
-190: 
-191: **Query pipeline** (`recall()` / `POST /memory/recall`):
-192: 1. **Query understanding** — LLM analyzes query for entities, temporal refs, and generates expansions
-193: 2. **Entity linking** — matches extracted entity mentions to stored entities (exact, fuzzy, embedding)
-194: 3. **HyDE** (optional) — generates hypothetical documents for improved embedding search
-195: 4. **Parallel search** — vector similarity + graph traversal + keyword (BM25/fulltext)
-196: 5. **Reciprocal Rank Fusion** — weighted fusion of search results
-197: 6. **Reranking** — cross-encoder or LLM-based reranking of fused candidates
-198: 7. **Agentic search** (optional) — multi-step exploration with follow-up queries
-199: 
-200: **Event sourcing**: Immutable `MemoryEvent` log in PostgreSQL for temporal queries and audit.
-201: 
-202: ### Extraction System
-203: 
-204: **Chunkers**: `fixed` (token count), `semantic` (embedding similarity boundaries), `recursive` (text splitting), `conversation` (time-gap and message-group aware).
-205: 
-206: **Skills**: YAML-configured extraction profiles defining entity types, relationship types, and extraction prompts. Skills are composable and stored per-namespace via `ExpertiseStore`. Default: `general_entities`.
-207: 
-208: **Entity resolution**: Deduplication of extracted entities across documents. Default mode is `smart`: per-document O(1) exact dedup via `EntityIndex`, single post-ingestion O(n*k) resolution pass with token-blocked matching. Legacy modes: `incremental`, `batch`, `none`.
-209: 
-210: **Expansion** (`SemanticExpander`):
-211: - `EntityIndex`: In-memory blocking index for O(1) exact dedup and O(k) fuzzy/embedding candidate retrieval
-212: - `CrossToolUnifier`: Merges entities from different extraction tools/runs (supports blocked matching via EntityIndex)
-213: - `RelationshipInferrer`: Infers implicit relationships from entity co-occurrence and attributes
-214: - `RuleEngine`: Configurable rules for domain-specific graph enrichment (supports incremental context updates)
-215: 
-216: **Attribute schemas**: Pydantic-validated attribute schemas per entity type (Person, Organization, Location, etc.). Extensible via `register_attribute_schema()`.
-217: 
-218: **Source taxonomy**: Controlled vocabulary for source types (`SourceTool` enum + dynamic registry). Downstream projects register domain-specific tools via `register_source_type()`.
-219: 
-220: ### Chat Engine
-221: 
-222: The `ChatEngine` provides conversational access to the memory lake:
-223: - **PersonaConfig**: Defines behavior, response style, and chat parameters
-224: - **HistoryManager**: Turn management with compression for long conversations
-225: - **PromptGenerator**: Constructs system prompts from persona config + retrieved context
-226: - Supports agentic search mode for deeper exploration during conversations
-227: 
-228: ## Code Style
-229: 
-230: - Python 3.13+
-231: - Line length: 120 characters
-232: - Black for formatting
-233: - isort with black profile
-234: - ruff for linting
-235: - ty for type checking (config in `pyproject.toml` under `[tool.ty]`)
-236: - Type hints throughout
-237: 
-238: ## Testing
-239: 
-240: - pytest with pytest-asyncio
-241: - Coverage minimum: 50%
-242: - Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
-243: - Fixtures in `tests/conftest.py`
-244: 
-245: ## Environment Variables
-246: 
-247: ### Core
-248: | Variable | Description | Default |
-249: |----------|-------------|---------|
-250: | `KHORA_DATABASE_URL` | PostgreSQL/pgvector connection URL | Required |
-251: | `KHORA_NEO4J_URL` | Neo4j connection URL (bolt://user:pass@host:port) | - |
-252: | `KHORA_DEBUG` | Enable debug mode | `false` |
-253: | `KHORA_ENVIRONMENT` | Environment: development, staging, production | `development` |
-254: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
-255: | `KHORA_API_PORT` | API server port | `8000` |
-256: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
-257: 
-258: ### LLM
-259: | Variable | Description | Default |
-260: |----------|-------------|---------|
-261: | `OPENAI_API_KEY` | OpenAI API key (for embeddings/LLM) | - |
-262: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
-263: | `KHORA_LLM__MODEL` | Primary LLM model | `gpt-4o-mini` |
-264: | `KHORA_LLM__EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
-265: | `KHORA_LLM__EMBEDDING_DIMENSION` | Embedding vector dimension | `1536` |
-266: 
-267: ### Storage (new-style backend configs)
-268: | Variable | Description | Default |
-269: |----------|-------------|---------|
-270: | `KHORA_STORAGE__GRAPH__BACKEND` | Graph backend: `neo4j`, `kuzu`, `memgraph`, `arcadedb` | `neo4j` |
-271: | `KHORA_STORAGE__VECTOR__BACKEND` | Vector backend: `pgvector`, `arcadedb` | `pgvector` |
-272: 
-273: ### Query Pipeline
-274: | Variable | Description | Default |
-275: |----------|-------------|---------|
-276: | `KHORA_QUERY__DEFAULT_MODE` | Default search mode: `vector`, `graph`, `hybrid`, `all` | `hybrid` |
-277: | `KHORA_QUERY__MIN_CHUNK_SIMILARITY` | Minimum chunk similarity threshold (0.0 = no filtering) | `0.05` |
-278: | `KHORA_QUERY__MIN_ENTITY_SIMILARITY` | Minimum entity similarity threshold | `0.05` |
-279: | `KHORA_QUERY__ENABLE_UNDERSTANDING` | Enable LLM query understanding | `true` |
-280: | `KHORA_QUERY__ENABLE_ENTITY_LINKING` | Enable entity linking | `true` |
-281: | `KHORA_QUERY__ENABLE_RERANKING` | Enable neural reranking | `true` |
-282: | `KHORA_QUERY__RERANKING_METHOD` | Reranking method: `cross_encoder`, `llm` | `cross_encoder` |
-283: | `KHORA_QUERY__ENABLE_KEYWORD_SEARCH` | Enable keyword search (runs in hybrid and all modes) | `true` |
-284: | `KHORA_QUERY__ENABLE_HYDE` | Enable HyDE query expansion | `false` |
-285: | `KHORA_QUERY__VECTOR_WEIGHT` | Weight for vector search in fusion | `0.5` |
-286: | `KHORA_QUERY__GRAPH_WEIGHT` | Weight for graph search in fusion | `0.3` |
-287: | `KHORA_QUERY__KEYWORD_WEIGHT` | Weight for keyword search in fusion | `0.2` |
-288: 
-289: ### Pipelines
-290: | Variable | Description | Default |
-291: |----------|-------------|---------|
-292: | `KHORA_PIPELINES__CHUNKING_STRATEGY` | Chunking strategy: `fixed`, `semantic`, `recursive` | `semantic` |
-293: | `KHORA_PIPELINES__CHUNK_SIZE` | Target chunk size in tokens | `512` |
-294: | `KHORA_PIPELINES__EXTRACT_ENTITIES` | Extract entities from documents | `true` |
-295: 
-296: ### Telemetry
-297: | Variable | Description | Default |
-298: |----------|-------------|---------|
-299: | `KHORA_TELEMETRY_DATABASE_URL` | PostgreSQL URL for telemetry DB (enables telemetry when set) | - |
-300: | `KHORA_TELEMETRY_SERVICE_NAME` | Service name tag in telemetry events | `khora` |
-301: 
-302: **URL formats:**
-303: - PostgreSQL: `postgresql://user:password@host:port/database`
-304: - Neo4j: `bolt://user:password@host:port` or `bolt://user:password@host:port/database`
-305: - Kuzu: Local directory path (e.g., `./kuzu_db`)
-306: - Memgraph: `bolt://user:password@host:port`
-307: - ArcadeDB: `http://user:password@host:port`
-308: 
-309: **Note:** Programmatic configuration takes priority over environment variables. Nested config uses `__` delimiter (e.g., `KHORA_QUERY__ENABLE_HYDE=true`).
-310: 
-311: ## Library Usage
-312: 
-313: ```python
-314: from khora import MemoryLake, SearchMode
-315: 
-316: # Simplest - reads KHORA_DATABASE_URL from env
-317: async with MemoryLake() as lake:
-318:     await lake.remember("Content to store", title="Title")
-319:     memories = await lake.recall("query")
-320: 
-321: # Common - explicit database URL
-322: async with MemoryLake("postgresql://localhost/mydb") as lake:
-323:     result = await lake.remember("content", title="My Document")
-324:     memories = await lake.recall("query", limit=20)
-325: 
-326: # With graph backend
-327: async with MemoryLake(
-328:     "postgresql://localhost/mydb",
-329:     graph_url="bolt://localhost:7687",
-330: ) as lake:
-331:     memories = await lake.recall("query", mode=SearchMode.GRAPH)
-332: 
-333: # Batch ingestion with automatic orchestration
-334: async with MemoryLake(database_url) as lake:
-335:     # Returns BatchResult with aggregated stats
-336:     result = await lake.remember_batch(
-337:         documents,
-338:         deduplicate=True,           # Cross-doc entity deduplication
-339:         infer_relationships=True,   # Run inference after ingestion
-340:         on_progress=lambda done, total: print(f"{done}/{total}"),
-341:     )
-342:     print(f"Processed {result.processed} docs, {result.entities} entities")
-343: 
-344: # Raw search - skip all LLM features (for benchmarks)
-345: async with MemoryLake(database_url) as lake:
-346:     results = await lake.recall(
-347:         query,
-348:         mode=SearchMode.ALL,
-349:         raw=True,  # Disables query understanding, entity linking, reranking, HyDE
-350:     )
-351: 
-352: # Convenience methods (avoid direct storage access)
-353: async with MemoryLake(database_url) as lake:
-354:     ns_id = await lake.ensure_namespace("my-namespace", description="Test")
-355:     doc = await lake.get_document(doc_id)
-356:     docs = await lake.list_documents(namespace=ns_id, limit=100)
-357:     entities = await lake.search_entities("Alice", namespace=ns_id, limit=10)
-358:     namespace_stats = await lake.stats(namespace=ns_id)
-359: 
-360: # Advanced - full KhoraConfig (passed as positional argument)
-361: from khora.config import KhoraConfig
-362: from khora.config.schema import StorageSettings, KuzuConfig, PgVectorConfig
-363: 
-364: config = KhoraConfig(
-365:     database_url="postgresql://user:pass@localhost:5432/mydb",
-366:     storage=StorageSettings(
-367:         graph=KuzuConfig(database_path="./my_kuzu_db"),
-368:         vector=PgVectorConfig(url="postgresql://user:pass@localhost:5432/mydb"),
-369:     ),
-370: )
-371: async with MemoryLake(config) as lake:  # KhoraConfig as first positional arg
-372:     ...
-373: 
-374: # Chat engine with persona
-375: from khora.chat import ChatEngine
-376: from khora.chat.persona import PersonaConfig
-377: 
-378: persona = PersonaConfig(...)
-379: chat = ChatEngine(persona=persona, memory_lake=lake, agentic_search=True)
-380: response = await chat.chat("What do you know about X?", namespace_id=ns_id)
-381: ```
-382: 
-383: ### Data Classes
-384: 
-385: ```python
-386: from khora import BatchResult, Stats, RememberResult, RecallResult
-387: 
-388: # BatchResult - returned by remember_batch()
-389: @dataclass
-390: class BatchResult:
-391:     total: int         # Total documents submitted
-392:     processed: int     # Successfully processed
-393:     skipped: int       # Skipped (unchanged by checksum)
-394:     failed: int        # Failed to process
-395:     chunks: int        # Total chunks created
-396:     entities: int      # Total entities extracted
-397:     relationships: int # Total relationships created
-398: 
-399: # Stats - returned by stats()
-400: @dataclass
-401: class Stats:
-402:     documents: int
-403:     chunks: int
-404:     entities: int
-405:     relationships: int
-406: ```
-407: 
-408: ### Deprecation Notices
-409: 
-410: The `storage` and `query_engine` properties are deprecated. Use the new convenience methods instead:
-411: 
-412: | Deprecated | Replacement |
-413: |------------|-------------|
-414: | `lake.storage.get_document(id)` | `lake.get_document(id)` |
-415: | `lake.storage.list_documents(...)` | `lake.list_documents(...)` |
-416: | `lake.storage.search_entities(...)` | `lake.search_entities(...)` |
-417: | `lake.query_engine.query(...)` | `lake.recall(..., raw=True)` |
-418: 
-419: ## API Endpoints
-420: 
-421: ### Memory Operations
-422: - `POST /memory/remember` - Store content (with extraction skill selection)
-423: - `POST /memory/recall` - Search memories (vector/graph/hybrid/all modes)
-424: - `DELETE /memory/forget` - Remove a memory
-425: - `GET /memory/documents/{id}` - Get document details
-426: - `GET /memory/entities` - List entities (filter by type, namespace)
-427: - `GET /memory/entities/{id}` - Get entity details with attributes
-428: - `GET /memory/entities/{id}/related` - Get related entities (configurable depth)
-429: 
-430: ### Namespace Management
-431: - `POST /namespaces/organizations` - Create organization
-432: - `GET /namespaces/organizations/{id}` - Get organization
-433: - `POST /namespaces/workspaces` - Create workspace
-434: - `GET /namespaces/workspaces/{id}` - Get workspace
-435: - `GET /namespaces/organizations/{id}/workspaces` - List workspaces in org
-436: - `POST /namespaces/` - Create namespace
-437: - `GET /namespaces/{id}` - Get namespace
-438: - `GET /namespaces/workspaces/{id}/namespaces` - List namespaces in workspace
-439: 
-440: ### Sync & Pipelines
-441: - `POST /sync/ingest` - Ingest documents (full pipeline)
-442: - `POST /sync/source` - Sync from external source (incremental)
-443: - `GET /sync/checkpoint/{namespace_id}/{source}` - Get sync checkpoint
-444: - `PUT /sync/checkpoint/{namespace_id}/{source}` - Set sync checkpoint
-445: - `GET /sync/pipelines` - List registered pipelines
-446: 
-447: ### Health Checks
-448: - `GET /status` - Service status with version
-449: - `GET /health` - Health check
-450: - `GET /health/ready` - Readiness probe (component checks)
-451: - `GET /health/live` - Liveness probe
-452: 
-453: ## Telemetry
-454: 
-455: The `khora.telemetry` module records LLM usage, storage operations, and pipeline performance to a **separate** PostgreSQL database. It is enabled by setting `KHORA_TELEMETRY_DATABASE_URL`.
-456: 
-457: ### How it works
-458: 
-459: - **Disabled by default**: When the env var is unset, a zero-cost `NoOpCollector` is used — all record methods are no-ops.
-460: - **Non-blocking**: Events are buffered in memory and flushed every 5 seconds (or 100 events) via a background `asyncio.Task`.
-461: - **Separate DB**: Telemetry uses its own `AsyncEngine` and auto-creates tables on startup (no Alembic).
-462: - **Tables**: `llm_events`, `storage_events`, `pipeline_events` in the telemetry database.
-463: 
-464: ### Instrumenting new code
-465: 
-466: ```python
-467: # Record an LLM call
-468: from khora.telemetry import get_collector
-469: get_collector().record_llm_call(
-470:     operation="my_operation",
-471:     model="gpt-4o-mini",
-472:     prompt_tokens=120,
-473:     completion_tokens=350,
-474:     total_tokens=470,
-475:     latency_ms=812.3,
-476: )
-477: 
-478: # Use the pipeline_stage context manager
-479: from khora.telemetry.instrument import pipeline_stage
-480: async with pipeline_stage("my_pipeline", "my_stage", run_id):
-481:     await do_work()
-482: 
-483: # Use decorators
-484: from khora.telemetry.instrument import instrument_llm, instrument_storage
-485: 
-486: @instrument_llm("my_llm_operation")
-487: async def call_llm(): ...
-488: 
-489: @instrument_storage("postgresql", "my_storage_op")
-490: async def store_data(): ...
-491: ```
-````
-
 ## File: src/khora/storage/coordinator.py
 ````python
   1: """Storage coordinator that orchestrates all backends.
@@ -37492,6 +37048,501 @@ README.md
 907:         if not self.relational:
 908:             raise RuntimeError("Relational backend not configured")
 909:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
+````
+
+## File: CLAUDE.md
+````markdown
+  1: # Khora - Development Guide
+  2: 
+  3: Khora is Deyta's Memory Lake - a system combining knowledge graphs, vector database (pgvector), and relational database (PostgreSQL) for unified knowledge storage and retrieval. Supports multiple graph backends (Neo4j, Kuzu, Memgraph, ArcadeDB) and vector backends (pgvector, ArcadeDB).
+  4: 
+  5: ## Quick Reference
+  6: 
+  7: ### Commands
+  8: ```bash
+  9: # Development
+ 10: uv run khora serve --reload      # Start dev server with hot-reload
+ 11: uv run khora serve --no-auth     # Start without authentication
+ 12: make test                         # Run tests with coverage
+ 13: make prek                         # Run pre-commit hooks
+ 14: make format                       # Format code (black, isort, ruff)
+ 15: make lint                         # Check linting (includes ty)
+ 16: make typecheck                    # Run type checking (ty)
+ 17: make dev                          # Start development databases
+ 18: make down                         # Stop development databases
+ 19: 
+ 20: # Database
+ 21: uv run alembic upgrade head       # Run migrations
+ 22: uv run alembic revision --autogenerate -m "description"  # Create migration
+ 23: ```
+ 24: 
+ 25: ### Project Structure
+ 26: ```
+ 27: src/khora/
+ 28: ├── __init__.py                  # Package exports (MemoryLake, SearchMode)
+ 29: ├── __main__.py                  # Entry point
+ 30: ├── memory_lake.py               # Primary MemoryLake class (remember/recall/forget/remember_batch)
+ 31: ├── logging_config.py            # Loguru setup
+ 32: ├── api/                         # FastAPI application
+ 33: │   ├── app.py                   # App factory with lifespan
+ 34: │   ├── deps.py                  # Dependency injection
+ 35: │   └── routes/
+ 36: │       ├── memory.py            # Remember/recall/forget + entity CRUD
+ 37: │       ├── namespaces.py        # Org/workspace/namespace management
+ 38: │       ├── sync.py              # Ingestion pipelines + sync checkpoints
+ 39: │       └── status.py            # Health checks (status, health, ready, live)
+ 40: ├── acl/                         # Access control
+ 41: │   ├── checker.py               # Permission checking with inheritance
+ 42: │   └── enforcer.py              # Cross-layer enforcement
+ 43: ├── chat/                        # Conversational interface
+ 44: │   ├── engine.py                # ChatEngine (persona-driven responses)
+ 45: │   ├── history.py               # HistoryManager (turn management + compression)
+ 46: │   ├── persona.py               # PersonaConfig (behavior, style, chat settings)
+ 47: │   └── prompt.py                # PromptGenerator (system prompt construction)
+ 48: ├── cli/
+ 49: │   ├── __init__.py              # Click CLI group
+ 50: │   └── server.py                # `khora serve` command
+ 51: ├── config/
+ 52: │   ├── schema.py                # KhoraConfig + StorageSettings + GraphConfig union + QuerySettings
+ 53: │   ├── llm.py                   # LiteLLM wrapper (acompletion, aembedding, router)
+ 54: │   └── resolver.py              # Hierarchical config resolution
+ 55: ├── core/models/                 # Domain models
+ 56: │   ├── document.py              # Document, Chunk, DocumentMetadata, DocumentStatus
+ 57: │   ├── entity.py                # Entity, Relationship, Episode, EntityType
+ 58: │   ├── event.py                 # MemoryEvent (event sourcing)
+ 59: │   ├── schemas.py               # Extensible attribute schemas (Person, Organization, etc.)
+ 60: │   ├── source.py                # Source taxonomy (SourceTool, aliases, registry)
+ 61: │   └── tenancy.py               # Organization, Workspace, MemoryNamespace
+ 62: ├── db/
+ 63: │   ├── models.py                # SQLAlchemy ORM models
+ 64: │   └── session.py               # Async session management (asyncpg)
+ 65: ├── extraction/                  # Content processing
+ 66: │   ├── entity_resolution.py     # Entity deduplication and resolution
+ 67: │   ├── chunkers/
+ 68: │   │   ├── base.py              # Chunker base class
+ 69: │   │   ├── fixed.py             # Fixed-size token chunking
+ 70: │   │   ├── semantic.py          # Embedding-based semantic chunking
+ 71: │   │   ├── recursive.py         # Recursive text splitting
+ 72: │   │   └── conversation.py      # Conversation-aware chunking (time gaps, message groups)
+ 73: │   ├── embedders/
+ 74: │   │   ├── base.py              # Embedder base class
+ 75: │   │   └── litellm.py           # LiteLLM embedding (batched, with telemetry)
+ 76: │   ├── extractors/
+ 77: │   │   ├── base.py              # Extractor base class
+ 78: │   │   └── llm.py               # LLM entity extraction (single + multi-batch)
+ 79: │   ├── expansion/               # Knowledge graph enrichment
+ 80: │   │   ├── expander.py          # SemanticExpander (orchestrates expansion)
+ 81: │   │   ├── entity_index.py      # EntityIndex — in-memory blocking index for entity resolution
+ 82: │   │   ├── cross_tool_unifier.py # Cross-tool entity unification (supports blocked matching)
+ 83: │   │   ├── relationship_inferrer.py # Infer implicit relationships
+ 84: │   │   └── rule_engine.py       # Configurable rule-based expansion
+ 85: │   └── skills/                  # Extraction skill system
+ 86: │       ├── base.py              # ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig
+ 87: │       ├── registry.py          # Skill registry (get/register skills)
+ 88: │       ├── loader.py            # YAML skill loader
+ 89: │       └── composer.py          # Skill composition
+ 90: ├── pipelines/                   # Processing pipelines
+ 91: │   ├── manager.py               # PipelineManager (ingestion orchestration)
+ 92: │   ├── registry.py              # Pipeline registration
+ 93: │   ├── incremental.py           # Incremental sync support
+ 94: │   ├── flows/
+ 95: │   │   ├── ingest.py            # Document ingestion flow (chunk → embed‖extract → expand → store)
+ 96: │   │   ├── expansion.py         # Post-extraction graph expansion flow
+ 97: │   │   └── sync.py              # External source sync flow
+ 98: │   └── tasks/
+ 99: │       ├── chunk.py             # Chunking task
+100: │       ├── embed.py             # Embedding task
+101: │       └── extract.py           # Entity extraction task
+102: ├── query/                       # Search engine
+103: │   ├── engine.py                # HybridQueryEngine (orchestrates all search)
+104: │   ├── understanding.py         # LLM query understanding (entities, temporal, expansion)
+105: │   ├── linking.py               # Entity linking (exact, fuzzy, embedding match)
+106: │   ├── keyword.py               # BM25/fulltext keyword search
+107: │   ├── fusion.py                # Reciprocal Rank Fusion
+108: │   ├── reranking.py             # Neural reranking (cross-encoder, LLM)
+109: │   ├── hyde.py                  # Hypothetical Document Embeddings
+110: │   ├── agentic.py               # Multi-step agentic search
+111: │   ├── temporal.py              # Time-based query filters
+112: │   ├── metrics.py               # SearchMetrics (per-query performance stats)
+113: │   ├── cache.py                 # Query result caching
+114: │   └── message_extract.py       # Message content extraction
+115: ├── storage/                     # Storage backends
+116: │   ├── coordinator.py           # StorageCoordinator (backend orchestration)
+117: │   ├── factory.py               # Storage initialization + backend selection
+118: │   ├── event_store.py           # Event sourcing (immutable event log)
+119: │   ├── expertise_store.py       # Expertise definition CRUD
+120: │   ├── optimize.py              # Post-ingestion index optimization
+121: │   └── backends/
+122: │       ├── base.py              # GraphBackend + VectorBackend base classes
+123: │       ├── mixins.py            # Shared backend mixins
+124: │       ├── postgresql.py        # PostgreSQL (documents, events, tenancy, metadata)
+125: │       ├── pgvector.py          # pgvector (embeddings, vector similarity search)
+126: │       ├── neo4j.py             # Neo4j graph backend
+127: │       ├── kuzu.py              # Kuzu embedded graph backend
+128: │       ├── memgraph.py          # Memgraph graph backend
+129: │       └── arcadedb.py          # ArcadeDB graph + vector backend
+130: └── telemetry/                   # Internal telemetry
+131:     ├── __init__.py              # init_telemetry/shutdown_telemetry/get_collector
+132:     ├── config.py                # TelemetryConfig (from env)
+133:     ├── models.py                # LLMEvent, StorageEvent, PipelineEvent
+134:     ├── tables.py                # SQLAlchemy Core table definitions
+135:     ├── session.py               # Separate async engine for telemetry DB
+136:     ├── collector.py             # TelemetryCollector (async buffer + flush loop)
+137:     ├── noop.py                  # NoOpCollector (zero-cost when disabled)
+138:     └── instrument.py            # Decorators: @instrument_llm, @instrument_storage, pipeline_stage
+139: ```
+140: 
+141: ## Architecture
+142: 
+143: ### Core Components
+144: - **MemoryLake**: Primary API for `remember()` / `recall()` / `forget()` / `remember_batch()` operations
+145: - **StorageCoordinator**: Orchestrates PostgreSQL, pgvector, and the active graph backend
+146: - **HybridQueryEngine**: Multi-stage query pipeline (understanding → linking → search → fusion → reranking)
+147: - **ChatEngine**: Persona-driven conversational interface over MemoryLake
+148: - **PipelineManager**: Manages ingestion and sync flows
+149: - **SemanticExpander**: Post-extraction knowledge graph enrichment (relationship inference, cross-tool unification, rule engine)
+150: - **ACLEnforcer**: Cross-layer permission enforcement with hierarchical inheritance
+151: 
+152: ### Storage Backends
+153: 
+154: **Relational (always PostgreSQL):**
+155: - Documents, events, permissions, tenancy hierarchy, sync checkpoints
+156: 
+157: **Vector (selectable):**
+158: - **pgvector** (default): Embeddings and vector similarity search via PostgreSQL extension
+159: - **ArcadeDB**: Vector storage via ArcadeDB's embedding support
+160: 
+161: **Graph (selectable via `storage.graph.backend`):**
+162: - **Neo4j** (default): Client-server graph database (bolt:// protocol)
+163: - **Kuzu**: Embedded graph database (local directory, no server needed)
+164: - **Memgraph**: In-memory graph database (bolt:// protocol)
+165: - **ArcadeDB**: Multi-model database (HTTP API, supports Cypher or Gremlin)
+166: 
+167: All graph backends implement a common `GraphBackend` interface: entity/relationship CRUD, neighborhood traversal, fulltext search.
+168: 
+169: ### Multi-Tenancy Model
+170: 
+171: ```
+172: Organization (tenancy_mode: shared|isolated)
+173:   └── Workspace
+174:         └── MemoryNamespace (config_overrides, versioning)
+175: ```
+176: 
+177: Each namespace isolates documents, chunks, entities, and relationships. Namespaces support per-namespace configuration overrides and custom expertise definitions.
+178: 
+179: ### Data Flow
+180: 
+181: **Ingestion pipeline** (`remember()` / `remember_batch()` / `POST /sync/ingest`):
+182: 1. **Document creation** — checksum-based deduplication
+183: 2. **Chunking** — fixed, semantic, recursive, or conversation-aware
+184: 3. **Embedding + Entity extraction** (concurrent) — batched LiteLLM embedding and LLM-based extraction run in parallel via `asyncio.gather`
+185: 4. **Storage** — chunks → pgvector, entities/relationships → graph backend (batch writes), entity embeddings → pgvector (batch transaction), documents → PostgreSQL
+186: 5. **Expansion** — relationship inference, cross-tool unification, rule engine
+187: 6. **Index optimization** — post-ingestion index maintenance
+188: 
+189: `remember_batch()` delegates to `ingest_documents` for shared EntityIndex and cross-document entity dedup.
+190: 
+191: **Query pipeline** (`recall()` / `POST /memory/recall`):
+192: 1. **Query understanding** — LLM analyzes query for entities, temporal refs, and generates expansions
+193: 2. **Entity linking** — matches extracted entity mentions to stored entities (exact, fuzzy, embedding)
+194: 3. **HyDE** (optional) — generates hypothetical documents for improved embedding search
+195: 4. **Parallel search** — vector similarity + graph traversal + keyword (BM25/fulltext)
+196: 5. **Reciprocal Rank Fusion** — weighted fusion of search results
+197: 6. **Reranking** — cross-encoder or LLM-based reranking of fused candidates
+198: 7. **Agentic search** (optional) — multi-step exploration with follow-up queries
+199: 
+200: **Event sourcing**: Immutable `MemoryEvent` log in PostgreSQL for temporal queries and audit.
+201: 
+202: ### Extraction System
+203: 
+204: **Chunkers**: `fixed` (token count), `semantic` (embedding similarity boundaries), `recursive` (text splitting), `conversation` (time-gap and message-group aware).
+205: 
+206: **Skills**: YAML-configured extraction profiles defining entity types, relationship types, and extraction prompts. Skills are composable and stored per-namespace via `ExpertiseStore`. Default: `general_entities`.
+207: 
+208: **Entity resolution**: Deduplication of extracted entities across documents. Default mode is `smart`: per-document O(1) exact dedup via `EntityIndex`, single post-ingestion O(n*k) resolution pass with token-blocked matching. Legacy modes: `incremental`, `batch`, `none`.
+209: 
+210: **Expansion** (`SemanticExpander`):
+211: - `EntityIndex`: In-memory blocking index for O(1) exact dedup and O(k) fuzzy/embedding candidate retrieval
+212: - `CrossToolUnifier`: Merges entities from different extraction tools/runs (supports blocked matching via EntityIndex)
+213: - `RelationshipInferrer`: Infers implicit relationships from entity co-occurrence and attributes
+214: - `RuleEngine`: Configurable rules for domain-specific graph enrichment (supports incremental context updates)
+215: 
+216: **Attribute schemas**: Pydantic-validated attribute schemas per entity type (Person, Organization, Location, etc.). Extensible via `register_attribute_schema()`.
+217: 
+218: **Source taxonomy**: Controlled vocabulary for source types (`SourceTool` enum + dynamic registry). Downstream projects register domain-specific tools via `register_source_type()`.
+219: 
+220: ### Chat Engine
+221: 
+222: The `ChatEngine` provides conversational access to the memory lake:
+223: - **PersonaConfig**: Defines behavior, response style, and chat parameters
+224: - **HistoryManager**: Turn management with compression for long conversations
+225: - **PromptGenerator**: Constructs system prompts from persona config + retrieved context
+226: - Supports agentic search mode for deeper exploration during conversations
+227: 
+228: ## Code Style
+229: 
+230: - Python 3.13+
+231: - Line length: 120 characters
+232: - Black for formatting
+233: - isort with black profile
+234: - ruff for linting
+235: - ty for type checking (config in `pyproject.toml` under `[tool.ty]`)
+236: - Type hints throughout
+237: 
+238: ## Testing
+239: 
+240: - pytest with pytest-asyncio
+241: - Coverage minimum: 50%
+242: - Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
+243: - Fixtures in `tests/conftest.py`
+244: 
+245: ## Environment Variables
+246: 
+247: ### Core
+248: | Variable | Description | Default |
+249: |----------|-------------|---------|
+250: | `KHORA_DATABASE_URL` | PostgreSQL/pgvector connection URL | Required |
+251: | `KHORA_NEO4J_URL` | Neo4j connection URL (bolt://user:pass@host:port) | - |
+252: | `KHORA_DEBUG` | Enable debug mode | `false` |
+253: | `KHORA_ENVIRONMENT` | Environment: development, staging, production | `development` |
+254: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
+255: | `KHORA_API_PORT` | API server port | `8000` |
+256: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
+257: 
+258: ### LLM
+259: | Variable | Description | Default |
+260: |----------|-------------|---------|
+261: | `OPENAI_API_KEY` | OpenAI API key (for embeddings/LLM) | - |
+262: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
+263: | `KHORA_LLM__MODEL` | Primary LLM model | `gpt-4o-mini` |
+264: | `KHORA_LLM__EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
+265: | `KHORA_LLM__EMBEDDING_DIMENSION` | Embedding vector dimension | `1536` |
+266: 
+267: ### Storage (new-style backend configs)
+268: | Variable | Description | Default |
+269: |----------|-------------|---------|
+270: | `KHORA_STORAGE__GRAPH__BACKEND` | Graph backend: `neo4j`, `kuzu`, `memgraph`, `arcadedb` | `neo4j` |
+271: | `KHORA_STORAGE__VECTOR__BACKEND` | Vector backend: `pgvector`, `arcadedb` | `pgvector` |
+272: 
+273: ### Query Pipeline
+274: | Variable | Description | Default |
+275: |----------|-------------|---------|
+276: | `KHORA_QUERY__DEFAULT_MODE` | Default search mode: `vector`, `graph`, `hybrid`, `all` | `hybrid` |
+277: | `KHORA_QUERY__MIN_CHUNK_SIMILARITY` | Minimum chunk similarity threshold (0.0 = no filtering) | `0.05` |
+278: | `KHORA_QUERY__MIN_ENTITY_SIMILARITY` | Minimum entity similarity threshold | `0.05` |
+279: | `KHORA_QUERY__ENABLE_UNDERSTANDING` | Enable LLM query understanding | `true` |
+280: | `KHORA_QUERY__ENABLE_ENTITY_LINKING` | Enable entity linking | `true` |
+281: | `KHORA_QUERY__ENABLE_RERANKING` | Enable neural reranking | `true` |
+282: | `KHORA_QUERY__RERANKING_METHOD` | Reranking method: `cross_encoder`, `llm` | `cross_encoder` |
+283: | `KHORA_QUERY__ENABLE_KEYWORD_SEARCH` | Enable keyword search (runs in hybrid and all modes) | `true` |
+284: | `KHORA_QUERY__ENABLE_HYDE` | Enable HyDE query expansion | `false` |
+285: | `KHORA_QUERY__VECTOR_WEIGHT` | Weight for vector search in fusion | `0.5` |
+286: | `KHORA_QUERY__GRAPH_WEIGHT` | Weight for graph search in fusion | `0.3` |
+287: | `KHORA_QUERY__KEYWORD_WEIGHT` | Weight for keyword search in fusion | `0.2` |
+288: 
+289: ### Pipelines
+290: | Variable | Description | Default |
+291: |----------|-------------|---------|
+292: | `KHORA_PIPELINES__CHUNKING_STRATEGY` | Chunking strategy: `fixed`, `semantic`, `recursive` | `semantic` |
+293: | `KHORA_PIPELINES__CHUNK_SIZE` | Target chunk size in tokens | `512` |
+294: | `KHORA_PIPELINES__EXTRACT_ENTITIES` | Extract entities from documents | `true` |
+295: 
+296: ### Telemetry
+297: | Variable | Description | Default |
+298: |----------|-------------|---------|
+299: | `KHORA_TELEMETRY_DATABASE_URL` | PostgreSQL URL for telemetry DB (enables telemetry when set) | - |
+300: | `KHORA_TELEMETRY_SERVICE_NAME` | Service name tag in telemetry events | `khora` |
+301: 
+302: **URL formats:**
+303: - PostgreSQL: `postgresql://user:password@host:port/database`
+304: - Neo4j: `bolt://user:password@host:port` or `bolt://user:password@host:port/database`
+305: - Kuzu: Local directory path (e.g., `./kuzu_db`)
+306: - Memgraph: `bolt://user:password@host:port`
+307: - ArcadeDB: `http://user:password@host:port`
+308: 
+309: **Note:** Programmatic configuration takes priority over environment variables. Nested config uses `__` delimiter (e.g., `KHORA_QUERY__ENABLE_HYDE=true`).
+310: 
+311: ## Library Usage
+312: 
+313: ```python
+314: from khora import MemoryLake, SearchMode
+315: 
+316: # Simplest - reads KHORA_DATABASE_URL from env
+317: async with MemoryLake() as lake:
+318:     await lake.remember("Content to store", title="Title")
+319:     memories = await lake.recall("query")
+320: 
+321: # Common - explicit database URL
+322: async with MemoryLake("postgresql://localhost/mydb") as lake:
+323:     result = await lake.remember("content", title="My Document")
+324:     memories = await lake.recall("query", limit=20)
+325: 
+326: # With graph backend
+327: async with MemoryLake(
+328:     "postgresql://localhost/mydb",
+329:     graph_url="bolt://localhost:7687",
+330: ) as lake:
+331:     memories = await lake.recall("query", mode=SearchMode.GRAPH)
+332: 
+333: # Batch ingestion with automatic orchestration
+334: async with MemoryLake(database_url) as lake:
+335:     # Returns BatchResult with aggregated stats
+336:     result = await lake.remember_batch(
+337:         documents,
+338:         deduplicate=True,           # Cross-doc entity deduplication
+339:         infer_relationships=True,   # Run inference after ingestion
+340:         on_progress=lambda done, total: print(f"{done}/{total}"),
+341:     )
+342:     print(f"Processed {result.processed} docs, {result.entities} entities")
+343: 
+344: # Raw search - skip all LLM features (for benchmarks)
+345: async with MemoryLake(database_url) as lake:
+346:     results = await lake.recall(
+347:         query,
+348:         mode=SearchMode.ALL,
+349:         raw=True,  # Disables query understanding, entity linking, reranking, HyDE
+350:     )
+351: 
+352: # Convenience methods (avoid direct storage access)
+353: async with MemoryLake(database_url) as lake:
+354:     ns_id = await lake.ensure_namespace("my-namespace", description="Test")
+355:     doc = await lake.get_document(doc_id)
+356:     docs = await lake.list_documents(namespace=ns_id, limit=100)
+357:     entities = await lake.search_entities("Alice", namespace=ns_id, limit=10)
+358:     namespace_stats = await lake.stats(namespace=ns_id)
+359: 
+360: # Advanced - full KhoraConfig (passed as positional argument)
+361: from khora.config import KhoraConfig
+362: from khora.config.schema import StorageSettings, KuzuConfig, PgVectorConfig
+363: 
+364: config = KhoraConfig(
+365:     database_url="postgresql://user:pass@localhost:5432/mydb",
+366:     storage=StorageSettings(
+367:         graph=KuzuConfig(database_path="./my_kuzu_db"),
+368:         vector=PgVectorConfig(url="postgresql://user:pass@localhost:5432/mydb"),
+369:     ),
+370: )
+371: async with MemoryLake(config) as lake:  # KhoraConfig as first positional arg
+372:     ...
+373: 
+374: # Chat engine with persona
+375: from khora.chat import ChatEngine
+376: from khora.chat.persona import PersonaConfig
+377: 
+378: persona = PersonaConfig(...)
+379: chat = ChatEngine(persona=persona, memory_lake=lake, agentic_search=True)
+380: response = await chat.chat("What do you know about X?", namespace_id=ns_id)
+381: ```
+382: 
+383: ### Data Classes
+384: 
+385: ```python
+386: from khora import BatchResult, Stats, RememberResult, RecallResult
+387: 
+388: # BatchResult - returned by remember_batch()
+389: @dataclass
+390: class BatchResult:
+391:     total: int         # Total documents submitted
+392:     processed: int     # Successfully processed
+393:     skipped: int       # Skipped (unchanged by checksum)
+394:     failed: int        # Failed to process
+395:     chunks: int        # Total chunks created
+396:     entities: int      # Total entities extracted
+397:     relationships: int # Total relationships created
+398: 
+399: # Stats - returned by stats()
+400: @dataclass
+401: class Stats:
+402:     documents: int
+403:     chunks: int
+404:     entities: int
+405:     relationships: int
+406: ```
+407: 
+408: ### Deprecation Notices
+409: 
+410: The `storage` and `query_engine` properties are deprecated. Use the new convenience methods instead:
+411: 
+412: | Deprecated | Replacement |
+413: |------------|-------------|
+414: | `lake.storage.get_document(id)` | `lake.get_document(id)` |
+415: | `lake.storage.list_documents(...)` | `lake.list_documents(...)` |
+416: | `lake.storage.search_entities(...)` | `lake.search_entities(...)` |
+417: | `lake.query_engine.query(...)` | `lake.recall(..., raw=True)` |
+418: 
+419: ## API Endpoints
+420: 
+421: ### Memory Operations
+422: - `POST /memory/remember` - Store content (with extraction skill selection)
+423: - `POST /memory/recall` - Search memories (vector/graph/hybrid/all modes)
+424: - `DELETE /memory/forget` - Remove a memory
+425: - `GET /memory/documents/{id}` - Get document details
+426: - `GET /memory/entities` - List entities (filter by type, namespace)
+427: - `GET /memory/entities/{id}` - Get entity details with attributes
+428: - `GET /memory/entities/{id}/related` - Get related entities (configurable depth)
+429: 
+430: ### Namespace Management
+431: - `POST /namespaces/organizations` - Create organization
+432: - `GET /namespaces/organizations/{id}` - Get organization
+433: - `POST /namespaces/workspaces` - Create workspace
+434: - `GET /namespaces/workspaces/{id}` - Get workspace
+435: - `GET /namespaces/organizations/{id}/workspaces` - List workspaces in org
+436: - `POST /namespaces/` - Create namespace
+437: - `GET /namespaces/{id}` - Get namespace
+438: - `GET /namespaces/workspaces/{id}/namespaces` - List namespaces in workspace
+439: 
+440: ### Sync & Pipelines
+441: - `POST /sync/ingest` - Ingest documents (full pipeline)
+442: - `POST /sync/source` - Sync from external source (incremental)
+443: - `GET /sync/checkpoint/{namespace_id}/{source}` - Get sync checkpoint
+444: - `PUT /sync/checkpoint/{namespace_id}/{source}` - Set sync checkpoint
+445: - `GET /sync/pipelines` - List registered pipelines
+446: 
+447: ### Health Checks
+448: - `GET /status` - Service status with version
+449: - `GET /health` - Health check
+450: - `GET /health/ready` - Readiness probe (component checks)
+451: - `GET /health/live` - Liveness probe
+452: 
+453: ## Telemetry
+454: 
+455: The `khora.telemetry` module records LLM usage, storage operations, and pipeline performance to a **separate** PostgreSQL database. It is enabled by setting `KHORA_TELEMETRY_DATABASE_URL`.
+456: 
+457: ### How it works
+458: 
+459: - **Disabled by default**: When the env var is unset, a zero-cost `NoOpCollector` is used — all record methods are no-ops.
+460: - **Non-blocking**: Events are buffered in memory and flushed every 5 seconds (or 100 events) via a background `asyncio.Task`.
+461: - **Separate DB**: Telemetry uses its own `AsyncEngine` and auto-creates tables on startup (no Alembic).
+462: - **Tables**: `llm_events`, `storage_events`, `pipeline_events` in the telemetry database.
+463: 
+464: ### Instrumenting new code
+465: 
+466: ```python
+467: # Record an LLM call
+468: from khora.telemetry import get_collector
+469: get_collector().record_llm_call(
+470:     operation="my_operation",
+471:     model="gpt-4o-mini",
+472:     prompt_tokens=120,
+473:     completion_tokens=350,
+474:     total_tokens=470,
+475:     latency_ms=812.3,
+476: )
+477: 
+478: # Use the pipeline_stage context manager
+479: from khora.telemetry.instrument import pipeline_stage
+480: async with pipeline_stage("my_pipeline", "my_stage", run_id):
+481:     await do_work()
+482: 
+483: # Use decorators
+484: from khora.telemetry.instrument import instrument_llm, instrument_storage
+485: 
+486: @instrument_llm("my_llm_operation")
+487: async def call_llm(): ...
+488: 
+489: @instrument_storage("postgresql", "my_storage_op")
+490: async def store_data(): ...
+491: ```
 ````
 
 ## File: src/khora/query/engine.py
@@ -39047,6 +39098,63 @@ README.md
 1549:         )
 ````
 
+## File: src/khora/__init__.py
+````python
+ 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 2: 
+ 3: Khora provides a unified interface for:
+ 4: - Storing and retrieving knowledge artifacts
+ 5: - Materializing data transformations
+ 6: - Building memory graphs and relationships
+ 7: 
+ 8: Example usage:
+ 9:     # Simplest - from env vars (KHORA_DATABASE_URL)
+10:     from khora import MemoryLake
+11: 
+12:     async with MemoryLake() as lake:
+13:         await lake.remember("Important information to store")
+14:         results = await lake.recall("query about information")
+15: 
+16:     # Common - explicit database URL
+17:     async with MemoryLake("postgresql://localhost/mydb") as lake:
+18:         await lake.remember("content", title="My Document")
+19:         results = await lake.recall("query", limit=20)
+20: 
+21:     # With graph backend
+22:     async with MemoryLake(
+23:         "postgresql://localhost/mydb",
+24:         graph_url="bolt://localhost:7687",
+25:     ) as lake:
+26:         results = await lake.recall("query", mode=SearchMode.GRAPH)
+27: 
+28:     # Batch ingestion with automatic optimization
+29:     async with MemoryLake(database_url) as lake:
+30:         result = await lake.remember_batch(documents)
+31:         print(f"Processed {result.processed} docs, {result.entities} entities")
+32: 
+33:     # Raw search without LLM features (for benchmarks)
+34:     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
+35: """
+36: 
+37: from .cli import main
+38: from .config import KhoraConfig
+39: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
+40: from .query import SearchMode
+41: 
+42: __version__ = "0.0.31"
+43: 
+44: __all__ = [
+45:     "main",
+46:     "MemoryLake",
+47:     "RememberResult",
+48:     "RecallResult",
+49:     "BatchResult",
+50:     "Stats",
+51:     "SearchMode",
+52:     "KhoraConfig",
+53: ]
+````
+
 ## File: src/khora/storage/backends/pgvector.py
 ````python
   1: """pgvector backend for vector embeddings storage.
@@ -39688,1024 +39796,1088 @@ README.md
 637:             }
 ````
 
-## File: src/khora/__init__.py
-````python
- 1: """Khora - Deyta's memory lake and materialization of knowledge.
- 2: 
- 3: Khora provides a unified interface for:
- 4: - Storing and retrieving knowledge artifacts
- 5: - Materializing data transformations
- 6: - Building memory graphs and relationships
- 7: 
- 8: Example usage:
- 9:     # Simplest - from env vars (KHORA_DATABASE_URL)
-10:     from khora import MemoryLake
-11: 
-12:     async with MemoryLake() as lake:
-13:         await lake.remember("Important information to store")
-14:         results = await lake.recall("query about information")
-15: 
-16:     # Common - explicit database URL
-17:     async with MemoryLake("postgresql://localhost/mydb") as lake:
-18:         await lake.remember("content", title="My Document")
-19:         results = await lake.recall("query", limit=20)
-20: 
-21:     # With graph backend
-22:     async with MemoryLake(
-23:         "postgresql://localhost/mydb",
-24:         graph_url="bolt://localhost:7687",
-25:     ) as lake:
-26:         results = await lake.recall("query", mode=SearchMode.GRAPH)
-27: 
-28:     # Batch ingestion with automatic optimization
-29:     async with MemoryLake(database_url) as lake:
-30:         result = await lake.remember_batch(documents)
-31:         print(f"Processed {result.processed} docs, {result.entities} entities")
-32: 
-33:     # Raw search without LLM features (for benchmarks)
-34:     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
-35: """
-36: 
-37: from .cli import main
-38: from .config import KhoraConfig
-39: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
-40: from .query import SearchMode
-41: 
-42: __version__ = "0.0.31"
-43: 
-44: __all__ = [
-45:     "main",
-46:     "MemoryLake",
-47:     "RememberResult",
-48:     "RecallResult",
-49:     "BatchResult",
-50:     "Stats",
-51:     "SearchMode",
-52:     "KhoraConfig",
-53: ]
-````
-
 ## File: src/khora/extraction/extractors/llm.py
 ````python
-  1: """LLM-based entity extraction using LiteLLM."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import asyncio
-  6: import json
-  7: from typing import TYPE_CHECKING, Any
-  8: 
-  9: from loguru import logger
- 10: from tenacity import AsyncRetrying, before_sleep_log, stop_after_attempt, wait_exponential
- 11: 
- 12: from .base import (
- 13:     EntityExtractor,
- 14:     ExtractedEntity,
- 15:     ExtractedEvent,
- 16:     ExtractedRelationship,
- 17:     ExtractionResult,
- 18:     TemporalInfo,
- 19: )
- 20: 
- 21: if TYPE_CHECKING:
- 22:     from khora.config import LiteLLMConfig
- 23:     from khora.extraction.skills import ExpertiseConfig
- 24: 
- 25: 
- 26: # Default entity types to extract
- 27: DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
- 28: 
- 29: # Default relationship types to use
- 30: DEFAULT_RELATIONSHIP_TYPES = [
- 31:     "WORKS_FOR",
- 32:     "KNOWS",
- 33:     "MANAGES",
- 34:     "PART_OF",
- 35:     "LOCATED_IN",
- 36:     "DEPENDS_ON",
- 37:     "IMPLEMENTS",
- 38:     "RELATES_TO",
- 39:     "ASSOCIATED_WITH",
- 40: ]
- 41: 
- 42: # Default system prompt for extraction
- 43: DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
- 44: 
- 45: # Extraction prompt template with temporal awareness
- 46: EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
- 47: 
- 48: Entity types to extract: {entity_types}
- 49: Relationship types to use: {relationship_types}
- 50: 
- 51: Text:
- 52: {text}
- 53: 
- 54: Return a JSON object with the following structure:
- 55: {{
- 56:     "entities": [
- 57:         {{
- 58:             "name": "entity name (canonical form, properly capitalized)",
- 59:             "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|PRODUCT|DATE|etc",
- 60:             "description": "brief description of the entity",
- 61:             "attributes": {{"key": "value"}},
- 62:             "aliases": ["alternative names", "nicknames", "abbreviations"],
- 63:             "temporal": {{
- 64:                 "mentioned_at": "when entity is mentioned (if temporal context exists)",
- 65:                 "valid_from": "ISO date or null if entity validity period is mentioned",
- 66:                 "valid_until": "ISO date or null if entity validity period ends"
- 67:             }}
- 68:         }}
- 69:     ],
- 70:     "relationships": [
- 71:         {{
- 72:             "source_entity": "source entity name (must match an entity above)",
- 73:             "target_entity": "target entity name (must match an entity above)",
- 74:             "relationship_type": "WORKS_FOR|KNOWS|MANAGES|REPORTS_TO|COLLABORATES_WITH|OWNS|PART_OF|LOCATED_IN|RELATES_TO|DEPENDS_ON|IMPLEMENTS|PRECEDES|FOLLOWS|ASSOCIATED_WITH|etc",
- 75:             "description": "brief description of relationship",
- 76:             "temporal": {{
- 77:                 "occurred_at": "when relationship occurred/started",
- 78:                 "valid_from": "ISO date or null if relationship has time bounds",
- 79:                 "valid_until": "ISO date or null if relationship ended"
- 80:             }}
- 81:         }}
- 82:     ],
- 83:     "events": [
- 84:         {{
- 85:             "description": "what happened",
- 86:             "occurred_at": "when it occurred (ISO date or descriptive)",
- 87:             "participants": ["entity names involved"],
- 88:             "event_type": "MEETING|DECISION|MILESTONE|ANNOUNCEMENT|INCIDENT|etc"
- 89:         }}
- 90:     ]
- 91: }}
- 92: 
- 93: Guidelines:
- 94: - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
- 95: - Include aliases for entities that have multiple names/abbreviations
- 96: - Extract temporal information when dates, times, or relative time references appear
- 97: - For events, capture the when, who, and what
- 98: - Be thorough but precise - only extract entities that are clearly mentioned
- 99: - Ensure relationship source/target names match extracted entity names exactly
-100: 
-101: Return ONLY valid JSON, no other text."""
-102: 
-103: 
-104: class LLMEntityExtractor(EntityExtractor):
-105:     """LLM-based entity extractor using LiteLLM.
-106: 
-107:     Uses an LLM to extract entities and relationships from text
-108:     through structured JSON output.
-109:     """
-110: 
-111:     # Models that require json_schema format instead of json_object
-112:     # OpenAI models with structured output support need explicit json_schema
-113:     # to ensure additionalProperties: false is properly set on all nested objects
-114:     MODELS_REQUIRING_JSON_SCHEMA: set[str] = {
-115:         "gpt-4o",
-116:         "gpt-4o-mini",
-117:         "gpt-4o-2024-05-13",
-118:         "gpt-4o-2024-08-06",
-119:         "gpt-4o-2024-11-20",
-120:         "gpt-4o-mini-2024-07-18",
-121:         "gpt-4-turbo",
-122:         "gpt-4-turbo-preview",
-123:         "o1",
-124:         "o1-mini",
-125:         "o1-preview",
-126:         "o3-mini",
-127:     }
-128: 
-129:     def __init__(
-130:         self,
-131:         model: str = "gpt-4o-mini",
-132:         *,
-133:         temperature: float = 0.3,  # Lower for more consistent extraction
-134:         max_tokens: int = 4000,
-135:         timeout: int = 60,
-136:         max_retries: int = 3,
-137:         max_concurrent: int = 5,
-138:         retry_wait: float = 1.0,
-139:     ) -> None:
-140:         """Initialize the LLM entity extractor.
-141: 
-142:         Args:
-143:             model: LLM model to use
-144:             temperature: Sampling temperature
-145:             max_tokens: Maximum tokens in response
-146:             timeout: Request timeout in seconds
-147:             max_retries: Maximum retries on failure
-148:             max_concurrent: Maximum concurrent extractions
-149:             retry_wait: Base wait time (seconds) for exponential backoff between retries
-150:         """
-151:         self._model = model
-152:         self._temperature = temperature
-153:         self._max_tokens = max_tokens
-154:         self._timeout = timeout
-155:         self._max_retries = max_retries
-156:         self._retry_wait = retry_wait
-157:         self._semaphore = asyncio.Semaphore(max_concurrent)
-158: 
-159:     def _get_response_format(self) -> dict[str, Any]:
-160:         """Get the appropriate response_format based on the model.
-161: 
-162:         Some models (like gpt-5-nano) require json_schema format with
-163:         strict structured outputs, while others work with json_object.
-164:         """
-165:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
-166:             return {
-167:                 "type": "json_schema",
-168:                 "json_schema": {
-169:                     "name": "extraction_result",
-170:                     "strict": True,
-171:                     "schema": {
-172:                         "type": "object",
-173:                         "properties": {
-174:                             "entities": {
-175:                                 "type": "array",
-176:                                 "items": {
-177:                                     "type": "object",
-178:                                     "properties": {
-179:                                         "name": {"type": "string"},
-180:                                         "entity_type": {"type": "string"},
-181:                                         "description": {"type": "string"},
-182:                                         "aliases": {"type": "array", "items": {"type": "string"}},
-183:                                     },
-184:                                     "required": ["name", "entity_type", "description", "aliases"],
-185:                                     "additionalProperties": False,
-186:                                 },
-187:                             },
-188:                             "relationships": {
-189:                                 "type": "array",
-190:                                 "items": {
-191:                                     "type": "object",
-192:                                     "properties": {
-193:                                         "source_entity": {"type": "string"},
-194:                                         "target_entity": {"type": "string"},
-195:                                         "relationship_type": {"type": "string"},
-196:                                         "description": {"type": "string"},
-197:                                     },
-198:                                     "required": ["source_entity", "target_entity", "relationship_type", "description"],
-199:                                     "additionalProperties": False,
-200:                                 },
-201:                             },
-202:                             "events": {
-203:                                 "type": "array",
-204:                                 "items": {
-205:                                     "type": "object",
-206:                                     "properties": {
-207:                                         "description": {"type": "string"},
-208:                                         "event_type": {"type": "string"},
-209:                                         "occurred_at": {"type": ["string", "null"]},
-210:                                         "participants": {"type": "array", "items": {"type": "string"}},
-211:                                     },
-212:                                     "required": ["description", "event_type", "occurred_at", "participants"],
-213:                                     "additionalProperties": False,
-214:                                 },
-215:                             },
-216:                         },
-217:                         "required": ["entities", "relationships", "events"],
-218:                         "additionalProperties": False,
-219:                     },
-220:                 },
-221:             }
-222:         return {"type": "json_object"}
-223: 
-224:     def _get_multi_response_format(self) -> dict[str, Any]:
-225:         """Get the appropriate response_format for multi-section batch extraction.
-226: 
-227:         Similar to _get_response_format but wraps entities/relationships/events
-228:         in a "sections" array for batch processing.
-229:         """
-230:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
-231:             section_schema = {
-232:                 "type": "object",
-233:                 "properties": {
-234:                     "entities": {
-235:                         "type": "array",
-236:                         "items": {
-237:                             "type": "object",
-238:                             "properties": {
-239:                                 "name": {"type": "string"},
-240:                                 "entity_type": {"type": "string"},
-241:                                 "description": {"type": "string"},
-242:                                 "aliases": {"type": "array", "items": {"type": "string"}},
-243:                             },
-244:                             "required": ["name", "entity_type", "description", "aliases"],
-245:                             "additionalProperties": False,
-246:                         },
-247:                     },
-248:                     "relationships": {
-249:                         "type": "array",
-250:                         "items": {
-251:                             "type": "object",
-252:                             "properties": {
-253:                                 "source_entity": {"type": "string"},
-254:                                 "target_entity": {"type": "string"},
-255:                                 "relationship_type": {"type": "string"},
-256:                                 "description": {"type": "string"},
-257:                             },
-258:                             "required": ["source_entity", "target_entity", "relationship_type", "description"],
-259:                             "additionalProperties": False,
-260:                         },
-261:                     },
-262:                     "events": {
-263:                         "type": "array",
-264:                         "items": {
-265:                             "type": "object",
-266:                             "properties": {
-267:                                 "description": {"type": "string"},
-268:                                 "event_type": {"type": "string"},
-269:                                 "occurred_at": {"type": ["string", "null"]},
-270:                                 "participants": {"type": "array", "items": {"type": "string"}},
-271:                             },
-272:                             "required": ["description", "event_type", "occurred_at", "participants"],
-273:                             "additionalProperties": False,
-274:                         },
-275:                     },
-276:                 },
-277:                 "required": ["entities", "relationships", "events"],
-278:                 "additionalProperties": False,
-279:             }
-280:             return {
-281:                 "type": "json_schema",
-282:                 "json_schema": {
-283:                     "name": "multi_extraction_result",
-284:                     "strict": True,
-285:                     "schema": {
-286:                         "type": "object",
-287:                         "properties": {
-288:                             "sections": {
-289:                                 "type": "array",
-290:                                 "items": section_schema,
-291:                             },
-292:                         },
-293:                         "required": ["sections"],
-294:                         "additionalProperties": False,
-295:                     },
-296:                 },
-297:             }
-298:         return {"type": "json_object"}
-299: 
-300:     @classmethod
-301:     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
-302:         """Create extractor from LiteLLM configuration.
-303: 
-304:         Args:
-305:             config: LiteLLMConfig instance
-306: 
-307:         Returns:
-308:             Configured LLMEntityExtractor
-309:         """
-310:         return cls(
-311:             model=config.model,
-312:             temperature=0.3,  # Override for extraction
-313:             max_tokens=config.max_tokens,
-314:             timeout=config.timeout,
-315:             max_retries=config.max_retries,
-316:             max_concurrent=config.max_concurrent_llm_calls,
-317:             retry_wait=config.retry_wait,
-318:         )
-319: 
-320:     async def extract(
-321:         self,
-322:         text: str,
-323:         *,
-324:         entity_types: list[str] | None = None,
-325:         expertise: ExpertiseConfig | None = None,
-326:         context: dict[str, Any] | None = None,
-327:     ) -> ExtractionResult:
-328:         """Extract entities and relationships from text.
-329: 
-330:         Args:
-331:             text: Text to extract from
-332:             entity_types: Optional list of entity types to extract
-333:             expertise: Optional ExpertiseConfig for domain-specific extraction
-334:             context: Optional context dict for prompt template rendering
-335: 
-336:         Returns:
-337:             ExtractionResult containing entities and relationships
-338:         """
-339:         if not text.strip():
-340:             return ExtractionResult()
-341: 
-342:         # Determine entity types from expertise or fallback
-343:         if expertise:
-344:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
-345:         else:
-346:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
-347: 
-348:         try:
-349:             import litellm
-350:         except ImportError:
-351:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
-352: 
-353:         # Render prompts based on expertise
-354:         system_prompt = self._render_system_prompt(expertise, context)
-355:         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
-356: 
-357:         try:
-358:             async for attempt in AsyncRetrying(
-359:                 stop=stop_after_attempt(self._max_retries),
-360:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
-361:                 before_sleep=before_sleep_log(logger, "WARNING"),
-362:                 reraise=True,
-363:             ):
-364:                 with attempt:
-365:                     async with self._semaphore:
-366:                         import time as _time
-367: 
-368:                         _t0 = _time.perf_counter()
-369:                         response = await litellm.acompletion(
-370:                             model=self._model,
-371:                             messages=[
-372:                                 {"role": "system", "content": system_prompt},
-373:                                 {"role": "user", "content": extraction_prompt},
-374:                             ],
-375:                             temperature=self._temperature,
-376:                             max_tokens=self._max_tokens,
-377:                             timeout=self._timeout,
-378:                             response_format=self._get_response_format(),
-379:                         )
-380:                         _latency = (_time.perf_counter() - _t0) * 1000
-381: 
-382:                         # Record telemetry
-383:                         from khora.telemetry import get_collector
-384: 
-385:                         usage = getattr(response, "usage", None)
-386:                         get_collector().record_llm_call(
-387:                             operation="entity_extraction",
-388:                             model=self._model,
-389:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-390:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-391:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
-392:                             latency_ms=_latency,
-393:                         )
-394: 
-395:                     content = response.choices[0].message.content
-396:                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
-397: 
-398:                     # Check for truncated response (hit max_tokens limit)
-399:                     if finish_reason == "length":
-400:                         model_used = getattr(response, "model", self._model)
-401:                         logger.warning(
-402:                             f"LLM response truncated (finish_reason=length) in extraction. "
-403:                             f"Model: {model_used}. Consider increasing max_tokens."
-404:                         )
-405:                         return ExtractionResult(
-406:                             metadata={"error": "truncated_response", "finish_reason": finish_reason}
-407:                         )
-408: 
-409:                     result = self._parse_response(content)
-410: 
-411:                     # Apply confidence filtering from expertise if available
-412:                     if expertise:
-413:                         result = self._filter_by_confidence(result, expertise)
-414: 
-415:                     return result
-416:         except Exception as e:
-417:             logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
-418:             return ExtractionResult(metadata={"error": str(e)})
-419: 
-420:     def _render_system_prompt(
-421:         self,
-422:         expertise: ExpertiseConfig | None,
-423:         context: dict[str, Any] | None,
-424:     ) -> str:
-425:         """Render the system prompt, optionally using expertise config."""
-426:         if not expertise or not expertise.system_prompt:
-427:             return DEFAULT_SYSTEM_PROMPT
-428: 
-429:         try:
-430:             from khora.extraction.skills.composer import ExpertiseComposer
-431: 
-432:             composer = ExpertiseComposer()
-433:             return composer.render_prompt(
-434:                 expertise.system_prompt,
-435:                 expertise=expertise,
-436:                 context=context,
-437:             )
-438:         except Exception as e:
-439:             logger.warning(f"Failed to render system prompt: {e}")
-440:             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
-441: 
-442:     def _build_tool_context(self, expertise: ExpertiseConfig | None, context: dict[str, Any] | None) -> str:
-443:         """Build tool-specific context block for the extraction prompt.
-444: 
-445:         When expertise has tool_schemas populated and the context identifies
-446:         a source_tool, this injects structured field knowledge so the LLM
-447:         understands the data format it's extracting from.
-448: 
-449:         Args:
-450:             expertise: Optional ExpertiseConfig with tool_schemas
-451:             context: Optional context dict with source_tool key
-452: 
-453:         Returns:
-454:             Tool context string to prepend to the text, or empty string
-455:         """
-456:         if not expertise or not expertise.tool_schemas or not context:
-457:             return ""
-458: 
-459:         source_tool = context.get("source_tool", "")
-460:         if not source_tool:
-461:             return ""
-462: 
-463:         schema = expertise.tool_schemas.get(source_tool)
-464:         if not schema:
-465:             return ""
-466: 
-467:         lines = [f"\nSOURCE CONTEXT: This content comes from {source_tool}."]
-468:         for obj_type, obj_schema in schema.items():
-469:             if not isinstance(obj_schema, dict):
-470:                 continue
-471:             fields = obj_schema.get("fields", [])
-472:             if fields:
-473:                 lines.append(f"  {obj_type} fields: {', '.join(str(f) for f in fields)}")
-474:             for key, values in obj_schema.items():
-475:                 if key != "fields" and isinstance(values, list):
-476:                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
-477: 
-478:         # Add attribute schema hints from entity types
-479:         if expertise.entity_types:
-480:             lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
-481:             for et in expertise.entity_types:
-482:                 required = et.attributes.get("required", [])
-483:                 optional = et.attributes.get("optional", [])
-484:                 if required or optional:
-485:                     parts = []
-486:                     if required:
-487:                         parts.append(f"required: {', '.join(required)}")
-488:                     if optional:
-489:                         parts.append(f"optional: {', '.join(optional)}")
-490:                     lines.append(f"  {et.name}: {'; '.join(parts)}")
-491: 
-492:         return "\n".join(lines)
-493: 
-494:     def _render_extraction_prompt(
-495:         self,
-496:         text: str,
-497:         entity_types: list[str],
-498:         expertise: ExpertiseConfig | None,
-499:         context: dict[str, Any] | None,
-500:     ) -> str:
-501:         """Render the extraction prompt, optionally using expertise config."""
-502:         # Build tool context for SaaS-aware extraction
-503:         tool_context = self._build_tool_context(expertise, context)
-504: 
-505:         # If expertise has a custom extraction prompt, use it
-506:         if expertise and expertise.extraction_prompt:
-507:             try:
-508:                 from khora.extraction.skills.composer import ExpertiseComposer
-509: 
-510:                 composer = ExpertiseComposer()
-511:                 # Get relationship types from expertise
-512:                 relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
-513: 
-514:                 prompt_context = {
-515:                     **(context or {}),
-516:                     "text": text[:8000],
-517:                     "entity_types": entity_types,
-518:                     "relationship_types": relationship_types,
-519:                     "tool_context": tool_context,
-520:                 }
-521:                 return composer.render_prompt(
-522:                     expertise.extraction_prompt,
-523:                     expertise=expertise,
-524:                     context=prompt_context,
-525:                 )
-526:             except Exception as e:
-527:                 logger.warning(f"Failed to render extraction prompt: {e}")
-528: 
-529:         # Use default extraction prompt with optional tool context
-530:         # Get relationship types from expertise or defaults
-531:         if expertise:
-532:             relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
-533:         else:
-534:             relationship_types = DEFAULT_RELATIONSHIP_TYPES
-535: 
-536:         prompt = EXTRACTION_PROMPT.format(
-537:             entity_types=", ".join(entity_types),
-538:             relationship_types=", ".join(relationship_types),
-539:             text=text[:8000],  # Truncate very long texts
-540:         )
-541:         if tool_context:
-542:             prompt = tool_context + "\n\n" + prompt
-543:         return prompt
-544: 
-545:     def _filter_by_confidence(
-546:         self,
-547:         result: ExtractionResult,
-548:         expertise: ExpertiseConfig,
-549:     ) -> ExtractionResult:
-550:         """Filter extraction results by confidence thresholds from expertise."""
-551:         min_entity = expertise.confidence.min_entity
-552:         min_relationship = expertise.confidence.min_relationship
-553: 
-554:         filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
-555:         filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
-556: 
-557:         return ExtractionResult(
-558:             entities=filtered_entities,
-559:             relationships=filtered_relationships,
-560:             events=result.events,
-561:             metadata=result.metadata,
-562:         )
-563: 
-564:     async def extract_batch(
-565:         self,
-566:         texts: list[str],
-567:         *,
-568:         entity_types: list[str] | None = None,
-569:         expertise: ExpertiseConfig | None = None,
-570:         context: dict[str, Any] | None = None,
-571:     ) -> list[ExtractionResult]:
-572:         """Extract from multiple texts concurrently.
-573: 
-574:         Args:
-575:             texts: List of texts to extract from
-576:             entity_types: Optional list of entity types to extract
-577:             expertise: Optional ExpertiseConfig for domain-specific extraction
-578:             context: Optional context dict for prompt template rendering
-579: 
-580:         Returns:
-581:             List of ExtractionResult objects
-582:         """
-583:         if not texts:
-584:             return []
-585: 
-586:         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
-587:         return await asyncio.gather(*tasks)
-588: 
-589:     async def extract_multi(
-590:         self,
-591:         texts: list[str],
-592:         *,
-593:         entity_types: list[str] | None = None,
-594:         expertise: ExpertiseConfig | None = None,
-595:         context: dict[str, Any] | None = None,
-596:         batch_size: int = 5,
-597:     ) -> list[ExtractionResult]:
-598:         """Extract entities from multiple texts in grouped LLM calls.
-599: 
-600:         Groups texts into batches and sends each batch as a single LLM call,
-601:         reducing API round-trips by up to batch_size times.
-602: 
-603:         Args:
-604:             texts: List of texts to extract from
-605:             entity_types: Optional list of entity types to extract
-606:             expertise: Optional ExpertiseConfig for domain-specific extraction
-607:             context: Optional context dict for prompt template rendering
-608:             batch_size: Number of texts per LLM call
-609: 
-610:         Returns:
-611:             List of ExtractionResult objects (one per input text)
-612:         """
-613:         if not texts:
-614:             return []
-615: 
-616:         if expertise:
-617:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
-618:         else:
-619:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
-620: 
-621:         try:
-622:             import litellm
-623:         except ImportError:
-624:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
-625: 
-626:         batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
-627:         all_results: list[ExtractionResult] = []
-628: 
-629:         # Build system prompt from expertise if available
-630:         system_prompt = self._render_system_prompt(expertise, context)
-631:         tool_context = self._build_tool_context(expertise, context)
-632: 
-633:         async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
-634:             results = await self._extract_multi_batch(
-635:                 batch,
-636:                 entity_types,
-637:                 litellm,
-638:                 system_prompt=system_prompt,
-639:                 tool_context=tool_context,
-640:                 expertise=expertise,
-641:                 context=context,
-642:             )
-643: 
-644:             # Check if batch failed (all results have errors) - fallback to single extraction
-645:             all_failed = all(r.metadata.get("error") for r in results)
-646:             if all_failed and len(batch) > 1:
-647:                 logger.info(
-648:                     f"Batch extraction failed for {len(batch)} texts, " f"falling back to single-document extraction"
-649:                 )
-650:                 # Extract documents one at a time
-651:                 single_results = []
-652:                 for text in batch:
-653:                     result = await self.extract(
-654:                         text,
-655:                         entity_types=entity_types,
-656:                         expertise=expertise,
-657:                         context=context,
-658:                     )
-659:                     single_results.append(result)
-660:                 results = single_results
-661: 
-662:             if expertise:
-663:                 results = [self._filter_by_confidence(r, expertise) for r in results]
-664:             return results
-665: 
-666:         batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
-667:         for results in batch_results:
-668:             all_results.extend(results)
-669: 
-670:         return all_results
-671: 
-672:     async def _extract_multi_batch(
-673:         self,
-674:         texts: list[str],
-675:         entity_types: list[str],
-676:         litellm: Any,
-677:         *,
-678:         system_prompt: str | None = None,
-679:         tool_context: str | None = None,
-680:         expertise: ExpertiseConfig | None = None,
-681:         context: dict[str, Any] | None = None,
-682:     ) -> list[ExtractionResult]:
-683:         """Extract from a batch of texts in a single LLM call."""
-684:         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
-685: 
-686:         # If expertise has custom extraction prompt, use it with multi-section adaptation
-687:         if expertise and expertise.extraction_prompt:
-688:             from khora.extraction.skills.composer import ExpertiseComposer
-689: 
-690:             composer = ExpertiseComposer()
-691:             # Append multi-section response format to the text
-692:             multi_text = (
-693:                 sections
-694:                 + """
-695: 
-696: ## MULTI-SECTION RESPONSE FORMAT:
-697: Return a JSON object with a "sections" array, one object per input section:
-698: {"sections": [
-699:     {"entities": [...], "relationships": [...], "events": [...]},
-700:     ...
-701: ]}
-702: Each section follows the entity/relationship format from the instructions above."""
-703:             )
-704: 
-705:             # Get relationship types from expertise
-706:             relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
-707: 
-708:             prompt_context = {
-709:                 **(context or {}),
-710:                 "text": multi_text,
-711:                 "entity_types": entity_types,
-712:                 "relationship_types": relationship_types,
-713:                 "tool_context": tool_context or "",
-714:             }
-715:             try:
-716:                 prompt = composer.render_prompt(
-717:                     expertise.extraction_prompt,
-718:                     expertise=expertise,
-719:                     context=prompt_context,
-720:                 )
-721:             except Exception as e:
-722:                 logger.warning(f"Failed to render extraction prompt for batch: {e}")
-723:                 # Fall through to default prompt below
-724:                 expertise = None
-725: 
-726:         # Fallback to hardcoded prompt (existing behavior)
-727:         if not expertise or not expertise.extraction_prompt:
-728:             # Get relationship types - expertise may exist but without custom extraction_prompt
-729:             if expertise:
-730:                 relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
-731:             else:
-732:                 relationship_types = DEFAULT_RELATIONSHIP_TYPES
-733: 
-734:             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
-735:             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
-736: 
-737: Entity types to find: {", ".join(entity_types)}
-738: Relationship types to use: {", ".join(relationship_types)}
-739: 
-740: {sections}
-741: 
-742: Return a JSON object with a "sections" array, one object per section:
-743: {{"sections": [
-744:     {{"entities": [...], "relationships": [...], "events": [...]}},
-745:     ...
-746: ]}}
-747: 
-748: Each section follows the same entity/relationship/event format.
-749: Return ONLY valid JSON, no other text."""
-750: 
-751:         try:
-752:             async for attempt in AsyncRetrying(
-753:                 stop=stop_after_attempt(self._max_retries),
-754:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
-755:                 before_sleep=before_sleep_log(logger, "WARNING"),
-756:                 reraise=True,
-757:             ):
-758:                 with attempt:
-759:                     async with self._semaphore:
-760:                         import time as _time
-761: 
-762:                         _t0 = _time.perf_counter()
-763:                         response = await litellm.acompletion(
-764:                             model=self._model,
-765:                             messages=[
-766:                                 {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
-767:                                 {"role": "user", "content": prompt},
-768:                             ],
-769:                             temperature=self._temperature,
-770:                             max_tokens=self._max_tokens,
-771:                             timeout=self._timeout,
-772:                             response_format=self._get_multi_response_format(),
-773:                         )
-774:                         _latency = (_time.perf_counter() - _t0) * 1000
-775: 
-776:                         # Record telemetry
-777:                         from khora.telemetry import get_collector
-778: 
-779:                         usage = getattr(response, "usage", None)
-780:                         get_collector().record_llm_call(
-781:                             operation="entity_extraction_multi",
-782:                             model=self._model,
-783:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-784:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-785:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
-786:                             latency_ms=_latency,
-787:                             metadata={"batch_size": len(texts)},
-788:                         )
-789: 
-790:                     content = response.choices[0].message.content
-791:                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
-792:                     model_used = getattr(response, "model", self._model)
-793: 
-794:                     if not content:
-795:                         # Log more details about the response for debugging
-796:                         logger.warning(
-797:                             f"Empty response content from LLM in batch extraction. "
-798:                             f"Model: {model_used}, finish_reason: {finish_reason}, "
-799:                             f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
-800:                         )
-801:                         return [
-802:                             ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
-803:                             for _ in texts
-804:                         ]
-805: 
-806:                     # Check for truncated response (hit max_tokens limit)
-807:                     if finish_reason == "length":
-808:                         logger.warning(
-809:                             f"LLM response truncated (finish_reason=length) in batch extraction. "
-810:                             f"Model: {model_used}, batch_size: {len(texts)}. "
-811:                             f"Consider increasing max_tokens or reducing batch size."
-812:                         )
-813:                         # Don't retry - truncation will happen again. Return empty results.
-814:                         return [
-815:                             ExtractionResult(metadata={"error": "truncated_response", "finish_reason": finish_reason})
-816:                             for _ in texts
-817:                         ]
-818: 
-819:                     # Parse JSON with error handling - don't retry on parse errors
-820:                     try:
-821:                         data = json.loads(content)
-822:                     except json.JSONDecodeError as json_err:
-823:                         # Log details to help diagnose the issue
-824:                         logger.warning(
-825:                             f"JSON parse error in batch extraction (finish_reason={finish_reason}): {json_err}. "
-826:                             f"Model: {model_used}, content_length: {len(content)}, "
-827:                             f"content_preview: {content[:200]}..."
-828:                         )
-829:                         # Raise to trigger retry - model may produce valid JSON on next attempt
-830:                         raise
-831: 
-832:                     if not isinstance(data, dict):
-833:                         logger.warning(f"Batch response is not a dict: {type(data)}")
-834:                         return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]
-835:                     sections_data = data.get("sections", [])
-836: 
-837:                     results: list[ExtractionResult] = []
-838:                     for i, text in enumerate(texts):
-839:                         if i < len(sections_data):
-840:                             results.append(self._parse_response(sections_data[i]))
-841:                         else:
-842:                             results.append(ExtractionResult())
-843: 
-844:                     return results
-845:         except Exception as e:
-846:             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
-847:             return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
-848: 
-849:     def _parse_response(self, content: str | dict | None) -> ExtractionResult:
-850:         """Parse the LLM response into an ExtractionResult.
-851: 
-852:         Accepts either a JSON string or a pre-parsed dict to avoid
-853:         unnecessary json.dumps/json.loads round-trips in batch mode.
-854:         """
-855:         try:
-856:             # Handle None or empty content
-857:             if content is None or content == "":
-858:                 logger.warning("Empty response content from LLM")
-859:                 return ExtractionResult(metadata={"error": "empty_response"})
-860: 
-861:             # Accept pre-parsed dict directly (from extract_multi_batch)
-862:             data = content if isinstance(content, dict) else json.loads(content)
-863: 
-864:             # Ensure data is actually a dict (not a string that parsed as string)
-865:             if not isinstance(data, dict):
-866:                 logger.warning(f"Response parsed but is not a dict: {type(data)}")
-867:                 return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
-868: 
-869:             entities = []
-870:             for e in data.get("entities", []):
-871:                 # Parse temporal info if present
-872:                 temporal = None
-873:                 if "temporal" in e and e["temporal"]:
-874:                     t = e["temporal"]
-875:                     temporal = TemporalInfo(
-876:                         mentioned_at=t.get("mentioned_at"),
-877:                         valid_from=t.get("valid_from"),
-878:                         valid_until=t.get("valid_until"),
-879:                     )
-880: 
-881:                 # Ensure attributes is a dict (LLM sometimes returns a list)
-882:                 attrs = e.get("attributes", {})
-883:                 if not isinstance(attrs, dict):
-884:                     attrs = {}
-885: 
-886:                 entities.append(
-887:                     ExtractedEntity(
-888:                         name=e.get("name") or "",
-889:                         entity_type=e.get("entity_type") or "CONCEPT",
-890:                         description=e.get("description") or "",
-891:                         attributes=attrs,
-892:                         aliases=e.get("aliases") or [],
-893:                         temporal=temporal,
-894:                         confidence=e.get("confidence") or 0.9,
-895:                     )
-896:                 )
-897: 
-898:             relationships = []
-899:             for r in data.get("relationships", []):
-900:                 # Parse temporal info if present
-901:                 temporal = None
-902:                 if "temporal" in r and r["temporal"]:
-903:                     t = r["temporal"]
-904:                     temporal = TemporalInfo(
-905:                         occurred_at=t.get("occurred_at"),
-906:                         valid_from=t.get("valid_from"),
-907:                         valid_until=t.get("valid_until"),
-908:                     )
-909: 
-910:                 relationships.append(
-911:                     ExtractedRelationship(
-912:                         source_entity=r.get("source_entity") or "",
-913:                         target_entity=r.get("target_entity") or "",
-914:                         relationship_type=r.get("relationship_type") or "RELATES_TO",
-915:                         description=r.get("description") or "",
-916:                         properties=r.get("properties") or {},
-917:                         temporal=temporal,
-918:                         confidence=r.get("confidence") or 0.9,
-919:                     )
-920:                 )
-921: 
-922:             events = []
-923:             for ev in data.get("events", []):
-924:                 events.append(
-925:                     ExtractedEvent(
-926:                         description=ev.get("description") or "",
-927:                         event_type=ev.get("event_type") or "EVENT",
-928:                         occurred_at=ev.get("occurred_at"),
-929:                         participants=ev.get("participants") or [],
-930:                         confidence=ev.get("confidence") or 0.9,
-931:                     )
-932:                 )
-933: 
-934:             return ExtractionResult(
-935:                 entities=entities,
-936:                 relationships=relationships,
-937:                 events=events,
-938:             )
-939: 
-940:         except json.JSONDecodeError as e:
-941:             logger.warning(f"Failed to parse extraction response as JSON: {e}")
-942:             # Try to extract JSON from the response
-943:             return self._extract_json_from_text(content)
-944: 
-945:     def _extract_json_from_text(self, text: str) -> ExtractionResult:
-946:         """Try to extract JSON from text that may contain other content."""
-947:         import re
-948: 
-949:         # Look for JSON object in the text
-950:         json_match = re.search(r"\{[\s\S]*\}", text)
-951:         if json_match:
-952:             try:
-953:                 data = json.loads(json_match.group())
-954:                 return self._parse_response(json.dumps(data))
-955:             except json.JSONDecodeError:
-956:                 pass
-957: 
-958:         logger.warning("Could not extract valid JSON from response")
-959:         return ExtractionResult(metadata={"raw_response": text[:500]})
+   1: """LLM-based entity extraction using LiteLLM."""
+   2: 
+   3: from __future__ import annotations
+   4: 
+   5: import asyncio
+   6: import json
+   7: from typing import TYPE_CHECKING, Any
+   8: 
+   9: from loguru import logger
+  10: from tenacity import AsyncRetrying, before_sleep_log, stop_after_attempt, wait_exponential
+  11: 
+  12: from .base import (
+  13:     EntityExtractor,
+  14:     ExtractedEntity,
+  15:     ExtractedEvent,
+  16:     ExtractedRelationship,
+  17:     ExtractionResult,
+  18:     TemporalInfo,
+  19: )
+  20: 
+  21: if TYPE_CHECKING:
+  22:     from khora.config import LiteLLMConfig
+  23:     from khora.extraction.skills import ExpertiseConfig
+  24: 
+  25: 
+  26: # Default entity types to extract
+  27: DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
+  28: 
+  29: # Default relationship types to use
+  30: DEFAULT_RELATIONSHIP_TYPES = [
+  31:     "WORKS_FOR",
+  32:     "KNOWS",
+  33:     "MANAGES",
+  34:     "PART_OF",
+  35:     "LOCATED_IN",
+  36:     "DEPENDS_ON",
+  37:     "IMPLEMENTS",
+  38:     "RELATES_TO",
+  39:     "ASSOCIATED_WITH",
+  40: ]
+  41: 
+  42: # Default system prompt for extraction
+  43: DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
+  44: 
+  45: # Extraction prompt template with temporal awareness
+  46: EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
+  47: 
+  48: Entity types to extract: {entity_types}
+  49: Relationship types to use: {relationship_types}
+  50: 
+  51: Text:
+  52: {text}
+  53: 
+  54: Return a JSON object with the following structure:
+  55: {{
+  56:     "entities": [
+  57:         {{
+  58:             "name": "entity name (canonical form, properly capitalized)",
+  59:             "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|PRODUCT|DATE|etc",
+  60:             "description": "brief description of the entity",
+  61:             "attributes": {{"key": "value"}},
+  62:             "aliases": ["alternative names", "nicknames", "abbreviations"],
+  63:             "temporal": {{
+  64:                 "mentioned_at": "when entity is mentioned (if temporal context exists)",
+  65:                 "valid_from": "ISO date or null if entity validity period is mentioned",
+  66:                 "valid_until": "ISO date or null if entity validity period ends"
+  67:             }}
+  68:         }}
+  69:     ],
+  70:     "relationships": [
+  71:         {{
+  72:             "source_entity": "source entity name (must match an entity above)",
+  73:             "target_entity": "target entity name (must match an entity above)",
+  74:             "relationship_type": "WORKS_FOR|KNOWS|MANAGES|REPORTS_TO|COLLABORATES_WITH|OWNS|PART_OF|LOCATED_IN|RELATES_TO|DEPENDS_ON|IMPLEMENTS|PRECEDES|FOLLOWS|ASSOCIATED_WITH|etc",
+  75:             "description": "brief description of relationship",
+  76:             "temporal": {{
+  77:                 "occurred_at": "when relationship occurred/started",
+  78:                 "valid_from": "ISO date or null if relationship has time bounds",
+  79:                 "valid_until": "ISO date or null if relationship ended"
+  80:             }}
+  81:         }}
+  82:     ],
+  83:     "events": [
+  84:         {{
+  85:             "description": "what happened",
+  86:             "occurred_at": "when it occurred (ISO date or descriptive)",
+  87:             "participants": ["entity names involved"],
+  88:             "event_type": "MEETING|DECISION|MILESTONE|ANNOUNCEMENT|INCIDENT|etc"
+  89:         }}
+  90:     ]
+  91: }}
+  92: 
+  93: Guidelines:
+  94: - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
+  95: - Include aliases for entities that have multiple names/abbreviations
+  96: - Extract temporal information when dates, times, or relative time references appear
+  97: - For events, capture the when, who, and what
+  98: - Be thorough but precise - only extract entities that are clearly mentioned
+  99: - Ensure relationship source/target names match extracted entity names exactly
+ 100: 
+ 101: Return ONLY valid JSON, no other text."""
+ 102: 
+ 103: 
+ 104: class LLMEntityExtractor(EntityExtractor):
+ 105:     """LLM-based entity extractor using LiteLLM.
+ 106: 
+ 107:     Uses an LLM to extract entities and relationships from text
+ 108:     through structured JSON output.
+ 109:     """
+ 110: 
+ 111:     # Models that require json_schema format instead of json_object
+ 112:     # OpenAI models with structured output support need explicit json_schema
+ 113:     # to ensure additionalProperties: false is properly set on all nested objects
+ 114:     MODELS_REQUIRING_JSON_SCHEMA: set[str] = {
+ 115:         "gpt-4o",
+ 116:         "gpt-4o-mini",
+ 117:         "gpt-4o-2024-05-13",
+ 118:         "gpt-4o-2024-08-06",
+ 119:         "gpt-4o-2024-11-20",
+ 120:         "gpt-4o-mini-2024-07-18",
+ 121:         "gpt-4-turbo",
+ 122:         "gpt-4-turbo-preview",
+ 123:         "o1",
+ 124:         "o1-mini",
+ 125:         "o1-preview",
+ 126:         "o3-mini",
+ 127:     }
+ 128: 
+ 129:     # Model input token multipliers for adaptive batching
+ 130:     # Multiplier is applied to max_tokens to get max_input_tokens budget
+ 131:     # Higher values for large context models (128K+), lower for smaller context
+ 132:     MODEL_INPUT_MULTIPLIERS: dict[str, int] = {
+ 133:         # Large context models (128K+) - can be more aggressive
+ 134:         "gpt-4o": 8,
+ 135:         "gpt-4o-2024-05-13": 8,
+ 136:         "gpt-4o-2024-08-06": 8,
+ 137:         "gpt-4o-2024-11-20": 8,
+ 138:         "gpt-4.1": 8,
+ 139:         "gpt-4.1-mini": 5,  # 128K context but smaller model
+ 140:         "gpt-4o-mini": 5,
+ 141:         "gpt-4o-mini-2024-07-18": 5,
+ 142:         "o1": 8,
+ 143:         "o1-mini": 5,
+ 144:         "o3-mini": 5,
+ 145:         # Medium context models (32K)
+ 146:         "gpt-4-turbo": 4,
+ 147:         "gpt-4-turbo-preview": 4,
+ 148:         # Smaller context models (8K-16K) - conservative
+ 149:         "gpt-4": 2,
+ 150:         "gpt-3.5-turbo": 2,
+ 151:         # Claude models
+ 152:         "claude-3-opus": 8,
+ 153:         "claude-3-sonnet": 8,
+ 154:         "claude-3-haiku": 5,
+ 155:     }
+ 156:     DEFAULT_INPUT_MULTIPLIER = 3  # Fallback for unknown models
+ 157: 
+ 158:     def __init__(
+ 159:         self,
+ 160:         model: str = "gpt-4o-mini",
+ 161:         *,
+ 162:         temperature: float = 0.3,  # Lower for more consistent extraction
+ 163:         max_tokens: int = 4000,
+ 164:         timeout: int = 60,
+ 165:         max_retries: int = 3,
+ 166:         max_concurrent: int = 5,
+ 167:         retry_wait: float = 1.0,
+ 168:     ) -> None:
+ 169:         """Initialize the LLM entity extractor.
+ 170: 
+ 171:         Args:
+ 172:             model: LLM model to use
+ 173:             temperature: Sampling temperature
+ 174:             max_tokens: Maximum tokens in response
+ 175:             timeout: Request timeout in seconds
+ 176:             max_retries: Maximum retries on failure
+ 177:             max_concurrent: Maximum concurrent extractions
+ 178:             retry_wait: Base wait time (seconds) for exponential backoff between retries
+ 179:         """
+ 180:         self._model = model
+ 181:         self._temperature = temperature
+ 182:         self._max_tokens = max_tokens
+ 183:         self._timeout = timeout
+ 184:         self._max_retries = max_retries
+ 185:         self._retry_wait = retry_wait
+ 186:         self._semaphore = asyncio.Semaphore(max_concurrent)
+ 187: 
+ 188:     def _estimate_tokens(self, text: str) -> int:
+ 189:         """Estimate token count for text.
+ 190: 
+ 191:         Uses ~3 chars per token as a conservative heuristic for English text.
+ 192:         This slightly overestimates to provide safety margin.
+ 193:         """
+ 194:         return len(text) // 3
+ 195: 
+ 196:     def _get_input_multiplier(self) -> int:
+ 197:         """Get input token multiplier based on model.
+ 198: 
+ 199:         Returns the multiplier to apply to max_tokens for calculating
+ 200:         the input token budget for adaptive batching.
+ 201:         """
+ 202:         # Check exact match first
+ 203:         if self._model in self.MODEL_INPUT_MULTIPLIERS:
+ 204:             return self.MODEL_INPUT_MULTIPLIERS[self._model]
+ 205:         # Check prefix matches (e.g., "gpt-4o-mini" matches "gpt-4o-mini-...")
+ 206:         for model_prefix, multiplier in self.MODEL_INPUT_MULTIPLIERS.items():
+ 207:             if self._model.startswith(model_prefix):
+ 208:                 return multiplier
+ 209:         return self.DEFAULT_INPUT_MULTIPLIER
+ 210: 
+ 211:     def _create_adaptive_batches(
+ 212:         self,
+ 213:         texts: list[str],
+ 214:         max_batch_size: int,
+ 215:         max_input_tokens: int,
+ 216:         prompt_overhead: int = 500,
+ 217:     ) -> list[list[str]]:
+ 218:         """Create batches that fit within token budget.
+ 219: 
+ 220:         Groups texts greedily until hitting the input token budget or
+ 221:         max batch size, whichever comes first.
+ 222: 
+ 223:         Args:
+ 224:             texts: List of texts to batch
+ 225:             max_batch_size: Maximum number of texts per batch
+ 226:             max_input_tokens: Token budget for input
+ 227:             prompt_overhead: Estimated tokens for system prompt and instructions
+ 228: 
+ 229:         Returns:
+ 230:             List of text batches
+ 231:         """
+ 232:         batches: list[list[str]] = []
+ 233:         current_batch: list[str] = []
+ 234:         current_tokens = prompt_overhead
+ 235: 
+ 236:         for text in texts:
+ 237:             # Match truncation in _extract_multi_batch (4000 chars)
+ 238:             text_tokens = self._estimate_tokens(text[:4000])
+ 239: 
+ 240:             # Check if adding this text would exceed budget or max batch size
+ 241:             if current_batch and (
+ 242:                 current_tokens + text_tokens > max_input_tokens or len(current_batch) >= max_batch_size
+ 243:             ):
+ 244:                 batches.append(current_batch)
+ 245:                 current_batch = []
+ 246:                 current_tokens = prompt_overhead
+ 247: 
+ 248:             current_batch.append(text)
+ 249:             current_tokens += text_tokens
+ 250: 
+ 251:         if current_batch:
+ 252:             batches.append(current_batch)
+ 253: 
+ 254:         return batches
+ 255: 
+ 256:     def _get_response_format(self) -> dict[str, Any]:
+ 257:         """Get the appropriate response_format based on the model.
+ 258: 
+ 259:         Some models (like gpt-5-nano) require json_schema format with
+ 260:         strict structured outputs, while others work with json_object.
+ 261:         """
+ 262:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+ 263:             return {
+ 264:                 "type": "json_schema",
+ 265:                 "json_schema": {
+ 266:                     "name": "extraction_result",
+ 267:                     "strict": True,
+ 268:                     "schema": {
+ 269:                         "type": "object",
+ 270:                         "properties": {
+ 271:                             "entities": {
+ 272:                                 "type": "array",
+ 273:                                 "items": {
+ 274:                                     "type": "object",
+ 275:                                     "properties": {
+ 276:                                         "name": {"type": "string"},
+ 277:                                         "entity_type": {"type": "string"},
+ 278:                                         "description": {"type": "string"},
+ 279:                                         "aliases": {"type": "array", "items": {"type": "string"}},
+ 280:                                     },
+ 281:                                     "required": ["name", "entity_type", "description", "aliases"],
+ 282:                                     "additionalProperties": False,
+ 283:                                 },
+ 284:                             },
+ 285:                             "relationships": {
+ 286:                                 "type": "array",
+ 287:                                 "items": {
+ 288:                                     "type": "object",
+ 289:                                     "properties": {
+ 290:                                         "source_entity": {"type": "string"},
+ 291:                                         "target_entity": {"type": "string"},
+ 292:                                         "relationship_type": {"type": "string"},
+ 293:                                         "description": {"type": "string"},
+ 294:                                     },
+ 295:                                     "required": ["source_entity", "target_entity", "relationship_type", "description"],
+ 296:                                     "additionalProperties": False,
+ 297:                                 },
+ 298:                             },
+ 299:                             "events": {
+ 300:                                 "type": "array",
+ 301:                                 "items": {
+ 302:                                     "type": "object",
+ 303:                                     "properties": {
+ 304:                                         "description": {"type": "string"},
+ 305:                                         "event_type": {"type": "string"},
+ 306:                                         "occurred_at": {"type": ["string", "null"]},
+ 307:                                         "participants": {"type": "array", "items": {"type": "string"}},
+ 308:                                     },
+ 309:                                     "required": ["description", "event_type", "occurred_at", "participants"],
+ 310:                                     "additionalProperties": False,
+ 311:                                 },
+ 312:                             },
+ 313:                         },
+ 314:                         "required": ["entities", "relationships", "events"],
+ 315:                         "additionalProperties": False,
+ 316:                     },
+ 317:                 },
+ 318:             }
+ 319:         return {"type": "json_object"}
+ 320: 
+ 321:     def _get_multi_response_format(self) -> dict[str, Any]:
+ 322:         """Get the appropriate response_format for multi-section batch extraction.
+ 323: 
+ 324:         Similar to _get_response_format but wraps entities/relationships/events
+ 325:         in a "sections" array for batch processing.
+ 326:         """
+ 327:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+ 328:             section_schema = {
+ 329:                 "type": "object",
+ 330:                 "properties": {
+ 331:                     "entities": {
+ 332:                         "type": "array",
+ 333:                         "items": {
+ 334:                             "type": "object",
+ 335:                             "properties": {
+ 336:                                 "name": {"type": "string"},
+ 337:                                 "entity_type": {"type": "string"},
+ 338:                                 "description": {"type": "string"},
+ 339:                                 "aliases": {"type": "array", "items": {"type": "string"}},
+ 340:                             },
+ 341:                             "required": ["name", "entity_type", "description", "aliases"],
+ 342:                             "additionalProperties": False,
+ 343:                         },
+ 344:                     },
+ 345:                     "relationships": {
+ 346:                         "type": "array",
+ 347:                         "items": {
+ 348:                             "type": "object",
+ 349:                             "properties": {
+ 350:                                 "source_entity": {"type": "string"},
+ 351:                                 "target_entity": {"type": "string"},
+ 352:                                 "relationship_type": {"type": "string"},
+ 353:                                 "description": {"type": "string"},
+ 354:                             },
+ 355:                             "required": ["source_entity", "target_entity", "relationship_type", "description"],
+ 356:                             "additionalProperties": False,
+ 357:                         },
+ 358:                     },
+ 359:                     "events": {
+ 360:                         "type": "array",
+ 361:                         "items": {
+ 362:                             "type": "object",
+ 363:                             "properties": {
+ 364:                                 "description": {"type": "string"},
+ 365:                                 "event_type": {"type": "string"},
+ 366:                                 "occurred_at": {"type": ["string", "null"]},
+ 367:                                 "participants": {"type": "array", "items": {"type": "string"}},
+ 368:                             },
+ 369:                             "required": ["description", "event_type", "occurred_at", "participants"],
+ 370:                             "additionalProperties": False,
+ 371:                         },
+ 372:                     },
+ 373:                 },
+ 374:                 "required": ["entities", "relationships", "events"],
+ 375:                 "additionalProperties": False,
+ 376:             }
+ 377:             return {
+ 378:                 "type": "json_schema",
+ 379:                 "json_schema": {
+ 380:                     "name": "multi_extraction_result",
+ 381:                     "strict": True,
+ 382:                     "schema": {
+ 383:                         "type": "object",
+ 384:                         "properties": {
+ 385:                             "sections": {
+ 386:                                 "type": "array",
+ 387:                                 "items": section_schema,
+ 388:                             },
+ 389:                         },
+ 390:                         "required": ["sections"],
+ 391:                         "additionalProperties": False,
+ 392:                     },
+ 393:                 },
+ 394:             }
+ 395:         return {"type": "json_object"}
+ 396: 
+ 397:     @classmethod
+ 398:     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
+ 399:         """Create extractor from LiteLLM configuration.
+ 400: 
+ 401:         Args:
+ 402:             config: LiteLLMConfig instance
+ 403: 
+ 404:         Returns:
+ 405:             Configured LLMEntityExtractor
+ 406:         """
+ 407:         return cls(
+ 408:             model=config.model,
+ 409:             temperature=0.3,  # Override for extraction
+ 410:             max_tokens=config.max_tokens,
+ 411:             timeout=config.timeout,
+ 412:             max_retries=config.max_retries,
+ 413:             max_concurrent=config.max_concurrent_llm_calls,
+ 414:             retry_wait=config.retry_wait,
+ 415:         )
+ 416: 
+ 417:     async def extract(
+ 418:         self,
+ 419:         text: str,
+ 420:         *,
+ 421:         entity_types: list[str] | None = None,
+ 422:         expertise: ExpertiseConfig | None = None,
+ 423:         context: dict[str, Any] | None = None,
+ 424:     ) -> ExtractionResult:
+ 425:         """Extract entities and relationships from text.
+ 426: 
+ 427:         Args:
+ 428:             text: Text to extract from
+ 429:             entity_types: Optional list of entity types to extract
+ 430:             expertise: Optional ExpertiseConfig for domain-specific extraction
+ 431:             context: Optional context dict for prompt template rendering
+ 432: 
+ 433:         Returns:
+ 434:             ExtractionResult containing entities and relationships
+ 435:         """
+ 436:         if not text.strip():
+ 437:             return ExtractionResult()
+ 438: 
+ 439:         # Determine entity types from expertise or fallback
+ 440:         if expertise:
+ 441:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+ 442:         else:
+ 443:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
+ 444: 
+ 445:         try:
+ 446:             import litellm
+ 447:         except ImportError:
+ 448:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
+ 449: 
+ 450:         # Render prompts based on expertise
+ 451:         system_prompt = self._render_system_prompt(expertise, context)
+ 452:         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
+ 453: 
+ 454:         try:
+ 455:             async for attempt in AsyncRetrying(
+ 456:                 stop=stop_after_attempt(self._max_retries),
+ 457:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+ 458:                 before_sleep=before_sleep_log(logger, "WARNING"),
+ 459:                 reraise=True,
+ 460:             ):
+ 461:                 with attempt:
+ 462:                     async with self._semaphore:
+ 463:                         import time as _time
+ 464: 
+ 465:                         _t0 = _time.perf_counter()
+ 466:                         response = await litellm.acompletion(
+ 467:                             model=self._model,
+ 468:                             messages=[
+ 469:                                 {"role": "system", "content": system_prompt},
+ 470:                                 {"role": "user", "content": extraction_prompt},
+ 471:                             ],
+ 472:                             temperature=self._temperature,
+ 473:                             max_tokens=self._max_tokens,
+ 474:                             timeout=self._timeout,
+ 475:                             response_format=self._get_response_format(),
+ 476:                         )
+ 477:                         _latency = (_time.perf_counter() - _t0) * 1000
+ 478: 
+ 479:                         # Record telemetry
+ 480:                         from khora.telemetry import get_collector
+ 481: 
+ 482:                         usage = getattr(response, "usage", None)
+ 483:                         get_collector().record_llm_call(
+ 484:                             operation="entity_extraction",
+ 485:                             model=self._model,
+ 486:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+ 487:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+ 488:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
+ 489:                             latency_ms=_latency,
+ 490:                         )
+ 491: 
+ 492:                     content = response.choices[0].message.content
+ 493:                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+ 494: 
+ 495:                     # Check for truncated response (hit max_tokens limit)
+ 496:                     if finish_reason == "length":
+ 497:                         model_used = getattr(response, "model", self._model)
+ 498:                         logger.warning(
+ 499:                             f"LLM response truncated (finish_reason=length) in extraction. "
+ 500:                             f"Model: {model_used}. Consider increasing max_tokens."
+ 501:                         )
+ 502:                         return ExtractionResult(
+ 503:                             metadata={"error": "truncated_response", "finish_reason": finish_reason}
+ 504:                         )
+ 505: 
+ 506:                     result = self._parse_response(content)
+ 507: 
+ 508:                     # Apply confidence filtering from expertise if available
+ 509:                     if expertise:
+ 510:                         result = self._filter_by_confidence(result, expertise)
+ 511: 
+ 512:                     return result
+ 513:         except Exception as e:
+ 514:             logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
+ 515:             return ExtractionResult(metadata={"error": str(e)})
+ 516: 
+ 517:     def _render_system_prompt(
+ 518:         self,
+ 519:         expertise: ExpertiseConfig | None,
+ 520:         context: dict[str, Any] | None,
+ 521:     ) -> str:
+ 522:         """Render the system prompt, optionally using expertise config."""
+ 523:         if not expertise or not expertise.system_prompt:
+ 524:             return DEFAULT_SYSTEM_PROMPT
+ 525: 
+ 526:         try:
+ 527:             from khora.extraction.skills.composer import ExpertiseComposer
+ 528: 
+ 529:             composer = ExpertiseComposer()
+ 530:             return composer.render_prompt(
+ 531:                 expertise.system_prompt,
+ 532:                 expertise=expertise,
+ 533:                 context=context,
+ 534:             )
+ 535:         except Exception as e:
+ 536:             logger.warning(f"Failed to render system prompt: {e}")
+ 537:             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
+ 538: 
+ 539:     def _build_tool_context(self, expertise: ExpertiseConfig | None, context: dict[str, Any] | None) -> str:
+ 540:         """Build tool-specific context block for the extraction prompt.
+ 541: 
+ 542:         When expertise has tool_schemas populated and the context identifies
+ 543:         a source_tool, this injects structured field knowledge so the LLM
+ 544:         understands the data format it's extracting from.
+ 545: 
+ 546:         Args:
+ 547:             expertise: Optional ExpertiseConfig with tool_schemas
+ 548:             context: Optional context dict with source_tool key
+ 549: 
+ 550:         Returns:
+ 551:             Tool context string to prepend to the text, or empty string
+ 552:         """
+ 553:         if not expertise or not expertise.tool_schemas or not context:
+ 554:             return ""
+ 555: 
+ 556:         source_tool = context.get("source_tool", "")
+ 557:         if not source_tool:
+ 558:             return ""
+ 559: 
+ 560:         schema = expertise.tool_schemas.get(source_tool)
+ 561:         if not schema:
+ 562:             return ""
+ 563: 
+ 564:         lines = [f"\nSOURCE CONTEXT: This content comes from {source_tool}."]
+ 565:         for obj_type, obj_schema in schema.items():
+ 566:             if not isinstance(obj_schema, dict):
+ 567:                 continue
+ 568:             fields = obj_schema.get("fields", [])
+ 569:             if fields:
+ 570:                 lines.append(f"  {obj_type} fields: {', '.join(str(f) for f in fields)}")
+ 571:             for key, values in obj_schema.items():
+ 572:                 if key != "fields" and isinstance(values, list):
+ 573:                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
+ 574: 
+ 575:         # Add attribute schema hints from entity types
+ 576:         if expertise.entity_types:
+ 577:             lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
+ 578:             for et in expertise.entity_types:
+ 579:                 required = et.attributes.get("required", [])
+ 580:                 optional = et.attributes.get("optional", [])
+ 581:                 if required or optional:
+ 582:                     parts = []
+ 583:                     if required:
+ 584:                         parts.append(f"required: {', '.join(required)}")
+ 585:                     if optional:
+ 586:                         parts.append(f"optional: {', '.join(optional)}")
+ 587:                     lines.append(f"  {et.name}: {'; '.join(parts)}")
+ 588: 
+ 589:         return "\n".join(lines)
+ 590: 
+ 591:     def _render_extraction_prompt(
+ 592:         self,
+ 593:         text: str,
+ 594:         entity_types: list[str],
+ 595:         expertise: ExpertiseConfig | None,
+ 596:         context: dict[str, Any] | None,
+ 597:     ) -> str:
+ 598:         """Render the extraction prompt, optionally using expertise config."""
+ 599:         # Build tool context for SaaS-aware extraction
+ 600:         tool_context = self._build_tool_context(expertise, context)
+ 601: 
+ 602:         # If expertise has a custom extraction prompt, use it
+ 603:         if expertise and expertise.extraction_prompt:
+ 604:             logger.debug(
+ 605:                 f"Using custom extraction_prompt from expertise '{expertise.name}' "
+ 606:                 f"({len(expertise.extraction_prompt)} chars)"
+ 607:             )
+ 608:             try:
+ 609:                 from khora.extraction.skills.composer import ExpertiseComposer
+ 610: 
+ 611:                 composer = ExpertiseComposer()
+ 612:                 # Get relationship types from expertise
+ 613:                 relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+ 614: 
+ 615:                 prompt_context = {
+ 616:                     **(context or {}),
+ 617:                     "text": text[:8000],
+ 618:                     "entity_types": entity_types,
+ 619:                     "relationship_types": relationship_types,
+ 620:                     "tool_context": tool_context,
+ 621:                 }
+ 622:                 return composer.render_prompt(
+ 623:                     expertise.extraction_prompt,
+ 624:                     expertise=expertise,
+ 625:                     context=prompt_context,
+ 626:                 )
+ 627:             except Exception as e:
+ 628:                 logger.warning(f"Failed to render extraction prompt: {e}")
+ 629: 
+ 630:         # Use default extraction prompt
+ 631:         logger.debug("Using DEFAULT_EXTRACTION_PROMPT (no custom prompt in expertise)")
+ 632:         # Use default extraction prompt with optional tool context
+ 633:         # Get relationship types from expertise or defaults
+ 634:         if expertise:
+ 635:             relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+ 636:         else:
+ 637:             relationship_types = DEFAULT_RELATIONSHIP_TYPES
+ 638: 
+ 639:         prompt = EXTRACTION_PROMPT.format(
+ 640:             entity_types=", ".join(entity_types),
+ 641:             relationship_types=", ".join(relationship_types),
+ 642:             text=text[:8000],  # Truncate very long texts
+ 643:         )
+ 644:         if tool_context:
+ 645:             prompt = tool_context + "\n\n" + prompt
+ 646:         return prompt
+ 647: 
+ 648:     def _filter_by_confidence(
+ 649:         self,
+ 650:         result: ExtractionResult,
+ 651:         expertise: ExpertiseConfig,
+ 652:     ) -> ExtractionResult:
+ 653:         """Filter extraction results by confidence thresholds from expertise."""
+ 654:         min_entity = expertise.confidence.min_entity
+ 655:         min_relationship = expertise.confidence.min_relationship
+ 656: 
+ 657:         filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
+ 658:         filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
+ 659: 
+ 660:         return ExtractionResult(
+ 661:             entities=filtered_entities,
+ 662:             relationships=filtered_relationships,
+ 663:             events=result.events,
+ 664:             metadata=result.metadata,
+ 665:         )
+ 666: 
+ 667:     async def extract_batch(
+ 668:         self,
+ 669:         texts: list[str],
+ 670:         *,
+ 671:         entity_types: list[str] | None = None,
+ 672:         expertise: ExpertiseConfig | None = None,
+ 673:         context: dict[str, Any] | None = None,
+ 674:     ) -> list[ExtractionResult]:
+ 675:         """Extract from multiple texts concurrently.
+ 676: 
+ 677:         Args:
+ 678:             texts: List of texts to extract from
+ 679:             entity_types: Optional list of entity types to extract
+ 680:             expertise: Optional ExpertiseConfig for domain-specific extraction
+ 681:             context: Optional context dict for prompt template rendering
+ 682: 
+ 683:         Returns:
+ 684:             List of ExtractionResult objects
+ 685:         """
+ 686:         if not texts:
+ 687:             return []
+ 688: 
+ 689:         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
+ 690:         return await asyncio.gather(*tasks)
+ 691: 
+ 692:     async def extract_multi(
+ 693:         self,
+ 694:         texts: list[str],
+ 695:         *,
+ 696:         entity_types: list[str] | None = None,
+ 697:         expertise: ExpertiseConfig | None = None,
+ 698:         context: dict[str, Any] | None = None,
+ 699:         batch_size: int = 5,
+ 700:         max_input_tokens: int | None = None,
+ 701:     ) -> list[ExtractionResult]:
+ 702:         """Extract entities from multiple texts in grouped LLM calls.
+ 703: 
+ 704:         Groups texts into batches using adaptive token-budget-based batching,
+ 705:         reducing API round-trips while avoiding context overflow.
+ 706: 
+ 707:         Args:
+ 708:             texts: List of texts to extract from
+ 709:             entity_types: Optional list of entity types to extract
+ 710:             expertise: Optional ExpertiseConfig for domain-specific extraction
+ 711:             context: Optional context dict for prompt template rendering
+ 712:             batch_size: Maximum number of texts per LLM call (fallback/cap)
+ 713:             max_input_tokens: Token budget for input. If None, auto-calculated
+ 714:                 from max_tokens using model-aware multipliers.
+ 715: 
+ 716:         Returns:
+ 717:             List of ExtractionResult objects (one per input text)
+ 718:         """
+ 719:         if not texts:
+ 720:             return []
+ 721: 
+ 722:         if expertise:
+ 723:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+ 724:         else:
+ 725:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
+ 726: 
+ 727:         try:
+ 728:             import litellm
+ 729:         except ImportError:
+ 730:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
+ 731: 
+ 732:         # Calculate max_input_tokens from model if not provided
+ 733:         if max_input_tokens is None:
+ 734:             multiplier = self._get_input_multiplier()
+ 735:             max_input_tokens = self._max_tokens * multiplier
+ 736:             logger.debug(
+ 737:                 f"Using adaptive batching: model={self._model}, "
+ 738:                 f"multiplier={multiplier}x, max_input_tokens={max_input_tokens}"
+ 739:             )
+ 740: 
+ 741:         # Create adaptive batches based on token budget
+ 742:         batches = self._create_adaptive_batches(
+ 743:             texts,
+ 744:             max_batch_size=batch_size,
+ 745:             max_input_tokens=max_input_tokens,
+ 746:         )
+ 747:         logger.debug(f"Created {len(batches)} batches from {len(texts)} texts")
+ 748:         all_results: list[ExtractionResult] = []
+ 749: 
+ 750:         # Build system prompt from expertise if available
+ 751:         system_prompt = self._render_system_prompt(expertise, context)
+ 752:         tool_context = self._build_tool_context(expertise, context)
+ 753: 
+ 754:         async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
+ 755:             results = await self._extract_multi_batch(
+ 756:                 batch,
+ 757:                 entity_types,
+ 758:                 litellm,
+ 759:                 system_prompt=system_prompt,
+ 760:                 tool_context=tool_context,
+ 761:                 expertise=expertise,
+ 762:                 context=context,
+ 763:             )
+ 764: 
+ 765:             # Check if batch failed (all results have errors) - fallback to single extraction
+ 766:             all_failed = all(r.metadata.get("error") for r in results)
+ 767:             if all_failed and len(batch) > 1:
+ 768:                 logger.info(
+ 769:                     f"Batch extraction failed for {len(batch)} texts, " f"falling back to single-document extraction"
+ 770:                 )
+ 771:                 # Extract documents one at a time
+ 772:                 single_results = []
+ 773:                 for text in batch:
+ 774:                     result = await self.extract(
+ 775:                         text,
+ 776:                         entity_types=entity_types,
+ 777:                         expertise=expertise,
+ 778:                         context=context,
+ 779:                     )
+ 780:                     single_results.append(result)
+ 781:                 results = single_results
+ 782: 
+ 783:             if expertise:
+ 784:                 results = [self._filter_by_confidence(r, expertise) for r in results]
+ 785:             return results
+ 786: 
+ 787:         batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
+ 788:         for results in batch_results:
+ 789:             all_results.extend(results)
+ 790: 
+ 791:         return all_results
+ 792: 
+ 793:     async def _extract_multi_batch(
+ 794:         self,
+ 795:         texts: list[str],
+ 796:         entity_types: list[str],
+ 797:         litellm: Any,
+ 798:         *,
+ 799:         system_prompt: str | None = None,
+ 800:         tool_context: str | None = None,
+ 801:         expertise: ExpertiseConfig | None = None,
+ 802:         context: dict[str, Any] | None = None,
+ 803:     ) -> list[ExtractionResult]:
+ 804:         """Extract from a batch of texts in a single LLM call."""
+ 805:         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
+ 806: 
+ 807:         # If expertise has custom extraction prompt, use it with multi-section adaptation
+ 808:         if expertise and expertise.extraction_prompt:
+ 809:             from khora.extraction.skills.composer import ExpertiseComposer
+ 810: 
+ 811:             composer = ExpertiseComposer()
+ 812:             # Append multi-section response format to the text
+ 813:             multi_text = (
+ 814:                 sections
+ 815:                 + """
+ 816: 
+ 817: ## MULTI-SECTION RESPONSE FORMAT:
+ 818: Return a JSON object with a "sections" array, one object per input section:
+ 819: {"sections": [
+ 820:     {"entities": [...], "relationships": [...], "events": [...]},
+ 821:     ...
+ 822: ]}
+ 823: Each section follows the entity/relationship format from the instructions above."""
+ 824:             )
+ 825: 
+ 826:             # Get relationship types from expertise
+ 827:             relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+ 828: 
+ 829:             prompt_context = {
+ 830:                 **(context or {}),
+ 831:                 "text": multi_text,
+ 832:                 "entity_types": entity_types,
+ 833:                 "relationship_types": relationship_types,
+ 834:                 "tool_context": tool_context or "",
+ 835:             }
+ 836:             try:
+ 837:                 prompt = composer.render_prompt(
+ 838:                     expertise.extraction_prompt,
+ 839:                     expertise=expertise,
+ 840:                     context=prompt_context,
+ 841:                 )
+ 842:             except Exception as e:
+ 843:                 logger.warning(f"Failed to render extraction prompt for batch: {e}")
+ 844:                 # Fall through to default prompt below
+ 845:                 expertise = None
+ 846: 
+ 847:         # Fallback to hardcoded prompt (existing behavior)
+ 848:         if not expertise or not expertise.extraction_prompt:
+ 849:             # Get relationship types - expertise may exist but without custom extraction_prompt
+ 850:             if expertise:
+ 851:                 relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+ 852:             else:
+ 853:                 relationship_types = DEFAULT_RELATIONSHIP_TYPES
+ 854: 
+ 855:             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
+ 856:             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
+ 857: 
+ 858: Entity types to find: {", ".join(entity_types)}
+ 859: Relationship types to use: {", ".join(relationship_types)}
+ 860: 
+ 861: {sections}
+ 862: 
+ 863: Return a JSON object with a "sections" array, one object per section:
+ 864: {{"sections": [
+ 865:     {{"entities": [...], "relationships": [...], "events": [...]}},
+ 866:     ...
+ 867: ]}}
+ 868: 
+ 869: Each section follows the same entity/relationship/event format.
+ 870: Return ONLY valid JSON, no other text."""
+ 871: 
+ 872:         try:
+ 873:             async for attempt in AsyncRetrying(
+ 874:                 stop=stop_after_attempt(self._max_retries),
+ 875:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+ 876:                 before_sleep=before_sleep_log(logger, "WARNING"),
+ 877:                 reraise=True,
+ 878:             ):
+ 879:                 with attempt:
+ 880:                     async with self._semaphore:
+ 881:                         import time as _time
+ 882: 
+ 883:                         _t0 = _time.perf_counter()
+ 884:                         response = await litellm.acompletion(
+ 885:                             model=self._model,
+ 886:                             messages=[
+ 887:                                 {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+ 888:                                 {"role": "user", "content": prompt},
+ 889:                             ],
+ 890:                             temperature=self._temperature,
+ 891:                             max_tokens=self._max_tokens,
+ 892:                             timeout=self._timeout,
+ 893:                             response_format=self._get_multi_response_format(),
+ 894:                         )
+ 895:                         _latency = (_time.perf_counter() - _t0) * 1000
+ 896: 
+ 897:                         # Record telemetry
+ 898:                         from khora.telemetry import get_collector
+ 899: 
+ 900:                         usage = getattr(response, "usage", None)
+ 901:                         get_collector().record_llm_call(
+ 902:                             operation="entity_extraction_multi",
+ 903:                             model=self._model,
+ 904:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+ 905:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+ 906:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
+ 907:                             latency_ms=_latency,
+ 908:                             metadata={"batch_size": len(texts)},
+ 909:                         )
+ 910: 
+ 911:                     content = response.choices[0].message.content
+ 912:                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+ 913:                     model_used = getattr(response, "model", self._model)
+ 914: 
+ 915:                     if not content:
+ 916:                         # Log more details about the response for debugging
+ 917:                         logger.warning(
+ 918:                             f"Empty response content from LLM in batch extraction. "
+ 919:                             f"Model: {model_used}, finish_reason: {finish_reason}, "
+ 920:                             f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
+ 921:                         )
+ 922:                         return [
+ 923:                             ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
+ 924:                             for _ in texts
+ 925:                         ]
+ 926: 
+ 927:                     # Check for truncated response (hit max_tokens limit)
+ 928:                     if finish_reason == "length":
+ 929:                         logger.warning(
+ 930:                             f"LLM response truncated (finish_reason=length) in batch extraction. "
+ 931:                             f"Model: {model_used}, batch_size: {len(texts)}. "
+ 932:                             f"Consider increasing max_tokens or reducing batch size."
+ 933:                         )
+ 934:                         # Don't retry - truncation will happen again. Return empty results.
+ 935:                         return [
+ 936:                             ExtractionResult(metadata={"error": "truncated_response", "finish_reason": finish_reason})
+ 937:                             for _ in texts
+ 938:                         ]
+ 939: 
+ 940:                     # Parse JSON with error handling - don't retry on parse errors
+ 941:                     try:
+ 942:                         data = json.loads(content)
+ 943:                     except json.JSONDecodeError as json_err:
+ 944:                         # Log details to help diagnose the issue
+ 945:                         logger.warning(
+ 946:                             f"JSON parse error in batch extraction (finish_reason={finish_reason}): {json_err}. "
+ 947:                             f"Model: {model_used}, content_length: {len(content)}, "
+ 948:                             f"content_preview: {content[:200]}..."
+ 949:                         )
+ 950:                         # Raise to trigger retry - model may produce valid JSON on next attempt
+ 951:                         raise
+ 952: 
+ 953:                     if not isinstance(data, dict):
+ 954:                         logger.warning(f"Batch response is not a dict: {type(data)}")
+ 955:                         return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]
+ 956:                     sections_data = data.get("sections", [])
+ 957: 
+ 958:                     results: list[ExtractionResult] = []
+ 959:                     for i, text in enumerate(texts):
+ 960:                         if i < len(sections_data):
+ 961:                             results.append(self._parse_response(sections_data[i]))
+ 962:                         else:
+ 963:                             results.append(ExtractionResult())
+ 964: 
+ 965:                     return results
+ 966:         except Exception as e:
+ 967:             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
+ 968:             return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
+ 969: 
+ 970:     def _parse_response(self, content: str | dict | None) -> ExtractionResult:
+ 971:         """Parse the LLM response into an ExtractionResult.
+ 972: 
+ 973:         Accepts either a JSON string or a pre-parsed dict to avoid
+ 974:         unnecessary json.dumps/json.loads round-trips in batch mode.
+ 975:         """
+ 976:         try:
+ 977:             # Handle None or empty content
+ 978:             if content is None or content == "":
+ 979:                 logger.warning("Empty response content from LLM")
+ 980:                 return ExtractionResult(metadata={"error": "empty_response"})
+ 981: 
+ 982:             # Accept pre-parsed dict directly (from extract_multi_batch)
+ 983:             data = content if isinstance(content, dict) else json.loads(content)
+ 984: 
+ 985:             # Ensure data is actually a dict (not a string that parsed as string)
+ 986:             if not isinstance(data, dict):
+ 987:                 logger.warning(f"Response parsed but is not a dict: {type(data)}")
+ 988:                 return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
+ 989: 
+ 990:             entities = []
+ 991:             for e in data.get("entities", []):
+ 992:                 # Parse temporal info if present
+ 993:                 temporal = None
+ 994:                 if "temporal" in e and e["temporal"]:
+ 995:                     t = e["temporal"]
+ 996:                     temporal = TemporalInfo(
+ 997:                         mentioned_at=t.get("mentioned_at"),
+ 998:                         valid_from=t.get("valid_from"),
+ 999:                         valid_until=t.get("valid_until"),
+1000:                     )
+1001: 
+1002:                 # Ensure attributes is a dict (LLM sometimes returns a list)
+1003:                 attrs = e.get("attributes", {})
+1004:                 if not isinstance(attrs, dict):
+1005:                     attrs = {}
+1006: 
+1007:                 entities.append(
+1008:                     ExtractedEntity(
+1009:                         name=e.get("name") or "",
+1010:                         entity_type=e.get("entity_type") or "CONCEPT",
+1011:                         description=e.get("description") or "",
+1012:                         attributes=attrs,
+1013:                         aliases=e.get("aliases") or [],
+1014:                         temporal=temporal,
+1015:                         confidence=e.get("confidence") or 0.9,
+1016:                     )
+1017:                 )
+1018: 
+1019:             relationships = []
+1020:             for r in data.get("relationships", []):
+1021:                 # Parse temporal info if present
+1022:                 temporal = None
+1023:                 if "temporal" in r and r["temporal"]:
+1024:                     t = r["temporal"]
+1025:                     temporal = TemporalInfo(
+1026:                         occurred_at=t.get("occurred_at"),
+1027:                         valid_from=t.get("valid_from"),
+1028:                         valid_until=t.get("valid_until"),
+1029:                     )
+1030: 
+1031:                 relationships.append(
+1032:                     ExtractedRelationship(
+1033:                         source_entity=r.get("source_entity") or "",
+1034:                         target_entity=r.get("target_entity") or "",
+1035:                         relationship_type=r.get("relationship_type") or "RELATES_TO",
+1036:                         description=r.get("description") or "",
+1037:                         properties=r.get("properties") or {},
+1038:                         temporal=temporal,
+1039:                         confidence=r.get("confidence") or 0.9,
+1040:                     )
+1041:                 )
+1042: 
+1043:             events = []
+1044:             for ev in data.get("events", []):
+1045:                 events.append(
+1046:                     ExtractedEvent(
+1047:                         description=ev.get("description") or "",
+1048:                         event_type=ev.get("event_type") or "EVENT",
+1049:                         occurred_at=ev.get("occurred_at"),
+1050:                         participants=ev.get("participants") or [],
+1051:                         confidence=ev.get("confidence") or 0.9,
+1052:                     )
+1053:                 )
+1054: 
+1055:             return ExtractionResult(
+1056:                 entities=entities,
+1057:                 relationships=relationships,
+1058:                 events=events,
+1059:             )
+1060: 
+1061:         except json.JSONDecodeError as e:
+1062:             logger.warning(f"Failed to parse extraction response as JSON: {e}")
+1063:             # Try to extract JSON from the response
+1064:             return self._extract_json_from_text(content)
+1065: 
+1066:     def _extract_json_from_text(self, text: str) -> ExtractionResult:
+1067:         """Try to extract JSON from text that may contain other content."""
+1068:         import re
+1069: 
+1070:         # Look for JSON object in the text
+1071:         json_match = re.search(r"\{[\s\S]*\}", text)
+1072:         if json_match:
+1073:             try:
+1074:                 data = json.loads(json_match.group())
+1075:                 return self._parse_response(json.dumps(data))
+1076:             except json.JSONDecodeError:
+1077:                 pass
+1078: 
+1079:         logger.warning("Could not extract valid JSON from response")
+1080:         return ExtractionResult(metadata={"raw_response": text[:500]})
 ````
 
 ## File: src/khora/pipelines/flows/ingest.py
@@ -41716,7 +41888,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.0.31"
+  3: version = "0.0.32"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -41900,6 +42072,33 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-04 12:36:41 +0100
+**Message:** feat: add adaptive token-budget-based extraction batching
+
+**Files:**
+- pyproject.toml
+- src/khora/extraction/extractors/llm.py
+- src/khora/pipelines/tasks/extract.py
+
+## Commit: 2026-02-04 10:53:38 +0100
+**Message:** chore: add debug logging for extraction prompt selection
+
+**Files:**
+- src/khora/extraction/extractors/llm.py
+
+## Commit: 2026-02-04 10:09:51 +0100
+**Message:** fix: filter self-referential matches early in rule engine
+
+**Files:**
+- src/khora/extraction/expansion/rule_engine.py
+
+## Commit: 2026-02-03 22:57:31 +0100
+**Message:** chore: update Khora version
+
+**Files:**
+- REPOMIX.md
+- uv.lock
+
 ## Commit: 2026-02-03 22:20:04 +0100
 **Message:** fix: make embed_concurrency configurable via LiteLLMConfig
 
@@ -42043,59 +42242,3 @@ README.md
 
 **Files:**
 - src/khora/storage/backends/pgvector.py
-
-## Commit: 2026-02-02 22:23:52 +0100
-**Message:** chore: bump version to 0.0.28
-
-**Files:**
-- REPOMIX.md
-- pyproject.toml
-- uv.lock
-
-## Commit: 2026-02-02 22:18:03 +0100
-**Message:** refactor: remove Prefect dependency, use tenacity for retries
-
-**Files:**
-- REPOMIX.md
-- pyproject.toml
-- src/khora/extraction/embedders/litellm.py
-- src/khora/extraction/extractors/llm.py
-- src/khora/logging_config.py
-- src/khora/pipelines/__init__.py
-- src/khora/pipelines/flows/__init__.py
-- src/khora/pipelines/flows/expansion.py
-- src/khora/pipelines/flows/ingest.py
-- src/khora/pipelines/flows/sync.py
-- src/khora/pipelines/manager.py
-- src/khora/pipelines/registry.py
-- src/khora/pipelines/tasks/__init__.py
-- src/khora/pipelines/tasks/chunk.py
-- src/khora/pipelines/tasks/embed.py
-- src/khora/pipelines/tasks/extract.py
-- src/khora/storage/backends/neo4j.py
-- src/khora/storage/backends/pgvector.py
-- src/khora/storage/coordinator.py
-- tests/unit/test_perf_optimizations.py
-- uv.lock
-
-## Commit: 2026-02-02 18:14:29 +0100
-**Message:** perf: remove O(n) all-same-type fallback in entity index candidate search
-
-**Files:**
-- src/khora/extraction/expansion/entity_index.py
-- src/khora/pipelines/flows/ingest.py
-
-## Commit: 2026-02-02 16:31:41 +0100
-**Message:** perf: accelerate CPU hotspots with numpy/rapidfuzz and BM25 inverted index
-
-**Files:**
-- REPOMIX.md
-- pyproject.toml
-- src/khora/_accel.py
-- src/khora/extraction/entity_resolution.py
-- src/khora/extraction/expansion/cross_tool_unifier.py
-- src/khora/extraction/expansion/entity_index.py
-- src/khora/query/keyword.py
-- src/khora/query/linking.py
-- tests/unit/test_entity_index.py
-- uv.lock
