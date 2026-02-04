@@ -126,6 +126,35 @@ class LLMEntityExtractor(EntityExtractor):
         "o3-mini",
     }
 
+    # Model input token multipliers for adaptive batching
+    # Multiplier is applied to max_tokens to get max_input_tokens budget
+    # Higher values for large context models (128K+), lower for smaller context
+    MODEL_INPUT_MULTIPLIERS: dict[str, int] = {
+        # Large context models (128K+) - can be more aggressive
+        "gpt-4o": 8,
+        "gpt-4o-2024-05-13": 8,
+        "gpt-4o-2024-08-06": 8,
+        "gpt-4o-2024-11-20": 8,
+        "gpt-4.1": 8,
+        "gpt-4.1-mini": 5,  # 128K context but smaller model
+        "gpt-4o-mini": 5,
+        "gpt-4o-mini-2024-07-18": 5,
+        "o1": 8,
+        "o1-mini": 5,
+        "o3-mini": 5,
+        # Medium context models (32K)
+        "gpt-4-turbo": 4,
+        "gpt-4-turbo-preview": 4,
+        # Smaller context models (8K-16K) - conservative
+        "gpt-4": 2,
+        "gpt-3.5-turbo": 2,
+        # Claude models
+        "claude-3-opus": 8,
+        "claude-3-sonnet": 8,
+        "claude-3-haiku": 5,
+    }
+    DEFAULT_INPUT_MULTIPLIER = 3  # Fallback for unknown models
+
     def __init__(
         self,
         model: str = "gpt-4o-mini",
@@ -155,6 +184,74 @@ class LLMEntityExtractor(EntityExtractor):
         self._max_retries = max_retries
         self._retry_wait = retry_wait
         self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count for text.
+
+        Uses ~3 chars per token as a conservative heuristic for English text.
+        This slightly overestimates to provide safety margin.
+        """
+        return len(text) // 3
+
+    def _get_input_multiplier(self) -> int:
+        """Get input token multiplier based on model.
+
+        Returns the multiplier to apply to max_tokens for calculating
+        the input token budget for adaptive batching.
+        """
+        # Check exact match first
+        if self._model in self.MODEL_INPUT_MULTIPLIERS:
+            return self.MODEL_INPUT_MULTIPLIERS[self._model]
+        # Check prefix matches (e.g., "gpt-4o-mini" matches "gpt-4o-mini-...")
+        for model_prefix, multiplier in self.MODEL_INPUT_MULTIPLIERS.items():
+            if self._model.startswith(model_prefix):
+                return multiplier
+        return self.DEFAULT_INPUT_MULTIPLIER
+
+    def _create_adaptive_batches(
+        self,
+        texts: list[str],
+        max_batch_size: int,
+        max_input_tokens: int,
+        prompt_overhead: int = 500,
+    ) -> list[list[str]]:
+        """Create batches that fit within token budget.
+
+        Groups texts greedily until hitting the input token budget or
+        max batch size, whichever comes first.
+
+        Args:
+            texts: List of texts to batch
+            max_batch_size: Maximum number of texts per batch
+            max_input_tokens: Token budget for input
+            prompt_overhead: Estimated tokens for system prompt and instructions
+
+        Returns:
+            List of text batches
+        """
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_tokens = prompt_overhead
+
+        for text in texts:
+            # Match truncation in _extract_multi_batch (4000 chars)
+            text_tokens = self._estimate_tokens(text[:4000])
+
+            # Check if adding this text would exceed budget or max batch size
+            if current_batch and (
+                current_tokens + text_tokens > max_input_tokens or len(current_batch) >= max_batch_size
+            ):
+                batches.append(current_batch)
+                current_batch = []
+                current_tokens = prompt_overhead
+
+            current_batch.append(text)
+            current_tokens += text_tokens
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     def _get_response_format(self) -> dict[str, Any]:
         """Get the appropriate response_format based on the model.
@@ -600,18 +697,21 @@ class LLMEntityExtractor(EntityExtractor):
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
         batch_size: int = 5,
+        max_input_tokens: int | None = None,
     ) -> list[ExtractionResult]:
         """Extract entities from multiple texts in grouped LLM calls.
 
-        Groups texts into batches and sends each batch as a single LLM call,
-        reducing API round-trips by up to batch_size times.
+        Groups texts into batches using adaptive token-budget-based batching,
+        reducing API round-trips while avoiding context overflow.
 
         Args:
             texts: List of texts to extract from
             entity_types: Optional list of entity types to extract
             expertise: Optional ExpertiseConfig for domain-specific extraction
             context: Optional context dict for prompt template rendering
-            batch_size: Number of texts per LLM call
+            batch_size: Maximum number of texts per LLM call (fallback/cap)
+            max_input_tokens: Token budget for input. If None, auto-calculated
+                from max_tokens using model-aware multipliers.
 
         Returns:
             List of ExtractionResult objects (one per input text)
@@ -629,7 +729,22 @@ class LLMEntityExtractor(EntityExtractor):
         except ImportError:
             raise RuntimeError("litellm package not installed. Run: pip install litellm")
 
-        batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+        # Calculate max_input_tokens from model if not provided
+        if max_input_tokens is None:
+            multiplier = self._get_input_multiplier()
+            max_input_tokens = self._max_tokens * multiplier
+            logger.debug(
+                f"Using adaptive batching: model={self._model}, "
+                f"multiplier={multiplier}x, max_input_tokens={max_input_tokens}"
+            )
+
+        # Create adaptive batches based on token budget
+        batches = self._create_adaptive_batches(
+            texts,
+            max_batch_size=batch_size,
+            max_input_tokens=max_input_tokens,
+        )
+        logger.debug(f"Created {len(batches)} batches from {len(texts)} texts")
         all_results: list[ExtractionResult] = []
 
         # Build system prompt from expertise if available

@@ -86,22 +86,27 @@ async def extract_entities(
         retry_wait=retry_wait,
     )
 
-    # Extract from all chunks using grouped multi-extraction (fewer LLM calls)
-    # Groups 3-5 chunks per LLM call, reducing API round-trips proportionally
+    # Extract from all chunks using adaptive token-budget-based batching
+    # Groups chunks into batches that fit within the model's input token budget,
+    # reducing API round-trips by up to 5x while avoiding context overflow
     texts = [chunk.content for chunk in chunks]
 
+    # Use adaptive batching based on token budget (auto-calculated from max_tokens)
+    # batch_size=5 is the max texts per batch; actual batching respects token limits
     if resolved_expertise:
         results = await extractor.extract_multi(
             texts,
             expertise=resolved_expertise,
             context=context,
-            batch_size=1,
+            batch_size=5,
+            max_input_tokens=None,  # Auto-calculate from model
         )
     else:
         results = await extractor.extract_multi(
             texts,
             entity_types=skill.entity_types,
-            batch_size=1,
+            batch_size=5,
+            max_input_tokens=None,  # Auto-calculate from model
         )
 
     # Process results
