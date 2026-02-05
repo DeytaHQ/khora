@@ -23,7 +23,7 @@ from .router import QueryComplexity, QueryComplexityRouter, RoutingDecision
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
-    from khora.engines.khora.backends import TemporalFilter, TemporalVectorStore
+    from khora.engines.skeleton.backends import TemporalFilter, TemporalVectorStore
     from khora.extraction.embedders import EmbedderProtocol
 
 

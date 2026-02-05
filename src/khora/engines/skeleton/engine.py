@@ -1,4 +1,4 @@
-"""Khora engine - temporal-first memory engine.
+"""Skeleton Construction engine - temporal-first memory engine.
 
 This engine is optimized for:
 - Temporal queries with structured field filtering
@@ -31,8 +31,8 @@ if TYPE_CHECKING:
     pass
 
 
-class KhoraEngine:
-    """Khora engine - temporal-first, cost-efficient memory engine.
+class SkeletonConstructionEngine:
+    """Skeleton Construction engine - temporal-first, cost-efficient memory engine.
 
     Key features:
     - Bi-temporal model: Track occurrence time vs ingestion time
@@ -43,11 +43,11 @@ class KhoraEngine:
 
     Usage:
         # Default backend (pgvector)
-        engine = KhoraEngine(config)
+        engine = SkeletonConstructionEngine(config)
         await engine.connect()
 
         # Weaviate backend
-        engine = KhoraEngine(config, backend="weaviate", weaviate_url="http://localhost:8080")
+        engine = SkeletonConstructionEngine(config, backend="weaviate", weaviate_url="http://localhost:8080")
         await engine.connect()
     """
 
@@ -59,7 +59,7 @@ class KhoraEngine:
         backend: str = "pgvector",
         weaviate_url: str | None = None,
     ) -> None:
-        """Initialize the Khora engine.
+        """Initialize the Skeleton Construction engine.
 
         Args:
             config: KhoraConfig instance
@@ -110,7 +110,7 @@ class KhoraEngine:
         if self._connected:
             return
 
-        logger.info(f"Connecting Khora engine (backend={self._backend_type})...")
+        logger.info(f"Connecting Skeleton Construction engine (backend={self._backend_type})...")
 
         # Create and connect relational storage (for documents, namespaces, etc.)
         self._storage = create_storage_coordinator(self._storage_config)
@@ -145,14 +145,14 @@ class KhoraEngine:
         await init_telemetry(telemetry_cfg)
 
         self._connected = True
-        logger.info("Khora engine connected")
+        logger.info("Skeleton Construction engine connected")
 
     async def disconnect(self) -> None:
         """Disconnect from all storage backends."""
         if not self._connected:
             return
 
-        logger.info("Disconnecting Khora engine...")
+        logger.info("Disconnecting Skeleton Construction engine...")
 
         # Shutdown telemetry
         from khora.telemetry import shutdown_telemetry
@@ -170,24 +170,24 @@ class KhoraEngine:
         self._embedder = None
         self._connected = False
 
-        logger.info("Khora engine disconnected")
+        logger.info("Skeleton Construction engine disconnected")
 
     def _get_storage(self) -> StorageCoordinator:
         """Get storage coordinator (internal use)."""
         if self._storage is None:
-            raise RuntimeError("Khora engine not connected. Call connect() first.")
+            raise RuntimeError("Skeleton Construction engine not connected. Call connect() first.")
         return self._storage
 
     def _get_temporal_store(self) -> TemporalVectorStore:
         """Get temporal store (internal use)."""
         if self._temporal_store is None:
-            raise RuntimeError("Khora engine not connected. Call connect() first.")
+            raise RuntimeError("Skeleton Construction engine not connected. Call connect() first.")
         return self._temporal_store
 
     def _get_embedder(self) -> LiteLLMEmbedder:
         """Get embedder (internal use)."""
         if self._embedder is None:
-            raise RuntimeError("Khora engine not connected. Call connect() first.")
+            raise RuntimeError("Skeleton Construction engine not connected. Call connect() first.")
         return self._embedder
 
     # =========================================================================
@@ -436,7 +436,7 @@ class KhoraEngine:
             query=query,
             namespace_id=namespace_id,
             chunks=chunks_with_scores,
-            entities=[],  # Khora engine focuses on chunks, not entities
+            entities=[],  # Skeleton engine focuses on chunks, not entities
             context_text=context_text,
             metadata={
                 "backend": self._backend_type,
@@ -561,12 +561,12 @@ class KhoraEngine:
         skill_name: str = "general_entities",
         max_concurrent: int = 10,
         deduplicate: bool = True,
-        infer_relationships: bool = False,  # Not used in Khora engine
+        infer_relationships: bool = False,  # Not used in Skeleton Construction engine
         on_progress: Callable[[int, int], None] | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
-        The Khora engine uses a simplified pipeline:
+        The Skeleton Construction engine uses a simplified pipeline:
         - Fast chunking without full entity extraction
         - Batch embedding for cost efficiency
         - Parallel processing with semaphore control
@@ -577,7 +577,7 @@ class KhoraEngine:
             skill_name: Extraction skill to use
             max_concurrent: Maximum concurrent document processing (default 10)
             deduplicate: Whether to skip duplicate documents
-            infer_relationships: Not used in Khora engine
+            infer_relationships: Not used in Skeleton engine
             on_progress: Callback for progress updates (completed, total)
 
         Returns:
@@ -826,7 +826,7 @@ class KhoraEngine:
     ) -> list[tuple[Entity, float]]:
         """Find entities related to a given entity.
 
-        Note: Khora engine focuses on temporal chunk retrieval.
+        Note: Skeleton Construction engine focuses on temporal chunk retrieval.
         For full entity graph traversal, use the GraphRAG engine.
         """
         # Return empty for now - Khora focuses on chunks
@@ -858,7 +858,7 @@ class KhoraEngine:
     ) -> list[Entity]:
         """Search entities by query text.
 
-        Note: Khora engine focuses on temporal chunk retrieval.
+        Note: Skeleton Construction engine focuses on temporal chunk retrieval.
         For full entity search, use the GraphRAG engine.
         """
         # Return empty for now - Khora focuses on chunks
@@ -878,7 +878,7 @@ class KhoraEngine:
         try:
             chunk_count = await storage.count_chunks(namespace_id)
         except (AttributeError, NotImplementedError):
-            chunk_count = 0  # Khora chunks are in temporal_store
+            chunk_count = 0  # Skeleton engine chunks are in temporal_store
 
         try:
             entity_count = await storage.count_entities(namespace_id)
@@ -915,4 +915,4 @@ class KhoraEngine:
         }
 
 
-__all__ = ["KhoraEngine"]
+__all__ = ["SkeletonConstructionEngine"]

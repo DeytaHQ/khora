@@ -221,11 +221,11 @@ Approximate nearest neighbor algorithm:
 
 | Paper/System | Khora Component | File |
 |--------------|-----------------|------|
-| TG-RAG | TimeHierarchyBuilder | `engines/khora/time_hierarchy.py` |
-| KET-RAG | SkeletonIndexer | `engines/khora/skeleton.py` |
-| Graphiti | TemporalEdgeStorage | `engines/khora/temporal_edges.py` |
+| TG-RAG | TimeHierarchyBuilder | `engines/skeleton/time_hierarchy.py` |
+| KET-RAG | SkeletonIndexer | `engines/skeleton/skeleton.py` |
+| Graphiti | TemporalEdgeStorage | `engines/skeleton/temporal_edges.py` |
 | GraphRAG | GraphRAGEngine | `engines/graphrag/engine.py` |
-| RRF | rrf_fusion() | `engines/khora/backends/pgvector.py` |
+| RRF | rrf_fusion() | `engines/skeleton/backends/pgvector.py` |
 
 ### Deviations from Papers
 
@@ -250,7 +250,7 @@ If you use Khora in research, please cite:
 
 ## Further Reading
 
-- [Khora Engine Documentation](engines/khora-engine.md)
+- [Skeleton Engine Documentation](engines/skeleton-engine.md)
 - [Engine Comparison](engines/engine-comparison.md)
 - [Temporal Model Deep Dive](engines/temporal-model.md)
 - [Skeleton Indexing](engines/skeleton-indexing.md)

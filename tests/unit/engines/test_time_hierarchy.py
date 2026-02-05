@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from khora.db.models import TimeGranularity
-from khora.engines.khora.time_hierarchy import TimeNode
+from khora.engines.skeleton.time_hierarchy import TimeNode
 
 
 class TestTimeNode:

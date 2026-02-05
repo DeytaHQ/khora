@@ -1,4 +1,4 @@
-"""Temporal edge storage for the Khora engine.
+"""Temporal edge storage for the Skeleton engine.
 
 This module implements Graphiti-inspired bi-temporal edge storage:
 - Occurrence time: When the fact/event happened
@@ -20,7 +20,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from khora.db.models import TemporalEdgeModel, TimeEdgeLinkModel
-from khora.engines.khora.time_hierarchy import TimeHierarchyBuilder
+from khora.engines.skeleton.time_hierarchy import TimeHierarchyBuilder
 
 if TYPE_CHECKING:
     pass

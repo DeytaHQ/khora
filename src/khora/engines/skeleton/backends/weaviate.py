@@ -1,4 +1,4 @@
-"""Weaviate backend for the Khora engine.
+"""Weaviate backend for the Skeleton engine.
 
 This backend provides:
 - Native hybrid search (BM25 + vector in single query)
@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 from loguru import logger
 
-from khora.engines.khora.backends import (
+from khora.engines.skeleton.backends import (
     TemporalChunk,
     TemporalFilter,
     TemporalSearchResult,

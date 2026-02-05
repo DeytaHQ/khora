@@ -1,6 +1,6 @@
 # Hybrid Search
 
-The Khora engine implements hybrid search combining vector similarity (semantic) with BM25 full-text search (keyword), merged using Reciprocal Rank Fusion (RRF). This document explains the search pipeline and tuning options.
+The Skeleton Construction engine implements hybrid search combining vector similarity (semantic) with BM25 full-text search (keyword), merged using Reciprocal Rank Fusion (RRF). This document explains the search pipeline and tuning options.
 
 ## Search Pipeline
 
@@ -196,7 +196,7 @@ results = await engine.recall(
 After fusion, results are filtered by temporal constraints:
 
 ```python
-from khora.engines.khora.backends import TemporalFilter
+from khora.engines.skeleton.backends import TemporalFilter
 
 results = await engine.recall(
     "project updates",
@@ -419,7 +419,7 @@ async def embed_query(query: str) -> list[float]:
 ```python
 from khora import MemoryLake
 
-async with MemoryLake(db_url, engine="khora") as lake:
+async with MemoryLake(db_url, engine="skeleton") as lake:
     results = await lake.recall(
         query,
         mode=SearchMode.HYBRID,
@@ -451,7 +451,7 @@ query:
 
 ## Related Documentation
 
-- [Khora Engine](khora-engine.md) - Overview of the Khora engine
+- [Skeleton Construction Engine](skeleton-engine.md) - Overview of the Skeleton Construction engine
 - [Query Engine](../query-engine/search-modes.md) - Search modes overview
 - [Fusion](../query-engine/fusion.md) - RRF implementation details
 - [Temporal Queries](../query-engine/temporal-queries.md) - Time-based filtering

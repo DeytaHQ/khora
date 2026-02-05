@@ -1,6 +1,6 @@
 # Temporal Model
 
-The Khora engine implements a bi-temporal model inspired by [Graphiti](https://github.com/getzep/graphiti), with a hierarchical time graph inspired by [TG-RAG](https://arxiv.org/abs/2410.15149). This document explains the theory and implementation.
+The Skeleton Construction engine implements a bi-temporal model inspired by [Graphiti](https://github.com/getzep/graphiti), with a hierarchical time graph inspired by [TG-RAG](https://arxiv.org/abs/2410.15149). This document explains the theory and implementation.
 
 ## Bi-Temporal Theory
 
@@ -9,9 +9,9 @@ Traditional databases track a single timestamp (typically `created_at`). Bi-temp
 1. **Transaction Time (System Time)**: When the fact was recorded in the system
 2. **Valid Time (Application Time)**: When the fact was true in the real world
 
-In Khora, we use:
+In the Skeleton Construction engine, we use:
 
-| Khora Field | Temporal Concept | Description |
+| Field | Temporal Concept | Description |
 |-------------|------------------|-------------|
 | `ingested_at` | Transaction time | When we learned about it |
 | `occurred_at` | Valid time | When the event actually happened |
@@ -178,7 +178,7 @@ async def _check_and_resolve_conflicts(
 
 ## Hierarchical Time Graph
 
-Inspired by TG-RAG, Khora maintains a hierarchical time structure for efficient temporal queries:
+Inspired by TG-RAG, the Skeleton Construction engine maintains a hierarchical time structure for efficient temporal queries:
 
 ```
 2024 (year)
@@ -430,6 +430,6 @@ edges = await storage.get_edges_by_entity(
 
 ## Related Documentation
 
-- [Khora Engine](khora-engine.md) - Overview of the Khora engine
+- [Skeleton Construction Engine](skeleton-engine.md) - Overview of the Skeleton Construction engine
 - [References](../REFERENCES.md) - Graphiti and TG-RAG paper citations
 - [Query Engine](../query-engine/temporal-queries.md) - Temporal query patterns

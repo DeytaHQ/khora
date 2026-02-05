@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from khora.engines.khora.temporal_edges import TemporalEdge
+from khora.engines.skeleton.temporal_edges import TemporalEdge
 
 
 class TestTemporalEdge:

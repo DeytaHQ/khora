@@ -1,6 +1,6 @@
-"""Khora engine - temporal-first memory engine.
+"""Skeleton Construction engine - temporal-first memory engine.
 
-The Khora engine is optimized for:
+The Skeleton Construction engine is optimized for:
 - Temporal queries: Filtering by date, relative time references ("yesterday" in message context)
 - Fast/cheap ingestion: Batch + incremental with skeleton-based indexing
 - High precision: Bi-temporal model tracking occurrence and ingestion time
@@ -10,14 +10,14 @@ The Khora engine is optimized for:
 
 Usage:
     # Default backend (pgvector)
-    async with MemoryLake(db_url, engine="khora") as lake:
+    async with MemoryLake(db_url, engine="skeleton") as lake:
         await lake.remember("content", title="Doc")
         results = await lake.recall("query", temporal_filter=TemporalFilter.relative_days(-1))
 
     # Weaviate backend (advanced filtering)
     async with MemoryLake(
         db_url,
-        engine="khora",
+        engine="skeleton",
         backend="weaviate",
         weaviate_url="http://localhost:8080",
     ) as lake:
@@ -28,6 +28,6 @@ Usage:
         )
 """
 
-from khora.engines.khora.engine import KhoraEngine
+from khora.engines.skeleton.engine import SkeletonConstructionEngine
 
-__all__ = ["KhoraEngine"]
+__all__ = ["SkeletonConstructionEngine"]

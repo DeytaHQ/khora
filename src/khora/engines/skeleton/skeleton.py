@@ -20,7 +20,7 @@ from uuid import UUID
 from loguru import logger
 
 if TYPE_CHECKING:
-    from khora.engines.khora.backends import TemporalChunk
+    from khora.engines.skeleton.backends import TemporalChunk
 
 
 @dataclass

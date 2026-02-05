@@ -24,7 +24,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
-    from khora.engines.khora.backends import TemporalChunk, TemporalFilter
+    from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter
 
 
 @dataclass

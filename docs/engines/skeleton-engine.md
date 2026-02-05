@@ -1,13 +1,10 @@
-# Khora Engine
+# Skeleton Construction Engine
 
-> *"Khora is the receptacle, the space, the matrix in which all things come to be."*
-> *— Plato, Timaeus*
+The **Skeleton Construction engine** is a temporal-first memory engine optimized for event streams, chat histories, and time-sensitive data. Unlike the GraphRAG engine which focuses on knowledge graph construction, Skeleton Construction prioritizes temporal relationships and cost-efficient retrieval through skeleton-based indexing.
 
-The **Khora Engine** is a temporal-first memory engine optimized for event streams, chat histories, and time-sensitive data. Unlike the GraphRAG engine which focuses on knowledge graph construction, Khora prioritizes temporal relationships and cost-efficient retrieval through skeleton-based indexing.
+## When to Use Skeleton Construction
 
-## When to Use Khora
-
-Choose the Khora engine when:
+Choose the Skeleton Construction engine when:
 
 - **Time matters most**: Chat logs, event streams, meeting transcripts, logs
 - **Cost is a concern**: 5-10x fewer LLM calls via skeleton indexing
@@ -25,7 +22,7 @@ Choose GraphRAG instead when:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              KhoraEngine                                     │
+│                       SkeletonConstructionEngine                             │
 │                      remember() / recall() / forget()                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
@@ -62,15 +59,15 @@ Choose GraphRAG instead when:
 
 ## Key Components
 
-### KhoraEngine (`src/khora/engines/khora/engine.py`)
+### SkeletonConstructionEngine (`src/khora/engines/skeleton/engine.py`)
 
 The main engine class implementing `MemoryEngineProtocol`:
 
 ```python
 from khora import MemoryLake
 
-# Use Khora engine explicitly
-async with MemoryLake("postgresql://...", engine="khora") as lake:
+# Use Skeleton Construction engine explicitly
+async with MemoryLake("postgresql://...", engine="skeleton") as lake:
     # Store with temporal context
     result = await lake.remember(
         "Meeting notes from quarterly review",
@@ -105,7 +102,7 @@ async with MemoryLake("postgresql://...", engine="khora") as lake:
 | `ensure_namespace()` | Get or create namespace by name |
 | `stats()` | Get document/chunk/entity counts |
 
-### TemporalEdgeStorage (`src/khora/engines/khora/temporal_edges.py`)
+### TemporalEdgeStorage (`src/khora/engines/skeleton/temporal_edges.py`)
 
 Manages bi-temporal edges with conflict detection, inspired by [Graphiti](https://github.com/getzep/graphiti):
 
@@ -141,7 +138,7 @@ edge1 = await storage.create_edge(alice_id, acme_id, "WORKS_FOR", occurred_at=ja
 edge2 = await storage.create_edge(alice_id, beta_id, "WORKS_FOR", occurred_at=mar_2024)
 ```
 
-### TimeHierarchyBuilder (`src/khora/engines/khora/time_hierarchy.py`)
+### TimeHierarchyBuilder (`src/khora/engines/skeleton/time_hierarchy.py`)
 
 Implements TG-RAG-inspired hierarchical time navigation:
 
@@ -165,7 +162,7 @@ Implements TG-RAG-inspired hierarchical time navigation:
 - Automatic ancestor creation on demand
 - Edge/entity counts aggregated at each level
 
-### SkeletonIndexer (`src/khora/engines/khora/skeleton.py`)
+### SkeletonIndexer (`src/khora/engines/skeleton/skeleton.py`)
 
 KET-RAG-inspired PageRank-based core chunk selection:
 
@@ -199,9 +196,9 @@ for chunk_id in core_chunk_ids:
 | Approach | LLM Calls per 1000 docs |
 |----------|-------------------------|
 | Full extraction (GraphRAG) | ~1000 |
-| Skeleton indexing (Khora) | ~100 |
+| Skeleton indexing (Skeleton) | ~100 |
 
-### LazyEntityExpander (`src/khora/engines/khora/skeleton.py`)
+### LazyEntityExpander (`src/khora/engines/skeleton/skeleton.py`)
 
 On-demand entity extraction for non-core chunks:
 
@@ -221,7 +218,7 @@ if not skeleton_indexer.is_core_chunk(chunk_id):
 Single-infrastructure deployment using PostgreSQL extensions:
 
 ```python
-engine = KhoraEngine(config, backend="pgvector")
+engine = SkeletonConstructionEngine(config, backend="pgvector")
 ```
 
 **Features:**
@@ -267,7 +264,7 @@ CREATE INDEX idx_chunks_content_tsv ON khora_chunks USING GIN (content_tsv);
 For horizontal scaling and native multi-tenancy:
 
 ```python
-engine = KhoraEngine(
+engine = SkeletonConstructionEngine(
     config,
     backend="weaviate",
     weaviate_url="http://localhost:8080"
@@ -286,7 +283,7 @@ engine = KhoraEngine(
 ### Temporal Filtering
 
 ```python
-from khora.engines.khora.backends import TemporalFilter
+from khora.engines.skeleton.backends import TemporalFilter
 
 # By time range
 results = await engine.recall(
@@ -354,7 +351,7 @@ results = await engine.recall(query, ns_id, mode=SearchMode.VECTOR)
 # Hybrid (vector + BM25 with RRF)
 results = await engine.recall(query, ns_id, mode=SearchMode.HYBRID)
 
-# Note: SearchMode.GRAPH is not supported in Khora engine
+# Note: SearchMode.GRAPH is not supported in Skeleton Construction engine
 # Use GraphRAG engine for graph-based queries
 ```
 
@@ -368,7 +365,7 @@ from khora.config import KhoraConfig
 config = KhoraConfig(
     database_url="postgresql://localhost/khora",
     engine=EngineConfig(
-        name="khora",
+        name="skeleton",
         backend="pgvector",  # or "weaviate"
     ),
     query=QueryConfig(
@@ -382,7 +379,7 @@ config = KhoraConfig(
 
 ```bash
 KHORA_DATABASE_URL=postgresql://localhost/khora
-KHORA_ENGINE__NAME=khora
+KHORA_ENGINE__NAME=skeleton
 KHORA_ENGINE__BACKEND=pgvector
 KHORA_QUERY__HYBRID_ALPHA=0.7
 KHORA_QUERY__RECENCY_DECAY_DAYS=30
@@ -391,9 +388,9 @@ KHORA_QUERY__RECENCY_DECAY_DAYS=30
 ### Via Genesis YAML
 
 ```yaml
-# config/khora/genesis.yaml
+# config/skeleton/genesis.yaml
 engine:
-  name: khora
+  name: skeleton
   backend: pgvector
 
 query:
@@ -407,8 +404,8 @@ temporal:
 
 ## Performance Characteristics
 
-| Metric | Khora | GraphRAG |
-|--------|-------|----------|
+| Metric | Skeleton Construction | GraphRAG |
+|--------|----------------------|----------|
 | LLM calls per 1000 docs | ~100 | ~1000 |
 | Ingestion latency | Lower | Higher |
 | Infrastructure | PostgreSQL only | PostgreSQL + Neo4j |
@@ -418,7 +415,7 @@ temporal:
 
 ## Related Documentation
 
-- [Engine Comparison](engine-comparison.md) - Detailed GraphRAG vs Khora comparison
+- [Engine Comparison](engine-comparison.md) - Detailed GraphRAG vs Skeleton comparison
 - [Temporal Model](temporal-model.md) - Deep dive into bi-temporal design
 - [Skeleton Indexing](skeleton-indexing.md) - PageRank-based core selection
 - [Hybrid Search](hybrid-search.md) - Vector + BM25 fusion details

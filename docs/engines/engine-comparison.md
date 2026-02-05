@@ -1,11 +1,11 @@
-# Engine Comparison: GraphRAG vs Khora
+# Engine Comparison: GraphRAG vs Skeleton Construction
 
 Khora supports two pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
 
 ## Quick Comparison
 
-| Aspect | GraphRAG | Khora |
-|--------|----------|-------|
+| Aspect | GraphRAG | Skeleton Construction |
+|--------|----------|----------------------|
 | **Primary Focus** | Knowledge graphs | Temporal events |
 | **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) |
 | **Core Data Model** | Entities & relationships | Chunks with temporal metadata |
@@ -32,14 +32,14 @@ print(f"Extracted {result.entities_extracted} entities")
 print(f"Created {result.relationships_created} relationships")
 ```
 
-**Khora:**
+**Skeleton Construction:**
 - Uses skeleton indexing to identify ~10% "core" chunks
 - Only core chunks get LLM extraction
 - Non-core chunks use keyword-based pseudo-entities
 - Lazy expansion during retrieval if needed
 
 ```python
-# Khora: Minimal extraction, skeleton-based
+# Skeleton Construction: Minimal extraction, skeleton-based
 result = await lake.remember(content)
 # Entities only extracted for "core" chunks (high PageRank)
 ```
@@ -51,7 +51,7 @@ result = await lake.remember(content)
 - Recency bias in search (configurable decay)
 - No distinction between event time and ingestion time
 
-**Khora:**
+**Skeleton Construction:**
 - Bi-temporal model:
   - `occurred_at`: When the event actually happened
   - `ingested_at`: When we learned about it
@@ -59,7 +59,7 @@ result = await lake.remember(content)
 - Native temporal filtering in queries
 
 ```python
-# Khora: Store event with occurrence time
+# Skeleton Construction: Store event with occurrence time
 await lake.remember(
     "Alice joined the team",
     metadata={"occurred_at": "2024-01-15T09:00:00Z"}
@@ -89,7 +89,7 @@ entities = await lake.list_entities(entity_type="PERSON")
 related = await lake.find_related_entities(entity_id, max_depth=2)
 ```
 
-**Khora:**
+**Skeleton Construction:**
 
 | Mode | Description |
 |------|-------------|
@@ -97,7 +97,7 @@ related = await lake.find_related_entities(entity_id, max_depth=2)
 | `HYBRID` | Vector + BM25 with configurable alpha |
 
 ```python
-# Khora: Time-filtered hybrid search
+# Skeleton Construction: Time-filtered hybrid search
 results = await lake.recall(
     query,
     hybrid_alpha=0.7,  # 70% vector, 30% BM25
@@ -121,7 +121,7 @@ Neo4j/Kuzu/Memgraph (required)
 └── Graph traversal
 ```
 
-**Khora:**
+**Skeleton Construction:**
 
 ```
 PostgreSQL (required)
@@ -139,8 +139,8 @@ Kuzu (optional, embedded)
 
 For 10,000 documents:
 
-| Operation | GraphRAG | Khora | Savings |
-|-----------|----------|-------|---------|
+| Operation | GraphRAG | Skeleton Construction | Savings |
+|-----------|----------|----------------------|---------|
 | Entity extraction calls | ~10,000 | ~1,000 | 90% |
 | Relationship extraction calls | ~10,000 | ~0 | 100% |
 | Embedding calls | ~10,000 | ~10,000 | 0% |
@@ -165,7 +165,7 @@ For 10,000 documents:
 - Organizational charts and hierarchies
 - Documentation with cross-references
 
-### Choose Khora When...
+### Choose Skeleton Construction When...
 
 - **Time is the primary dimension**: Chat logs, event streams, meeting notes
 - **Cost optimization critical**: Large volumes, budget constraints
@@ -184,7 +184,7 @@ For 10,000 documents:
 
 ## Migration Considerations
 
-### From GraphRAG to Khora
+### From GraphRAG to Skeleton Construction
 
 1. **Graph features lost**: Entity relationships won't be pre-computed
 2. **Query changes**: `SearchMode.GRAPH` not available; use `HYBRID`
@@ -196,7 +196,7 @@ For 10,000 documents:
 results = await lake.recall(query, mode=SearchMode.GRAPH)
 entities = await lake.find_related_entities(entity_id)
 
-# After (Khora)
+# After (Skeleton Construction)
 results = await lake.recall(
     query,
     mode=SearchMode.HYBRID,
@@ -205,7 +205,7 @@ results = await lake.recall(
 # Entity relationships must be handled differently
 ```
 
-### From Khora to GraphRAG
+### From Skeleton Construction to GraphRAG
 
 1. **Temporal metadata preserved**: `occurred_at` becomes document metadata
 2. **Re-extraction needed**: All documents must be re-processed for entities
@@ -213,7 +213,7 @@ results = await lake.recall(
 4. **Higher initial cost**: Full entity extraction on migration
 
 ```python
-# Before (Khora)
+# Before (Skeleton Construction)
 results = await lake.recall(query, temporal_filter={...})
 
 # After (GraphRAG)
@@ -225,16 +225,16 @@ entities = await lake.list_entities(entity_type="PERSON")
 
 For some use cases, you might use both engines:
 
-1. **Khora for ingestion**: Fast, cost-efficient initial storage
+1. **Skeleton Construction for ingestion**: Fast, cost-efficient initial storage
 2. **Background GraphRAG enrichment**: Async entity extraction for important documents
-3. **Query routing**: Time-sensitive queries → Khora, entity queries → GraphRAG
+3. **Query routing**: Time-sensitive queries → Skeleton Construction, entity queries → GraphRAG
 
 ```python
 # Example: Dual-engine setup (conceptual)
-async with MemoryLake(db_url, engine="khora") as khora_lake:
+async with MemoryLake(db_url, engine="skeleton") as skeleton_lake:
     async with MemoryLake(db_url, engine="graphrag") as graphrag_lake:
-        # Fast ingestion via Khora
-        await khora_lake.remember(content, title="Event")
+        # Fast ingestion via Skeleton Construction
+        await skeleton_lake.remember(content, title="Event")
 
         # Background enrichment for important content
         if is_important(content):
@@ -255,12 +255,12 @@ KHORA_DATABASE_URL=postgresql://localhost/khora
 KHORA_NEO4J_URL=bolt://localhost:7687
 ```
 
-### Khora Setup
+### Skeleton Construction Setup
 
 ```yaml
 # genesis.yaml
 engine:
-  name: khora
+  name: skeleton
   backend: pgvector  # or weaviate
 
 temporal:
@@ -280,8 +280,8 @@ KHORA_DATABASE_URL=postgresql://localhost/khora
 
 *Benchmarks on 10,000 documents, single-node deployment:*
 
-| Metric | GraphRAG | Khora | Notes |
-|--------|----------|-------|-------|
+| Metric | GraphRAG | Skeleton Construction | Notes |
+|--------|----------|----------------------|-------|
 | Ingestion time | ~45 min | ~8 min | Entity extraction overhead |
 | Query latency (p50) | ~200ms | ~150ms | Graph traversal adds latency |
 | Query latency (p99) | ~800ms | ~400ms | |
@@ -292,7 +292,7 @@ KHORA_DATABASE_URL=postgresql://localhost/khora
 
 ## Related Documentation
 
-- [Khora Engine](khora-engine.md) - Detailed Khora engine documentation
+- [Skeleton Construction Engine](skeleton-engine.md) - Detailed Skeleton Construction engine documentation
 - [Temporal Model](temporal-model.md) - Bi-temporal design deep dive
 - [Skeleton Indexing](skeleton-indexing.md) - Cost optimization via PageRank
 - [Hybrid Search](hybrid-search.md) - Vector + BM25 fusion

@@ -1,6 +1,6 @@
-"""Backend implementations for the Khora engine.
+"""Backend implementations for the Skeleton engine.
 
-The Khora engine supports multiple backends for temporal vector storage:
+The Skeleton engine supports multiple backends for temporal vector storage:
 - pgvector: PostgreSQL+pgvector (default, no additional infrastructure)
 - weaviate: Weaviate (advanced hybrid search, multi-field filtering)
 """
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class TemporalChunk:
-    """Chunk with temporal metadata for the Khora engine."""
+    """Chunk with temporal metadata for the Skeleton engine."""
 
     id: UUID
     namespace_id: UUID
@@ -166,13 +166,13 @@ def create_temporal_store(
         Configured TemporalVectorStore implementation
     """
     if backend == "pgvector":
-        from khora.engines.khora.backends.pgvector import PgVectorTemporalStore
+        from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
 
         return PgVectorTemporalStore(config)
     elif backend == "weaviate":
         if not weaviate_url:
             raise ValueError("weaviate_url is required for weaviate backend")
-        from khora.engines.khora.backends.weaviate import WeaviateTemporalStore
+        from khora.engines.skeleton.backends.weaviate import WeaviateTemporalStore
 
         return WeaviateTemporalStore(config, weaviate_url)
     else:

@@ -26,8 +26,8 @@ from neo4j import AsyncGraphDatabase
 
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
-from khora.engines.khora.backends import TemporalChunk, TemporalFilter, create_temporal_store
-from khora.engines.khora.skeleton import SkeletonIndexer
+from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
+from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -81,7 +81,7 @@ class VectorCypherEngine:
 
     Requirements:
     - PostgreSQL with pgvector extension
-    - Neo4j (required, not optional like in KhoraEngine)
+    - Neo4j (required, not optional like in SkeletonEngine)
 
     Usage:
         engine = VectorCypherEngine(config)

@@ -15,7 +15,7 @@ uv run alembic upgrade head  # Run migrations
 ## Architecture
 
 ```
-MemoryLake (facade) → Engine (graphrag | khora) → StorageCoordinator
+MemoryLake (facade) → Engine (graphrag | skeleton) → StorageCoordinator
                                                   ├── PostgreSQL (documents, tenancy)
                                                   ├── pgvector (embeddings)
                                                   └── Graph backend (entities, relationships)
@@ -23,17 +23,17 @@ MemoryLake (facade) → Engine (graphrag | khora) → StorageCoordinator
 
 **Pluggable Engines:**
 - **GraphRAG** (`engine="graphrag"`) - Full knowledge graph extraction, requires Neo4j/Kuzu
-- **Khora** (`engine="khora"`) - Temporal-first, cost-optimized, Neo4j optional
+- **Skeleton Construction** (`engine="skeleton"`) - Temporal-first, cost-optimized, Neo4j optional
 
 **Key entry points:**
 - `src/khora/memory_lake.py` - Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
 - `src/khora/engines/graphrag/engine.py` - GraphRAG engine (default)
-- `src/khora/engines/khora/engine.py` - Khora temporal-first engine
-- `src/khora/engines/khora/temporal_edges.py` - Bi-temporal edge storage
-- `src/khora/engines/khora/time_hierarchy.py` - Hierarchical time graph (Year→Quarter→Month→Week→Day)
-- `src/khora/engines/khora/skeleton.py` - PageRank-based skeleton indexing
-- `src/khora/engines/khora/backends/pgvector.py` - PostgreSQL+pgvector backend
-- `src/khora/engines/khora/backends/weaviate.py` - Weaviate backend
+- `src/khora/engines/skeleton/engine.py` - Skeleton Construction temporal-first engine
+- `src/khora/engines/skeleton/temporal_edges.py` - Bi-temporal edge storage
+- `src/khora/engines/skeleton/time_hierarchy.py` - Hierarchical time graph (Year→Quarter→Month→Week→Day)
+- `src/khora/engines/skeleton/skeleton.py` - PageRank-based skeleton indexing
+- `src/khora/engines/skeleton/backends/pgvector.py` - PostgreSQL+pgvector backend
+- `src/khora/engines/skeleton/backends/weaviate.py` - Weaviate backend
 - `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
 - `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
 
@@ -60,12 +60,12 @@ async with MemoryLake("postgresql://...") as lake:
 |----------|--------|--------|
 | Knowledge bases | `graphrag` | Rich entity/relationship extraction |
 | Entity exploration | `graphrag` | Graph traversal support |
-| Chat/message history | `khora` | Temporal-first, structured filters |
-| Event streams/logs | `khora` | Bi-temporal model |
-| Cost-sensitive apps | `khora` | 5-10x fewer LLM calls |
-| Simple infrastructure | `khora` | No Neo4j required |
+| Chat/message history | `skeleton` | Skeleton Construction: Temporal-first, structured filters |
+| Event streams/logs | `skeleton` | Skeleton Construction: Bi-temporal model |
+| Cost-sensitive apps | `skeleton` | Skeleton Construction: 5-10x fewer LLM calls |
+| Simple infrastructure | `skeleton` | Skeleton Construction: No Neo4j required |
 
-**Khora engine features:**
+**Skeleton Construction engine features:**
 - Bi-temporal: `occurred_at` (event time) vs `ingested_at` (system time)
 - Skeleton indexing: PageRank identifies ~10% core chunks for LLM extraction
 - Time hierarchy: Year → Quarter → Month → Week → Day for range queries

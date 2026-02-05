@@ -1,4 +1,4 @@
-"""Unit tests for the Khora engine."""
+"""Unit tests for the Skeleton Construction engine."""
 
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.khora.backends import TemporalChunk, TemporalFilter, TemporalSearchResult
+from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, TemporalSearchResult
 
 
 class TestTemporalFilter:
@@ -155,8 +155,8 @@ class TestTemporalSearchResult:
         assert result.combined_score is None
 
 
-class TestKhoraEngineFilterBuilding:
-    """Tests for KhoraEngine filter building."""
+class TestSkeletonConstructionEngineFilterBuilding:
+    """Tests for SkeletonConstructionEngine filter building."""
 
     @pytest.fixture
     def mock_config(self):
@@ -185,9 +185,9 @@ class TestKhoraEngineFilterBuilding:
 
     def test_build_temporal_filter_from_dict(self, mock_config):
         """Test building TemporalFilter from dict."""
-        from khora.engines.khora.engine import KhoraEngine
+        from khora.engines.skeleton.engine import SkeletonConstructionEngine
 
-        engine = KhoraEngine(mock_config, backend="pgvector")
+        engine = SkeletonConstructionEngine(mock_config, backend="pgvector")
 
         filters = {
             "occurred_at": {"gte": "2024-01-01", "lt": "2024-02-01"},
@@ -206,9 +206,9 @@ class TestKhoraEngineFilterBuilding:
 
     def test_build_temporal_filter_simple_values(self, mock_config):
         """Test building TemporalFilter with simple values (not dicts)."""
-        from khora.engines.khora.engine import KhoraEngine
+        from khora.engines.skeleton.engine import SkeletonConstructionEngine
 
-        engine = KhoraEngine(mock_config, backend="pgvector")
+        engine = SkeletonConstructionEngine(mock_config, backend="pgvector")
 
         filters = {
             "author": "alice",
@@ -223,9 +223,9 @@ class TestKhoraEngineFilterBuilding:
 
     def test_parse_datetime_iso(self, mock_config):
         """Test parsing ISO datetime strings."""
-        from khora.engines.khora.engine import KhoraEngine
+        from khora.engines.skeleton.engine import SkeletonConstructionEngine
 
-        engine = KhoraEngine(mock_config, backend="pgvector")
+        engine = SkeletonConstructionEngine(mock_config, backend="pgvector")
 
         # ISO format with timezone
         dt = engine._parse_datetime("2024-01-15T10:30:00+00:00")
@@ -246,9 +246,9 @@ class TestKhoraEngineFilterBuilding:
 
     def test_parse_datetime_object(self, mock_config):
         """Test that datetime objects pass through."""
-        from khora.engines.khora.engine import KhoraEngine
+        from khora.engines.skeleton.engine import SkeletonConstructionEngine
 
-        engine = KhoraEngine(mock_config, backend="pgvector")
+        engine = SkeletonConstructionEngine(mock_config, backend="pgvector")
 
         now = datetime.now(UTC)
         result = engine._parse_datetime(now)
@@ -260,8 +260,8 @@ class TestCreateTemporalStore:
 
     def test_create_pgvector_store(self):
         """Test creating pgvector store."""
-        from khora.engines.khora.backends import create_temporal_store
-        from khora.engines.khora.backends.pgvector import PgVectorTemporalStore
+        from khora.engines.skeleton.backends import create_temporal_store
+        from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
 
         config = MagicMock()
         config.get_postgresql_url.return_value = "postgresql://localhost/test"
@@ -272,8 +272,8 @@ class TestCreateTemporalStore:
 
     def test_create_weaviate_store(self):
         """Test creating weaviate store."""
-        from khora.engines.khora.backends import create_temporal_store
-        from khora.engines.khora.backends.weaviate import WeaviateTemporalStore
+        from khora.engines.skeleton.backends import create_temporal_store
+        from khora.engines.skeleton.backends.weaviate import WeaviateTemporalStore
 
         config = MagicMock()
         config.llm.embedding_dimension = 1536
@@ -283,7 +283,7 @@ class TestCreateTemporalStore:
 
     def test_create_weaviate_store_requires_url(self):
         """Test that weaviate store requires URL."""
-        from khora.engines.khora.backends import create_temporal_store
+        from khora.engines.skeleton.backends import create_temporal_store
 
         config = MagicMock()
 
@@ -292,7 +292,7 @@ class TestCreateTemporalStore:
 
     def test_create_unknown_backend_raises(self):
         """Test that unknown backend raises error."""
-        from khora.engines.khora.backends import create_temporal_store
+        from khora.engines.skeleton.backends import create_temporal_store
 
         config = MagicMock()
 
@@ -304,16 +304,16 @@ class TestCreateTemporalStore:
 class TestEngineRegistration:
     """Tests for engine registration."""
 
-    def test_khora_engine_registered(self):
-        """Test that khora engine is registered."""
+    def test_skeleton_engine_registered(self):
+        """Test that skeleton engine is registered."""
         from khora.engines import list_engines
 
         engines = list_engines()
-        assert "khora" in engines
+        assert "skeleton" in engines
         assert "graphrag" in engines
 
-    def test_create_khora_engine(self):
-        """Test creating khora engine via factory."""
+    def test_create_skeleton_engine(self):
+        """Test creating Skeleton Construction engine via factory."""
         from khora.engines import create_engine
 
         config = MagicMock()
@@ -331,8 +331,8 @@ class TestEngineRegistration:
         config.llm.timeout = 30
         config.llm.max_retries = 3
 
-        engine = create_engine("khora", config)
+        engine = create_engine("skeleton", config)
 
-        from khora.engines.khora.engine import KhoraEngine
+        from khora.engines.skeleton.engine import SkeletonConstructionEngine
 
-        assert isinstance(engine, KhoraEngine)
+        assert isinstance(engine, SkeletonConstructionEngine)

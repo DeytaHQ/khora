@@ -1,4 +1,4 @@
-"""PostgreSQL+pgvector backend for the Khora engine.
+"""PostgreSQL+pgvector backend for the Skeleton engine.
 
 This backend provides:
 - BRIN-indexed temporal queries (99% space savings vs btree)
@@ -33,7 +33,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from khora.engines.khora.backends import (
+from khora.engines.skeleton.backends import (
     TemporalChunk,
     TemporalFilter,
     TemporalSearchResult,

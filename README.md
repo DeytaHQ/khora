@@ -22,7 +22,7 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 ### Key Features
 
 - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
-- **Pluggable Engines**: Choose GraphRAG (knowledge graphs) or Khora (temporal-first)
+- **Pluggable Engines**: Choose GraphRAG (knowledge graphs) or Skeleton (temporal-first)
 - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
 - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
 - **Event Sourcing**: Immutable event log for temporal queries and audit trails
@@ -39,7 +39,7 @@ Khora supports two engines with different strengths:
 | Engine | Focus | Best For | LLM Cost |
 |--------|-------|----------|----------|
 | **GraphRAG** | Knowledge graphs | Knowledge bases, entity exploration | Higher |
-| **Khora** | Temporal events | Chat logs, events, cost-sensitive apps | 5-10x lower |
+| **Skeleton Construction** | Temporal events | Chat logs, events, cost-sensitive apps | 5-10x lower |
 
 ### GraphRAG Engine (Default)
 
@@ -60,14 +60,14 @@ async with MemoryLake("postgresql://...", engine="graphrag") as lake:
 
 **Requirements:** PostgreSQL + pgvector + Neo4j/Kuzu/Memgraph
 
-### Khora Engine (Temporal-First)
+### Skeleton Construction Engine (Temporal-First)
 
 Cost-optimized engine with bi-temporal model and skeleton indexing:
 
 ```python
 from khora import MemoryLake
 
-async with MemoryLake("postgresql://...", engine="khora") as lake:
+async with MemoryLake("postgresql://...", engine="skeleton") as lake:
     # Store with temporal metadata
     result = await lake.remember(
         "Team standup notes",
@@ -102,7 +102,7 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 | Topic | Description |
 |-------|-------------|
 | **Engines** | |
-| [Khora Engine](docs/engines/khora-engine.md) | Temporal-first engine documentation |
+| [Skeleton Construction Engine](docs/engines/skeleton-engine.md) | Temporal-first engine documentation |
 | [Engine Comparison](docs/engines/engine-comparison.md) | GraphRAG vs Khora comparison |
 | [Temporal Model](docs/engines/temporal-model.md) | Bi-temporal design deep dive |
 | [Skeleton Indexing](docs/engines/skeleton-indexing.md) | Cost optimization via PageRank |
