@@ -3910,6 +3910,142 @@ README.md
 66: ]
 ````
 
+## File: src/khora/query/fusion.py
+````python
+  1: """Reciprocal Rank Fusion for combining search results."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from dataclasses import dataclass
+  6: from typing import Any, TypeVar
+  7: 
+  8: T = TypeVar("T")
+  9: 
+ 10: 
+ 11: @dataclass
+ 12: class RankedItem:
+ 13:     """An item with its score and source."""
+ 14: 
+ 15:     item: Any
+ 16:     score: float
+ 17:     source: str  # Which search method produced this result
+ 18:     rank: int = 0  # Rank within its source
+ 19: 
+ 20: 
+ 21: def reciprocal_rank_fusion(
+ 22:     ranked_lists: dict[str, list[tuple[Any, float]]],
+ 23:     *,
+ 24:     k: int = 60,
+ 25:     weights: dict[str, float] | None = None,
+ 26:     id_extractor: callable = lambda x: x,
+ 27: ) -> list[tuple[Any, float]]:
+ 28:     """Combine multiple ranked lists using Reciprocal Rank Fusion.
+ 29: 
+ 30:     RRF is a simple but effective method for combining results from
+ 31:     multiple search systems without requiring score calibration.
+ 32: 
+ 33:     RRF score = sum(weight[source] / (k + rank[source]))
+ 34: 
+ 35:     Args:
+ 36:         ranked_lists: Dict of source name to list of (item, score) tuples
+ 37:         k: RRF parameter (default 60, higher = more even distribution)
+ 38:         weights: Optional weights for each source
+ 39:         id_extractor: Function to extract ID from item for deduplication
+ 40: 
+ 41:     Returns:
+ 42:         List of (item, rrf_score) tuples sorted by score descending
+ 43:     """
+ 44:     if not ranked_lists:
+ 45:         return []
+ 46: 
+ 47:     # Filter out empty lists
+ 48:     ranked_lists = {k: v for k, v in ranked_lists.items() if v}
+ 49:     if not ranked_lists:
+ 50:         return []
+ 51: 
+ 52:     # Default equal weights
+ 53:     if weights is None:
+ 54:         weights = {source: 1.0 for source in ranked_lists}
+ 55: 
+ 56:     # Normalize weights
+ 57:     total_weight = sum(weights.get(s, 1.0) for s in ranked_lists)
+ 58:     if total_weight == 0:
+ 59:         # If all weights are zero, use equal weights
+ 60:         total_weight = len(ranked_lists)
+ 61:         normalized_weights = {s: 1.0 / total_weight for s in ranked_lists}
+ 62:     else:
+ 63:         normalized_weights = {s: weights.get(s, 1.0) / total_weight for s in ranked_lists}
+ 64: 
+ 65:     # Calculate RRF scores
+ 66:     rrf_scores: dict[Any, float] = {}
+ 67:     items_by_id: dict[Any, Any] = {}
+ 68: 
+ 69:     for source, ranked_list in ranked_lists.items():
+ 70:         weight = normalized_weights.get(source, 1.0)
+ 71: 
+ 72:         for rank, (item, _score) in enumerate(ranked_list, start=1):
+ 73:             item_id = id_extractor(item)
+ 74: 
+ 75:             # RRF formula: weight / (k + rank)
+ 76:             rrf_contribution = weight / (k + rank)
+ 77: 
+ 78:             if item_id in rrf_scores:
+ 79:                 rrf_scores[item_id] += rrf_contribution
+ 80:             else:
+ 81:                 rrf_scores[item_id] = rrf_contribution
+ 82:                 items_by_id[item_id] = item
+ 83: 
+ 84:     # Sort by RRF score
+ 85:     sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+ 86: 
+ 87:     return [(items_by_id[item_id], rrf_scores[item_id]) for item_id in sorted_ids]
+ 88: 
+ 89: 
+ 90: def combine_with_weights(
+ 91:     results: list[list[tuple[Any, float]]],
+ 92:     weights: list[float],
+ 93:     *,
+ 94:     id_extractor: callable = lambda x: x,
+ 95: ) -> list[tuple[Any, float]]:
+ 96:     """Combine results using simple weighted scoring.
+ 97: 
+ 98:     Args:
+ 99:         results: List of ranked result lists
+100:         weights: Weight for each result list
+101:         id_extractor: Function to extract ID from item
+102: 
+103:     Returns:
+104:         Combined and sorted results
+105:     """
+106:     # Normalize weights
+107:     total_weight = sum(weights)
+108:     if total_weight == 0:
+109:         # If all weights are zero, use equal weights
+110:         normalized_weights = [1.0 / len(weights) for _ in weights] if weights else []
+111:     else:
+112:         normalized_weights = [w / total_weight for w in weights]
+113: 
+114:     # Combine scores
+115:     combined_scores: dict[Any, float] = {}
+116:     items_by_id: dict[Any, Any] = {}
+117: 
+118:     for result_list, weight in zip(results, normalized_weights):
+119:         for item, score in result_list:
+120:             item_id = id_extractor(item)
+121:             weighted_score = score * weight
+122: 
+123:             if item_id in combined_scores:
+124:                 combined_scores[item_id] += weighted_score
+125:             else:
+126:                 combined_scores[item_id] = weighted_score
+127:                 items_by_id[item_id] = item
+128: 
+129:     # Sort by combined score
+130:     sorted_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)
+131: 
+132:     return [(items_by_id[item_id], combined_scores[item_id]) for item_id in sorted_ids]
+````
+
 ## File: src/khora/query/temporal.py
 ````python
   1: """Temporal query support for Khora Memory Lake."""
@@ -7689,63 +7825,6 @@ README.md
 82:         "status": "alive",
 83:         "timestamp": datetime.now(UTC).isoformat(),
 84:     }
-````
-
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.1.4")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/config/__init__.py
@@ -16073,142 +16152,6 @@ README.md
 170:     return _registry
 ````
 
-## File: src/khora/query/fusion.py
-````python
-  1: """Reciprocal Rank Fusion for combining search results."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from dataclasses import dataclass
-  6: from typing import Any, TypeVar
-  7: 
-  8: T = TypeVar("T")
-  9: 
- 10: 
- 11: @dataclass
- 12: class RankedItem:
- 13:     """An item with its score and source."""
- 14: 
- 15:     item: Any
- 16:     score: float
- 17:     source: str  # Which search method produced this result
- 18:     rank: int = 0  # Rank within its source
- 19: 
- 20: 
- 21: def reciprocal_rank_fusion(
- 22:     ranked_lists: dict[str, list[tuple[Any, float]]],
- 23:     *,
- 24:     k: int = 60,
- 25:     weights: dict[str, float] | None = None,
- 26:     id_extractor: callable = lambda x: x,
- 27: ) -> list[tuple[Any, float]]:
- 28:     """Combine multiple ranked lists using Reciprocal Rank Fusion.
- 29: 
- 30:     RRF is a simple but effective method for combining results from
- 31:     multiple search systems without requiring score calibration.
- 32: 
- 33:     RRF score = sum(weight[source] / (k + rank[source]))
- 34: 
- 35:     Args:
- 36:         ranked_lists: Dict of source name to list of (item, score) tuples
- 37:         k: RRF parameter (default 60, higher = more even distribution)
- 38:         weights: Optional weights for each source
- 39:         id_extractor: Function to extract ID from item for deduplication
- 40: 
- 41:     Returns:
- 42:         List of (item, rrf_score) tuples sorted by score descending
- 43:     """
- 44:     if not ranked_lists:
- 45:         return []
- 46: 
- 47:     # Filter out empty lists
- 48:     ranked_lists = {k: v for k, v in ranked_lists.items() if v}
- 49:     if not ranked_lists:
- 50:         return []
- 51: 
- 52:     # Default equal weights
- 53:     if weights is None:
- 54:         weights = {source: 1.0 for source in ranked_lists}
- 55: 
- 56:     # Normalize weights
- 57:     total_weight = sum(weights.get(s, 1.0) for s in ranked_lists)
- 58:     if total_weight == 0:
- 59:         # If all weights are zero, use equal weights
- 60:         total_weight = len(ranked_lists)
- 61:         normalized_weights = {s: 1.0 / total_weight for s in ranked_lists}
- 62:     else:
- 63:         normalized_weights = {s: weights.get(s, 1.0) / total_weight for s in ranked_lists}
- 64: 
- 65:     # Calculate RRF scores
- 66:     rrf_scores: dict[Any, float] = {}
- 67:     items_by_id: dict[Any, Any] = {}
- 68: 
- 69:     for source, ranked_list in ranked_lists.items():
- 70:         weight = normalized_weights.get(source, 1.0)
- 71: 
- 72:         for rank, (item, _score) in enumerate(ranked_list, start=1):
- 73:             item_id = id_extractor(item)
- 74: 
- 75:             # RRF formula: weight / (k + rank)
- 76:             rrf_contribution = weight / (k + rank)
- 77: 
- 78:             if item_id in rrf_scores:
- 79:                 rrf_scores[item_id] += rrf_contribution
- 80:             else:
- 81:                 rrf_scores[item_id] = rrf_contribution
- 82:                 items_by_id[item_id] = item
- 83: 
- 84:     # Sort by RRF score
- 85:     sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
- 86: 
- 87:     return [(items_by_id[item_id], rrf_scores[item_id]) for item_id in sorted_ids]
- 88: 
- 89: 
- 90: def combine_with_weights(
- 91:     results: list[list[tuple[Any, float]]],
- 92:     weights: list[float],
- 93:     *,
- 94:     id_extractor: callable = lambda x: x,
- 95: ) -> list[tuple[Any, float]]:
- 96:     """Combine results using simple weighted scoring.
- 97: 
- 98:     Args:
- 99:         results: List of ranked result lists
-100:         weights: Weight for each result list
-101:         id_extractor: Function to extract ID from item
-102: 
-103:     Returns:
-104:         Combined and sorted results
-105:     """
-106:     # Normalize weights
-107:     total_weight = sum(weights)
-108:     if total_weight == 0:
-109:         # If all weights are zero, use equal weights
-110:         normalized_weights = [1.0 / len(weights) for _ in weights] if weights else []
-111:     else:
-112:         normalized_weights = [w / total_weight for w in weights]
-113: 
-114:     # Combine scores
-115:     combined_scores: dict[Any, float] = {}
-116:     items_by_id: dict[Any, Any] = {}
-117: 
-118:     for result_list, weight in zip(results, normalized_weights):
-119:         for item, score in result_list:
-120:             item_id = id_extractor(item)
-121:             weighted_score = score * weight
-122: 
-123:             if item_id in combined_scores:
-124:                 combined_scores[item_id] += weighted_score
-125:             else:
-126:                 combined_scores[item_id] = weighted_score
-127:                 items_by_id[item_id] = item
-128: 
-129:     # Sort by combined score
-130:     sorted_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)
-131: 
-132:     return [(items_by_id[item_id], combined_scores[item_id]) for item_id in sorted_ids]
-````
-
 ## File: src/khora/query/keyword.py
 ````python
   1: """Keyword search module for Khora Memory Lake.
@@ -21909,152 +21852,61 @@ README.md
 159:         assert call["metadata"] == {"chunk_count": 42}
 ````
 
-## File: src/khora/api/app.py
+## File: src/khora/cli/__init__.py
 ````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     else:
- 86:         # If MemoryLake wasn't initialized, still shut down telemetry
- 87:         from ..telemetry import shutdown_telemetry
- 88: 
- 89:         await shutdown_telemetry()
- 90:     await close_db()
- 91: 
- 92: 
- 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 94:     """Create and configure the FastAPI application.
- 95: 
- 96:     Args:
- 97:         config: Optional application configuration
- 98: 
- 99:     Returns:
-100:         Configured FastAPI application
-101:     """
-102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
-103:     from ..logging_config import setup_logging
-104: 
-105:     setup_logging(level="INFO")
-106: 
-107:     if config is None:
-108:         from ..config import load_config
-109: 
-110:         config = load_config()
-111: 
-112:     app = FastAPI(
-113:         title="Khora",
-114:         description="Deyta's memory lake and materialization of knowledge",
-115:         version="0.1.4",
-116:         lifespan=lifespan,
-117:         debug=config.debug,
-118:     )
-119: 
-120:     # Store config in app state
-121:     app.state.config = config
-122: 
-123:     # Configure CORS
-124:     app.add_middleware(
-125:         CORSMiddleware,
-126:         allow_origins=["*"] if config.debug else [],
-127:         allow_credentials=True,
-128:         allow_methods=["*"],
-129:         allow_headers=["*"],
-130:     )
-131: 
-132:     # Add request logging
-133:     app.add_middleware(LoggingMiddleware)
-134: 
-135:     # Register routes
-136:     # Status endpoint is public (no auth)
-137:     app.include_router(status.router, tags=["status"])
-138: 
-139:     # Memory Lake API routes
-140:     app.include_router(memory.router)
-141:     app.include_router(namespaces.router)
-142:     app.include_router(sync.router)
-143: 
-144:     return app
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.1.4")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/engines/vectorcypher/dual_nodes.py
@@ -35375,6 +35227,154 @@ README.md
 186:         assert result == []
 ````
 
+## File: src/khora/api/app.py
+````python
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     else:
+ 86:         # If MemoryLake wasn't initialized, still shut down telemetry
+ 87:         from ..telemetry import shutdown_telemetry
+ 88: 
+ 89:         await shutdown_telemetry()
+ 90:     await close_db()
+ 91: 
+ 92: 
+ 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 94:     """Create and configure the FastAPI application.
+ 95: 
+ 96:     Args:
+ 97:         config: Optional application configuration
+ 98: 
+ 99:     Returns:
+100:         Configured FastAPI application
+101:     """
+102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+103:     from ..logging_config import setup_logging
+104: 
+105:     setup_logging(level="INFO")
+106: 
+107:     if config is None:
+108:         from ..config import load_config
+109: 
+110:         config = load_config()
+111: 
+112:     app = FastAPI(
+113:         title="Khora",
+114:         description="Deyta's memory lake and materialization of knowledge",
+115:         version="0.1.4",
+116:         lifespan=lifespan,
+117:         debug=config.debug,
+118:     )
+119: 
+120:     # Store config in app state
+121:     app.state.config = config
+122: 
+123:     # Configure CORS
+124:     app.add_middleware(
+125:         CORSMiddleware,
+126:         allow_origins=["*"] if config.debug else [],
+127:         allow_credentials=True,
+128:         allow_methods=["*"],
+129:         allow_headers=["*"],
+130:     )
+131: 
+132:     # Add request logging
+133:     app.add_middleware(LoggingMiddleware)
+134: 
+135:     # Register routes
+136:     # Status endpoint is public (no auth)
+137:     app.include_router(status.router, tags=["status"])
+138: 
+139:     # Memory Lake API routes
+140:     app.include_router(memory.router)
+141:     app.include_router(namespaces.router)
+142:     app.include_router(sync.router)
+143: 
+144:     return app
+````
+
 ## File: src/khora/db/models.py
 ````python
   1: """SQLAlchemy models for Khora Memory Lake.
@@ -40985,12 +40985,12 @@ README.md
 137:                 e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
 138:             }
 139:             if not (actual_rel_types & expected_rels):
-140:                 logger.warning(
+140:                 logger.debug(
 141:                     f"No relationship type overlap: rules expect {sorted(expected_rels)}, "
 142:                     f"graph has {sorted(actual_rel_types)}"
 143:                 )
 144:             if not (actual_entity_types & expected_entities):
-145:                 logger.warning(
+145:                 logger.debug(
 146:                     f"No entity type overlap: rules expect {sorted(expected_entities)}, "
 147:                     f"graph has {sorted(actual_entity_types)}"
 148:                 )
@@ -50370,6 +50370,17 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-05 20:08:55 +0100
+**Message:** chore: bump version to 0.1.4
+
+**Files:**
+- REPOMIX.md
+- pyproject.toml
+- src/khora/__init__.py
+- src/khora/api/app.py
+- src/khora/cli/__init__.py
+- uv.lock
+
 ## Commit: 2026-02-05 20:07:54 +0100
 **Message:** docs: add VectorCypher engine documentation
 
@@ -50619,10 +50630,3 @@ README.md
 - pyproject.toml
 - src/khora/__init__.py
 - src/khora/extraction/extractors/llm.py
-
-## Commit: 2026-02-03 19:04:12 +0100
-**Message:** fix: reduce extraction batch_size to 1 to prevent truncation
-
-**Files:**
-- REPOMIX.md
-- src/khora/pipelines/tasks/extract.py

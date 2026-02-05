@@ -137,12 +137,12 @@ class RelationshipInferrer:
                 e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
             }
             if not (actual_rel_types & expected_rels):
-                logger.warning(
+                logger.debug(
                     f"No relationship type overlap: rules expect {sorted(expected_rels)}, "
                     f"graph has {sorted(actual_rel_types)}"
                 )
             if not (actual_entity_types & expected_entities):
-                logger.warning(
+                logger.debug(
                     f"No entity type overlap: rules expect {sorted(expected_entities)}, "
                     f"graph has {sorted(actual_entity_types)}"
                 )
