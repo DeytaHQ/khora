@@ -75,17 +75,26 @@ class KhoraEngine:
             self._storage_config = storage_config
         else:
             postgresql_url = config.get_postgresql_url()
-            self._storage_config = StorageConfig(
-                postgresql_url=postgresql_url,
-                pgvector_url=postgresql_url,
-                neo4j_url=config.get_neo4j_url(),
-                neo4j_user=config.get_neo4j_user(),
-                neo4j_password=config.get_neo4j_password(),
-                neo4j_database=config.get_neo4j_database(),
-                pgvector_embedding_dimension=config.storage.embedding_dimension,
-                graph_config=config.get_graph_config(),
-                vector_config=config.get_vector_config(),
-            )
+            graph_config = config.get_graph_config()
+
+            # Only use legacy neo4j_url fields when graph_config is explicitly set
+            # This prevents environment variables (KHORA_NEO4J_URL) from overriding
+            # the explicit graph_config=None setting
+            storage_kwargs: dict[str, Any] = {
+                "postgresql_url": postgresql_url,
+                "pgvector_url": postgresql_url,
+                "pgvector_embedding_dimension": config.storage.embedding_dimension,
+                "graph_config": graph_config,
+                "vector_config": config.get_vector_config(),
+            }
+            if graph_config is not None:
+                # Only pass legacy neo4j fields when graph is configured
+                storage_kwargs["neo4j_url"] = config.get_neo4j_url()
+                storage_kwargs["neo4j_user"] = config.get_neo4j_user()
+                storage_kwargs["neo4j_password"] = config.get_neo4j_password()
+                storage_kwargs["neo4j_database"] = config.get_neo4j_database()
+
+            self._storage_config = StorageConfig(**storage_kwargs)
 
         self._storage: StorageCoordinator | None = None
         self._temporal_store: TemporalVectorStore | None = None
