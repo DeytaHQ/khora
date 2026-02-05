@@ -173,7 +173,7 @@ def configure_litellm(config: LiteLLMConfig | None = None) -> None:
 
     # Disable verbose logging and telemetry
     litellm.set_verbose = False
-    litellm.telemetry = False
+    litellm.telemetry = False  # type: ignore[assignment]
 
     # Set up API keys from environment
     api_key = config.get_api_key()

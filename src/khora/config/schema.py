@@ -503,16 +503,13 @@ class KhoraConfig(BaseSettings):
         If using legacy config, builds a Neo4jConfig from the parsed URL.
         """
         graph = self.storage.graph
-        # If graph is None (not configured), return None
-        if graph is None:
-            return None
         # If it's already set from new-style config with a URL, return as-is
         if isinstance(graph, Neo4jConfig) and graph.url:
             return graph
         # If it's a non-Neo4j backend (Kuzu, Memgraph, etc.), return as-is
-        if not isinstance(graph, Neo4jConfig):
+        if graph is not None and not isinstance(graph, Neo4jConfig):
             return graph
-        # It's a Neo4jConfig without URL - check legacy neo4j_url
+        # Check legacy neo4j_url (covers both graph=None and Neo4jConfig without URL)
         neo4j_url = self.get_neo4j_url()
         if neo4j_url:
             return Neo4jConfig(

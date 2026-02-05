@@ -25,8 +25,8 @@ except ImportError:  # pragma: no cover
     _HAS_NUMPY = False
 
 try:
-    from rapidfuzz.distance import Levenshtein as _rf_lev  # type: ignore[unresolved-import]
-    from rapidfuzz.fuzz import ratio as _rf_ratio  # type: ignore[unresolved-import]
+    from rapidfuzz.distance import Levenshtein as _rf_lev
+    from rapidfuzz.fuzz import ratio as _rf_ratio
 
     _HAS_RAPIDFUZZ = True
 except ImportError:  # pragma: no cover

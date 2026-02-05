@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+import khora
+
 
 @pytest.mark.unit
 class TestStatusEndpoints:
@@ -18,7 +20,7 @@ class TestStatusEndpoints:
         data = response.json()
         assert data["status"] == "ok"
         assert "timestamp" in data
-        assert data["version"] == "0.1.0"
+        assert data["version"] == khora.__version__
         assert data["service"] == "khora"
 
     def test_health_check(self, test_client: TestClient) -> None:
@@ -29,7 +31,7 @@ class TestStatusEndpoints:
         data = response.json()
         assert data["status"] == "healthy"
         assert "timestamp" in data
-        assert data["version"] == "0.1.0"
+        assert data["version"] == khora.__version__
 
     def test_readiness_check(self, test_client: TestClient) -> None:
         """Test readiness check endpoint."""

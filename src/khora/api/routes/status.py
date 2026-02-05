@@ -7,6 +7,8 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+import khora
+
 router = APIRouter()
 
 
@@ -20,7 +22,7 @@ async def status_check(request: Request) -> dict[str, Any]:
     return {
         "status": "ok",
         "timestamp": datetime.now(UTC).isoformat(),
-        "version": "0.0.9",
+        "version": khora.__version__,
         "service": "khora",
     }
 
@@ -35,7 +37,7 @@ async def health_check(request: Request) -> dict[str, Any]:
     return {
         "status": "healthy",
         "timestamp": datetime.now(UTC).isoformat(),
-        "version": "0.0.9",
+        "version": khora.__version__,
     }
 
 

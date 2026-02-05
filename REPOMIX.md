@@ -16745,8 +16745,8 @@ README.md
  25:     _HAS_NUMPY = False
  26: 
  27: try:
- 28:     from rapidfuzz.distance import Levenshtein as _rf_lev  # type: ignore[unresolved-import]
- 29:     from rapidfuzz.fuzz import ratio as _rf_ratio  # type: ignore[unresolved-import]
+ 28:     from rapidfuzz.distance import Levenshtein as _rf_lev
+ 29:     from rapidfuzz.fuzz import ratio as _rf_ratio
  30: 
  31:     _HAS_RAPIDFUZZ = True
  32: except ImportError:  # pragma: no cover
@@ -18634,9 +18634,9 @@ README.md
  58: 
  59:     def test_defaults(self):
  60:         settings = StorageSettings()
- 61:         assert isinstance(settings.graph, Neo4jConfig)
- 62:         assert isinstance(settings.vector, PgVectorConfig)
- 63:         assert settings.graph.url is None
+ 61:         # Graph backend is optional - None by default
+ 62:         assert settings.graph is None
+ 63:         assert isinstance(settings.vector, PgVectorConfig)
  64:         assert settings.vector.url is None
  65: 
  66: 
@@ -22606,6 +22606,94 @@ README.md
 159:         assert call["metadata"] == {"chunk_count": 42}
 ````
 
+## File: src/khora/api/routes/status.py
+````python
+ 1: """Status endpoints for Khora API."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
+ 7: 
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: import khora
+11: 
+12: router = APIRouter()
+13: 
+14: 
+15: @router.get("/status")
+16: async def status_check(request: Request) -> dict[str, Any]:
+17:     """Basic status check endpoint.
+18: 
+19:     Returns:
+20:         Status with timestamp and version
+21:     """
+22:     return {
+23:         "status": "ok",
+24:         "timestamp": datetime.now(UTC).isoformat(),
+25:         "version": khora.__version__,
+26:         "service": "khora",
+27:     }
+28: 
+29: 
+30: @router.get("/health")
+31: async def health_check(request: Request) -> dict[str, Any]:
+32:     """Health check endpoint for orchestration systems.
+33: 
+34:     Returns:
+35:         Health status with timestamp
+36:     """
+37:     return {
+38:         "status": "healthy",
+39:         "timestamp": datetime.now(UTC).isoformat(),
+40:         "version": khora.__version__,
+41:     }
+42: 
+43: 
+44: @router.get("/health/ready")
+45: async def readiness_check(request: Request) -> dict[str, Any]:
+46:     """Readiness check for Kubernetes/orchestration.
+47: 
+48:     Checks that all required services are available.
+49: 
+50:     Returns:
+51:         Readiness status with component checks
+52:     """
+53:     config = request.app.state.config
+54:     checks: dict[str, bool] = {}
+55: 
+56:     # TODO: Add actual health checks for:
+57:     # - Database connections
+58:     # - External services
+59: 
+60:     # For now, return basic status
+61:     checks["config_loaded"] = config is not None
+62: 
+63:     all_healthy = all(checks.values())
+64: 
+65:     return {
+66:         "status": "ready" if all_healthy else "not_ready",
+67:         "timestamp": datetime.now(UTC).isoformat(),
+68:         "checks": checks,
+69:     }
+70: 
+71: 
+72: @router.get("/health/live")
+73: async def liveness_check() -> dict[str, Any]:
+74:     """Liveness check for Kubernetes/orchestration.
+75: 
+76:     Simple check that the application is running.
+77: 
+78:     Returns:
+79:         Liveness status
+80:     """
+81:     return {
+82:         "status": "alive",
+83:         "timestamp": datetime.now(UTC).isoformat(),
+84:     }
+````
+
 ## File: src/khora/config/llm.py
 ````python
   1: """LiteLLM configuration for unified LLM access.
@@ -22783,7 +22871,7 @@ README.md
 173: 
 174:     # Disable verbose logging and telemetry
 175:     litellm.set_verbose = False
-176:     litellm.telemetry = False
+176:     litellm.telemetry = False  # type: ignore[assignment]
 177: 
 178:     # Set up API keys from environment
 179:     api_key = config.get_api_key()
@@ -31242,90 +31330,872 @@ README.md
 186:         assert result == []
 ````
 
-## File: src/khora/api/routes/status.py
+## File: README.md
+````markdown
+  1: # Khora
+  2: 
+  3: > *"Khora is the receptacle, the space, the matrix in which all things come to be."*
+  4: > *— Plato, Timaeus*
+  5: 
+  6: In Plato's cosmology, **Khora** (χώρα) is the primordial receptacle—neither being nor non-being, but the space that receives all forms and gives them place. It is the nurse of becoming, the womb of the cosmos where the eternal Forms find material expression. Khora does not impose form; it receives, holds, and makes manifestation possible.
+  7: 
+  8: This project embodies that philosophy: **Khora is a memory lake**—a receptacle for knowledge that receives information from disparate sources, holds it in structured form, and enables its retrieval through multiple paths of inquiry. Just as Plato's Khora mediates between the intelligible and sensible worlds, this Memory Lake bridges raw data and meaningful knowledge through semantic extraction, graph relationships, and temporal context.
+  9: 
+ 10: ---
+ 11: 
+ 12: ## Overview
+ 13: 
+ 14: Khora is a **Memory Lake** system that combines three storage paradigms:
+ 15: 
+ 16: - **Knowledge Graph** (Neo4j) — Entities and their relationships
+ 17: - **Vector Database** (pgvector) — Semantic embeddings for similarity search
+ 18: - **Relational Database** (PostgreSQL) — Documents, events, and metadata
+ 19: 
+ 20: It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
+ 21: 
+ 22: ### Key Features
+ 23: 
+ 24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
+ 25: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
+ 26: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
+ 27: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
+ 28: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
+ 29: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
+ 30: - **Semantic Extraction**: LLM-powered entity and relationship extraction
+ 31: 
+ 32: ---
+ 33: 
+ 34: ## Documentation
+ 35: 
+ 36: Comprehensive documentation is available in the [`docs/`](docs/) directory:
+ 37: 
+ 38: | Topic | Description |
+ 39: |-------|-------------|
+ 40: | **Architecture** | |
+ 41: | [Overview](docs/architecture/overview.md) | System design, components, data flow |
+ 42: | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
+ 43: | [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
+ 44: | [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
+ 45: | **Data Models** | |
+ 46: | [Overview](docs/data-models/overview.md) | Model relationships and purposes |
+ 47: | [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
+ 48: | [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
+ 49: | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
+ 50: | **Extraction Pipeline** | |
+ 51: | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
+ 52: | [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
+ 53: | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
+ 54: | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
+ 55: | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
+ 56: | [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
+ 57: | [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
+ 58: | **Query Engine** | |
+ 59: | [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
+ 60: | [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
+ 61: | [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
+ 62: | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
+ 63: | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
+ 64: | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
+ 65: | **Planning** | |
+ 66: | [Roadmap](docs/roadmap.md) | Future improvements and features |
+ 67: 
+ 68: ---
+ 69: 
+ 70: ## Installation
+ 71: 
+ 72: ### Prerequisites
+ 73: 
+ 74: - Python 3.13+
+ 75: - [uv](https://github.com/astral-sh/uv) for package management
+ 76: - PostgreSQL with pgvector extension
+ 77: - Neo4j (optional, for graph features)
+ 78: 
+ 79: ### Quick Install
+ 80: 
+ 81: ```bash
+ 82: # Clone and install
+ 83: git clone https://github.com/DeytaHQ/khora.git
+ 84: cd khora
+ 85: uv sync --all-extras
+ 86: 
+ 87: # Install pre-commit hooks
+ 88: uv run prek install
+ 89: ```
+ 90: 
+ 91: ### Start Development Databases
+ 92: 
+ 93: ```bash
+ 94: # Start PostgreSQL and Neo4j via Docker
+ 95: make dev
+ 96: 
+ 97: # Run database migrations
+ 98: uv run alembic upgrade head
+ 99: ```
+100: 
+101: ---
+102: 
+103: ## Usage
+104: 
+105: ### As a Library
+106: 
+107: The primary interface is the `MemoryLake` class:
+108: 
+109: ```python
+110: from khora import MemoryLake, SearchMode
+111: 
+112: async def main():
+113:     # Simplest - reads KHORA_DATABASE_URL from environment
+114:     async with MemoryLake() as lake:
+115:         # Store a memory
+116:         result = await lake.remember(
+117:             "Albert Einstein developed the theory of relativity in 1905.",
+118:             title="Einstein Biography",
+119:             source="wikipedia",
+120:         )
+121:         print(f"Stored document: {result.document_id}")
+122:         print(f"Extracted {result.entities_extracted} entities")
+123: 
+124:         # Recall relevant memories
+125:         memories = await lake.recall(
+126:             "Who developed relativity?",
+127:             limit=5,
+128:             mode=SearchMode.HYBRID,  # vector + graph + keyword
+129:         )
+130:         print(f"Found {len(memories.chunks)} relevant chunks")
+131:         print(f"Context: {memories.context_text}")
+132: 
+133:         # Explore entity relationships
+134:         entities = await lake.list_entities(entity_type="PERSON")
+135:         for entity in entities:
+136:             related = await lake.find_related_entities(entity.id, max_depth=2)
+137:             print(f"{entity.name} is related to {len(related)} entities")
+138: 
+139:         # Forget a memory
+140:         await lake.forget(result.document_id)
+141: 
+142: import asyncio
+143: asyncio.run(main())
+144: ```
+145: 
+146: ### Simplified Constructor
+147: 
+148: The `MemoryLake` constructor supports multiple initialization patterns:
+149: 
+150: ```python
+151: from khora import MemoryLake, KhoraConfig
+152: 
+153: # 1. From environment variables (KHORA_DATABASE_URL)
+154: lake = MemoryLake()
+155: 
+156: # 2. Explicit database URL
+157: lake = MemoryLake("postgresql://localhost/mydb")
+158: 
+159: # 3. With graph backend
+160: lake = MemoryLake(
+161:     "postgresql://localhost/mydb",
+162:     graph_url="bolt://localhost:7687",
+163: )
+164: 
+165: # 4. Custom embedding model
+166: lake = MemoryLake(
+167:     "postgresql://localhost/mydb",
+168:     embedding_model="text-embedding-3-large",
+169: )
+170: 
+171: # 5. Full configuration object (for advanced use)
+172: config = KhoraConfig(
+173:     database_url="postgresql://localhost/mydb",
+174:     neo4j_url="bolt://localhost:7687",
+175: )
+176: lake = MemoryLake(config)
+177: ```
+178: 
+179: ### Batch Ingestion
+180: 
+181: For efficient bulk document ingestion:
+182: 
+183: ```python
+184: from khora import MemoryLake
+185: 
+186: async with MemoryLake(database_url) as lake:
+187:     # Batch ingestion with automatic optimization
+188:     result = await lake.remember_batch(
+189:         [
+190:             {"content": "Document 1 text...", "title": "Doc 1"},
+191:             {"content": "Document 2 text...", "title": "Doc 2"},
+192:             {"content": "Document 3 text...", "title": "Doc 3"},
+193:         ],
+194:         deduplicate=True,           # Cross-document entity deduplication
+195:         infer_relationships=True,   # Relationship inference after ingestion
+196:         on_progress=lambda done, total: print(f"Progress: {done}/{total}"),
+197:     )
+198: 
+199:     print(f"Processed: {result.processed}/{result.total} documents")
+200:     print(f"Chunks: {result.chunks}, Entities: {result.entities}")
+201:     print(f"Relationships: {result.relationships}")
+202: ```
+203: 
+204: ### Raw Search (No LLM Features)
+205: 
+206: For benchmarks or simple searches without LLM overhead:
+207: 
+208: ```python
+209: # Skip query understanding, entity linking, reranking, HyDE
+210: results = await lake.recall(
+211:     "search query",
+212:     mode=SearchMode.ALL,
+213:     raw=True,  # Disables all LLM features
+214: )
+215: ```
+216: 
+217: ### Search Modes
+218: 
+219: ```python
+220: from khora import MemoryLake, SearchMode
+221: 
+222: async with MemoryLake() as lake:
+223:     # Vector-only search (semantic similarity)
+224:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
+225: 
+226:     # Graph-only search (entity relationships)
+227:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
+228: 
+229:     # Hybrid search (combines all sources with RRF)
+230:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
+231: 
+232:     # All sources (returns results from each separately)
+233:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
+234: ```
+235: 
+236: ### Multi-Tenancy
+237: 
+238: ```python
+239: from khora import MemoryLake
+240: 
+241: async with MemoryLake() as lake:
+242:     # Simple: Get or create a namespace by name
+243:     namespace_id = await lake.ensure_namespace("physics", description="Physics research")
+244: 
+245:     # Store memories in specific namespace
+246:     await lake.remember(
+247:         "Important research findings...",
+248:         namespace=namespace_id,
+249:     )
+250: 
+251:     # Query within namespace (isolated from other namespaces)
+252:     results = await lake.recall("findings", namespace=namespace_id)
+253: 
+254:     # Get namespace statistics
+255:     stats = await lake.stats(namespace=namespace_id)
+256:     print(f"Documents: {stats.documents}, Entities: {stats.entities}")
+257: ```
+258: 
+259: ### As a Service
+260: 
+261: ```bash
+262: # Start the API server
+263: uv run khora serve --reload
+264: 
+265: # Or with Docker
+266: docker compose up
+267: ```
+268: 
+269: #### API Endpoints
+270: 
+271: **Memory Operations:**
+272: ```bash
+273: # Store a memory
+274: curl -X POST http://localhost:8100/memory/remember \
+275:   -H "Content-Type: application/json" \
+276:   -d '{
+277:     "content": "Einstein developed relativity in 1905.",
+278:     "title": "Physics History",
+279:     "skill_name": "general_entities"
+280:   }'
+281: 
+282: # Recall memories
+283: curl -X POST http://localhost:8100/memory/recall \
+284:   -H "Content-Type: application/json" \
+285:   -d '{
+286:     "query": "Who developed relativity?",
+287:     "limit": 10,
+288:     "mode": "hybrid"
+289:   }'
+290: 
+291: # Get a document
+292: curl http://localhost:8100/memory/documents/{document_id}
+293: 
+294: # List entities
+295: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
+296: 
+297: # Get related entities
+298: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
+299: 
+300: # Forget a memory
+301: curl -X DELETE http://localhost:8100/memory/forget \
+302:   -H "Content-Type: application/json" \
+303:   -d '{"document_id": "uuid-here"}'
+304: ```
+305: 
+306: **Namespace Management:**
+307: ```bash
+308: # Create organization
+309: curl -X POST http://localhost:8100/namespaces/organizations \
+310:   -H "Content-Type: application/json" \
+311:   -d '{"name": "Acme Corp", "slug": "acme"}'
+312: 
+313: # Create workspace
+314: curl -X POST http://localhost:8100/namespaces/workspaces \
+315:   -H "Content-Type: application/json" \
+316:   -d '{"organization_id": "org-uuid", "name": "Research"}'
+317: 
+318: # Create namespace
+319: curl -X POST http://localhost:8100/namespaces/ \
+320:   -H "Content-Type: application/json" \
+321:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
+322: ```
+323: 
+324: **Sync & Pipelines:**
+325: ```bash
+326: # Ingest documents
+327: curl -X POST http://localhost:8100/sync/ingest \
+328:   -H "Content-Type: application/json" \
+329:   -d '{
+330:     "namespace_id": "ns-uuid",
+331:     "documents": [{"content": "Document text..."}],
+332:     "skill_name": "general_entities"
+333:   }'
+334: 
+335: # List available pipelines
+336: curl http://localhost:8100/sync/pipelines
+337: ```
+338: 
+339: **Health Checks:**
+340: ```bash
+341: curl http://localhost:8100/status        # Service status
+342: curl http://localhost:8100/health        # Health check
+343: curl http://localhost:8100/health/ready  # Readiness probe
+344: curl http://localhost:8100/health/live   # Liveness probe
+345: ```
+346: 
+347: ---
+348: 
+349: ## Architecture
+350: 
+351: ```
+352: ┌─────────────────────────────────────────────────────────────────────────────┐
+353: │                              MemoryLake API                                  │
+354: │                         (Library + FastAPI Service)                          │
+355: ├─────────────────────────────────────────────────────────────────────────────┤
+356: │                                                                              │
+357: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
+358: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
+359: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
+360: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
+361: │         │                  │                  │                  │          │
+362: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
+363: │                          Storage Coordinator                                 │
+364: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
+365: │         │                   │                   │                            │
+366: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
+367: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
+368: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
+369: │  │ Documents)  │     │             │     │            │     │            │ │
+370: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
+371: │                                                                              │
+372: └──────────────────────────────────────────────────────────────────────────────┘
+373: ```
+374: 
+375: ### Core Components
+376: 
+377: | Component | Purpose |
+378: |-----------|---------|
+379: | `MemoryLake` | Primary API for remember/recall/forget operations |
+380: | `StorageCoordinator` | Orchestrates all storage backends |
+381: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
+382: | `PipelineManager` | Manages Prefect ingestion flows |
+383: | `ACLEnforcer` | Cross-layer permission enforcement |
+384: 
+385: ### Storage Backends
+386: 
+387: | Backend | Technology | Purpose |
+388: |---------|------------|---------|
+389: | Relational | PostgreSQL | Documents, events, permissions, metadata |
+390: | Vector | pgvector | Embeddings for semantic similarity search |
+391: | Graph | Neo4j | Entity nodes and relationship edges |
+392: | Event Store | PostgreSQL | Immutable event log for sourcing |
+393: 
+394: ### Data Flow
+395: 
+396: 1. **Ingestion** (Three-Phase Pipeline)
+397:    - Phase 1: Stage documents, compute checksums, detect duplicates
+398:    - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
+399:    - Phase 3 (optional): Cross-document entity unification and relationship inference
+400: 
+401: 2. **Query** (Hybrid Search)
+402:    - Execute vector, graph, and keyword searches in parallel
+403:    - Apply Reciprocal Rank Fusion to combine results
+404:    - Filter by ACL and temporal context
+405: 
+406: 3. **Event Sourcing**
+407:    - All changes recorded as immutable events
+408:    - Enables temporal queries ("state as of date X")
+409:    - Complete audit trail for compliance
+410: 
+411: ---
+412: 
+413: ## Configuration
+414: 
+415: ### Environment Variables
+416: 
+417: | Variable | Description | Default |
+418: |----------|-------------|---------|
+419: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
+420: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
+421: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
+422: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
+423: | `KHORA_DEBUG` | Enable debug mode | `false` |
+424: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
+425: | `KHORA_API_PORT` | API server port | `8100` |
+426: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
+427: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
+428: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
+429: 
+430: ### LiteLLM Configuration
+431: 
+432: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
+433: 
+434: ```yaml
+435: # examples/config/litellm/openai.yaml
+436: model: "gpt-4o-mini"
+437: api_key_env: "OPENAI_API_KEY"
+438: temperature: 0.7
+439: max_tokens: 8192
+440: embedding_model: "text-embedding-3-small"
+441: ```
+442: 
+443: ```yaml
+444: # examples/config/litellm/claude.yaml
+445: model: "claude-sonnet-4-20250514"
+446: api_key_env: "ANTHROPIC_API_KEY"
+447: temperature: 0.7
+448: max_tokens: 8192
+449: 
+450: # Router with fallbacks
+451: model_list:
+452:   - model_name: claude-sonnet-4
+453:     litellm_params:
+454:       model: claude-sonnet-4-20250514
+455:       api_key: os.environ/ANTHROPIC_API_KEY
+456:   - model_name: claude-sonnet-4
+457:     litellm_params:
+458:       model: claude-3-5-sonnet-20241022
+459:       api_key: os.environ/ANTHROPIC_API_KEY
+460: ```
+461: 
+462: ### Extraction Skills
+463: 
+464: Configure entity extraction in your code:
+465: 
+466: ```python
+467: from khora.extraction.skills import ExtractionSkill
+468: 
+469: skill = ExtractionSkill(
+470:     name="custom_entities",
+471:     description="Extract domain-specific entities",
+472:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
+473:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
+474: )
+475: 
+476: await lake.remember(content, skill_name="custom_entities")
+477: ```
+478: 
+479: ---
+480: 
+481: ## Project Structure
+482: 
+483: ```
+484: khora/
+485: ├── src/khora/
+486: │   ├── __init__.py              # Package exports
+487: │   ├── memory_lake.py           # Primary MemoryLake class
+488: │   ├── api/                     # FastAPI application
+489: │   │   ├── app.py               # App factory with lifespan
+490: │   │   ├── deps.py              # Dependency injection
+491: │   │   └── routes/              # API endpoints
+492: │   │       ├── memory.py        # Remember/recall/forget
+493: │   │       ├── namespaces.py    # Multi-tenancy management
+494: │   │       ├── sync.py          # Ingestion pipelines
+495: │   │       └── status.py        # Health checks
+496: │   ├── acl/                     # Access control
+497: │   │   ├── checker.py           # Permission checking
+498: │   │   └── enforcer.py          # Cross-layer enforcement
+499: │   ├── cli/                     # Command-line interface
+500: │   ├── config/                  # Configuration
+501: │   │   ├── schema.py            # Pydantic settings
+502: │   │   ├── llm.py               # LiteLLM configuration
+503: │   │   └── resolver.py          # Hierarchical config
+504: │   ├── core/models/             # Domain models
+505: │   │   ├── document.py          # Document, Chunk
+506: │   │   ├── entity.py            # Entity, Relationship
+507: │   │   ├── event.py             # MemoryEvent (sourcing)
+508: │   │   └── tenancy.py           # Org, Workspace, Namespace
+509: │   ├── db/                      # Database layer
+510: │   │   ├── models.py            # SQLAlchemy ORM
+511: │   │   └── session.py           # Async session management
+512: │   ├── extraction/              # Content processing
+513: │   │   ├── chunkers/            # Text chunking strategies
+514: │   │   ├── embedders/           # Embedding generation
+515: │   │   ├── extractors/          # Entity extraction
+516: │   │   └── skills/              # Extraction configurations
+517: │   ├── pipelines/               # Prefect workflows
+518: │   │   ├── flows/               # Ingestion and sync flows
+519: │   │   ├── tasks/               # Individual pipeline tasks
+520: │   │   ├── manager.py           # Pipeline orchestration
+521: │   │   └── registry.py          # Pipeline registration
+522: │   ├── query/                   # Search engine
+523: │   │   ├── engine.py            # HybridQueryEngine
+524: │   │   ├── fusion.py            # Reciprocal Rank Fusion
+525: │   │   └── temporal.py          # Time-based queries
+526: │   └── storage/                 # Storage backends
+527: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
+528: │       ├── coordinator.py       # Backend orchestration
+529: │       ├── event_store.py       # Event sourcing
+530: │       └── factory.py           # Storage initialization
+531: ├── tests/                       # Test suite
+532: ├── alembic/                     # Database migrations
+533: ├── examples/config/             # Example configurations
+534: ├── docker-compose.yml           # Development services
+535: └── pyproject.toml               # Project configuration
+536: ```
+537: 
+538: ---
+539: 
+540: ## Development
+541: 
+542: ### Commands
+543: 
+544: ```bash
+545: # Start development server
+546: uv run khora serve --reload --no-auth
+547: 
+548: # Run tests with coverage
+549: make test
+550: 
+551: # Format code
+552: make format
+553: 
+554: # Run linting
+555: make lint
+556: 
+557: # Run all pre-commit hooks
+558: make prek
+559: 
+560: # Start development databases
+561: make dev
+562: 
+563: # Stop development databases
+564: make down
+565: ```
+566: 
+567: ### Database Migrations
+568: 
+569: ```bash
+570: # Run all migrations
+571: uv run alembic upgrade head
+572: 
+573: # Create a new migration
+574: uv run alembic revision --autogenerate -m "Add new table"
+575: 
+576: # Rollback one migration
+577: uv run alembic downgrade -1
+578: ```
+579: 
+580: ### Testing
+581: 
+582: ```bash
+583: # Run all tests
+584: make test
+585: 
+586: # Run specific test file
+587: uv run pytest tests/unit/test_api.py -v
+588: 
+589: # Run with markers
+590: uv run pytest -m unit        # Unit tests only
+591: uv run pytest -m integration # Integration tests
+592: uv run pytest -m e2e         # End-to-end tests
+593: ```
+594: 
+595: ---
+596: 
+597: ## API Reference
+598: 
+599: ### MemoryLake Class
+600: 
+601: #### Constructor
+602: 
+603: ```python
+604: class MemoryLake:
+605:     def __init__(
+606:         self,
+607:         database_url: str | KhoraConfig | None = None,
+608:         *,
+609:         graph_url: str | None = None,
+610:         embedding_model: str = "text-embedding-3-small",
+611:     ):
+612:         """Initialize the Memory Lake.
+613: 
+614:         Args:
+615:             database_url: PostgreSQL URL, KhoraConfig, or None (reads from env)
+616:             graph_url: Optional Neo4j URL (bolt://user:pass@host:port)
+617:             embedding_model: Embedding model to use
+618:         """
+619: ```
+620: 
+621: #### Core Methods
+622: 
+623: ```python
+624:     async def remember(
+625:         self,
+626:         content: str,
+627:         *,
+628:         namespace: str | UUID | None = None,
+629:         title: str = "",
+630:         source: str = "",
+631:         metadata: dict = {},
+632:         skill_name: str = "general_entities",
+633:     ) -> RememberResult:
+634:         """Store content in the memory lake."""
+635: 
+636:     async def remember_batch(
+637:         self,
+638:         documents: list[dict],
+639:         *,
+640:         namespace: str | UUID | None = None,
+641:         skill_name: str = "general_entities",
+642:         max_concurrent: int = 5,
+643:         deduplicate: bool = True,
+644:         infer_relationships: bool = True,
+645:         on_progress: Callable[[int, int], None] | None = None,
+646:     ) -> BatchResult:
+647:         """Store multiple documents with automatic optimization."""
+648: 
+649:     async def recall(
+650:         self,
+651:         query: str,
+652:         *,
+653:         namespace: str | UUID | None = None,
+654:         limit: int = 10,
+655:         mode: SearchMode = SearchMode.HYBRID,
+656:         min_similarity: float = 0.0,
+657:         agentic: bool = False,
+658:         raw: bool = False,  # Skip all LLM features
+659:     ) -> RecallResult:
+660:         """Recall memories relevant to a query."""
+661: 
+662:     async def forget(
+663:         self,
+664:         document_id: UUID,
+665:         *,
+666:         namespace: str | UUID | None = None,
+667:     ) -> bool:
+668:         """Remove a memory from the lake."""
+669: ```
+670: 
+671: #### Convenience Methods
+672: 
+673: ```python
+674:     async def ensure_namespace(
+675:         self,
+676:         name: str,
+677:         *,
+678:         description: str = "",
+679:     ) -> UUID:
+680:         """Get or create a namespace by name."""
+681: 
+682:     async def get_document(self, document_id: UUID) -> Document | None:
+683:         """Get a document by ID."""
+684: 
+685:     async def list_documents(
+686:         self,
+687:         *,
+688:         namespace: str | UUID | None = None,
+689:         limit: int = 100,
+690:     ) -> list[Document]:
+691:         """List documents in a namespace."""
+692: 
+693:     async def search_entities(
+694:         self,
+695:         query: str,
+696:         *,
+697:         namespace: str | UUID | None = None,
+698:         limit: int = 10,
+699:     ) -> list[Entity]:
+700:         """Search entities by query text using embedding similarity."""
+701: 
+702:     async def stats(
+703:         self,
+704:         *,
+705:         namespace: str | UUID | None = None,
+706:     ) -> Stats:
+707:         """Get document/chunk/entity/relationship counts."""
+708: 
+709:     async def list_entities(
+710:         self,
+711:         *,
+712:         namespace: str | UUID | None = None,
+713:         entity_type: str | None = None,
+714:         limit: int = 100,
+715:     ) -> list[Entity]:
+716:         """List entities in a namespace."""
+717: 
+718:     async def find_related_entities(
+719:         self,
+720:         entity_id: UUID,
+721:         *,
+722:         max_depth: int = 2,
+723:         limit: int = 20,
+724:     ) -> list[tuple[Entity, float]]:
+725:         """Find entities related to a given entity."""
+726: ```
+727: 
+728: ### Data Classes
+729: 
+730: ```python
+731: @dataclass
+732: class RememberResult:
+733:     """Result of a remember() operation."""
+734:     document_id: UUID
+735:     namespace_id: UUID
+736:     chunks_created: int
+737:     entities_extracted: int
+738:     relationships_created: int
+739:     metadata: dict[str, Any]
+740: 
+741: @dataclass
+742: class RecallResult:
+743:     """Result of a recall() operation."""
+744:     query: str
+745:     namespace_id: UUID
+746:     chunks: list[tuple[Chunk, float]]
+747:     entities: list[tuple[Entity, float]]
+748:     context_text: str
+749:     metadata: dict[str, Any]
+750: 
+751: @dataclass
+752: class BatchResult:
+753:     """Result of remember_batch() operation."""
+754:     total: int        # Total documents submitted
+755:     processed: int    # Successfully processed
+756:     skipped: int      # Skipped (duplicates)
+757:     failed: int       # Failed to process
+758:     chunks: int       # Total chunks created
+759:     entities: int     # Total entities extracted
+760:     relationships: int # Total relationships created
+761: 
+762: @dataclass
+763: class Stats:
+764:     """Namespace statistics from stats()."""
+765:     documents: int
+766:     chunks: int
+767:     entities: int
+768:     relationships: int
+769: ```
+770: 
+771: ### Search Modes
+772: 
+773: | Mode | Description |
+774: |------|-------------|
+775: | `VECTOR` | Semantic similarity search using embeddings |
+776: | `GRAPH` | Entity and relationship traversal |
+777: | `HYBRID` | Combined vector + graph + keyword with RRF fusion |
+778: | `ALL` | All sources (vector, graph, keyword) |
+779: 
+780: ### Entity Types
+781: 
+782: | Type | Description |
+783: |------|-------------|
+784: | `PERSON` | Individual people |
+785: | `ORGANIZATION` | Companies, institutions |
+786: | `LOCATION` | Places, addresses |
+787: | `CONCEPT` | Abstract ideas, theories |
+788: | `EVENT` | Occurrences, incidents |
+789: | `TECHNOLOGY` | Tools, platforms, languages |
+790: | `PRODUCT` | Goods, services |
+791: | `DOCUMENT` | Referenced documents |
+792: | `OTHER` | Uncategorized entities |
+793: 
+794: ### Deprecation Notices
+795: 
+796: The following properties emit `DeprecationWarning` and will be removed in a future version:
+797: 
+798: | Deprecated | Replacement |
+799: |------------|-------------|
+800: | `lake.storage` | Use `lake.get_document()`, `lake.list_documents()`, `lake.stats()` |
+801: | `lake.query_engine` | Use `lake.recall()` with `raw=True` for unprocessed search |
+802: 
+803: ---
+804: 
+805: ## License
+806: 
+807: Copyright (c) 2024-2025 Deyta. All rights reserved.
+````
+
+## File: src/khora/cli/__init__.py
 ````python
- 1: """Status endpoints for Khora API."""
+ 1: """Command-line interface for Khora."""
  2: 
  3: from __future__ import annotations
  4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: router = APIRouter()
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
 11: 
 12: 
-13: @router.get("/status")
-14: async def status_check(request: Request) -> dict[str, Any]:
-15:     """Basic status check endpoint.
-16: 
-17:     Returns:
-18:         Status with timestamp and version
-19:     """
-20:     return {
-21:         "status": "ok",
-22:         "timestamp": datetime.now(UTC).isoformat(),
-23:         "version": "0.0.9",
-24:         "service": "khora",
-25:     }
-26: 
-27: 
-28: @router.get("/health")
-29: async def health_check(request: Request) -> dict[str, Any]:
-30:     """Health check endpoint for orchestration systems.
-31: 
-32:     Returns:
-33:         Health status with timestamp
-34:     """
-35:     return {
-36:         "status": "healthy",
-37:         "timestamp": datetime.now(UTC).isoformat(),
-38:         "version": "0.0.9",
-39:     }
-40: 
-41: 
-42: @router.get("/health/ready")
-43: async def readiness_check(request: Request) -> dict[str, Any]:
-44:     """Readiness check for Kubernetes/orchestration.
-45: 
-46:     Checks that all required services are available.
+13: @click.group()
+14: @click.version_option(version="0.1.0")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
 47: 
-48:     Returns:
-49:         Readiness status with component checks
-50:     """
-51:     config = request.app.state.config
-52:     checks: dict[str, bool] = {}
-53: 
-54:     # TODO: Add actual health checks for:
-55:     # - Database connections
-56:     # - External services
-57: 
-58:     # For now, return basic status
-59:     checks["config_loaded"] = config is not None
-60: 
-61:     all_healthy = all(checks.values())
-62: 
-63:     return {
-64:         "status": "ready" if all_healthy else "not_ready",
-65:         "timestamp": datetime.now(UTC).isoformat(),
-66:         "checks": checks,
-67:     }
-68: 
-69: 
-70: @router.get("/health/live")
-71: async def liveness_check() -> dict[str, Any]:
-72:     """Liveness check for Kubernetes/orchestration.
-73: 
-74:     Simple check that the application is running.
-75: 
-76:     Returns:
-77:         Liveness status
-78:     """
-79:     return {
-80:         "status": "alive",
-81:         "timestamp": datetime.now(UTC).isoformat(),
-82:     }
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/db/models.py
@@ -34255,6 +35125,93 @@ README.md
 81:     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 ````
 
+## File: tests/unit/test_api.py
+````python
+ 1: """Tests for API module."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
+ 7: 
+ 8: import khora
+ 9: 
+10: 
+11: @pytest.mark.unit
+12: class TestStatusEndpoints:
+13:     """Tests for status check endpoints."""
+14: 
+15:     def test_status_check(self, test_client: TestClient) -> None:
+16:         """Test basic status check endpoint."""
+17:         response = test_client.get("/status")
+18: 
+19:         assert response.status_code == 200
+20:         data = response.json()
+21:         assert data["status"] == "ok"
+22:         assert "timestamp" in data
+23:         assert data["version"] == khora.__version__
+24:         assert data["service"] == "khora"
+25: 
+26:     def test_health_check(self, test_client: TestClient) -> None:
+27:         """Test health check endpoint."""
+28:         response = test_client.get("/health")
+29: 
+30:         assert response.status_code == 200
+31:         data = response.json()
+32:         assert data["status"] == "healthy"
+33:         assert "timestamp" in data
+34:         assert data["version"] == khora.__version__
+35: 
+36:     def test_readiness_check(self, test_client: TestClient) -> None:
+37:         """Test readiness check endpoint."""
+38:         response = test_client.get("/health/ready")
+39: 
+40:         assert response.status_code == 200
+41:         data = response.json()
+42:         assert data["status"] in ["ready", "not_ready"]
+43:         assert "timestamp" in data
+44:         assert "checks" in data
+45: 
+46:     def test_liveness_check(self, test_client: TestClient) -> None:
+47:         """Test liveness check endpoint."""
+48:         response = test_client.get("/health/live")
+49: 
+50:         assert response.status_code == 200
+51:         data = response.json()
+52:         assert data["status"] == "alive"
+53:         assert "timestamp" in data
+54: 
+55: 
+56: @pytest.mark.unit
+57: class TestConfig:
+58:     """Tests for configuration."""
+59: 
+60:     def test_default_config(self) -> None:
+61:         """Test default configuration values."""
+62:         from khora.config import KhoraConfig
+63: 
+64:         config = KhoraConfig()
+65:         assert config.app_name == "khora"
+66:         assert config.environment == "development"
+67:         assert config.debug is False
+68:         assert config.api_host == "127.0.0.1"
+69:         assert config.api_port == 8000
+70:         assert config.auth_enabled is True
+71: 
+72:     def test_config_from_env(self, monkeypatch) -> None:
+73:         """Test configuration from environment variables."""
+74:         from khora.config import KhoraConfig
+75: 
+76:         monkeypatch.setenv("KHORA_DEBUG", "true")
+77:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+78:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+79: 
+80:         config = KhoraConfig()
+81:         assert config.debug is True
+82:         assert config.api_port == 9000
+83:         assert config.environment == "staging"
+````
+
 ## File: tests/unit/test_entity_index.py
 ````python
   1: """Tests for EntityIndex — the in-memory blocking index for entity resolution."""
@@ -35586,872 +36543,152 @@ README.md
 1044:             create_engine("nonexistent", _mock_config())
 ````
 
-## File: README.md
-````markdown
-  1: # Khora
-  2: 
-  3: > *"Khora is the receptacle, the space, the matrix in which all things come to be."*
-  4: > *— Plato, Timaeus*
-  5: 
-  6: In Plato's cosmology, **Khora** (χώρα) is the primordial receptacle—neither being nor non-being, but the space that receives all forms and gives them place. It is the nurse of becoming, the womb of the cosmos where the eternal Forms find material expression. Khora does not impose form; it receives, holds, and makes manifestation possible.
-  7: 
-  8: This project embodies that philosophy: **Khora is a memory lake**—a receptacle for knowledge that receives information from disparate sources, holds it in structured form, and enables its retrieval through multiple paths of inquiry. Just as Plato's Khora mediates between the intelligible and sensible worlds, this Memory Lake bridges raw data and meaningful knowledge through semantic extraction, graph relationships, and temporal context.
-  9: 
- 10: ---
- 11: 
- 12: ## Overview
- 13: 
- 14: Khora is a **Memory Lake** system that combines three storage paradigms:
- 15: 
- 16: - **Knowledge Graph** (Neo4j) — Entities and their relationships
- 17: - **Vector Database** (pgvector) — Semantic embeddings for similarity search
- 18: - **Relational Database** (PostgreSQL) — Documents, events, and metadata
- 19: 
- 20: It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
- 21: 
- 22: ### Key Features
- 23: 
- 24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
- 25: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
- 26: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
- 27: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
- 28: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
- 29: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
- 30: - **Semantic Extraction**: LLM-powered entity and relationship extraction
- 31: 
- 32: ---
- 33: 
- 34: ## Documentation
- 35: 
- 36: Comprehensive documentation is available in the [`docs/`](docs/) directory:
- 37: 
- 38: | Topic | Description |
- 39: |-------|-------------|
- 40: | **Architecture** | |
- 41: | [Overview](docs/architecture/overview.md) | System design, components, data flow |
- 42: | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
- 43: | [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
- 44: | [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
- 45: | **Data Models** | |
- 46: | [Overview](docs/data-models/overview.md) | Model relationships and purposes |
- 47: | [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
- 48: | [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
- 49: | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
- 50: | **Extraction Pipeline** | |
- 51: | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
- 52: | [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
- 53: | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
- 54: | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
- 55: | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
- 56: | [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
- 57: | [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
- 58: | **Query Engine** | |
- 59: | [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
- 60: | [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
- 61: | [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
- 62: | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
- 63: | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
- 64: | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
- 65: | **Planning** | |
- 66: | [Roadmap](docs/roadmap.md) | Future improvements and features |
- 67: 
- 68: ---
- 69: 
- 70: ## Installation
- 71: 
- 72: ### Prerequisites
- 73: 
- 74: - Python 3.13+
- 75: - [uv](https://github.com/astral-sh/uv) for package management
- 76: - PostgreSQL with pgvector extension
- 77: - Neo4j (optional, for graph features)
- 78: 
- 79: ### Quick Install
- 80: 
- 81: ```bash
- 82: # Clone and install
- 83: git clone https://github.com/DeytaHQ/khora.git
- 84: cd khora
- 85: uv sync --all-extras
- 86: 
- 87: # Install pre-commit hooks
- 88: uv run prek install
- 89: ```
- 90: 
- 91: ### Start Development Databases
- 92: 
- 93: ```bash
- 94: # Start PostgreSQL and Neo4j via Docker
- 95: make dev
- 96: 
- 97: # Run database migrations
- 98: uv run alembic upgrade head
- 99: ```
-100: 
-101: ---
-102: 
-103: ## Usage
-104: 
-105: ### As a Library
-106: 
-107: The primary interface is the `MemoryLake` class:
-108: 
-109: ```python
-110: from khora import MemoryLake, SearchMode
-111: 
-112: async def main():
-113:     # Simplest - reads KHORA_DATABASE_URL from environment
-114:     async with MemoryLake() as lake:
-115:         # Store a memory
-116:         result = await lake.remember(
-117:             "Albert Einstein developed the theory of relativity in 1905.",
-118:             title="Einstein Biography",
-119:             source="wikipedia",
-120:         )
-121:         print(f"Stored document: {result.document_id}")
-122:         print(f"Extracted {result.entities_extracted} entities")
-123: 
-124:         # Recall relevant memories
-125:         memories = await lake.recall(
-126:             "Who developed relativity?",
-127:             limit=5,
-128:             mode=SearchMode.HYBRID,  # vector + graph + keyword
-129:         )
-130:         print(f"Found {len(memories.chunks)} relevant chunks")
-131:         print(f"Context: {memories.context_text}")
-132: 
-133:         # Explore entity relationships
-134:         entities = await lake.list_entities(entity_type="PERSON")
-135:         for entity in entities:
-136:             related = await lake.find_related_entities(entity.id, max_depth=2)
-137:             print(f"{entity.name} is related to {len(related)} entities")
-138: 
-139:         # Forget a memory
-140:         await lake.forget(result.document_id)
-141: 
-142: import asyncio
-143: asyncio.run(main())
-144: ```
-145: 
-146: ### Simplified Constructor
-147: 
-148: The `MemoryLake` constructor supports multiple initialization patterns:
-149: 
-150: ```python
-151: from khora import MemoryLake, KhoraConfig
-152: 
-153: # 1. From environment variables (KHORA_DATABASE_URL)
-154: lake = MemoryLake()
-155: 
-156: # 2. Explicit database URL
-157: lake = MemoryLake("postgresql://localhost/mydb")
-158: 
-159: # 3. With graph backend
-160: lake = MemoryLake(
-161:     "postgresql://localhost/mydb",
-162:     graph_url="bolt://localhost:7687",
-163: )
-164: 
-165: # 4. Custom embedding model
-166: lake = MemoryLake(
-167:     "postgresql://localhost/mydb",
-168:     embedding_model="text-embedding-3-large",
-169: )
-170: 
-171: # 5. Full configuration object (for advanced use)
-172: config = KhoraConfig(
-173:     database_url="postgresql://localhost/mydb",
-174:     neo4j_url="bolt://localhost:7687",
-175: )
-176: lake = MemoryLake(config)
-177: ```
-178: 
-179: ### Batch Ingestion
-180: 
-181: For efficient bulk document ingestion:
-182: 
-183: ```python
-184: from khora import MemoryLake
-185: 
-186: async with MemoryLake(database_url) as lake:
-187:     # Batch ingestion with automatic optimization
-188:     result = await lake.remember_batch(
-189:         [
-190:             {"content": "Document 1 text...", "title": "Doc 1"},
-191:             {"content": "Document 2 text...", "title": "Doc 2"},
-192:             {"content": "Document 3 text...", "title": "Doc 3"},
-193:         ],
-194:         deduplicate=True,           # Cross-document entity deduplication
-195:         infer_relationships=True,   # Relationship inference after ingestion
-196:         on_progress=lambda done, total: print(f"Progress: {done}/{total}"),
-197:     )
-198: 
-199:     print(f"Processed: {result.processed}/{result.total} documents")
-200:     print(f"Chunks: {result.chunks}, Entities: {result.entities}")
-201:     print(f"Relationships: {result.relationships}")
-202: ```
-203: 
-204: ### Raw Search (No LLM Features)
-205: 
-206: For benchmarks or simple searches without LLM overhead:
-207: 
-208: ```python
-209: # Skip query understanding, entity linking, reranking, HyDE
-210: results = await lake.recall(
-211:     "search query",
-212:     mode=SearchMode.ALL,
-213:     raw=True,  # Disables all LLM features
-214: )
-215: ```
-216: 
-217: ### Search Modes
-218: 
-219: ```python
-220: from khora import MemoryLake, SearchMode
-221: 
-222: async with MemoryLake() as lake:
-223:     # Vector-only search (semantic similarity)
-224:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
-225: 
-226:     # Graph-only search (entity relationships)
-227:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
-228: 
-229:     # Hybrid search (combines all sources with RRF)
-230:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
-231: 
-232:     # All sources (returns results from each separately)
-233:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
-234: ```
-235: 
-236: ### Multi-Tenancy
-237: 
-238: ```python
-239: from khora import MemoryLake
-240: 
-241: async with MemoryLake() as lake:
-242:     # Simple: Get or create a namespace by name
-243:     namespace_id = await lake.ensure_namespace("physics", description="Physics research")
-244: 
-245:     # Store memories in specific namespace
-246:     await lake.remember(
-247:         "Important research findings...",
-248:         namespace=namespace_id,
-249:     )
-250: 
-251:     # Query within namespace (isolated from other namespaces)
-252:     results = await lake.recall("findings", namespace=namespace_id)
-253: 
-254:     # Get namespace statistics
-255:     stats = await lake.stats(namespace=namespace_id)
-256:     print(f"Documents: {stats.documents}, Entities: {stats.entities}")
-257: ```
-258: 
-259: ### As a Service
-260: 
-261: ```bash
-262: # Start the API server
-263: uv run khora serve --reload
-264: 
-265: # Or with Docker
-266: docker compose up
-267: ```
-268: 
-269: #### API Endpoints
-270: 
-271: **Memory Operations:**
-272: ```bash
-273: # Store a memory
-274: curl -X POST http://localhost:8100/memory/remember \
-275:   -H "Content-Type: application/json" \
-276:   -d '{
-277:     "content": "Einstein developed relativity in 1905.",
-278:     "title": "Physics History",
-279:     "skill_name": "general_entities"
-280:   }'
-281: 
-282: # Recall memories
-283: curl -X POST http://localhost:8100/memory/recall \
-284:   -H "Content-Type: application/json" \
-285:   -d '{
-286:     "query": "Who developed relativity?",
-287:     "limit": 10,
-288:     "mode": "hybrid"
-289:   }'
-290: 
-291: # Get a document
-292: curl http://localhost:8100/memory/documents/{document_id}
-293: 
-294: # List entities
-295: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
-296: 
-297: # Get related entities
-298: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
-299: 
-300: # Forget a memory
-301: curl -X DELETE http://localhost:8100/memory/forget \
-302:   -H "Content-Type: application/json" \
-303:   -d '{"document_id": "uuid-here"}'
-304: ```
-305: 
-306: **Namespace Management:**
-307: ```bash
-308: # Create organization
-309: curl -X POST http://localhost:8100/namespaces/organizations \
-310:   -H "Content-Type: application/json" \
-311:   -d '{"name": "Acme Corp", "slug": "acme"}'
-312: 
-313: # Create workspace
-314: curl -X POST http://localhost:8100/namespaces/workspaces \
-315:   -H "Content-Type: application/json" \
-316:   -d '{"organization_id": "org-uuid", "name": "Research"}'
-317: 
-318: # Create namespace
-319: curl -X POST http://localhost:8100/namespaces/ \
-320:   -H "Content-Type: application/json" \
-321:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
-322: ```
-323: 
-324: **Sync & Pipelines:**
-325: ```bash
-326: # Ingest documents
-327: curl -X POST http://localhost:8100/sync/ingest \
-328:   -H "Content-Type: application/json" \
-329:   -d '{
-330:     "namespace_id": "ns-uuid",
-331:     "documents": [{"content": "Document text..."}],
-332:     "skill_name": "general_entities"
-333:   }'
-334: 
-335: # List available pipelines
-336: curl http://localhost:8100/sync/pipelines
-337: ```
-338: 
-339: **Health Checks:**
-340: ```bash
-341: curl http://localhost:8100/status        # Service status
-342: curl http://localhost:8100/health        # Health check
-343: curl http://localhost:8100/health/ready  # Readiness probe
-344: curl http://localhost:8100/health/live   # Liveness probe
-345: ```
-346: 
-347: ---
-348: 
-349: ## Architecture
-350: 
-351: ```
-352: ┌─────────────────────────────────────────────────────────────────────────────┐
-353: │                              MemoryLake API                                  │
-354: │                         (Library + FastAPI Service)                          │
-355: ├─────────────────────────────────────────────────────────────────────────────┤
-356: │                                                                              │
-357: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
-358: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
-359: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
-360: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
-361: │         │                  │                  │                  │          │
-362: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
-363: │                          Storage Coordinator                                 │
-364: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
-365: │         │                   │                   │                            │
-366: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
-367: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
-368: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
-369: │  │ Documents)  │     │             │     │            │     │            │ │
-370: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
-371: │                                                                              │
-372: └──────────────────────────────────────────────────────────────────────────────┘
-373: ```
-374: 
-375: ### Core Components
-376: 
-377: | Component | Purpose |
-378: |-----------|---------|
-379: | `MemoryLake` | Primary API for remember/recall/forget operations |
-380: | `StorageCoordinator` | Orchestrates all storage backends |
-381: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
-382: | `PipelineManager` | Manages Prefect ingestion flows |
-383: | `ACLEnforcer` | Cross-layer permission enforcement |
-384: 
-385: ### Storage Backends
-386: 
-387: | Backend | Technology | Purpose |
-388: |---------|------------|---------|
-389: | Relational | PostgreSQL | Documents, events, permissions, metadata |
-390: | Vector | pgvector | Embeddings for semantic similarity search |
-391: | Graph | Neo4j | Entity nodes and relationship edges |
-392: | Event Store | PostgreSQL | Immutable event log for sourcing |
-393: 
-394: ### Data Flow
-395: 
-396: 1. **Ingestion** (Three-Phase Pipeline)
-397:    - Phase 1: Stage documents, compute checksums, detect duplicates
-398:    - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
-399:    - Phase 3 (optional): Cross-document entity unification and relationship inference
-400: 
-401: 2. **Query** (Hybrid Search)
-402:    - Execute vector, graph, and keyword searches in parallel
-403:    - Apply Reciprocal Rank Fusion to combine results
-404:    - Filter by ACL and temporal context
-405: 
-406: 3. **Event Sourcing**
-407:    - All changes recorded as immutable events
-408:    - Enables temporal queries ("state as of date X")
-409:    - Complete audit trail for compliance
-410: 
-411: ---
-412: 
-413: ## Configuration
-414: 
-415: ### Environment Variables
-416: 
-417: | Variable | Description | Default |
-418: |----------|-------------|---------|
-419: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
-420: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
-421: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
-422: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
-423: | `KHORA_DEBUG` | Enable debug mode | `false` |
-424: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
-425: | `KHORA_API_PORT` | API server port | `8100` |
-426: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
-427: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
-428: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
-429: 
-430: ### LiteLLM Configuration
-431: 
-432: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
-433: 
-434: ```yaml
-435: # examples/config/litellm/openai.yaml
-436: model: "gpt-4o-mini"
-437: api_key_env: "OPENAI_API_KEY"
-438: temperature: 0.7
-439: max_tokens: 8192
-440: embedding_model: "text-embedding-3-small"
-441: ```
-442: 
-443: ```yaml
-444: # examples/config/litellm/claude.yaml
-445: model: "claude-sonnet-4-20250514"
-446: api_key_env: "ANTHROPIC_API_KEY"
-447: temperature: 0.7
-448: max_tokens: 8192
-449: 
-450: # Router with fallbacks
-451: model_list:
-452:   - model_name: claude-sonnet-4
-453:     litellm_params:
-454:       model: claude-sonnet-4-20250514
-455:       api_key: os.environ/ANTHROPIC_API_KEY
-456:   - model_name: claude-sonnet-4
-457:     litellm_params:
-458:       model: claude-3-5-sonnet-20241022
-459:       api_key: os.environ/ANTHROPIC_API_KEY
-460: ```
-461: 
-462: ### Extraction Skills
-463: 
-464: Configure entity extraction in your code:
-465: 
-466: ```python
-467: from khora.extraction.skills import ExtractionSkill
-468: 
-469: skill = ExtractionSkill(
-470:     name="custom_entities",
-471:     description="Extract domain-specific entities",
-472:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
-473:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
-474: )
-475: 
-476: await lake.remember(content, skill_name="custom_entities")
-477: ```
-478: 
-479: ---
-480: 
-481: ## Project Structure
-482: 
-483: ```
-484: khora/
-485: ├── src/khora/
-486: │   ├── __init__.py              # Package exports
-487: │   ├── memory_lake.py           # Primary MemoryLake class
-488: │   ├── api/                     # FastAPI application
-489: │   │   ├── app.py               # App factory with lifespan
-490: │   │   ├── deps.py              # Dependency injection
-491: │   │   └── routes/              # API endpoints
-492: │   │       ├── memory.py        # Remember/recall/forget
-493: │   │       ├── namespaces.py    # Multi-tenancy management
-494: │   │       ├── sync.py          # Ingestion pipelines
-495: │   │       └── status.py        # Health checks
-496: │   ├── acl/                     # Access control
-497: │   │   ├── checker.py           # Permission checking
-498: │   │   └── enforcer.py          # Cross-layer enforcement
-499: │   ├── cli/                     # Command-line interface
-500: │   ├── config/                  # Configuration
-501: │   │   ├── schema.py            # Pydantic settings
-502: │   │   ├── llm.py               # LiteLLM configuration
-503: │   │   └── resolver.py          # Hierarchical config
-504: │   ├── core/models/             # Domain models
-505: │   │   ├── document.py          # Document, Chunk
-506: │   │   ├── entity.py            # Entity, Relationship
-507: │   │   ├── event.py             # MemoryEvent (sourcing)
-508: │   │   └── tenancy.py           # Org, Workspace, Namespace
-509: │   ├── db/                      # Database layer
-510: │   │   ├── models.py            # SQLAlchemy ORM
-511: │   │   └── session.py           # Async session management
-512: │   ├── extraction/              # Content processing
-513: │   │   ├── chunkers/            # Text chunking strategies
-514: │   │   ├── embedders/           # Embedding generation
-515: │   │   ├── extractors/          # Entity extraction
-516: │   │   └── skills/              # Extraction configurations
-517: │   ├── pipelines/               # Prefect workflows
-518: │   │   ├── flows/               # Ingestion and sync flows
-519: │   │   ├── tasks/               # Individual pipeline tasks
-520: │   │   ├── manager.py           # Pipeline orchestration
-521: │   │   └── registry.py          # Pipeline registration
-522: │   ├── query/                   # Search engine
-523: │   │   ├── engine.py            # HybridQueryEngine
-524: │   │   ├── fusion.py            # Reciprocal Rank Fusion
-525: │   │   └── temporal.py          # Time-based queries
-526: │   └── storage/                 # Storage backends
-527: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
-528: │       ├── coordinator.py       # Backend orchestration
-529: │       ├── event_store.py       # Event sourcing
-530: │       └── factory.py           # Storage initialization
-531: ├── tests/                       # Test suite
-532: ├── alembic/                     # Database migrations
-533: ├── examples/config/             # Example configurations
-534: ├── docker-compose.yml           # Development services
-535: └── pyproject.toml               # Project configuration
-536: ```
-537: 
-538: ---
-539: 
-540: ## Development
-541: 
-542: ### Commands
-543: 
-544: ```bash
-545: # Start development server
-546: uv run khora serve --reload --no-auth
-547: 
-548: # Run tests with coverage
-549: make test
-550: 
-551: # Format code
-552: make format
-553: 
-554: # Run linting
-555: make lint
-556: 
-557: # Run all pre-commit hooks
-558: make prek
-559: 
-560: # Start development databases
-561: make dev
-562: 
-563: # Stop development databases
-564: make down
-565: ```
-566: 
-567: ### Database Migrations
-568: 
-569: ```bash
-570: # Run all migrations
-571: uv run alembic upgrade head
-572: 
-573: # Create a new migration
-574: uv run alembic revision --autogenerate -m "Add new table"
-575: 
-576: # Rollback one migration
-577: uv run alembic downgrade -1
-578: ```
-579: 
-580: ### Testing
-581: 
-582: ```bash
-583: # Run all tests
-584: make test
-585: 
-586: # Run specific test file
-587: uv run pytest tests/unit/test_api.py -v
-588: 
-589: # Run with markers
-590: uv run pytest -m unit        # Unit tests only
-591: uv run pytest -m integration # Integration tests
-592: uv run pytest -m e2e         # End-to-end tests
-593: ```
-594: 
-595: ---
-596: 
-597: ## API Reference
-598: 
-599: ### MemoryLake Class
-600: 
-601: #### Constructor
-602: 
-603: ```python
-604: class MemoryLake:
-605:     def __init__(
-606:         self,
-607:         database_url: str | KhoraConfig | None = None,
-608:         *,
-609:         graph_url: str | None = None,
-610:         embedding_model: str = "text-embedding-3-small",
-611:     ):
-612:         """Initialize the Memory Lake.
-613: 
-614:         Args:
-615:             database_url: PostgreSQL URL, KhoraConfig, or None (reads from env)
-616:             graph_url: Optional Neo4j URL (bolt://user:pass@host:port)
-617:             embedding_model: Embedding model to use
-618:         """
-619: ```
-620: 
-621: #### Core Methods
-622: 
-623: ```python
-624:     async def remember(
-625:         self,
-626:         content: str,
-627:         *,
-628:         namespace: str | UUID | None = None,
-629:         title: str = "",
-630:         source: str = "",
-631:         metadata: dict = {},
-632:         skill_name: str = "general_entities",
-633:     ) -> RememberResult:
-634:         """Store content in the memory lake."""
-635: 
-636:     async def remember_batch(
-637:         self,
-638:         documents: list[dict],
-639:         *,
-640:         namespace: str | UUID | None = None,
-641:         skill_name: str = "general_entities",
-642:         max_concurrent: int = 5,
-643:         deduplicate: bool = True,
-644:         infer_relationships: bool = True,
-645:         on_progress: Callable[[int, int], None] | None = None,
-646:     ) -> BatchResult:
-647:         """Store multiple documents with automatic optimization."""
-648: 
-649:     async def recall(
-650:         self,
-651:         query: str,
-652:         *,
-653:         namespace: str | UUID | None = None,
-654:         limit: int = 10,
-655:         mode: SearchMode = SearchMode.HYBRID,
-656:         min_similarity: float = 0.0,
-657:         agentic: bool = False,
-658:         raw: bool = False,  # Skip all LLM features
-659:     ) -> RecallResult:
-660:         """Recall memories relevant to a query."""
-661: 
-662:     async def forget(
-663:         self,
-664:         document_id: UUID,
-665:         *,
-666:         namespace: str | UUID | None = None,
-667:     ) -> bool:
-668:         """Remove a memory from the lake."""
-669: ```
-670: 
-671: #### Convenience Methods
-672: 
-673: ```python
-674:     async def ensure_namespace(
-675:         self,
-676:         name: str,
-677:         *,
-678:         description: str = "",
-679:     ) -> UUID:
-680:         """Get or create a namespace by name."""
-681: 
-682:     async def get_document(self, document_id: UUID) -> Document | None:
-683:         """Get a document by ID."""
-684: 
-685:     async def list_documents(
-686:         self,
-687:         *,
-688:         namespace: str | UUID | None = None,
-689:         limit: int = 100,
-690:     ) -> list[Document]:
-691:         """List documents in a namespace."""
-692: 
-693:     async def search_entities(
-694:         self,
-695:         query: str,
-696:         *,
-697:         namespace: str | UUID | None = None,
-698:         limit: int = 10,
-699:     ) -> list[Entity]:
-700:         """Search entities by query text using embedding similarity."""
-701: 
-702:     async def stats(
-703:         self,
-704:         *,
-705:         namespace: str | UUID | None = None,
-706:     ) -> Stats:
-707:         """Get document/chunk/entity/relationship counts."""
-708: 
-709:     async def list_entities(
-710:         self,
-711:         *,
-712:         namespace: str | UUID | None = None,
-713:         entity_type: str | None = None,
-714:         limit: int = 100,
-715:     ) -> list[Entity]:
-716:         """List entities in a namespace."""
-717: 
-718:     async def find_related_entities(
-719:         self,
-720:         entity_id: UUID,
-721:         *,
-722:         max_depth: int = 2,
-723:         limit: int = 20,
-724:     ) -> list[tuple[Entity, float]]:
-725:         """Find entities related to a given entity."""
-726: ```
-727: 
-728: ### Data Classes
-729: 
-730: ```python
-731: @dataclass
-732: class RememberResult:
-733:     """Result of a remember() operation."""
-734:     document_id: UUID
-735:     namespace_id: UUID
-736:     chunks_created: int
-737:     entities_extracted: int
-738:     relationships_created: int
-739:     metadata: dict[str, Any]
-740: 
-741: @dataclass
-742: class RecallResult:
-743:     """Result of a recall() operation."""
-744:     query: str
-745:     namespace_id: UUID
-746:     chunks: list[tuple[Chunk, float]]
-747:     entities: list[tuple[Entity, float]]
-748:     context_text: str
-749:     metadata: dict[str, Any]
-750: 
-751: @dataclass
-752: class BatchResult:
-753:     """Result of remember_batch() operation."""
-754:     total: int        # Total documents submitted
-755:     processed: int    # Successfully processed
-756:     skipped: int      # Skipped (duplicates)
-757:     failed: int       # Failed to process
-758:     chunks: int       # Total chunks created
-759:     entities: int     # Total entities extracted
-760:     relationships: int # Total relationships created
-761: 
-762: @dataclass
-763: class Stats:
-764:     """Namespace statistics from stats()."""
-765:     documents: int
-766:     chunks: int
-767:     entities: int
-768:     relationships: int
-769: ```
-770: 
-771: ### Search Modes
-772: 
-773: | Mode | Description |
-774: |------|-------------|
-775: | `VECTOR` | Semantic similarity search using embeddings |
-776: | `GRAPH` | Entity and relationship traversal |
-777: | `HYBRID` | Combined vector + graph + keyword with RRF fusion |
-778: | `ALL` | All sources (vector, graph, keyword) |
-779: 
-780: ### Entity Types
-781: 
-782: | Type | Description |
-783: |------|-------------|
-784: | `PERSON` | Individual people |
-785: | `ORGANIZATION` | Companies, institutions |
-786: | `LOCATION` | Places, addresses |
-787: | `CONCEPT` | Abstract ideas, theories |
-788: | `EVENT` | Occurrences, incidents |
-789: | `TECHNOLOGY` | Tools, platforms, languages |
-790: | `PRODUCT` | Goods, services |
-791: | `DOCUMENT` | Referenced documents |
-792: | `OTHER` | Uncategorized entities |
-793: 
-794: ### Deprecation Notices
-795: 
-796: The following properties emit `DeprecationWarning` and will be removed in a future version:
-797: 
-798: | Deprecated | Replacement |
-799: |------------|-------------|
-800: | `lake.storage` | Use `lake.get_document()`, `lake.list_documents()`, `lake.stats()` |
-801: | `lake.query_engine` | Use `lake.recall()` with `raw=True` for unprocessed search |
-802: 
-803: ---
-804: 
-805: ## License
-806: 
-807: Copyright (c) 2024-2025 Deyta. All rights reserved.
-````
-
-## File: src/khora/cli/__init__.py
+## File: src/khora/api/app.py
 ````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.1.0")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     else:
+ 86:         # If MemoryLake wasn't initialized, still shut down telemetry
+ 87:         from ..telemetry import shutdown_telemetry
+ 88: 
+ 89:         await shutdown_telemetry()
+ 90:     await close_db()
+ 91: 
+ 92: 
+ 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 94:     """Create and configure the FastAPI application.
+ 95: 
+ 96:     Args:
+ 97:         config: Optional application configuration
+ 98: 
+ 99:     Returns:
+100:         Configured FastAPI application
+101:     """
+102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+103:     from ..logging_config import setup_logging
+104: 
+105:     setup_logging(level="INFO")
+106: 
+107:     if config is None:
+108:         from ..config import load_config
+109: 
+110:         config = load_config()
+111: 
+112:     app = FastAPI(
+113:         title="Khora",
+114:         description="Deyta's memory lake and materialization of knowledge",
+115:         version="0.1.0",
+116:         lifespan=lifespan,
+117:         debug=config.debug,
+118:     )
+119: 
+120:     # Store config in app state
+121:     app.state.config = config
+122: 
+123:     # Configure CORS
+124:     app.add_middleware(
+125:         CORSMiddleware,
+126:         allow_origins=["*"] if config.debug else [],
+127:         allow_credentials=True,
+128:         allow_methods=["*"],
+129:         allow_headers=["*"],
+130:     )
+131: 
+132:     # Add request logging
+133:     app.add_middleware(LoggingMiddleware)
+134: 
+135:     # Register routes
+136:     # Status endpoint is public (no auth)
+137:     app.include_router(status.router, tags=["status"])
+138: 
+139:     # Memory Lake API routes
+140:     app.include_router(memory.router)
+141:     app.include_router(namespaces.router)
+142:     app.include_router(sync.router)
+143: 
+144:     return app
 ````
 
 ## File: src/khora/core/models/entity.py
@@ -36692,239 +36929,6 @@ README.md
 234: 
 235:             return self.occurred_at + timedelta(seconds=self.duration_seconds)
 236:         return None
-````
-
-## File: tests/unit/test_api.py
-````python
- 1: """Tests for API module."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
- 7: 
- 8: 
- 9: @pytest.mark.unit
-10: class TestStatusEndpoints:
-11:     """Tests for status check endpoints."""
-12: 
-13:     def test_status_check(self, test_client: TestClient) -> None:
-14:         """Test basic status check endpoint."""
-15:         response = test_client.get("/status")
-16: 
-17:         assert response.status_code == 200
-18:         data = response.json()
-19:         assert data["status"] == "ok"
-20:         assert "timestamp" in data
-21:         assert data["version"] == "0.1.0"
-22:         assert data["service"] == "khora"
-23: 
-24:     def test_health_check(self, test_client: TestClient) -> None:
-25:         """Test health check endpoint."""
-26:         response = test_client.get("/health")
-27: 
-28:         assert response.status_code == 200
-29:         data = response.json()
-30:         assert data["status"] == "healthy"
-31:         assert "timestamp" in data
-32:         assert data["version"] == "0.1.0"
-33: 
-34:     def test_readiness_check(self, test_client: TestClient) -> None:
-35:         """Test readiness check endpoint."""
-36:         response = test_client.get("/health/ready")
-37: 
-38:         assert response.status_code == 200
-39:         data = response.json()
-40:         assert data["status"] in ["ready", "not_ready"]
-41:         assert "timestamp" in data
-42:         assert "checks" in data
-43: 
-44:     def test_liveness_check(self, test_client: TestClient) -> None:
-45:         """Test liveness check endpoint."""
-46:         response = test_client.get("/health/live")
-47: 
-48:         assert response.status_code == 200
-49:         data = response.json()
-50:         assert data["status"] == "alive"
-51:         assert "timestamp" in data
-52: 
-53: 
-54: @pytest.mark.unit
-55: class TestConfig:
-56:     """Tests for configuration."""
-57: 
-58:     def test_default_config(self) -> None:
-59:         """Test default configuration values."""
-60:         from khora.config import KhoraConfig
-61: 
-62:         config = KhoraConfig()
-63:         assert config.app_name == "khora"
-64:         assert config.environment == "development"
-65:         assert config.debug is False
-66:         assert config.api_host == "127.0.0.1"
-67:         assert config.api_port == 8000
-68:         assert config.auth_enabled is True
-69: 
-70:     def test_config_from_env(self, monkeypatch) -> None:
-71:         """Test configuration from environment variables."""
-72:         from khora.config import KhoraConfig
-73: 
-74:         monkeypatch.setenv("KHORA_DEBUG", "true")
-75:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-76:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-77: 
-78:         config = KhoraConfig()
-79:         assert config.debug is True
-80:         assert config.api_port == 9000
-81:         assert config.environment == "staging"
-````
-
-## File: src/khora/api/app.py
-````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     else:
- 86:         # If MemoryLake wasn't initialized, still shut down telemetry
- 87:         from ..telemetry import shutdown_telemetry
- 88: 
- 89:         await shutdown_telemetry()
- 90:     await close_db()
- 91: 
- 92: 
- 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 94:     """Create and configure the FastAPI application.
- 95: 
- 96:     Args:
- 97:         config: Optional application configuration
- 98: 
- 99:     Returns:
-100:         Configured FastAPI application
-101:     """
-102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
-103:     from ..logging_config import setup_logging
-104: 
-105:     setup_logging(level="INFO")
-106: 
-107:     if config is None:
-108:         from ..config import load_config
-109: 
-110:         config = load_config()
-111: 
-112:     app = FastAPI(
-113:         title="Khora",
-114:         description="Deyta's memory lake and materialization of knowledge",
-115:         version="0.1.0",
-116:         lifespan=lifespan,
-117:         debug=config.debug,
-118:     )
-119: 
-120:     # Store config in app state
-121:     app.state.config = config
-122: 
-123:     # Configure CORS
-124:     app.add_middleware(
-125:         CORSMiddleware,
-126:         allow_origins=["*"] if config.debug else [],
-127:         allow_credentials=True,
-128:         allow_methods=["*"],
-129:         allow_headers=["*"],
-130:     )
-131: 
-132:     # Add request logging
-133:     app.add_middleware(LoggingMiddleware)
-134: 
-135:     # Register routes
-136:     # Status endpoint is public (no auth)
-137:     app.include_router(status.router, tags=["status"])
-138: 
-139:     # Memory Lake API routes
-140:     app.include_router(memory.router)
-141:     app.include_router(namespaces.router)
-142:     app.include_router(sync.router)
-143: 
-144:     return app
 ````
 
 ## File: src/khora/extraction/expansion/expander.py
@@ -42865,41 +42869,38 @@ README.md
 503:         If using legacy config, builds a Neo4jConfig from the parsed URL.
 504:         """
 505:         graph = self.storage.graph
-506:         # If graph is None (not configured), return None
-507:         if graph is None:
-508:             return None
-509:         # If it's already set from new-style config with a URL, return as-is
-510:         if isinstance(graph, Neo4jConfig) and graph.url:
+506:         # If it's already set from new-style config with a URL, return as-is
+507:         if isinstance(graph, Neo4jConfig) and graph.url:
+508:             return graph
+509:         # If it's a non-Neo4j backend (Kuzu, Memgraph, etc.), return as-is
+510:         if graph is not None and not isinstance(graph, Neo4jConfig):
 511:             return graph
-512:         # If it's a non-Neo4j backend (Kuzu, Memgraph, etc.), return as-is
-513:         if not isinstance(graph, Neo4jConfig):
-514:             return graph
-515:         # It's a Neo4jConfig without URL - check legacy neo4j_url
-516:         neo4j_url = self.get_neo4j_url()
-517:         if neo4j_url:
-518:             return Neo4jConfig(
-519:                 url=neo4j_url,
-520:                 user=self.get_neo4j_user(),
-521:                 password=self.get_neo4j_password(),
-522:                 database=self.get_neo4j_database(),
-523:             )
-524:         # No URL configured - graph backend is disabled
-525:         return None
+512:         # Check legacy neo4j_url (covers both graph=None and Neo4jConfig without URL)
+513:         neo4j_url = self.get_neo4j_url()
+514:         if neo4j_url:
+515:             return Neo4jConfig(
+516:                 url=neo4j_url,
+517:                 user=self.get_neo4j_user(),
+518:                 password=self.get_neo4j_password(),
+519:                 database=self.get_neo4j_database(),
+520:             )
+521:         # No URL configured - graph backend is disabled
+522:         return None
+523: 
+524:     def get_vector_config(self) -> VectorConfig:
+525:         """Get the vector backend configuration.
 526: 
-527:     def get_vector_config(self) -> VectorConfig:
-528:         """Get the vector backend configuration.
-529: 
-530:         If using legacy config, builds a PgVectorConfig from the flat fields.
-531:         """
-532:         vector = self.storage.vector
-533:         if isinstance(vector, PgVectorConfig) and not vector.url:
-534:             # Populate from legacy fields
-535:             url = self.storage.pgvector_url or self.get_postgresql_url()
-536:             return PgVectorConfig(
-537:                 url=url,
-538:                 embedding_dimension=self.storage.embedding_dimension,
-539:             )
-540:         return vector
+527:         If using legacy config, builds a PgVectorConfig from the flat fields.
+528:         """
+529:         vector = self.storage.vector
+530:         if isinstance(vector, PgVectorConfig) and not vector.url:
+531:             # Populate from legacy fields
+532:             url = self.storage.pgvector_url or self.get_postgresql_url()
+533:             return PgVectorConfig(
+534:                 url=url,
+535:                 embedding_dimension=self.storage.embedding_dimension,
+536:             )
+537:         return vector
 ````
 
 ## File: CLAUDE.md
@@ -45199,7 +45200,7 @@ README.md
 40: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
 41: from .query import SearchMode
 42: 
-43: __version__ = "0.1.0"
+43: __version__ = "0.1.1"
 44: 
 45: __all__ = [
 46:     "main",
@@ -47309,7 +47310,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.1.0"
+  3: version = "0.1.1"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -47499,6 +47500,19 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-05 17:00:51 +0100
+**Message:** chore: bump version to 0.1.1
+
+**Files:**
+- pyproject.toml
+- src/khora/__init__.py
+
+## Commit: 2026-02-05 16:50:38 +0100
+**Message:** chore: update REPOMIX.md
+
+**Files:**
+- REPOMIX.md
+
 ## Commit: 2026-02-05 16:45:14 +0100
 **Message:** fix: make graph backend optional in StorageSettings
 
@@ -47685,20 +47699,3 @@ README.md
 
 **Files:**
 - src/khora/pipelines/flows/ingest.py
-
-## Commit: 2026-02-03 15:44:08 +0100
-**Message:** docs: update API documentation for simplified MemoryLake interface
-
-**Files:**
-- CLAUDE.md
-- README.md
-- REPOMIX.md
-
-## Commit: 2026-02-03 15:28:00 +0100
-**Message:** feat: redesign MemoryLake API for genuine simplicity
-
-**Files:**
-- REPOMIX.md
-- src/khora/__init__.py
-- src/khora/memory_lake.py
-- tests/unit/test_memory_lake.py

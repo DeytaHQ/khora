@@ -58,9 +58,9 @@ class TestStorageSettingsBackwardsCompat:
 
     def test_defaults(self):
         settings = StorageSettings()
-        assert isinstance(settings.graph, Neo4jConfig)
+        # Graph backend is optional - None by default
+        assert settings.graph is None
         assert isinstance(settings.vector, PgVectorConfig)
-        assert settings.graph.url is None
         assert settings.vector.url is None
 
 
