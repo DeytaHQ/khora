@@ -18,7 +18,7 @@ class TestStatusEndpoints:
         data = response.json()
         assert data["status"] == "ok"
         assert "timestamp" in data
-        assert data["version"] == "0.0.9"
+        assert data["version"] == "0.1.0"
         assert data["service"] == "khora"
 
     def test_health_check(self, test_client: TestClient) -> None:
@@ -29,7 +29,7 @@ class TestStatusEndpoints:
         data = response.json()
         assert data["status"] == "healthy"
         assert "timestamp" in data
-        assert data["version"] == "0.0.9"
+        assert data["version"] == "0.1.0"
 
     def test_readiness_check(self, test_client: TestClient) -> None:
         """Test readiness check endpoint."""

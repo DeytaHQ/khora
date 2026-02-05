@@ -1,6 +1,6 @@
 [project]
 name = "khora"
-version = "0.0.32"
+version = "0.1.0"
 description = "Khora is Memory Lake"
 readme = "README.md"
 authors = [
