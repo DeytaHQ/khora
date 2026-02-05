@@ -115,17 +115,25 @@ class StorageCoordinator:
         logger.info("Storage backends disconnected")
 
     async def health_check(self) -> StorageHealth:
-        """Check health of all backends."""
+        """Check health of all backends (parallel)."""
         health = StorageHealth()
 
+        # Build list of health check coroutines to run in parallel
+        checks: list[tuple[str, Any]] = []
         if self.relational:
-            health.relational = await self.relational.is_healthy()
+            checks.append(("relational", self.relational.is_healthy()))
         if self.vector:
-            health.vector = await self.vector.is_healthy()
+            checks.append(("vector", self.vector.is_healthy()))
         if self.graph:
-            health.graph = await self.graph.is_healthy()
+            checks.append(("graph", self.graph.is_healthy()))
         if self.event_store:
-            health.event_store = await self.event_store.is_healthy()
+            checks.append(("event_store", self.event_store.is_healthy()))
+
+        if checks:
+            results = await asyncio.gather(*[coro for _, coro in checks], return_exceptions=True)
+            for (name, _), result in zip(checks, results):
+                # Treat exceptions as unhealthy
+                setattr(health, name, result is True)
 
         return health
 
@@ -297,6 +305,22 @@ class StorageCoordinator:
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.get_document_by_checksum(namespace_id, checksum)
+
+    async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+        """Fetch documents by content checksums in a single query.
+
+        Used for batch deduplication to avoid N serial DB queries.
+
+        Args:
+            namespace_id: Namespace to search in
+            checksums: List of content checksums to look up
+
+        Returns:
+            Dictionary mapping checksum to Document (only for existing documents)
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_documents_by_checksums(namespace_id, checksums)
 
     # =========================================================================
     # Chunk operations (delegated to vector)

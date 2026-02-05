@@ -2307,65 +2307,82 @@ README.md
  4: 
  5: from abc import ABC, abstractmethod
  6: from dataclasses import dataclass, field
- 7: from typing import Any
+ 7: from typing import TYPE_CHECKING, Any
  8: 
- 9: 
-10: @dataclass
-11: class ChunkResult:
-12:     """Result of chunking a document."""
-13: 
-14:     content: str
-15:     index: int
-16:     start_char: int
-17:     end_char: int
-18:     token_count: int
-19:     metadata: dict[str, Any] = field(default_factory=dict)
-20: 
-21: 
-22: class Chunker(ABC):
-23:     """Abstract base class for text chunkers."""
-24: 
-25:     def __init__(self, *, chunk_size: int = 512, chunk_overlap: int = 50) -> None:
-26:         """Initialize the chunker.
+ 9: if TYPE_CHECKING:
+10:     import tiktoken as _tiktoken
+11: 
+12: # Module-level cached encoding to avoid repeated initialization
+13: _TIKTOKEN_ENCODING: _tiktoken.Encoding | None = None
+14: 
+15: 
+16: def _get_tiktoken_encoding() -> _tiktoken.Encoding | None:
+17:     """Get or create the cached tiktoken encoding."""
+18:     global _TIKTOKEN_ENCODING
+19:     if _TIKTOKEN_ENCODING is None:
+20:         try:
+21:             import tiktoken
+22: 
+23:             _TIKTOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
+24:         except ImportError:
+25:             pass
+26:     return _TIKTOKEN_ENCODING
 27: 
-28:         Args:
-29:             chunk_size: Target chunk size in tokens
-30:             chunk_overlap: Overlap between chunks in tokens
-31:         """
-32:         self.chunk_size = chunk_size
-33:         self.chunk_overlap = chunk_overlap
-34: 
-35:     @abstractmethod
-36:     def chunk(self, text: str) -> list[ChunkResult]:
-37:         """Split text into chunks.
-38: 
-39:         Args:
-40:             text: Text to chunk
-41: 
-42:         Returns:
-43:             List of ChunkResult objects
-44:         """
-45:         ...
+28: 
+29: @dataclass
+30: class ChunkResult:
+31:     """Result of chunking a document."""
+32: 
+33:     content: str
+34:     index: int
+35:     start_char: int
+36:     end_char: int
+37:     token_count: int
+38:     metadata: dict[str, Any] = field(default_factory=dict)
+39: 
+40: 
+41: class Chunker(ABC):
+42:     """Abstract base class for text chunkers."""
+43: 
+44:     def __init__(self, *, chunk_size: int = 512, chunk_overlap: int = 50) -> None:
+45:         """Initialize the chunker.
 46: 
-47:     def count_tokens(self, text: str) -> int:
-48:         """Count tokens in text.
-49: 
-50:         Uses tiktoken for accurate token counting.
-51: 
-52:         Args:
-53:             text: Text to count tokens in
-54: 
-55:         Returns:
-56:             Token count
-57:         """
-58:         try:
-59:             import tiktoken
-60: 
-61:             encoding = tiktoken.get_encoding("cl100k_base")
-62:             return len(encoding.encode(text))
-63:         except ImportError:
-64:             # Fallback: estimate ~4 chars per token
-65:             return len(text) // 4
+47:         Args:
+48:             chunk_size: Target chunk size in tokens
+49:             chunk_overlap: Overlap between chunks in tokens
+50:         """
+51:         self.chunk_size = chunk_size
+52:         self.chunk_overlap = chunk_overlap
+53:         # Cache encoding reference for this instance (avoids repeated global lookups)
+54:         self._encoding = _get_tiktoken_encoding()
+55: 
+56:     @abstractmethod
+57:     def chunk(self, text: str) -> list[ChunkResult]:
+58:         """Split text into chunks.
+59: 
+60:         Args:
+61:             text: Text to chunk
+62: 
+63:         Returns:
+64:             List of ChunkResult objects
+65:         """
+66:         ...
+67: 
+68:     def count_tokens(self, text: str) -> int:
+69:         """Count tokens in text.
+70: 
+71:         Uses tiktoken for accurate token counting.
+72: 
+73:         Args:
+74:             text: Text to count tokens in
+75: 
+76:         Returns:
+77:             Token count
+78:         """
+79:         if self._encoding is not None:
+80:             return len(self._encoding.encode(text))
+81:         # Fallback: estimate ~4 chars per token
+82:         return len(text) // 4
 ````
 
 ## File: src/khora/extraction/chunkers/fixed.py
@@ -2396,88 +2413,85 @@ README.md
  24:         if not text.strip():
  25:             return []
  26: 
- 27:         try:
- 28:             import tiktoken
- 29: 
- 30:             encoding = tiktoken.get_encoding("cl100k_base")
- 31:             tokens = encoding.encode(text)
- 32:         except ImportError:
- 33:             # Fallback: character-based chunking
- 34:             return self._chunk_by_chars(text)
- 35: 
- 36:         chunks = []
- 37:         start = 0
- 38:         chunk_index = 0
+ 27:         if self._encoding is None:
+ 28:             # Fallback: character-based chunking
+ 29:             return self._chunk_by_chars(text)
+ 30: 
+ 31:         tokens = self._encoding.encode(text)
+ 32: 
+ 33:         chunks = []
+ 34:         start = 0
+ 35:         chunk_index = 0
+ 36: 
+ 37:         while start < len(tokens):
+ 38:             end = min(start + self.chunk_size, len(tokens))
  39: 
- 40:         while start < len(tokens):
- 41:             end = min(start + self.chunk_size, len(tokens))
- 42: 
- 43:             # Get the chunk tokens
- 44:             chunk_tokens = tokens[start:end]
- 45:             chunk_text = encoding.decode(chunk_tokens)
- 46: 
- 47:             # Calculate character positions
- 48:             # This is approximate for token-based chunking
- 49:             if chunk_index == 0:
- 50:                 start_char = 0
- 51:             else:
- 52:                 start_char = text.find(chunk_text[:50])
- 53:                 if start_char == -1:
- 54:                     start_char = 0
- 55: 
- 56:             end_char = start_char + len(chunk_text)
- 57: 
- 58:             chunks.append(
- 59:                 ChunkResult(
- 60:                     content=chunk_text,
- 61:                     index=chunk_index,
- 62:                     start_char=start_char,
- 63:                     end_char=end_char,
- 64:                     token_count=len(chunk_tokens),
- 65:                 )
- 66:             )
- 67: 
- 68:             # Move start with overlap
- 69:             start = end - self.chunk_overlap if end < len(tokens) else end
- 70:             chunk_index += 1
- 71: 
- 72:         return chunks
- 73: 
- 74:     def _chunk_by_chars(self, text: str) -> list[ChunkResult]:
- 75:         """Fallback character-based chunking."""
- 76:         # Estimate chars per token (~4)
- 77:         chars_per_chunk = self.chunk_size * 4
- 78:         overlap_chars = self.chunk_overlap * 4
- 79: 
- 80:         chunks = []
- 81:         start = 0
- 82:         chunk_index = 0
+ 40:             # Get the chunk tokens
+ 41:             chunk_tokens = tokens[start:end]
+ 42:             chunk_text = self._encoding.decode(chunk_tokens)
+ 43: 
+ 44:             # Calculate character positions
+ 45:             # This is approximate for token-based chunking
+ 46:             if chunk_index == 0:
+ 47:                 start_char = 0
+ 48:             else:
+ 49:                 start_char = text.find(chunk_text[:50])
+ 50:                 if start_char == -1:
+ 51:                     start_char = 0
+ 52: 
+ 53:             end_char = start_char + len(chunk_text)
+ 54: 
+ 55:             chunks.append(
+ 56:                 ChunkResult(
+ 57:                     content=chunk_text,
+ 58:                     index=chunk_index,
+ 59:                     start_char=start_char,
+ 60:                     end_char=end_char,
+ 61:                     token_count=len(chunk_tokens),
+ 62:                 )
+ 63:             )
+ 64: 
+ 65:             # Move start with overlap
+ 66:             start = end - self.chunk_overlap if end < len(tokens) else end
+ 67:             chunk_index += 1
+ 68: 
+ 69:         return chunks
+ 70: 
+ 71:     def _chunk_by_chars(self, text: str) -> list[ChunkResult]:
+ 72:         """Fallback character-based chunking."""
+ 73:         # Estimate chars per token (~4)
+ 74:         chars_per_chunk = self.chunk_size * 4
+ 75:         overlap_chars = self.chunk_overlap * 4
+ 76: 
+ 77:         chunks = []
+ 78:         start = 0
+ 79:         chunk_index = 0
+ 80: 
+ 81:         while start < len(text):
+ 82:             end = min(start + chars_per_chunk, len(text))
  83: 
- 84:         while start < len(text):
- 85:             end = min(start + chars_per_chunk, len(text))
- 86: 
- 87:             # Try to break at word boundary
- 88:             if end < len(text):
- 89:                 space_pos = text.rfind(" ", start + chars_per_chunk // 2, end)
- 90:                 if space_pos > start:
- 91:                     end = space_pos
- 92: 
- 93:             chunk_text = text[start:end].strip()
- 94:             if chunk_text:
- 95:                 chunks.append(
- 96:                     ChunkResult(
- 97:                         content=chunk_text,
- 98:                         index=chunk_index,
- 99:                         start_char=start,
-100:                         end_char=end,
-101:                         token_count=len(chunk_text) // 4,
-102:                     )
-103:                 )
-104:                 chunk_index += 1
-105: 
-106:             start = end - overlap_chars if end < len(text) else end
-107: 
-108:         return chunks
+ 84:             # Try to break at word boundary
+ 85:             if end < len(text):
+ 86:                 space_pos = text.rfind(" ", start + chars_per_chunk // 2, end)
+ 87:                 if space_pos > start:
+ 88:                     end = space_pos
+ 89: 
+ 90:             chunk_text = text[start:end].strip()
+ 91:             if chunk_text:
+ 92:                 chunks.append(
+ 93:                     ChunkResult(
+ 94:                         content=chunk_text,
+ 95:                         index=chunk_index,
+ 96:                         start_char=start,
+ 97:                         end_char=end,
+ 98:                         token_count=len(chunk_text) // 4,
+ 99:                     )
+100:                 )
+101:                 chunk_index += 1
+102: 
+103:             start = end - overlap_chars if end < len(text) else end
+104: 
+105:         return chunks
 ````
 
 ## File: src/khora/extraction/chunkers/recursive.py
@@ -2616,39 +2630,36 @@ README.md
 132: 
 133:     def _get_overlap_text(self, text: str) -> str:
 134:         """Get the overlap portion from the end of text."""
-135:         try:
-136:             import tiktoken
+135:         if self._encoding is not None:
+136:             tokens = self._encoding.encode(text)
 137: 
-138:             encoding = tiktoken.get_encoding("cl100k_base")
-139:             tokens = encoding.encode(text)
+138:             if len(tokens) <= self.chunk_overlap:
+139:                 return text
 140: 
-141:             if len(tokens) <= self.chunk_overlap:
-142:                 return text
+141:             overlap_tokens = tokens[-self.chunk_overlap :]
+142:             return self._encoding.decode(overlap_tokens)
 143: 
-144:             overlap_tokens = tokens[-self.chunk_overlap :]
-145:             return encoding.decode(overlap_tokens)
-146:         except ImportError:
-147:             # Character-based fallback
-148:             overlap_chars = self.chunk_overlap * 4
-149:             return text[-overlap_chars:] if len(text) > overlap_chars else text
-150: 
-151:     def _create_chunk_result(self, content: str, index: int, original_text: str) -> ChunkResult:
-152:         """Create a ChunkResult with character positions."""
-153:         # Find position in original text
-154:         start_char = original_text.find(content)
-155:         if start_char == -1:
-156:             # Try with first 50 chars for partial match
-157:             start_char = original_text.find(content[:50]) if len(content) > 50 else 0
-158: 
-159:         end_char = start_char + len(content) if start_char >= 0 else len(content)
-160: 
-161:         return ChunkResult(
-162:             content=content,
-163:             index=index,
-164:             start_char=max(0, start_char),
-165:             end_char=end_char,
-166:             token_count=self.count_tokens(content),
-167:         )
+144:         # Character-based fallback
+145:         overlap_chars = self.chunk_overlap * 4
+146:         return text[-overlap_chars:] if len(text) > overlap_chars else text
+147: 
+148:     def _create_chunk_result(self, content: str, index: int, original_text: str) -> ChunkResult:
+149:         """Create a ChunkResult with character positions."""
+150:         # Find position in original text
+151:         start_char = original_text.find(content)
+152:         if start_char == -1:
+153:             # Try with first 50 chars for partial match
+154:             start_char = original_text.find(content[:50]) if len(content) > 50 else 0
+155: 
+156:         end_char = start_char + len(content) if start_char >= 0 else len(content)
+157: 
+158:         return ChunkResult(
+159:             content=content,
+160:             index=index,
+161:             start_char=max(0, start_char),
+162:             end_char=end_char,
+163:             token_count=self.count_tokens(content),
+164:         )
 ````
 
 ## File: src/khora/extraction/chunkers/semantic.py
@@ -2661,187 +2672,185 @@ README.md
   6: 
   7: from .base import Chunker, ChunkResult
   8: 
-  9: 
- 10: class SemanticChunker(Chunker):
- 11:     """Semantic chunker that respects document structure.
+  9: # Precompiled regex patterns for performance
+ 10: _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
+ 11: _SENTENCE_ENDINGS = re.compile(r"(?<=[.!?])\s+")
  12: 
- 13:     Attempts to split text at natural boundaries (paragraphs, sentences)
- 14:     while staying within token limits. Preserves semantic coherence.
- 15:     """
+ 13: 
+ 14: class SemanticChunker(Chunker):
+ 15:     """Semantic chunker that respects document structure.
  16: 
- 17:     def __init__(
- 18:         self,
- 19:         *,
- 20:         chunk_size: int = 512,
- 21:         chunk_overlap: int = 50,
- 22:         respect_sentences: bool = True,
- 23:         respect_paragraphs: bool = True,
- 24:     ) -> None:
- 25:         """Initialize the semantic chunker.
- 26: 
- 27:         Args:
- 28:             chunk_size: Target chunk size in tokens
- 29:             chunk_overlap: Overlap between chunks in tokens
- 30:             respect_sentences: Try to break at sentence boundaries
- 31:             respect_paragraphs: Try to break at paragraph boundaries
- 32:         """
- 33:         super().__init__(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
- 34:         self.respect_sentences = respect_sentences
- 35:         self.respect_paragraphs = respect_paragraphs
- 36: 
- 37:     def chunk(self, text: str) -> list[ChunkResult]:
- 38:         """Split text into semantic chunks.
- 39: 
- 40:         Args:
- 41:             text: Text to chunk
- 42: 
- 43:         Returns:
- 44:             List of ChunkResult objects
- 45:         """
- 46:         if not text.strip():
- 47:             return []
- 48: 
- 49:         # First split into paragraphs
- 50:         if self.respect_paragraphs:
- 51:             paragraphs = self._split_paragraphs(text)
- 52:         else:
- 53:             paragraphs = [text]
- 54: 
- 55:         # Build chunks from paragraphs
- 56:         chunks = []
- 57:         current_chunk = ""
- 58:         current_tokens = 0
- 59:         chunk_index = 0
- 60:         current_start = 0
- 61: 
- 62:         for para in paragraphs:
- 63:             para_tokens = self.count_tokens(para)
- 64: 
- 65:             # If paragraph fits in current chunk
- 66:             if current_tokens + para_tokens <= self.chunk_size:
- 67:                 if current_chunk:
- 68:                     current_chunk += "\n\n" + para
- 69:                 else:
- 70:                     current_chunk = para
- 71:                 current_tokens += para_tokens
- 72:             else:
- 73:                 # Save current chunk if not empty
- 74:                 if current_chunk:
- 75:                     chunks.append(self._create_chunk_result(current_chunk, chunk_index, current_start, text))
- 76:                     chunk_index += 1
- 77: 
- 78:                 # Handle large paragraphs
- 79:                 if para_tokens > self.chunk_size:
- 80:                     # Split large paragraph into sentences
- 81:                     sub_chunks = self._split_large_paragraph(para)
- 82:                     for sub_chunk in sub_chunks:
- 83:                         chunks.append(self._create_chunk_result(sub_chunk, chunk_index, current_start, text))
- 84:                         chunk_index += 1
- 85:                     current_chunk = ""
- 86:                     current_tokens = 0
- 87:                 else:
- 88:                     current_chunk = para
- 89:                     current_tokens = para_tokens
- 90: 
- 91:                 current_start = text.find(current_chunk) if current_chunk else current_start
- 92: 
- 93:         # Don't forget the last chunk
- 94:         if current_chunk:
- 95:             chunks.append(self._create_chunk_result(current_chunk, chunk_index, current_start, text))
+ 17:     Attempts to split text at natural boundaries (paragraphs, sentences)
+ 18:     while staying within token limits. Preserves semantic coherence.
+ 19:     """
+ 20: 
+ 21:     def __init__(
+ 22:         self,
+ 23:         *,
+ 24:         chunk_size: int = 512,
+ 25:         chunk_overlap: int = 50,
+ 26:         respect_sentences: bool = True,
+ 27:         respect_paragraphs: bool = True,
+ 28:     ) -> None:
+ 29:         """Initialize the semantic chunker.
+ 30: 
+ 31:         Args:
+ 32:             chunk_size: Target chunk size in tokens
+ 33:             chunk_overlap: Overlap between chunks in tokens
+ 34:             respect_sentences: Try to break at sentence boundaries
+ 35:             respect_paragraphs: Try to break at paragraph boundaries
+ 36:         """
+ 37:         super().__init__(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+ 38:         self.respect_sentences = respect_sentences
+ 39:         self.respect_paragraphs = respect_paragraphs
+ 40: 
+ 41:     def chunk(self, text: str) -> list[ChunkResult]:
+ 42:         """Split text into semantic chunks.
+ 43: 
+ 44:         Args:
+ 45:             text: Text to chunk
+ 46: 
+ 47:         Returns:
+ 48:             List of ChunkResult objects
+ 49:         """
+ 50:         if not text.strip():
+ 51:             return []
+ 52: 
+ 53:         # First split into paragraphs
+ 54:         if self.respect_paragraphs:
+ 55:             paragraphs = self._split_paragraphs(text)
+ 56:         else:
+ 57:             paragraphs = [text]
+ 58: 
+ 59:         # Build chunks from paragraphs
+ 60:         chunks = []
+ 61:         current_chunk = ""
+ 62:         current_tokens = 0
+ 63:         chunk_index = 0
+ 64:         current_start = 0
+ 65: 
+ 66:         for para in paragraphs:
+ 67:             para_tokens = self.count_tokens(para)
+ 68: 
+ 69:             # If paragraph fits in current chunk
+ 70:             if current_tokens + para_tokens <= self.chunk_size:
+ 71:                 if current_chunk:
+ 72:                     current_chunk += "\n\n" + para
+ 73:                 else:
+ 74:                     current_chunk = para
+ 75:                 current_tokens += para_tokens
+ 76:             else:
+ 77:                 # Save current chunk if not empty
+ 78:                 if current_chunk:
+ 79:                     chunks.append(self._create_chunk_result(current_chunk, chunk_index, current_start, text))
+ 80:                     chunk_index += 1
+ 81: 
+ 82:                 # Handle large paragraphs
+ 83:                 if para_tokens > self.chunk_size:
+ 84:                     # Split large paragraph into sentences
+ 85:                     sub_chunks = self._split_large_paragraph(para)
+ 86:                     for sub_chunk in sub_chunks:
+ 87:                         chunks.append(self._create_chunk_result(sub_chunk, chunk_index, current_start, text))
+ 88:                         chunk_index += 1
+ 89:                     current_chunk = ""
+ 90:                     current_tokens = 0
+ 91:                 else:
+ 92:                     current_chunk = para
+ 93:                     current_tokens = para_tokens
+ 94: 
+ 95:                 current_start = text.find(current_chunk) if current_chunk else current_start
  96: 
- 97:         return chunks
- 98: 
- 99:     def _split_paragraphs(self, text: str) -> list[str]:
-100:         """Split text into paragraphs."""
-101:         # Split on double newlines or multiple newlines
-102:         paragraphs = re.split(r"\n\s*\n", text)
-103:         return [p.strip() for p in paragraphs if p.strip()]
-104: 
-105:     def _split_large_paragraph(self, para: str) -> list[str]:
-106:         """Split a large paragraph that exceeds chunk size."""
-107:         if not self.respect_sentences:
-108:             # Fall back to fixed chunking
-109:             return self._fixed_split(para)
-110: 
-111:         # Split into sentences
-112:         sentences = self._split_sentences(para)
-113: 
-114:         chunks = []
-115:         current_chunk = ""
-116:         current_tokens = 0
+ 97:         # Don't forget the last chunk
+ 98:         if current_chunk:
+ 99:             chunks.append(self._create_chunk_result(current_chunk, chunk_index, current_start, text))
+100: 
+101:         return chunks
+102: 
+103:     def _split_paragraphs(self, text: str) -> list[str]:
+104:         """Split text into paragraphs."""
+105:         # Split on double newlines or multiple newlines
+106:         paragraphs = _PARAGRAPH_SPLIT.split(text)
+107:         return [p.strip() for p in paragraphs if p.strip()]
+108: 
+109:     def _split_large_paragraph(self, para: str) -> list[str]:
+110:         """Split a large paragraph that exceeds chunk size."""
+111:         if not self.respect_sentences:
+112:             # Fall back to fixed chunking
+113:             return self._fixed_split(para)
+114: 
+115:         # Split into sentences
+116:         sentences = self._split_sentences(para)
 117: 
-118:         for sentence in sentences:
-119:             sentence_tokens = self.count_tokens(sentence)
-120: 
-121:             if current_tokens + sentence_tokens <= self.chunk_size:
-122:                 current_chunk = (current_chunk + " " + sentence).strip()
-123:                 current_tokens += sentence_tokens
-124:             else:
-125:                 if current_chunk:
-126:                     chunks.append(current_chunk)
-127: 
-128:                 # Handle sentences larger than chunk_size
-129:                 if sentence_tokens > self.chunk_size:
-130:                     chunks.extend(self._fixed_split(sentence))
-131:                     current_chunk = ""
-132:                     current_tokens = 0
-133:                 else:
-134:                     current_chunk = sentence
-135:                     current_tokens = sentence_tokens
-136: 
-137:         if current_chunk:
-138:             chunks.append(current_chunk)
-139: 
-140:         return chunks
-141: 
-142:     def _split_sentences(self, text: str) -> list[str]:
-143:         """Split text into sentences."""
-144:         # Simple sentence splitting - handles common cases
-145:         # Could be improved with nltk or spacy for better accuracy
-146:         sentence_endings = r"(?<=[.!?])\s+"
-147:         sentences = re.split(sentence_endings, text)
-148:         return [s.strip() for s in sentences if s.strip()]
-149: 
-150:     def _fixed_split(self, text: str) -> list[str]:
-151:         """Fixed-size split for text that can't be split semantically."""
-152:         try:
-153:             import tiktoken
-154: 
-155:             encoding = tiktoken.get_encoding("cl100k_base")
-156:             tokens = encoding.encode(text)
-157:         except ImportError:
-158:             # Character-based fallback
-159:             chars_per_chunk = self.chunk_size * 4
-160:             return [
-161:                 text[i : i + chars_per_chunk] for i in range(0, len(text), chars_per_chunk - self.chunk_overlap * 4)
-162:             ]
-163: 
-164:         chunks = []
-165:         start = 0
-166:         while start < len(tokens):
-167:             end = min(start + self.chunk_size, len(tokens))
-168:             chunk_tokens = tokens[start:end]
-169:             chunks.append(encoding.decode(chunk_tokens))
-170:             start = end - self.chunk_overlap if end < len(tokens) else end
+118:         chunks = []
+119:         current_chunk = ""
+120:         current_tokens = 0
+121: 
+122:         for sentence in sentences:
+123:             sentence_tokens = self.count_tokens(sentence)
+124: 
+125:             if current_tokens + sentence_tokens <= self.chunk_size:
+126:                 current_chunk = (current_chunk + " " + sentence).strip()
+127:                 current_tokens += sentence_tokens
+128:             else:
+129:                 if current_chunk:
+130:                     chunks.append(current_chunk)
+131: 
+132:                 # Handle sentences larger than chunk_size
+133:                 if sentence_tokens > self.chunk_size:
+134:                     chunks.extend(self._fixed_split(sentence))
+135:                     current_chunk = ""
+136:                     current_tokens = 0
+137:                 else:
+138:                     current_chunk = sentence
+139:                     current_tokens = sentence_tokens
+140: 
+141:         if current_chunk:
+142:             chunks.append(current_chunk)
+143: 
+144:         return chunks
+145: 
+146:     def _split_sentences(self, text: str) -> list[str]:
+147:         """Split text into sentences."""
+148:         # Simple sentence splitting - handles common cases
+149:         # Could be improved with nltk or spacy for better accuracy
+150:         sentences = _SENTENCE_ENDINGS.split(text)
+151:         return [s.strip() for s in sentences if s.strip()]
+152: 
+153:     def _fixed_split(self, text: str) -> list[str]:
+154:         """Fixed-size split for text that can't be split semantically."""
+155:         if self._encoding is not None:
+156:             tokens = self._encoding.encode(text)
+157: 
+158:             chunks = []
+159:             start = 0
+160:             while start < len(tokens):
+161:                 end = min(start + self.chunk_size, len(tokens))
+162:                 chunk_tokens = tokens[start:end]
+163:                 chunks.append(self._encoding.decode(chunk_tokens))
+164:                 start = end - self.chunk_overlap if end < len(tokens) else end
+165: 
+166:             return chunks
+167: 
+168:         # Character-based fallback
+169:         chars_per_chunk = self.chunk_size * 4
+170:         return [text[i : i + chars_per_chunk] for i in range(0, len(text), chars_per_chunk - self.chunk_overlap * 4)]
 171: 
-172:         return chunks
-173: 
-174:     def _create_chunk_result(self, content: str, index: int, hint_start: int, full_text: str) -> ChunkResult:
-175:         """Create a ChunkResult with proper character positions."""
-176:         # Find actual position in text
-177:         start_char = full_text.find(content, max(0, hint_start - 100))
-178:         if start_char == -1:
-179:             start_char = hint_start
+172:     def _create_chunk_result(self, content: str, index: int, hint_start: int, full_text: str) -> ChunkResult:
+173:         """Create a ChunkResult with proper character positions."""
+174:         # Find actual position in text
+175:         start_char = full_text.find(content, max(0, hint_start - 100))
+176:         if start_char == -1:
+177:             start_char = hint_start
+178: 
+179:         end_char = start_char + len(content)
 180: 
-181:         end_char = start_char + len(content)
-182: 
-183:         return ChunkResult(
-184:             content=content,
-185:             index=index,
-186:             start_char=start_char,
-187:             end_char=end_char,
-188:             token_count=self.count_tokens(content),
-189:         )
+181:         return ChunkResult(
+182:             content=content,
+183:             index=index,
+184:             start_char=start_char,
+185:             end_char=end_char,
+186:             token_count=self.count_tokens(content),
+187:         )
 ````
 
 ## File: src/khora/extraction/embedders/__init__.py
@@ -14882,67 +14891,92 @@ README.md
 516:             models = result.scalars().all()
 517:             return {UUID(m.id): self._document_model_to_domain(m) for m in models}
 518: 
-519:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
-520:         """Convert DocumentModel to domain Document."""
-521:         return Document(
-522:             id=UUID(model.id),
-523:             namespace_id=UUID(model.namespace_id),
-524:             content=model.content,
-525:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
-526:             metadata=DocumentMetadata(
-527:                 source=model.source,
-528:                 source_type=model.source_type,
-529:                 content_type=model.content_type,
-530:                 title=model.title,
-531:                 author=model.author,
-532:                 language=model.language,
-533:                 checksum=model.checksum,
-534:                 size_bytes=model.size_bytes,
-535:                 custom=model.metadata_,
-536:             ),
-537:             chunk_count=model.chunk_count,
-538:             entity_count=model.entity_count,
-539:             error_message=model.error_message,
-540:             created_at=model.created_at,
-541:             updated_at=model.updated_at,
-542:             processed_at=model.processed_at,
-543:         )
-544: 
-545:     # =========================================================================
-546:     # Sync checkpoint operations
-547:     # =========================================================================
-548: 
-549:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-550:         """Get the last sync checkpoint for a source."""
-551:         async with self._get_session() as session:
-552:             result = await session.execute(
-553:                 select(SyncCheckpointModel).where(
-554:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-555:                 )
-556:             )
-557:             model = result.scalar_one_or_none()
-558:             return model.checkpoint if model else None
-559: 
-560:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-561:         """Set the sync checkpoint for a source."""
-562:         async with self._get_session() as session:
-563:             result = await session.execute(
-564:                 select(SyncCheckpointModel).where(
-565:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
-566:                 )
-567:             )
-568:             model = result.scalar_one_or_none()
-569:             if model:
-570:                 model.checkpoint = checkpoint
-571:                 model.updated_at = datetime.now(UTC)
-572:             else:
-573:                 model = SyncCheckpointModel(
-574:                     namespace_id=str(namespace_id),
-575:                     source=source,
-576:                     checkpoint=checkpoint,
-577:                 )
-578:                 session.add(model)
-579:             await session.commit()
+519:     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+520:         """Fetch documents by content checksums in a single query.
+521: 
+522:         Used for batch deduplication to avoid N serial DB queries.
+523: 
+524:         Args:
+525:             namespace_id: Namespace to search in
+526:             checksums: List of content checksums to look up
+527: 
+528:         Returns:
+529:             Dictionary mapping checksum to Document (only for existing documents)
+530:         """
+531:         if not checksums:
+532:             return {}
+533: 
+534:         async with self._get_session() as session:
+535:             result = await session.execute(
+536:                 select(DocumentModel).where(
+537:                     DocumentModel.namespace_id == str(namespace_id),
+538:                     DocumentModel.checksum.in_(checksums),
+539:                 )
+540:             )
+541:             models = result.scalars().all()
+542:             return {m.checksum: self._document_model_to_domain(m) for m in models}
+543: 
+544:     def _document_model_to_domain(self, model: DocumentModel) -> Document:
+545:         """Convert DocumentModel to domain Document."""
+546:         return Document(
+547:             id=UUID(model.id),
+548:             namespace_id=UUID(model.namespace_id),
+549:             content=model.content,
+550:             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
+551:             metadata=DocumentMetadata(
+552:                 source=model.source,
+553:                 source_type=model.source_type,
+554:                 content_type=model.content_type,
+555:                 title=model.title,
+556:                 author=model.author,
+557:                 language=model.language,
+558:                 checksum=model.checksum,
+559:                 size_bytes=model.size_bytes,
+560:                 custom=model.metadata_,
+561:             ),
+562:             chunk_count=model.chunk_count,
+563:             entity_count=model.entity_count,
+564:             error_message=model.error_message,
+565:             created_at=model.created_at,
+566:             updated_at=model.updated_at,
+567:             processed_at=model.processed_at,
+568:         )
+569: 
+570:     # =========================================================================
+571:     # Sync checkpoint operations
+572:     # =========================================================================
+573: 
+574:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+575:         """Get the last sync checkpoint for a source."""
+576:         async with self._get_session() as session:
+577:             result = await session.execute(
+578:                 select(SyncCheckpointModel).where(
+579:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+580:                 )
+581:             )
+582:             model = result.scalar_one_or_none()
+583:             return model.checkpoint if model else None
+584: 
+585:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+586:         """Set the sync checkpoint for a source."""
+587:         async with self._get_session() as session:
+588:             result = await session.execute(
+589:                 select(SyncCheckpointModel).where(
+590:                     SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+591:                 )
+592:             )
+593:             model = result.scalar_one_or_none()
+594:             if model:
+595:                 model.checkpoint = checkpoint
+596:                 model.updated_at = datetime.now(UTC)
+597:             else:
+598:                 model = SyncCheckpointModel(
+599:                     namespace_id=str(namespace_id),
+600:                     source=source,
+601:                     checkpoint=checkpoint,
+602:                 )
+603:                 session.add(model)
+604:             await session.commit()
 ````
 
 ## File: src/khora/storage/optimize.py
@@ -32883,618 +32917,627 @@ README.md
 295:         )
 296:         chunker = create_chunker(chunker_config)
 297: 
-298:         # Chunk the document
-299:         raw_chunks = chunker.chunk(document.content)
-300: 
-301:         if not raw_chunks:
-302:             # Mark document as processed with 0 chunks
-303:             document.mark_completed(0, 0)
-304:             await storage.update_document(document)
-305:             return 0, 0, 0
-306: 
-307:         # Embed chunks in batch
-308:         chunk_texts = [c.content for c in raw_chunks]
-309:         embeddings = await embedder.embed_batch(chunk_texts)
-310: 
-311:         # Extract metadata for filtering (source_system, author, channel, etc.)
-312:         doc_metadata = document.metadata.custom if document.metadata else {}
-313: 
-314:         # Create temporal chunks
-315:         temporal_chunks = []
-316:         for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-317:             temporal_chunk = TemporalChunk(
-318:                 id=None,  # Will be assigned
-319:                 namespace_id=document.namespace_id,
-320:                 document_id=document.id,
-321:                 content=raw_chunk.content,
-322:                 embedding=embedding,
-323:                 occurred_at=occurred_at,
-324:                 created_at=datetime.now(UTC),
-325:                 source_system=doc_metadata.get("source_system"),
-326:                 author=doc_metadata.get("author"),
-327:                 channel=doc_metadata.get("channel"),
-328:                 tags=doc_metadata.get("tags", []),
-329:                 confidence=1.0,
-330:                 metadata={
-331:                     "chunk_index": i,
-332:                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-333:                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-334:                 },
-335:             )
-336:             temporal_chunks.append(temporal_chunk)
-337: 
-338:         # Store in temporal store
-339:         stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-340: 
-341:         # Update document status
-342:         document.mark_completed(len(stored_chunks), 0)
-343:         await storage.update_document(document)
-344: 
-345:         logger.debug(f"Processed document {document.id}: {len(stored_chunks)} chunks")
-346: 
-347:         return len(stored_chunks), 0, 0
-348: 
-349:     async def recall(
-350:         self,
-351:         query: str,
-352:         namespace_id: UUID,
-353:         *,
-354:         limit: int = 10,
-355:         mode: SearchMode = SearchMode.HYBRID,
-356:         min_similarity: float = 0.0,
-357:         agentic: bool = False,
-358:         raw: bool = False,
-359:         # Khora-specific parameters
-360:         temporal_filter: TemporalFilter | None = None,
-361:         temporal_reference: datetime | None = None,
-362:         hybrid_alpha: float | None = None,
-363:         filters: dict[str, Any] | None = None,
-364:     ) -> RecallResult:
-365:         """Recall memories relevant to a query.
-366: 
-367:         Args:
-368:             query: Query text
-369:             namespace_id: Namespace to search
-370:             limit: Maximum number of results
-371:             mode: Search mode (VECTOR, KEYWORD, HYBRID)
-372:             min_similarity: Minimum similarity threshold
-373:             agentic: Whether to use agentic mode
-374:             raw: Disable all LLM features
-375:             temporal_filter: Structured temporal filter
-376:             temporal_reference: Reference point for relative time (e.g., message timestamp)
-377:             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
-378:             filters: Additional structured filters (converted to TemporalFilter)
-379: 
-380:         Returns:
-381:             RecallResult with chunks and context
-382:         """
-383:         embedder = self._get_embedder()
-384:         temporal_store = self._get_temporal_store()
-385: 
-386:         # Embed the query
-387:         query_embedding = await embedder.embed(query)
-388: 
-389:         # Build temporal filter from filters dict if provided
-390:         if filters and not temporal_filter:
-391:             temporal_filter = self._build_temporal_filter_from_dict(filters)
-392: 
-393:         # Handle relative time references
-394:         if temporal_reference and temporal_filter:
-395:             temporal_filter = self._adjust_relative_time(temporal_filter, temporal_reference)
-396: 
-397:         # Determine hybrid alpha based on mode
-398:         if hybrid_alpha is None:
-399:             if mode == SearchMode.VECTOR:
-400:                 hybrid_alpha = 1.0  # Pure vector
-401:             elif mode == SearchMode.KEYWORD:
-402:                 hybrid_alpha = 0.0  # Pure BM25
-403:             else:  # HYBRID
-404:                 hybrid_alpha = 0.7  # Default blend
-405: 
-406:         # Perform search
-407:         results = await temporal_store.search(
-408:             namespace_id,
-409:             query_embedding,
-410:             limit=limit,
-411:             min_similarity=min_similarity,
-412:             temporal_filter=temporal_filter,
-413:             hybrid_alpha=hybrid_alpha,
-414:             query_text=query,
-415:         )
-416: 
-417:         # Build context text
-418:         context_parts = []
-419:         chunks_with_scores = []
-420:         for result in results:
-421:             context_parts.append(result.chunk.content)
-422:             # Convert TemporalChunk to a simple dict for RecallResult
-423:             chunk_dict = {
-424:                 "id": result.chunk.id,
-425:                 "content": result.chunk.content,
-426:                 "document_id": result.chunk.document_id,
-427:                 "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
-428:                 "metadata": result.chunk.metadata,
-429:             }
-430:             chunks_with_scores.append((chunk_dict, result.combined_score or result.similarity))
-431: 
-432:         context_text = "\n\n---\n\n".join(context_parts[:limit])
-433: 
-434:         return RecallResult(
-435:             query=query,
-436:             namespace_id=namespace_id,
-437:             chunks=chunks_with_scores,
-438:             entities=[],  # Khora engine focuses on chunks, not entities
-439:             context_text=context_text,
-440:             metadata={
-441:                 "backend": self._backend_type,
-442:                 "hybrid_alpha": hybrid_alpha,
-443:                 "temporal_filter": str(temporal_filter) if temporal_filter else None,
-444:             },
-445:         )
-446: 
-447:     def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> TemporalFilter:
-448:         """Convert a filters dict to a TemporalFilter.
-449: 
-450:         Example:
-451:             filters = {
-452:                 "occurred_at": {"gte": "2024-01-01", "lt": "2024-02-01"},
-453:                 "author": {"eq": "alice"},
-454:                 "source_system": {"eq": "slack"},
-455:             }
-456:         """
-457: 
-458:         tf = TemporalFilter()
-459: 
-460:         for key, value in filters.items():
-461:             if not isinstance(value, dict):
-462:                 value = {"eq": value}
-463: 
-464:             if key == "occurred_at":
-465:                 if "gte" in value:
-466:                     tf.occurred_after = self._parse_datetime(value["gte"])
-467:                 if "gt" in value:
-468:                     tf.occurred_after = self._parse_datetime(value["gt"])
-469:                 if "lt" in value:
-470:                     tf.occurred_before = self._parse_datetime(value["lt"])
-471:                 if "lte" in value:
-472:                     tf.occurred_before = self._parse_datetime(value["lte"])
-473:             elif key == "created_at":
-474:                 if "gte" in value:
-475:                     tf.created_after = self._parse_datetime(value["gte"])
-476:                 if "gt" in value:
-477:                     tf.created_after = self._parse_datetime(value["gt"])
-478:                 if "lt" in value:
-479:                     tf.created_before = self._parse_datetime(value["lt"])
-480:                 if "lte" in value:
-481:                     tf.created_before = self._parse_datetime(value["lte"])
-482:             elif key == "source_system":
-483:                 tf.source_system = value.get(
-484:                     "eq", value.get("in", [None])[0] if isinstance(value.get("in"), list) else None
-485:                 )
-486:             elif key == "author":
-487:                 tf.author = value.get("eq")
-488:             elif key == "channel":
-489:                 tf.channel = value.get("eq")
-490:             elif key == "tags":
-491:                 if "contains" in value:
-492:                     tf.tags = value["contains"]
-493:                 elif "eq" in value:
-494:                     tf.tags = [value["eq"]] if isinstance(value["eq"], str) else value["eq"]
-495:             else:
-496:                 tf.additional[key] = value
-497: 
-498:         return tf
-499: 
-500:     def _parse_datetime(self, value: Any) -> datetime:
-501:         """Parse a datetime value from various formats."""
-502:         if isinstance(value, datetime):
-503:             if value.tzinfo is None:
-504:                 return value.replace(tzinfo=UTC)
-505:             return value
-506:         if isinstance(value, str):
-507:             # Date only (try this first to avoid fromisoformat without tz)
-508:             try:
-509:                 return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
-510:             except ValueError:
-511:                 pass
-512:             # ISO format with timezone
-513:             try:
-514:                 dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-515:                 if dt.tzinfo is None:
-516:                     dt = dt.replace(tzinfo=UTC)
-517:                 return dt
-518:             except ValueError:
-519:                 pass
-520:         raise ValueError(f"Cannot parse datetime: {value}")
-521: 
-522:     def _adjust_relative_time(
-523:         self,
-524:         temporal_filter: TemporalFilter,
-525:         reference: datetime,
-526:     ) -> TemporalFilter:
-527:         """Adjust temporal filter for relative time references.
-528: 
-529:         This enables queries like "yesterday" to be relative to the message timestamp,
-530:         not the current time.
-531:         """
-532:         # If filter already has absolute times, don't adjust
-533:         # This is a placeholder for more sophisticated relative time handling
-534:         return temporal_filter
-535: 
-536:     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
-537:         """Remove a memory from the engine."""
-538:         storage = self._get_storage()
-539:         temporal_store = self._get_temporal_store()
-540: 
-541:         # Verify namespace if provided
-542:         if namespace_id:
-543:             document = await storage.get_document(document_id)
-544:             if document and document.namespace_id != namespace_id:
-545:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-546:                 return False
-547: 
-548:         # Delete from temporal store
-549:         ns_id = namespace_id or (await storage.get_document(document_id)).namespace_id
-550:         await temporal_store.delete_chunks_by_document(document_id, ns_id)
-551: 
-552:         # Delete from relational storage
-553:         return await storage.delete_document(document_id)
-554: 
-555:     async def remember_batch(
-556:         self,
-557:         documents: list[dict[str, Any]],
-558:         namespace_id: UUID,
-559:         *,
-560:         skill_name: str = "general_entities",
-561:         max_concurrent: int = 10,
-562:         deduplicate: bool = True,
-563:         infer_relationships: bool = False,  # Not used in Khora engine
-564:         on_progress: Callable[[int, int], None] | None = None,
-565:     ) -> BatchResult:
-566:         """Store multiple documents with automatic optimization.
-567: 
-568:         The Khora engine uses a simplified pipeline:
-569:         - Fast chunking without full entity extraction
-570:         - Batch embedding for cost efficiency
-571:         - Parallel processing with semaphore control
-572: 
-573:         Args:
-574:             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
-575:             namespace_id: Namespace to store documents in
-576:             skill_name: Extraction skill to use
-577:             max_concurrent: Maximum concurrent document processing (default 10)
-578:             deduplicate: Whether to skip duplicate documents
-579:             infer_relationships: Not used in Khora engine
-580:             on_progress: Callback for progress updates (completed, total)
-581: 
-582:         Returns:
-583:             BatchResult with processing statistics
-584:         """
-585:         if not documents:
-586:             return BatchResult(
-587:                 total=0,
-588:                 processed=0,
-589:                 skipped=0,
-590:                 failed=0,
-591:                 chunks=0,
-592:                 entities=0,
-593:                 relationships=0,
-594:             )
-595: 
-596:         storage = self._get_storage()
-597:         total = len(documents)
-598: 
-599:         # Track results with thread-safe counters
-600:         results: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "chunks": 0}
-601:         results_lock = asyncio.Lock()
-602:         progress_count = 0
-603:         progress_lock = asyncio.Lock()
-604: 
-605:         # For deduplication within the batch, track checksums we've started processing
-606:         checksums_in_flight: set[str] = set()
-607:         checksums_lock = asyncio.Lock()
-608: 
-609:         semaphore = asyncio.Semaphore(max_concurrent)
-610: 
-611:         async def process_document(doc_data: dict[str, Any]) -> None:
-612:             """Process a single document with semaphore control."""
-613:             nonlocal progress_count
-614: 
-615:             content = doc_data.get("content", "")
-616:             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+298:         # Chunk the document (run in thread to avoid blocking event loop during
+299:         # CPU-bound tiktoken operations)
+300:         raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
+301: 
+302:         if not raw_chunks:
+303:             # Mark document as processed with 0 chunks
+304:             document.mark_completed(0, 0)
+305:             await storage.update_document(document)
+306:             return 0, 0, 0
+307: 
+308:         # Embed chunks in batch
+309:         chunk_texts = [c.content for c in raw_chunks]
+310:         embeddings = await embedder.embed_batch(chunk_texts)
+311: 
+312:         # Extract metadata for filtering (source_system, author, channel, etc.)
+313:         doc_metadata = document.metadata.custom if document.metadata else {}
+314: 
+315:         # Create temporal chunks
+316:         temporal_chunks = []
+317:         for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+318:             temporal_chunk = TemporalChunk(
+319:                 id=None,  # Will be assigned
+320:                 namespace_id=document.namespace_id,
+321:                 document_id=document.id,
+322:                 content=raw_chunk.content,
+323:                 embedding=embedding,
+324:                 occurred_at=occurred_at,
+325:                 created_at=datetime.now(UTC),
+326:                 source_system=doc_metadata.get("source_system"),
+327:                 author=doc_metadata.get("author"),
+328:                 channel=doc_metadata.get("channel"),
+329:                 tags=doc_metadata.get("tags", []),
+330:                 confidence=1.0,
+331:                 metadata={
+332:                     "chunk_index": i,
+333:                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+334:                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+335:                 },
+336:             )
+337:             temporal_chunks.append(temporal_chunk)
+338: 
+339:         # Store in temporal store
+340:         stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+341: 
+342:         # Update document status
+343:         document.mark_completed(len(stored_chunks), 0)
+344:         await storage.update_document(document)
+345: 
+346:         logger.debug(f"Processed document {document.id}: {len(stored_chunks)} chunks")
+347: 
+348:         return len(stored_chunks), 0, 0
+349: 
+350:     async def recall(
+351:         self,
+352:         query: str,
+353:         namespace_id: UUID,
+354:         *,
+355:         limit: int = 10,
+356:         mode: SearchMode = SearchMode.HYBRID,
+357:         min_similarity: float = 0.0,
+358:         agentic: bool = False,
+359:         raw: bool = False,
+360:         # Khora-specific parameters
+361:         temporal_filter: TemporalFilter | None = None,
+362:         temporal_reference: datetime | None = None,
+363:         hybrid_alpha: float | None = None,
+364:         filters: dict[str, Any] | None = None,
+365:     ) -> RecallResult:
+366:         """Recall memories relevant to a query.
+367: 
+368:         Args:
+369:             query: Query text
+370:             namespace_id: Namespace to search
+371:             limit: Maximum number of results
+372:             mode: Search mode (VECTOR, KEYWORD, HYBRID)
+373:             min_similarity: Minimum similarity threshold
+374:             agentic: Whether to use agentic mode
+375:             raw: Disable all LLM features
+376:             temporal_filter: Structured temporal filter
+377:             temporal_reference: Reference point for relative time (e.g., message timestamp)
+378:             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
+379:             filters: Additional structured filters (converted to TemporalFilter)
+380: 
+381:         Returns:
+382:             RecallResult with chunks and context
+383:         """
+384:         embedder = self._get_embedder()
+385:         temporal_store = self._get_temporal_store()
+386: 
+387:         # Embed the query
+388:         query_embedding = await embedder.embed(query)
+389: 
+390:         # Build temporal filter from filters dict if provided
+391:         if filters and not temporal_filter:
+392:             temporal_filter = self._build_temporal_filter_from_dict(filters)
+393: 
+394:         # Handle relative time references
+395:         if temporal_reference and temporal_filter:
+396:             temporal_filter = self._adjust_relative_time(temporal_filter, temporal_reference)
+397: 
+398:         # Determine hybrid alpha based on mode
+399:         if hybrid_alpha is None:
+400:             if mode == SearchMode.VECTOR:
+401:                 hybrid_alpha = 1.0  # Pure vector
+402:             elif mode == SearchMode.KEYWORD:
+403:                 hybrid_alpha = 0.0  # Pure BM25
+404:             else:  # HYBRID
+405:                 hybrid_alpha = 0.7  # Default blend
+406: 
+407:         # Perform search
+408:         results = await temporal_store.search(
+409:             namespace_id,
+410:             query_embedding,
+411:             limit=limit,
+412:             min_similarity=min_similarity,
+413:             temporal_filter=temporal_filter,
+414:             hybrid_alpha=hybrid_alpha,
+415:             query_text=query,
+416:         )
+417: 
+418:         # Build context text
+419:         context_parts = []
+420:         chunks_with_scores = []
+421:         for result in results:
+422:             context_parts.append(result.chunk.content)
+423:             # Convert TemporalChunk to a simple dict for RecallResult
+424:             chunk_dict = {
+425:                 "id": result.chunk.id,
+426:                 "content": result.chunk.content,
+427:                 "document_id": result.chunk.document_id,
+428:                 "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
+429:                 "metadata": result.chunk.metadata,
+430:             }
+431:             chunks_with_scores.append((chunk_dict, result.combined_score or result.similarity))
+432: 
+433:         context_text = "\n\n---\n\n".join(context_parts[:limit])
+434: 
+435:         return RecallResult(
+436:             query=query,
+437:             namespace_id=namespace_id,
+438:             chunks=chunks_with_scores,
+439:             entities=[],  # Khora engine focuses on chunks, not entities
+440:             context_text=context_text,
+441:             metadata={
+442:                 "backend": self._backend_type,
+443:                 "hybrid_alpha": hybrid_alpha,
+444:                 "temporal_filter": str(temporal_filter) if temporal_filter else None,
+445:             },
+446:         )
+447: 
+448:     def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> TemporalFilter:
+449:         """Convert a filters dict to a TemporalFilter.
+450: 
+451:         Example:
+452:             filters = {
+453:                 "occurred_at": {"gte": "2024-01-01", "lt": "2024-02-01"},
+454:                 "author": {"eq": "alice"},
+455:                 "source_system": {"eq": "slack"},
+456:             }
+457:         """
+458: 
+459:         tf = TemporalFilter()
+460: 
+461:         for key, value in filters.items():
+462:             if not isinstance(value, dict):
+463:                 value = {"eq": value}
+464: 
+465:             if key == "occurred_at":
+466:                 if "gte" in value:
+467:                     tf.occurred_after = self._parse_datetime(value["gte"])
+468:                 if "gt" in value:
+469:                     tf.occurred_after = self._parse_datetime(value["gt"])
+470:                 if "lt" in value:
+471:                     tf.occurred_before = self._parse_datetime(value["lt"])
+472:                 if "lte" in value:
+473:                     tf.occurred_before = self._parse_datetime(value["lte"])
+474:             elif key == "created_at":
+475:                 if "gte" in value:
+476:                     tf.created_after = self._parse_datetime(value["gte"])
+477:                 if "gt" in value:
+478:                     tf.created_after = self._parse_datetime(value["gt"])
+479:                 if "lt" in value:
+480:                     tf.created_before = self._parse_datetime(value["lt"])
+481:                 if "lte" in value:
+482:                     tf.created_before = self._parse_datetime(value["lte"])
+483:             elif key == "source_system":
+484:                 tf.source_system = value.get(
+485:                     "eq", value.get("in", [None])[0] if isinstance(value.get("in"), list) else None
+486:                 )
+487:             elif key == "author":
+488:                 tf.author = value.get("eq")
+489:             elif key == "channel":
+490:                 tf.channel = value.get("eq")
+491:             elif key == "tags":
+492:                 if "contains" in value:
+493:                     tf.tags = value["contains"]
+494:                 elif "eq" in value:
+495:                     tf.tags = [value["eq"]] if isinstance(value["eq"], str) else value["eq"]
+496:             else:
+497:                 tf.additional[key] = value
+498: 
+499:         return tf
+500: 
+501:     def _parse_datetime(self, value: Any) -> datetime:
+502:         """Parse a datetime value from various formats."""
+503:         if isinstance(value, datetime):
+504:             if value.tzinfo is None:
+505:                 return value.replace(tzinfo=UTC)
+506:             return value
+507:         if isinstance(value, str):
+508:             # Date only (try this first to avoid fromisoformat without tz)
+509:             try:
+510:                 return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+511:             except ValueError:
+512:                 pass
+513:             # ISO format with timezone
+514:             try:
+515:                 dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+516:                 if dt.tzinfo is None:
+517:                     dt = dt.replace(tzinfo=UTC)
+518:                 return dt
+519:             except ValueError:
+520:                 pass
+521:         raise ValueError(f"Cannot parse datetime: {value}")
+522: 
+523:     def _adjust_relative_time(
+524:         self,
+525:         temporal_filter: TemporalFilter,
+526:         reference: datetime,
+527:     ) -> TemporalFilter:
+528:         """Adjust temporal filter for relative time references.
+529: 
+530:         This enables queries like "yesterday" to be relative to the message timestamp,
+531:         not the current time.
+532:         """
+533:         # If filter already has absolute times, don't adjust
+534:         # This is a placeholder for more sophisticated relative time handling
+535:         return temporal_filter
+536: 
+537:     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
+538:         """Remove a memory from the engine."""
+539:         storage = self._get_storage()
+540:         temporal_store = self._get_temporal_store()
+541: 
+542:         # Verify namespace if provided
+543:         if namespace_id:
+544:             document = await storage.get_document(document_id)
+545:             if document and document.namespace_id != namespace_id:
+546:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
+547:                 return False
+548: 
+549:         # Delete from temporal store
+550:         ns_id = namespace_id or (await storage.get_document(document_id)).namespace_id
+551:         await temporal_store.delete_chunks_by_document(document_id, ns_id)
+552: 
+553:         # Delete from relational storage
+554:         return await storage.delete_document(document_id)
+555: 
+556:     async def remember_batch(
+557:         self,
+558:         documents: list[dict[str, Any]],
+559:         namespace_id: UUID,
+560:         *,
+561:         skill_name: str = "general_entities",
+562:         max_concurrent: int = 10,
+563:         deduplicate: bool = True,
+564:         infer_relationships: bool = False,  # Not used in Khora engine
+565:         on_progress: Callable[[int, int], None] | None = None,
+566:     ) -> BatchResult:
+567:         """Store multiple documents with automatic optimization.
+568: 
+569:         The Khora engine uses a simplified pipeline:
+570:         - Fast chunking without full entity extraction
+571:         - Batch embedding for cost efficiency
+572:         - Parallel processing with semaphore control
+573: 
+574:         Args:
+575:             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
+576:             namespace_id: Namespace to store documents in
+577:             skill_name: Extraction skill to use
+578:             max_concurrent: Maximum concurrent document processing (default 10)
+579:             deduplicate: Whether to skip duplicate documents
+580:             infer_relationships: Not used in Khora engine
+581:             on_progress: Callback for progress updates (completed, total)
+582: 
+583:         Returns:
+584:             BatchResult with processing statistics
+585:         """
+586:         if not documents:
+587:             return BatchResult(
+588:                 total=0,
+589:                 processed=0,
+590:                 skipped=0,
+591:                 failed=0,
+592:                 chunks=0,
+593:                 entities=0,
+594:                 relationships=0,
+595:             )
+596: 
+597:         storage = self._get_storage()
+598:         total = len(documents)
+599: 
+600:         # Track results with thread-safe counters
+601:         results: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "chunks": 0}
+602:         results_lock = asyncio.Lock()
+603:         progress_count = 0
+604:         progress_lock = asyncio.Lock()
+605: 
+606:         # Compute checksums for all documents upfront
+607:         doc_checksums: list[str] = []
+608:         for doc_data in documents:
+609:             content = doc_data.get("content", "")
+610:             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+611:             doc_checksums.append(checksum)
+612: 
+613:         # Batch lookup existing documents by checksum (single query instead of N queries)
+614:         existing_docs: dict[str, Any] = {}
+615:         if deduplicate:
+616:             existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
 617: 
-618:             # Check for duplicate within the batch (before acquiring semaphore)
-619:             async with checksums_lock:
-620:                 if checksum in checksums_in_flight:
-621:                     async with results_lock:
-622:                         results["skipped"] += 1
-623:                     return
-624:                 checksums_in_flight.add(checksum)
-625: 
-626:             # Check for duplicate in storage (using efficient per-document lookup)
-627:             if deduplicate:
-628:                 existing = await storage.get_document_by_checksum(namespace_id, checksum)
-629:                 if existing:
-630:                     async with results_lock:
-631:                         results["skipped"] += 1
-632:                     # Update progress
-633:                     if on_progress:
-634:                         async with progress_lock:
-635:                             progress_count += 1
-636:                             on_progress(progress_count, total)
-637:                     return
-638: 
-639:             async with semaphore:
-640:                 try:
-641:                     # Extract occurred_at from metadata if present
-642:                     doc_metadata = doc_data.get("metadata", {})
-643:                     occurred_at = None
-644:                     if "occurred_at" in doc_metadata:
-645:                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+618:         # Track checksums we've started processing (for intra-batch deduplication)
+619:         checksums_in_flight: set[str] = set()
+620:         checksums_lock = asyncio.Lock()
+621: 
+622:         semaphore = asyncio.Semaphore(max_concurrent)
+623: 
+624:         async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
+625:             """Process a single document with semaphore control."""
+626:             nonlocal progress_count
+627: 
+628:             # Check for duplicate within the batch (before acquiring semaphore)
+629:             async with checksums_lock:
+630:                 if checksum in checksums_in_flight:
+631:                     async with results_lock:
+632:                         results["skipped"] += 1
+633:                     return
+634:                 checksums_in_flight.add(checksum)
+635: 
+636:             # Check if already exists in storage (using pre-fetched batch result)
+637:             if deduplicate and checksum in existing_docs:
+638:                 async with results_lock:
+639:                     results["skipped"] += 1
+640:                 # Update progress
+641:                 if on_progress:
+642:                     async with progress_lock:
+643:                         progress_count += 1
+644:                         on_progress(progress_count, total)
+645:                 return
 646: 
-647:                     result = await self.remember(
-648:                         content,
-649:                         namespace_id,
-650:                         title=doc_data.get("title", ""),
-651:                         source=doc_data.get("source", ""),
-652:                         metadata=doc_metadata,
-653:                         skill_name=skill_name,
-654:                         occurred_at=occurred_at,
-655:                     )
-656: 
-657:                     async with results_lock:
-658:                         if result.metadata.get("duplicate"):
-659:                             results["skipped"] += 1
-660:                         else:
-661:                             results["processed"] += 1
-662:                             results["chunks"] += result.chunks_created
-663: 
-664:                 except Exception as e:
-665:                     logger.error(f"Failed to process document: {e}")
+647:             async with semaphore:
+648:                 try:
+649:                     # Extract occurred_at from metadata if present
+650:                     doc_metadata = doc_data.get("metadata", {})
+651:                     occurred_at = None
+652:                     if "occurred_at" in doc_metadata:
+653:                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+654: 
+655:                     content = doc_data.get("content", "")
+656:                     result = await self.remember(
+657:                         content,
+658:                         namespace_id,
+659:                         title=doc_data.get("title", ""),
+660:                         source=doc_data.get("source", ""),
+661:                         metadata=doc_metadata,
+662:                         skill_name=skill_name,
+663:                         occurred_at=occurred_at,
+664:                     )
+665: 
 666:                     async with results_lock:
-667:                         results["failed"] += 1
-668: 
-669:             # Update progress
-670:             if on_progress:
-671:                 async with progress_lock:
-672:                     progress_count += 1
-673:                     on_progress(progress_count, total)
-674: 
-675:         # Process all documents concurrently with semaphore control
-676:         await asyncio.gather(*[process_document(doc) for doc in documents])
+667:                         if result.metadata.get("duplicate"):
+668:                             results["skipped"] += 1
+669:                         else:
+670:                             results["processed"] += 1
+671:                             results["chunks"] += result.chunks_created
+672: 
+673:                 except Exception as e:
+674:                     logger.error(f"Failed to process document: {e}")
+675:                     async with results_lock:
+676:                         results["failed"] += 1
 677: 
-678:         return BatchResult(
-679:             total=total,
-680:             processed=results["processed"],
-681:             skipped=results["skipped"],
-682:             failed=results["failed"],
-683:             chunks=results["chunks"],
-684:             entities=0,
-685:             relationships=0,
-686:         )
-687: 
-688:     # =========================================================================
-689:     # Namespace Management
-690:     # =========================================================================
-691: 
-692:     async def get_or_create_default_namespace(self) -> UUID:
-693:         """Get or create a default namespace for simple usage."""
-694:         if self._default_namespace_id:
-695:             return self._default_namespace_id
+678:             # Update progress
+679:             if on_progress:
+680:                 async with progress_lock:
+681:                     progress_count += 1
+682:                     on_progress(progress_count, total)
+683: 
+684:         # Process all documents concurrently with semaphore control
+685:         await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
+686: 
+687:         return BatchResult(
+688:             total=total,
+689:             processed=results["processed"],
+690:             skipped=results["skipped"],
+691:             failed=results["failed"],
+692:             chunks=results["chunks"],
+693:             entities=0,
+694:             relationships=0,
+695:         )
 696: 
-697:         storage = self._get_storage()
-698: 
-699:         # Try to find existing default namespace
-700:         default_org = await storage.get_organization_by_slug("default")
-701:         if not default_org:
-702:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
-703: 
-704:         workspaces = await storage.list_workspaces(default_org.id)
-705:         if workspaces:
-706:             default_workspace = workspaces[0]
-707:         else:
-708:             default_workspace = await storage.create_workspace(
-709:                 Workspace(
-710:                     organization_id=default_org.id,
-711:                     name="Default",
-712:                     slug="default",
-713:                 )
-714:             )
-715: 
-716:         namespaces = await storage.list_namespaces(default_workspace.id)
-717:         if namespaces:
-718:             default_namespace = namespaces[0]
-719:         else:
-720:             default_namespace = await storage.create_namespace(
-721:                 MemoryNamespace(
-722:                     workspace_id=default_workspace.id,
-723:                     name="Default",
-724:                     slug="default",
-725:                 )
-726:             )
-727: 
-728:         self._default_namespace_id = default_namespace.id
-729:         return self._default_namespace_id
-730: 
-731:     async def create_namespace(
-732:         self,
-733:         name: str,
-734:         workspace_id: UUID,
-735:         *,
-736:         description: str = "",
-737:         config_overrides: dict[str, Any] | None = None,
-738:     ) -> MemoryNamespace:
-739:         """Create a new memory namespace."""
-740:         namespace = MemoryNamespace(
-741:             workspace_id=workspace_id,
-742:             name=name,
-743:             description=description,
-744:             config_overrides=config_overrides or {},
-745:         )
-746:         return await self._get_storage().create_namespace(namespace)
-747: 
-748:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-749:         """Get a namespace by ID."""
-750:         return await self._get_storage().get_namespace(namespace_id)
-751: 
-752:     async def ensure_namespace(
-753:         self,
-754:         name: str,
-755:         *,
-756:         description: str = "",
-757:     ) -> UUID:
-758:         """Get or create a namespace by name."""
-759:         storage = self._get_storage()
+697:     # =========================================================================
+698:     # Namespace Management
+699:     # =========================================================================
+700: 
+701:     async def get_or_create_default_namespace(self) -> UUID:
+702:         """Get or create a default namespace for simple usage."""
+703:         if self._default_namespace_id:
+704:             return self._default_namespace_id
+705: 
+706:         storage = self._get_storage()
+707: 
+708:         # Try to find existing default namespace
+709:         default_org = await storage.get_organization_by_slug("default")
+710:         if not default_org:
+711:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
+712: 
+713:         workspaces = await storage.list_workspaces(default_org.id)
+714:         if workspaces:
+715:             default_workspace = workspaces[0]
+716:         else:
+717:             default_workspace = await storage.create_workspace(
+718:                 Workspace(
+719:                     organization_id=default_org.id,
+720:                     name="Default",
+721:                     slug="default",
+722:                 )
+723:             )
+724: 
+725:         namespaces = await storage.list_namespaces(default_workspace.id)
+726:         if namespaces:
+727:             default_namespace = namespaces[0]
+728:         else:
+729:             default_namespace = await storage.create_namespace(
+730:                 MemoryNamespace(
+731:                     workspace_id=default_workspace.id,
+732:                     name="Default",
+733:                     slug="default",
+734:                 )
+735:             )
+736: 
+737:         self._default_namespace_id = default_namespace.id
+738:         return self._default_namespace_id
+739: 
+740:     async def create_namespace(
+741:         self,
+742:         name: str,
+743:         workspace_id: UUID,
+744:         *,
+745:         description: str = "",
+746:         config_overrides: dict[str, Any] | None = None,
+747:     ) -> MemoryNamespace:
+748:         """Create a new memory namespace."""
+749:         namespace = MemoryNamespace(
+750:             workspace_id=workspace_id,
+751:             name=name,
+752:             description=description,
+753:             config_overrides=config_overrides or {},
+754:         )
+755:         return await self._get_storage().create_namespace(namespace)
+756: 
+757:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+758:         """Get a namespace by ID."""
+759:         return await self._get_storage().get_namespace(namespace_id)
 760: 
-761:         # Ensure default org/workspace exists
-762:         await self.get_or_create_default_namespace()
-763: 
-764:         # Get default workspace
-765:         default_org = await storage.get_organization_by_slug("default")
-766:         if not default_org:
-767:             raise RuntimeError("Default organization not found")
-768: 
-769:         workspaces = await storage.list_workspaces(default_org.id)
-770:         if not workspaces:
-771:             raise RuntimeError("Default workspace not found")
+761:     async def ensure_namespace(
+762:         self,
+763:         name: str,
+764:         *,
+765:         description: str = "",
+766:     ) -> UUID:
+767:         """Get or create a namespace by name."""
+768:         storage = self._get_storage()
+769: 
+770:         # Ensure default org/workspace exists
+771:         await self.get_or_create_default_namespace()
 772: 
-773:         default_workspace = workspaces[0]
-774: 
-775:         # Try to find namespace by slug
-776:         slug = name.lower().replace(" ", "-")
-777:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
-778:         if existing_ns:
-779:             return existing_ns.id
-780: 
-781:         # Create new namespace
-782:         new_ns = await storage.create_namespace(
-783:             MemoryNamespace(
-784:                 workspace_id=default_workspace.id,
-785:                 name=name,
-786:                 slug=slug,
-787:                 description=description,
-788:             )
-789:         )
-790:         return new_ns.id
-791: 
-792:     # =========================================================================
-793:     # Entity Operations (minimal for Khora engine)
-794:     # =========================================================================
-795: 
-796:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-797:         """Get an entity by ID."""
-798:         return await self._get_storage().get_entity(entity_id)
-799: 
-800:     async def list_entities(
-801:         self,
-802:         namespace_id: UUID,
-803:         *,
-804:         entity_type: str | None = None,
-805:         limit: int = 100,
-806:     ) -> list[Entity]:
-807:         """List entities in a namespace."""
-808:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
-809: 
-810:     async def find_related_entities(
-811:         self,
-812:         entity_id: UUID,
-813:         namespace_id: UUID,
-814:         *,
-815:         max_depth: int = 2,
-816:         limit: int = 20,
-817:     ) -> list[tuple[Entity, float]]:
-818:         """Find entities related to a given entity.
-819: 
-820:         Note: Khora engine focuses on temporal chunk retrieval.
-821:         For full entity graph traversal, use the GraphRAG engine.
-822:         """
-823:         # Return empty for now - Khora focuses on chunks
-824:         return []
-825: 
-826:     # =========================================================================
-827:     # Document Operations
-828:     # =========================================================================
-829: 
-830:     async def get_document(self, document_id: UUID) -> Document | None:
-831:         """Get a document by ID."""
-832:         return await self._get_storage().get_document(document_id)
-833: 
-834:     async def list_documents(
-835:         self,
-836:         namespace_id: UUID,
-837:         *,
-838:         limit: int = 100,
-839:     ) -> list[Document]:
-840:         """List documents in a namespace."""
-841:         return await self._get_storage().list_documents(namespace_id, limit=limit)
+773:         # Get default workspace
+774:         default_org = await storage.get_organization_by_slug("default")
+775:         if not default_org:
+776:             raise RuntimeError("Default organization not found")
+777: 
+778:         workspaces = await storage.list_workspaces(default_org.id)
+779:         if not workspaces:
+780:             raise RuntimeError("Default workspace not found")
+781: 
+782:         default_workspace = workspaces[0]
+783: 
+784:         # Try to find namespace by slug
+785:         slug = name.lower().replace(" ", "-")
+786:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
+787:         if existing_ns:
+788:             return existing_ns.id
+789: 
+790:         # Create new namespace
+791:         new_ns = await storage.create_namespace(
+792:             MemoryNamespace(
+793:                 workspace_id=default_workspace.id,
+794:                 name=name,
+795:                 slug=slug,
+796:                 description=description,
+797:             )
+798:         )
+799:         return new_ns.id
+800: 
+801:     # =========================================================================
+802:     # Entity Operations (minimal for Khora engine)
+803:     # =========================================================================
+804: 
+805:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+806:         """Get an entity by ID."""
+807:         return await self._get_storage().get_entity(entity_id)
+808: 
+809:     async def list_entities(
+810:         self,
+811:         namespace_id: UUID,
+812:         *,
+813:         entity_type: str | None = None,
+814:         limit: int = 100,
+815:     ) -> list[Entity]:
+816:         """List entities in a namespace."""
+817:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+818: 
+819:     async def find_related_entities(
+820:         self,
+821:         entity_id: UUID,
+822:         namespace_id: UUID,
+823:         *,
+824:         max_depth: int = 2,
+825:         limit: int = 20,
+826:     ) -> list[tuple[Entity, float]]:
+827:         """Find entities related to a given entity.
+828: 
+829:         Note: Khora engine focuses on temporal chunk retrieval.
+830:         For full entity graph traversal, use the GraphRAG engine.
+831:         """
+832:         # Return empty for now - Khora focuses on chunks
+833:         return []
+834: 
+835:     # =========================================================================
+836:     # Document Operations
+837:     # =========================================================================
+838: 
+839:     async def get_document(self, document_id: UUID) -> Document | None:
+840:         """Get a document by ID."""
+841:         return await self._get_storage().get_document(document_id)
 842: 
-843:     async def search_entities(
+843:     async def list_documents(
 844:         self,
-845:         query: str,
-846:         namespace_id: UUID,
-847:         *,
-848:         limit: int = 10,
-849:     ) -> list[Entity]:
-850:         """Search entities by query text.
+845:         namespace_id: UUID,
+846:         *,
+847:         limit: int = 100,
+848:     ) -> list[Document]:
+849:         """List documents in a namespace."""
+850:         return await self._get_storage().list_documents(namespace_id, limit=limit)
 851: 
-852:         Note: Khora engine focuses on temporal chunk retrieval.
-853:         For full entity search, use the GraphRAG engine.
-854:         """
-855:         # Return empty for now - Khora focuses on chunks
-856:         return []
-857: 
-858:     async def stats(self, namespace_id: UUID) -> Stats:
-859:         """Get document/chunk/entity/relationship counts for a namespace."""
-860:         storage = self._get_storage()
-861: 
-862:         # Get counts
-863:         try:
-864:             doc_count = await storage.count_documents(namespace_id)
-865:         except (AttributeError, NotImplementedError):
-866:             documents = await storage.list_documents(namespace_id, limit=0)
-867:             doc_count = len(documents) if documents else 0
-868: 
-869:         try:
-870:             chunk_count = await storage.count_chunks(namespace_id)
-871:         except (AttributeError, NotImplementedError):
-872:             chunk_count = 0  # Khora chunks are in temporal_store
-873: 
-874:         try:
-875:             entity_count = await storage.count_entities(namespace_id)
-876:         except (AttributeError, NotImplementedError):
-877:             entity_count = 0
-878: 
-879:         try:
-880:             relationship_count = await storage.count_relationships(namespace_id)
-881:         except (AttributeError, NotImplementedError):
-882:             relationship_count = 0
-883: 
-884:         return Stats(
-885:             documents=doc_count,
-886:             chunks=chunk_count,
-887:             entities=entity_count,
-888:             relationships=relationship_count,
-889:         )
-890: 
-891:     async def health_check(self) -> dict[str, Any]:
-892:         """Check health of all components."""
-893:         if not self._connected:
-894:             return {"status": "disconnected"}
-895: 
-896:         storage_health = await self._get_storage().health_check()
-897:         temporal_health = await self._get_temporal_store().health_check()
-898: 
-899:         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy"
-900: 
-901:         return {
-902:             "status": "healthy" if all_healthy else "degraded",
-903:             "storage": storage_health.summary,
-904:             "temporal_store": temporal_health,
-905:             "backend": self._backend_type,
-906:         }
+852:     async def search_entities(
+853:         self,
+854:         query: str,
+855:         namespace_id: UUID,
+856:         *,
+857:         limit: int = 10,
+858:     ) -> list[Entity]:
+859:         """Search entities by query text.
+860: 
+861:         Note: Khora engine focuses on temporal chunk retrieval.
+862:         For full entity search, use the GraphRAG engine.
+863:         """
+864:         # Return empty for now - Khora focuses on chunks
+865:         return []
+866: 
+867:     async def stats(self, namespace_id: UUID) -> Stats:
+868:         """Get document/chunk/entity/relationship counts for a namespace."""
+869:         storage = self._get_storage()
+870: 
+871:         # Get counts
+872:         try:
+873:             doc_count = await storage.count_documents(namespace_id)
+874:         except (AttributeError, NotImplementedError):
+875:             documents = await storage.list_documents(namespace_id, limit=0)
+876:             doc_count = len(documents) if documents else 0
+877: 
+878:         try:
+879:             chunk_count = await storage.count_chunks(namespace_id)
+880:         except (AttributeError, NotImplementedError):
+881:             chunk_count = 0  # Khora chunks are in temporal_store
+882: 
+883:         try:
+884:             entity_count = await storage.count_entities(namespace_id)
+885:         except (AttributeError, NotImplementedError):
+886:             entity_count = 0
+887: 
+888:         try:
+889:             relationship_count = await storage.count_relationships(namespace_id)
+890:         except (AttributeError, NotImplementedError):
+891:             relationship_count = 0
+892: 
+893:         return Stats(
+894:             documents=doc_count,
+895:             chunks=chunk_count,
+896:             entities=entity_count,
+897:             relationships=relationship_count,
+898:         )
+899: 
+900:     async def health_check(self) -> dict[str, Any]:
+901:         """Check health of all components."""
+902:         if not self._connected:
+903:             return {"status": "disconnected"}
+904: 
+905:         storage_health = await self._get_storage().health_check()
+906:         temporal_health = await self._get_temporal_store().health_check()
 907: 
-908: 
-909: __all__ = ["KhoraEngine"]
+908:         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy"
+909: 
+910:         return {
+911:             "status": "healthy" if all_healthy else "degraded",
+912:             "storage": storage_health.summary,
+913:             "temporal_store": temporal_health,
+914:             "backend": self._backend_type,
+915:         }
+916: 
+917: 
+918: __all__ = ["KhoraEngine"]
 ````
 
 ## File: src/khora/extraction/expansion/entity_index.py
@@ -40936,798 +40979,822 @@ README.md
 115:         logger.info("Storage backends disconnected")
 116: 
 117:     async def health_check(self) -> StorageHealth:
-118:         """Check health of all backends."""
+118:         """Check health of all backends (parallel)."""
 119:         health = StorageHealth()
 120: 
-121:         if self.relational:
-122:             health.relational = await self.relational.is_healthy()
-123:         if self.vector:
-124:             health.vector = await self.vector.is_healthy()
-125:         if self.graph:
-126:             health.graph = await self.graph.is_healthy()
-127:         if self.event_store:
-128:             health.event_store = await self.event_store.is_healthy()
-129: 
-130:         return health
+121:         # Build list of health check coroutines to run in parallel
+122:         checks: list[tuple[str, Any]] = []
+123:         if self.relational:
+124:             checks.append(("relational", self.relational.is_healthy()))
+125:         if self.vector:
+126:             checks.append(("vector", self.vector.is_healthy()))
+127:         if self.graph:
+128:             checks.append(("graph", self.graph.is_healthy()))
+129:         if self.event_store:
+130:             checks.append(("event_store", self.event_store.is_healthy()))
 131: 
-132:     # =========================================================================
-133:     # Tenancy operations (delegated to relational)
-134:     # =========================================================================
-135: 
-136:     async def create_organization(self, org: Organization) -> Organization:
-137:         """Create a new organization."""
-138:         if not self.relational:
-139:             raise RuntimeError("Relational backend not configured")
-140:         return await self.relational.create_organization(org)
-141: 
-142:     async def get_organization(self, org_id: UUID) -> Organization | None:
-143:         """Get an organization by ID."""
-144:         if not self.relational:
-145:             raise RuntimeError("Relational backend not configured")
-146:         return await self.relational.get_organization(org_id)
-147: 
-148:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
-149:         """Get an organization by slug."""
-150:         if not self.relational:
-151:             raise RuntimeError("Relational backend not configured")
-152:         return await self.relational.get_organization_by_slug(slug)
-153: 
-154:     async def create_workspace(self, workspace: Workspace) -> Workspace:
-155:         """Create a new workspace."""
-156:         if not self.relational:
-157:             raise RuntimeError("Relational backend not configured")
-158:         return await self.relational.create_workspace(workspace)
-159: 
-160:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
-161:         """Get a workspace by ID."""
-162:         if not self.relational:
-163:             raise RuntimeError("Relational backend not configured")
-164:         return await self.relational.get_workspace(workspace_id)
-165: 
-166:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
-167:         """List all workspaces in an organization."""
-168:         if not self.relational:
-169:             raise RuntimeError("Relational backend not configured")
-170:         return await self.relational.list_workspaces(organization_id)
-171: 
-172:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-173:         """Create a new memory namespace."""
-174:         if not self.relational:
-175:             raise RuntimeError("Relational backend not configured")
-176:         return await self.relational.create_namespace(namespace)
-177: 
-178:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-179:         """Get a namespace by ID."""
-180:         if not self.relational:
-181:             raise RuntimeError("Relational backend not configured")
-182:         return await self.relational.get_namespace(namespace_id)
-183: 
-184:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
-185:         """Get a namespace by workspace ID and slug."""
-186:         if not self.relational:
-187:             raise RuntimeError("Relational backend not configured")
-188:         return await self.relational.get_namespace_by_slug(workspace_id, slug)
-189: 
-190:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
-191:         """List all namespaces in a workspace."""
-192:         if not self.relational:
-193:             raise RuntimeError("Relational backend not configured")
-194:         return await self.relational.list_namespaces(workspace_id)
-195: 
-196:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
-197:         """Update a namespace."""
-198:         if not self.relational:
-199:             raise RuntimeError("Relational backend not configured")
-200:         return await self.relational.update_namespace(namespace)
-201: 
-202:     async def create_namespace_version(
-203:         self,
-204:         workspace_id: UUID,
-205:         slug: str,
-206:         *,
-207:         previous_version: MemoryNamespace | None = None,
-208:     ) -> MemoryNamespace:
-209:         """Create a new version of a namespace.
-210: 
-211:         If previous_version is provided, increments its version number and links to it.
-212:         The previous version is marked as inactive.
-213: 
-214:         Args:
-215:             workspace_id: Workspace ID
-216:             slug: Namespace slug
-217:             previous_version: The previous version to supersede (if any)
+132:         if checks:
+133:             results = await asyncio.gather(*[coro for _, coro in checks], return_exceptions=True)
+134:             for (name, _), result in zip(checks, results):
+135:                 # Treat exceptions as unhealthy
+136:                 setattr(health, name, result is True)
+137: 
+138:         return health
+139: 
+140:     # =========================================================================
+141:     # Tenancy operations (delegated to relational)
+142:     # =========================================================================
+143: 
+144:     async def create_organization(self, org: Organization) -> Organization:
+145:         """Create a new organization."""
+146:         if not self.relational:
+147:             raise RuntimeError("Relational backend not configured")
+148:         return await self.relational.create_organization(org)
+149: 
+150:     async def get_organization(self, org_id: UUID) -> Organization | None:
+151:         """Get an organization by ID."""
+152:         if not self.relational:
+153:             raise RuntimeError("Relational backend not configured")
+154:         return await self.relational.get_organization(org_id)
+155: 
+156:     async def get_organization_by_slug(self, slug: str) -> Organization | None:
+157:         """Get an organization by slug."""
+158:         if not self.relational:
+159:             raise RuntimeError("Relational backend not configured")
+160:         return await self.relational.get_organization_by_slug(slug)
+161: 
+162:     async def create_workspace(self, workspace: Workspace) -> Workspace:
+163:         """Create a new workspace."""
+164:         if not self.relational:
+165:             raise RuntimeError("Relational backend not configured")
+166:         return await self.relational.create_workspace(workspace)
+167: 
+168:     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
+169:         """Get a workspace by ID."""
+170:         if not self.relational:
+171:             raise RuntimeError("Relational backend not configured")
+172:         return await self.relational.get_workspace(workspace_id)
+173: 
+174:     async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
+175:         """List all workspaces in an organization."""
+176:         if not self.relational:
+177:             raise RuntimeError("Relational backend not configured")
+178:         return await self.relational.list_workspaces(organization_id)
+179: 
+180:     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+181:         """Create a new memory namespace."""
+182:         if not self.relational:
+183:             raise RuntimeError("Relational backend not configured")
+184:         return await self.relational.create_namespace(namespace)
+185: 
+186:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+187:         """Get a namespace by ID."""
+188:         if not self.relational:
+189:             raise RuntimeError("Relational backend not configured")
+190:         return await self.relational.get_namespace(namespace_id)
+191: 
+192:     async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
+193:         """Get a namespace by workspace ID and slug."""
+194:         if not self.relational:
+195:             raise RuntimeError("Relational backend not configured")
+196:         return await self.relational.get_namespace_by_slug(workspace_id, slug)
+197: 
+198:     async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
+199:         """List all namespaces in a workspace."""
+200:         if not self.relational:
+201:             raise RuntimeError("Relational backend not configured")
+202:         return await self.relational.list_namespaces(workspace_id)
+203: 
+204:     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
+205:         """Update a namespace."""
+206:         if not self.relational:
+207:             raise RuntimeError("Relational backend not configured")
+208:         return await self.relational.update_namespace(namespace)
+209: 
+210:     async def create_namespace_version(
+211:         self,
+212:         workspace_id: UUID,
+213:         slug: str,
+214:         *,
+215:         previous_version: MemoryNamespace | None = None,
+216:     ) -> MemoryNamespace:
+217:         """Create a new version of a namespace.
 218: 
-219:         Returns:
-220:             New namespace version
-221:         """
-222:         if not self.relational:
-223:             raise RuntimeError("Relational backend not configured")
-224:         return await self.relational.create_namespace_version(workspace_id, slug, previous_version=previous_version)
-225: 
-226:     async def deactivate_namespace(self, namespace_id: UUID) -> None:
-227:         """Mark a namespace version as inactive.
-228: 
-229:         Args:
-230:             namespace_id: ID of the namespace to deactivate
-231:         """
-232:         if not self.relational:
-233:             raise RuntimeError("Relational backend not configured")
-234:         await self.relational.deactivate_namespace(namespace_id)
-235: 
-236:     # =========================================================================
-237:     # Document operations (delegated to relational)
-238:     # =========================================================================
-239: 
-240:     async def create_document(self, document: Document) -> Document:
-241:         """Create a new document."""
-242:         if not self.relational:
-243:             raise RuntimeError("Relational backend not configured")
-244:         import time as _time
-245: 
-246:         _t0 = _time.perf_counter()
-247:         result = await self.relational.create_document(document)
-248:         from khora.telemetry import get_collector
-249: 
-250:         get_collector().record_storage_op(
-251:             backend="postgresql",
-252:             operation="create_document",
-253:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-254:             record_count=1,
-255:             namespace_id=document.namespace_id,
-256:         )
-257:         return result
-258: 
-259:     async def get_document(self, document_id: UUID) -> Document | None:
-260:         """Get a document by ID."""
-261:         if not self.relational:
-262:             raise RuntimeError("Relational backend not configured")
-263:         return await self.relational.get_document(document_id)
-264: 
-265:     async def list_documents(
-266:         self,
-267:         namespace_id: UUID,
-268:         *,
-269:         status: str | None = None,
-270:         limit: int = 100,
-271:         offset: int = 0,
-272:     ) -> list[Document]:
-273:         """List documents in a namespace."""
-274:         if not self.relational:
-275:             raise RuntimeError("Relational backend not configured")
-276:         return await self.relational.list_documents(namespace_id, status=status, limit=limit, offset=offset)
-277: 
-278:     async def update_document(self, document: Document) -> Document:
-279:         """Update a document."""
-280:         if not self.relational:
-281:             raise RuntimeError("Relational backend not configured")
-282:         return await self.relational.update_document(document)
-283: 
-284:     async def delete_document(self, document_id: UUID) -> bool:
-285:         """Delete a document and its chunks."""
-286:         if not self.relational:
-287:             raise RuntimeError("Relational backend not configured")
-288: 
-289:         # Delete chunks first
-290:         if self.vector:
-291:             await self.vector.delete_chunks_by_document(document_id)
-292: 
-293:         return await self.relational.delete_document(document_id)
-294: 
-295:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-296:         """Get a document by its content checksum."""
-297:         if not self.relational:
-298:             raise RuntimeError("Relational backend not configured")
-299:         return await self.relational.get_document_by_checksum(namespace_id, checksum)
+219:         If previous_version is provided, increments its version number and links to it.
+220:         The previous version is marked as inactive.
+221: 
+222:         Args:
+223:             workspace_id: Workspace ID
+224:             slug: Namespace slug
+225:             previous_version: The previous version to supersede (if any)
+226: 
+227:         Returns:
+228:             New namespace version
+229:         """
+230:         if not self.relational:
+231:             raise RuntimeError("Relational backend not configured")
+232:         return await self.relational.create_namespace_version(workspace_id, slug, previous_version=previous_version)
+233: 
+234:     async def deactivate_namespace(self, namespace_id: UUID) -> None:
+235:         """Mark a namespace version as inactive.
+236: 
+237:         Args:
+238:             namespace_id: ID of the namespace to deactivate
+239:         """
+240:         if not self.relational:
+241:             raise RuntimeError("Relational backend not configured")
+242:         await self.relational.deactivate_namespace(namespace_id)
+243: 
+244:     # =========================================================================
+245:     # Document operations (delegated to relational)
+246:     # =========================================================================
+247: 
+248:     async def create_document(self, document: Document) -> Document:
+249:         """Create a new document."""
+250:         if not self.relational:
+251:             raise RuntimeError("Relational backend not configured")
+252:         import time as _time
+253: 
+254:         _t0 = _time.perf_counter()
+255:         result = await self.relational.create_document(document)
+256:         from khora.telemetry import get_collector
+257: 
+258:         get_collector().record_storage_op(
+259:             backend="postgresql",
+260:             operation="create_document",
+261:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+262:             record_count=1,
+263:             namespace_id=document.namespace_id,
+264:         )
+265:         return result
+266: 
+267:     async def get_document(self, document_id: UUID) -> Document | None:
+268:         """Get a document by ID."""
+269:         if not self.relational:
+270:             raise RuntimeError("Relational backend not configured")
+271:         return await self.relational.get_document(document_id)
+272: 
+273:     async def list_documents(
+274:         self,
+275:         namespace_id: UUID,
+276:         *,
+277:         status: str | None = None,
+278:         limit: int = 100,
+279:         offset: int = 0,
+280:     ) -> list[Document]:
+281:         """List documents in a namespace."""
+282:         if not self.relational:
+283:             raise RuntimeError("Relational backend not configured")
+284:         return await self.relational.list_documents(namespace_id, status=status, limit=limit, offset=offset)
+285: 
+286:     async def update_document(self, document: Document) -> Document:
+287:         """Update a document."""
+288:         if not self.relational:
+289:             raise RuntimeError("Relational backend not configured")
+290:         return await self.relational.update_document(document)
+291: 
+292:     async def delete_document(self, document_id: UUID) -> bool:
+293:         """Delete a document and its chunks."""
+294:         if not self.relational:
+295:             raise RuntimeError("Relational backend not configured")
+296: 
+297:         # Delete chunks first
+298:         if self.vector:
+299:             await self.vector.delete_chunks_by_document(document_id)
 300: 
-301:     # =========================================================================
-302:     # Chunk operations (delegated to vector)
-303:     # =========================================================================
-304: 
-305:     async def create_chunk(self, chunk: Chunk) -> Chunk:
-306:         """Create a new chunk with embedding."""
-307:         if not self.vector:
-308:             raise RuntimeError("Vector backend not configured")
-309:         return await self.vector.create_chunk(chunk)
-310: 
-311:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
-312:         """Create multiple chunks in a batch."""
-313:         if not self.vector:
-314:             raise RuntimeError("Vector backend not configured")
-315:         import time as _time
-316: 
-317:         _t0 = _time.perf_counter()
-318:         result = await self.vector.create_chunks_batch(chunks)
-319:         from khora.telemetry import get_collector
-320: 
-321:         get_collector().record_storage_op(
-322:             backend="pgvector",
-323:             operation="create_chunks_batch",
-324:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-325:             record_count=len(chunks),
-326:             namespace_id=chunks[0].namespace_id if chunks else None,
-327:         )
-328:         return result
-329: 
-330:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-331:         """Get a chunk by ID."""
-332:         if not self.vector:
-333:             raise RuntimeError("Vector backend not configured")
-334:         return await self.vector.get_chunk(chunk_id)
-335: 
-336:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-337:         """Get all chunks for a document."""
-338:         if not self.vector:
-339:             raise RuntimeError("Vector backend not configured")
-340:         return await self.vector.get_chunks_by_document(document_id)
-341: 
-342:     async def search_similar_chunks(
-343:         self,
-344:         namespace_id: UUID,
-345:         query_embedding: list[float],
-346:         *,
-347:         limit: int = 10,
-348:         min_similarity: float = 0.0,
-349:         filter_document_ids: list[UUID] | None = None,
-350:     ) -> list[tuple[Chunk, float]]:
-351:         """Search for similar chunks."""
-352:         if not self.vector:
-353:             raise RuntimeError("Vector backend not configured")
-354:         import time as _time
-355: 
-356:         _t0 = _time.perf_counter()
-357:         result = await self.vector.search_similar(
-358:             namespace_id,
-359:             query_embedding,
-360:             limit=limit,
-361:             min_similarity=min_similarity,
-362:             filter_document_ids=filter_document_ids,
-363:         )
-364:         from khora.telemetry import get_collector
+301:         return await self.relational.delete_document(document_id)
+302: 
+303:     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+304:         """Get a document by its content checksum."""
+305:         if not self.relational:
+306:             raise RuntimeError("Relational backend not configured")
+307:         return await self.relational.get_document_by_checksum(namespace_id, checksum)
+308: 
+309:     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+310:         """Fetch documents by content checksums in a single query.
+311: 
+312:         Used for batch deduplication to avoid N serial DB queries.
+313: 
+314:         Args:
+315:             namespace_id: Namespace to search in
+316:             checksums: List of content checksums to look up
+317: 
+318:         Returns:
+319:             Dictionary mapping checksum to Document (only for existing documents)
+320:         """
+321:         if not self.relational:
+322:             raise RuntimeError("Relational backend not configured")
+323:         return await self.relational.get_documents_by_checksums(namespace_id, checksums)
+324: 
+325:     # =========================================================================
+326:     # Chunk operations (delegated to vector)
+327:     # =========================================================================
+328: 
+329:     async def create_chunk(self, chunk: Chunk) -> Chunk:
+330:         """Create a new chunk with embedding."""
+331:         if not self.vector:
+332:             raise RuntimeError("Vector backend not configured")
+333:         return await self.vector.create_chunk(chunk)
+334: 
+335:     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+336:         """Create multiple chunks in a batch."""
+337:         if not self.vector:
+338:             raise RuntimeError("Vector backend not configured")
+339:         import time as _time
+340: 
+341:         _t0 = _time.perf_counter()
+342:         result = await self.vector.create_chunks_batch(chunks)
+343:         from khora.telemetry import get_collector
+344: 
+345:         get_collector().record_storage_op(
+346:             backend="pgvector",
+347:             operation="create_chunks_batch",
+348:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+349:             record_count=len(chunks),
+350:             namespace_id=chunks[0].namespace_id if chunks else None,
+351:         )
+352:         return result
+353: 
+354:     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+355:         """Get a chunk by ID."""
+356:         if not self.vector:
+357:             raise RuntimeError("Vector backend not configured")
+358:         return await self.vector.get_chunk(chunk_id)
+359: 
+360:     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+361:         """Get all chunks for a document."""
+362:         if not self.vector:
+363:             raise RuntimeError("Vector backend not configured")
+364:         return await self.vector.get_chunks_by_document(document_id)
 365: 
-366:         get_collector().record_storage_op(
-367:             backend="pgvector",
-368:             operation="search_similar_chunks",
-369:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-370:             record_count=len(result),
-371:             namespace_id=namespace_id,
-372:         )
-373:         return result
-374: 
-375:     async def search_fulltext_chunks(
-376:         self,
-377:         namespace_id: UUID,
-378:         query_text: str,
-379:         *,
-380:         limit: int = 10,
-381:         language: str = "english",
-382:     ) -> list[tuple[Chunk, float]]:
-383:         """Search chunks using PostgreSQL full-text search."""
-384:         if not self.vector:
-385:             raise RuntimeError("Vector backend not configured")
-386:         import time as _time
-387: 
-388:         _t0 = _time.perf_counter()
-389:         result = await self.vector.search_fulltext(
-390:             namespace_id,
-391:             query_text,
-392:             limit=limit,
-393:             language=language,
-394:         )
-395:         from khora.telemetry import get_collector
-396: 
-397:         get_collector().record_storage_op(
-398:             backend="pgvector",
-399:             operation="search_fulltext_chunks",
-400:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-401:             record_count=len(result),
-402:             namespace_id=namespace_id,
-403:         )
-404:         return result
-405: 
-406:     async def count_chunks(self, namespace_id: UUID) -> int:
-407:         """Count chunks in a namespace."""
+366:     async def search_similar_chunks(
+367:         self,
+368:         namespace_id: UUID,
+369:         query_embedding: list[float],
+370:         *,
+371:         limit: int = 10,
+372:         min_similarity: float = 0.0,
+373:         filter_document_ids: list[UUID] | None = None,
+374:     ) -> list[tuple[Chunk, float]]:
+375:         """Search for similar chunks."""
+376:         if not self.vector:
+377:             raise RuntimeError("Vector backend not configured")
+378:         import time as _time
+379: 
+380:         _t0 = _time.perf_counter()
+381:         result = await self.vector.search_similar(
+382:             namespace_id,
+383:             query_embedding,
+384:             limit=limit,
+385:             min_similarity=min_similarity,
+386:             filter_document_ids=filter_document_ids,
+387:         )
+388:         from khora.telemetry import get_collector
+389: 
+390:         get_collector().record_storage_op(
+391:             backend="pgvector",
+392:             operation="search_similar_chunks",
+393:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+394:             record_count=len(result),
+395:             namespace_id=namespace_id,
+396:         )
+397:         return result
+398: 
+399:     async def search_fulltext_chunks(
+400:         self,
+401:         namespace_id: UUID,
+402:         query_text: str,
+403:         *,
+404:         limit: int = 10,
+405:         language: str = "english",
+406:     ) -> list[tuple[Chunk, float]]:
+407:         """Search chunks using PostgreSQL full-text search."""
 408:         if not self.vector:
 409:             raise RuntimeError("Vector backend not configured")
-410:         return await self.vector.count_chunks(namespace_id)
+410:         import time as _time
 411: 
-412:     async def list_chunks(
-413:         self,
-414:         namespace_id: UUID,
-415:         *,
-416:         limit: int = 1000,
-417:         offset: int = 0,
-418:     ) -> list[Chunk]:
-419:         """List chunks in a namespace.
+412:         _t0 = _time.perf_counter()
+413:         result = await self.vector.search_fulltext(
+414:             namespace_id,
+415:             query_text,
+416:             limit=limit,
+417:             language=language,
+418:         )
+419:         from khora.telemetry import get_collector
 420: 
-421:         Args:
-422:             namespace_id: Namespace ID
-423:             limit: Maximum chunks to return
-424:             offset: Offset for pagination
-425: 
-426:         Returns:
-427:             List of chunks
-428:         """
-429:         if not self.vector:
-430:             raise RuntimeError("Vector backend not configured")
-431:         return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
-432: 
-433:     async def count_entities(self, namespace_id: UUID) -> int:
-434:         """Count entities in a namespace."""
-435:         if self.graph:
-436:             return await self.graph.count_entities(namespace_id)
-437:         return 0
-438: 
-439:     # =========================================================================
-440:     # Entity operations (cross-backend)
-441:     # =========================================================================
-442: 
-443:     async def create_entity(self, entity: Entity) -> Entity:
-444:         """Create an entity in both graph and vector stores (parallel)."""
-445:         import time as _time
-446: 
-447:         _t0 = _time.perf_counter()
-448:         # Parallel writes to graph + vector, matching update_entity pattern
-449:         if self.graph and self.vector:
-450:             graph_result, _ = await asyncio.gather(
-451:                 self.graph.create_entity(entity),
-452:                 self.vector.create_entity(entity),
-453:             )
-454:             entity = graph_result
-455:         elif self.graph:
-456:             entity = await self.graph.create_entity(entity)
-457:         elif self.vector:
-458:             await self.vector.create_entity(entity)
-459:         from khora.telemetry import get_collector
-460: 
-461:         get_collector().record_storage_op(
-462:             backend="graph+vector",
-463:             operation="create_entity",
-464:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-465:             record_count=1,
-466:             namespace_id=entity.namespace_id,
-467:         )
-468:         return entity
-469: 
-470:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-471:         """Get an entity by ID."""
-472:         if self.graph:
-473:             return await self.graph.get_entity(entity_id)
-474:         return None
-475: 
-476:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
-477:         """Get an entity by name and type."""
-478:         if self.graph:
-479:             return await self.graph.get_entity_by_name(namespace_id, name, entity_type)
-480:         return None
-481: 
-482:     async def update_entity(self, entity: Entity) -> Entity:
-483:         """Update an entity in both graph and vector stores (parallel)."""
-484:         if self.graph and self.vector:
-485:             graph_result, _ = await asyncio.gather(
-486:                 self.graph.update_entity(entity),
-487:                 self.vector.update_entity(entity),
-488:             )
-489:             return graph_result
-490:         if self.graph:
-491:             return await self.graph.update_entity(entity)
-492:         if self.vector:
-493:             await self.vector.update_entity(entity)
-494:         return entity
-495: 
-496:     async def delete_entity(self, entity_id: UUID) -> bool:
-497:         """Delete an entity."""
-498:         if self.graph:
-499:             return await self.graph.delete_entity(entity_id)
-500:         return False
-501: 
-502:     async def list_entities(
-503:         self,
-504:         namespace_id: UUID,
-505:         *,
-506:         entity_type: str | None = None,
-507:         limit: int = 100,
-508:         offset: int = 0,
-509:     ) -> list[Entity]:
-510:         """List entities in a namespace."""
-511:         if self.graph:
-512:             return await self.graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
-513:         return []
-514: 
-515:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-516:         """Update the embedding for an entity."""
-517:         if self.vector:
-518:             await self.vector.update_entity_embedding(entity_id, embedding, model)
+421:         get_collector().record_storage_op(
+422:             backend="pgvector",
+423:             operation="search_fulltext_chunks",
+424:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+425:             record_count=len(result),
+426:             namespace_id=namespace_id,
+427:         )
+428:         return result
+429: 
+430:     async def count_chunks(self, namespace_id: UUID) -> int:
+431:         """Count chunks in a namespace."""
+432:         if not self.vector:
+433:             raise RuntimeError("Vector backend not configured")
+434:         return await self.vector.count_chunks(namespace_id)
+435: 
+436:     async def list_chunks(
+437:         self,
+438:         namespace_id: UUID,
+439:         *,
+440:         limit: int = 1000,
+441:         offset: int = 0,
+442:     ) -> list[Chunk]:
+443:         """List chunks in a namespace.
+444: 
+445:         Args:
+446:             namespace_id: Namespace ID
+447:             limit: Maximum chunks to return
+448:             offset: Offset for pagination
+449: 
+450:         Returns:
+451:             List of chunks
+452:         """
+453:         if not self.vector:
+454:             raise RuntimeError("Vector backend not configured")
+455:         return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
+456: 
+457:     async def count_entities(self, namespace_id: UUID) -> int:
+458:         """Count entities in a namespace."""
+459:         if self.graph:
+460:             return await self.graph.count_entities(namespace_id)
+461:         return 0
+462: 
+463:     # =========================================================================
+464:     # Entity operations (cross-backend)
+465:     # =========================================================================
+466: 
+467:     async def create_entity(self, entity: Entity) -> Entity:
+468:         """Create an entity in both graph and vector stores (parallel)."""
+469:         import time as _time
+470: 
+471:         _t0 = _time.perf_counter()
+472:         # Parallel writes to graph + vector, matching update_entity pattern
+473:         if self.graph and self.vector:
+474:             graph_result, _ = await asyncio.gather(
+475:                 self.graph.create_entity(entity),
+476:                 self.vector.create_entity(entity),
+477:             )
+478:             entity = graph_result
+479:         elif self.graph:
+480:             entity = await self.graph.create_entity(entity)
+481:         elif self.vector:
+482:             await self.vector.create_entity(entity)
+483:         from khora.telemetry import get_collector
+484: 
+485:         get_collector().record_storage_op(
+486:             backend="graph+vector",
+487:             operation="create_entity",
+488:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+489:             record_count=1,
+490:             namespace_id=entity.namespace_id,
+491:         )
+492:         return entity
+493: 
+494:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+495:         """Get an entity by ID."""
+496:         if self.graph:
+497:             return await self.graph.get_entity(entity_id)
+498:         return None
+499: 
+500:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+501:         """Get an entity by name and type."""
+502:         if self.graph:
+503:             return await self.graph.get_entity_by_name(namespace_id, name, entity_type)
+504:         return None
+505: 
+506:     async def update_entity(self, entity: Entity) -> Entity:
+507:         """Update an entity in both graph and vector stores (parallel)."""
+508:         if self.graph and self.vector:
+509:             graph_result, _ = await asyncio.gather(
+510:                 self.graph.update_entity(entity),
+511:                 self.vector.update_entity(entity),
+512:             )
+513:             return graph_result
+514:         if self.graph:
+515:             return await self.graph.update_entity(entity)
+516:         if self.vector:
+517:             await self.vector.update_entity(entity)
+518:         return entity
 519: 
-520:     async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
-521:         """Update embeddings for multiple entities in a single transaction."""
-522:         if self.vector and hasattr(self.vector, "update_entity_embeddings_batch"):
-523:             return await self.vector.update_entity_embeddings_batch(updates)
-524:         # Fallback to individual updates
-525:         if self.vector:
-526:             for entity_id, embedding, model in updates:
-527:                 await self.vector.update_entity_embedding(entity_id, embedding, model)
-528:             return len(updates)
-529:         return 0
-530: 
-531:     async def search_similar_entities(
-532:         self,
-533:         namespace_id: UUID,
-534:         query_embedding: list[float],
-535:         *,
-536:         limit: int = 10,
-537:         min_similarity: float = 0.0,
-538:     ) -> list[tuple[UUID, float]]:
-539:         """Search for similar entities."""
-540:         if not self.vector:
-541:             raise RuntimeError("Vector backend not configured")
-542:         import time as _time
+520:     async def delete_entity(self, entity_id: UUID) -> bool:
+521:         """Delete an entity."""
+522:         if self.graph:
+523:             return await self.graph.delete_entity(entity_id)
+524:         return False
+525: 
+526:     async def list_entities(
+527:         self,
+528:         namespace_id: UUID,
+529:         *,
+530:         entity_type: str | None = None,
+531:         limit: int = 100,
+532:         offset: int = 0,
+533:     ) -> list[Entity]:
+534:         """List entities in a namespace."""
+535:         if self.graph:
+536:             return await self.graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
+537:         return []
+538: 
+539:     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+540:         """Update the embedding for an entity."""
+541:         if self.vector:
+542:             await self.vector.update_entity_embedding(entity_id, embedding, model)
 543: 
-544:         _t0 = _time.perf_counter()
-545:         result = await self.vector.search_similar_entities(
-546:             namespace_id,
-547:             query_embedding,
-548:             limit=limit,
-549:             min_similarity=min_similarity,
-550:         )
-551:         from khora.telemetry import get_collector
-552: 
-553:         get_collector().record_storage_op(
-554:             backend="pgvector",
-555:             operation="search_similar_entities",
-556:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-557:             record_count=len(result),
-558:             namespace_id=namespace_id,
-559:         )
-560:         return result
-561: 
-562:     async def upsert_entities_batch(
-563:         self,
-564:         namespace_id: UUID,
-565:         entities: list[Entity],
-566:         *,
-567:         batch_size: int = 200,
-568:     ) -> list[tuple[Entity, bool]]:
-569:         """Batch upsert entities across graph and vector backends.
-570: 
-571:         Uses MERGE semantics: creates new entities, updates existing ones
-572:         matched by (namespace_id, name, entity_type).
-573: 
-574:         Returns list of (entity, is_new) tuples.
-575:         """
-576:         if not entities:
-577:             return []
-578: 
-579:         import time as _time
-580: 
-581:         _t0 = _time.perf_counter()
-582: 
-583:         results: list[tuple[Entity, bool]] = []
-584: 
-585:         # Upsert in graph and vector backends in parallel
-586:         has_graph = self.graph and hasattr(self.graph, "upsert_entities_batch")
-587:         has_vector = self.vector and hasattr(self.vector, "upsert_entities_batch")
-588: 
-589:         if has_graph and has_vector:
-590:             graph_results, _ = await asyncio.gather(
-591:                 self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
-592:                 self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
-593:             )
-594:             results = graph_results
-595:         elif has_graph:
-596:             results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
-597:         elif has_vector:
-598:             await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
-599: 
-600:         from khora.telemetry import get_collector
-601: 
-602:         get_collector().record_storage_op(
-603:             backend="graph+vector",
-604:             operation="upsert_entities_batch",
-605:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-606:             record_count=len(entities),
-607:             namespace_id=namespace_id,
-608:         )
-609:         return results
-610: 
-611:     async def create_relationships_batch(
-612:         self,
-613:         relationships: list[Relationship],
-614:         *,
-615:         batch_size: int = 50,
-616:     ) -> int:
-617:         """Batch create relationships in the graph backend.
-618: 
-619:         Returns the number of relationships created.
-620:         """
-621:         if not relationships:
-622:             return 0
+544:     async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+545:         """Update embeddings for multiple entities in a single transaction."""
+546:         if self.vector and hasattr(self.vector, "update_entity_embeddings_batch"):
+547:             return await self.vector.update_entity_embeddings_batch(updates)
+548:         # Fallback to individual updates
+549:         if self.vector:
+550:             for entity_id, embedding, model in updates:
+551:                 await self.vector.update_entity_embedding(entity_id, embedding, model)
+552:             return len(updates)
+553:         return 0
+554: 
+555:     async def search_similar_entities(
+556:         self,
+557:         namespace_id: UUID,
+558:         query_embedding: list[float],
+559:         *,
+560:         limit: int = 10,
+561:         min_similarity: float = 0.0,
+562:     ) -> list[tuple[UUID, float]]:
+563:         """Search for similar entities."""
+564:         if not self.vector:
+565:             raise RuntimeError("Vector backend not configured")
+566:         import time as _time
+567: 
+568:         _t0 = _time.perf_counter()
+569:         result = await self.vector.search_similar_entities(
+570:             namespace_id,
+571:             query_embedding,
+572:             limit=limit,
+573:             min_similarity=min_similarity,
+574:         )
+575:         from khora.telemetry import get_collector
+576: 
+577:         get_collector().record_storage_op(
+578:             backend="pgvector",
+579:             operation="search_similar_entities",
+580:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+581:             record_count=len(result),
+582:             namespace_id=namespace_id,
+583:         )
+584:         return result
+585: 
+586:     async def upsert_entities_batch(
+587:         self,
+588:         namespace_id: UUID,
+589:         entities: list[Entity],
+590:         *,
+591:         batch_size: int = 200,
+592:     ) -> list[tuple[Entity, bool]]:
+593:         """Batch upsert entities across graph and vector backends.
+594: 
+595:         Uses MERGE semantics: creates new entities, updates existing ones
+596:         matched by (namespace_id, name, entity_type).
+597: 
+598:         Returns list of (entity, is_new) tuples.
+599:         """
+600:         if not entities:
+601:             return []
+602: 
+603:         import time as _time
+604: 
+605:         _t0 = _time.perf_counter()
+606: 
+607:         results: list[tuple[Entity, bool]] = []
+608: 
+609:         # Upsert in graph and vector backends in parallel
+610:         has_graph = self.graph and hasattr(self.graph, "upsert_entities_batch")
+611:         has_vector = self.vector and hasattr(self.vector, "upsert_entities_batch")
+612: 
+613:         if has_graph and has_vector:
+614:             graph_results, _ = await asyncio.gather(
+615:                 self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
+616:                 self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
+617:             )
+618:             results = graph_results
+619:         elif has_graph:
+620:             results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+621:         elif has_vector:
+622:             await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
 623: 
-624:         import time as _time
+624:         from khora.telemetry import get_collector
 625: 
-626:         _t0 = _time.perf_counter()
-627: 
-628:         count = 0
-629:         if self.graph and hasattr(self.graph, "create_relationships_batch"):
-630:             count = await self.graph.create_relationships_batch(relationships, batch_size=batch_size)
-631: 
-632:         from khora.telemetry import get_collector
-633: 
-634:         get_collector().record_storage_op(
-635:             backend="graph",
-636:             operation="create_relationships_batch",
-637:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-638:             record_count=count,
-639:             namespace_id=relationships[0].namespace_id if relationships else None,
-640:         )
-641:         return count
+626:         get_collector().record_storage_op(
+627:             backend="graph+vector",
+628:             operation="upsert_entities_batch",
+629:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+630:             record_count=len(entities),
+631:             namespace_id=namespace_id,
+632:         )
+633:         return results
+634: 
+635:     async def create_relationships_batch(
+636:         self,
+637:         relationships: list[Relationship],
+638:         *,
+639:         batch_size: int = 50,
+640:     ) -> int:
+641:         """Batch create relationships in the graph backend.
 642: 
-643:     # =========================================================================
-644:     # Relationship operations (delegated to graph)
-645:     # =========================================================================
-646: 
-647:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-648:         """Create a relationship between entities."""
-649:         if not self.graph:
-650:             raise RuntimeError("Graph backend not configured")
-651:         import time as _time
-652: 
-653:         _t0 = _time.perf_counter()
-654:         result = await self.graph.create_relationship(relationship)
-655:         from khora.telemetry import get_collector
-656: 
-657:         get_collector().record_storage_op(
-658:             backend="graph",
-659:             operation="create_relationship",
-660:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-661:             record_count=1,
-662:             namespace_id=relationship.namespace_id,
-663:         )
-664:         return result
-665: 
-666:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-667:         """Get a relationship by ID."""
-668:         if self.graph:
-669:             return await self.graph.get_relationship(relationship_id)
-670:         return None
-671: 
-672:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-673:         """Delete a relationship."""
-674:         if self.graph:
-675:             return await self.graph.delete_relationship(relationship_id)
-676:         return False
-677: 
-678:     async def get_entity_relationships(
-679:         self,
-680:         entity_id: UUID,
-681:         *,
-682:         direction: str = "both",
-683:         relationship_types: list[str] | None = None,
-684:         limit: int = 100,
-685:     ) -> list[Relationship]:
-686:         """Get relationships for an entity."""
-687:         if self.graph:
-688:             return await self.graph.get_entity_relationships(
-689:                 entity_id, direction=direction, relationship_types=relationship_types, limit=limit
-690:             )
-691:         return []
-692: 
-693:     async def list_relationships(
-694:         self,
-695:         namespace_id: UUID,
-696:         *,
-697:         relationship_type: str | None = None,
-698:         limit: int = 1000,
-699:         offset: int = 0,
-700:     ) -> list[Relationship]:
-701:         """List all relationships in a namespace."""
-702:         if self.graph:
-703:             return await self.graph.list_relationships(
-704:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
-705:             )
-706:         return []
-707: 
-708:     # =========================================================================
-709:     # Episode operations (delegated to graph)
-710:     # =========================================================================
-711: 
-712:     async def create_episode(self, episode: Episode) -> Episode:
-713:         """Create an episode."""
-714:         if not self.graph:
-715:             raise RuntimeError("Graph backend not configured")
-716:         return await self.graph.create_episode(episode)
-717: 
-718:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-719:         """Get an episode by ID."""
-720:         if self.graph:
-721:             return await self.graph.get_episode(episode_id)
-722:         return None
-723: 
-724:     async def list_episodes(
-725:         self,
-726:         namespace_id: UUID,
-727:         *,
-728:         start_time: datetime | None = None,
-729:         end_time: datetime | None = None,
-730:         limit: int = 100,
-731:     ) -> list[Episode]:
-732:         """List episodes in a time range."""
-733:         if self.graph:
-734:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
-735:         return []
-736: 
-737:     # =========================================================================
-738:     # Graph traversal (delegated to graph)
-739:     # =========================================================================
-740: 
-741:     async def find_paths(
-742:         self,
-743:         namespace_id: UUID,
-744:         source_entity_id: UUID,
-745:         target_entity_id: UUID,
-746:         *,
-747:         max_depth: int = 3,
-748:         relationship_types: list[str] | None = None,
-749:     ) -> list[list[dict[str, Any]]]:
-750:         """Find paths between two entities."""
-751:         if self.graph:
-752:             return await self.graph.find_paths(
-753:                 namespace_id,
-754:                 source_entity_id,
-755:                 target_entity_id,
-756:                 max_depth=max_depth,
-757:                 relationship_types=relationship_types,
-758:             )
+643:         Returns the number of relationships created.
+644:         """
+645:         if not relationships:
+646:             return 0
+647: 
+648:         import time as _time
+649: 
+650:         _t0 = _time.perf_counter()
+651: 
+652:         count = 0
+653:         if self.graph and hasattr(self.graph, "create_relationships_batch"):
+654:             count = await self.graph.create_relationships_batch(relationships, batch_size=batch_size)
+655: 
+656:         from khora.telemetry import get_collector
+657: 
+658:         get_collector().record_storage_op(
+659:             backend="graph",
+660:             operation="create_relationships_batch",
+661:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+662:             record_count=count,
+663:             namespace_id=relationships[0].namespace_id if relationships else None,
+664:         )
+665:         return count
+666: 
+667:     # =========================================================================
+668:     # Relationship operations (delegated to graph)
+669:     # =========================================================================
+670: 
+671:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+672:         """Create a relationship between entities."""
+673:         if not self.graph:
+674:             raise RuntimeError("Graph backend not configured")
+675:         import time as _time
+676: 
+677:         _t0 = _time.perf_counter()
+678:         result = await self.graph.create_relationship(relationship)
+679:         from khora.telemetry import get_collector
+680: 
+681:         get_collector().record_storage_op(
+682:             backend="graph",
+683:             operation="create_relationship",
+684:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+685:             record_count=1,
+686:             namespace_id=relationship.namespace_id,
+687:         )
+688:         return result
+689: 
+690:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+691:         """Get a relationship by ID."""
+692:         if self.graph:
+693:             return await self.graph.get_relationship(relationship_id)
+694:         return None
+695: 
+696:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+697:         """Delete a relationship."""
+698:         if self.graph:
+699:             return await self.graph.delete_relationship(relationship_id)
+700:         return False
+701: 
+702:     async def get_entity_relationships(
+703:         self,
+704:         entity_id: UUID,
+705:         *,
+706:         direction: str = "both",
+707:         relationship_types: list[str] | None = None,
+708:         limit: int = 100,
+709:     ) -> list[Relationship]:
+710:         """Get relationships for an entity."""
+711:         if self.graph:
+712:             return await self.graph.get_entity_relationships(
+713:                 entity_id, direction=direction, relationship_types=relationship_types, limit=limit
+714:             )
+715:         return []
+716: 
+717:     async def list_relationships(
+718:         self,
+719:         namespace_id: UUID,
+720:         *,
+721:         relationship_type: str | None = None,
+722:         limit: int = 1000,
+723:         offset: int = 0,
+724:     ) -> list[Relationship]:
+725:         """List all relationships in a namespace."""
+726:         if self.graph:
+727:             return await self.graph.list_relationships(
+728:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+729:             )
+730:         return []
+731: 
+732:     # =========================================================================
+733:     # Episode operations (delegated to graph)
+734:     # =========================================================================
+735: 
+736:     async def create_episode(self, episode: Episode) -> Episode:
+737:         """Create an episode."""
+738:         if not self.graph:
+739:             raise RuntimeError("Graph backend not configured")
+740:         return await self.graph.create_episode(episode)
+741: 
+742:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+743:         """Get an episode by ID."""
+744:         if self.graph:
+745:             return await self.graph.get_episode(episode_id)
+746:         return None
+747: 
+748:     async def list_episodes(
+749:         self,
+750:         namespace_id: UUID,
+751:         *,
+752:         start_time: datetime | None = None,
+753:         end_time: datetime | None = None,
+754:         limit: int = 100,
+755:     ) -> list[Episode]:
+756:         """List episodes in a time range."""
+757:         if self.graph:
+758:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
 759:         return []
 760: 
-761:     async def get_neighborhood(
-762:         self,
-763:         entity_id: UUID,
-764:         *,
-765:         depth: int = 1,
-766:         relationship_types: list[str] | None = None,
-767:         limit: int = 50,
-768:     ) -> dict[str, Any]:
-769:         """Get the neighborhood of an entity."""
-770:         if self.graph:
-771:             return await self.graph.get_neighborhood(
-772:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
-773:             )
-774:         return {"entities": [], "relationships": []}
-775: 
-776:     # =========================================================================
-777:     # Batch operations (optimized for parallel fetching)
-778:     # =========================================================================
-779: 
-780:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-781:         """Fetch multiple entities in a single query.
-782: 
-783:         Args:
-784:             entity_ids: List of entity IDs to fetch
-785: 
-786:         Returns:
-787:             Dictionary mapping entity ID to Entity object
-788:         """
-789:         if not entity_ids:
-790:             return {}
-791:         if self.graph:
-792:             return await self.graph.get_entities_batch(entity_ids)
-793:         return {}
-794: 
-795:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-796:         """Fetch multiple documents in a single query.
-797: 
-798:         Args:
-799:             document_ids: List of document IDs to fetch
-800: 
-801:         Returns:
-802:             Dictionary mapping document ID to Document object
-803:         """
-804:         if not document_ids:
-805:             return {}
-806:         if self.relational:
-807:             return await self.relational.get_documents_batch(document_ids)
-808:         return {}
+761:     # =========================================================================
+762:     # Graph traversal (delegated to graph)
+763:     # =========================================================================
+764: 
+765:     async def find_paths(
+766:         self,
+767:         namespace_id: UUID,
+768:         source_entity_id: UUID,
+769:         target_entity_id: UUID,
+770:         *,
+771:         max_depth: int = 3,
+772:         relationship_types: list[str] | None = None,
+773:     ) -> list[list[dict[str, Any]]]:
+774:         """Find paths between two entities."""
+775:         if self.graph:
+776:             return await self.graph.find_paths(
+777:                 namespace_id,
+778:                 source_entity_id,
+779:                 target_entity_id,
+780:                 max_depth=max_depth,
+781:                 relationship_types=relationship_types,
+782:             )
+783:         return []
+784: 
+785:     async def get_neighborhood(
+786:         self,
+787:         entity_id: UUID,
+788:         *,
+789:         depth: int = 1,
+790:         relationship_types: list[str] | None = None,
+791:         limit: int = 50,
+792:     ) -> dict[str, Any]:
+793:         """Get the neighborhood of an entity."""
+794:         if self.graph:
+795:             return await self.graph.get_neighborhood(
+796:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
+797:             )
+798:         return {"entities": [], "relationships": []}
+799: 
+800:     # =========================================================================
+801:     # Batch operations (optimized for parallel fetching)
+802:     # =========================================================================
+803: 
+804:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+805:         """Fetch multiple entities in a single query.
+806: 
+807:         Args:
+808:             entity_ids: List of entity IDs to fetch
 809: 
-810:     async def get_neighborhoods_batch(
-811:         self,
-812:         entity_ids: list[UUID],
-813:         *,
-814:         depth: int = 1,
-815:         relationship_types: list[str] | None = None,
-816:         limit_per_entity: int = 20,
-817:     ) -> dict[UUID, dict[str, Any]]:
-818:         """Get neighborhoods for multiple entities in a single query.
-819: 
-820:         Args:
-821:             entity_ids: List of entity IDs
-822:             depth: Max traversal depth
-823:             relationship_types: Optional relationship type filter
-824:             limit_per_entity: Max nodes per entity neighborhood
-825: 
-826:         Returns:
-827:             Dictionary mapping entity ID to neighborhood data
-828:         """
-829:         if not entity_ids:
-830:             return {}
-831:         if self.graph:
-832:             import time as _time
+810:         Returns:
+811:             Dictionary mapping entity ID to Entity object
+812:         """
+813:         if not entity_ids:
+814:             return {}
+815:         if self.graph:
+816:             return await self.graph.get_entities_batch(entity_ids)
+817:         return {}
+818: 
+819:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+820:         """Fetch multiple documents in a single query.
+821: 
+822:         Args:
+823:             document_ids: List of document IDs to fetch
+824: 
+825:         Returns:
+826:             Dictionary mapping document ID to Document object
+827:         """
+828:         if not document_ids:
+829:             return {}
+830:         if self.relational:
+831:             return await self.relational.get_documents_batch(document_ids)
+832:         return {}
 833: 
-834:             _t0 = _time.perf_counter()
-835:             result = await self.graph.get_neighborhoods_batch(
-836:                 entity_ids,
-837:                 depth=depth,
-838:                 relationship_types=relationship_types,
-839:                 limit_per_entity=limit_per_entity,
-840:             )
-841:             from khora.telemetry import get_collector
-842: 
-843:             get_collector().record_storage_op(
-844:                 backend="graph",
-845:                 operation="get_neighborhoods_batch",
-846:                 latency_ms=(_time.perf_counter() - _t0) * 1000,
-847:                 record_count=len(result),
-848:                 # No namespace_id available — entity_ids don't carry namespace info
-849:             )
-850:             return result
-851:         return {}
-852: 
-853:     # =========================================================================
-854:     # Event operations (delegated to event store)
-855:     # =========================================================================
-856: 
-857:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-858:         """Append an event to the log."""
-859:         if not self.event_store:
-860:             raise RuntimeError("Event store not configured")
-861:         return await self.event_store.append_event(event)
-862: 
-863:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-864:         """Append multiple events in a batch."""
-865:         if not self.event_store:
-866:             raise RuntimeError("Event store not configured")
-867:         return await self.event_store.append_events_batch(events)
-868: 
-869:     async def get_events(
-870:         self,
-871:         namespace_id: UUID,
-872:         *,
-873:         event_types: list[str] | None = None,
-874:         resource_type: str | None = None,
-875:         resource_id: UUID | None = None,
-876:         after: datetime | None = None,
-877:         before: datetime | None = None,
-878:         limit: int = 100,
-879:         offset: int = 0,
-880:     ) -> list[MemoryEvent]:
-881:         """Query events from the log."""
-882:         if not self.event_store:
-883:             raise RuntimeError("Event store not configured")
-884:         return await self.event_store.get_events(
-885:             namespace_id,
-886:             event_types=event_types,
-887:             resource_type=resource_type,
-888:             resource_id=resource_id,
-889:             after=after,
-890:             before=before,
-891:             limit=limit,
-892:             offset=offset,
-893:         )
-894: 
-895:     # =========================================================================
-896:     # Sync checkpoint operations (delegated to relational)
-897:     # =========================================================================
-898: 
-899:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-900:         """Get the last sync checkpoint for a source."""
-901:         if not self.relational:
-902:             raise RuntimeError("Relational backend not configured")
-903:         return await self.relational.get_sync_checkpoint(namespace_id, source)
-904: 
-905:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-906:         """Set the sync checkpoint for a source."""
-907:         if not self.relational:
-908:             raise RuntimeError("Relational backend not configured")
-909:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
+834:     async def get_neighborhoods_batch(
+835:         self,
+836:         entity_ids: list[UUID],
+837:         *,
+838:         depth: int = 1,
+839:         relationship_types: list[str] | None = None,
+840:         limit_per_entity: int = 20,
+841:     ) -> dict[UUID, dict[str, Any]]:
+842:         """Get neighborhoods for multiple entities in a single query.
+843: 
+844:         Args:
+845:             entity_ids: List of entity IDs
+846:             depth: Max traversal depth
+847:             relationship_types: Optional relationship type filter
+848:             limit_per_entity: Max nodes per entity neighborhood
+849: 
+850:         Returns:
+851:             Dictionary mapping entity ID to neighborhood data
+852:         """
+853:         if not entity_ids:
+854:             return {}
+855:         if self.graph:
+856:             import time as _time
+857: 
+858:             _t0 = _time.perf_counter()
+859:             result = await self.graph.get_neighborhoods_batch(
+860:                 entity_ids,
+861:                 depth=depth,
+862:                 relationship_types=relationship_types,
+863:                 limit_per_entity=limit_per_entity,
+864:             )
+865:             from khora.telemetry import get_collector
+866: 
+867:             get_collector().record_storage_op(
+868:                 backend="graph",
+869:                 operation="get_neighborhoods_batch",
+870:                 latency_ms=(_time.perf_counter() - _t0) * 1000,
+871:                 record_count=len(result),
+872:                 # No namespace_id available — entity_ids don't carry namespace info
+873:             )
+874:             return result
+875:         return {}
+876: 
+877:     # =========================================================================
+878:     # Event operations (delegated to event store)
+879:     # =========================================================================
+880: 
+881:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+882:         """Append an event to the log."""
+883:         if not self.event_store:
+884:             raise RuntimeError("Event store not configured")
+885:         return await self.event_store.append_event(event)
+886: 
+887:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+888:         """Append multiple events in a batch."""
+889:         if not self.event_store:
+890:             raise RuntimeError("Event store not configured")
+891:         return await self.event_store.append_events_batch(events)
+892: 
+893:     async def get_events(
+894:         self,
+895:         namespace_id: UUID,
+896:         *,
+897:         event_types: list[str] | None = None,
+898:         resource_type: str | None = None,
+899:         resource_id: UUID | None = None,
+900:         after: datetime | None = None,
+901:         before: datetime | None = None,
+902:         limit: int = 100,
+903:         offset: int = 0,
+904:     ) -> list[MemoryEvent]:
+905:         """Query events from the log."""
+906:         if not self.event_store:
+907:             raise RuntimeError("Event store not configured")
+908:         return await self.event_store.get_events(
+909:             namespace_id,
+910:             event_types=event_types,
+911:             resource_type=resource_type,
+912:             resource_id=resource_id,
+913:             after=after,
+914:             before=before,
+915:             limit=limit,
+916:             offset=offset,
+917:         )
+918: 
+919:     # =========================================================================
+920:     # Sync checkpoint operations (delegated to relational)
+921:     # =========================================================================
+922: 
+923:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+924:         """Get the last sync checkpoint for a source."""
+925:         if not self.relational:
+926:             raise RuntimeError("Relational backend not configured")
+927:         return await self.relational.get_sync_checkpoint(namespace_id, source)
+928: 
+929:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+930:         """Set the sync checkpoint for a source."""
+931:         if not self.relational:
+932:             raise RuntimeError("Relational backend not configured")
+933:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
 ## File: src/khora/memory_lake.py
@@ -47669,6 +47736,14 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-05 18:09:50 +0100
+**Message:** chore: bump version to 0.1.2
+
+**Files:**
+- REPOMIX.md
+- pyproject.toml
+- uv.lock
+
 ## Commit: 2026-02-05 18:07:31 +0100
 **Message:** fix: handle malformed LLM responses in entity extraction
 
@@ -47877,9 +47952,3 @@ README.md
 **Files:**
 - REPOMIX.md
 - tests/unit/test_entity_index.py
-
-## Commit: 2026-02-03 17:03:53 +0100
-**Message:** fix: disable json_schema for gpt-5-nano (token limit issues)
-
-**Files:**
-- src/khora/extraction/extractors/llm.py

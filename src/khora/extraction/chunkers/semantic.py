@@ -6,6 +6,10 @@ import re
 
 from .base import Chunker, ChunkResult
 
+# Precompiled regex patterns for performance
+_PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
+_SENTENCE_ENDINGS = re.compile(r"(?<=[.!?])\s+")
+
 
 class SemanticChunker(Chunker):
     """Semantic chunker that respects document structure.
@@ -99,7 +103,7 @@ class SemanticChunker(Chunker):
     def _split_paragraphs(self, text: str) -> list[str]:
         """Split text into paragraphs."""
         # Split on double newlines or multiple newlines
-        paragraphs = re.split(r"\n\s*\n", text)
+        paragraphs = _PARAGRAPH_SPLIT.split(text)
         return [p.strip() for p in paragraphs if p.strip()]
 
     def _split_large_paragraph(self, para: str) -> list[str]:
@@ -143,33 +147,27 @@ class SemanticChunker(Chunker):
         """Split text into sentences."""
         # Simple sentence splitting - handles common cases
         # Could be improved with nltk or spacy for better accuracy
-        sentence_endings = r"(?<=[.!?])\s+"
-        sentences = re.split(sentence_endings, text)
+        sentences = _SENTENCE_ENDINGS.split(text)
         return [s.strip() for s in sentences if s.strip()]
 
     def _fixed_split(self, text: str) -> list[str]:
         """Fixed-size split for text that can't be split semantically."""
-        try:
-            import tiktoken
+        if self._encoding is not None:
+            tokens = self._encoding.encode(text)
 
-            encoding = tiktoken.get_encoding("cl100k_base")
-            tokens = encoding.encode(text)
-        except ImportError:
-            # Character-based fallback
-            chars_per_chunk = self.chunk_size * 4
-            return [
-                text[i : i + chars_per_chunk] for i in range(0, len(text), chars_per_chunk - self.chunk_overlap * 4)
-            ]
+            chunks = []
+            start = 0
+            while start < len(tokens):
+                end = min(start + self.chunk_size, len(tokens))
+                chunk_tokens = tokens[start:end]
+                chunks.append(self._encoding.decode(chunk_tokens))
+                start = end - self.chunk_overlap if end < len(tokens) else end
 
-        chunks = []
-        start = 0
-        while start < len(tokens):
-            end = min(start + self.chunk_size, len(tokens))
-            chunk_tokens = tokens[start:end]
-            chunks.append(encoding.decode(chunk_tokens))
-            start = end - self.chunk_overlap if end < len(tokens) else end
+            return chunks
 
-        return chunks
+        # Character-based fallback
+        chars_per_chunk = self.chunk_size * 4
+        return [text[i : i + chars_per_chunk] for i in range(0, len(text), chars_per_chunk - self.chunk_overlap * 4)]
 
     def _create_chunk_result(self, content: str, index: int, hint_start: int, full_text: str) -> ChunkResult:
         """Create a ChunkResult with proper character positions."""

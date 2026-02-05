@@ -516,6 +516,31 @@ class PostgreSQLBackend:
             models = result.scalars().all()
             return {UUID(m.id): self._document_model_to_domain(m) for m in models}
 
+    async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+        """Fetch documents by content checksums in a single query.
+
+        Used for batch deduplication to avoid N serial DB queries.
+
+        Args:
+            namespace_id: Namespace to search in
+            checksums: List of content checksums to look up
+
+        Returns:
+            Dictionary mapping checksum to Document (only for existing documents)
+        """
+        if not checksums:
+            return {}
+
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.namespace_id == str(namespace_id),
+                    DocumentModel.checksum.in_(checksums),
+                )
+            )
+            models = result.scalars().all()
+            return {m.checksum: self._document_model_to_domain(m) for m in models}
+
     def _document_model_to_domain(self, model: DocumentModel) -> Document:
         """Convert DocumentModel to domain Document."""
         return Document(

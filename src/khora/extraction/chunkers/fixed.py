@@ -24,14 +24,11 @@ class FixedChunker(Chunker):
         if not text.strip():
             return []
 
-        try:
-            import tiktoken
-
-            encoding = tiktoken.get_encoding("cl100k_base")
-            tokens = encoding.encode(text)
-        except ImportError:
+        if self._encoding is None:
             # Fallback: character-based chunking
             return self._chunk_by_chars(text)
+
+        tokens = self._encoding.encode(text)
 
         chunks = []
         start = 0
@@ -42,7 +39,7 @@ class FixedChunker(Chunker):
 
             # Get the chunk tokens
             chunk_tokens = tokens[start:end]
-            chunk_text = encoding.decode(chunk_tokens)
+            chunk_text = self._encoding.decode(chunk_tokens)
 
             # Calculate character positions
             # This is approximate for token-based chunking

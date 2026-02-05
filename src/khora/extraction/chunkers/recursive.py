@@ -132,21 +132,18 @@ class RecursiveChunker(Chunker):
 
     def _get_overlap_text(self, text: str) -> str:
         """Get the overlap portion from the end of text."""
-        try:
-            import tiktoken
-
-            encoding = tiktoken.get_encoding("cl100k_base")
-            tokens = encoding.encode(text)
+        if self._encoding is not None:
+            tokens = self._encoding.encode(text)
 
             if len(tokens) <= self.chunk_overlap:
                 return text
 
             overlap_tokens = tokens[-self.chunk_overlap :]
-            return encoding.decode(overlap_tokens)
-        except ImportError:
-            # Character-based fallback
-            overlap_chars = self.chunk_overlap * 4
-            return text[-overlap_chars:] if len(text) > overlap_chars else text
+            return self._encoding.decode(overlap_tokens)
+
+        # Character-based fallback
+        overlap_chars = self.chunk_overlap * 4
+        return text[-overlap_chars:] if len(text) > overlap_chars else text
 
     def _create_chunk_result(self, content: str, index: int, original_text: str) -> ChunkResult:
         """Create a ChunkResult with character positions."""

@@ -295,8 +295,9 @@ class KhoraEngine:
         )
         chunker = create_chunker(chunker_config)
 
-        # Chunk the document
-        raw_chunks = chunker.chunk(document.content)
+        # Chunk the document (run in thread to avoid blocking event loop during
+        # CPU-bound tiktoken operations)
+        raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
 
         if not raw_chunks:
             # Mark document as processed with 0 chunks
@@ -602,18 +603,27 @@ class KhoraEngine:
         progress_count = 0
         progress_lock = asyncio.Lock()
 
-        # For deduplication within the batch, track checksums we've started processing
+        # Compute checksums for all documents upfront
+        doc_checksums: list[str] = []
+        for doc_data in documents:
+            content = doc_data.get("content", "")
+            checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            doc_checksums.append(checksum)
+
+        # Batch lookup existing documents by checksum (single query instead of N queries)
+        existing_docs: dict[str, Any] = {}
+        if deduplicate:
+            existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
+
+        # Track checksums we've started processing (for intra-batch deduplication)
         checksums_in_flight: set[str] = set()
         checksums_lock = asyncio.Lock()
 
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def process_document(doc_data: dict[str, Any]) -> None:
+        async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
             """Process a single document with semaphore control."""
             nonlocal progress_count
-
-            content = doc_data.get("content", "")
-            checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
             # Check for duplicate within the batch (before acquiring semaphore)
             async with checksums_lock:
@@ -623,18 +633,16 @@ class KhoraEngine:
                     return
                 checksums_in_flight.add(checksum)
 
-            # Check for duplicate in storage (using efficient per-document lookup)
-            if deduplicate:
-                existing = await storage.get_document_by_checksum(namespace_id, checksum)
-                if existing:
-                    async with results_lock:
-                        results["skipped"] += 1
-                    # Update progress
-                    if on_progress:
-                        async with progress_lock:
-                            progress_count += 1
-                            on_progress(progress_count, total)
-                    return
+            # Check if already exists in storage (using pre-fetched batch result)
+            if deduplicate and checksum in existing_docs:
+                async with results_lock:
+                    results["skipped"] += 1
+                # Update progress
+                if on_progress:
+                    async with progress_lock:
+                        progress_count += 1
+                        on_progress(progress_count, total)
+                return
 
             async with semaphore:
                 try:
@@ -644,6 +652,7 @@ class KhoraEngine:
                     if "occurred_at" in doc_metadata:
                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
 
+                    content = doc_data.get("content", "")
                     result = await self.remember(
                         content,
                         namespace_id,
@@ -673,7 +682,7 @@ class KhoraEngine:
                     on_progress(progress_count, total)
 
         # Process all documents concurrently with semaphore control
-        await asyncio.gather(*[process_document(doc) for doc in documents])
+        await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
 
         return BatchResult(
             total=total,
