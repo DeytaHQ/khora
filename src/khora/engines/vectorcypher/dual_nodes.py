@@ -1,0 +1,509 @@
+"""Dual-node manager for HippoRAG 2 architecture in Neo4j.
+
+Implements the dual-node structure where:
+- (:Chunk) nodes represent text chunks with content and embeddings
+- (:Entity) nodes represent extracted entities
+- [:MENTIONED_IN] edges link entities to chunks where they appear
+- [:AT_TIME] edges link chunks/entities to time hierarchy nodes
+
+This structure enables efficient retrieval by:
+1. Finding entry entities via vector similarity
+2. Expanding to related entities via graph traversal
+3. Retrieving chunks via MENTIONED_IN relationships
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
+
+from loguru import logger
+
+if TYPE_CHECKING:
+    from neo4j import AsyncDriver
+
+    from khora.engines.khora.backends import TemporalChunk, TemporalFilter
+
+
+@dataclass
+class ChunkNode:
+    """Chunk node representation for Neo4j."""
+
+    id: UUID
+    namespace_id: UUID
+    document_id: UUID
+    content: str
+    embedding: list[float] | None = None
+    occurred_at: datetime | None = None
+    created_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass
+class EntityChunkLink:
+    """Link between entity and chunk."""
+
+    entity_id: UUID
+    chunk_id: UUID
+    mention_count: int = 1
+    context: str = ""
+
+
+class DualNodeManager:
+    """Manages HippoRAG 2 dual-node structure in Neo4j.
+
+    Creates and maintains:
+    - (:Chunk) nodes with content and embeddings
+    - [:MENTIONED_IN] relationships from Entity to Chunk
+    - [:AT_TIME] relationships to time hierarchy
+
+    The dual-node structure enables efficient retrieval:
+    - Vector search on Entity nodes for entry points
+    - Graph expansion to find related entities
+    - Chunk retrieval via MENTIONED_IN for context
+    """
+
+    def __init__(self, driver: AsyncDriver, database: str = "neo4j"):
+        """Initialize the manager.
+
+        Args:
+            driver: Neo4j async driver
+            database: Database name
+        """
+        self._driver = driver
+        self._database = database
+
+    async def ensure_indexes(self) -> None:
+        """Create indexes for Chunk nodes."""
+        indexes = [
+            "CREATE INDEX chunk_id IF NOT EXISTS FOR (c:Chunk) ON (c.id)",
+            "CREATE INDEX chunk_namespace IF NOT EXISTS FOR (c:Chunk) ON (c.namespace_id)",
+            "CREATE INDEX chunk_document IF NOT EXISTS FOR (c:Chunk) ON (c.document_id)",
+            "CREATE INDEX chunk_occurred_at IF NOT EXISTS FOR (c:Chunk) ON (c.occurred_at)",
+            # Composite for efficient namespace + time queries
+            "CREATE INDEX chunk_ns_time IF NOT EXISTS FOR (c:Chunk) ON (c.namespace_id, c.occurred_at)",
+        ]
+
+        async with self._driver.session(database=self._database) as session:
+            for index in indexes:
+                try:
+                    await session.run(index)
+                except Exception as e:
+                    logger.debug(f"Index creation: {e}")
+
+    async def create_chunk_node(self, chunk: TemporalChunk) -> UUID:
+        """Create a single Chunk node in Neo4j.
+
+        Args:
+            chunk: Temporal chunk to create node for
+
+        Returns:
+            Chunk node ID
+        """
+        chunk_id = chunk.id or uuid4()
+
+        query = """
+        CREATE (c:Chunk {
+            id: $id,
+            namespace_id: $namespace_id,
+            document_id: $document_id,
+            content: $content,
+            occurred_at: $occurred_at,
+            created_at: $created_at,
+            source_system: $source_system,
+            author: $author,
+            channel: $channel,
+            confidence: $confidence,
+            metadata: $metadata
+        })
+        RETURN c.id AS id
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            await session.run(
+                query,
+                id=str(chunk_id),
+                namespace_id=str(chunk.namespace_id),
+                document_id=str(chunk.document_id),
+                content=chunk.content,
+                occurred_at=chunk.occurred_at.isoformat() if chunk.occurred_at else None,
+                created_at=chunk.created_at.isoformat() if chunk.created_at else datetime.now(UTC).isoformat(),
+                source_system=chunk.source_system,
+                author=chunk.author,
+                channel=chunk.channel,
+                confidence=chunk.confidence,
+                metadata=chunk.metadata or {},
+            )
+
+        logger.debug(f"Created Chunk node: {chunk_id}")
+        return chunk_id
+
+    async def create_chunk_nodes_batch(
+        self,
+        chunks: list[TemporalChunk],
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Create Chunk nodes in batch.
+
+        Args:
+            chunks: List of temporal chunks
+            namespace_id: Namespace ID
+
+        Returns:
+            List of created chunk IDs
+        """
+        if not chunks:
+            return []
+
+        # Prepare batch data
+        chunk_data = []
+        chunk_ids = []
+
+        for chunk in chunks:
+            chunk_id = chunk.id or uuid4()
+            chunk_ids.append(chunk_id)
+
+            chunk_data.append(
+                {
+                    "id": str(chunk_id),
+                    "namespace_id": str(namespace_id),
+                    "document_id": str(chunk.document_id),
+                    "content": chunk.content,
+                    "occurred_at": chunk.occurred_at.isoformat() if chunk.occurred_at else None,
+                    "created_at": chunk.created_at.isoformat() if chunk.created_at else datetime.now(UTC).isoformat(),
+                    "source_system": chunk.source_system,
+                    "author": chunk.author,
+                    "channel": chunk.channel,
+                    "confidence": chunk.confidence,
+                    "metadata": chunk.metadata or {},
+                }
+            )
+
+        query = """
+        UNWIND $chunks AS chunk
+        CREATE (c:Chunk {
+            id: chunk.id,
+            namespace_id: chunk.namespace_id,
+            document_id: chunk.document_id,
+            content: chunk.content,
+            occurred_at: chunk.occurred_at,
+            created_at: chunk.created_at,
+            source_system: chunk.source_system,
+            author: chunk.author,
+            channel: chunk.channel,
+            confidence: chunk.confidence,
+            metadata: chunk.metadata
+        })
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            await session.run(query, chunks=chunk_data)
+
+        logger.debug(f"Created {len(chunk_ids)} Chunk nodes in batch")
+        return chunk_ids
+
+    async def link_entity_to_chunk(
+        self,
+        entity_id: UUID,
+        chunk_id: UUID,
+        *,
+        mention_count: int = 1,
+        context: str = "",
+    ) -> None:
+        """Create MENTIONED_IN relationship from Entity to Chunk.
+
+        Args:
+            entity_id: Entity node ID
+            chunk_id: Chunk node ID
+            mention_count: Number of times entity is mentioned in chunk
+            context: Surrounding context of the mention
+        """
+        query = """
+        MATCH (e:Entity {id: $entity_id})
+        MATCH (c:Chunk {id: $chunk_id})
+        MERGE (e)-[r:MENTIONED_IN]->(c)
+        ON CREATE SET r.mention_count = $mention_count, r.context = $context
+        ON MATCH SET r.mention_count = r.mention_count + $mention_count
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            await session.run(
+                query,
+                entity_id=str(entity_id),
+                chunk_id=str(chunk_id),
+                mention_count=mention_count,
+                context=context,
+            )
+
+    async def link_entities_to_chunks_batch(
+        self,
+        links: list[EntityChunkLink],
+    ) -> None:
+        """Create MENTIONED_IN relationships in batch.
+
+        Args:
+            links: List of EntityChunkLink objects
+        """
+        if not links:
+            return
+
+        link_data = [
+            {
+                "entity_id": str(link.entity_id),
+                "chunk_id": str(link.chunk_id),
+                "mention_count": link.mention_count,
+                "context": link.context,
+            }
+            for link in links
+        ]
+
+        query = """
+        UNWIND $links AS link
+        MATCH (e:Entity {id: link.entity_id})
+        MATCH (c:Chunk {id: link.chunk_id})
+        MERGE (e)-[r:MENTIONED_IN]->(c)
+        ON CREATE SET r.mention_count = link.mention_count, r.context = link.context
+        ON MATCH SET r.mention_count = r.mention_count + link.mention_count
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            await session.run(query, links=link_data)
+
+        logger.debug(f"Created {len(links)} MENTIONED_IN relationships")
+
+    async def link_chunk_to_time(
+        self,
+        chunk_id: UUID,
+        time_node_id: UUID,
+    ) -> None:
+        """Create AT_TIME relationship from Chunk to TimeNode.
+
+        Args:
+            chunk_id: Chunk node ID
+            time_node_id: TimeNode ID (usually a day node)
+        """
+        query = """
+        MATCH (c:Chunk {id: $chunk_id})
+        MATCH (t:TimeNode {id: $time_node_id})
+        MERGE (c)-[:AT_TIME]->(t)
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            await session.run(
+                query,
+                chunk_id=str(chunk_id),
+                time_node_id=str(time_node_id),
+            )
+
+    async def link_chunks_to_time_batch(
+        self,
+        chunk_time_links: list[tuple[UUID, UUID]],
+    ) -> None:
+        """Create AT_TIME relationships in batch.
+
+        Args:
+            chunk_time_links: List of (chunk_id, time_node_id) tuples
+        """
+        if not chunk_time_links:
+            return
+
+        link_data = [
+            {"chunk_id": str(chunk_id), "time_node_id": str(time_id)} for chunk_id, time_id in chunk_time_links
+        ]
+
+        query = """
+        UNWIND $links AS link
+        MATCH (c:Chunk {id: link.chunk_id})
+        MATCH (t:TimeNode {id: link.time_node_id})
+        MERGE (c)-[:AT_TIME]->(t)
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            await session.run(query, links=link_data)
+
+    async def get_chunks_by_entities(
+        self,
+        entity_ids: list[UUID],
+        namespace_id: UUID,
+        *,
+        temporal_filter: TemporalFilter | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get chunks connected to the given entities via MENTIONED_IN.
+
+        Args:
+            entity_ids: List of entity IDs to find chunks for
+            namespace_id: Namespace to search within
+            temporal_filter: Optional temporal constraints
+            limit: Maximum chunks to return
+
+        Returns:
+            List of chunk dicts with entity connection info
+        """
+        if not entity_ids:
+            return []
+
+        # Build temporal filter conditions
+        temporal_conditions = []
+        params: dict[str, Any] = {
+            "entity_ids": [str(eid) for eid in entity_ids],
+            "namespace_id": str(namespace_id),
+            "limit": limit,
+        }
+
+        if temporal_filter:
+            if temporal_filter.occurred_after:
+                temporal_conditions.append("c.occurred_at >= $occurred_after")
+                params["occurred_after"] = temporal_filter.occurred_after.isoformat()
+            if temporal_filter.occurred_before:
+                temporal_conditions.append("c.occurred_at < $occurred_before")
+                params["occurred_before"] = temporal_filter.occurred_before.isoformat()
+            if temporal_filter.source_system:
+                temporal_conditions.append("c.source_system = $source_system")
+                params["source_system"] = temporal_filter.source_system
+            if temporal_filter.author:
+                temporal_conditions.append("c.author = $author")
+                params["author"] = temporal_filter.author
+            if temporal_filter.channel:
+                temporal_conditions.append("c.channel = $channel")
+                params["channel"] = temporal_filter.channel
+
+        where_clause = ""
+        if temporal_conditions:
+            where_clause = "AND " + " AND ".join(temporal_conditions)
+
+        query = f"""
+        MATCH (e:Entity)-[r:MENTIONED_IN]->(c:Chunk)
+        WHERE e.id IN $entity_ids
+        AND c.namespace_id = $namespace_id
+        {where_clause}
+        RETURN c.id AS chunk_id,
+               c.content AS content,
+               c.document_id AS document_id,
+               c.occurred_at AS occurred_at,
+               c.metadata AS metadata,
+               collect(DISTINCT e.id) AS entity_ids,
+               sum(r.mention_count) AS total_mentions
+        ORDER BY total_mentions DESC
+        LIMIT $limit
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            result = await session.run(query, **params)
+            records = [record.data() async for record in result]
+
+        return records
+
+    async def get_entity_neighborhoods(
+        self,
+        entity_ids: list[UUID],
+        namespace_id: UUID,
+        *,
+        depth: int = 2,
+        limit_per_entity: int = 20,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Get neighborhood of entities via relationship traversal.
+
+        Args:
+            entity_ids: Starting entity IDs
+            namespace_id: Namespace constraint
+            depth: Maximum traversal depth (1-4)
+            limit_per_entity: Max related entities per starting entity
+
+        Returns:
+            Dict mapping entity_id -> list of related entity info
+        """
+        if not entity_ids:
+            return {}
+
+        depth = min(max(1, depth), 4)  # Clamp to 1-4
+
+        query = f"""
+        MATCH (e:Entity)
+        WHERE e.id IN $entity_ids AND e.namespace_id = $namespace_id
+        MATCH path = (e)-[*1..{depth}]-(related:Entity)
+        WHERE related.namespace_id = $namespace_id
+        AND related.id <> e.id
+        WITH e, related, length(path) AS distance
+        RETURN e.id AS source_id,
+               collect(DISTINCT {{
+                   id: related.id,
+                   name: related.name,
+                   entity_type: related.entity_type,
+                   distance: distance
+               }})[0..$limit] AS related_entities
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            result = await session.run(
+                query,
+                entity_ids=[str(eid) for eid in entity_ids],
+                namespace_id=str(namespace_id),
+                limit=limit_per_entity,
+            )
+            records = [record.data() async for record in result]
+
+        return {record["source_id"]: record["related_entities"] for record in records}
+
+    async def delete_chunks_by_document(
+        self,
+        document_id: UUID,
+        namespace_id: UUID,
+    ) -> int:
+        """Delete all Chunk nodes for a document.
+
+        Also removes MENTIONED_IN and AT_TIME relationships.
+
+        Args:
+            document_id: Document ID
+            namespace_id: Namespace ID
+
+        Returns:
+            Number of chunks deleted
+        """
+        query = """
+        MATCH (c:Chunk {document_id: $document_id, namespace_id: $namespace_id})
+        DETACH DELETE c
+        RETURN count(c) AS deleted
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            result = await session.run(
+                query,
+                document_id=str(document_id),
+                namespace_id=str(namespace_id),
+            )
+            record = await result.single()
+
+        deleted = record["deleted"] if record else 0
+        logger.debug(f"Deleted {deleted} Chunk nodes for document {document_id}")
+        return deleted
+
+    async def count_chunks(self, namespace_id: UUID) -> int:
+        """Count Chunk nodes in a namespace.
+
+        Args:
+            namespace_id: Namespace ID
+
+        Returns:
+            Number of chunks
+        """
+        query = """
+        MATCH (c:Chunk {namespace_id: $namespace_id})
+        RETURN count(c) AS count
+        """
+
+        async with self._driver.session(database=self._database) as session:
+            result = await session.run(query, namespace_id=str(namespace_id))
+            record = await result.single()
+
+        return record["count"] if record else 0
+
+
+__all__ = [
+    "ChunkNode",
+    "DualNodeManager",
+    "EntityChunkLink",
+]

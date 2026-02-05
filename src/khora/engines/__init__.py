@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 _ENGINE_REGISTRY: dict[str, tuple[str, str]] = {
     "graphrag": ("khora.engines.graphrag.engine", "GraphRAGEngine"),
     "khora": ("khora.engines.khora.engine", "KhoraEngine"),
+    "vectorcypher": ("khora.engines.vectorcypher.engine", "VectorCypherEngine"),
 }
 
 

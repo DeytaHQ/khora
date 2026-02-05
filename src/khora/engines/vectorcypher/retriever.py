@@ -1,0 +1,512 @@
+"""VectorCypher retriever - hybrid vector+graph retrieval.
+
+Implements the VectorCypher retrieval pipeline:
+1. Vector search to find entry entities (pgvector)
+2. Cypher traversal to expand relationships (Neo4j)
+3. Chunk retrieval via MENTIONED_IN relationships
+4. RRF fusion to combine vector and graph scores
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
+
+from loguru import logger
+
+from .dual_nodes import DualNodeManager
+from .fusion import FusedResult, apply_recency_boost, normalize_scores, weighted_rrf
+from .router import QueryComplexity, QueryComplexityRouter, RoutingDecision
+
+if TYPE_CHECKING:
+    from neo4j import AsyncDriver
+
+    from khora.engines.khora.backends import TemporalFilter, TemporalVectorStore
+    from khora.extraction.embedders import EmbedderProtocol
+
+
+@dataclass
+class VectorCypherResult:
+    """Result from VectorCypher retrieval."""
+
+    chunks: list[tuple[dict[str, Any], float]]
+    entities: list[tuple[dict[str, Any], float]]
+    routing_decision: RoutingDecision
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RetrieverConfig:
+    """Configuration for the retriever."""
+
+    # Graph traversal settings
+    default_depth: int = 2
+    max_depth: int = 4
+    max_entry_entities: int = 10
+
+    # Fusion settings
+    rrf_k: int = 60
+    vector_weight: float = 0.6
+    graph_weight: float = 0.4
+
+    # Temporal settings
+    recency_weight: float = 0.2
+    recency_decay_days: int = 30
+
+    # Limits
+    max_chunks: int = 50
+    max_entities: int = 30
+
+
+class VectorCypherRetriever:
+    """Hybrid retriever combining vector search with Cypher graph traversal.
+
+    The retrieval pipeline:
+    1. Route query to determine search strategy
+    2. Vector search for entry entities via pgvector
+    3. (If complex) Expand entities via Neo4j Cypher queries
+    4. Fetch chunks connected to entities via MENTIONED_IN
+    5. Apply RRF fusion to combine results
+    6. Apply temporal recency boost
+    """
+
+    def __init__(
+        self,
+        vector_store: TemporalVectorStore,
+        neo4j_driver: AsyncDriver,
+        embedder: EmbedderProtocol,
+        *,
+        database: str = "neo4j",
+        config: RetrieverConfig | None = None,
+    ):
+        """Initialize the retriever.
+
+        Args:
+            vector_store: pgvector temporal store for chunk search
+            neo4j_driver: Neo4j async driver for graph traversal
+            embedder: Embedder for query embedding
+            database: Neo4j database name
+            config: Retriever configuration
+        """
+        self._vector_store = vector_store
+        self._neo4j_driver = neo4j_driver
+        self._embedder = embedder
+        self._database = database
+        self._config = config or RetrieverConfig()
+
+        # Initialize sub-components
+        self._router = QueryComplexityRouter()
+        self._dual_nodes = DualNodeManager(neo4j_driver, database)
+
+    async def retrieve(
+        self,
+        query: str,
+        namespace_id: UUID,
+        *,
+        temporal_filter: TemporalFilter | None = None,
+        graph_depth: int | None = None,
+        limit: int | None = None,
+    ) -> VectorCypherResult:
+        """Retrieve relevant chunks using VectorCypher hybrid approach.
+
+        Args:
+            query: User query
+            namespace_id: Namespace to search
+            temporal_filter: Optional temporal constraints
+            graph_depth: Override for graph traversal depth
+            limit: Maximum chunks to return
+
+        Returns:
+            VectorCypherResult with chunks, entities, and metadata
+        """
+        limit = limit or self._config.max_chunks
+
+        # Step 1: Route query to determine strategy
+        routing = await self._router.route(query)
+        logger.debug(f"Query routing: {routing.complexity.value} (use_graph={routing.use_graph})")
+
+        # Step 2: Embed the query
+        query_embedding = await self._embedder.embed(query)
+
+        # Step 3: Vector search for entry points
+        if routing.complexity == QueryComplexity.SIMPLE:
+            # Simple path: direct chunk retrieval
+            return await self._simple_retrieve(
+                query=query,
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                limit=limit,
+                routing=routing,
+            )
+
+        # Complex/moderate path: VectorCypher
+        depth = graph_depth or routing.graph_depth
+        entry_limit = routing.suggested_entry_limit
+
+        # Step 3a: Find entry entities via vector search
+        entry_entities = await self._vector_search_entities(
+            query_embedding=query_embedding,
+            namespace_id=namespace_id,
+            limit=entry_limit,
+        )
+
+        if not entry_entities:
+            logger.debug("No entry entities found, falling back to simple retrieval")
+            return await self._simple_retrieve(
+                query=query,
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                limit=limit,
+                routing=routing,
+            )
+
+        # Step 4: Cypher expand to find related entities
+        expanded_entities = await self._cypher_expand(
+            entry_entity_ids=[e[0] for e in entry_entities],
+            namespace_id=namespace_id,
+            depth=depth,
+        )
+
+        # Step 5: Fetch chunks from all entities
+        all_entity_ids = list({e[0] for e in entry_entities} | expanded_entities.keys())
+
+        chunks = await self._fetch_chunks_from_entities(
+            entity_ids=all_entity_ids,
+            namespace_id=namespace_id,
+            temporal_filter=temporal_filter,
+            limit=limit * 2,  # Fetch more for fusion
+        )
+
+        # Step 6: Also do direct chunk vector search
+        vector_chunks = await self._vector_search_chunks(
+            query_embedding=query_embedding,
+            namespace_id=namespace_id,
+            temporal_filter=temporal_filter,
+            query_text=query,
+            limit=limit,
+        )
+
+        # Step 7: RRF fusion
+        fused_results = self._fuse_results(
+            vector_chunks=vector_chunks,
+            graph_chunks=chunks,
+        )
+
+        # Step 8: Apply recency boost if temporal data available
+        if self._config.recency_weight > 0:
+            recency_scores = self._calculate_recency_scores(fused_results)
+            fused_results = apply_recency_boost(
+                fused_results,
+                recency_scores,
+                recency_weight=self._config.recency_weight,
+            )
+
+        # Normalize scores
+        fused_results = normalize_scores(fused_results)
+
+        # Build result
+        chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
+
+        entity_results = [
+            ({"id": str(eid), "score": score}, score) for eid, score in entry_entities[: self._config.max_entities]
+        ]
+
+        return VectorCypherResult(
+            chunks=chunk_results,
+            entities=entity_results,
+            routing_decision=routing,
+            metadata={
+                "entry_entities": len(entry_entities),
+                "expanded_entities": len(expanded_entities),
+                "graph_depth": depth,
+                "total_chunks_before_fusion": len(chunks) + len(vector_chunks),
+            },
+        )
+
+    async def _simple_retrieve(
+        self,
+        query: str,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        temporal_filter: TemporalFilter | None,
+        limit: int,
+        routing: RoutingDecision,
+    ) -> VectorCypherResult:
+        """Simple retrieval path - vector search only."""
+        results = await self._vector_store.search(
+            namespace_id=namespace_id,
+            query_embedding=query_embedding,
+            limit=limit,
+            temporal_filter=temporal_filter,
+            hybrid_alpha=0.7,  # Default hybrid
+            query_text=query,
+        )
+
+        chunk_results = []
+        for r in results:
+            chunk_dict = {
+                "id": str(r.chunk.id),
+                "content": r.chunk.content,
+                "document_id": str(r.chunk.document_id),
+                "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
+                "metadata": r.chunk.metadata,
+            }
+            chunk_results.append((chunk_dict, r.combined_score or r.similarity))
+
+        return VectorCypherResult(
+            chunks=chunk_results,
+            entities=[],
+            routing_decision=routing,
+            metadata={"search_mode": "simple_vector"},
+        )
+
+    async def _vector_search_entities(
+        self,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        limit: int,
+    ) -> list[tuple[UUID, float]]:
+        """Search for entry entities using vector similarity on entity embeddings.
+
+        Args:
+            query_embedding: Query embedding vector
+            namespace_id: Namespace to search
+            limit: Maximum entities to return
+
+        Returns:
+            List of (entity_id, similarity_score) tuples
+        """
+        # Search entities in Neo4j using vector similarity
+        # Note: This requires Neo4j vector index or we search via pgvector entities table
+        query = """
+        MATCH (e:Entity {namespace_id: $namespace_id})
+        WHERE e.embedding IS NOT NULL
+        WITH e, gds.similarity.cosine(e.embedding, $query_embedding) AS similarity
+        WHERE similarity > 0.3
+        RETURN e.id AS id, similarity
+        ORDER BY similarity DESC
+        LIMIT $limit
+        """
+
+        try:
+            async with self._neo4j_driver.session(database=self._database) as session:
+                result = await session.run(
+                    query,
+                    namespace_id=str(namespace_id),
+                    query_embedding=query_embedding,
+                    limit=limit,
+                )
+                records = [record.data() async for record in result]
+
+            return [(UUID(r["id"]), r["similarity"]) for r in records]
+        except Exception as e:
+            logger.warning(f"Entity vector search failed (Neo4j GDS may not be available): {e}")
+            # Fallback: return empty, will use simple retrieval
+            return []
+
+    async def _cypher_expand(
+        self,
+        entry_entity_ids: list[UUID],
+        namespace_id: UUID,
+        depth: int,
+    ) -> dict[UUID, float]:
+        """Expand entry entities to find related entities via graph traversal.
+
+        Args:
+            entry_entity_ids: Starting entity IDs
+            namespace_id: Namespace constraint
+            depth: Maximum traversal depth
+
+        Returns:
+            Dict mapping entity_id -> relevance score
+        """
+        if not entry_entity_ids:
+            return {}
+
+        depth = min(max(1, depth), self._config.max_depth)
+
+        # Get neighborhoods from dual node manager
+        neighborhoods = await self._dual_nodes.get_entity_neighborhoods(
+            entity_ids=entry_entity_ids,
+            namespace_id=namespace_id,
+            depth=depth,
+            limit_per_entity=20,
+        )
+
+        # Score entities by distance from entry points
+        entity_scores: dict[UUID, float] = {}
+
+        for source_id, related in neighborhoods.items():
+            for entity_info in related:
+                entity_id = UUID(entity_info["id"])
+                distance = entity_info["distance"]
+                # Score decreases with distance
+                score = 1.0 / (1 + distance)
+
+                if entity_id in entity_scores:
+                    # Take max score if entity reached multiple ways
+                    entity_scores[entity_id] = max(entity_scores[entity_id], score)
+                else:
+                    entity_scores[entity_id] = score
+
+        return entity_scores
+
+    async def _fetch_chunks_from_entities(
+        self,
+        entity_ids: list[UUID],
+        namespace_id: UUID,
+        temporal_filter: TemporalFilter | None,
+        limit: int,
+    ) -> list[tuple[UUID, float, dict[str, Any]]]:
+        """Fetch chunks connected to entities via MENTIONED_IN.
+
+        Args:
+            entity_ids: Entity IDs to fetch chunks for
+            namespace_id: Namespace constraint
+            temporal_filter: Optional temporal constraints
+            limit: Maximum chunks to return
+
+        Returns:
+            List of (chunk_id, score, chunk_data) tuples
+        """
+        chunk_records = await self._dual_nodes.get_chunks_by_entities(
+            entity_ids=entity_ids,
+            namespace_id=namespace_id,
+            temporal_filter=temporal_filter,
+            limit=limit,
+        )
+
+        results = []
+        for record in chunk_records:
+            chunk_id = UUID(record["chunk_id"])
+            # Score based on mention count and entity coverage
+            score = float(record.get("total_mentions", 1))
+            entity_count = len(record.get("entity_ids", []))
+            score = score * (1 + 0.1 * entity_count)  # Boost for multiple entity connections
+
+            chunk_data = {
+                "id": record["chunk_id"],
+                "content": record["content"],
+                "document_id": record["document_id"],
+                "occurred_at": record.get("occurred_at"),
+                "metadata": record.get("metadata", {}),
+                "connected_entities": record.get("entity_ids", []),
+            }
+            results.append((chunk_id, score, chunk_data))
+
+        return results
+
+    async def _vector_search_chunks(
+        self,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        temporal_filter: TemporalFilter | None,
+        query_text: str,
+        limit: int,
+    ) -> list[tuple[UUID, float, dict[str, Any]]]:
+        """Direct vector search on chunks via pgvector.
+
+        Args:
+            query_embedding: Query embedding
+            namespace_id: Namespace to search
+            temporal_filter: Temporal constraints
+            query_text: Original query text for hybrid search
+            limit: Maximum results
+
+        Returns:
+            List of (chunk_id, score, chunk_data) tuples
+        """
+        results = await self._vector_store.search(
+            namespace_id=namespace_id,
+            query_embedding=query_embedding,
+            limit=limit,
+            temporal_filter=temporal_filter,
+            hybrid_alpha=0.7,
+            query_text=query_text,
+        )
+
+        return [
+            (
+                r.chunk.id,
+                r.combined_score or r.similarity,
+                {
+                    "id": str(r.chunk.id),
+                    "content": r.chunk.content,
+                    "document_id": str(r.chunk.document_id),
+                    "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
+                    "metadata": r.chunk.metadata,
+                },
+            )
+            for r in results
+        ]
+
+    def _fuse_results(
+        self,
+        vector_chunks: list[tuple[UUID, float, dict[str, Any]]],
+        graph_chunks: list[tuple[UUID, float, dict[str, Any]]],
+    ) -> list[FusedResult]:
+        """Fuse vector and graph results using weighted RRF.
+
+        Args:
+            vector_chunks: Results from vector search
+            graph_chunks: Results from graph traversal
+
+        Returns:
+            Fused and sorted results
+        """
+        return weighted_rrf(
+            vector_results=vector_chunks,
+            graph_results=graph_chunks,
+            k=self._config.rrf_k,
+            vector_weight=self._config.vector_weight,
+            graph_weight=self._config.graph_weight,
+        )
+
+    def _calculate_recency_scores(
+        self,
+        results: list[FusedResult],
+    ) -> dict[UUID, float]:
+        """Calculate recency scores for temporal boosting.
+
+        Args:
+            results: Fused results with items containing occurred_at
+
+        Returns:
+            Dict mapping item_id -> recency score (0-1)
+        """
+        now = datetime.now(UTC)
+        decay_days = self._config.recency_decay_days
+        scores: dict[UUID, float] = {}
+
+        for r in results:
+            item = r.item
+            if isinstance(item, dict):
+                occurred_at_str = item.get("occurred_at")
+                if occurred_at_str:
+                    try:
+                        occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
+                        if occurred_at.tzinfo is None:
+                            occurred_at = occurred_at.replace(tzinfo=UTC)
+                        days_old = (now - occurred_at).days
+                        # Exponential decay
+                        recency = max(0.0, 1.0 - (days_old / decay_days))
+                        scores[r.item_id] = recency
+                    except (ValueError, TypeError):
+                        scores[r.item_id] = 0.5  # Default for unparseable dates
+                else:
+                    scores[r.item_id] = 0.5  # Default for missing dates
+            else:
+                scores[r.item_id] = 0.5
+
+        return scores
+
+
+__all__ = [
+    "RetrieverConfig",
+    "VectorCypherResult",
+    "VectorCypherRetriever",
+]
