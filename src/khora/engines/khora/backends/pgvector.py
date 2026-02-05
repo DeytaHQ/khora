@@ -142,6 +142,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
             )
 
             # Create trigger for auto-updating content_tsv
+            # Note: Each statement must be executed separately (asyncpg limitation)
             await conn.execute(
                 text(
                     """
@@ -150,12 +151,17 @@ class PgVectorTemporalStore(TemporalVectorStore):
                     NEW.content_tsv := to_tsvector('english', NEW.content);
                     RETURN NEW;
                 END
-                $$ LANGUAGE plpgsql;
-
-                DROP TRIGGER IF EXISTS khora_chunks_content_tsv_update ON khora_chunks;
+                $$ LANGUAGE plpgsql
+                """
+                )
+            )
+            await conn.execute(text("DROP TRIGGER IF EXISTS khora_chunks_content_tsv_update ON khora_chunks"))
+            await conn.execute(
+                text(
+                    """
                 CREATE TRIGGER khora_chunks_content_tsv_update
                 BEFORE INSERT OR UPDATE ON khora_chunks
-                FOR EACH ROW EXECUTE FUNCTION khora_chunks_content_tsv_trigger();
+                FOR EACH ROW EXECUTE FUNCTION khora_chunks_content_tsv_trigger()
                 """
                 )
             )
