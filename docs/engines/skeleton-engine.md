@@ -8,7 +8,7 @@ Choose the Skeleton Construction engine when:
 
 - **Time matters most**: Chat logs, event streams, meeting transcripts, logs
 - **Cost is a concern**: 5-10x fewer LLM calls via skeleton indexing
-- **Infrastructure is limited**: No Neo4j required (embedded Kuzu or PostgreSQL-only)
+- **Infrastructure is limited**: PostgreSQL-only (no graph database required)
 - **Freshness is critical**: Bi-temporal model tracks both event time and ingestion time
 - **Structured filters needed**: Filter by author, channel, tags, time ranges
 

@@ -34,11 +34,12 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 
 ## Pluggable Engines
 
-Khora supports two engines with different strengths:
+Khora supports three engines with different strengths:
 
 | Engine | Focus | Best For | LLM Cost |
 |--------|-------|----------|----------|
 | **GraphRAG** | Knowledge graphs | Knowledge bases, entity exploration | Higher |
+| **VectorCypher** | Hybrid retrieval | Multi-hop queries, complex relationships | Medium |
 | **Skeleton Construction** | Temporal events | Chat logs, events, cost-sensitive apps | 5-10x lower |
 
 ### GraphRAG Engine (Default)
@@ -103,7 +104,8 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 |-------|-------------|
 | **Engines** | |
 | [Skeleton Construction Engine](docs/engines/skeleton-engine.md) | Temporal-first engine documentation |
-| [Engine Comparison](docs/engines/engine-comparison.md) | GraphRAG vs Khora comparison |
+| [VectorCypher Engine](docs/engines/vectorcypher-engine.md) | Hybrid vector+graph engine documentation |
+| [Engine Comparison](docs/engines/engine-comparison.md) | GraphRAG vs Skeleton vs VectorCypher comparison |
 | [Temporal Model](docs/engines/temporal-model.md) | Bi-temporal design deep dive |
 | [Skeleton Indexing](docs/engines/skeleton-indexing.md) | Cost optimization via PageRank |
 | [Hybrid Search](docs/engines/hybrid-search.md) | Vector + BM25 fusion |

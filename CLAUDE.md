@@ -60,6 +60,8 @@ async with MemoryLake("postgresql://...") as lake:
 |----------|--------|--------|
 | Knowledge bases | `graphrag` | Rich entity/relationship extraction |
 | Entity exploration | `graphrag` | Graph traversal support |
+| Multi-hop queries | `vectorcypher` | Vector + Cypher graph traversal |
+| Complex relationships | `vectorcypher` | RRF fusion, query routing |
 | Chat/message history | `skeleton` | Skeleton Construction: Temporal-first, structured filters |
 | Event streams/logs | `skeleton` | Skeleton Construction: Bi-temporal model |
 | Cost-sensitive apps | `skeleton` | Skeleton Construction: 5-10x fewer LLM calls |

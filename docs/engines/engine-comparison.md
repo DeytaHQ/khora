@@ -4,16 +4,16 @@ Khora supports two pluggable engines with different strengths. This guide helps 
 
 ## Quick Comparison
 
-| Aspect | GraphRAG | Skeleton Construction |
-|--------|----------|----------------------|
-| **Primary Focus** | Knowledge graphs | Temporal events |
-| **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) |
-| **Core Data Model** | Entities & relationships | Chunks with temporal metadata |
-| **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) |
-| **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) |
-| **Graph Backend** | Required (Neo4j/Kuzu/Memgraph) | Optional (Kuzu embedded) |
-| **Search Modes** | Vector + Graph + Keyword | Vector + BM25 Hybrid |
-| **Best For** | Knowledge bases | Chat history, logs, events |
+| Aspect | GraphRAG | Skeleton Construction | VectorCypher |
+|--------|----------|----------------------|--------------|
+| **Primary Focus** | Knowledge graphs | Temporal events | Hybrid retrieval |
+| **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) | Skeleton (25%) |
+| **Core Data Model** | Entities & relationships | Chunks with temporal metadata | Dual nodes (Entity + Chunk) |
+| **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Bi-temporal |
+| **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~250 calls/1000 docs) |
+| **Graph Backend** | Required (Neo4j/Kuzu/Memgraph) | Not required | Required (Neo4j) |
+| **Search Modes** | Vector + Graph + Keyword | Vector + BM25 Hybrid | Vector + Cypher + RRF |
+| **Best For** | Knowledge bases | Chat history, logs, events | Complex multi-hop queries |
 
 ## Detailed Comparison
 
@@ -128,11 +128,21 @@ PostgreSQL (required)
 ├── Documents & metadata
 ├── pgvector embeddings
 ├── BM25 full-text (tsvector)
-├── BRIN temporal indexes
-└── Time hierarchy nodes
+└── BRIN temporal indexes
+```
 
-Kuzu (optional, embedded)
-└── Graph features if needed
+**VectorCypher:**
+
+```
+PostgreSQL (required)
+├── Documents & metadata
+└── pgvector embeddings
+
+Neo4j (required)
+├── Entity nodes
+├── Chunk nodes
+├── MENTIONED_IN relationships
+└── Graph traversal
 ```
 
 ### Cost Analysis
