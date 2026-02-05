@@ -91,13 +91,13 @@ class RelationshipInferrer:
         entity_types = Counter(
             e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
         )
-        logger.info(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
+        logger.debug(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
 
         rel_types = Counter(
             r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
             for r in relationships
         )
-        logger.info(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
+        logger.debug(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
 
         # Detailed pattern diagnostics (debug-only to avoid overhead)
         if logger._core.min_level <= 10:  # DEBUG level
@@ -156,7 +156,7 @@ class RelationshipInferrer:
 
             # Evaluate inference rules
             matches = self._rule_engine.evaluate_inference_rules(context)
-            logger.info(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
+            logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
 
             # Log details of first few matches (debug only, avoids list() overhead)
             if logger._core.min_level <= 10:
@@ -269,7 +269,7 @@ class RelationshipInferrer:
         # Log filtering breakdown
         total_filtered = filtered_rule_limit + filtered_confidence + filtered_entity_resolution + filtered_self_ref
         if total_filtered > 0 or len(matches) > 0:
-            logger.info(
+            logger.debug(
                 f"Match filtering: {len(matches)} input -> {len(inferred)} output | "
                 f"rule_limit={filtered_rule_limit}, confidence={filtered_confidence}, "
                 f"entity_resolution={filtered_entity_resolution}, self_ref={filtered_self_ref}"
