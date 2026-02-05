@@ -7603,6 +7603,151 @@ README.md
 337:     ]
 ````
 
+## File: src/khora/api/routes/status.py
+````python
+ 1: """Status endpoints for Khora API."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
+ 7: 
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: import khora
+11: 
+12: router = APIRouter()
+13: 
+14: 
+15: @router.get("/status")
+16: async def status_check(request: Request) -> dict[str, Any]:
+17:     """Basic status check endpoint.
+18: 
+19:     Returns:
+20:         Status with timestamp and version
+21:     """
+22:     return {
+23:         "status": "ok",
+24:         "timestamp": datetime.now(UTC).isoformat(),
+25:         "version": khora.__version__,
+26:         "service": "khora",
+27:     }
+28: 
+29: 
+30: @router.get("/health")
+31: async def health_check(request: Request) -> dict[str, Any]:
+32:     """Health check endpoint for orchestration systems.
+33: 
+34:     Returns:
+35:         Health status with timestamp
+36:     """
+37:     return {
+38:         "status": "healthy",
+39:         "timestamp": datetime.now(UTC).isoformat(),
+40:         "version": khora.__version__,
+41:     }
+42: 
+43: 
+44: @router.get("/health/ready")
+45: async def readiness_check(request: Request) -> dict[str, Any]:
+46:     """Readiness check for Kubernetes/orchestration.
+47: 
+48:     Checks that all required services are available.
+49: 
+50:     Returns:
+51:         Readiness status with component checks
+52:     """
+53:     config = request.app.state.config
+54:     checks: dict[str, bool] = {}
+55: 
+56:     # TODO: Add actual health checks for:
+57:     # - Database connections
+58:     # - External services
+59: 
+60:     # For now, return basic status
+61:     checks["config_loaded"] = config is not None
+62: 
+63:     all_healthy = all(checks.values())
+64: 
+65:     return {
+66:         "status": "ready" if all_healthy else "not_ready",
+67:         "timestamp": datetime.now(UTC).isoformat(),
+68:         "checks": checks,
+69:     }
+70: 
+71: 
+72: @router.get("/health/live")
+73: async def liveness_check() -> dict[str, Any]:
+74:     """Liveness check for Kubernetes/orchestration.
+75: 
+76:     Simple check that the application is running.
+77: 
+78:     Returns:
+79:         Liveness status
+80:     """
+81:     return {
+82:         "status": "alive",
+83:         "timestamp": datetime.now(UTC).isoformat(),
+84:     }
+````
+
+## File: src/khora/cli/__init__.py
+````python
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.1.4")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
+````
+
 ## File: src/khora/config/__init__.py
 ````python
  1: """Configuration module for Khora."""
@@ -21764,149 +21909,152 @@ README.md
 159:         assert call["metadata"] == {"chunk_count": 42}
 ````
 
-## File: src/khora/api/routes/status.py
+## File: src/khora/api/app.py
 ````python
- 1: """Status endpoints for Khora API."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: import khora
-11: 
-12: router = APIRouter()
-13: 
-14: 
-15: @router.get("/status")
-16: async def status_check(request: Request) -> dict[str, Any]:
-17:     """Basic status check endpoint.
-18: 
-19:     Returns:
-20:         Status with timestamp and version
-21:     """
-22:     return {
-23:         "status": "ok",
-24:         "timestamp": datetime.now(UTC).isoformat(),
-25:         "version": khora.__version__,
-26:         "service": "khora",
-27:     }
-28: 
-29: 
-30: @router.get("/health")
-31: async def health_check(request: Request) -> dict[str, Any]:
-32:     """Health check endpoint for orchestration systems.
-33: 
-34:     Returns:
-35:         Health status with timestamp
-36:     """
-37:     return {
-38:         "status": "healthy",
-39:         "timestamp": datetime.now(UTC).isoformat(),
-40:         "version": khora.__version__,
-41:     }
-42: 
-43: 
-44: @router.get("/health/ready")
-45: async def readiness_check(request: Request) -> dict[str, Any]:
-46:     """Readiness check for Kubernetes/orchestration.
-47: 
-48:     Checks that all required services are available.
-49: 
-50:     Returns:
-51:         Readiness status with component checks
-52:     """
-53:     config = request.app.state.config
-54:     checks: dict[str, bool] = {}
-55: 
-56:     # TODO: Add actual health checks for:
-57:     # - Database connections
-58:     # - External services
-59: 
-60:     # For now, return basic status
-61:     checks["config_loaded"] = config is not None
-62: 
-63:     all_healthy = all(checks.values())
-64: 
-65:     return {
-66:         "status": "ready" if all_healthy else "not_ready",
-67:         "timestamp": datetime.now(UTC).isoformat(),
-68:         "checks": checks,
-69:     }
-70: 
-71: 
-72: @router.get("/health/live")
-73: async def liveness_check() -> dict[str, Any]:
-74:     """Liveness check for Kubernetes/orchestration.
-75: 
-76:     Simple check that the application is running.
-77: 
-78:     Returns:
-79:         Liveness status
-80:     """
-81:     return {
-82:         "status": "alive",
-83:         "timestamp": datetime.now(UTC).isoformat(),
-84:     }
-````
-
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.1.0")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     else:
+ 86:         # If MemoryLake wasn't initialized, still shut down telemetry
+ 87:         from ..telemetry import shutdown_telemetry
+ 88: 
+ 89:         await shutdown_telemetry()
+ 90:     await close_db()
+ 91: 
+ 92: 
+ 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 94:     """Create and configure the FastAPI application.
+ 95: 
+ 96:     Args:
+ 97:         config: Optional application configuration
+ 98: 
+ 99:     Returns:
+100:         Configured FastAPI application
+101:     """
+102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+103:     from ..logging_config import setup_logging
+104: 
+105:     setup_logging(level="INFO")
+106: 
+107:     if config is None:
+108:         from ..config import load_config
+109: 
+110:         config = load_config()
+111: 
+112:     app = FastAPI(
+113:         title="Khora",
+114:         description="Deyta's memory lake and materialization of knowledge",
+115:         version="0.1.4",
+116:         lifespan=lifespan,
+117:         debug=config.debug,
+118:     )
+119: 
+120:     # Store config in app state
+121:     app.state.config = config
+122: 
+123:     # Configure CORS
+124:     app.add_middleware(
+125:         CORSMiddleware,
+126:         allow_origins=["*"] if config.debug else [],
+127:         allow_credentials=True,
+128:         allow_methods=["*"],
+129:         allow_headers=["*"],
+130:     )
+131: 
+132:     # Add request logging
+133:     app.add_middleware(LoggingMiddleware)
+134: 
+135:     # Register routes
+136:     # Status endpoint is public (no auth)
+137:     app.include_router(status.router, tags=["status"])
+138: 
+139:     # Memory Lake API routes
+140:     app.include_router(memory.router)
+141:     app.include_router(namespaces.router)
+142:     app.include_router(sync.router)
+143: 
+144:     return app
 ````
 
 ## File: src/khora/engines/vectorcypher/dual_nodes.py
@@ -33175,6 +33323,93 @@ README.md
 229:         assert q1_end == q2_start
 ````
 
+## File: tests/unit/test_api.py
+````python
+ 1: """Tests for API module."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
+ 7: 
+ 8: import khora
+ 9: 
+10: 
+11: @pytest.mark.unit
+12: class TestStatusEndpoints:
+13:     """Tests for status check endpoints."""
+14: 
+15:     def test_status_check(self, test_client: TestClient) -> None:
+16:         """Test basic status check endpoint."""
+17:         response = test_client.get("/status")
+18: 
+19:         assert response.status_code == 200
+20:         data = response.json()
+21:         assert data["status"] == "ok"
+22:         assert "timestamp" in data
+23:         assert data["version"] == khora.__version__
+24:         assert data["service"] == "khora"
+25: 
+26:     def test_health_check(self, test_client: TestClient) -> None:
+27:         """Test health check endpoint."""
+28:         response = test_client.get("/health")
+29: 
+30:         assert response.status_code == 200
+31:         data = response.json()
+32:         assert data["status"] == "healthy"
+33:         assert "timestamp" in data
+34:         assert data["version"] == khora.__version__
+35: 
+36:     def test_readiness_check(self, test_client: TestClient) -> None:
+37:         """Test readiness check endpoint."""
+38:         response = test_client.get("/health/ready")
+39: 
+40:         assert response.status_code == 200
+41:         data = response.json()
+42:         assert data["status"] in ["ready", "not_ready"]
+43:         assert "timestamp" in data
+44:         assert "checks" in data
+45: 
+46:     def test_liveness_check(self, test_client: TestClient) -> None:
+47:         """Test liveness check endpoint."""
+48:         response = test_client.get("/health/live")
+49: 
+50:         assert response.status_code == 200
+51:         data = response.json()
+52:         assert data["status"] == "alive"
+53:         assert "timestamp" in data
+54: 
+55: 
+56: @pytest.mark.unit
+57: class TestConfig:
+58:     """Tests for configuration."""
+59: 
+60:     def test_default_config(self) -> None:
+61:         """Test default configuration values."""
+62:         from khora.config import KhoraConfig
+63: 
+64:         config = KhoraConfig()
+65:         assert config.app_name == "khora"
+66:         assert config.environment == "development"
+67:         assert config.debug is False
+68:         assert config.api_host == "127.0.0.1"
+69:         assert config.api_port == 8000
+70:         assert config.auth_enabled is True
+71: 
+72:     def test_config_from_env(self, monkeypatch) -> None:
+73:         """Test configuration from environment variables."""
+74:         from khora.config import KhoraConfig
+75: 
+76:         monkeypatch.setenv("KHORA_DEBUG", "true")
+77:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+78:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+79: 
+80:         config = KhoraConfig()
+81:         assert config.debug is True
+82:         assert config.api_port == 9000
+83:         assert config.environment == "staging"
+````
+
 ## File: tests/unit/test_config_backends.py
 ````python
   1: """Tests for discriminated-union backend config parsing and backwards compatibility."""
@@ -35140,154 +35375,6 @@ README.md
 186:         assert result == []
 ````
 
-## File: src/khora/api/app.py
-````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     else:
- 86:         # If MemoryLake wasn't initialized, still shut down telemetry
- 87:         from ..telemetry import shutdown_telemetry
- 88: 
- 89:         await shutdown_telemetry()
- 90:     await close_db()
- 91: 
- 92: 
- 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 94:     """Create and configure the FastAPI application.
- 95: 
- 96:     Args:
- 97:         config: Optional application configuration
- 98: 
- 99:     Returns:
-100:         Configured FastAPI application
-101:     """
-102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
-103:     from ..logging_config import setup_logging
-104: 
-105:     setup_logging(level="INFO")
-106: 
-107:     if config is None:
-108:         from ..config import load_config
-109: 
-110:         config = load_config()
-111: 
-112:     app = FastAPI(
-113:         title="Khora",
-114:         description="Deyta's memory lake and materialization of knowledge",
-115:         version="0.1.0",
-116:         lifespan=lifespan,
-117:         debug=config.debug,
-118:     )
-119: 
-120:     # Store config in app state
-121:     app.state.config = config
-122: 
-123:     # Configure CORS
-124:     app.add_middleware(
-125:         CORSMiddleware,
-126:         allow_origins=["*"] if config.debug else [],
-127:         allow_credentials=True,
-128:         allow_methods=["*"],
-129:         allow_headers=["*"],
-130:     )
-131: 
-132:     # Add request logging
-133:     app.add_middleware(LoggingMiddleware)
-134: 
-135:     # Register routes
-136:     # Status endpoint is public (no auth)
-137:     app.include_router(status.router, tags=["status"])
-138: 
-139:     # Memory Lake API routes
-140:     app.include_router(memory.router)
-141:     app.include_router(namespaces.router)
-142:     app.include_router(sync.router)
-143: 
-144:     return app
-````
-
 ## File: src/khora/db/models.py
 ````python
   1: """SQLAlchemy models for Khora Memory Lake.
@@ -36741,93 +36828,6 @@ README.md
 79: 
 80:     # Keep uvicorn access logs visible
 81:     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
-````
-
-## File: tests/unit/test_api.py
-````python
- 1: """Tests for API module."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
- 7: 
- 8: import khora
- 9: 
-10: 
-11: @pytest.mark.unit
-12: class TestStatusEndpoints:
-13:     """Tests for status check endpoints."""
-14: 
-15:     def test_status_check(self, test_client: TestClient) -> None:
-16:         """Test basic status check endpoint."""
-17:         response = test_client.get("/status")
-18: 
-19:         assert response.status_code == 200
-20:         data = response.json()
-21:         assert data["status"] == "ok"
-22:         assert "timestamp" in data
-23:         assert data["version"] == khora.__version__
-24:         assert data["service"] == "khora"
-25: 
-26:     def test_health_check(self, test_client: TestClient) -> None:
-27:         """Test health check endpoint."""
-28:         response = test_client.get("/health")
-29: 
-30:         assert response.status_code == 200
-31:         data = response.json()
-32:         assert data["status"] == "healthy"
-33:         assert "timestamp" in data
-34:         assert data["version"] == khora.__version__
-35: 
-36:     def test_readiness_check(self, test_client: TestClient) -> None:
-37:         """Test readiness check endpoint."""
-38:         response = test_client.get("/health/ready")
-39: 
-40:         assert response.status_code == 200
-41:         data = response.json()
-42:         assert data["status"] in ["ready", "not_ready"]
-43:         assert "timestamp" in data
-44:         assert "checks" in data
-45: 
-46:     def test_liveness_check(self, test_client: TestClient) -> None:
-47:         """Test liveness check endpoint."""
-48:         response = test_client.get("/health/live")
-49: 
-50:         assert response.status_code == 200
-51:         data = response.json()
-52:         assert data["status"] == "alive"
-53:         assert "timestamp" in data
-54: 
-55: 
-56: @pytest.mark.unit
-57: class TestConfig:
-58:     """Tests for configuration."""
-59: 
-60:     def test_default_config(self) -> None:
-61:         """Test default configuration values."""
-62:         from khora.config import KhoraConfig
-63: 
-64:         config = KhoraConfig()
-65:         assert config.app_name == "khora"
-66:         assert config.environment == "development"
-67:         assert config.debug is False
-68:         assert config.api_host == "127.0.0.1"
-69:         assert config.api_port == 8000
-70:         assert config.auth_enabled is True
-71: 
-72:     def test_config_from_env(self, monkeypatch) -> None:
-73:         """Test configuration from environment variables."""
-74:         from khora.config import KhoraConfig
-75: 
-76:         monkeypatch.setenv("KHORA_DEBUG", "true")
-77:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-78:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-79: 
-80:         config = KhoraConfig()
-81:         assert config.debug is True
-82:         assert config.api_port == 9000
-83:         assert config.environment == "staging"
 ````
 
 ## File: tests/unit/test_entity_index.py
@@ -39757,6 +39757,208 @@ README.md
 619:         ...
 ````
 
+## File: src/khora/chat/engine.py
+````python
+  1: """Chat engine for conversational memory lake interactions."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: from dataclasses import dataclass, field
+  6: from typing import TYPE_CHECKING, Any
+  7: from uuid import UUID, uuid4
+  8: 
+  9: import litellm
+ 10: from loguru import logger
+ 11: 
+ 12: from .history import HistoryManager
+ 13: from .prompt import PromptGenerator
+ 14: 
+ 15: if TYPE_CHECKING:
+ 16:     from khora.memory_lake import MemoryLake
+ 17: 
+ 18:     from .persona import PersonaConfig
+ 19: 
+ 20: 
+ 21: @dataclass
+ 22: class ChatResponse:
+ 23:     """Response from chat engine."""
+ 24: 
+ 25:     content: str
+ 26:     conversation_id: UUID
+ 27:     message_id: UUID
+ 28:     sources: list[dict] = field(default_factory=list)
+ 29:     metadata: dict[str, Any] = field(default_factory=dict)
+ 30: 
+ 31: 
+ 32: class ChatEngine:
+ 33:     """Main chat engine orchestrating persona, history, and responses."""
+ 34: 
+ 35:     def __init__(
+ 36:         self,
+ 37:         persona: PersonaConfig,
+ 38:         memory_lake: MemoryLake,
+ 39:         llm_model: str = "gpt-4o",
+ 40:         agentic_search: bool = False,
+ 41:     ) -> None:
+ 42:         """Initialize the chat engine.
+ 43: 
+ 44:         Args:
+ 45:             persona: Persona configuration for response generation
+ 46:             memory_lake: MemoryLake instance for search
+ 47:             llm_model: LLM model to use for response generation
+ 48:             agentic_search: Whether to use multi-step agentic search
+ 49:         """
+ 50:         self.persona = persona
+ 51:         self.lake = memory_lake
+ 52:         self.llm_model = llm_model
+ 53:         self.agentic_search = agentic_search
+ 54: 
+ 55:         self.history_manager = HistoryManager(
+ 56:             max_turns=persona.chat.max_history_turns,
+ 57:             compress_after=persona.chat.compression.compress_after_turns,
+ 58:             keep_recent=persona.chat.compression.keep_recent_turns,
+ 59:         )
+ 60: 
+ 61:         self.prompt_generator = PromptGenerator(persona)
+ 62: 
+ 63:     async def chat(
+ 64:         self,
+ 65:         query: str,
+ 66:         *,
+ 67:         namespace_id: UUID,
+ 68:         conversation_id: UUID | None = None,
+ 69:     ) -> ChatResponse:
+ 70:         """Process a chat message and generate response.
+ 71: 
+ 72:         Args:
+ 73:             query: User's question
+ 74:             namespace_id: Namespace to search in
+ 75:             conversation_id: Optional conversation ID for history
+ 76: 
+ 77:         Returns:
+ 78:             ChatResponse with generated answer
+ 79:         """
+ 80:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+ 81: 
+ 82:         ensure_trace_id()
+ 83: 
+ 84:         # Get or create conversation
+ 85:         conv_id = conversation_id or uuid4()
+ 86:         self.history_manager.get_or_create(conv_id, namespace_id)
+ 87: 
+ 88:         logger.debug(f"Processing chat query: {query[:50]}...")
+ 89: 
+ 90:         # 1. Search memory lake for relevant context
+ 91:         recall_result = await self.lake.recall(
+ 92:             query,
+ 93:             namespace=namespace_id,
+ 94:             limit=10,
+ 95:             agentic=self.agentic_search,
+ 96:         )
+ 97: 
+ 98:         # Convert to simple dict format for prompt
+ 99:         # Resolve source_system from parent documents (chunks don't store it directly)
+100:         search_results = []
+101:         doc_cache: dict[str, str] = {}
+102:         for chunk, score in recall_result.chunks[:5]:
+103:             source = "unknown"
+104:             if chunk.document_id:
+105:                 doc_id_str = str(chunk.document_id)
+106:                 if doc_id_str in doc_cache:
+107:                     source = doc_cache[doc_id_str]
+108:                 else:
+109:                     try:
+110:                         doc = await self.lake.get_document(chunk.document_id)
+111:                         if doc and doc.metadata:
+112:                             source = doc.metadata.custom.get("source_system", "")
+113:                             if not source:
+114:                                 source = doc.metadata.source.split("/")[0] if doc.metadata.source else "unknown"
+115:                             doc_cache[doc_id_str] = source
+116:                     except Exception:
+117:                         pass
+118: 
+119:             search_results.append(
+120:                 {
+121:                     "content": chunk.content,
+122:                     "source": source,
+123:                     "score": score,
+124:                 }
+125:             )
+126: 
+127:         logger.debug(f"Found {len(search_results)} relevant search results")
+128: 
+129:         # 2. Get conversation context
+130:         history_summary, recent_messages = self.history_manager.get_context_messages(conv_id)
+131: 
+132:         # 3. Build prompt
+133:         messages = self.prompt_generator.build_messages(
+134:             query,
+135:             search_results,
+136:             history_summary,
+137:             recent_messages,
+138:         )
+139: 
+140:         # 4. Generate response
+141:         logger.debug(f"Generating response with {self.llm_model}")
+142:         import time as _time
+143: 
+144:         _t0 = _time.perf_counter()
+145:         response = await litellm.acompletion(
+146:             model=self.llm_model,
+147:             messages=messages,
+148:             max_tokens=self.persona.chat.response.max_tokens,
+149:             temperature=self.persona.chat.response.temperature,
+150:         )
+151:         _latency = (_time.perf_counter() - _t0) * 1000
+152: 
+153:         # Record telemetry
+154:         from khora.telemetry import get_collector
+155: 
+156:         usage = getattr(response, "usage", None)
+157:         get_collector().record_llm_call(
+158:             operation="chat",
+159:             model=self.llm_model,
+160:             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+161:             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+162:             total_tokens=getattr(usage, "total_tokens", 0) or 0,
+163:             latency_ms=_latency,
+164:             namespace_id=namespace_id,
+165:         )
+166: 
+167:         response_content = response.choices[0].message.content
+168: 
+169:         # 5. Add messages to history
+170:         self.history_manager.add_message(conv_id, "user", query, search_results)
+171:         assistant_msg = self.history_manager.add_message(conv_id, "assistant", response_content)
+172: 
+173:         # 6. Compress history if needed
+174:         if self.persona.chat.compression.enabled:
+175:             compressed = await self.history_manager.compress_if_needed(conv_id)
+176:             if compressed:
+177:                 logger.debug("Compressed conversation history")
+178: 
+179:         clear_trace_id()
+180: 
+181:         return ChatResponse(
+182:             content=response_content,
+183:             conversation_id=conv_id,
+184:             message_id=assistant_msg.id,
+185:             sources=search_results,
+186:             metadata={
+187:                 "model": self.llm_model,
+188:                 "search_count": len(recall_result.chunks),
+189:             },
+190:         )
+191: 
+192:     def clear_conversation(self, conversation_id: UUID) -> None:
+193:         """Clear a conversation's history.
+194: 
+195:         Args:
+196:             conversation_id: Conversation to clear
+197:         """
+198:         self.history_manager.clear(conversation_id)
+````
+
 ## File: README.md
 ````markdown
   1: # Khora
@@ -40640,208 +40842,6 @@ README.md
 879: ## License
 880: 
 881: Copyright (c) 2024-2025 Deyta. All rights reserved.
-````
-
-## File: src/khora/chat/engine.py
-````python
-  1: """Chat engine for conversational memory lake interactions."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: from dataclasses import dataclass, field
-  6: from typing import TYPE_CHECKING, Any
-  7: from uuid import UUID, uuid4
-  8: 
-  9: import litellm
- 10: from loguru import logger
- 11: 
- 12: from .history import HistoryManager
- 13: from .prompt import PromptGenerator
- 14: 
- 15: if TYPE_CHECKING:
- 16:     from khora.memory_lake import MemoryLake
- 17: 
- 18:     from .persona import PersonaConfig
- 19: 
- 20: 
- 21: @dataclass
- 22: class ChatResponse:
- 23:     """Response from chat engine."""
- 24: 
- 25:     content: str
- 26:     conversation_id: UUID
- 27:     message_id: UUID
- 28:     sources: list[dict] = field(default_factory=list)
- 29:     metadata: dict[str, Any] = field(default_factory=dict)
- 30: 
- 31: 
- 32: class ChatEngine:
- 33:     """Main chat engine orchestrating persona, history, and responses."""
- 34: 
- 35:     def __init__(
- 36:         self,
- 37:         persona: PersonaConfig,
- 38:         memory_lake: MemoryLake,
- 39:         llm_model: str = "gpt-4o",
- 40:         agentic_search: bool = False,
- 41:     ) -> None:
- 42:         """Initialize the chat engine.
- 43: 
- 44:         Args:
- 45:             persona: Persona configuration for response generation
- 46:             memory_lake: MemoryLake instance for search
- 47:             llm_model: LLM model to use for response generation
- 48:             agentic_search: Whether to use multi-step agentic search
- 49:         """
- 50:         self.persona = persona
- 51:         self.lake = memory_lake
- 52:         self.llm_model = llm_model
- 53:         self.agentic_search = agentic_search
- 54: 
- 55:         self.history_manager = HistoryManager(
- 56:             max_turns=persona.chat.max_history_turns,
- 57:             compress_after=persona.chat.compression.compress_after_turns,
- 58:             keep_recent=persona.chat.compression.keep_recent_turns,
- 59:         )
- 60: 
- 61:         self.prompt_generator = PromptGenerator(persona)
- 62: 
- 63:     async def chat(
- 64:         self,
- 65:         query: str,
- 66:         *,
- 67:         namespace_id: UUID,
- 68:         conversation_id: UUID | None = None,
- 69:     ) -> ChatResponse:
- 70:         """Process a chat message and generate response.
- 71: 
- 72:         Args:
- 73:             query: User's question
- 74:             namespace_id: Namespace to search in
- 75:             conversation_id: Optional conversation ID for history
- 76: 
- 77:         Returns:
- 78:             ChatResponse with generated answer
- 79:         """
- 80:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
- 81: 
- 82:         ensure_trace_id()
- 83: 
- 84:         # Get or create conversation
- 85:         conv_id = conversation_id or uuid4()
- 86:         self.history_manager.get_or_create(conv_id, namespace_id)
- 87: 
- 88:         logger.debug(f"Processing chat query: {query[:50]}...")
- 89: 
- 90:         # 1. Search memory lake for relevant context
- 91:         recall_result = await self.lake.recall(
- 92:             query,
- 93:             namespace=namespace_id,
- 94:             limit=10,
- 95:             agentic=self.agentic_search,
- 96:         )
- 97: 
- 98:         # Convert to simple dict format for prompt
- 99:         # Resolve source_system from parent documents (chunks don't store it directly)
-100:         search_results = []
-101:         doc_cache: dict[str, str] = {}
-102:         for chunk, score in recall_result.chunks[:5]:
-103:             source = "unknown"
-104:             if chunk.document_id:
-105:                 doc_id_str = str(chunk.document_id)
-106:                 if doc_id_str in doc_cache:
-107:                     source = doc_cache[doc_id_str]
-108:                 else:
-109:                     try:
-110:                         doc = await self.lake.get_document(chunk.document_id)
-111:                         if doc and doc.metadata:
-112:                             source = doc.metadata.custom.get("source_system", "")
-113:                             if not source:
-114:                                 source = doc.metadata.source.split("/")[0] if doc.metadata.source else "unknown"
-115:                             doc_cache[doc_id_str] = source
-116:                     except Exception:
-117:                         pass
-118: 
-119:             search_results.append(
-120:                 {
-121:                     "content": chunk.content,
-122:                     "source": source,
-123:                     "score": score,
-124:                 }
-125:             )
-126: 
-127:         logger.debug(f"Found {len(search_results)} relevant search results")
-128: 
-129:         # 2. Get conversation context
-130:         history_summary, recent_messages = self.history_manager.get_context_messages(conv_id)
-131: 
-132:         # 3. Build prompt
-133:         messages = self.prompt_generator.build_messages(
-134:             query,
-135:             search_results,
-136:             history_summary,
-137:             recent_messages,
-138:         )
-139: 
-140:         # 4. Generate response
-141:         logger.debug(f"Generating response with {self.llm_model}")
-142:         import time as _time
-143: 
-144:         _t0 = _time.perf_counter()
-145:         response = await litellm.acompletion(
-146:             model=self.llm_model,
-147:             messages=messages,
-148:             max_tokens=self.persona.chat.response.max_tokens,
-149:             temperature=self.persona.chat.response.temperature,
-150:         )
-151:         _latency = (_time.perf_counter() - _t0) * 1000
-152: 
-153:         # Record telemetry
-154:         from khora.telemetry import get_collector
-155: 
-156:         usage = getattr(response, "usage", None)
-157:         get_collector().record_llm_call(
-158:             operation="chat",
-159:             model=self.llm_model,
-160:             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-161:             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-162:             total_tokens=getattr(usage, "total_tokens", 0) or 0,
-163:             latency_ms=_latency,
-164:             namespace_id=namespace_id,
-165:         )
-166: 
-167:         response_content = response.choices[0].message.content
-168: 
-169:         # 5. Add messages to history
-170:         self.history_manager.add_message(conv_id, "user", query, search_results)
-171:         assistant_msg = self.history_manager.add_message(conv_id, "assistant", response_content)
-172: 
-173:         # 6. Compress history if needed
-174:         if self.persona.chat.compression.enabled:
-175:             compressed = await self.history_manager.compress_if_needed(conv_id)
-176:             if compressed:
-177:                 logger.debug("Compressed conversation history")
-178: 
-179:         clear_trace_id()
-180: 
-181:         return ChatResponse(
-182:             content=response_content,
-183:             conversation_id=conv_id,
-184:             message_id=assistant_msg.id,
-185:             sources=search_results,
-186:             metadata={
-187:                 "model": self.llm_model,
-188:                 "search_count": len(recall_result.chunks),
-189:             },
-190:         )
-191: 
-192:     def clear_conversation(self, conversation_id: UUID) -> None:
-193:         """Clear a conversation's history.
-194: 
-195:         Args:
-196:             conversation_id: Conversation to clear
-197:         """
-198:         self.history_manager.clear(conversation_id)
 ````
 
 ## File: src/khora/extraction/expansion/relationship_inferrer.py
@@ -48053,7 +48053,7 @@ README.md
 40: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
 41: from .query import SearchMode
 42: 
-43: __version__ = "0.1.1"
+43: __version__ = "0.1.4"
 44: 
 45: __all__ = [
 46:     "main",
@@ -50180,7 +50180,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.1.3"
+  3: version = "0.1.4"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -50369,6 +50369,17 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-02-05 20:07:54 +0100
+**Message:** docs: add VectorCypher engine documentation
+
+**Files:**
+- CLAUDE.md
+- README.md
+- REPOMIX.md
+- docs/engines/engine-comparison.md
+- docs/engines/skeleton-engine.md
+- docs/engines/vectorcypher-engine.md
 
 ## Commit: 2026-02-05 19:58:19 +0100
 **Message:** refactor: rename SkeletonEngine to SkeletonConstructionEngine
@@ -50615,9 +50626,3 @@ README.md
 **Files:**
 - REPOMIX.md
 - src/khora/pipelines/tasks/extract.py
-
-## Commit: 2026-02-03 19:03:41 +0100
-**Message:** fix: reduce extraction batch_size to 1 to prevent truncation
-
-**Files:**
-- REPOMIX.md
