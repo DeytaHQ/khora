@@ -21852,63 +21852,6 @@ README.md
 159:         assert call["metadata"] == {"chunk_count": 42}
 ````
 
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.1.5")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
-````
-
 ## File: src/khora/engines/vectorcypher/dual_nodes.py
 ````python
   1: """Dual-node manager for HippoRAG 2 architecture in Neo4j.
@@ -35227,152 +35170,61 @@ README.md
 186:         assert result == []
 ````
 
-## File: src/khora/api/app.py
+## File: src/khora/cli/__init__.py
 ````python
-  1: """FastAPI application factory for Khora."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
-  9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
- 19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
- 23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
- 34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
- 38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
- 60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
- 66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
- 80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     else:
- 86:         # If MemoryLake wasn't initialized, still shut down telemetry
- 87:         from ..telemetry import shutdown_telemetry
- 88: 
- 89:         await shutdown_telemetry()
- 90:     await close_db()
- 91: 
- 92: 
- 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 94:     """Create and configure the FastAPI application.
- 95: 
- 96:     Args:
- 97:         config: Optional application configuration
- 98: 
- 99:     Returns:
-100:         Configured FastAPI application
-101:     """
-102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
-103:     from ..logging_config import setup_logging
-104: 
-105:     setup_logging(level="INFO")
-106: 
-107:     if config is None:
-108:         from ..config import load_config
-109: 
-110:         config = load_config()
-111: 
-112:     app = FastAPI(
-113:         title="Khora",
-114:         description="Deyta's memory lake and materialization of knowledge",
-115:         version="0.1.5",
-116:         lifespan=lifespan,
-117:         debug=config.debug,
-118:     )
-119: 
-120:     # Store config in app state
-121:     app.state.config = config
-122: 
-123:     # Configure CORS
-124:     app.add_middleware(
-125:         CORSMiddleware,
-126:         allow_origins=["*"] if config.debug else [],
-127:         allow_credentials=True,
-128:         allow_methods=["*"],
-129:         allow_headers=["*"],
-130:     )
-131: 
-132:     # Add request logging
-133:     app.add_middleware(LoggingMiddleware)
-134: 
-135:     # Register routes
-136:     # Status endpoint is public (no auth)
-137:     app.include_router(status.router, tags=["status"])
-138: 
-139:     # Memory Lake API routes
-140:     app.include_router(memory.router)
-141:     app.include_router(namespaces.router)
-142:     app.include_router(sync.router)
-143: 
-144:     return app
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.1.5")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
 ````
 
 ## File: src/khora/db/models.py
@@ -38159,6 +38011,154 @@ README.md
 1042: 
 1043:         with pytest.raises(ValueError, match="Unknown engine"):
 1044:             create_engine("nonexistent", _mock_config())
+````
+
+## File: src/khora/api/app.py
+````python
+  1: """FastAPI application factory for Khora."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
+  9: 
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
+ 19: 
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
+ 23: 
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 34: 
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
+ 38: 
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
+ 60: 
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
+ 66: 
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
+ 80: 
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     else:
+ 86:         # If MemoryLake wasn't initialized, still shut down telemetry
+ 87:         from ..telemetry import shutdown_telemetry
+ 88: 
+ 89:         await shutdown_telemetry()
+ 90:     await close_db()
+ 91: 
+ 92: 
+ 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 94:     """Create and configure the FastAPI application.
+ 95: 
+ 96:     Args:
+ 97:         config: Optional application configuration
+ 98: 
+ 99:     Returns:
+100:         Configured FastAPI application
+101:     """
+102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+103:     from ..logging_config import setup_logging
+104: 
+105:     setup_logging(level="INFO")
+106: 
+107:     if config is None:
+108:         from ..config import load_config
+109: 
+110:         config = load_config()
+111: 
+112:     app = FastAPI(
+113:         title="Khora",
+114:         description="Deyta's memory lake and materialization of knowledge",
+115:         version="0.1.5",
+116:         lifespan=lifespan,
+117:         debug=config.debug,
+118:     )
+119: 
+120:     # Store config in app state
+121:     app.state.config = config
+122: 
+123:     # Configure CORS
+124:     app.add_middleware(
+125:         CORSMiddleware,
+126:         allow_origins=["*"] if config.debug else [],
+127:         allow_credentials=True,
+128:         allow_methods=["*"],
+129:         allow_headers=["*"],
+130:     )
+131: 
+132:     # Add request logging
+133:     app.add_middleware(LoggingMiddleware)
+134: 
+135:     # Register routes
+136:     # Status endpoint is public (no auth)
+137:     app.include_router(status.router, tags=["status"])
+138: 
+139:     # Memory Lake API routes
+140:     app.include_router(memory.router)
+141:     app.include_router(namespaces.router)
+142:     app.include_router(sync.router)
+143: 
+144:     return app
 ````
 
 ## File: src/khora/config/llm.py
@@ -48009,68 +48009,6 @@ README.md
 85: Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
 ````
 
-## File: src/khora/__init__.py
-````python
- 1: """Khora - Deyta's memory lake and materialization of knowledge.
- 2: 
- 3: Khora provides a unified interface for:
- 4: - Storing and retrieving knowledge artifacts
- 5: - Materializing data transformations
- 6: - Building memory graphs and relationships
- 7: 
- 8: Example usage:
- 9:     # Simplest - from env vars (KHORA_DATABASE_URL)
-10:     from khora import MemoryLake
-11: 
-12:     async with MemoryLake() as lake:
-13:         await lake.remember("Important information to store")
-14:         results = await lake.recall("query about information")
-15: 
-16:     # Common - explicit database URL
-17:     async with MemoryLake("postgresql://localhost/mydb") as lake:
-18:         await lake.remember("content", title="My Document")
-19:         results = await lake.recall("query", limit=20)
-20: 
-21:     # With graph backend
-22:     async with MemoryLake(
-23:         "postgresql://localhost/mydb",
-24:         graph_url="bolt://localhost:7687",
-25:     ) as lake:
-26:         results = await lake.recall("query", mode=SearchMode.GRAPH)
-27: 
-28:     # Batch ingestion with automatic optimization
-29:     async with MemoryLake(database_url) as lake:
-30:         result = await lake.remember_batch(documents)
-31:         print(f"Processed {result.processed} docs, {result.entities} entities")
-32: 
-33:     # Raw search without LLM features (for benchmarks)
-34:     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
-35: """
-36: 
-37: from .cli import main
-38: from .config import KhoraConfig
-39: from .engines import create_engine, list_engines, register_engine
-40: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
-41: from .query import SearchMode
-42: 
-43: __version__ = "0.1.5"
-44: 
-45: __all__ = [
-46:     "main",
-47:     "MemoryLake",
-48:     "RememberResult",
-49:     "RecallResult",
-50:     "BatchResult",
-51:     "Stats",
-52:     "SearchMode",
-53:     "KhoraConfig",
-54:     # Engine functions
-55:     "create_engine",
-56:     "list_engines",
-57:     "register_engine",
-58: ]
-````
-
 ## File: src/khora/pipelines/flows/ingest.py
 ````python
    1: """Two-phase ingestion flow for Khora Memory Lake.
@@ -49073,6 +49011,68 @@ README.md
  998:         "total_entities": len(entities),
  999:         "entities_updated": total_updated,
 1000:     }
+````
+
+## File: src/khora/__init__.py
+````python
+ 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 2: 
+ 3: Khora provides a unified interface for:
+ 4: - Storing and retrieving knowledge artifacts
+ 5: - Materializing data transformations
+ 6: - Building memory graphs and relationships
+ 7: 
+ 8: Example usage:
+ 9:     # Simplest - from env vars (KHORA_DATABASE_URL)
+10:     from khora import MemoryLake
+11: 
+12:     async with MemoryLake() as lake:
+13:         await lake.remember("Important information to store")
+14:         results = await lake.recall("query about information")
+15: 
+16:     # Common - explicit database URL
+17:     async with MemoryLake("postgresql://localhost/mydb") as lake:
+18:         await lake.remember("content", title="My Document")
+19:         results = await lake.recall("query", limit=20)
+20: 
+21:     # With graph backend
+22:     async with MemoryLake(
+23:         "postgresql://localhost/mydb",
+24:         graph_url="bolt://localhost:7687",
+25:     ) as lake:
+26:         results = await lake.recall("query", mode=SearchMode.GRAPH)
+27: 
+28:     # Batch ingestion with automatic optimization
+29:     async with MemoryLake(database_url) as lake:
+30:         result = await lake.remember_batch(documents)
+31:         print(f"Processed {result.processed} docs, {result.entities} entities")
+32: 
+33:     # Raw search without LLM features (for benchmarks)
+34:     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
+35: """
+36: 
+37: from .cli import main
+38: from .config import KhoraConfig
+39: from .engines import create_engine, list_engines, register_engine
+40: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
+41: from .query import SearchMode
+42: 
+43: __version__ = "0.1.5"
+44: 
+45: __all__ = [
+46:     "main",
+47:     "MemoryLake",
+48:     "RememberResult",
+49:     "RecallResult",
+50:     "BatchResult",
+51:     "Stats",
+52:     "SearchMode",
+53:     "KhoraConfig",
+54:     # Engine functions
+55:     "create_engine",
+56:     "list_engines",
+57:     "register_engine",
+58: ]
 ````
 
 ## File: src/khora/extraction/extractors/llm.py
@@ -50370,6 +50370,17 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-05 20:27:14 +0100
+**Message:** chore: bump version to 0.1.5
+
+**Files:**
+- REPOMIX.md
+- pyproject.toml
+- src/khora/__init__.py
+- src/khora/api/app.py
+- src/khora/cli/__init__.py
+- uv.lock
+
 ## Commit: 2026-02-05 20:26:18 +0100
 **Message:** fix: reduce relationship inferrer log noise
 
@@ -50622,10 +50633,3 @@ README.md
 
 **Files:**
 - src/khora/extraction/expansion/rule_engine.py
-
-## Commit: 2026-02-03 22:57:31 +0100
-**Message:** chore: update Khora version
-
-**Files:**
-- REPOMIX.md
-- uv.lock

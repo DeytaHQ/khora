@@ -5,19 +5,19 @@ Khora doesn't use one database - it uses three, each chosen for what it does bes
 ## The Three Musketeers
 
 ```
-+--------------------+    +--------------------+    +--------------------+
-|    PostgreSQL      |    |      pgvector      |    |       Neo4j        |
-|                    |    |                    |    |                    |
-|  The Record Keeper |    |  The Meaning       |    |  The Connector     |
-|                    |    |  Finder            |    |                    |
-|  Documents         |    |  "What's similar   |    |  "Who knows whom?" |
-|  Who owns what     |    |  to this?"         |    |  "What's related   |
-|  What happened     |    |                    |    |  to what?"         |
-|  when              |    |  Embedding         |    |                    |
-|                    |    |  similarity        |    |  Entity nodes      |
-|  ACID guarantees   |    |  search            |    |  Relationship      |
-|  Transactions      |    |                    |    |  edges             |
-+--------------------+    +--------------------+    +--------------------+
+┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐
+│    PostgreSQL      │    │      pgvector      │    │       Neo4j        │
+│                    │    │                    │    │                    │
+│  The Record Keeper │    │  The Meaning       │    │  The Connector     │
+│                    │    │  Finder            │    │                    │
+│  Documents         │    │  "What's similar   │    │  "Who knows whom?" │
+│  Who owns what     │    │  to this?"         │    │  "What's related   │
+│  What happened     │    │                    │    │  to what?"         │
+│  when              │    │  Embedding         │    │                    │
+│                    │    │  similarity        │    │  Entity nodes      │
+│  ACID guarantees   │    │  search            │    │  Relationship      │
+│  Transactions      │    │                    │    │  edges             │
+└────────────────────┘    └────────────────────┘    └────────────────────┘
 ```
 
 **PostgreSQL** is your source of truth. It stores documents, tracks ownership through the tenant hierarchy, and maintains an immutable event log. When you need to know "what exactly is stored" or "who has access to what", PostgreSQL answers.
