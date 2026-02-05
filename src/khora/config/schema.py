@@ -159,7 +159,7 @@ class StorageSettings(BaseModel):
     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
 
     # New-style backend configs
-    graph: GraphConfig = Field(default_factory=Neo4jConfig, description="Graph backend configuration")
+    graph: GraphConfig | None = Field(default=None, description="Graph backend configuration (optional)")
     vector: VectorConfig = Field(default_factory=PgVectorConfig, description="Vector backend configuration")
 
     # Legacy flat fields — kept for backwards compatibility
@@ -496,19 +496,23 @@ class KhoraConfig(BaseSettings):
             return graph.database
         return self.storage.neo4j_database
 
-    def get_graph_config(self) -> GraphConfig:
+    def get_graph_config(self) -> GraphConfig | None:
         """Get the graph backend configuration.
 
+        Returns None if no graph backend is configured, allowing graph-free operation.
         If using legacy config, builds a Neo4jConfig from the parsed URL.
         """
         graph = self.storage.graph
+        # If graph is None (not configured), return None
+        if graph is None:
+            return None
         # If it's already set from new-style config with a URL, return as-is
         if isinstance(graph, Neo4jConfig) and graph.url:
             return graph
-        # If it's a non-Neo4j backend, return as-is
+        # If it's a non-Neo4j backend (Kuzu, Memgraph, etc.), return as-is
         if not isinstance(graph, Neo4jConfig):
             return graph
-        # Build from legacy/parsed URL
+        # It's a Neo4jConfig without URL - check legacy neo4j_url
         neo4j_url = self.get_neo4j_url()
         if neo4j_url:
             return Neo4jConfig(
@@ -517,7 +521,8 @@ class KhoraConfig(BaseSettings):
                 password=self.get_neo4j_password(),
                 database=self.get_neo4j_database(),
             )
-        return graph
+        # No URL configured - graph backend is disabled
+        return None
 
     def get_vector_config(self) -> VectorConfig:
         """Get the vector backend configuration.
