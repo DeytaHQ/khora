@@ -22,6 +22,7 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 ### Key Features
 
 - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
+- **Pluggable Engines**: Choose GraphRAG (knowledge graphs) or Khora (temporal-first)
 - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
 - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
 - **Event Sourcing**: Immutable event log for temporal queries and audit trails
@@ -31,12 +32,81 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 
 ---
 
+## Pluggable Engines
+
+Khora supports two engines with different strengths:
+
+| Engine | Focus | Best For | LLM Cost |
+|--------|-------|----------|----------|
+| **GraphRAG** | Knowledge graphs | Knowledge bases, entity exploration | Higher |
+| **Khora** | Temporal events | Chat logs, events, cost-sensitive apps | 5-10x lower |
+
+### GraphRAG Engine (Default)
+
+Full knowledge graph construction with entity and relationship extraction:
+
+```python
+from khora import MemoryLake
+
+async with MemoryLake("postgresql://...", engine="graphrag") as lake:
+    # Extracts entities and relationships from all content
+    result = await lake.remember("Einstein developed relativity in 1905.")
+    print(f"Extracted {result.entities_extracted} entities")
+
+    # Graph-based retrieval
+    entities = await lake.list_entities(entity_type="PERSON")
+    related = await lake.find_related_entities(entity_id, max_depth=2)
+```
+
+**Requirements:** PostgreSQL + pgvector + Neo4j/Kuzu/Memgraph
+
+### Khora Engine (Temporal-First)
+
+Cost-optimized engine with bi-temporal model and skeleton indexing:
+
+```python
+from khora import MemoryLake
+
+async with MemoryLake("postgresql://...", engine="khora") as lake:
+    # Store with temporal metadata
+    result = await lake.remember(
+        "Team standup notes",
+        metadata={
+            "occurred_at": "2024-01-15T09:00:00Z",
+            "author": "alice@company.com",
+            "channel": "engineering"
+        }
+    )
+
+    # Temporal and structured filtering
+    results = await lake.recall(
+        "What decisions were made?",
+        temporal_filter={
+            "occurred_after": "2024-01-01",
+            "author": "alice@company.com"
+        },
+        hybrid_alpha=0.7  # 70% vector, 30% BM25
+    )
+```
+
+**Requirements:** PostgreSQL + pgvector only (Neo4j optional)
+
+See [Engine Comparison](docs/engines/engine-comparison.md) for detailed guidance.
+
+---
+
 ## Documentation
 
 Comprehensive documentation is available in the [`docs/`](docs/) directory:
 
 | Topic | Description |
 |-------|-------------|
+| **Engines** | |
+| [Khora Engine](docs/engines/khora-engine.md) | Temporal-first engine documentation |
+| [Engine Comparison](docs/engines/engine-comparison.md) | GraphRAG vs Khora comparison |
+| [Temporal Model](docs/engines/temporal-model.md) | Bi-temporal design deep dive |
+| [Skeleton Indexing](docs/engines/skeleton-indexing.md) | Cost optimization via PageRank |
+| [Hybrid Search](docs/engines/hybrid-search.md) | Vector + BM25 fusion |
 | **Architecture** | |
 | [Overview](docs/architecture/overview.md) | System design, components, data flow |
 | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
@@ -64,6 +134,8 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
 | **Planning** | |
 | [Roadmap](docs/roadmap.md) | Future improvements and features |
+| **References** | |
+| [References](docs/REFERENCES.md) | Research papers and inspirations |
 
 ---
 

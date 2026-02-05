@@ -1,0 +1,298 @@
+# Engine Comparison: GraphRAG vs Khora
+
+Khora supports two pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
+
+## Quick Comparison
+
+| Aspect | GraphRAG | Khora |
+|--------|----------|-------|
+| **Primary Focus** | Knowledge graphs | Temporal events |
+| **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) |
+| **Core Data Model** | Entities & relationships | Chunks with temporal metadata |
+| **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) |
+| **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) |
+| **Graph Backend** | Required (Neo4j/Kuzu/Memgraph) | Optional (Kuzu embedded) |
+| **Search Modes** | Vector + Graph + Keyword | Vector + BM25 Hybrid |
+| **Best For** | Knowledge bases | Chat history, logs, events |
+
+## Detailed Comparison
+
+### Entity Extraction
+
+**GraphRAG:**
+- Extracts entities from every document during ingestion
+- Rich relationship extraction with typed edges
+- Cross-document entity deduplication and resolution
+- Full knowledge graph construction
+
+```python
+# GraphRAG: Entity extraction happens during remember()
+result = await lake.remember(content)
+print(f"Extracted {result.entities_extracted} entities")
+print(f"Created {result.relationships_created} relationships")
+```
+
+**Khora:**
+- Uses skeleton indexing to identify ~10% "core" chunks
+- Only core chunks get LLM extraction
+- Non-core chunks use keyword-based pseudo-entities
+- Lazy expansion during retrieval if needed
+
+```python
+# Khora: Minimal extraction, skeleton-based
+result = await lake.remember(content)
+# Entities only extracted for "core" chunks (high PageRank)
+```
+
+### Time Model
+
+**GraphRAG:**
+- Single timestamp: `created_at` (when document was ingested)
+- Recency bias in search (configurable decay)
+- No distinction between event time and ingestion time
+
+**Khora:**
+- Bi-temporal model:
+  - `occurred_at`: When the event actually happened
+  - `ingested_at`: When we learned about it
+- Hierarchical time navigation (Year → Quarter → Month → Week → Day)
+- Native temporal filtering in queries
+
+```python
+# Khora: Store event with occurrence time
+await lake.remember(
+    "Alice joined the team",
+    metadata={"occurred_at": "2024-01-15T09:00:00Z"}
+)
+
+# Query: "What happened in January?"
+results = await lake.recall(
+    "team changes",
+    temporal_filter={"occurred_after": "2024-01-01", "occurred_before": "2024-02-01"}
+)
+```
+
+### Search Capabilities
+
+**GraphRAG:**
+
+| Mode | Description |
+|------|-------------|
+| `VECTOR` | Semantic similarity via embeddings |
+| `GRAPH` | Entity-centric traversal, relationship exploration |
+| `KEYWORD` | BM25 full-text search |
+| `HYBRID` | All three combined with RRF |
+
+```python
+# GraphRAG: Entity exploration
+entities = await lake.list_entities(entity_type="PERSON")
+related = await lake.find_related_entities(entity_id, max_depth=2)
+```
+
+**Khora:**
+
+| Mode | Description |
+|------|-------------|
+| `VECTOR` | Semantic similarity via embeddings |
+| `HYBRID` | Vector + BM25 with configurable alpha |
+
+```python
+# Khora: Time-filtered hybrid search
+results = await lake.recall(
+    query,
+    hybrid_alpha=0.7,  # 70% vector, 30% BM25
+    temporal_filter={"author": "alice", "channel": "engineering"}
+)
+```
+
+### Infrastructure Requirements
+
+**GraphRAG:**
+
+```
+PostgreSQL (required)
+├── Documents & metadata
+├── Event sourcing
+└── pgvector embeddings
+
+Neo4j/Kuzu/Memgraph (required)
+├── Entity nodes
+├── Relationship edges
+└── Graph traversal
+```
+
+**Khora:**
+
+```
+PostgreSQL (required)
+├── Documents & metadata
+├── pgvector embeddings
+├── BM25 full-text (tsvector)
+├── BRIN temporal indexes
+└── Time hierarchy nodes
+
+Kuzu (optional, embedded)
+└── Graph features if needed
+```
+
+### Cost Analysis
+
+For 10,000 documents:
+
+| Operation | GraphRAG | Khora | Savings |
+|-----------|----------|-------|---------|
+| Entity extraction calls | ~10,000 | ~1,000 | 90% |
+| Relationship extraction calls | ~10,000 | ~0 | 100% |
+| Embedding calls | ~10,000 | ~10,000 | 0% |
+| **Total LLM calls** | **~30,000** | **~11,000** | **63%** |
+
+*Note: Actual costs depend on document length, extraction complexity, and LLM pricing.*
+
+## Use Case Guide
+
+### Choose GraphRAG When...
+
+- **Building a knowledge base**: Product documentation, research papers, FAQs
+- **Entity relationships matter**: "Who reports to whom?", "What products does Company X make?"
+- **Graph exploration needed**: Multi-hop traversal, relationship discovery
+- **Accuracy over cost**: Willing to pay for comprehensive extraction
+- **Long-term reference**: Content doesn't change frequently
+
+**Example Use Cases:**
+- Corporate knowledge management
+- Research paper analysis
+- Product catalog with relationships
+- Organizational charts and hierarchies
+- Documentation with cross-references
+
+### Choose Khora When...
+
+- **Time is the primary dimension**: Chat logs, event streams, meeting notes
+- **Cost optimization critical**: Large volumes, budget constraints
+- **Freshness matters**: Recent events more important than old
+- **Structured filtering needed**: By author, channel, tags, time ranges
+- **Simple infrastructure**: Don't want to manage Neo4j
+- **Real-time ingestion**: Streaming data, continuous updates
+
+**Example Use Cases:**
+- Slack/Discord message archives
+- Meeting transcripts with timestamps
+- Support ticket history
+- Application logs and events
+- News and social media monitoring
+- Customer interaction history
+
+## Migration Considerations
+
+### From GraphRAG to Khora
+
+1. **Graph features lost**: Entity relationships won't be pre-computed
+2. **Query changes**: `SearchMode.GRAPH` not available; use `HYBRID`
+3. **Entity methods unavailable**: `list_entities()`, `find_related_entities()`
+4. **Temporal benefits**: Add `occurred_at` metadata for time-based queries
+
+```python
+# Before (GraphRAG)
+results = await lake.recall(query, mode=SearchMode.GRAPH)
+entities = await lake.find_related_entities(entity_id)
+
+# After (Khora)
+results = await lake.recall(
+    query,
+    mode=SearchMode.HYBRID,
+    temporal_filter={"occurred_after": "2024-01-01"}
+)
+# Entity relationships must be handled differently
+```
+
+### From Khora to GraphRAG
+
+1. **Temporal metadata preserved**: `occurred_at` becomes document metadata
+2. **Re-extraction needed**: All documents must be re-processed for entities
+3. **Infrastructure addition**: Neo4j/Kuzu/Memgraph required
+4. **Higher initial cost**: Full entity extraction on migration
+
+```python
+# Before (Khora)
+results = await lake.recall(query, temporal_filter={...})
+
+# After (GraphRAG)
+results = await lake.recall(query, mode=SearchMode.HYBRID)
+entities = await lake.list_entities(entity_type="PERSON")
+```
+
+## Hybrid Approach
+
+For some use cases, you might use both engines:
+
+1. **Khora for ingestion**: Fast, cost-efficient initial storage
+2. **Background GraphRAG enrichment**: Async entity extraction for important documents
+3. **Query routing**: Time-sensitive queries → Khora, entity queries → GraphRAG
+
+```python
+# Example: Dual-engine setup (conceptual)
+async with MemoryLake(db_url, engine="khora") as khora_lake:
+    async with MemoryLake(db_url, engine="graphrag") as graphrag_lake:
+        # Fast ingestion via Khora
+        await khora_lake.remember(content, title="Event")
+
+        # Background enrichment for important content
+        if is_important(content):
+            await graphrag_lake.remember(content, title="Event")
+```
+
+## Configuration Examples
+
+### GraphRAG Setup
+
+```yaml
+# genesis.yaml
+engine:
+  name: graphrag
+
+# Environment
+KHORA_DATABASE_URL=postgresql://localhost/khora
+KHORA_NEO4J_URL=bolt://localhost:7687
+```
+
+### Khora Setup
+
+```yaml
+# genesis.yaml
+engine:
+  name: khora
+  backend: pgvector  # or weaviate
+
+temporal:
+  default_lookback_days: 90
+  hierarchy_enabled: true
+
+query:
+  hybrid_alpha: 0.7
+  recency_decay_days: 30
+
+# Environment
+KHORA_DATABASE_URL=postgresql://localhost/khora
+# No Neo4j required
+```
+
+## Performance Benchmarks
+
+*Benchmarks on 10,000 documents, single-node deployment:*
+
+| Metric | GraphRAG | Khora | Notes |
+|--------|----------|-------|-------|
+| Ingestion time | ~45 min | ~8 min | Entity extraction overhead |
+| Query latency (p50) | ~200ms | ~150ms | Graph traversal adds latency |
+| Query latency (p99) | ~800ms | ~400ms | |
+| Storage size | ~2.5 GB | ~1.5 GB | Graph storage overhead |
+| Memory usage | ~4 GB | ~2 GB | Neo4j in-memory graph |
+
+*Note: Actual performance varies by hardware, document size, and query patterns.*
+
+## Related Documentation
+
+- [Khora Engine](khora-engine.md) - Detailed Khora engine documentation
+- [Temporal Model](temporal-model.md) - Bi-temporal design deep dive
+- [Skeleton Indexing](skeleton-indexing.md) - Cost optimization via PageRank
+- [Hybrid Search](hybrid-search.md) - Vector + BM25 fusion

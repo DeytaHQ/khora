@@ -10577,531 +10577,6 @@ README.md
 547: __all__ = ["ChunkNode", "KeywordNode", "LazyEntityExpander", "SkeletonIndexer"]
 ````
 
-## File: src/khora/engines/khora/temporal_edges.py
-````python
-  1: """Temporal edge storage for the Khora engine.
-  2: 
-  3: This module implements Graphiti-inspired bi-temporal edge storage:
-  4: - Occurrence time: When the fact/event happened
-  5: - Ingestion time: When we learned about it
-  6: - Validity windows: When the fact is considered true
-  7: - Edge invalidation: Tracking contradicting facts
-  8: """
-  9: 
- 10: from __future__ import annotations
- 11: 
- 12: import asyncio
- 13: from dataclasses import dataclass, field
- 14: from datetime import UTC, datetime
- 15: from typing import TYPE_CHECKING, Any
- 16: from uuid import UUID, uuid4
- 17: 
- 18: from loguru import logger
- 19: from sqlalchemy import and_, select
- 20: from sqlalchemy.ext.asyncio import AsyncSession
- 21: 
- 22: from khora.db.models import TemporalEdgeModel, TimeEdgeLinkModel
- 23: from khora.engines.khora.time_hierarchy import TimeHierarchyBuilder
- 24: 
- 25: if TYPE_CHECKING:
- 26:     pass
- 27: 
- 28: 
- 29: @dataclass
- 30: class TemporalEdge:
- 31:     """In-memory representation of a temporal edge."""
- 32: 
- 33:     id: UUID
- 34:     namespace_id: UUID
- 35:     source_entity_id: UUID
- 36:     target_entity_id: UUID
- 37:     relationship_type: str
- 38:     description: str = ""
- 39: 
- 40:     # Bi-temporal fields
- 41:     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
- 42:     ingested_at: datetime = field(default_factory=lambda: datetime.now(UTC))
- 43:     valid_from: datetime | None = None
- 44:     valid_until: datetime | None = None
- 45: 
- 46:     # Validity tracking
- 47:     is_valid: bool = True
- 48:     invalidated_by_id: UUID | None = None
- 49:     invalidation_reason: str | None = None
- 50: 
- 51:     # Source tracking
- 52:     confidence: float = 1.0
- 53:     properties: dict[str, Any] = field(default_factory=dict)
- 54:     source_document_ids: list[UUID] = field(default_factory=list)
- 55:     source_chunk_ids: list[UUID] = field(default_factory=list)
- 56: 
- 57: 
- 58: class TemporalEdgeStorage:
- 59:     """Storage layer for temporal edges with time hierarchy integration.
- 60: 
- 61:     Provides:
- 62:     - Creation of timestamped edges (not collapsed like RelationshipModel)
- 63:     - Automatic time node linking for efficient temporal queries
- 64:     - Edge invalidation for handling contradicting facts
- 65:     - Queries by time window, entity pair, or relationship type
- 66:     """
- 67: 
- 68:     def __init__(self, session: AsyncSession):
- 69:         """Initialize the storage.
- 70: 
- 71:         Args:
- 72:             session: SQLAlchemy async session
- 73:         """
- 74:         self._session = session
- 75:         self._time_builder = TimeHierarchyBuilder(session)
- 76: 
- 77:     async def create_edge(
- 78:         self,
- 79:         edge: TemporalEdge,
- 80:         *,
- 81:         check_conflicts: bool = True,
- 82:     ) -> TemporalEdge:
- 83:         """Create a temporal edge.
- 84: 
- 85:         Args:
- 86:             edge: Edge to create
- 87:             check_conflicts: If True, check for and invalidate conflicting edges
- 88: 
- 89:         Returns:
- 90:             Created edge with ID assigned
- 91:         """
- 92:         # Check for conflicting edges if requested
- 93:         if check_conflicts:
- 94:             await self._handle_conflicts(edge)
- 95: 
- 96:         # Create the edge
- 97:         edge_id = edge.id or uuid4()
- 98:         model = TemporalEdgeModel(
- 99:             id=str(edge_id),
-100:             namespace_id=str(edge.namespace_id),
-101:             source_entity_id=str(edge.source_entity_id),
-102:             target_entity_id=str(edge.target_entity_id),
-103:             relationship_type=edge.relationship_type,
-104:             description=edge.description,
-105:             occurred_at=edge.occurred_at,
-106:             ingested_at=edge.ingested_at,
-107:             valid_from=edge.valid_from,
-108:             valid_until=edge.valid_until,
-109:             is_valid=edge.is_valid,
-110:             confidence=edge.confidence,
-111:             properties=edge.properties,
-112:             source_document_ids=[str(id) for id in edge.source_document_ids],
-113:             source_chunk_ids=[str(id) for id in edge.source_chunk_ids],
-114:         )
-115: 
-116:         self._session.add(model)
-117:         await self._session.flush()
-118: 
-119:         # Link to time hierarchy
-120:         await self._link_to_time_node(edge.namespace_id, edge_id, edge.occurred_at)
-121: 
-122:         edge.id = edge_id
-123:         logger.debug(
-124:             f"Created temporal edge: {edge.source_entity_id} --[{edge.relationship_type}@{edge.occurred_at}]--> {edge.target_entity_id}"
-125:         )
-126: 
-127:         return edge
-128: 
-129:     async def create_edges_batch(
-130:         self,
-131:         edges: list[TemporalEdge],
-132:         *,
-133:         check_conflicts: bool = False,  # Disabled for batch performance
-134:     ) -> list[TemporalEdge]:
-135:         """Create multiple temporal edges in batch.
-136: 
-137:         Args:
-138:             edges: Edges to create
-139:             check_conflicts: If True, check for conflicts (slower)
-140: 
-141:         Returns:
-142:             Created edges with IDs assigned
-143:         """
-144:         if not edges:
-145:             return []
-146: 
-147:         # Process edges concurrently
-148:         tasks = [self.create_edge(edge, check_conflicts=check_conflicts) for edge in edges]
-149:         created = await asyncio.gather(*tasks)
-150: 
-151:         return list(created)
-152: 
-153:     async def get_edge(self, edge_id: UUID) -> TemporalEdge | None:
-154:         """Get an edge by ID.
-155: 
-156:         Args:
-157:             edge_id: Edge ID
-158: 
-159:         Returns:
-160:             Edge or None if not found
-161:         """
-162:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
-163:         result = await self._session.execute(stmt)
-164:         row = result.scalar_one_or_none()
-165: 
-166:         return self._model_to_edge(row) if row else None
-167: 
-168:     async def invalidate_edge(
-169:         self,
-170:         edge_id: UUID,
-171:         *,
-172:         invalidated_by: UUID | None = None,
-173:         reason: str | None = None,
-174:     ) -> bool:
-175:         """Invalidate an edge (mark as no longer valid).
-176: 
-177:         Args:
-178:             edge_id: Edge to invalidate
-179:             invalidated_by: New edge that contradicts this one
-180:             reason: Human-readable reason for invalidation
-181: 
-182:         Returns:
-183:             True if edge was invalidated
-184:         """
-185:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
-186:         result = await self._session.execute(stmt)
-187:         row = result.scalar_one_or_none()
-188: 
-189:         if not row:
-190:             return False
-191: 
-192:         row.is_valid = False
-193:         row.invalidated_by_id = str(invalidated_by) if invalidated_by else None
-194:         row.invalidation_reason = reason
-195: 
-196:         await self._session.flush()
-197:         logger.debug(f"Invalidated edge {edge_id}: {reason}")
-198: 
-199:         return True
-200: 
-201:     async def get_edges_by_time_range(
-202:         self,
-203:         namespace_id: UUID,
-204:         start: datetime,
-205:         end: datetime,
-206:         *,
-207:         relationship_type: str | None = None,
-208:         include_invalid: bool = False,
-209:         limit: int = 1000,
-210:     ) -> list[TemporalEdge]:
-211:         """Get edges within a time range.
-212: 
-213:         Args:
-214:             namespace_id: Namespace to query
-215:             start: Range start (inclusive)
-216:             end: Range end (exclusive)
-217:             relationship_type: Optional filter by relationship type
-218:             include_invalid: If True, include invalidated edges
-219:             limit: Maximum number of edges to return
-220: 
-221:         Returns:
-222:             List of edges in chronological order
-223:         """
-224:         conditions = [
-225:             TemporalEdgeModel.namespace_id == str(namespace_id),
-226:             TemporalEdgeModel.occurred_at >= start,
-227:             TemporalEdgeModel.occurred_at < end,
-228:         ]
-229: 
-230:         if relationship_type:
-231:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
-232: 
-233:         if not include_invalid:
-234:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
-235: 
-236:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
-237: 
-238:         result = await self._session.execute(stmt)
-239:         rows = result.scalars().all()
-240: 
-241:         return [self._model_to_edge(row) for row in rows]
-242: 
-243:     async def get_edges_by_entity(
-244:         self,
-245:         entity_id: UUID,
-246:         namespace_id: UUID,
-247:         *,
-248:         direction: str = "both",  # "outgoing", "incoming", "both"
-249:         time_start: datetime | None = None,
-250:         time_end: datetime | None = None,
-251:         include_invalid: bool = False,
-252:         limit: int = 100,
-253:     ) -> list[TemporalEdge]:
-254:         """Get edges connected to an entity.
-255: 
-256:         Args:
-257:             entity_id: Entity to find edges for
-258:             namespace_id: Namespace to query
-259:             direction: Which edges to find ("outgoing", "incoming", "both")
-260:             time_start: Optional time range start
-261:             time_end: Optional time range end
-262:             include_invalid: If True, include invalidated edges
-263:             limit: Maximum number of edges to return
-264: 
-265:         Returns:
-266:             List of edges in chronological order
-267:         """
-268:         entity_id_str = str(entity_id)
-269: 
-270:         if direction == "outgoing":
-271:             entity_condition = TemporalEdgeModel.source_entity_id == entity_id_str
-272:         elif direction == "incoming":
-273:             entity_condition = TemporalEdgeModel.target_entity_id == entity_id_str
-274:         else:  # both
-275:             entity_condition = (TemporalEdgeModel.source_entity_id == entity_id_str) | (
-276:                 TemporalEdgeModel.target_entity_id == entity_id_str
-277:             )
-278: 
-279:         conditions = [
-280:             TemporalEdgeModel.namespace_id == str(namespace_id),
-281:             entity_condition,
-282:         ]
-283: 
-284:         if time_start:
-285:             conditions.append(TemporalEdgeModel.occurred_at >= time_start)
-286:         if time_end:
-287:             conditions.append(TemporalEdgeModel.occurred_at < time_end)
-288:         if not include_invalid:
-289:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
-290: 
-291:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
-292: 
-293:         result = await self._session.execute(stmt)
-294:         rows = result.scalars().all()
-295: 
-296:         return [self._model_to_edge(row) for row in rows]
-297: 
-298:     async def get_edges_by_entity_pair(
-299:         self,
-300:         source_entity_id: UUID,
-301:         target_entity_id: UUID,
-302:         namespace_id: UUID,
-303:         *,
-304:         relationship_type: str | None = None,
-305:         include_invalid: bool = False,
-306:         limit: int = 100,
-307:     ) -> list[TemporalEdge]:
-308:         """Get edges between two specific entities.
-309: 
-310:         Args:
-311:             source_entity_id: Source entity
-312:             target_entity_id: Target entity
-313:             namespace_id: Namespace to query
-314:             relationship_type: Optional filter by relationship type
-315:             include_invalid: If True, include invalidated edges
-316:             limit: Maximum number of edges to return
-317: 
-318:         Returns:
-319:             List of edges in chronological order
-320:         """
-321:         conditions = [
-322:             TemporalEdgeModel.namespace_id == str(namespace_id),
-323:             TemporalEdgeModel.source_entity_id == str(source_entity_id),
-324:             TemporalEdgeModel.target_entity_id == str(target_entity_id),
-325:         ]
-326: 
-327:         if relationship_type:
-328:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
-329:         if not include_invalid:
-330:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
-331: 
-332:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
-333: 
-334:         result = await self._session.execute(stmt)
-335:         rows = result.scalars().all()
-336: 
-337:         return [self._model_to_edge(row) for row in rows]
-338: 
-339:     async def get_valid_at(
-340:         self,
-341:         namespace_id: UUID,
-342:         point_in_time: datetime,
-343:         *,
-344:         entity_id: UUID | None = None,
-345:         relationship_type: str | None = None,
-346:         limit: int = 1000,
-347:     ) -> list[TemporalEdge]:
-348:         """Get edges that were valid at a specific point in time.
-349: 
-350:         Uses the valid_from/valid_until fields to determine validity.
-351: 
-352:         Args:
-353:             namespace_id: Namespace to query
-354:             point_in_time: The point in time to query
-355:             entity_id: Optional filter by entity
-356:             relationship_type: Optional filter by relationship type
-357:             limit: Maximum number of edges to return
-358: 
-359:         Returns:
-360:             List of edges valid at that time
-361:         """
-362:         conditions = [
-363:             TemporalEdgeModel.namespace_id == str(namespace_id),
-364:             TemporalEdgeModel.is_valid == True,  # noqa: E712
-365:             # valid_from <= point_in_time < valid_until
-366:             (TemporalEdgeModel.valid_from.is_(None)) | (TemporalEdgeModel.valid_from <= point_in_time),
-367:             (TemporalEdgeModel.valid_until.is_(None)) | (TemporalEdgeModel.valid_until > point_in_time),
-368:         ]
-369: 
-370:         if entity_id:
-371:             conditions.append(
-372:                 (TemporalEdgeModel.source_entity_id == str(entity_id))
-373:                 | (TemporalEdgeModel.target_entity_id == str(entity_id))
-374:             )
-375: 
-376:         if relationship_type:
-377:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
-378: 
-379:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
-380: 
-381:         result = await self._session.execute(stmt)
-382:         rows = result.scalars().all()
-383: 
-384:         return [self._model_to_edge(row) for row in rows]
-385: 
-386:     async def delete_edge(self, edge_id: UUID) -> bool:
-387:         """Delete an edge.
-388: 
-389:         Args:
-390:             edge_id: Edge to delete
-391: 
-392:         Returns:
-393:             True if deleted
-394:         """
-395:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
-396:         result = await self._session.execute(stmt)
-397:         row = result.scalar_one_or_none()
-398: 
-399:         if not row:
-400:             return False
-401: 
-402:         await self._session.delete(row)
-403:         await self._session.flush()
-404: 
-405:         return True
-406: 
-407:     async def delete_edges_by_entity(self, entity_id: UUID, namespace_id: UUID) -> int:
-408:         """Delete all edges connected to an entity.
-409: 
-410:         Args:
-411:             entity_id: Entity whose edges to delete
-412:             namespace_id: Namespace
-413: 
-414:         Returns:
-415:             Number of edges deleted
-416:         """
-417:         stmt = select(TemporalEdgeModel).where(
-418:             TemporalEdgeModel.namespace_id == str(namespace_id),
-419:             (TemporalEdgeModel.source_entity_id == str(entity_id))
-420:             | (TemporalEdgeModel.target_entity_id == str(entity_id)),
-421:         )
-422: 
-423:         result = await self._session.execute(stmt)
-424:         rows = result.scalars().all()
-425: 
-426:         for row in rows:
-427:             await self._session.delete(row)
-428: 
-429:         await self._session.flush()
-430:         return len(rows)
-431: 
-432:     # =========================================================================
-433:     # Private helper methods
-434:     # =========================================================================
-435: 
-436:     async def _link_to_time_node(
-437:         self,
-438:         namespace_id: UUID,
-439:         edge_id: UUID,
-440:         occurred_at: datetime,
-441:     ) -> None:
-442:         """Link an edge to its time node in the hierarchy."""
-443:         # Get or create the day node
-444:         day_node = await self._time_builder.get_or_create_day_node(namespace_id, occurred_at)
-445: 
-446:         # Create the link
-447:         link = TimeEdgeLinkModel(
-448:             time_node_id=str(day_node.id),
-449:             edge_id=str(edge_id),
-450:         )
-451:         self._session.add(link)
-452: 
-453:         # Update edge count
-454:         await self._time_builder.increment_edge_count(day_node.id)
-455: 
-456:         await self._session.flush()
-457: 
-458:     async def _handle_conflicts(self, new_edge: TemporalEdge) -> None:
-459:         """Check for and handle conflicting edges.
-460: 
-461:         A conflict is detected when:
-462:         - Same source/target entities
-463:         - Same relationship type
-464:         - New edge occurs after existing edge
-465:         - The relationship type implies mutual exclusivity (e.g., WORKS_FOR)
-466:         """
-467:         # Get existing edges between the same entity pair
-468:         existing = await self.get_edges_by_entity_pair(
-469:             new_edge.source_entity_id,
-470:             new_edge.target_entity_id,
-471:             new_edge.namespace_id,
-472:             relationship_type=new_edge.relationship_type,
-473:             include_invalid=False,
-474:         )
-475: 
-476:         # Check for conflicts based on relationship semantics
-477:         exclusive_types = {
-478:             "WORKS_FOR",
-479:             "REPORTS_TO",
-480:             "MANAGES",
-481:             "MARRIED_TO",
-482:             "CEO_OF",
-483:             "PRESIDENT_OF",
-484:             "LOCATED_AT",
-485:             "HEADQUARTERED_IN",
-486:         }
-487: 
-488:         if new_edge.relationship_type.upper() in exclusive_types:
-489:             for old_edge in existing:
-490:                 # If new edge is more recent, invalidate old one
-491:                 if new_edge.occurred_at > old_edge.occurred_at:
-492:                     await self.invalidate_edge(
-493:                         old_edge.id,
-494:                         invalidated_by=new_edge.id,
-495:                         reason=f"Superseded by newer {new_edge.relationship_type} edge",
-496:                     )
-497: 
-498:     def _model_to_edge(self, model: TemporalEdgeModel) -> TemporalEdge:
-499:         """Convert a database model to a TemporalEdge dataclass."""
-500:         return TemporalEdge(
-501:             id=UUID(model.id),
-502:             namespace_id=UUID(model.namespace_id),
-503:             source_entity_id=UUID(model.source_entity_id),
-504:             target_entity_id=UUID(model.target_entity_id),
-505:             relationship_type=model.relationship_type,
-506:             description=model.description,
-507:             occurred_at=model.occurred_at,
-508:             ingested_at=model.ingested_at,
-509:             valid_from=model.valid_from,
-510:             valid_until=model.valid_until,
-511:             is_valid=model.is_valid,
-512:             invalidated_by_id=UUID(model.invalidated_by_id) if model.invalidated_by_id else None,
-513:             invalidation_reason=model.invalidation_reason,
-514:             confidence=model.confidence,
-515:             properties=model.properties or {},
-516:             source_document_ids=[UUID(id) for id in (model.source_document_ids or [])],
-517:             source_chunk_ids=[UUID(id) for id in (model.source_chunk_ids or [])],
-518:         )
-519: 
-520: 
-521: __all__ = ["TemporalEdge", "TemporalEdgeStorage"]
-````
-
 ## File: src/khora/engines/khora/time_hierarchy.py
 ````python
   1: """Hierarchical time graph builder for the Khora engine.
@@ -21952,917 +21427,529 @@ README.md
 549: __all__ = ["PgVectorTemporalStore"]
 ````
 
-## File: src/khora/engines/khora/engine.py
+## File: src/khora/engines/khora/temporal_edges.py
 ````python
-  1: """Khora engine - temporal-first memory engine.
+  1: """Temporal edge storage for the Khora engine.
   2: 
-  3: This engine is optimized for:
-  4: - Temporal queries with structured field filtering
-  5: - Fast and cost-efficient ingestion
-  6: - High-precision retrieval with bi-temporal model
-  7: - Multiple backends (pgvector, Weaviate)
+  3: This module implements Graphiti-inspired bi-temporal edge storage:
+  4: - Occurrence time: When the fact/event happened
+  5: - Ingestion time: When we learned about it
+  6: - Validity windows: When the fact is considered true
+  7: - Edge invalidation: Tracking contradicting facts
   8: """
   9: 
  10: from __future__ import annotations
  11: 
  12: import asyncio
- 13: import hashlib
- 14: from collections.abc import Callable
- 15: from datetime import UTC, datetime
- 16: from typing import TYPE_CHECKING, Any
- 17: from uuid import UUID
- 18: 
- 19: from loguru import logger
- 20: 
- 21: from khora.config import KhoraConfig, LiteLLMConfig
- 22: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
- 23: from khora.extraction.embedders import LiteLLMEmbedder
- 24: from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
- 25: from khora.query import SearchMode
- 26: from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+ 13: from dataclasses import dataclass, field
+ 14: from datetime import UTC, datetime
+ 15: from typing import TYPE_CHECKING, Any
+ 16: from uuid import UUID, uuid4
+ 17: 
+ 18: from loguru import logger
+ 19: from sqlalchemy import and_, select
+ 20: from sqlalchemy.ext.asyncio import AsyncSession
+ 21: 
+ 22: from khora.db.models import TemporalEdgeModel, TimeEdgeLinkModel
+ 23: from khora.engines.khora.time_hierarchy import TimeHierarchyBuilder
+ 24: 
+ 25: if TYPE_CHECKING:
+ 26:     pass
  27: 
- 28: from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
- 29: 
- 30: if TYPE_CHECKING:
- 31:     pass
+ 28: 
+ 29: @dataclass
+ 30: class TemporalEdge:
+ 31:     """In-memory representation of a temporal edge."""
  32: 
- 33: 
- 34: class KhoraEngine:
- 35:     """Khora engine - temporal-first, cost-efficient memory engine.
- 36: 
- 37:     Key features:
- 38:     - Bi-temporal model: Track occurrence time vs ingestion time
- 39:     - Hierarchical time graph: Year → Quarter → Month → Week → Day
- 40:     - Structured field filtering: Filter on occurred_at, not just created_at
- 41:     - Multiple backends: PostgreSQL+pgvector (default) and Weaviate (advanced)
- 42:     - Cost optimization: Skeleton-based indexing with lazy expansion
- 43: 
- 44:     Usage:
- 45:         # Default backend (pgvector)
- 46:         engine = KhoraEngine(config)
- 47:         await engine.connect()
- 48: 
- 49:         # Weaviate backend
- 50:         engine = KhoraEngine(config, backend="weaviate", weaviate_url="http://localhost:8080")
- 51:         await engine.connect()
- 52:     """
- 53: 
- 54:     def __init__(
- 55:         self,
- 56:         config: KhoraConfig,
- 57:         *,
- 58:         storage_config: StorageConfig | None = None,
- 59:         backend: str = "pgvector",
- 60:         weaviate_url: str | None = None,
- 61:     ) -> None:
- 62:         """Initialize the Khora engine.
- 63: 
- 64:         Args:
- 65:             config: KhoraConfig instance
- 66:             storage_config: Storage configuration (deprecated, derived from config)
- 67:             backend: Backend type ("pgvector" or "weaviate")
- 68:             weaviate_url: Weaviate URL (required for weaviate backend)
- 69:         """
- 70:         self._config = config
- 71:         self._backend_type = backend
- 72:         self._weaviate_url = weaviate_url
- 73: 
- 74:         # Build storage config
- 75:         if storage_config:
- 76:             self._storage_config = storage_config
- 77:         else:
- 78:             postgresql_url = config.get_postgresql_url()
- 79:             graph_config = config.get_graph_config()
- 80: 
- 81:             # Only use legacy neo4j_url fields when graph_config is explicitly set
- 82:             # This prevents environment variables (KHORA_NEO4J_URL) from overriding
- 83:             # the explicit graph_config=None setting
- 84:             storage_kwargs: dict[str, Any] = {
- 85:                 "postgresql_url": postgresql_url,
- 86:                 "pgvector_url": postgresql_url,
- 87:                 "pgvector_embedding_dimension": config.storage.embedding_dimension,
- 88:                 "graph_config": graph_config,
- 89:                 "vector_config": config.get_vector_config(),
- 90:             }
- 91:             if graph_config is not None:
- 92:                 # Only pass legacy neo4j fields when graph is configured
- 93:                 storage_kwargs["neo4j_url"] = config.get_neo4j_url()
- 94:                 storage_kwargs["neo4j_user"] = config.get_neo4j_user()
- 95:                 storage_kwargs["neo4j_password"] = config.get_neo4j_password()
- 96:                 storage_kwargs["neo4j_database"] = config.get_neo4j_database()
- 97: 
- 98:             self._storage_config = StorageConfig(**storage_kwargs)
- 99: 
-100:         self._storage: StorageCoordinator | None = None
-101:         self._temporal_store: TemporalVectorStore | None = None
-102:         self._embedder: LiteLLMEmbedder | None = None
-103:         self._connected = False
-104: 
-105:         # Default namespace for simple usage
-106:         self._default_namespace_id: UUID | None = None
-107: 
-108:     async def connect(self) -> None:
-109:         """Connect to all storage backends."""
-110:         if self._connected:
-111:             return
-112: 
-113:         logger.info(f"Connecting Khora engine (backend={self._backend_type})...")
-114: 
-115:         # Create and connect relational storage (for documents, namespaces, etc.)
-116:         self._storage = create_storage_coordinator(self._storage_config)
-117:         await self._storage.connect()
+ 33:     id: UUID
+ 34:     namespace_id: UUID
+ 35:     source_entity_id: UUID
+ 36:     target_entity_id: UUID
+ 37:     relationship_type: str
+ 38:     description: str = ""
+ 39: 
+ 40:     # Bi-temporal fields
+ 41:     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 42:     ingested_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 43:     valid_from: datetime | None = None
+ 44:     valid_until: datetime | None = None
+ 45: 
+ 46:     # Validity tracking
+ 47:     is_valid: bool = True
+ 48:     invalidated_by_id: UUID | None = None
+ 49:     invalidation_reason: str | None = None
+ 50: 
+ 51:     # Source tracking
+ 52:     confidence: float = 1.0
+ 53:     properties: dict[str, Any] = field(default_factory=dict)
+ 54:     source_document_ids: list[UUID] = field(default_factory=list)
+ 55:     source_chunk_ids: list[UUID] = field(default_factory=list)
+ 56: 
+ 57: 
+ 58: class TemporalEdgeStorage:
+ 59:     """Storage layer for temporal edges with time hierarchy integration.
+ 60: 
+ 61:     Provides:
+ 62:     - Creation of timestamped edges (not collapsed like RelationshipModel)
+ 63:     - Automatic time node linking for efficient temporal queries
+ 64:     - Edge invalidation for handling contradicting facts
+ 65:     - Queries by time window, entity pair, or relationship type
+ 66:     """
+ 67: 
+ 68:     def __init__(self, session: AsyncSession):
+ 69:         """Initialize the storage.
+ 70: 
+ 71:         Args:
+ 72:             session: SQLAlchemy async session
+ 73:         """
+ 74:         self._session = session
+ 75:         self._time_builder = TimeHierarchyBuilder(session)
+ 76: 
+ 77:     async def create_edge(
+ 78:         self,
+ 79:         edge: TemporalEdge,
+ 80:         *,
+ 81:         check_conflicts: bool = True,
+ 82:     ) -> TemporalEdge:
+ 83:         """Create a temporal edge.
+ 84: 
+ 85:         Args:
+ 86:             edge: Edge to create
+ 87:             check_conflicts: If True, check for and invalidate conflicting edges
+ 88: 
+ 89:         Returns:
+ 90:             Created edge with ID assigned
+ 91:         """
+ 92:         # Check for conflicting edges if requested
+ 93:         if check_conflicts:
+ 94:             await self._handle_conflicts(edge)
+ 95: 
+ 96:         # Create the edge
+ 97:         edge_id = edge.id or uuid4()
+ 98:         model = TemporalEdgeModel(
+ 99:             id=str(edge_id),
+100:             namespace_id=str(edge.namespace_id),
+101:             source_entity_id=str(edge.source_entity_id),
+102:             target_entity_id=str(edge.target_entity_id),
+103:             relationship_type=edge.relationship_type,
+104:             description=edge.description,
+105:             occurred_at=edge.occurred_at,
+106:             ingested_at=edge.ingested_at,
+107:             valid_from=edge.valid_from,
+108:             valid_until=edge.valid_until,
+109:             is_valid=edge.is_valid,
+110:             confidence=edge.confidence,
+111:             properties=edge.properties,
+112:             source_document_ids=[str(id) for id in edge.source_document_ids],
+113:             source_chunk_ids=[str(id) for id in edge.source_chunk_ids],
+114:         )
+115: 
+116:         self._session.add(model)
+117:         await self._session.flush()
 118: 
-119:         # Create and connect temporal vector store
-120:         self._temporal_store = create_temporal_store(
-121:             self._backend_type,
-122:             self._config,
-123:             weaviate_url=self._weaviate_url,
-124:         )
-125:         await self._temporal_store.connect()
+119:         # Link to time hierarchy
+120:         await self._link_to_time_node(edge.namespace_id, edge_id, edge.occurred_at)
+121: 
+122:         edge.id = edge_id
+123:         logger.debug(
+124:             f"Created temporal edge: {edge.source_entity_id} --[{edge.relationship_type}@{edge.occurred_at}]--> {edge.target_entity_id}"
+125:         )
 126: 
-127:         # Create embedder
-128:         llm_config = LiteLLMConfig(
-129:             model=self._config.llm.model,
-130:             embedding_model=self._config.llm.embedding_model,
-131:             embedding_dimension=self._config.llm.embedding_dimension,
-132:             timeout=self._config.llm.timeout,
-133:             max_retries=self._config.llm.max_retries,
-134:         )
-135:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
+127:         return edge
+128: 
+129:     async def create_edges_batch(
+130:         self,
+131:         edges: list[TemporalEdge],
+132:         *,
+133:         check_conflicts: bool = False,  # Disabled for batch performance
+134:     ) -> list[TemporalEdge]:
+135:         """Create multiple temporal edges in batch.
 136: 
-137:         # Initialize telemetry
-138:         from khora.telemetry import init_telemetry
-139:         from khora.telemetry.config import TelemetryConfig
+137:         Args:
+138:             edges: Edges to create
+139:             check_conflicts: If True, check for conflicts (slower)
 140: 
-141:         telemetry_cfg = TelemetryConfig(
-142:             database_url=self._config.telemetry_database_url,
-143:             service_name=self._config.telemetry_service_name,
-144:         )
-145:         await init_telemetry(telemetry_cfg)
+141:         Returns:
+142:             Created edges with IDs assigned
+143:         """
+144:         if not edges:
+145:             return []
 146: 
-147:         self._connected = True
-148:         logger.info("Khora engine connected")
-149: 
-150:     async def disconnect(self) -> None:
-151:         """Disconnect from all storage backends."""
-152:         if not self._connected:
-153:             return
-154: 
-155:         logger.info("Disconnecting Khora engine...")
-156: 
-157:         # Shutdown telemetry
-158:         from khora.telemetry import shutdown_telemetry
-159: 
-160:         await shutdown_telemetry()
-161: 
-162:         if self._temporal_store:
-163:             await self._temporal_store.disconnect()
-164:             self._temporal_store = None
+147:         # Process edges concurrently
+148:         tasks = [self.create_edge(edge, check_conflicts=check_conflicts) for edge in edges]
+149:         created = await asyncio.gather(*tasks)
+150: 
+151:         return list(created)
+152: 
+153:     async def get_edge(self, edge_id: UUID) -> TemporalEdge | None:
+154:         """Get an edge by ID.
+155: 
+156:         Args:
+157:             edge_id: Edge ID
+158: 
+159:         Returns:
+160:             Edge or None if not found
+161:         """
+162:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+163:         result = await self._session.execute(stmt)
+164:         row = result.scalar_one_or_none()
 165: 
-166:         if self._storage:
-167:             await self._storage.disconnect()
-168:             self._storage = None
-169: 
-170:         self._embedder = None
-171:         self._connected = False
-172: 
-173:         logger.info("Khora engine disconnected")
-174: 
-175:     def _get_storage(self) -> StorageCoordinator:
-176:         """Get storage coordinator (internal use)."""
-177:         if self._storage is None:
-178:             raise RuntimeError("Khora engine not connected. Call connect() first.")
-179:         return self._storage
-180: 
-181:     def _get_temporal_store(self) -> TemporalVectorStore:
-182:         """Get temporal store (internal use)."""
-183:         if self._temporal_store is None:
-184:             raise RuntimeError("Khora engine not connected. Call connect() first.")
-185:         return self._temporal_store
-186: 
-187:     def _get_embedder(self) -> LiteLLMEmbedder:
-188:         """Get embedder (internal use)."""
-189:         if self._embedder is None:
-190:             raise RuntimeError("Khora engine not connected. Call connect() first.")
-191:         return self._embedder
-192: 
-193:     # =========================================================================
-194:     # Core API: remember, recall, forget
-195:     # =========================================================================
-196: 
-197:     async def remember(
-198:         self,
-199:         content: str,
-200:         namespace_id: UUID,
-201:         *,
-202:         title: str = "",
-203:         source: str = "",
-204:         metadata: dict[str, Any] | None = None,
-205:         skill_name: str = "general_entities",
-206:         occurred_at: datetime | None = None,
-207:     ) -> RememberResult:
-208:         """Store content in the memory engine.
-209: 
-210:         Args:
-211:             content: Content to store
-212:             namespace_id: Namespace to store in
-213:             title: Document title
-214:             source: Document source
-215:             metadata: Additional metadata
-216:             skill_name: Extraction skill (default: general_entities)
-217:             occurred_at: When this content/event occurred (default: now)
-218: 
-219:         Returns:
-220:             RememberResult with document_id and counts
-221:         """
-222:         # Compute checksum
-223:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-224: 
-225:         storage = self._get_storage()
-226: 
-227:         # Check for duplicate
-228:         existing = await storage.get_document_by_checksum(namespace_id, checksum)
-229:         if existing:
-230:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
-231:             return RememberResult(
-232:                 document_id=existing.id,
-233:                 namespace_id=namespace_id,
-234:                 chunks_created=existing.chunk_count,
-235:                 entities_extracted=existing.entity_count,
-236:                 relationships_created=0,
-237:                 metadata={"duplicate": True, "status": str(existing.status)},
-238:             )
-239: 
-240:         # Create document in relational storage
-241:         doc_metadata = DocumentMetadata(
-242:             title=title,
-243:             source=source,
-244:             source_type="api",
-245:             checksum=checksum,
-246:             size_bytes=len(content.encode("utf-8")),
-247:             custom=metadata or {},
-248:         )
-249:         document = Document(
-250:             namespace_id=namespace_id,
-251:             content=content,
-252:             metadata=doc_metadata,
-253:         )
-254:         document = await storage.create_document(document)
+166:         return self._model_to_edge(row) if row else None
+167: 
+168:     async def invalidate_edge(
+169:         self,
+170:         edge_id: UUID,
+171:         *,
+172:         invalidated_by: UUID | None = None,
+173:         reason: str | None = None,
+174:     ) -> bool:
+175:         """Invalidate an edge (mark as no longer valid).
+176: 
+177:         Args:
+178:             edge_id: Edge to invalidate
+179:             invalidated_by: New edge that contradicts this one
+180:             reason: Human-readable reason for invalidation
+181: 
+182:         Returns:
+183:             True if edge was invalidated
+184:         """
+185:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+186:         result = await self._session.execute(stmt)
+187:         row = result.scalar_one_or_none()
+188: 
+189:         if not row:
+190:             return False
+191: 
+192:         row.is_valid = False
+193:         row.invalidated_by_id = str(invalidated_by) if invalidated_by else None
+194:         row.invalidation_reason = reason
+195: 
+196:         await self._session.flush()
+197:         logger.debug(f"Invalidated edge {edge_id}: {reason}")
+198: 
+199:         return True
+200: 
+201:     async def get_edges_by_time_range(
+202:         self,
+203:         namespace_id: UUID,
+204:         start: datetime,
+205:         end: datetime,
+206:         *,
+207:         relationship_type: str | None = None,
+208:         include_invalid: bool = False,
+209:         limit: int = 1000,
+210:     ) -> list[TemporalEdge]:
+211:         """Get edges within a time range.
+212: 
+213:         Args:
+214:             namespace_id: Namespace to query
+215:             start: Range start (inclusive)
+216:             end: Range end (exclusive)
+217:             relationship_type: Optional filter by relationship type
+218:             include_invalid: If True, include invalidated edges
+219:             limit: Maximum number of edges to return
+220: 
+221:         Returns:
+222:             List of edges in chronological order
+223:         """
+224:         conditions = [
+225:             TemporalEdgeModel.namespace_id == str(namespace_id),
+226:             TemporalEdgeModel.occurred_at >= start,
+227:             TemporalEdgeModel.occurred_at < end,
+228:         ]
+229: 
+230:         if relationship_type:
+231:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
+232: 
+233:         if not include_invalid:
+234:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
+235: 
+236:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
+237: 
+238:         result = await self._session.execute(stmt)
+239:         rows = result.scalars().all()
+240: 
+241:         return [self._model_to_edge(row) for row in rows]
+242: 
+243:     async def get_edges_by_entity(
+244:         self,
+245:         entity_id: UUID,
+246:         namespace_id: UUID,
+247:         *,
+248:         direction: str = "both",  # "outgoing", "incoming", "both"
+249:         time_start: datetime | None = None,
+250:         time_end: datetime | None = None,
+251:         include_invalid: bool = False,
+252:         limit: int = 100,
+253:     ) -> list[TemporalEdge]:
+254:         """Get edges connected to an entity.
 255: 
-256:         # Process through simplified pipeline (no full KG extraction)
-257:         chunks_created, entities_extracted, relationships_created = await self._process_document(
-258:             document,
-259:             skill_name=skill_name,
-260:             occurred_at=occurred_at or datetime.now(UTC),
-261:         )
-262: 
-263:         return RememberResult(
-264:             document_id=document.id,
-265:             namespace_id=namespace_id,
-266:             chunks_created=chunks_created,
-267:             entities_extracted=entities_extracted,
-268:             relationships_created=relationships_created,
-269:         )
-270: 
-271:     async def _process_document(
-272:         self,
-273:         document: Document,
-274:         *,
-275:         skill_name: str,
-276:         occurred_at: datetime,
-277:     ) -> tuple[int, int, int]:
-278:         """Process a document into chunks (simplified pipeline).
-279: 
-280:         Unlike GraphRAG, this focuses on fast chunking and embedding without
-281:         full entity extraction. Entity extraction can be done lazily on retrieval.
-282:         """
-283:         from khora.pipelines.chunking import create_chunker
-284:         from khora.pipelines.chunking.config import ChunkerConfig
-285: 
-286:         storage = self._get_storage()
-287:         embedder = self._get_embedder()
-288:         temporal_store = self._get_temporal_store()
-289: 
-290:         # Create chunker
-291:         chunker_config = ChunkerConfig(
-292:             strategy=self._config.pipeline.chunking_strategy,
-293:             chunk_size=self._config.pipeline.chunk_size,
-294:             chunk_overlap=self._config.pipeline.chunk_overlap,
-295:         )
-296:         chunker = create_chunker(chunker_config)
+256:         Args:
+257:             entity_id: Entity to find edges for
+258:             namespace_id: Namespace to query
+259:             direction: Which edges to find ("outgoing", "incoming", "both")
+260:             time_start: Optional time range start
+261:             time_end: Optional time range end
+262:             include_invalid: If True, include invalidated edges
+263:             limit: Maximum number of edges to return
+264: 
+265:         Returns:
+266:             List of edges in chronological order
+267:         """
+268:         entity_id_str = str(entity_id)
+269: 
+270:         if direction == "outgoing":
+271:             entity_condition = TemporalEdgeModel.source_entity_id == entity_id_str
+272:         elif direction == "incoming":
+273:             entity_condition = TemporalEdgeModel.target_entity_id == entity_id_str
+274:         else:  # both
+275:             entity_condition = (TemporalEdgeModel.source_entity_id == entity_id_str) | (
+276:                 TemporalEdgeModel.target_entity_id == entity_id_str
+277:             )
+278: 
+279:         conditions = [
+280:             TemporalEdgeModel.namespace_id == str(namespace_id),
+281:             entity_condition,
+282:         ]
+283: 
+284:         if time_start:
+285:             conditions.append(TemporalEdgeModel.occurred_at >= time_start)
+286:         if time_end:
+287:             conditions.append(TemporalEdgeModel.occurred_at < time_end)
+288:         if not include_invalid:
+289:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
+290: 
+291:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
+292: 
+293:         result = await self._session.execute(stmt)
+294:         rows = result.scalars().all()
+295: 
+296:         return [self._model_to_edge(row) for row in rows]
 297: 
-298:         # Chunk the document
-299:         raw_chunks = chunker.chunk(document.content)
-300: 
-301:         if not raw_chunks:
-302:             # Mark document as processed with 0 chunks
-303:             document.mark_completed(0, 0)
-304:             await storage.update_document(document)
-305:             return 0, 0, 0
-306: 
-307:         # Embed chunks in batch
-308:         chunk_texts = [c.content for c in raw_chunks]
-309:         embeddings = await embedder.embed_batch(chunk_texts)
-310: 
-311:         # Extract metadata for filtering (source_system, author, channel, etc.)
-312:         doc_metadata = document.metadata.custom if document.metadata else {}
-313: 
-314:         # Create temporal chunks
-315:         temporal_chunks = []
-316:         for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-317:             temporal_chunk = TemporalChunk(
-318:                 id=None,  # Will be assigned
-319:                 namespace_id=document.namespace_id,
-320:                 document_id=document.id,
-321:                 content=raw_chunk.content,
-322:                 embedding=embedding,
-323:                 occurred_at=occurred_at,
-324:                 created_at=datetime.now(UTC),
-325:                 source_system=doc_metadata.get("source_system"),
-326:                 author=doc_metadata.get("author"),
-327:                 channel=doc_metadata.get("channel"),
-328:                 tags=doc_metadata.get("tags", []),
-329:                 confidence=1.0,
-330:                 metadata={
-331:                     "chunk_index": i,
-332:                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-333:                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-334:                 },
-335:             )
-336:             temporal_chunks.append(temporal_chunk)
-337: 
-338:         # Store in temporal store
-339:         stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-340: 
-341:         # Update document status
-342:         document.mark_completed(len(stored_chunks), 0)
-343:         await storage.update_document(document)
-344: 
-345:         logger.debug(f"Processed document {document.id}: {len(stored_chunks)} chunks")
-346: 
-347:         return len(stored_chunks), 0, 0
-348: 
-349:     async def recall(
-350:         self,
-351:         query: str,
-352:         namespace_id: UUID,
-353:         *,
-354:         limit: int = 10,
-355:         mode: SearchMode = SearchMode.HYBRID,
-356:         min_similarity: float = 0.0,
-357:         agentic: bool = False,
-358:         raw: bool = False,
-359:         # Khora-specific parameters
-360:         temporal_filter: TemporalFilter | None = None,
-361:         temporal_reference: datetime | None = None,
-362:         hybrid_alpha: float | None = None,
-363:         filters: dict[str, Any] | None = None,
-364:     ) -> RecallResult:
-365:         """Recall memories relevant to a query.
-366: 
-367:         Args:
-368:             query: Query text
-369:             namespace_id: Namespace to search
-370:             limit: Maximum number of results
-371:             mode: Search mode (VECTOR, KEYWORD, HYBRID)
-372:             min_similarity: Minimum similarity threshold
-373:             agentic: Whether to use agentic mode
-374:             raw: Disable all LLM features
-375:             temporal_filter: Structured temporal filter
-376:             temporal_reference: Reference point for relative time (e.g., message timestamp)
-377:             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
-378:             filters: Additional structured filters (converted to TemporalFilter)
-379: 
-380:         Returns:
-381:             RecallResult with chunks and context
-382:         """
-383:         embedder = self._get_embedder()
-384:         temporal_store = self._get_temporal_store()
+298:     async def get_edges_by_entity_pair(
+299:         self,
+300:         source_entity_id: UUID,
+301:         target_entity_id: UUID,
+302:         namespace_id: UUID,
+303:         *,
+304:         relationship_type: str | None = None,
+305:         include_invalid: bool = False,
+306:         limit: int = 100,
+307:     ) -> list[TemporalEdge]:
+308:         """Get edges between two specific entities.
+309: 
+310:         Args:
+311:             source_entity_id: Source entity
+312:             target_entity_id: Target entity
+313:             namespace_id: Namespace to query
+314:             relationship_type: Optional filter by relationship type
+315:             include_invalid: If True, include invalidated edges
+316:             limit: Maximum number of edges to return
+317: 
+318:         Returns:
+319:             List of edges in chronological order
+320:         """
+321:         conditions = [
+322:             TemporalEdgeModel.namespace_id == str(namespace_id),
+323:             TemporalEdgeModel.source_entity_id == str(source_entity_id),
+324:             TemporalEdgeModel.target_entity_id == str(target_entity_id),
+325:         ]
+326: 
+327:         if relationship_type:
+328:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
+329:         if not include_invalid:
+330:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
+331: 
+332:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
+333: 
+334:         result = await self._session.execute(stmt)
+335:         rows = result.scalars().all()
+336: 
+337:         return [self._model_to_edge(row) for row in rows]
+338: 
+339:     async def get_valid_at(
+340:         self,
+341:         namespace_id: UUID,
+342:         point_in_time: datetime,
+343:         *,
+344:         entity_id: UUID | None = None,
+345:         relationship_type: str | None = None,
+346:         limit: int = 1000,
+347:     ) -> list[TemporalEdge]:
+348:         """Get edges that were valid at a specific point in time.
+349: 
+350:         Uses the valid_from/valid_until fields to determine validity.
+351: 
+352:         Args:
+353:             namespace_id: Namespace to query
+354:             point_in_time: The point in time to query
+355:             entity_id: Optional filter by entity
+356:             relationship_type: Optional filter by relationship type
+357:             limit: Maximum number of edges to return
+358: 
+359:         Returns:
+360:             List of edges valid at that time
+361:         """
+362:         conditions = [
+363:             TemporalEdgeModel.namespace_id == str(namespace_id),
+364:             TemporalEdgeModel.is_valid == True,  # noqa: E712
+365:             # valid_from <= point_in_time < valid_until
+366:             (TemporalEdgeModel.valid_from.is_(None)) | (TemporalEdgeModel.valid_from <= point_in_time),
+367:             (TemporalEdgeModel.valid_until.is_(None)) | (TemporalEdgeModel.valid_until > point_in_time),
+368:         ]
+369: 
+370:         if entity_id:
+371:             conditions.append(
+372:                 (TemporalEdgeModel.source_entity_id == str(entity_id))
+373:                 | (TemporalEdgeModel.target_entity_id == str(entity_id))
+374:             )
+375: 
+376:         if relationship_type:
+377:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
+378: 
+379:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
+380: 
+381:         result = await self._session.execute(stmt)
+382:         rows = result.scalars().all()
+383: 
+384:         return [self._model_to_edge(row) for row in rows]
 385: 
-386:         # Embed the query
-387:         query_embedding = await embedder.embed(query)
+386:     async def delete_edge(self, edge_id: UUID) -> bool:
+387:         """Delete an edge.
 388: 
-389:         # Build temporal filter from filters dict if provided
-390:         if filters and not temporal_filter:
-391:             temporal_filter = self._build_temporal_filter_from_dict(filters)
-392: 
-393:         # Handle relative time references
-394:         if temporal_reference and temporal_filter:
-395:             temporal_filter = self._adjust_relative_time(temporal_filter, temporal_reference)
-396: 
-397:         # Determine hybrid alpha based on mode
-398:         if hybrid_alpha is None:
-399:             if mode == SearchMode.VECTOR:
-400:                 hybrid_alpha = 1.0  # Pure vector
-401:             elif mode == SearchMode.KEYWORD:
-402:                 hybrid_alpha = 0.0  # Pure BM25
-403:             else:  # HYBRID
-404:                 hybrid_alpha = 0.7  # Default blend
-405: 
-406:         # Perform search
-407:         results = await temporal_store.search(
-408:             namespace_id,
-409:             query_embedding,
-410:             limit=limit,
-411:             min_similarity=min_similarity,
-412:             temporal_filter=temporal_filter,
-413:             hybrid_alpha=hybrid_alpha,
-414:             query_text=query,
-415:         )
-416: 
-417:         # Build context text
-418:         context_parts = []
-419:         chunks_with_scores = []
-420:         for result in results:
-421:             context_parts.append(result.chunk.content)
-422:             # Convert TemporalChunk to a simple dict for RecallResult
-423:             chunk_dict = {
-424:                 "id": result.chunk.id,
-425:                 "content": result.chunk.content,
-426:                 "document_id": result.chunk.document_id,
-427:                 "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
-428:                 "metadata": result.chunk.metadata,
-429:             }
-430:             chunks_with_scores.append((chunk_dict, result.combined_score or result.similarity))
+389:         Args:
+390:             edge_id: Edge to delete
+391: 
+392:         Returns:
+393:             True if deleted
+394:         """
+395:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+396:         result = await self._session.execute(stmt)
+397:         row = result.scalar_one_or_none()
+398: 
+399:         if not row:
+400:             return False
+401: 
+402:         await self._session.delete(row)
+403:         await self._session.flush()
+404: 
+405:         return True
+406: 
+407:     async def delete_edges_by_entity(self, entity_id: UUID, namespace_id: UUID) -> int:
+408:         """Delete all edges connected to an entity.
+409: 
+410:         Args:
+411:             entity_id: Entity whose edges to delete
+412:             namespace_id: Namespace
+413: 
+414:         Returns:
+415:             Number of edges deleted
+416:         """
+417:         stmt = select(TemporalEdgeModel).where(
+418:             TemporalEdgeModel.namespace_id == str(namespace_id),
+419:             (TemporalEdgeModel.source_entity_id == str(entity_id))
+420:             | (TemporalEdgeModel.target_entity_id == str(entity_id)),
+421:         )
+422: 
+423:         result = await self._session.execute(stmt)
+424:         rows = result.scalars().all()
+425: 
+426:         for row in rows:
+427:             await self._session.delete(row)
+428: 
+429:         await self._session.flush()
+430:         return len(rows)
 431: 
-432:         context_text = "\n\n---\n\n".join(context_parts[:limit])
-433: 
-434:         return RecallResult(
-435:             query=query,
-436:             namespace_id=namespace_id,
-437:             chunks=chunks_with_scores,
-438:             entities=[],  # Khora engine focuses on chunks, not entities
-439:             context_text=context_text,
-440:             metadata={
-441:                 "backend": self._backend_type,
-442:                 "hybrid_alpha": hybrid_alpha,
-443:                 "temporal_filter": str(temporal_filter) if temporal_filter else None,
-444:             },
-445:         )
-446: 
-447:     def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> TemporalFilter:
-448:         """Convert a filters dict to a TemporalFilter.
-449: 
-450:         Example:
-451:             filters = {
-452:                 "occurred_at": {"gte": "2024-01-01", "lt": "2024-02-01"},
-453:                 "author": {"eq": "alice"},
-454:                 "source_system": {"eq": "slack"},
-455:             }
-456:         """
+432:     # =========================================================================
+433:     # Private helper methods
+434:     # =========================================================================
+435: 
+436:     async def _link_to_time_node(
+437:         self,
+438:         namespace_id: UUID,
+439:         edge_id: UUID,
+440:         occurred_at: datetime,
+441:     ) -> None:
+442:         """Link an edge to its time node in the hierarchy."""
+443:         # Get or create the day node
+444:         day_node = await self._time_builder.get_or_create_day_node(namespace_id, occurred_at)
+445: 
+446:         # Create the link
+447:         link = TimeEdgeLinkModel(
+448:             time_node_id=str(day_node.id),
+449:             edge_id=str(edge_id),
+450:         )
+451:         self._session.add(link)
+452: 
+453:         # Update edge count
+454:         await self._time_builder.increment_edge_count(day_node.id)
+455: 
+456:         await self._session.flush()
 457: 
-458:         tf = TemporalFilter()
-459: 
-460:         for key, value in filters.items():
-461:             if not isinstance(value, dict):
-462:                 value = {"eq": value}
-463: 
-464:             if key == "occurred_at":
-465:                 if "gte" in value:
-466:                     tf.occurred_after = self._parse_datetime(value["gte"])
-467:                 if "gt" in value:
-468:                     tf.occurred_after = self._parse_datetime(value["gt"])
-469:                 if "lt" in value:
-470:                     tf.occurred_before = self._parse_datetime(value["lt"])
-471:                 if "lte" in value:
-472:                     tf.occurred_before = self._parse_datetime(value["lte"])
-473:             elif key == "created_at":
-474:                 if "gte" in value:
-475:                     tf.created_after = self._parse_datetime(value["gte"])
-476:                 if "gt" in value:
-477:                     tf.created_after = self._parse_datetime(value["gt"])
-478:                 if "lt" in value:
-479:                     tf.created_before = self._parse_datetime(value["lt"])
-480:                 if "lte" in value:
-481:                     tf.created_before = self._parse_datetime(value["lte"])
-482:             elif key == "source_system":
-483:                 tf.source_system = value.get(
-484:                     "eq", value.get("in", [None])[0] if isinstance(value.get("in"), list) else None
-485:                 )
-486:             elif key == "author":
-487:                 tf.author = value.get("eq")
-488:             elif key == "channel":
-489:                 tf.channel = value.get("eq")
-490:             elif key == "tags":
-491:                 if "contains" in value:
-492:                     tf.tags = value["contains"]
-493:                 elif "eq" in value:
-494:                     tf.tags = [value["eq"]] if isinstance(value["eq"], str) else value["eq"]
-495:             else:
-496:                 tf.additional[key] = value
+458:     async def _handle_conflicts(self, new_edge: TemporalEdge) -> None:
+459:         """Check for and handle conflicting edges.
+460: 
+461:         A conflict is detected when:
+462:         - Same source/target entities
+463:         - Same relationship type
+464:         - New edge occurs after existing edge
+465:         - The relationship type implies mutual exclusivity (e.g., WORKS_FOR)
+466:         """
+467:         # Get existing edges between the same entity pair
+468:         existing = await self.get_edges_by_entity_pair(
+469:             new_edge.source_entity_id,
+470:             new_edge.target_entity_id,
+471:             new_edge.namespace_id,
+472:             relationship_type=new_edge.relationship_type,
+473:             include_invalid=False,
+474:         )
+475: 
+476:         # Check for conflicts based on relationship semantics
+477:         exclusive_types = {
+478:             "WORKS_FOR",
+479:             "REPORTS_TO",
+480:             "MANAGES",
+481:             "MARRIED_TO",
+482:             "CEO_OF",
+483:             "PRESIDENT_OF",
+484:             "LOCATED_AT",
+485:             "HEADQUARTERED_IN",
+486:         }
+487: 
+488:         if new_edge.relationship_type.upper() in exclusive_types:
+489:             for old_edge in existing:
+490:                 # If new edge is more recent, invalidate old one
+491:                 if new_edge.occurred_at > old_edge.occurred_at:
+492:                     await self.invalidate_edge(
+493:                         old_edge.id,
+494:                         invalidated_by=new_edge.id,
+495:                         reason=f"Superseded by newer {new_edge.relationship_type} edge",
+496:                     )
 497: 
-498:         return tf
-499: 
-500:     def _parse_datetime(self, value: Any) -> datetime:
-501:         """Parse a datetime value from various formats."""
-502:         if isinstance(value, datetime):
-503:             if value.tzinfo is None:
-504:                 return value.replace(tzinfo=UTC)
-505:             return value
-506:         if isinstance(value, str):
-507:             # Date only (try this first to avoid fromisoformat without tz)
-508:             try:
-509:                 return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
-510:             except ValueError:
-511:                 pass
-512:             # ISO format with timezone
-513:             try:
-514:                 dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-515:                 if dt.tzinfo is None:
-516:                     dt = dt.replace(tzinfo=UTC)
-517:                 return dt
-518:             except ValueError:
-519:                 pass
-520:         raise ValueError(f"Cannot parse datetime: {value}")
-521: 
-522:     def _adjust_relative_time(
-523:         self,
-524:         temporal_filter: TemporalFilter,
-525:         reference: datetime,
-526:     ) -> TemporalFilter:
-527:         """Adjust temporal filter for relative time references.
-528: 
-529:         This enables queries like "yesterday" to be relative to the message timestamp,
-530:         not the current time.
-531:         """
-532:         # If filter already has absolute times, don't adjust
-533:         # This is a placeholder for more sophisticated relative time handling
-534:         return temporal_filter
-535: 
-536:     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
-537:         """Remove a memory from the engine."""
-538:         storage = self._get_storage()
-539:         temporal_store = self._get_temporal_store()
-540: 
-541:         # Verify namespace if provided
-542:         if namespace_id:
-543:             document = await storage.get_document(document_id)
-544:             if document and document.namespace_id != namespace_id:
-545:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-546:                 return False
-547: 
-548:         # Delete from temporal store
-549:         ns_id = namespace_id or (await storage.get_document(document_id)).namespace_id
-550:         await temporal_store.delete_chunks_by_document(document_id, ns_id)
-551: 
-552:         # Delete from relational storage
-553:         return await storage.delete_document(document_id)
-554: 
-555:     async def remember_batch(
-556:         self,
-557:         documents: list[dict[str, Any]],
-558:         namespace_id: UUID,
-559:         *,
-560:         skill_name: str = "general_entities",
-561:         max_concurrent: int = 10,
-562:         deduplicate: bool = True,
-563:         infer_relationships: bool = False,  # Not used in Khora engine
-564:         on_progress: Callable[[int, int], None] | None = None,
-565:     ) -> BatchResult:
-566:         """Store multiple documents with automatic optimization.
-567: 
-568:         The Khora engine uses a simplified pipeline:
-569:         - Fast chunking without full entity extraction
-570:         - Batch embedding for cost efficiency
-571:         - Parallel processing with semaphore control
-572: 
-573:         Args:
-574:             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
-575:             namespace_id: Namespace to store documents in
-576:             skill_name: Extraction skill to use
-577:             max_concurrent: Maximum concurrent document processing (default 10)
-578:             deduplicate: Whether to skip duplicate documents
-579:             infer_relationships: Not used in Khora engine
-580:             on_progress: Callback for progress updates (completed, total)
-581: 
-582:         Returns:
-583:             BatchResult with processing statistics
-584:         """
-585:         if not documents:
-586:             return BatchResult(
-587:                 total=0,
-588:                 processed=0,
-589:                 skipped=0,
-590:                 failed=0,
-591:                 chunks=0,
-592:                 entities=0,
-593:                 relationships=0,
-594:             )
-595: 
-596:         storage = self._get_storage()
-597:         total = len(documents)
-598: 
-599:         # Track results with thread-safe counters
-600:         results: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "chunks": 0}
-601:         results_lock = asyncio.Lock()
-602:         progress_count = 0
-603:         progress_lock = asyncio.Lock()
-604: 
-605:         # For deduplication within the batch, track checksums we've started processing
-606:         checksums_in_flight: set[str] = set()
-607:         checksums_lock = asyncio.Lock()
-608: 
-609:         semaphore = asyncio.Semaphore(max_concurrent)
-610: 
-611:         async def process_document(doc_data: dict[str, Any]) -> None:
-612:             """Process a single document with semaphore control."""
-613:             nonlocal progress_count
-614: 
-615:             content = doc_data.get("content", "")
-616:             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-617: 
-618:             # Check for duplicate within the batch (before acquiring semaphore)
-619:             async with checksums_lock:
-620:                 if checksum in checksums_in_flight:
-621:                     async with results_lock:
-622:                         results["skipped"] += 1
-623:                     return
-624:                 checksums_in_flight.add(checksum)
-625: 
-626:             # Check for duplicate in storage (using efficient per-document lookup)
-627:             if deduplicate:
-628:                 existing = await storage.get_document_by_checksum(namespace_id, checksum)
-629:                 if existing:
-630:                     async with results_lock:
-631:                         results["skipped"] += 1
-632:                     # Update progress
-633:                     if on_progress:
-634:                         async with progress_lock:
-635:                             progress_count += 1
-636:                             on_progress(progress_count, total)
-637:                     return
-638: 
-639:             async with semaphore:
-640:                 try:
-641:                     # Extract occurred_at from metadata if present
-642:                     doc_metadata = doc_data.get("metadata", {})
-643:                     occurred_at = None
-644:                     if "occurred_at" in doc_metadata:
-645:                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
-646: 
-647:                     result = await self.remember(
-648:                         content,
-649:                         namespace_id,
-650:                         title=doc_data.get("title", ""),
-651:                         source=doc_data.get("source", ""),
-652:                         metadata=doc_metadata,
-653:                         skill_name=skill_name,
-654:                         occurred_at=occurred_at,
-655:                     )
-656: 
-657:                     async with results_lock:
-658:                         if result.metadata.get("duplicate"):
-659:                             results["skipped"] += 1
-660:                         else:
-661:                             results["processed"] += 1
-662:                             results["chunks"] += result.chunks_created
-663: 
-664:                 except Exception as e:
-665:                     logger.error(f"Failed to process document: {e}")
-666:                     async with results_lock:
-667:                         results["failed"] += 1
-668: 
-669:             # Update progress
-670:             if on_progress:
-671:                 async with progress_lock:
-672:                     progress_count += 1
-673:                     on_progress(progress_count, total)
-674: 
-675:         # Process all documents concurrently with semaphore control
-676:         await asyncio.gather(*[process_document(doc) for doc in documents])
-677: 
-678:         return BatchResult(
-679:             total=total,
-680:             processed=results["processed"],
-681:             skipped=results["skipped"],
-682:             failed=results["failed"],
-683:             chunks=results["chunks"],
-684:             entities=0,
-685:             relationships=0,
-686:         )
-687: 
-688:     # =========================================================================
-689:     # Namespace Management
-690:     # =========================================================================
-691: 
-692:     async def get_or_create_default_namespace(self) -> UUID:
-693:         """Get or create a default namespace for simple usage."""
-694:         if self._default_namespace_id:
-695:             return self._default_namespace_id
-696: 
-697:         storage = self._get_storage()
-698: 
-699:         # Try to find existing default namespace
-700:         default_org = await storage.get_organization_by_slug("default")
-701:         if not default_org:
-702:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
-703: 
-704:         workspaces = await storage.list_workspaces(default_org.id)
-705:         if workspaces:
-706:             default_workspace = workspaces[0]
-707:         else:
-708:             default_workspace = await storage.create_workspace(
-709:                 Workspace(
-710:                     organization_id=default_org.id,
-711:                     name="Default",
-712:                     slug="default",
-713:                 )
-714:             )
-715: 
-716:         namespaces = await storage.list_namespaces(default_workspace.id)
-717:         if namespaces:
-718:             default_namespace = namespaces[0]
-719:         else:
-720:             default_namespace = await storage.create_namespace(
-721:                 MemoryNamespace(
-722:                     workspace_id=default_workspace.id,
-723:                     name="Default",
-724:                     slug="default",
-725:                 )
-726:             )
-727: 
-728:         self._default_namespace_id = default_namespace.id
-729:         return self._default_namespace_id
-730: 
-731:     async def create_namespace(
-732:         self,
-733:         name: str,
-734:         workspace_id: UUID,
-735:         *,
-736:         description: str = "",
-737:         config_overrides: dict[str, Any] | None = None,
-738:     ) -> MemoryNamespace:
-739:         """Create a new memory namespace."""
-740:         namespace = MemoryNamespace(
-741:             workspace_id=workspace_id,
-742:             name=name,
-743:             description=description,
-744:             config_overrides=config_overrides or {},
-745:         )
-746:         return await self._get_storage().create_namespace(namespace)
-747: 
-748:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-749:         """Get a namespace by ID."""
-750:         return await self._get_storage().get_namespace(namespace_id)
-751: 
-752:     async def ensure_namespace(
-753:         self,
-754:         name: str,
-755:         *,
-756:         description: str = "",
-757:     ) -> UUID:
-758:         """Get or create a namespace by name."""
-759:         storage = self._get_storage()
-760: 
-761:         # Ensure default org/workspace exists
-762:         await self.get_or_create_default_namespace()
-763: 
-764:         # Get default workspace
-765:         default_org = await storage.get_organization_by_slug("default")
-766:         if not default_org:
-767:             raise RuntimeError("Default organization not found")
-768: 
-769:         workspaces = await storage.list_workspaces(default_org.id)
-770:         if not workspaces:
-771:             raise RuntimeError("Default workspace not found")
-772: 
-773:         default_workspace = workspaces[0]
-774: 
-775:         # Try to find namespace by slug
-776:         slug = name.lower().replace(" ", "-")
-777:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
-778:         if existing_ns:
-779:             return existing_ns.id
-780: 
-781:         # Create new namespace
-782:         new_ns = await storage.create_namespace(
-783:             MemoryNamespace(
-784:                 workspace_id=default_workspace.id,
-785:                 name=name,
-786:                 slug=slug,
-787:                 description=description,
-788:             )
-789:         )
-790:         return new_ns.id
-791: 
-792:     # =========================================================================
-793:     # Entity Operations (minimal for Khora engine)
-794:     # =========================================================================
-795: 
-796:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-797:         """Get an entity by ID."""
-798:         return await self._get_storage().get_entity(entity_id)
-799: 
-800:     async def list_entities(
-801:         self,
-802:         namespace_id: UUID,
-803:         *,
-804:         entity_type: str | None = None,
-805:         limit: int = 100,
-806:     ) -> list[Entity]:
-807:         """List entities in a namespace."""
-808:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
-809: 
-810:     async def find_related_entities(
-811:         self,
-812:         entity_id: UUID,
-813:         namespace_id: UUID,
-814:         *,
-815:         max_depth: int = 2,
-816:         limit: int = 20,
-817:     ) -> list[tuple[Entity, float]]:
-818:         """Find entities related to a given entity.
-819: 
-820:         Note: Khora engine focuses on temporal chunk retrieval.
-821:         For full entity graph traversal, use the GraphRAG engine.
-822:         """
-823:         # Return empty for now - Khora focuses on chunks
-824:         return []
-825: 
-826:     # =========================================================================
-827:     # Document Operations
-828:     # =========================================================================
-829: 
-830:     async def get_document(self, document_id: UUID) -> Document | None:
-831:         """Get a document by ID."""
-832:         return await self._get_storage().get_document(document_id)
-833: 
-834:     async def list_documents(
-835:         self,
-836:         namespace_id: UUID,
-837:         *,
-838:         limit: int = 100,
-839:     ) -> list[Document]:
-840:         """List documents in a namespace."""
-841:         return await self._get_storage().list_documents(namespace_id, limit=limit)
-842: 
-843:     async def search_entities(
-844:         self,
-845:         query: str,
-846:         namespace_id: UUID,
-847:         *,
-848:         limit: int = 10,
-849:     ) -> list[Entity]:
-850:         """Search entities by query text.
-851: 
-852:         Note: Khora engine focuses on temporal chunk retrieval.
-853:         For full entity search, use the GraphRAG engine.
-854:         """
-855:         # Return empty for now - Khora focuses on chunks
-856:         return []
-857: 
-858:     async def stats(self, namespace_id: UUID) -> Stats:
-859:         """Get document/chunk/entity/relationship counts for a namespace."""
-860:         storage = self._get_storage()
-861: 
-862:         # Get counts
-863:         try:
-864:             doc_count = await storage.count_documents(namespace_id)
-865:         except (AttributeError, NotImplementedError):
-866:             documents = await storage.list_documents(namespace_id, limit=0)
-867:             doc_count = len(documents) if documents else 0
-868: 
-869:         try:
-870:             chunk_count = await storage.count_chunks(namespace_id)
-871:         except (AttributeError, NotImplementedError):
-872:             chunk_count = 0  # Khora chunks are in temporal_store
-873: 
-874:         try:
-875:             entity_count = await storage.count_entities(namespace_id)
-876:         except (AttributeError, NotImplementedError):
-877:             entity_count = 0
-878: 
-879:         try:
-880:             relationship_count = await storage.count_relationships(namespace_id)
-881:         except (AttributeError, NotImplementedError):
-882:             relationship_count = 0
-883: 
-884:         return Stats(
-885:             documents=doc_count,
-886:             chunks=chunk_count,
-887:             entities=entity_count,
-888:             relationships=relationship_count,
-889:         )
-890: 
-891:     async def health_check(self) -> dict[str, Any]:
-892:         """Check health of all components."""
-893:         if not self._connected:
-894:             return {"status": "disconnected"}
-895: 
-896:         storage_health = await self._get_storage().health_check()
-897:         temporal_health = await self._get_temporal_store().health_check()
-898: 
-899:         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy"
-900: 
-901:         return {
-902:             "status": "healthy" if all_healthy else "degraded",
-903:             "storage": storage_health.summary,
-904:             "temporal_store": temporal_health,
-905:             "backend": self._backend_type,
-906:         }
-907: 
-908: 
-909: __all__ = ["KhoraEngine"]
+498:     def _model_to_edge(self, model: TemporalEdgeModel) -> TemporalEdge:
+499:         """Convert a database model to a TemporalEdge dataclass."""
+500:         return TemporalEdge(
+501:             id=UUID(model.id),
+502:             namespace_id=UUID(model.namespace_id),
+503:             source_entity_id=UUID(model.source_entity_id),
+504:             target_entity_id=UUID(model.target_entity_id),
+505:             relationship_type=model.relationship_type,
+506:             description=model.description,
+507:             occurred_at=model.occurred_at,
+508:             ingested_at=model.ingested_at,
+509:             valid_from=model.valid_from,
+510:             valid_until=model.valid_until,
+511:             is_valid=model.is_valid,
+512:             invalidated_by_id=UUID(model.invalidated_by_id) if model.invalidated_by_id else None,
+513:             invalidation_reason=model.invalidation_reason,
+514:             confidence=model.confidence,
+515:             properties=model.properties or {},
+516:             source_document_ids=[UUID(id) for id in (model.source_document_ids or [])],
+517:             source_chunk_ids=[UUID(id) for id in (model.source_chunk_ids or [])],
+518:         )
+519: 
+520: 
+521: __all__ = ["TemporalEdge", "TemporalEdgeStorage"]
 ````
 
 ## File: src/khora/engines/__init__.py
@@ -24568,6 +23655,778 @@ README.md
 46:         chunk.embedding_model = model
 47: 
 48:     return chunks
+````
+
+## File: src/khora/query/agentic.py
+````python
+  1: """Agentic search for Khora Memory Lake.
+  2: 
+  3: Provides a two-step exploration agent that:
+  4: 1. Performs initial search with comprehensive query understanding (single LLM call)
+  5: 2. Uses pre-computed follow-up queries from understanding for deeper exploration
+  6: 3. Explores multiple sources even if initial hits are concentrated
+  7: 4. Maintains full trace log of search reasoning
+  8: 
+  9: The key efficiency gain: ALL LLM extraction happens in the initial query understanding
+ 10: call. Follow-up queries are pre-computed, eliminating additional LLM round-trips.
+ 11: """
+ 12: 
+ 13: from __future__ import annotations
+ 14: 
+ 15: from collections.abc import AsyncGenerator
+ 16: from dataclasses import dataclass, field
+ 17: from datetime import datetime
+ 18: from typing import TYPE_CHECKING, Any
+ 19: from uuid import UUID
+ 20: 
+ 21: from loguru import logger
+ 22: 
+ 23: if TYPE_CHECKING:
+ 24:     from khora.config.llm import LiteLLMConfig
+ 25:     from khora.core.models import Chunk, Entity
+ 26:     from khora.query.engine import HybridQueryEngine, QueryConfig, QueryResult
+ 27:     from khora.query.understanding import UnderstandingResult
+ 28: 
+ 29: 
+ 30: @dataclass
+ 31: class SearchStep:
+ 32:     """A single step in the agentic search process."""
+ 33: 
+ 34:     step_number: int
+ 35:     query: str
+ 36:     reasoning: str
+ 37:     timestamp: datetime = field(default_factory=datetime.utcnow)
+ 38: 
+ 39:     # Results summary
+ 40:     total_chunks: int = 0
+ 41:     total_entities: int = 0
+ 42:     sources_hit: dict[str, int] = field(default_factory=dict)
+ 43: 
+ 44:     # Search method contributions (counts for display)
+ 45:     vector_hits: int = 0
+ 46:     graph_hits: int = 0
+ 47:     keyword_hits: int = 0
+ 48: 
+ 49:     # Full search method data with chunk IDs (for attribution)
+ 50:     search_methods_data: dict[str, Any] = field(default_factory=dict)
+ 51: 
+ 52:     # Graph elements triggered
+ 53:     entities_linked: list[str] = field(default_factory=list)
+ 54:     relationships_traversed: list[tuple[str, str, str]] = field(default_factory=list)
+ 55: 
+ 56:     # Temporal info
+ 57:     temporal_filter_applied: bool = False
+ 58:     time_range: tuple[datetime | None, datetime | None] | None = None
+ 59: 
+ 60: 
+ 61: @dataclass
+ 62: class AgenticSearchTrace:
+ 63:     """Full trace of an agentic search session."""
+ 64: 
+ 65:     session_id: str
+ 66:     original_query: str
+ 67:     started_at: datetime = field(default_factory=datetime.utcnow)
+ 68:     completed_at: datetime | None = None
+ 69: 
+ 70:     # Query understanding (from single LLM call)
+ 71:     understanding_reasoning: str = ""
+ 72:     complexity_score: float = 0.0
+ 73:     source_priority: dict[str, float] = field(default_factory=dict)
+ 74: 
+ 75:     steps: list[SearchStep] = field(default_factory=list)
+ 76: 
+ 77:     # Final summary
+ 78:     summary: str = ""
+ 79:     total_unique_chunks: int = 0
+ 80:     total_unique_entities: int = 0
+ 81:     sources_explored: dict[str, int] = field(default_factory=dict)
+ 82: 
+ 83:     def add_step(self, step: SearchStep) -> None:
+ 84:         """Add a search step to the trace."""
+ 85:         self.steps.append(step)
+ 86: 
+ 87:     def to_dict(self) -> dict[str, Any]:
+ 88:         """Convert trace to dictionary for logging/storage."""
+ 89:         return {
+ 90:             "session_id": self.session_id,
+ 91:             "original_query": self.original_query,
+ 92:             "started_at": self.started_at.isoformat(),
+ 93:             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+ 94:             "understanding_reasoning": self.understanding_reasoning,
+ 95:             "complexity_score": self.complexity_score,
+ 96:             "source_priority": self.source_priority,
+ 97:             "steps": [
+ 98:                 {
+ 99:                     "step_number": s.step_number,
+100:                     "query": s.query,
+101:                     "reasoning": s.reasoning,
+102:                     "timestamp": s.timestamp.isoformat(),
+103:                     "total_chunks": s.total_chunks,
+104:                     "total_entities": s.total_entities,
+105:                     "sources_hit": s.sources_hit,
+106:                     "search_contributions": {
+107:                         "vector": s.vector_hits,
+108:                         "graph": s.graph_hits,
+109:                         "keyword": s.keyword_hits,
+110:                     },
+111:                     "entities_linked": s.entities_linked,
+112:                     "relationships_traversed": [
+113:                         {"from": f, "type": r, "to": t} for f, r, t in s.relationships_traversed
+114:                     ],
+115:                     "temporal_filter_applied": s.temporal_filter_applied,
+116:                     "time_range": (
+117:                         [
+118:                             s.time_range[0].isoformat() if s.time_range and s.time_range[0] else None,
+119:                             s.time_range[1].isoformat() if s.time_range and s.time_range[1] else None,
+120:                         ]
+121:                         if s.time_range
+122:                         else None
+123:                     ),
+124:                 }
+125:                 for s in self.steps
+126:             ],
+127:             "summary": self.summary,
+128:             "total_unique_chunks": self.total_unique_chunks,
+129:             "total_unique_entities": self.total_unique_entities,
+130:             "sources_explored": self.sources_explored,
+131:         }
+132: 
+133: 
+134: @dataclass
+135: class AgenticSearchStepResult:
+136:     """Yielded by search_stream for each completed step."""
+137: 
+138:     step_number: int
+139:     query: str
+140:     chunks: list[tuple[Chunk, float, str]]
+141:     entities: list[tuple[Entity, float]]
+142:     is_final: bool = False
+143:     metadata: dict[str, Any] = field(default_factory=dict)
+144: 
+145: 
+146: @dataclass
+147: class AgenticSearchResult:
+148:     """Result from agentic search."""
+149: 
+150:     # Combined results from all steps
+151:     chunks: list[tuple[Chunk, float, str]] = field(default_factory=list)
+152:     entities: list[tuple[Entity, float]] = field(default_factory=list)
+153: 
+154:     # Summary (generated without additional LLM call if possible)
+155:     summary: str = ""
+156: 
+157:     # Full trace
+158:     trace: AgenticSearchTrace | None = None
+159: 
+160:     # Query understanding (from single LLM call)
+161:     understanding: UnderstandingResult | None = None
+162: 
+163:     # Metadata
+164:     metadata: dict[str, Any] = field(default_factory=dict)
+165: 
+166: 
+167: class AgenticSearchAgent:
+168:     """Two-step exploration agent for deep search.
+169: 
+170:     EFFICIENCY: All LLM extraction happens in the initial query understanding.
+171:     The understanding result includes:
+172:     - Pre-computed follow-up queries with reasoning
+173:     - Source priority recommendations
+174:     - Search strategy (weights for vector/graph/keyword)
+175:     - Complexity assessment
+176: 
+177:     This eliminates additional LLM calls during exploration.
+178:     """
+179: 
+180:     def __init__(
+181:         self,
+182:         engine: HybridQueryEngine,
+183:         llm_config: LiteLLMConfig | None = None,
+184:     ) -> None:
+185:         """Initialize the agentic search agent.
+186: 
+187:         Args:
+188:             engine: The hybrid query engine to use
+189:             llm_config: LLM configuration (used by engine's query understanding)
+190:         """
+191:         self._engine = engine
+192:         self._llm_config = llm_config
+193: 
+194:     async def search(
+195:         self,
+196:         query: str,
+197:         namespace_id: UUID,
+198:         config: QueryConfig | None = None,
+199:         max_steps: int = 3,
+200:     ) -> AgenticSearchResult:
+201:         """Perform agentic search with multi-step exploration.
+202: 
+203:         The search process:
+204:         1. Initial query with comprehensive understanding (single LLM call)
+205:         2. Execute pre-computed follow-up queries (no additional LLM calls)
+206:         3. Merge and rank all results
+207: 
+208:         Args:
+209:             query: Original search query
+210:             namespace_id: Namespace to search in
+211:             config: Query configuration
+212:             max_steps: Maximum exploration steps (default 3)
+213: 
+214:         Returns:
+215:             AgenticSearchResult with combined results and trace
+216:         """
+217:         import uuid
+218: 
+219:         trace = AgenticSearchTrace(
+220:             session_id=str(uuid.uuid4()),
+221:             original_query=query,
+222:         )
+223: 
+224:         all_chunks: dict[str, tuple[Chunk, float, str]] = {}
+225:         all_entities: dict[str, tuple[Entity, float]] = {}
+226:         understanding: UnderstandingResult | None = None
+227: 
+228:         # Step 1: Initial search (this triggers comprehensive query understanding)
+229:         logger.info(f"Agentic search step 1: '{query[:50]}...'")
+230: 
+231:         step1_result = await self._engine.query(
+232:             query,
+233:             namespace_id,
+234:             config=config,
+235:             _lightweight_understanding=False,  # Full prompt for agentic step 1 (needs follow-ups)
+236:         )
+237: 
+238:         # Extract understanding from result metadata
+239:         if "understanding" in step1_result.metadata:
+240:             understanding_data = step1_result.metadata["understanding"]
+241:             trace.understanding_reasoning = understanding_data.get("reasoning", "")
+242:             trace.complexity_score = understanding_data.get("complexity_score", 0.5)
+243:             trace.source_priority = understanding_data.get("source_priority", {})
+244: 
+245:         # Analyze and record step 1
+246:         step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
+247:         trace.add_step(step1)
+248: 
+249:         # Collect results (batch fetch document sources for all chunks)
+250:         chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+251:         for chunk, score in step1_result.chunks:
+252:             source = chunk_sources.get(str(chunk.id), "unknown")
+253:             all_chunks[str(chunk.id)] = (chunk, score, source)
+254: 
+255:         for entity, score in step1_result.entities:
+256:             all_entities[str(entity.id)] = (entity, score)
+257: 
+258:         # Step 2+: Execute pre-computed follow-up queries
+259:         if max_steps >= 2 and "understanding" in step1_result.metadata:
+260:             follow_up_queries = step1_result.metadata["understanding"].get("follow_up_queries", [])
+261: 
+262:             # Also check for queries generated from result analysis
+263:             additional_follow_ups = self._generate_additional_follow_ups(step1_result, step1)
+264:             all_follow_ups = list(follow_up_queries) + additional_follow_ups
+265: 
+266:             for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
+267:                 if isinstance(follow_up, dict):
+268:                     fq_query = follow_up.get("query", "")
+269:                     fq_reasoning = follow_up.get("reasoning", f"Follow-up query {i+1}")
+270:                 else:
+271:                     fq_query = str(follow_up)
+272:                     fq_reasoning = f"Pre-computed follow-up query {i+1}"
+273: 
+274:                 if not fq_query:
+275:                     continue
+276: 
+277:                 logger.info(f"Agentic search step {i+2}: '{fq_query[:50]}...'")
+278: 
+279:                 step_result = await self._engine.query(
+280:                     fq_query,
+281:                     namespace_id,
+282:                     config=config,
+283:                 )
+284: 
+285:                 step = self._analyze_results(step_result, fq_query, i + 2, fq_reasoning)
+286:                 trace.add_step(step)
+287: 
+288:                 # Collect new results (keep higher scores) - batch fetch sources
+289:                 step_chunk_sources = await self._get_chunk_sources_batch(step_result.chunks)
+290:                 for chunk, score in step_result.chunks:
+291:                     chunk_id = str(chunk.id)
+292:                     if chunk_id not in all_chunks or all_chunks[chunk_id][1] < score:
+293:                         source = step_chunk_sources.get(chunk_id, "unknown")
+294:                         all_chunks[chunk_id] = (chunk, score, source)
+295: 
+296:                 for entity, score in step_result.entities:
+297:                     entity_id = str(entity.id)
+298:                     if entity_id not in all_entities or all_entities[entity_id][1] < score:
+299:                         all_entities[entity_id] = (entity, score)
+300: 
+301:         # Generate summary (without additional LLM call)
+302:         summary = self._generate_summary_fast(query, all_chunks, all_entities, trace)
+303: 
+304:         # Finalize trace
+305:         trace.completed_at = datetime.utcnow()
+306:         trace.summary = summary
+307:         trace.total_unique_chunks = len(all_chunks)
+308:         trace.total_unique_entities = len(all_entities)
+309: 
+310:         # Count sources
+311:         for _, (_, _, source) in all_chunks.items():
+312:             trace.sources_explored[source] = trace.sources_explored.get(source, 0) + 1
+313: 
+314:         # Sort results by score
+315:         sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
+316:         sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
+317: 
+318:         # Aggregate search_methods from all steps for attribution
+319:         aggregated_search_methods = self._aggregate_search_methods(trace.steps)
+320: 
+321:         return AgenticSearchResult(
+322:             chunks=sorted_chunks,
+323:             entities=sorted_entities,
+324:             summary=summary,
+325:             trace=trace,
+326:             understanding=understanding,
+327:             metadata={
+328:                 "original_query": query,
+329:                 "total_steps": len(trace.steps),
+330:                 "sources_explored": trace.sources_explored,
+331:                 "complexity_score": trace.complexity_score,
+332:                 "search_methods": aggregated_search_methods,
+333:             },
+334:         )
+335: 
+336:     async def search_speculative(
+337:         self,
+338:         query: str,
+339:         namespace_id: UUID,
+340:         config: QueryConfig | None = None,
+341:         max_steps: int = 3,
+342:     ) -> AgenticSearchResult:
+343:         """Perform agentic search with speculative follow-up execution.
+344: 
+345:         Executes the main query, then runs all follow-up queries in parallel
+346:         (instead of sequentially), reducing total latency.
+347: 
+348:         Args:
+349:             query: Original search query
+350:             namespace_id: Namespace to search in
+351:             config: Query configuration
+352:             max_steps: Maximum exploration steps
+353: 
+354:         Returns:
+355:             AgenticSearchResult with combined results
+356:         """
+357:         import asyncio
+358:         import uuid as uuid_mod
+359: 
+360:         trace = AgenticSearchTrace(
+361:             session_id=str(uuid_mod.uuid4()),
+362:             original_query=query,
+363:         )
+364: 
+365:         all_chunks: dict[str, tuple[Chunk, float, str]] = {}
+366:         all_entities: dict[str, tuple[Entity, float]] = {}
+367: 
+368:         # Step 1: Initial search (triggers query understanding)
+369:         logger.info(f"Speculative search step 1: '{query[:50]}...'")
+370:         step1_result = await self._engine.query(query, namespace_id, config=config, _lightweight_understanding=False)
+371: 
+372:         if "understanding" in step1_result.metadata:
+373:             ud = step1_result.metadata["understanding"]
+374:             trace.understanding_reasoning = ud.get("reasoning", "")
+375:             trace.complexity_score = ud.get("complexity_score", 0.5)
+376:             trace.source_priority = ud.get("source_priority", {})
+377: 
+378:         step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
+379:         trace.add_step(step1)
+380: 
+381:         chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+382:         for chunk, score in step1_result.chunks:
+383:             all_chunks[str(chunk.id)] = (chunk, score, chunk_sources.get(str(chunk.id), "unknown"))
+384:         for entity, score in step1_result.entities:
+385:             all_entities[str(entity.id)] = (entity, score)
+386: 
+387:         # Collect all follow-up queries
+388:         follow_up_queries = step1_result.metadata.get("understanding", {}).get("follow_up_queries", [])
+389:         additional = self._generate_additional_follow_ups(step1_result, step1)
+390:         all_follow_ups = list(follow_up_queries) + additional
+391:         follow_ups_to_run = all_follow_ups[: max_steps - 1]
+392: 
+393:         if follow_ups_to_run:
+394:             # Execute ALL follow-ups in parallel
+395:             async def run_follow_up(i: int, follow_up: Any) -> tuple[int, QueryResult, str]:
+396:                 fq_query = follow_up.get("query", "") if isinstance(follow_up, dict) else str(follow_up)
+397:                 fq_reasoning = (
+398:                     follow_up.get("reasoning", f"Follow-up {i + 2}")
+399:                     if isinstance(follow_up, dict)
+400:                     else f"Follow-up {i + 2}"
+401:                 )
+402:                 logger.info(f"Speculative search step {i + 2}: '{fq_query[:50]}...'")
+403:                 result = await self._engine.query(fq_query, namespace_id, config=config)
+404:                 return i, result, fq_reasoning
+405: 
+406:             tasks = [
+407:                 run_follow_up(i, fu)
+408:                 for i, fu in enumerate(follow_ups_to_run)
+409:                 if (fu.get("query", "") if isinstance(fu, dict) else str(fu))
+410:             ]
+411: 
+412:             results = await asyncio.gather(*tasks, return_exceptions=True)
+413: 
+414:             for r in results:
+415:                 if isinstance(r, Exception):
+416:                     logger.warning(f"Speculative follow-up failed: {r}")
+417:                     continue
+418:                 i, step_result, reasoning = r
+419:                 fq_query = follow_ups_to_run[i]
+420:                 fq_query_text = fq_query.get("query", "") if isinstance(fq_query, dict) else str(fq_query)
+421: 
+422:                 step = self._analyze_results(step_result, fq_query_text, i + 2, reasoning)
+423:                 trace.add_step(step)
+424: 
+425:                 step_sources = await self._get_chunk_sources_batch(step_result.chunks)
+426:                 for chunk, score in step_result.chunks:
+427:                     cid = str(chunk.id)
+428:                     if cid not in all_chunks or all_chunks[cid][1] < score:
+429:                         all_chunks[cid] = (chunk, score, step_sources.get(cid, "unknown"))
+430:                 for entity, score in step_result.entities:
+431:                     eid = str(entity.id)
+432:                     if eid not in all_entities or all_entities[eid][1] < score:
+433:                         all_entities[eid] = (entity, score)
+434: 
+435:         summary = self._generate_summary_fast(query, all_chunks, all_entities, trace)
+436:         trace.completed_at = datetime.utcnow()
+437:         trace.summary = summary
+438:         trace.total_unique_chunks = len(all_chunks)
+439:         trace.total_unique_entities = len(all_entities)
+440: 
+441:         for _, (_, _, source) in all_chunks.items():
+442:             trace.sources_explored[source] = trace.sources_explored.get(source, 0) + 1
+443: 
+444:         sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
+445:         sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
+446:         aggregated_search_methods = self._aggregate_search_methods(trace.steps)
+447: 
+448:         return AgenticSearchResult(
+449:             chunks=sorted_chunks,
+450:             entities=sorted_entities,
+451:             summary=summary,
+452:             trace=trace,
+453:             understanding=None,
+454:             metadata={
+455:                 "original_query": query,
+456:                 "total_steps": len(trace.steps),
+457:                 "sources_explored": trace.sources_explored,
+458:                 "complexity_score": trace.complexity_score,
+459:                 "search_methods": aggregated_search_methods,
+460:                 "speculative": True,
+461:             },
+462:         )
+463: 
+464:     async def search_stream(
+465:         self,
+466:         query: str,
+467:         namespace_id: UUID,
+468:         config: QueryConfig | None = None,
+469:         max_steps: int = 3,
+470:     ) -> AsyncGenerator[AgenticSearchStepResult]:
+471:         """Stream search results as each step completes.
+472: 
+473:         Yields partial results after each exploration step,
+474:         allowing callers to display incremental progress.
+475: 
+476:         Args:
+477:             query: Original search query
+478:             namespace_id: Namespace to search in
+479:             config: Query configuration
+480:             max_steps: Maximum exploration steps
+481: 
+482:         Yields:
+483:             AgenticSearchStepResult for each completed step
+484:         """
+485:         all_chunks: dict[str, tuple[Chunk, float, str]] = {}
+486:         all_entities: dict[str, tuple[Entity, float]] = {}
+487: 
+488:         # Step 1: Initial search
+489:         logger.info(f"Agentic stream step 1: '{query[:50]}...'")
+490:         step1_result = await self._engine.query(query, namespace_id, config=config, _lightweight_understanding=False)
+491: 
+492:         chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+493:         for chunk, score in step1_result.chunks:
+494:             source = chunk_sources.get(str(chunk.id), "unknown")
+495:             all_chunks[str(chunk.id)] = (chunk, score, source)
+496:         for entity, score in step1_result.entities:
+497:             all_entities[str(entity.id)] = (entity, score)
+498: 
+499:         is_last = max_steps <= 1
+500:         yield AgenticSearchStepResult(
+501:             step_number=1,
+502:             query=query,
+503:             chunks=sorted(all_chunks.values(), key=lambda x: x[1], reverse=True),
+504:             entities=sorted(all_entities.values(), key=lambda x: x[1], reverse=True),
+505:             is_final=is_last,
+506:         )
+507: 
+508:         if is_last:
+509:             return
+510: 
+511:         # Follow-up steps
+512:         follow_up_queries = step1_result.metadata.get("understanding", {}).get("follow_up_queries", [])
+513:         step1_analysis = self._analyze_results(step1_result, query, 1, "Initial search")
+514:         additional = self._generate_additional_follow_ups(step1_result, step1_analysis)
+515:         all_follow_ups = list(follow_up_queries) + additional
+516: 
+517:         for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
+518:             fq_query = follow_up.get("query", "") if isinstance(follow_up, dict) else str(follow_up)
+519:             if not fq_query:
+520:                 continue
+521: 
+522:             logger.info(f"Agentic stream step {i + 2}: '{fq_query[:50]}...'")
+523:             step_result = await self._engine.query(fq_query, namespace_id, config=config)
+524: 
+525:             step_sources = await self._get_chunk_sources_batch(step_result.chunks)
+526:             for chunk, score in step_result.chunks:
+527:                 cid = str(chunk.id)
+528:                 if cid not in all_chunks or all_chunks[cid][1] < score:
+529:                     all_chunks[cid] = (chunk, score, step_sources.get(cid, "unknown"))
+530:             for entity, score in step_result.entities:
+531:                 eid = str(entity.id)
+532:                 if eid not in all_entities or all_entities[eid][1] < score:
+533:                     all_entities[eid] = (entity, score)
+534: 
+535:             is_last = i + 2 >= max_steps or i + 1 >= len(all_follow_ups[: max_steps - 1])
+536:             yield AgenticSearchStepResult(
+537:                 step_number=i + 2,
+538:                 query=fq_query,
+539:                 chunks=sorted(all_chunks.values(), key=lambda x: x[1], reverse=True),
+540:                 entities=sorted(all_entities.values(), key=lambda x: x[1], reverse=True),
+541:                 is_final=is_last,
+542:             )
+543: 
+544:     def _analyze_results(
+545:         self,
+546:         result: QueryResult,
+547:         query: str,
+548:         step_number: int,
+549:         reasoning: str,
+550:     ) -> SearchStep:
+551:         """Analyze search results and create a step record."""
+552:         step = SearchStep(
+553:             step_number=step_number,
+554:             query=query,
+555:             reasoning=reasoning,
+556:         )
+557: 
+558:         step.total_chunks = len(result.chunks)
+559:         step.total_entities = len(result.entities)
+560: 
+561:         # Extract search method contributions
+562:         if result.search_contributions:
+563:             step.vector_hits = result.search_contributions.vector.chunk_count
+564:             step.graph_hits = result.search_contributions.graph.chunk_count
+565:             step.keyword_hits = result.search_contributions.keyword.chunk_count
+566:             # Store full search methods data for attribution
+567:             step.search_methods_data = result.search_contributions.to_dict()
+568: 
+569:         # Extract graph info
+570:         if result.graph_info:
+571:             step.entities_linked = result.graph_info.entities_linked
+572:             step.relationships_traversed = result.graph_info.relationships_traversed
+573: 
+574:         # Extract temporal info
+575:         if result.temporal_info:
+576:             step.temporal_filter_applied = result.temporal_info.filter_applied
+577:             if result.temporal_info.time_start or result.temporal_info.time_end:
+578:                 step.time_range = (result.temporal_info.time_start, result.temporal_info.time_end)
+579: 
+580:         return step
+581: 
+582:     def _generate_additional_follow_ups(
+583:         self,
+584:         result: QueryResult,
+585:         analysis: SearchStep,
+586:     ) -> list[dict[str, Any]]:
+587:         """Generate additional follow-up queries based on result analysis.
+588: 
+589:         These are computed locally without LLM calls, based on:
+590:         - Under-represented sources
+591:         - High-scoring entities found
+592:         """
+593:         follow_ups = []
+594: 
+595:         # Check for source imbalance
+596:         if analysis.sources_hit:
+597:             total_hits = sum(analysis.sources_hit.values())
+598:             if total_hits > 0:
+599:                 dominant_source = max(analysis.sources_hit.items(), key=lambda x: x[1])
+600:                 if dominant_source[1] / total_hits > 0.8:
+601:                     # One source dominates - target others
+602:                     for source in ["linear", "notion", "attio", "gong"]:
+603:                         if source != dominant_source[0] and analysis.sources_hit.get(source, 0) == 0:
+604:                             follow_ups.append(
+605:                                 {
+606:                                     "query": f"{analysis.query} {source}",
+607:                                     "reasoning": f"Targeting under-represented source: {source}",
+608:                                 }
+609:                             )
+610:                             break
+611: 
+612:         # Explore top entities
+613:         if result.entities and len(result.entities) > 0:
+614:             top_entity = result.entities[0][0]
+615:             follow_ups.append(
+616:                 {
+617:                     "query": f"{top_entity.name} context details",
+618:                     "reasoning": f"Exploring top entity: {top_entity.name}",
+619:                 }
+620:             )
+621: 
+622:         return follow_ups[:2]  # Limit to 2 additional
+623: 
+624:     async def _get_chunk_source(self, chunk: Chunk, namespace_id: UUID) -> str:
+625:         """Get the source system for a chunk."""
+626:         try:
+627:             doc = await self._engine._storage.get_document(chunk.document_id)
+628:             if doc and doc.metadata:
+629:                 source = doc.metadata.custom.get("source_system", "")
+630:                 if not source and doc.metadata.source:
+631:                     source = doc.metadata.source.split("/")[0]
+632:                 return source or "unknown"
+633:         except Exception:
+634:             pass
+635:         return "unknown"
+636: 
+637:     async def _get_chunk_sources_batch(self, chunks: list[tuple[Chunk, float]]) -> dict[str, str]:
+638:         """Get source systems for multiple chunks in a single batch query.
+639: 
+640:         Args:
+641:             chunks: List of (chunk, score) tuples
+642: 
+643:         Returns:
+644:             Dictionary mapping chunk ID to source string
+645:         """
+646:         if not chunks:
+647:             return {}
+648: 
+649:         # Collect unique document IDs
+650:         doc_ids = list({chunk.document_id for chunk, _ in chunks})
+651: 
+652:         # Batch fetch all documents
+653:         docs_map = await self._engine._storage.get_documents_batch(doc_ids)
+654: 
+655:         # Build chunk_id -> source mapping
+656:         sources: dict[str, str] = {}
+657:         for chunk, _ in chunks:
+658:             doc = docs_map.get(chunk.document_id)
+659:             if doc and doc.metadata:
+660:                 source = doc.metadata.custom.get("source_system", "")
+661:                 if not source and doc.metadata.source:
+662:                     source = doc.metadata.source.split("/")[0]
+663:                 sources[str(chunk.id)] = source or "unknown"
+664:             else:
+665:                 sources[str(chunk.id)] = "unknown"
+666: 
+667:         return sources
+668: 
+669:     def _aggregate_search_methods(self, steps: list[SearchStep]) -> dict[str, Any]:
+670:         """Aggregate search methods data from all steps for attribution.
+671: 
+672:         Combines the chunk/entity IDs from all steps so results can be
+673:         attributed to their source search method(s).
+674:         """
+675:         # Aggregate all chunk and entity IDs by method
+676:         all_vector_chunks: set[str] = set()
+677:         all_graph_chunks: set[str] = set()
+678:         all_keyword_chunks: set[str] = set()
+679:         all_vector_entities: set[str] = set()
+680:         all_graph_entities: set[str] = set()
+681: 
+682:         for step in steps:
+683:             if not step.search_methods_data:
+684:                 continue
+685: 
+686:             by_method = step.search_methods_data.get("by_method", {})
+687: 
+688:             # Collect chunk IDs from each method
+689:             vector_data = by_method.get("vector", {})
+690:             all_vector_chunks.update(vector_data.get("chunks", {}).get("ids", []))
+691:             all_vector_entities.update(vector_data.get("entities", {}).get("ids", []))
+692: 
+693:             graph_data = by_method.get("graph", {})
+694:             all_graph_chunks.update(graph_data.get("chunks", {}).get("ids", []))
+695:             all_graph_entities.update(graph_data.get("entities", {}).get("ids", []))
+696: 
+697:             keyword_data = by_method.get("keyword", {})
+698:             all_keyword_chunks.update(keyword_data.get("chunks", {}).get("ids", []))
+699: 
+700:         # Compute overlaps
+701:         vector_graph_overlap = all_vector_chunks & all_graph_chunks
+702:         vector_keyword_overlap = all_vector_chunks & all_keyword_chunks
+703:         graph_keyword_overlap = all_graph_chunks & all_keyword_chunks
+704:         all_methods_overlap = all_vector_chunks & all_graph_chunks & all_keyword_chunks
+705: 
+706:         vector_only = all_vector_chunks - all_graph_chunks - all_keyword_chunks
+707:         graph_only = all_graph_chunks - all_vector_chunks - all_keyword_chunks
+708:         keyword_only = all_keyword_chunks - all_vector_chunks - all_graph_chunks
+709: 
+710:         vector_graph_entity_overlap = all_vector_entities & all_graph_entities
+711:         vector_only_entities = all_vector_entities - all_graph_entities
+712:         graph_only_entities = all_graph_entities - all_vector_entities
+713: 
+714:         return {
+715:             "chunk_overlap": {
+716:                 "vector_only": {"count": len(vector_only), "ids": list(vector_only)},
+717:                 "graph_only": {"count": len(graph_only), "ids": list(graph_only)},
+718:                 "keyword_only": {"count": len(keyword_only), "ids": list(keyword_only)},
+719:                 "vector_and_graph": {"count": len(vector_graph_overlap), "ids": list(vector_graph_overlap)},
+720:                 "vector_and_keyword": {"count": len(vector_keyword_overlap), "ids": list(vector_keyword_overlap)},
+721:                 "graph_and_keyword": {"count": len(graph_keyword_overlap), "ids": list(graph_keyword_overlap)},
+722:                 "all_three_methods": {"count": len(all_methods_overlap), "ids": list(all_methods_overlap)},
+723:             },
+724:             "entity_overlap": {
+725:                 "vector_only": {"count": len(vector_only_entities), "ids": list(vector_only_entities)},
+726:                 "graph_only": {"count": len(graph_only_entities), "ids": list(graph_only_entities)},
+727:                 "vector_and_graph": {
+728:                     "count": len(vector_graph_entity_overlap),
+729:                     "ids": list(vector_graph_entity_overlap),
+730:                 },
+731:             },
+732:         }
+733: 
+734:     def _generate_summary_fast(
+735:         self,
+736:         query: str,
+737:         chunks: dict[str, tuple[Chunk, float, str]],
+738:         entities: dict[str, tuple[Entity, float]],
+739:         trace: AgenticSearchTrace,
+740:     ) -> str:
+741:         """Generate a summary without additional LLM call.
+742: 
+743:         Uses structured data from the search to create a useful summary.
+744:         """
+745:         sources = {}
+746:         for _, (_, _, source) in chunks.items():
+747:             sources[source] = sources.get(source, 0) + 1
+748: 
+749:         source_parts = [f"{s}: {c}" for s, c in sorted(sources.items(), key=lambda x: -x[1])]
+750:         source_summary = ", ".join(source_parts) if source_parts else "none"
+751: 
+752:         entity_names = [e.name for e, _ in sorted(entities.values(), key=lambda x: -x[1])[:5]]
+753:         entity_summary = ", ".join(entity_names) if entity_names else "none found"
+754: 
+755:         # Build structured summary
+756:         parts = [
+757:             f"Found {len(chunks)} results across {len(sources)} sources ({source_summary}).",
+758:         ]
+759: 
+760:         if entity_names:
+761:             parts.append(f"Key entities: {entity_summary}.")
+762: 
+763:         parts.append(f"Explored in {len(trace.steps)} steps.")
+764: 
+765:         if trace.complexity_score > 0.7:
+766:             parts.append("Query was identified as complex, requiring multi-step exploration.")
+767: 
+768:         return " ".join(parts)
 ````
 
 ## File: src/khora/query/cache.py
@@ -31679,789 +31538,861 @@ README.md
  22: ### Key Features
  23: 
  24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
- 25: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
- 26: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
- 27: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
- 28: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
- 29: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
- 30: - **Semantic Extraction**: LLM-powered entity and relationship extraction
- 31: 
- 32: ---
- 33: 
- 34: ## Documentation
- 35: 
- 36: Comprehensive documentation is available in the [`docs/`](docs/) directory:
- 37: 
- 38: | Topic | Description |
- 39: |-------|-------------|
- 40: | **Architecture** | |
- 41: | [Overview](docs/architecture/overview.md) | System design, components, data flow |
- 42: | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
- 43: | [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
- 44: | [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
- 45: | **Data Models** | |
- 46: | [Overview](docs/data-models/overview.md) | Model relationships and purposes |
- 47: | [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
- 48: | [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
- 49: | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
- 50: | **Extraction Pipeline** | |
- 51: | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
- 52: | [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
- 53: | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
- 54: | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
- 55: | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
- 56: | [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
- 57: | [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
- 58: | **Query Engine** | |
- 59: | [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
- 60: | [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
- 61: | [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
- 62: | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
- 63: | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
- 64: | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
- 65: | **Planning** | |
- 66: | [Roadmap](docs/roadmap.md) | Future improvements and features |
- 67: 
- 68: ---
+ 25: - **Pluggable Engines**: Choose GraphRAG (knowledge graphs) or Khora (temporal-first)
+ 26: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
+ 27: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
+ 28: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
+ 29: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
+ 30: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
+ 31: - **Semantic Extraction**: LLM-powered entity and relationship extraction
+ 32: 
+ 33: ---
+ 34: 
+ 35: ## Pluggable Engines
+ 36: 
+ 37: Khora supports two engines with different strengths:
+ 38: 
+ 39: | Engine | Focus | Best For | LLM Cost |
+ 40: |--------|-------|----------|----------|
+ 41: | **GraphRAG** | Knowledge graphs | Knowledge bases, entity exploration | Higher |
+ 42: | **Khora** | Temporal events | Chat logs, events, cost-sensitive apps | 5-10x lower |
+ 43: 
+ 44: ### GraphRAG Engine (Default)
+ 45: 
+ 46: Full knowledge graph construction with entity and relationship extraction:
+ 47: 
+ 48: ```python
+ 49: from khora import MemoryLake
+ 50: 
+ 51: async with MemoryLake("postgresql://...", engine="graphrag") as lake:
+ 52:     # Extracts entities and relationships from all content
+ 53:     result = await lake.remember("Einstein developed relativity in 1905.")
+ 54:     print(f"Extracted {result.entities_extracted} entities")
+ 55: 
+ 56:     # Graph-based retrieval
+ 57:     entities = await lake.list_entities(entity_type="PERSON")
+ 58:     related = await lake.find_related_entities(entity_id, max_depth=2)
+ 59: ```
+ 60: 
+ 61: **Requirements:** PostgreSQL + pgvector + Neo4j/Kuzu/Memgraph
+ 62: 
+ 63: ### Khora Engine (Temporal-First)
+ 64: 
+ 65: Cost-optimized engine with bi-temporal model and skeleton indexing:
+ 66: 
+ 67: ```python
+ 68: from khora import MemoryLake
  69: 
- 70: ## Installation
- 71: 
- 72: ### Prerequisites
- 73: 
- 74: - Python 3.13+
- 75: - [uv](https://github.com/astral-sh/uv) for package management
- 76: - PostgreSQL with pgvector extension
- 77: - Neo4j (optional, for graph features)
- 78: 
- 79: ### Quick Install
+ 70: async with MemoryLake("postgresql://...", engine="khora") as lake:
+ 71:     # Store with temporal metadata
+ 72:     result = await lake.remember(
+ 73:         "Team standup notes",
+ 74:         metadata={
+ 75:             "occurred_at": "2024-01-15T09:00:00Z",
+ 76:             "author": "alice@company.com",
+ 77:             "channel": "engineering"
+ 78:         }
+ 79:     )
  80: 
- 81: ```bash
- 82: # Clone and install
- 83: git clone https://github.com/DeytaHQ/khora.git
- 84: cd khora
- 85: uv sync --all-extras
- 86: 
- 87: # Install pre-commit hooks
- 88: uv run prek install
- 89: ```
- 90: 
- 91: ### Start Development Databases
- 92: 
- 93: ```bash
- 94: # Start PostgreSQL and Neo4j via Docker
- 95: make dev
- 96: 
- 97: # Run database migrations
- 98: uv run alembic upgrade head
- 99: ```
-100: 
-101: ---
-102: 
-103: ## Usage
-104: 
-105: ### As a Library
-106: 
-107: The primary interface is the `MemoryLake` class:
-108: 
-109: ```python
-110: from khora import MemoryLake, SearchMode
-111: 
-112: async def main():
-113:     # Simplest - reads KHORA_DATABASE_URL from environment
-114:     async with MemoryLake() as lake:
-115:         # Store a memory
-116:         result = await lake.remember(
-117:             "Albert Einstein developed the theory of relativity in 1905.",
-118:             title="Einstein Biography",
-119:             source="wikipedia",
-120:         )
-121:         print(f"Stored document: {result.document_id}")
-122:         print(f"Extracted {result.entities_extracted} entities")
-123: 
-124:         # Recall relevant memories
-125:         memories = await lake.recall(
-126:             "Who developed relativity?",
-127:             limit=5,
-128:             mode=SearchMode.HYBRID,  # vector + graph + keyword
-129:         )
-130:         print(f"Found {len(memories.chunks)} relevant chunks")
-131:         print(f"Context: {memories.context_text}")
-132: 
-133:         # Explore entity relationships
-134:         entities = await lake.list_entities(entity_type="PERSON")
-135:         for entity in entities:
-136:             related = await lake.find_related_entities(entity.id, max_depth=2)
-137:             print(f"{entity.name} is related to {len(related)} entities")
-138: 
-139:         # Forget a memory
-140:         await lake.forget(result.document_id)
+ 81:     # Temporal and structured filtering
+ 82:     results = await lake.recall(
+ 83:         "What decisions were made?",
+ 84:         temporal_filter={
+ 85:             "occurred_after": "2024-01-01",
+ 86:             "author": "alice@company.com"
+ 87:         },
+ 88:         hybrid_alpha=0.7  # 70% vector, 30% BM25
+ 89:     )
+ 90: ```
+ 91: 
+ 92: **Requirements:** PostgreSQL + pgvector only (Neo4j optional)
+ 93: 
+ 94: See [Engine Comparison](docs/engines/engine-comparison.md) for detailed guidance.
+ 95: 
+ 96: ---
+ 97: 
+ 98: ## Documentation
+ 99: 
+100: Comprehensive documentation is available in the [`docs/`](docs/) directory:
+101: 
+102: | Topic | Description |
+103: |-------|-------------|
+104: | **Engines** | |
+105: | [Khora Engine](docs/engines/khora-engine.md) | Temporal-first engine documentation |
+106: | [Engine Comparison](docs/engines/engine-comparison.md) | GraphRAG vs Khora comparison |
+107: | [Temporal Model](docs/engines/temporal-model.md) | Bi-temporal design deep dive |
+108: | [Skeleton Indexing](docs/engines/skeleton-indexing.md) | Cost optimization via PageRank |
+109: | [Hybrid Search](docs/engines/hybrid-search.md) | Vector + BM25 fusion |
+110: | **Architecture** | |
+111: | [Overview](docs/architecture/overview.md) | System design, components, data flow |
+112: | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
+113: | [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
+114: | [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
+115: | **Data Models** | |
+116: | [Overview](docs/data-models/overview.md) | Model relationships and purposes |
+117: | [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
+118: | [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
+119: | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
+120: | **Extraction Pipeline** | |
+121: | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
+122: | [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
+123: | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
+124: | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
+125: | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
+126: | [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
+127: | [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
+128: | **Query Engine** | |
+129: | [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
+130: | [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
+131: | [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
+132: | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
+133: | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
+134: | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
+135: | **Planning** | |
+136: | [Roadmap](docs/roadmap.md) | Future improvements and features |
+137: | **References** | |
+138: | [References](docs/REFERENCES.md) | Research papers and inspirations |
+139: 
+140: ---
 141: 
-142: import asyncio
-143: asyncio.run(main())
-144: ```
+142: ## Installation
+143: 
+144: ### Prerequisites
 145: 
-146: ### Simplified Constructor
-147: 
-148: The `MemoryLake` constructor supports multiple initialization patterns:
-149: 
-150: ```python
-151: from khora import MemoryLake, KhoraConfig
+146: - Python 3.13+
+147: - [uv](https://github.com/astral-sh/uv) for package management
+148: - PostgreSQL with pgvector extension
+149: - Neo4j (optional, for graph features)
+150: 
+151: ### Quick Install
 152: 
-153: # 1. From environment variables (KHORA_DATABASE_URL)
-154: lake = MemoryLake()
-155: 
-156: # 2. Explicit database URL
-157: lake = MemoryLake("postgresql://localhost/mydb")
+153: ```bash
+154: # Clone and install
+155: git clone https://github.com/DeytaHQ/khora.git
+156: cd khora
+157: uv sync --all-extras
 158: 
-159: # 3. With graph backend
-160: lake = MemoryLake(
-161:     "postgresql://localhost/mydb",
-162:     graph_url="bolt://localhost:7687",
-163: )
+159: # Install pre-commit hooks
+160: uv run prek install
+161: ```
+162: 
+163: ### Start Development Databases
 164: 
-165: # 4. Custom embedding model
-166: lake = MemoryLake(
-167:     "postgresql://localhost/mydb",
-168:     embedding_model="text-embedding-3-large",
-169: )
-170: 
-171: # 5. Full configuration object (for advanced use)
-172: config = KhoraConfig(
-173:     database_url="postgresql://localhost/mydb",
-174:     neo4j_url="bolt://localhost:7687",
-175: )
-176: lake = MemoryLake(config)
-177: ```
+165: ```bash
+166: # Start PostgreSQL and Neo4j via Docker
+167: make dev
+168: 
+169: # Run database migrations
+170: uv run alembic upgrade head
+171: ```
+172: 
+173: ---
+174: 
+175: ## Usage
+176: 
+177: ### As a Library
 178: 
-179: ### Batch Ingestion
+179: The primary interface is the `MemoryLake` class:
 180: 
-181: For efficient bulk document ingestion:
-182: 
-183: ```python
-184: from khora import MemoryLake
-185: 
-186: async with MemoryLake(database_url) as lake:
-187:     # Batch ingestion with automatic optimization
-188:     result = await lake.remember_batch(
-189:         [
-190:             {"content": "Document 1 text...", "title": "Doc 1"},
-191:             {"content": "Document 2 text...", "title": "Doc 2"},
-192:             {"content": "Document 3 text...", "title": "Doc 3"},
-193:         ],
-194:         deduplicate=True,           # Cross-document entity deduplication
-195:         infer_relationships=True,   # Relationship inference after ingestion
-196:         on_progress=lambda done, total: print(f"Progress: {done}/{total}"),
-197:     )
-198: 
-199:     print(f"Processed: {result.processed}/{result.total} documents")
-200:     print(f"Chunks: {result.chunks}, Entities: {result.entities}")
-201:     print(f"Relationships: {result.relationships}")
-202: ```
-203: 
-204: ### Raw Search (No LLM Features)
-205: 
-206: For benchmarks or simple searches without LLM overhead:
-207: 
-208: ```python
-209: # Skip query understanding, entity linking, reranking, HyDE
-210: results = await lake.recall(
-211:     "search query",
-212:     mode=SearchMode.ALL,
-213:     raw=True,  # Disables all LLM features
-214: )
-215: ```
-216: 
-217: ### Search Modes
-218: 
-219: ```python
-220: from khora import MemoryLake, SearchMode
+181: ```python
+182: from khora import MemoryLake, SearchMode
+183: 
+184: async def main():
+185:     # Simplest - reads KHORA_DATABASE_URL from environment
+186:     async with MemoryLake() as lake:
+187:         # Store a memory
+188:         result = await lake.remember(
+189:             "Albert Einstein developed the theory of relativity in 1905.",
+190:             title="Einstein Biography",
+191:             source="wikipedia",
+192:         )
+193:         print(f"Stored document: {result.document_id}")
+194:         print(f"Extracted {result.entities_extracted} entities")
+195: 
+196:         # Recall relevant memories
+197:         memories = await lake.recall(
+198:             "Who developed relativity?",
+199:             limit=5,
+200:             mode=SearchMode.HYBRID,  # vector + graph + keyword
+201:         )
+202:         print(f"Found {len(memories.chunks)} relevant chunks")
+203:         print(f"Context: {memories.context_text}")
+204: 
+205:         # Explore entity relationships
+206:         entities = await lake.list_entities(entity_type="PERSON")
+207:         for entity in entities:
+208:             related = await lake.find_related_entities(entity.id, max_depth=2)
+209:             print(f"{entity.name} is related to {len(related)} entities")
+210: 
+211:         # Forget a memory
+212:         await lake.forget(result.document_id)
+213: 
+214: import asyncio
+215: asyncio.run(main())
+216: ```
+217: 
+218: ### Simplified Constructor
+219: 
+220: The `MemoryLake` constructor supports multiple initialization patterns:
 221: 
-222: async with MemoryLake() as lake:
-223:     # Vector-only search (semantic similarity)
-224:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
-225: 
-226:     # Graph-only search (entity relationships)
-227:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
-228: 
-229:     # Hybrid search (combines all sources with RRF)
-230:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
-231: 
-232:     # All sources (returns results from each separately)
-233:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
-234: ```
-235: 
-236: ### Multi-Tenancy
-237: 
-238: ```python
-239: from khora import MemoryLake
-240: 
-241: async with MemoryLake() as lake:
-242:     # Simple: Get or create a namespace by name
-243:     namespace_id = await lake.ensure_namespace("physics", description="Physics research")
-244: 
-245:     # Store memories in specific namespace
-246:     await lake.remember(
-247:         "Important research findings...",
-248:         namespace=namespace_id,
-249:     )
+222: ```python
+223: from khora import MemoryLake, KhoraConfig
+224: 
+225: # 1. From environment variables (KHORA_DATABASE_URL)
+226: lake = MemoryLake()
+227: 
+228: # 2. Explicit database URL
+229: lake = MemoryLake("postgresql://localhost/mydb")
+230: 
+231: # 3. With graph backend
+232: lake = MemoryLake(
+233:     "postgresql://localhost/mydb",
+234:     graph_url="bolt://localhost:7687",
+235: )
+236: 
+237: # 4. Custom embedding model
+238: lake = MemoryLake(
+239:     "postgresql://localhost/mydb",
+240:     embedding_model="text-embedding-3-large",
+241: )
+242: 
+243: # 5. Full configuration object (for advanced use)
+244: config = KhoraConfig(
+245:     database_url="postgresql://localhost/mydb",
+246:     neo4j_url="bolt://localhost:7687",
+247: )
+248: lake = MemoryLake(config)
+249: ```
 250: 
-251:     # Query within namespace (isolated from other namespaces)
-252:     results = await lake.recall("findings", namespace=namespace_id)
-253: 
-254:     # Get namespace statistics
-255:     stats = await lake.stats(namespace=namespace_id)
-256:     print(f"Documents: {stats.documents}, Entities: {stats.entities}")
-257: ```
-258: 
-259: ### As a Service
-260: 
-261: ```bash
-262: # Start the API server
-263: uv run khora serve --reload
-264: 
-265: # Or with Docker
-266: docker compose up
-267: ```
-268: 
-269: #### API Endpoints
+251: ### Batch Ingestion
+252: 
+253: For efficient bulk document ingestion:
+254: 
+255: ```python
+256: from khora import MemoryLake
+257: 
+258: async with MemoryLake(database_url) as lake:
+259:     # Batch ingestion with automatic optimization
+260:     result = await lake.remember_batch(
+261:         [
+262:             {"content": "Document 1 text...", "title": "Doc 1"},
+263:             {"content": "Document 2 text...", "title": "Doc 2"},
+264:             {"content": "Document 3 text...", "title": "Doc 3"},
+265:         ],
+266:         deduplicate=True,           # Cross-document entity deduplication
+267:         infer_relationships=True,   # Relationship inference after ingestion
+268:         on_progress=lambda done, total: print(f"Progress: {done}/{total}"),
+269:     )
 270: 
-271: **Memory Operations:**
-272: ```bash
-273: # Store a memory
-274: curl -X POST http://localhost:8100/memory/remember \
-275:   -H "Content-Type: application/json" \
-276:   -d '{
-277:     "content": "Einstein developed relativity in 1905.",
-278:     "title": "Physics History",
-279:     "skill_name": "general_entities"
-280:   }'
-281: 
-282: # Recall memories
-283: curl -X POST http://localhost:8100/memory/recall \
-284:   -H "Content-Type: application/json" \
-285:   -d '{
-286:     "query": "Who developed relativity?",
-287:     "limit": 10,
-288:     "mode": "hybrid"
-289:   }'
+271:     print(f"Processed: {result.processed}/{result.total} documents")
+272:     print(f"Chunks: {result.chunks}, Entities: {result.entities}")
+273:     print(f"Relationships: {result.relationships}")
+274: ```
+275: 
+276: ### Raw Search (No LLM Features)
+277: 
+278: For benchmarks or simple searches without LLM overhead:
+279: 
+280: ```python
+281: # Skip query understanding, entity linking, reranking, HyDE
+282: results = await lake.recall(
+283:     "search query",
+284:     mode=SearchMode.ALL,
+285:     raw=True,  # Disables all LLM features
+286: )
+287: ```
+288: 
+289: ### Search Modes
 290: 
-291: # Get a document
-292: curl http://localhost:8100/memory/documents/{document_id}
+291: ```python
+292: from khora import MemoryLake, SearchMode
 293: 
-294: # List entities
-295: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
-296: 
-297: # Get related entities
-298: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
-299: 
-300: # Forget a memory
-301: curl -X DELETE http://localhost:8100/memory/forget \
-302:   -H "Content-Type: application/json" \
-303:   -d '{"document_id": "uuid-here"}'
-304: ```
-305: 
-306: **Namespace Management:**
-307: ```bash
-308: # Create organization
-309: curl -X POST http://localhost:8100/namespaces/organizations \
-310:   -H "Content-Type: application/json" \
-311:   -d '{"name": "Acme Corp", "slug": "acme"}'
+294: async with MemoryLake() as lake:
+295:     # Vector-only search (semantic similarity)
+296:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
+297: 
+298:     # Graph-only search (entity relationships)
+299:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
+300: 
+301:     # Hybrid search (combines all sources with RRF)
+302:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
+303: 
+304:     # All sources (returns results from each separately)
+305:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
+306: ```
+307: 
+308: ### Multi-Tenancy
+309: 
+310: ```python
+311: from khora import MemoryLake
 312: 
-313: # Create workspace
-314: curl -X POST http://localhost:8100/namespaces/workspaces \
-315:   -H "Content-Type: application/json" \
-316:   -d '{"organization_id": "org-uuid", "name": "Research"}'
-317: 
-318: # Create namespace
-319: curl -X POST http://localhost:8100/namespaces/ \
-320:   -H "Content-Type: application/json" \
-321:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
-322: ```
-323: 
-324: **Sync & Pipelines:**
-325: ```bash
-326: # Ingest documents
-327: curl -X POST http://localhost:8100/sync/ingest \
-328:   -H "Content-Type: application/json" \
-329:   -d '{
-330:     "namespace_id": "ns-uuid",
-331:     "documents": [{"content": "Document text..."}],
-332:     "skill_name": "general_entities"
-333:   }'
-334: 
-335: # List available pipelines
-336: curl http://localhost:8100/sync/pipelines
-337: ```
-338: 
-339: **Health Checks:**
-340: ```bash
-341: curl http://localhost:8100/status        # Service status
-342: curl http://localhost:8100/health        # Health check
-343: curl http://localhost:8100/health/ready  # Readiness probe
-344: curl http://localhost:8100/health/live   # Liveness probe
-345: ```
-346: 
-347: ---
-348: 
-349: ## Architecture
-350: 
-351: ```
-352: ┌─────────────────────────────────────────────────────────────────────────────┐
-353: │                              MemoryLake API                                  │
-354: │                         (Library + FastAPI Service)                          │
-355: ├─────────────────────────────────────────────────────────────────────────────┤
-356: │                                                                              │
-357: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
-358: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
-359: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
-360: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
-361: │         │                  │                  │                  │          │
-362: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
-363: │                          Storage Coordinator                                 │
-364: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
-365: │         │                   │                   │                            │
-366: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
-367: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
-368: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
-369: │  │ Documents)  │     │             │     │            │     │            │ │
-370: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
-371: │                                                                              │
-372: └──────────────────────────────────────────────────────────────────────────────┘
-373: ```
-374: 
-375: ### Core Components
-376: 
-377: | Component | Purpose |
-378: |-----------|---------|
-379: | `MemoryLake` | Primary API for remember/recall/forget operations |
-380: | `StorageCoordinator` | Orchestrates all storage backends |
-381: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
-382: | `PipelineManager` | Manages Prefect ingestion flows |
-383: | `ACLEnforcer` | Cross-layer permission enforcement |
+313: async with MemoryLake() as lake:
+314:     # Simple: Get or create a namespace by name
+315:     namespace_id = await lake.ensure_namespace("physics", description="Physics research")
+316: 
+317:     # Store memories in specific namespace
+318:     await lake.remember(
+319:         "Important research findings...",
+320:         namespace=namespace_id,
+321:     )
+322: 
+323:     # Query within namespace (isolated from other namespaces)
+324:     results = await lake.recall("findings", namespace=namespace_id)
+325: 
+326:     # Get namespace statistics
+327:     stats = await lake.stats(namespace=namespace_id)
+328:     print(f"Documents: {stats.documents}, Entities: {stats.entities}")
+329: ```
+330: 
+331: ### As a Service
+332: 
+333: ```bash
+334: # Start the API server
+335: uv run khora serve --reload
+336: 
+337: # Or with Docker
+338: docker compose up
+339: ```
+340: 
+341: #### API Endpoints
+342: 
+343: **Memory Operations:**
+344: ```bash
+345: # Store a memory
+346: curl -X POST http://localhost:8100/memory/remember \
+347:   -H "Content-Type: application/json" \
+348:   -d '{
+349:     "content": "Einstein developed relativity in 1905.",
+350:     "title": "Physics History",
+351:     "skill_name": "general_entities"
+352:   }'
+353: 
+354: # Recall memories
+355: curl -X POST http://localhost:8100/memory/recall \
+356:   -H "Content-Type: application/json" \
+357:   -d '{
+358:     "query": "Who developed relativity?",
+359:     "limit": 10,
+360:     "mode": "hybrid"
+361:   }'
+362: 
+363: # Get a document
+364: curl http://localhost:8100/memory/documents/{document_id}
+365: 
+366: # List entities
+367: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
+368: 
+369: # Get related entities
+370: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
+371: 
+372: # Forget a memory
+373: curl -X DELETE http://localhost:8100/memory/forget \
+374:   -H "Content-Type: application/json" \
+375:   -d '{"document_id": "uuid-here"}'
+376: ```
+377: 
+378: **Namespace Management:**
+379: ```bash
+380: # Create organization
+381: curl -X POST http://localhost:8100/namespaces/organizations \
+382:   -H "Content-Type: application/json" \
+383:   -d '{"name": "Acme Corp", "slug": "acme"}'
 384: 
-385: ### Storage Backends
-386: 
-387: | Backend | Technology | Purpose |
-388: |---------|------------|---------|
-389: | Relational | PostgreSQL | Documents, events, permissions, metadata |
-390: | Vector | pgvector | Embeddings for semantic similarity search |
-391: | Graph | Neo4j | Entity nodes and relationship edges |
-392: | Event Store | PostgreSQL | Immutable event log for sourcing |
-393: 
-394: ### Data Flow
+385: # Create workspace
+386: curl -X POST http://localhost:8100/namespaces/workspaces \
+387:   -H "Content-Type: application/json" \
+388:   -d '{"organization_id": "org-uuid", "name": "Research"}'
+389: 
+390: # Create namespace
+391: curl -X POST http://localhost:8100/namespaces/ \
+392:   -H "Content-Type: application/json" \
+393:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
+394: ```
 395: 
-396: 1. **Ingestion** (Three-Phase Pipeline)
-397:    - Phase 1: Stage documents, compute checksums, detect duplicates
-398:    - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
-399:    - Phase 3 (optional): Cross-document entity unification and relationship inference
-400: 
-401: 2. **Query** (Hybrid Search)
-402:    - Execute vector, graph, and keyword searches in parallel
-403:    - Apply Reciprocal Rank Fusion to combine results
-404:    - Filter by ACL and temporal context
-405: 
-406: 3. **Event Sourcing**
-407:    - All changes recorded as immutable events
-408:    - Enables temporal queries ("state as of date X")
-409:    - Complete audit trail for compliance
+396: **Sync & Pipelines:**
+397: ```bash
+398: # Ingest documents
+399: curl -X POST http://localhost:8100/sync/ingest \
+400:   -H "Content-Type: application/json" \
+401:   -d '{
+402:     "namespace_id": "ns-uuid",
+403:     "documents": [{"content": "Document text..."}],
+404:     "skill_name": "general_entities"
+405:   }'
+406: 
+407: # List available pipelines
+408: curl http://localhost:8100/sync/pipelines
+409: ```
 410: 
-411: ---
-412: 
-413: ## Configuration
-414: 
-415: ### Environment Variables
-416: 
-417: | Variable | Description | Default |
-418: |----------|-------------|---------|
-419: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
-420: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
-421: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
-422: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
-423: | `KHORA_DEBUG` | Enable debug mode | `false` |
-424: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
-425: | `KHORA_API_PORT` | API server port | `8100` |
-426: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
-427: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
-428: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
-429: 
-430: ### LiteLLM Configuration
-431: 
-432: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
-433: 
-434: ```yaml
-435: # examples/config/litellm/openai.yaml
-436: model: "gpt-4o-mini"
-437: api_key_env: "OPENAI_API_KEY"
-438: temperature: 0.7
-439: max_tokens: 8192
-440: embedding_model: "text-embedding-3-small"
-441: ```
-442: 
-443: ```yaml
-444: # examples/config/litellm/claude.yaml
-445: model: "claude-sonnet-4-20250514"
-446: api_key_env: "ANTHROPIC_API_KEY"
-447: temperature: 0.7
-448: max_tokens: 8192
-449: 
-450: # Router with fallbacks
-451: model_list:
-452:   - model_name: claude-sonnet-4
-453:     litellm_params:
-454:       model: claude-sonnet-4-20250514
-455:       api_key: os.environ/ANTHROPIC_API_KEY
-456:   - model_name: claude-sonnet-4
-457:     litellm_params:
-458:       model: claude-3-5-sonnet-20241022
-459:       api_key: os.environ/ANTHROPIC_API_KEY
-460: ```
-461: 
-462: ### Extraction Skills
-463: 
-464: Configure entity extraction in your code:
+411: **Health Checks:**
+412: ```bash
+413: curl http://localhost:8100/status        # Service status
+414: curl http://localhost:8100/health        # Health check
+415: curl http://localhost:8100/health/ready  # Readiness probe
+416: curl http://localhost:8100/health/live   # Liveness probe
+417: ```
+418: 
+419: ---
+420: 
+421: ## Architecture
+422: 
+423: ```
+424: ┌─────────────────────────────────────────────────────────────────────────────┐
+425: │                              MemoryLake API                                  │
+426: │                         (Library + FastAPI Service)                          │
+427: ├─────────────────────────────────────────────────────────────────────────────┤
+428: │                                                                              │
+429: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
+430: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
+431: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
+432: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
+433: │         │                  │                  │                  │          │
+434: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
+435: │                          Storage Coordinator                                 │
+436: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
+437: │         │                   │                   │                            │
+438: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
+439: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
+440: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
+441: │  │ Documents)  │     │             │     │            │     │            │ │
+442: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
+443: │                                                                              │
+444: └──────────────────────────────────────────────────────────────────────────────┘
+445: ```
+446: 
+447: ### Core Components
+448: 
+449: | Component | Purpose |
+450: |-----------|---------|
+451: | `MemoryLake` | Primary API for remember/recall/forget operations |
+452: | `StorageCoordinator` | Orchestrates all storage backends |
+453: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
+454: | `PipelineManager` | Manages Prefect ingestion flows |
+455: | `ACLEnforcer` | Cross-layer permission enforcement |
+456: 
+457: ### Storage Backends
+458: 
+459: | Backend | Technology | Purpose |
+460: |---------|------------|---------|
+461: | Relational | PostgreSQL | Documents, events, permissions, metadata |
+462: | Vector | pgvector | Embeddings for semantic similarity search |
+463: | Graph | Neo4j | Entity nodes and relationship edges |
+464: | Event Store | PostgreSQL | Immutable event log for sourcing |
 465: 
-466: ```python
-467: from khora.extraction.skills import ExtractionSkill
-468: 
-469: skill = ExtractionSkill(
-470:     name="custom_entities",
-471:     description="Extract domain-specific entities",
-472:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
-473:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
-474: )
-475: 
-476: await lake.remember(content, skill_name="custom_entities")
-477: ```
-478: 
-479: ---
-480: 
-481: ## Project Structure
+466: ### Data Flow
+467: 
+468: 1. **Ingestion** (Three-Phase Pipeline)
+469:    - Phase 1: Stage documents, compute checksums, detect duplicates
+470:    - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
+471:    - Phase 3 (optional): Cross-document entity unification and relationship inference
+472: 
+473: 2. **Query** (Hybrid Search)
+474:    - Execute vector, graph, and keyword searches in parallel
+475:    - Apply Reciprocal Rank Fusion to combine results
+476:    - Filter by ACL and temporal context
+477: 
+478: 3. **Event Sourcing**
+479:    - All changes recorded as immutable events
+480:    - Enables temporal queries ("state as of date X")
+481:    - Complete audit trail for compliance
 482: 
-483: ```
-484: khora/
-485: ├── src/khora/
-486: │   ├── __init__.py              # Package exports
-487: │   ├── memory_lake.py           # Primary MemoryLake class
-488: │   ├── api/                     # FastAPI application
-489: │   │   ├── app.py               # App factory with lifespan
-490: │   │   ├── deps.py              # Dependency injection
-491: │   │   └── routes/              # API endpoints
-492: │   │       ├── memory.py        # Remember/recall/forget
-493: │   │       ├── namespaces.py    # Multi-tenancy management
-494: │   │       ├── sync.py          # Ingestion pipelines
-495: │   │       └── status.py        # Health checks
-496: │   ├── acl/                     # Access control
-497: │   │   ├── checker.py           # Permission checking
-498: │   │   └── enforcer.py          # Cross-layer enforcement
-499: │   ├── cli/                     # Command-line interface
-500: │   ├── config/                  # Configuration
-501: │   │   ├── schema.py            # Pydantic settings
-502: │   │   ├── llm.py               # LiteLLM configuration
-503: │   │   └── resolver.py          # Hierarchical config
-504: │   ├── core/models/             # Domain models
-505: │   │   ├── document.py          # Document, Chunk
-506: │   │   ├── entity.py            # Entity, Relationship
-507: │   │   ├── event.py             # MemoryEvent (sourcing)
-508: │   │   └── tenancy.py           # Org, Workspace, Namespace
-509: │   ├── db/                      # Database layer
-510: │   │   ├── models.py            # SQLAlchemy ORM
-511: │   │   └── session.py           # Async session management
-512: │   ├── extraction/              # Content processing
-513: │   │   ├── chunkers/            # Text chunking strategies
-514: │   │   ├── embedders/           # Embedding generation
-515: │   │   ├── extractors/          # Entity extraction
-516: │   │   └── skills/              # Extraction configurations
-517: │   ├── pipelines/               # Prefect workflows
-518: │   │   ├── flows/               # Ingestion and sync flows
-519: │   │   ├── tasks/               # Individual pipeline tasks
-520: │   │   ├── manager.py           # Pipeline orchestration
-521: │   │   └── registry.py          # Pipeline registration
-522: │   ├── query/                   # Search engine
-523: │   │   ├── engine.py            # HybridQueryEngine
-524: │   │   ├── fusion.py            # Reciprocal Rank Fusion
-525: │   │   └── temporal.py          # Time-based queries
-526: │   └── storage/                 # Storage backends
-527: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
-528: │       ├── coordinator.py       # Backend orchestration
-529: │       ├── event_store.py       # Event sourcing
-530: │       └── factory.py           # Storage initialization
-531: ├── tests/                       # Test suite
-532: ├── alembic/                     # Database migrations
-533: ├── examples/config/             # Example configurations
-534: ├── docker-compose.yml           # Development services
-535: └── pyproject.toml               # Project configuration
-536: ```
+483: ---
+484: 
+485: ## Configuration
+486: 
+487: ### Environment Variables
+488: 
+489: | Variable | Description | Default |
+490: |----------|-------------|---------|
+491: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
+492: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
+493: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
+494: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
+495: | `KHORA_DEBUG` | Enable debug mode | `false` |
+496: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
+497: | `KHORA_API_PORT` | API server port | `8100` |
+498: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
+499: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
+500: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
+501: 
+502: ### LiteLLM Configuration
+503: 
+504: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
+505: 
+506: ```yaml
+507: # examples/config/litellm/openai.yaml
+508: model: "gpt-4o-mini"
+509: api_key_env: "OPENAI_API_KEY"
+510: temperature: 0.7
+511: max_tokens: 8192
+512: embedding_model: "text-embedding-3-small"
+513: ```
+514: 
+515: ```yaml
+516: # examples/config/litellm/claude.yaml
+517: model: "claude-sonnet-4-20250514"
+518: api_key_env: "ANTHROPIC_API_KEY"
+519: temperature: 0.7
+520: max_tokens: 8192
+521: 
+522: # Router with fallbacks
+523: model_list:
+524:   - model_name: claude-sonnet-4
+525:     litellm_params:
+526:       model: claude-sonnet-4-20250514
+527:       api_key: os.environ/ANTHROPIC_API_KEY
+528:   - model_name: claude-sonnet-4
+529:     litellm_params:
+530:       model: claude-3-5-sonnet-20241022
+531:       api_key: os.environ/ANTHROPIC_API_KEY
+532: ```
+533: 
+534: ### Extraction Skills
+535: 
+536: Configure entity extraction in your code:
 537: 
-538: ---
-539: 
-540: ## Development
-541: 
-542: ### Commands
-543: 
-544: ```bash
-545: # Start development server
-546: uv run khora serve --reload --no-auth
+538: ```python
+539: from khora.extraction.skills import ExtractionSkill
+540: 
+541: skill = ExtractionSkill(
+542:     name="custom_entities",
+543:     description="Extract domain-specific entities",
+544:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
+545:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
+546: )
 547: 
-548: # Run tests with coverage
-549: make test
+548: await lake.remember(content, skill_name="custom_entities")
+549: ```
 550: 
-551: # Format code
-552: make format
-553: 
-554: # Run linting
-555: make lint
-556: 
-557: # Run all pre-commit hooks
-558: make prek
-559: 
-560: # Start development databases
-561: make dev
-562: 
-563: # Stop development databases
-564: make down
-565: ```
-566: 
-567: ### Database Migrations
-568: 
-569: ```bash
-570: # Run all migrations
-571: uv run alembic upgrade head
-572: 
-573: # Create a new migration
-574: uv run alembic revision --autogenerate -m "Add new table"
-575: 
-576: # Rollback one migration
-577: uv run alembic downgrade -1
-578: ```
-579: 
-580: ### Testing
-581: 
-582: ```bash
-583: # Run all tests
-584: make test
-585: 
-586: # Run specific test file
-587: uv run pytest tests/unit/test_api.py -v
-588: 
-589: # Run with markers
-590: uv run pytest -m unit        # Unit tests only
-591: uv run pytest -m integration # Integration tests
-592: uv run pytest -m e2e         # End-to-end tests
-593: ```
-594: 
-595: ---
-596: 
-597: ## API Reference
-598: 
-599: ### MemoryLake Class
-600: 
-601: #### Constructor
-602: 
-603: ```python
-604: class MemoryLake:
-605:     def __init__(
-606:         self,
-607:         database_url: str | KhoraConfig | None = None,
-608:         *,
-609:         graph_url: str | None = None,
-610:         embedding_model: str = "text-embedding-3-small",
-611:     ):
-612:         """Initialize the Memory Lake.
+551: ---
+552: 
+553: ## Project Structure
+554: 
+555: ```
+556: khora/
+557: ├── src/khora/
+558: │   ├── __init__.py              # Package exports
+559: │   ├── memory_lake.py           # Primary MemoryLake class
+560: │   ├── api/                     # FastAPI application
+561: │   │   ├── app.py               # App factory with lifespan
+562: │   │   ├── deps.py              # Dependency injection
+563: │   │   └── routes/              # API endpoints
+564: │   │       ├── memory.py        # Remember/recall/forget
+565: │   │       ├── namespaces.py    # Multi-tenancy management
+566: │   │       ├── sync.py          # Ingestion pipelines
+567: │   │       └── status.py        # Health checks
+568: │   ├── acl/                     # Access control
+569: │   │   ├── checker.py           # Permission checking
+570: │   │   └── enforcer.py          # Cross-layer enforcement
+571: │   ├── cli/                     # Command-line interface
+572: │   ├── config/                  # Configuration
+573: │   │   ├── schema.py            # Pydantic settings
+574: │   │   ├── llm.py               # LiteLLM configuration
+575: │   │   └── resolver.py          # Hierarchical config
+576: │   ├── core/models/             # Domain models
+577: │   │   ├── document.py          # Document, Chunk
+578: │   │   ├── entity.py            # Entity, Relationship
+579: │   │   ├── event.py             # MemoryEvent (sourcing)
+580: │   │   └── tenancy.py           # Org, Workspace, Namespace
+581: │   ├── db/                      # Database layer
+582: │   │   ├── models.py            # SQLAlchemy ORM
+583: │   │   └── session.py           # Async session management
+584: │   ├── extraction/              # Content processing
+585: │   │   ├── chunkers/            # Text chunking strategies
+586: │   │   ├── embedders/           # Embedding generation
+587: │   │   ├── extractors/          # Entity extraction
+588: │   │   └── skills/              # Extraction configurations
+589: │   ├── pipelines/               # Prefect workflows
+590: │   │   ├── flows/               # Ingestion and sync flows
+591: │   │   ├── tasks/               # Individual pipeline tasks
+592: │   │   ├── manager.py           # Pipeline orchestration
+593: │   │   └── registry.py          # Pipeline registration
+594: │   ├── query/                   # Search engine
+595: │   │   ├── engine.py            # HybridQueryEngine
+596: │   │   ├── fusion.py            # Reciprocal Rank Fusion
+597: │   │   └── temporal.py          # Time-based queries
+598: │   └── storage/                 # Storage backends
+599: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
+600: │       ├── coordinator.py       # Backend orchestration
+601: │       ├── event_store.py       # Event sourcing
+602: │       └── factory.py           # Storage initialization
+603: ├── tests/                       # Test suite
+604: ├── alembic/                     # Database migrations
+605: ├── examples/config/             # Example configurations
+606: ├── docker-compose.yml           # Development services
+607: └── pyproject.toml               # Project configuration
+608: ```
+609: 
+610: ---
+611: 
+612: ## Development
 613: 
-614:         Args:
-615:             database_url: PostgreSQL URL, KhoraConfig, or None (reads from env)
-616:             graph_url: Optional Neo4j URL (bolt://user:pass@host:port)
-617:             embedding_model: Embedding model to use
-618:         """
-619: ```
-620: 
-621: #### Core Methods
+614: ### Commands
+615: 
+616: ```bash
+617: # Start development server
+618: uv run khora serve --reload --no-auth
+619: 
+620: # Run tests with coverage
+621: make test
 622: 
-623: ```python
-624:     async def remember(
-625:         self,
-626:         content: str,
-627:         *,
-628:         namespace: str | UUID | None = None,
-629:         title: str = "",
-630:         source: str = "",
-631:         metadata: dict = {},
-632:         skill_name: str = "general_entities",
-633:     ) -> RememberResult:
-634:         """Store content in the memory lake."""
-635: 
-636:     async def remember_batch(
-637:         self,
-638:         documents: list[dict],
-639:         *,
-640:         namespace: str | UUID | None = None,
-641:         skill_name: str = "general_entities",
-642:         max_concurrent: int = 5,
-643:         deduplicate: bool = True,
-644:         infer_relationships: bool = True,
-645:         on_progress: Callable[[int, int], None] | None = None,
-646:     ) -> BatchResult:
-647:         """Store multiple documents with automatic optimization."""
-648: 
-649:     async def recall(
-650:         self,
-651:         query: str,
-652:         *,
-653:         namespace: str | UUID | None = None,
-654:         limit: int = 10,
-655:         mode: SearchMode = SearchMode.HYBRID,
-656:         min_similarity: float = 0.0,
-657:         agentic: bool = False,
-658:         raw: bool = False,  # Skip all LLM features
-659:     ) -> RecallResult:
-660:         """Recall memories relevant to a query."""
-661: 
-662:     async def forget(
-663:         self,
-664:         document_id: UUID,
-665:         *,
-666:         namespace: str | UUID | None = None,
-667:     ) -> bool:
-668:         """Remove a memory from the lake."""
-669: ```
+623: # Format code
+624: make format
+625: 
+626: # Run linting
+627: make lint
+628: 
+629: # Run all pre-commit hooks
+630: make prek
+631: 
+632: # Start development databases
+633: make dev
+634: 
+635: # Stop development databases
+636: make down
+637: ```
+638: 
+639: ### Database Migrations
+640: 
+641: ```bash
+642: # Run all migrations
+643: uv run alembic upgrade head
+644: 
+645: # Create a new migration
+646: uv run alembic revision --autogenerate -m "Add new table"
+647: 
+648: # Rollback one migration
+649: uv run alembic downgrade -1
+650: ```
+651: 
+652: ### Testing
+653: 
+654: ```bash
+655: # Run all tests
+656: make test
+657: 
+658: # Run specific test file
+659: uv run pytest tests/unit/test_api.py -v
+660: 
+661: # Run with markers
+662: uv run pytest -m unit        # Unit tests only
+663: uv run pytest -m integration # Integration tests
+664: uv run pytest -m e2e         # End-to-end tests
+665: ```
+666: 
+667: ---
+668: 
+669: ## API Reference
 670: 
-671: #### Convenience Methods
+671: ### MemoryLake Class
 672: 
-673: ```python
-674:     async def ensure_namespace(
-675:         self,
-676:         name: str,
-677:         *,
-678:         description: str = "",
-679:     ) -> UUID:
-680:         """Get or create a namespace by name."""
-681: 
-682:     async def get_document(self, document_id: UUID) -> Document | None:
-683:         """Get a document by ID."""
-684: 
-685:     async def list_documents(
-686:         self,
-687:         *,
-688:         namespace: str | UUID | None = None,
-689:         limit: int = 100,
-690:     ) -> list[Document]:
-691:         """List documents in a namespace."""
+673: #### Constructor
+674: 
+675: ```python
+676: class MemoryLake:
+677:     def __init__(
+678:         self,
+679:         database_url: str | KhoraConfig | None = None,
+680:         *,
+681:         graph_url: str | None = None,
+682:         embedding_model: str = "text-embedding-3-small",
+683:     ):
+684:         """Initialize the Memory Lake.
+685: 
+686:         Args:
+687:             database_url: PostgreSQL URL, KhoraConfig, or None (reads from env)
+688:             graph_url: Optional Neo4j URL (bolt://user:pass@host:port)
+689:             embedding_model: Embedding model to use
+690:         """
+691: ```
 692: 
-693:     async def search_entities(
-694:         self,
-695:         query: str,
-696:         *,
-697:         namespace: str | UUID | None = None,
-698:         limit: int = 10,
-699:     ) -> list[Entity]:
-700:         """Search entities by query text using embedding similarity."""
-701: 
-702:     async def stats(
-703:         self,
-704:         *,
-705:         namespace: str | UUID | None = None,
-706:     ) -> Stats:
-707:         """Get document/chunk/entity/relationship counts."""
-708: 
-709:     async def list_entities(
-710:         self,
+693: #### Core Methods
+694: 
+695: ```python
+696:     async def remember(
+697:         self,
+698:         content: str,
+699:         *,
+700:         namespace: str | UUID | None = None,
+701:         title: str = "",
+702:         source: str = "",
+703:         metadata: dict = {},
+704:         skill_name: str = "general_entities",
+705:     ) -> RememberResult:
+706:         """Store content in the memory lake."""
+707: 
+708:     async def remember_batch(
+709:         self,
+710:         documents: list[dict],
 711:         *,
 712:         namespace: str | UUID | None = None,
-713:         entity_type: str | None = None,
-714:         limit: int = 100,
-715:     ) -> list[Entity]:
-716:         """List entities in a namespace."""
-717: 
-718:     async def find_related_entities(
-719:         self,
-720:         entity_id: UUID,
-721:         *,
-722:         max_depth: int = 2,
-723:         limit: int = 20,
-724:     ) -> list[tuple[Entity, float]]:
-725:         """Find entities related to a given entity."""
-726: ```
-727: 
-728: ### Data Classes
-729: 
-730: ```python
-731: @dataclass
-732: class RememberResult:
-733:     """Result of a remember() operation."""
-734:     document_id: UUID
-735:     namespace_id: UUID
-736:     chunks_created: int
-737:     entities_extracted: int
-738:     relationships_created: int
-739:     metadata: dict[str, Any]
-740: 
-741: @dataclass
-742: class RecallResult:
-743:     """Result of a recall() operation."""
-744:     query: str
-745:     namespace_id: UUID
-746:     chunks: list[tuple[Chunk, float]]
-747:     entities: list[tuple[Entity, float]]
-748:     context_text: str
-749:     metadata: dict[str, Any]
-750: 
-751: @dataclass
-752: class BatchResult:
-753:     """Result of remember_batch() operation."""
-754:     total: int        # Total documents submitted
-755:     processed: int    # Successfully processed
-756:     skipped: int      # Skipped (duplicates)
-757:     failed: int       # Failed to process
-758:     chunks: int       # Total chunks created
-759:     entities: int     # Total entities extracted
-760:     relationships: int # Total relationships created
-761: 
-762: @dataclass
-763: class Stats:
-764:     """Namespace statistics from stats()."""
-765:     documents: int
-766:     chunks: int
-767:     entities: int
-768:     relationships: int
-769: ```
-770: 
-771: ### Search Modes
-772: 
-773: | Mode | Description |
-774: |------|-------------|
-775: | `VECTOR` | Semantic similarity search using embeddings |
-776: | `GRAPH` | Entity and relationship traversal |
-777: | `HYBRID` | Combined vector + graph + keyword with RRF fusion |
-778: | `ALL` | All sources (vector, graph, keyword) |
-779: 
-780: ### Entity Types
-781: 
-782: | Type | Description |
-783: |------|-------------|
-784: | `PERSON` | Individual people |
-785: | `ORGANIZATION` | Companies, institutions |
-786: | `LOCATION` | Places, addresses |
-787: | `CONCEPT` | Abstract ideas, theories |
-788: | `EVENT` | Occurrences, incidents |
-789: | `TECHNOLOGY` | Tools, platforms, languages |
-790: | `PRODUCT` | Goods, services |
-791: | `DOCUMENT` | Referenced documents |
-792: | `OTHER` | Uncategorized entities |
-793: 
-794: ### Deprecation Notices
-795: 
-796: The following properties emit `DeprecationWarning` and will be removed in a future version:
-797: 
-798: | Deprecated | Replacement |
-799: |------------|-------------|
-800: | `lake.storage` | Use `lake.get_document()`, `lake.list_documents()`, `lake.stats()` |
-801: | `lake.query_engine` | Use `lake.recall()` with `raw=True` for unprocessed search |
-802: 
-803: ---
-804: 
-805: ## License
-806: 
-807: Copyright (c) 2024-2025 Deyta. All rights reserved.
+713:         skill_name: str = "general_entities",
+714:         max_concurrent: int = 5,
+715:         deduplicate: bool = True,
+716:         infer_relationships: bool = True,
+717:         on_progress: Callable[[int, int], None] | None = None,
+718:     ) -> BatchResult:
+719:         """Store multiple documents with automatic optimization."""
+720: 
+721:     async def recall(
+722:         self,
+723:         query: str,
+724:         *,
+725:         namespace: str | UUID | None = None,
+726:         limit: int = 10,
+727:         mode: SearchMode = SearchMode.HYBRID,
+728:         min_similarity: float = 0.0,
+729:         agentic: bool = False,
+730:         raw: bool = False,  # Skip all LLM features
+731:     ) -> RecallResult:
+732:         """Recall memories relevant to a query."""
+733: 
+734:     async def forget(
+735:         self,
+736:         document_id: UUID,
+737:         *,
+738:         namespace: str | UUID | None = None,
+739:     ) -> bool:
+740:         """Remove a memory from the lake."""
+741: ```
+742: 
+743: #### Convenience Methods
+744: 
+745: ```python
+746:     async def ensure_namespace(
+747:         self,
+748:         name: str,
+749:         *,
+750:         description: str = "",
+751:     ) -> UUID:
+752:         """Get or create a namespace by name."""
+753: 
+754:     async def get_document(self, document_id: UUID) -> Document | None:
+755:         """Get a document by ID."""
+756: 
+757:     async def list_documents(
+758:         self,
+759:         *,
+760:         namespace: str | UUID | None = None,
+761:         limit: int = 100,
+762:     ) -> list[Document]:
+763:         """List documents in a namespace."""
+764: 
+765:     async def search_entities(
+766:         self,
+767:         query: str,
+768:         *,
+769:         namespace: str | UUID | None = None,
+770:         limit: int = 10,
+771:     ) -> list[Entity]:
+772:         """Search entities by query text using embedding similarity."""
+773: 
+774:     async def stats(
+775:         self,
+776:         *,
+777:         namespace: str | UUID | None = None,
+778:     ) -> Stats:
+779:         """Get document/chunk/entity/relationship counts."""
+780: 
+781:     async def list_entities(
+782:         self,
+783:         *,
+784:         namespace: str | UUID | None = None,
+785:         entity_type: str | None = None,
+786:         limit: int = 100,
+787:     ) -> list[Entity]:
+788:         """List entities in a namespace."""
+789: 
+790:     async def find_related_entities(
+791:         self,
+792:         entity_id: UUID,
+793:         *,
+794:         max_depth: int = 2,
+795:         limit: int = 20,
+796:     ) -> list[tuple[Entity, float]]:
+797:         """Find entities related to a given entity."""
+798: ```
+799: 
+800: ### Data Classes
+801: 
+802: ```python
+803: @dataclass
+804: class RememberResult:
+805:     """Result of a remember() operation."""
+806:     document_id: UUID
+807:     namespace_id: UUID
+808:     chunks_created: int
+809:     entities_extracted: int
+810:     relationships_created: int
+811:     metadata: dict[str, Any]
+812: 
+813: @dataclass
+814: class RecallResult:
+815:     """Result of a recall() operation."""
+816:     query: str
+817:     namespace_id: UUID
+818:     chunks: list[tuple[Chunk, float]]
+819:     entities: list[tuple[Entity, float]]
+820:     context_text: str
+821:     metadata: dict[str, Any]
+822: 
+823: @dataclass
+824: class BatchResult:
+825:     """Result of remember_batch() operation."""
+826:     total: int        # Total documents submitted
+827:     processed: int    # Successfully processed
+828:     skipped: int      # Skipped (duplicates)
+829:     failed: int       # Failed to process
+830:     chunks: int       # Total chunks created
+831:     entities: int     # Total entities extracted
+832:     relationships: int # Total relationships created
+833: 
+834: @dataclass
+835: class Stats:
+836:     """Namespace statistics from stats()."""
+837:     documents: int
+838:     chunks: int
+839:     entities: int
+840:     relationships: int
+841: ```
+842: 
+843: ### Search Modes
+844: 
+845: | Mode | Description |
+846: |------|-------------|
+847: | `VECTOR` | Semantic similarity search using embeddings |
+848: | `GRAPH` | Entity and relationship traversal |
+849: | `HYBRID` | Combined vector + graph + keyword with RRF fusion |
+850: | `ALL` | All sources (vector, graph, keyword) |
+851: 
+852: ### Entity Types
+853: 
+854: | Type | Description |
+855: |------|-------------|
+856: | `PERSON` | Individual people |
+857: | `ORGANIZATION` | Companies, institutions |
+858: | `LOCATION` | Places, addresses |
+859: | `CONCEPT` | Abstract ideas, theories |
+860: | `EVENT` | Occurrences, incidents |
+861: | `TECHNOLOGY` | Tools, platforms, languages |
+862: | `PRODUCT` | Goods, services |
+863: | `DOCUMENT` | Referenced documents |
+864: | `OTHER` | Uncategorized entities |
+865: 
+866: ### Deprecation Notices
+867: 
+868: The following properties emit `DeprecationWarning` and will be removed in a future version:
+869: 
+870: | Deprecated | Replacement |
+871: |------------|-------------|
+872: | `lake.storage` | Use `lake.get_document()`, `lake.list_documents()`, `lake.stats()` |
+873: | `lake.query_engine` | Use `lake.recall()` with `raw=True` for unprocessed search |
+874: 
+875: ---
+876: 
+877: ## License
+878: 
+879: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
 ## File: src/khora/api/routes/status.py
@@ -32607,347 +32538,6 @@ README.md
 51: 
 52: 
 53: __all__ = ["cli", "main"]
-````
-
-## File: src/khora/config/llm.py
-````python
-  1: """LiteLLM configuration for unified LLM access.
-  2: 
-  3: Provides a unified interface to all LLM providers (OpenAI, Anthropic, Google, etc.)
-  4: with fallbacks and routing. Based on the memoryman/potemkin pattern.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import os
- 10: from pathlib import Path
- 11: from typing import Any
- 12: 
- 13: import yaml
- 14: from loguru import logger
- 15: from pydantic import BaseModel, Field
- 16: 
- 17: 
- 18: class LiteLLMConfig(BaseModel):
- 19:     """Configuration for LiteLLM unified model access.
- 20: 
- 21:     This configuration provides a unified interface to all LLM providers
- 22:     including OpenAI, Anthropic, Google, and others through LiteLLM.
- 23:     """
- 24: 
- 25:     # Primary model configuration
- 26:     model: str = Field(
- 27:         default="gpt-4o-mini",
- 28:         description="Primary model to use (e.g., gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)",
- 29:     )
- 30:     api_key_env: str = Field(
- 31:         default="OPENAI_API_KEY",
- 32:         description="Environment variable name for API key",
- 33:     )
- 34: 
- 35:     # Model parameters
- 36:     temperature: float = Field(
- 37:         default=0.7,
- 38:         ge=0.0,
- 39:         le=2.0,
- 40:         description="Sampling temperature for generation",
- 41:     )
- 42:     max_tokens: int = Field(
- 43:         default=2000,
- 44:         gt=0,
- 45:         description="Maximum tokens to generate",
- 46:     )
- 47: 
- 48:     # Request configuration
- 49:     timeout: int = Field(
- 50:         default=30,
- 51:         gt=0,
- 52:         description="Request timeout in seconds",
- 53:     )
- 54:     max_retries: int = Field(
- 55:         default=3,
- 56:         ge=0,
- 57:         description="Maximum number of retries on failure",
- 58:     )
- 59:     retry_wait: int = Field(
- 60:         default=2,
- 61:         ge=0,
- 62:         description="Wait time between retries in seconds",
- 63:     )
- 64: 
- 65:     # Concurrency
- 66:     max_concurrent_llm_calls: int = Field(
- 67:         default=10,
- 68:         gt=0,
- 69:         description="Maximum concurrent LLM API calls",
- 70:     )
- 71: 
- 72:     # Router configuration for fallbacks
- 73:     model_list: list[dict[str, Any]] | None = Field(
- 74:         default=None,
- 75:         description="List of model configurations for router fallbacks",
- 76:     )
- 77:     router_settings: dict[str, Any] | None = Field(
- 78:         default=None,
- 79:         description="Router settings (routing_strategy, num_retries, etc.)",
- 80:     )
- 81: 
- 82:     # Embedding model configuration
- 83:     embedding_model: str = Field(
- 84:         default="text-embedding-3-small",
- 85:         description="Model to use for embeddings",
- 86:     )
- 87:     embedding_api_key_env: str | None = Field(
- 88:         default=None,
- 89:         description="Environment variable for embedding API key (defaults to api_key_env)",
- 90:     )
- 91:     embedding_dimension: int = Field(
- 92:         default=1536,
- 93:         gt=0,
- 94:         description="Embedding vector dimension",
- 95:     )
- 96:     embed_concurrency: int = Field(
- 97:         default=25,
- 98:         gt=0,
- 99:         description="Maximum concurrent embedding API calls",
-100:     )
-101: 
-102:     @classmethod
-103:     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
-104:         """Load configuration from a YAML file.
-105: 
-106:         Args:
-107:             path: Path to the YAML configuration file
-108: 
-109:         Returns:
-110:             LiteLLMConfig instance
-111:         """
-112:         path = Path(path)
-113:         with path.open() as f:
-114:             data = yaml.safe_load(f)
-115:         return cls.model_validate(data or {})
-116: 
-117:     @classmethod
-118:     def from_dict(cls, config: dict[str, Any]) -> LiteLLMConfig:
-119:         """Create configuration from a dictionary.
-120: 
-121:         Args:
-122:             config: Configuration dictionary (can be nested under 'llm' key)
-123: 
-124:         Returns:
-125:             LiteLLMConfig instance
-126:         """
-127:         # Handle nested configuration
-128:         if "llm" in config:
-129:             config = config["llm"]
-130: 
-131:         # Handle config_file path
-132:         if "config_file" in config:
-133:             return cls.from_yaml(config["config_file"])
-134: 
-135:         return cls.model_validate(config)
-136: 
-137:     def get_api_key(self) -> str:
-138:         """Get the API key from environment variable."""
-139:         key = os.environ.get(self.api_key_env, "")
-140:         if not key:
-141:             logger.warning(f"API key environment variable {self.api_key_env} not set")
-142:         return key
-143: 
-144:     def get_embedding_api_key(self) -> str:
-145:         """Get the embedding API key from environment variable."""
-146:         env_var = self.embedding_api_key_env or self.api_key_env
-147:         key = os.environ.get(env_var, "")
-148:         if not key:
-149:             logger.warning(f"Embedding API key environment variable {env_var} not set")
-150:         return key
-151: 
-152: 
-153: def configure_litellm(config: LiteLLMConfig | None = None) -> None:
-154:     """Configure LiteLLM with the given configuration.
-155: 
-156:     This function should be called once at application startup to configure
-157:     LiteLLM's global settings.
-158: 
-159:     Args:
-160:         config: LiteLLM configuration (uses defaults if None)
-161:     """
-162:     try:
-163:         import litellm
-164:     except ImportError:
-165:         logger.warning("litellm package not installed, skipping configuration")
-166:         return
-167: 
-168:     if config is None:
-169:         config = LiteLLMConfig()
-170: 
-171:     # Critical for compatibility across providers
-172:     litellm.drop_params = True
-173: 
-174:     # Disable verbose logging and telemetry
-175:     litellm.set_verbose = False
-176:     litellm.telemetry = False  # type: ignore[assignment]
-177: 
-178:     # Set up API keys from environment
-179:     api_key = config.get_api_key()
-180:     if api_key:
-181:         # LiteLLM uses provider-specific env vars, so we ensure they're set
-182:         if "openai" in config.model.lower() or config.model.startswith("gpt"):
-183:             os.environ.setdefault("OPENAI_API_KEY", api_key)
-184:         elif "claude" in config.model.lower() or "anthropic" in config.model.lower():
-185:             os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
-186:         elif "gemini" in config.model.lower():
-187:             os.environ.setdefault("GOOGLE_API_KEY", api_key)
-188: 
-189:     logger.info(f"LiteLLM configured with model: {config.model}")
-190: 
-191: 
-192: def create_litellm_router(config: LiteLLMConfig) -> Any:
-193:     """Create a LiteLLM router for fallback handling.
-194: 
-195:     Args:
-196:         config: LiteLLM configuration with model_list
-197: 
-198:     Returns:
-199:         LiteLLM Router instance
-200:     """
-201:     try:
-202:         from litellm import Router
-203:     except ImportError:
-204:         logger.warning("litellm package not installed")
-205:         return None
-206: 
-207:     if not config.model_list:
-208:         logger.warning("No model_list configured, router not created")
-209:         return None
-210: 
-211:     router_settings = config.router_settings or {
-212:         "routing_strategy": "simple-shuffle",
-213:         "num_retries": config.max_retries,
-214:     }
-215: 
-216:     router = Router(
-217:         model_list=config.model_list,
-218:         **router_settings,
-219:     )
-220: 
-221:     logger.info(f"LiteLLM router created with {len(config.model_list)} models")
-222:     return router
-223: 
-224: 
-225: async def acompletion(
-226:     prompt: str,
-227:     config: LiteLLMConfig | None = None,
-228:     *,
-229:     system_prompt: str | None = None,
-230:     **kwargs: Any,
-231: ) -> str:
-232:     """Async completion with LiteLLM.
-233: 
-234:     Args:
-235:         prompt: User prompt
-236:         config: LiteLLM configuration (uses defaults if None)
-237:         system_prompt: Optional system prompt
-238:         **kwargs: Additional arguments passed to litellm.acompletion
-239: 
-240:     Returns:
-241:         Generated text response
-242:     """
-243:     try:
-244:         import litellm
-245:     except ImportError:
-246:         raise RuntimeError("litellm package not installed. Run: pip install litellm")
-247: 
-248:     if config is None:
-249:         config = LiteLLMConfig()
-250: 
-251:     messages = []
-252:     if system_prompt:
-253:         messages.append({"role": "system", "content": system_prompt})
-254:     messages.append({"role": "user", "content": prompt})
-255: 
-256:     import time as _time
-257: 
-258:     _t0 = _time.perf_counter()
-259:     response = await litellm.acompletion(
-260:         model=config.model,
-261:         messages=messages,
-262:         temperature=kwargs.pop("temperature", config.temperature),
-263:         max_tokens=kwargs.pop("max_tokens", config.max_tokens),
-264:         timeout=kwargs.pop("timeout", config.timeout),
-265:         num_retries=kwargs.pop("num_retries", config.max_retries),
-266:         **kwargs,
-267:     )
-268:     _latency = (_time.perf_counter() - _t0) * 1000
-269: 
-270:     # Record telemetry
-271:     from khora.telemetry import get_collector
-272: 
-273:     usage = getattr(response, "usage", None)
-274:     get_collector().record_llm_call(
-275:         operation=kwargs.get("_telemetry_op", "completion"),
-276:         model=config.model,
-277:         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-278:         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-279:         total_tokens=getattr(usage, "total_tokens", 0) or 0,
-280:         latency_ms=_latency,
-281:     )
-282: 
-283:     return response.choices[0].message.content
-284: 
-285: 
-286: async def aembedding(
-287:     text: str | list[str],
-288:     config: LiteLLMConfig | None = None,
-289:     **kwargs: Any,
-290: ) -> list[list[float]]:
-291:     """Async embedding generation with LiteLLM.
-292: 
-293:     Args:
-294:         text: Text or list of texts to embed
-295:         config: LiteLLM configuration (uses defaults if None)
-296:         **kwargs: Additional arguments passed to litellm.aembedding
-297: 
-298:     Returns:
-299:         List of embedding vectors
-300:     """
-301:     try:
-302:         import litellm
-303:     except ImportError:
-304:         raise RuntimeError("litellm package not installed. Run: pip install litellm")
-305: 
-306:     if config is None:
-307:         config = LiteLLMConfig()
-308: 
-309:     # Ensure text is a list
-310:     if isinstance(text, str):
-311:         text = [text]
-312: 
-313:     import time as _time
-314: 
-315:     _t0 = _time.perf_counter()
-316:     response = await litellm.aembedding(
-317:         model=config.embedding_model,
-318:         input=text,
-319:         timeout=kwargs.pop("timeout", config.timeout),
-320:         **kwargs,
-321:     )
-322:     _latency = (_time.perf_counter() - _t0) * 1000
-323: 
-324:     # Record telemetry
-325:     from khora.telemetry import get_collector
-326: 
-327:     usage = getattr(response, "usage", None)
-328:     get_collector().record_llm_call(
-329:         operation="embedding",
-330:         model=config.embedding_model,
-331:         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-332:         total_tokens=getattr(usage, "total_tokens", 0) or 0,
-333:         latency_ms=_latency,
-334:         metadata={"batch_size": len(text)},
-335:     )
-336: 
-337:     return [item["embedding"] for item in response.data]
 ````
 
 ## File: src/khora/db/models.py
@@ -33729,6 +33319,919 @@ README.md
 775:         return f"<TimeEdgeLink(time_node_id={self.time_node_id!r}, edge_id={self.edge_id!r})>"
 ````
 
+## File: src/khora/engines/khora/engine.py
+````python
+  1: """Khora engine - temporal-first memory engine.
+  2: 
+  3: This engine is optimized for:
+  4: - Temporal queries with structured field filtering
+  5: - Fast and cost-efficient ingestion
+  6: - High-precision retrieval with bi-temporal model
+  7: - Multiple backends (pgvector, Weaviate)
+  8: """
+  9: 
+ 10: from __future__ import annotations
+ 11: 
+ 12: import asyncio
+ 13: import hashlib
+ 14: from collections.abc import Callable
+ 15: from datetime import UTC, datetime
+ 16: from typing import TYPE_CHECKING, Any
+ 17: from uuid import UUID
+ 18: 
+ 19: from loguru import logger
+ 20: 
+ 21: from khora.config import KhoraConfig, LiteLLMConfig
+ 22: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+ 23: from khora.extraction.embedders import LiteLLMEmbedder
+ 24: from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
+ 25: from khora.query import SearchMode
+ 26: from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+ 27: 
+ 28: from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
+ 29: 
+ 30: if TYPE_CHECKING:
+ 31:     pass
+ 32: 
+ 33: 
+ 34: class KhoraEngine:
+ 35:     """Khora engine - temporal-first, cost-efficient memory engine.
+ 36: 
+ 37:     Key features:
+ 38:     - Bi-temporal model: Track occurrence time vs ingestion time
+ 39:     - Hierarchical time graph: Year → Quarter → Month → Week → Day
+ 40:     - Structured field filtering: Filter on occurred_at, not just created_at
+ 41:     - Multiple backends: PostgreSQL+pgvector (default) and Weaviate (advanced)
+ 42:     - Cost optimization: Skeleton-based indexing with lazy expansion
+ 43: 
+ 44:     Usage:
+ 45:         # Default backend (pgvector)
+ 46:         engine = KhoraEngine(config)
+ 47:         await engine.connect()
+ 48: 
+ 49:         # Weaviate backend
+ 50:         engine = KhoraEngine(config, backend="weaviate", weaviate_url="http://localhost:8080")
+ 51:         await engine.connect()
+ 52:     """
+ 53: 
+ 54:     def __init__(
+ 55:         self,
+ 56:         config: KhoraConfig,
+ 57:         *,
+ 58:         storage_config: StorageConfig | None = None,
+ 59:         backend: str = "pgvector",
+ 60:         weaviate_url: str | None = None,
+ 61:     ) -> None:
+ 62:         """Initialize the Khora engine.
+ 63: 
+ 64:         Args:
+ 65:             config: KhoraConfig instance
+ 66:             storage_config: Storage configuration (deprecated, derived from config)
+ 67:             backend: Backend type ("pgvector" or "weaviate")
+ 68:             weaviate_url: Weaviate URL (required for weaviate backend)
+ 69:         """
+ 70:         self._config = config
+ 71:         self._backend_type = backend
+ 72:         self._weaviate_url = weaviate_url
+ 73: 
+ 74:         # Build storage config
+ 75:         if storage_config:
+ 76:             self._storage_config = storage_config
+ 77:         else:
+ 78:             postgresql_url = config.get_postgresql_url()
+ 79:             graph_config = config.get_graph_config()
+ 80: 
+ 81:             # Only use legacy neo4j_url fields when graph_config is explicitly set
+ 82:             # This prevents environment variables (KHORA_NEO4J_URL) from overriding
+ 83:             # the explicit graph_config=None setting
+ 84:             storage_kwargs: dict[str, Any] = {
+ 85:                 "postgresql_url": postgresql_url,
+ 86:                 "pgvector_url": postgresql_url,
+ 87:                 "pgvector_embedding_dimension": config.storage.embedding_dimension,
+ 88:                 "graph_config": graph_config,
+ 89:                 "vector_config": config.get_vector_config(),
+ 90:             }
+ 91:             if graph_config is not None:
+ 92:                 # Only pass legacy neo4j fields when graph is configured
+ 93:                 storage_kwargs["neo4j_url"] = config.get_neo4j_url()
+ 94:                 storage_kwargs["neo4j_user"] = config.get_neo4j_user()
+ 95:                 storage_kwargs["neo4j_password"] = config.get_neo4j_password()
+ 96:                 storage_kwargs["neo4j_database"] = config.get_neo4j_database()
+ 97: 
+ 98:             self._storage_config = StorageConfig(**storage_kwargs)
+ 99: 
+100:         self._storage: StorageCoordinator | None = None
+101:         self._temporal_store: TemporalVectorStore | None = None
+102:         self._embedder: LiteLLMEmbedder | None = None
+103:         self._connected = False
+104: 
+105:         # Default namespace for simple usage
+106:         self._default_namespace_id: UUID | None = None
+107: 
+108:     async def connect(self) -> None:
+109:         """Connect to all storage backends."""
+110:         if self._connected:
+111:             return
+112: 
+113:         logger.info(f"Connecting Khora engine (backend={self._backend_type})...")
+114: 
+115:         # Create and connect relational storage (for documents, namespaces, etc.)
+116:         self._storage = create_storage_coordinator(self._storage_config)
+117:         await self._storage.connect()
+118: 
+119:         # Create and connect temporal vector store
+120:         self._temporal_store = create_temporal_store(
+121:             self._backend_type,
+122:             self._config,
+123:             weaviate_url=self._weaviate_url,
+124:         )
+125:         await self._temporal_store.connect()
+126: 
+127:         # Create embedder
+128:         llm_config = LiteLLMConfig(
+129:             model=self._config.llm.model,
+130:             embedding_model=self._config.llm.embedding_model,
+131:             embedding_dimension=self._config.llm.embedding_dimension,
+132:             timeout=self._config.llm.timeout,
+133:             max_retries=self._config.llm.max_retries,
+134:         )
+135:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
+136: 
+137:         # Initialize telemetry
+138:         from khora.telemetry import init_telemetry
+139:         from khora.telemetry.config import TelemetryConfig
+140: 
+141:         telemetry_cfg = TelemetryConfig(
+142:             database_url=self._config.telemetry_database_url,
+143:             service_name=self._config.telemetry_service_name,
+144:         )
+145:         await init_telemetry(telemetry_cfg)
+146: 
+147:         self._connected = True
+148:         logger.info("Khora engine connected")
+149: 
+150:     async def disconnect(self) -> None:
+151:         """Disconnect from all storage backends."""
+152:         if not self._connected:
+153:             return
+154: 
+155:         logger.info("Disconnecting Khora engine...")
+156: 
+157:         # Shutdown telemetry
+158:         from khora.telemetry import shutdown_telemetry
+159: 
+160:         await shutdown_telemetry()
+161: 
+162:         if self._temporal_store:
+163:             await self._temporal_store.disconnect()
+164:             self._temporal_store = None
+165: 
+166:         if self._storage:
+167:             await self._storage.disconnect()
+168:             self._storage = None
+169: 
+170:         self._embedder = None
+171:         self._connected = False
+172: 
+173:         logger.info("Khora engine disconnected")
+174: 
+175:     def _get_storage(self) -> StorageCoordinator:
+176:         """Get storage coordinator (internal use)."""
+177:         if self._storage is None:
+178:             raise RuntimeError("Khora engine not connected. Call connect() first.")
+179:         return self._storage
+180: 
+181:     def _get_temporal_store(self) -> TemporalVectorStore:
+182:         """Get temporal store (internal use)."""
+183:         if self._temporal_store is None:
+184:             raise RuntimeError("Khora engine not connected. Call connect() first.")
+185:         return self._temporal_store
+186: 
+187:     def _get_embedder(self) -> LiteLLMEmbedder:
+188:         """Get embedder (internal use)."""
+189:         if self._embedder is None:
+190:             raise RuntimeError("Khora engine not connected. Call connect() first.")
+191:         return self._embedder
+192: 
+193:     # =========================================================================
+194:     # Core API: remember, recall, forget
+195:     # =========================================================================
+196: 
+197:     async def remember(
+198:         self,
+199:         content: str,
+200:         namespace_id: UUID,
+201:         *,
+202:         title: str = "",
+203:         source: str = "",
+204:         metadata: dict[str, Any] | None = None,
+205:         skill_name: str = "general_entities",
+206:         occurred_at: datetime | None = None,
+207:     ) -> RememberResult:
+208:         """Store content in the memory engine.
+209: 
+210:         Args:
+211:             content: Content to store
+212:             namespace_id: Namespace to store in
+213:             title: Document title
+214:             source: Document source
+215:             metadata: Additional metadata
+216:             skill_name: Extraction skill (default: general_entities)
+217:             occurred_at: When this content/event occurred (default: now)
+218: 
+219:         Returns:
+220:             RememberResult with document_id and counts
+221:         """
+222:         # Compute checksum
+223:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+224: 
+225:         storage = self._get_storage()
+226: 
+227:         # Check for duplicate
+228:         existing = await storage.get_document_by_checksum(namespace_id, checksum)
+229:         if existing:
+230:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
+231:             return RememberResult(
+232:                 document_id=existing.id,
+233:                 namespace_id=namespace_id,
+234:                 chunks_created=existing.chunk_count,
+235:                 entities_extracted=existing.entity_count,
+236:                 relationships_created=0,
+237:                 metadata={"duplicate": True, "status": str(existing.status)},
+238:             )
+239: 
+240:         # Create document in relational storage
+241:         doc_metadata = DocumentMetadata(
+242:             title=title,
+243:             source=source,
+244:             source_type="api",
+245:             checksum=checksum,
+246:             size_bytes=len(content.encode("utf-8")),
+247:             custom=metadata or {},
+248:         )
+249:         document = Document(
+250:             namespace_id=namespace_id,
+251:             content=content,
+252:             metadata=doc_metadata,
+253:         )
+254:         document = await storage.create_document(document)
+255: 
+256:         # Process through simplified pipeline (no full KG extraction)
+257:         chunks_created, entities_extracted, relationships_created = await self._process_document(
+258:             document,
+259:             skill_name=skill_name,
+260:             occurred_at=occurred_at or datetime.now(UTC),
+261:         )
+262: 
+263:         return RememberResult(
+264:             document_id=document.id,
+265:             namespace_id=namespace_id,
+266:             chunks_created=chunks_created,
+267:             entities_extracted=entities_extracted,
+268:             relationships_created=relationships_created,
+269:         )
+270: 
+271:     async def _process_document(
+272:         self,
+273:         document: Document,
+274:         *,
+275:         skill_name: str,
+276:         occurred_at: datetime,
+277:     ) -> tuple[int, int, int]:
+278:         """Process a document into chunks (simplified pipeline).
+279: 
+280:         Unlike GraphRAG, this focuses on fast chunking and embedding without
+281:         full entity extraction. Entity extraction can be done lazily on retrieval.
+282:         """
+283:         from khora.pipelines.chunking import create_chunker
+284:         from khora.pipelines.chunking.config import ChunkerConfig
+285: 
+286:         storage = self._get_storage()
+287:         embedder = self._get_embedder()
+288:         temporal_store = self._get_temporal_store()
+289: 
+290:         # Create chunker
+291:         chunker_config = ChunkerConfig(
+292:             strategy=self._config.pipeline.chunking_strategy,
+293:             chunk_size=self._config.pipeline.chunk_size,
+294:             chunk_overlap=self._config.pipeline.chunk_overlap,
+295:         )
+296:         chunker = create_chunker(chunker_config)
+297: 
+298:         # Chunk the document
+299:         raw_chunks = chunker.chunk(document.content)
+300: 
+301:         if not raw_chunks:
+302:             # Mark document as processed with 0 chunks
+303:             document.mark_completed(0, 0)
+304:             await storage.update_document(document)
+305:             return 0, 0, 0
+306: 
+307:         # Embed chunks in batch
+308:         chunk_texts = [c.content for c in raw_chunks]
+309:         embeddings = await embedder.embed_batch(chunk_texts)
+310: 
+311:         # Extract metadata for filtering (source_system, author, channel, etc.)
+312:         doc_metadata = document.metadata.custom if document.metadata else {}
+313: 
+314:         # Create temporal chunks
+315:         temporal_chunks = []
+316:         for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+317:             temporal_chunk = TemporalChunk(
+318:                 id=None,  # Will be assigned
+319:                 namespace_id=document.namespace_id,
+320:                 document_id=document.id,
+321:                 content=raw_chunk.content,
+322:                 embedding=embedding,
+323:                 occurred_at=occurred_at,
+324:                 created_at=datetime.now(UTC),
+325:                 source_system=doc_metadata.get("source_system"),
+326:                 author=doc_metadata.get("author"),
+327:                 channel=doc_metadata.get("channel"),
+328:                 tags=doc_metadata.get("tags", []),
+329:                 confidence=1.0,
+330:                 metadata={
+331:                     "chunk_index": i,
+332:                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+333:                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+334:                 },
+335:             )
+336:             temporal_chunks.append(temporal_chunk)
+337: 
+338:         # Store in temporal store
+339:         stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+340: 
+341:         # Update document status
+342:         document.mark_completed(len(stored_chunks), 0)
+343:         await storage.update_document(document)
+344: 
+345:         logger.debug(f"Processed document {document.id}: {len(stored_chunks)} chunks")
+346: 
+347:         return len(stored_chunks), 0, 0
+348: 
+349:     async def recall(
+350:         self,
+351:         query: str,
+352:         namespace_id: UUID,
+353:         *,
+354:         limit: int = 10,
+355:         mode: SearchMode = SearchMode.HYBRID,
+356:         min_similarity: float = 0.0,
+357:         agentic: bool = False,
+358:         raw: bool = False,
+359:         # Khora-specific parameters
+360:         temporal_filter: TemporalFilter | None = None,
+361:         temporal_reference: datetime | None = None,
+362:         hybrid_alpha: float | None = None,
+363:         filters: dict[str, Any] | None = None,
+364:     ) -> RecallResult:
+365:         """Recall memories relevant to a query.
+366: 
+367:         Args:
+368:             query: Query text
+369:             namespace_id: Namespace to search
+370:             limit: Maximum number of results
+371:             mode: Search mode (VECTOR, KEYWORD, HYBRID)
+372:             min_similarity: Minimum similarity threshold
+373:             agentic: Whether to use agentic mode
+374:             raw: Disable all LLM features
+375:             temporal_filter: Structured temporal filter
+376:             temporal_reference: Reference point for relative time (e.g., message timestamp)
+377:             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
+378:             filters: Additional structured filters (converted to TemporalFilter)
+379: 
+380:         Returns:
+381:             RecallResult with chunks and context
+382:         """
+383:         embedder = self._get_embedder()
+384:         temporal_store = self._get_temporal_store()
+385: 
+386:         # Embed the query
+387:         query_embedding = await embedder.embed(query)
+388: 
+389:         # Build temporal filter from filters dict if provided
+390:         if filters and not temporal_filter:
+391:             temporal_filter = self._build_temporal_filter_from_dict(filters)
+392: 
+393:         # Handle relative time references
+394:         if temporal_reference and temporal_filter:
+395:             temporal_filter = self._adjust_relative_time(temporal_filter, temporal_reference)
+396: 
+397:         # Determine hybrid alpha based on mode
+398:         if hybrid_alpha is None:
+399:             if mode == SearchMode.VECTOR:
+400:                 hybrid_alpha = 1.0  # Pure vector
+401:             elif mode == SearchMode.KEYWORD:
+402:                 hybrid_alpha = 0.0  # Pure BM25
+403:             else:  # HYBRID
+404:                 hybrid_alpha = 0.7  # Default blend
+405: 
+406:         # Perform search
+407:         results = await temporal_store.search(
+408:             namespace_id,
+409:             query_embedding,
+410:             limit=limit,
+411:             min_similarity=min_similarity,
+412:             temporal_filter=temporal_filter,
+413:             hybrid_alpha=hybrid_alpha,
+414:             query_text=query,
+415:         )
+416: 
+417:         # Build context text
+418:         context_parts = []
+419:         chunks_with_scores = []
+420:         for result in results:
+421:             context_parts.append(result.chunk.content)
+422:             # Convert TemporalChunk to a simple dict for RecallResult
+423:             chunk_dict = {
+424:                 "id": result.chunk.id,
+425:                 "content": result.chunk.content,
+426:                 "document_id": result.chunk.document_id,
+427:                 "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
+428:                 "metadata": result.chunk.metadata,
+429:             }
+430:             chunks_with_scores.append((chunk_dict, result.combined_score or result.similarity))
+431: 
+432:         context_text = "\n\n---\n\n".join(context_parts[:limit])
+433: 
+434:         return RecallResult(
+435:             query=query,
+436:             namespace_id=namespace_id,
+437:             chunks=chunks_with_scores,
+438:             entities=[],  # Khora engine focuses on chunks, not entities
+439:             context_text=context_text,
+440:             metadata={
+441:                 "backend": self._backend_type,
+442:                 "hybrid_alpha": hybrid_alpha,
+443:                 "temporal_filter": str(temporal_filter) if temporal_filter else None,
+444:             },
+445:         )
+446: 
+447:     def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> TemporalFilter:
+448:         """Convert a filters dict to a TemporalFilter.
+449: 
+450:         Example:
+451:             filters = {
+452:                 "occurred_at": {"gte": "2024-01-01", "lt": "2024-02-01"},
+453:                 "author": {"eq": "alice"},
+454:                 "source_system": {"eq": "slack"},
+455:             }
+456:         """
+457: 
+458:         tf = TemporalFilter()
+459: 
+460:         for key, value in filters.items():
+461:             if not isinstance(value, dict):
+462:                 value = {"eq": value}
+463: 
+464:             if key == "occurred_at":
+465:                 if "gte" in value:
+466:                     tf.occurred_after = self._parse_datetime(value["gte"])
+467:                 if "gt" in value:
+468:                     tf.occurred_after = self._parse_datetime(value["gt"])
+469:                 if "lt" in value:
+470:                     tf.occurred_before = self._parse_datetime(value["lt"])
+471:                 if "lte" in value:
+472:                     tf.occurred_before = self._parse_datetime(value["lte"])
+473:             elif key == "created_at":
+474:                 if "gte" in value:
+475:                     tf.created_after = self._parse_datetime(value["gte"])
+476:                 if "gt" in value:
+477:                     tf.created_after = self._parse_datetime(value["gt"])
+478:                 if "lt" in value:
+479:                     tf.created_before = self._parse_datetime(value["lt"])
+480:                 if "lte" in value:
+481:                     tf.created_before = self._parse_datetime(value["lte"])
+482:             elif key == "source_system":
+483:                 tf.source_system = value.get(
+484:                     "eq", value.get("in", [None])[0] if isinstance(value.get("in"), list) else None
+485:                 )
+486:             elif key == "author":
+487:                 tf.author = value.get("eq")
+488:             elif key == "channel":
+489:                 tf.channel = value.get("eq")
+490:             elif key == "tags":
+491:                 if "contains" in value:
+492:                     tf.tags = value["contains"]
+493:                 elif "eq" in value:
+494:                     tf.tags = [value["eq"]] if isinstance(value["eq"], str) else value["eq"]
+495:             else:
+496:                 tf.additional[key] = value
+497: 
+498:         return tf
+499: 
+500:     def _parse_datetime(self, value: Any) -> datetime:
+501:         """Parse a datetime value from various formats."""
+502:         if isinstance(value, datetime):
+503:             if value.tzinfo is None:
+504:                 return value.replace(tzinfo=UTC)
+505:             return value
+506:         if isinstance(value, str):
+507:             # Date only (try this first to avoid fromisoformat without tz)
+508:             try:
+509:                 return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+510:             except ValueError:
+511:                 pass
+512:             # ISO format with timezone
+513:             try:
+514:                 dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+515:                 if dt.tzinfo is None:
+516:                     dt = dt.replace(tzinfo=UTC)
+517:                 return dt
+518:             except ValueError:
+519:                 pass
+520:         raise ValueError(f"Cannot parse datetime: {value}")
+521: 
+522:     def _adjust_relative_time(
+523:         self,
+524:         temporal_filter: TemporalFilter,
+525:         reference: datetime,
+526:     ) -> TemporalFilter:
+527:         """Adjust temporal filter for relative time references.
+528: 
+529:         This enables queries like "yesterday" to be relative to the message timestamp,
+530:         not the current time.
+531:         """
+532:         # If filter already has absolute times, don't adjust
+533:         # This is a placeholder for more sophisticated relative time handling
+534:         return temporal_filter
+535: 
+536:     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
+537:         """Remove a memory from the engine."""
+538:         storage = self._get_storage()
+539:         temporal_store = self._get_temporal_store()
+540: 
+541:         # Verify namespace if provided
+542:         if namespace_id:
+543:             document = await storage.get_document(document_id)
+544:             if document and document.namespace_id != namespace_id:
+545:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
+546:                 return False
+547: 
+548:         # Delete from temporal store
+549:         ns_id = namespace_id or (await storage.get_document(document_id)).namespace_id
+550:         await temporal_store.delete_chunks_by_document(document_id, ns_id)
+551: 
+552:         # Delete from relational storage
+553:         return await storage.delete_document(document_id)
+554: 
+555:     async def remember_batch(
+556:         self,
+557:         documents: list[dict[str, Any]],
+558:         namespace_id: UUID,
+559:         *,
+560:         skill_name: str = "general_entities",
+561:         max_concurrent: int = 10,
+562:         deduplicate: bool = True,
+563:         infer_relationships: bool = False,  # Not used in Khora engine
+564:         on_progress: Callable[[int, int], None] | None = None,
+565:     ) -> BatchResult:
+566:         """Store multiple documents with automatic optimization.
+567: 
+568:         The Khora engine uses a simplified pipeline:
+569:         - Fast chunking without full entity extraction
+570:         - Batch embedding for cost efficiency
+571:         - Parallel processing with semaphore control
+572: 
+573:         Args:
+574:             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
+575:             namespace_id: Namespace to store documents in
+576:             skill_name: Extraction skill to use
+577:             max_concurrent: Maximum concurrent document processing (default 10)
+578:             deduplicate: Whether to skip duplicate documents
+579:             infer_relationships: Not used in Khora engine
+580:             on_progress: Callback for progress updates (completed, total)
+581: 
+582:         Returns:
+583:             BatchResult with processing statistics
+584:         """
+585:         if not documents:
+586:             return BatchResult(
+587:                 total=0,
+588:                 processed=0,
+589:                 skipped=0,
+590:                 failed=0,
+591:                 chunks=0,
+592:                 entities=0,
+593:                 relationships=0,
+594:             )
+595: 
+596:         storage = self._get_storage()
+597:         total = len(documents)
+598: 
+599:         # Track results with thread-safe counters
+600:         results: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "chunks": 0}
+601:         results_lock = asyncio.Lock()
+602:         progress_count = 0
+603:         progress_lock = asyncio.Lock()
+604: 
+605:         # For deduplication within the batch, track checksums we've started processing
+606:         checksums_in_flight: set[str] = set()
+607:         checksums_lock = asyncio.Lock()
+608: 
+609:         semaphore = asyncio.Semaphore(max_concurrent)
+610: 
+611:         async def process_document(doc_data: dict[str, Any]) -> None:
+612:             """Process a single document with semaphore control."""
+613:             nonlocal progress_count
+614: 
+615:             content = doc_data.get("content", "")
+616:             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+617: 
+618:             # Check for duplicate within the batch (before acquiring semaphore)
+619:             async with checksums_lock:
+620:                 if checksum in checksums_in_flight:
+621:                     async with results_lock:
+622:                         results["skipped"] += 1
+623:                     return
+624:                 checksums_in_flight.add(checksum)
+625: 
+626:             # Check for duplicate in storage (using efficient per-document lookup)
+627:             if deduplicate:
+628:                 existing = await storage.get_document_by_checksum(namespace_id, checksum)
+629:                 if existing:
+630:                     async with results_lock:
+631:                         results["skipped"] += 1
+632:                     # Update progress
+633:                     if on_progress:
+634:                         async with progress_lock:
+635:                             progress_count += 1
+636:                             on_progress(progress_count, total)
+637:                     return
+638: 
+639:             async with semaphore:
+640:                 try:
+641:                     # Extract occurred_at from metadata if present
+642:                     doc_metadata = doc_data.get("metadata", {})
+643:                     occurred_at = None
+644:                     if "occurred_at" in doc_metadata:
+645:                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+646: 
+647:                     result = await self.remember(
+648:                         content,
+649:                         namespace_id,
+650:                         title=doc_data.get("title", ""),
+651:                         source=doc_data.get("source", ""),
+652:                         metadata=doc_metadata,
+653:                         skill_name=skill_name,
+654:                         occurred_at=occurred_at,
+655:                     )
+656: 
+657:                     async with results_lock:
+658:                         if result.metadata.get("duplicate"):
+659:                             results["skipped"] += 1
+660:                         else:
+661:                             results["processed"] += 1
+662:                             results["chunks"] += result.chunks_created
+663: 
+664:                 except Exception as e:
+665:                     logger.error(f"Failed to process document: {e}")
+666:                     async with results_lock:
+667:                         results["failed"] += 1
+668: 
+669:             # Update progress
+670:             if on_progress:
+671:                 async with progress_lock:
+672:                     progress_count += 1
+673:                     on_progress(progress_count, total)
+674: 
+675:         # Process all documents concurrently with semaphore control
+676:         await asyncio.gather(*[process_document(doc) for doc in documents])
+677: 
+678:         return BatchResult(
+679:             total=total,
+680:             processed=results["processed"],
+681:             skipped=results["skipped"],
+682:             failed=results["failed"],
+683:             chunks=results["chunks"],
+684:             entities=0,
+685:             relationships=0,
+686:         )
+687: 
+688:     # =========================================================================
+689:     # Namespace Management
+690:     # =========================================================================
+691: 
+692:     async def get_or_create_default_namespace(self) -> UUID:
+693:         """Get or create a default namespace for simple usage."""
+694:         if self._default_namespace_id:
+695:             return self._default_namespace_id
+696: 
+697:         storage = self._get_storage()
+698: 
+699:         # Try to find existing default namespace
+700:         default_org = await storage.get_organization_by_slug("default")
+701:         if not default_org:
+702:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
+703: 
+704:         workspaces = await storage.list_workspaces(default_org.id)
+705:         if workspaces:
+706:             default_workspace = workspaces[0]
+707:         else:
+708:             default_workspace = await storage.create_workspace(
+709:                 Workspace(
+710:                     organization_id=default_org.id,
+711:                     name="Default",
+712:                     slug="default",
+713:                 )
+714:             )
+715: 
+716:         namespaces = await storage.list_namespaces(default_workspace.id)
+717:         if namespaces:
+718:             default_namespace = namespaces[0]
+719:         else:
+720:             default_namespace = await storage.create_namespace(
+721:                 MemoryNamespace(
+722:                     workspace_id=default_workspace.id,
+723:                     name="Default",
+724:                     slug="default",
+725:                 )
+726:             )
+727: 
+728:         self._default_namespace_id = default_namespace.id
+729:         return self._default_namespace_id
+730: 
+731:     async def create_namespace(
+732:         self,
+733:         name: str,
+734:         workspace_id: UUID,
+735:         *,
+736:         description: str = "",
+737:         config_overrides: dict[str, Any] | None = None,
+738:     ) -> MemoryNamespace:
+739:         """Create a new memory namespace."""
+740:         namespace = MemoryNamespace(
+741:             workspace_id=workspace_id,
+742:             name=name,
+743:             description=description,
+744:             config_overrides=config_overrides or {},
+745:         )
+746:         return await self._get_storage().create_namespace(namespace)
+747: 
+748:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+749:         """Get a namespace by ID."""
+750:         return await self._get_storage().get_namespace(namespace_id)
+751: 
+752:     async def ensure_namespace(
+753:         self,
+754:         name: str,
+755:         *,
+756:         description: str = "",
+757:     ) -> UUID:
+758:         """Get or create a namespace by name."""
+759:         storage = self._get_storage()
+760: 
+761:         # Ensure default org/workspace exists
+762:         await self.get_or_create_default_namespace()
+763: 
+764:         # Get default workspace
+765:         default_org = await storage.get_organization_by_slug("default")
+766:         if not default_org:
+767:             raise RuntimeError("Default organization not found")
+768: 
+769:         workspaces = await storage.list_workspaces(default_org.id)
+770:         if not workspaces:
+771:             raise RuntimeError("Default workspace not found")
+772: 
+773:         default_workspace = workspaces[0]
+774: 
+775:         # Try to find namespace by slug
+776:         slug = name.lower().replace(" ", "-")
+777:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
+778:         if existing_ns:
+779:             return existing_ns.id
+780: 
+781:         # Create new namespace
+782:         new_ns = await storage.create_namespace(
+783:             MemoryNamespace(
+784:                 workspace_id=default_workspace.id,
+785:                 name=name,
+786:                 slug=slug,
+787:                 description=description,
+788:             )
+789:         )
+790:         return new_ns.id
+791: 
+792:     # =========================================================================
+793:     # Entity Operations (minimal for Khora engine)
+794:     # =========================================================================
+795: 
+796:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+797:         """Get an entity by ID."""
+798:         return await self._get_storage().get_entity(entity_id)
+799: 
+800:     async def list_entities(
+801:         self,
+802:         namespace_id: UUID,
+803:         *,
+804:         entity_type: str | None = None,
+805:         limit: int = 100,
+806:     ) -> list[Entity]:
+807:         """List entities in a namespace."""
+808:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+809: 
+810:     async def find_related_entities(
+811:         self,
+812:         entity_id: UUID,
+813:         namespace_id: UUID,
+814:         *,
+815:         max_depth: int = 2,
+816:         limit: int = 20,
+817:     ) -> list[tuple[Entity, float]]:
+818:         """Find entities related to a given entity.
+819: 
+820:         Note: Khora engine focuses on temporal chunk retrieval.
+821:         For full entity graph traversal, use the GraphRAG engine.
+822:         """
+823:         # Return empty for now - Khora focuses on chunks
+824:         return []
+825: 
+826:     # =========================================================================
+827:     # Document Operations
+828:     # =========================================================================
+829: 
+830:     async def get_document(self, document_id: UUID) -> Document | None:
+831:         """Get a document by ID."""
+832:         return await self._get_storage().get_document(document_id)
+833: 
+834:     async def list_documents(
+835:         self,
+836:         namespace_id: UUID,
+837:         *,
+838:         limit: int = 100,
+839:     ) -> list[Document]:
+840:         """List documents in a namespace."""
+841:         return await self._get_storage().list_documents(namespace_id, limit=limit)
+842: 
+843:     async def search_entities(
+844:         self,
+845:         query: str,
+846:         namespace_id: UUID,
+847:         *,
+848:         limit: int = 10,
+849:     ) -> list[Entity]:
+850:         """Search entities by query text.
+851: 
+852:         Note: Khora engine focuses on temporal chunk retrieval.
+853:         For full entity search, use the GraphRAG engine.
+854:         """
+855:         # Return empty for now - Khora focuses on chunks
+856:         return []
+857: 
+858:     async def stats(self, namespace_id: UUID) -> Stats:
+859:         """Get document/chunk/entity/relationship counts for a namespace."""
+860:         storage = self._get_storage()
+861: 
+862:         # Get counts
+863:         try:
+864:             doc_count = await storage.count_documents(namespace_id)
+865:         except (AttributeError, NotImplementedError):
+866:             documents = await storage.list_documents(namespace_id, limit=0)
+867:             doc_count = len(documents) if documents else 0
+868: 
+869:         try:
+870:             chunk_count = await storage.count_chunks(namespace_id)
+871:         except (AttributeError, NotImplementedError):
+872:             chunk_count = 0  # Khora chunks are in temporal_store
+873: 
+874:         try:
+875:             entity_count = await storage.count_entities(namespace_id)
+876:         except (AttributeError, NotImplementedError):
+877:             entity_count = 0
+878: 
+879:         try:
+880:             relationship_count = await storage.count_relationships(namespace_id)
+881:         except (AttributeError, NotImplementedError):
+882:             relationship_count = 0
+883: 
+884:         return Stats(
+885:             documents=doc_count,
+886:             chunks=chunk_count,
+887:             entities=entity_count,
+888:             relationships=relationship_count,
+889:         )
+890: 
+891:     async def health_check(self) -> dict[str, Any]:
+892:         """Check health of all components."""
+893:         if not self._connected:
+894:             return {"status": "disconnected"}
+895: 
+896:         storage_health = await self._get_storage().health_check()
+897:         temporal_health = await self._get_temporal_store().health_check()
+898: 
+899:         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy"
+900: 
+901:         return {
+902:             "status": "healthy" if all_healthy else "degraded",
+903:             "storage": storage_health.summary,
+904:             "temporal_store": temporal_health,
+905:             "backend": self._backend_type,
+906:         }
+907: 
+908: 
+909: __all__ = ["KhoraEngine"]
+````
+
 ## File: src/khora/extraction/expansion/entity_index.py
 ````python
   1: """Fast entity lookup and candidate blocking for entity resolution.
@@ -34318,778 +34821,6 @@ README.md
 335:     )
 336: 
 337:     return new_entity, True
-````
-
-## File: src/khora/query/agentic.py
-````python
-  1: """Agentic search for Khora Memory Lake.
-  2: 
-  3: Provides a two-step exploration agent that:
-  4: 1. Performs initial search with comprehensive query understanding (single LLM call)
-  5: 2. Uses pre-computed follow-up queries from understanding for deeper exploration
-  6: 3. Explores multiple sources even if initial hits are concentrated
-  7: 4. Maintains full trace log of search reasoning
-  8: 
-  9: The key efficiency gain: ALL LLM extraction happens in the initial query understanding
- 10: call. Follow-up queries are pre-computed, eliminating additional LLM round-trips.
- 11: """
- 12: 
- 13: from __future__ import annotations
- 14: 
- 15: from collections.abc import AsyncGenerator
- 16: from dataclasses import dataclass, field
- 17: from datetime import datetime
- 18: from typing import TYPE_CHECKING, Any
- 19: from uuid import UUID
- 20: 
- 21: from loguru import logger
- 22: 
- 23: if TYPE_CHECKING:
- 24:     from khora.config.llm import LiteLLMConfig
- 25:     from khora.core.models import Chunk, Entity
- 26:     from khora.query.engine import HybridQueryEngine, QueryConfig, QueryResult
- 27:     from khora.query.understanding import UnderstandingResult
- 28: 
- 29: 
- 30: @dataclass
- 31: class SearchStep:
- 32:     """A single step in the agentic search process."""
- 33: 
- 34:     step_number: int
- 35:     query: str
- 36:     reasoning: str
- 37:     timestamp: datetime = field(default_factory=datetime.utcnow)
- 38: 
- 39:     # Results summary
- 40:     total_chunks: int = 0
- 41:     total_entities: int = 0
- 42:     sources_hit: dict[str, int] = field(default_factory=dict)
- 43: 
- 44:     # Search method contributions (counts for display)
- 45:     vector_hits: int = 0
- 46:     graph_hits: int = 0
- 47:     keyword_hits: int = 0
- 48: 
- 49:     # Full search method data with chunk IDs (for attribution)
- 50:     search_methods_data: dict[str, Any] = field(default_factory=dict)
- 51: 
- 52:     # Graph elements triggered
- 53:     entities_linked: list[str] = field(default_factory=list)
- 54:     relationships_traversed: list[tuple[str, str, str]] = field(default_factory=list)
- 55: 
- 56:     # Temporal info
- 57:     temporal_filter_applied: bool = False
- 58:     time_range: tuple[datetime | None, datetime | None] | None = None
- 59: 
- 60: 
- 61: @dataclass
- 62: class AgenticSearchTrace:
- 63:     """Full trace of an agentic search session."""
- 64: 
- 65:     session_id: str
- 66:     original_query: str
- 67:     started_at: datetime = field(default_factory=datetime.utcnow)
- 68:     completed_at: datetime | None = None
- 69: 
- 70:     # Query understanding (from single LLM call)
- 71:     understanding_reasoning: str = ""
- 72:     complexity_score: float = 0.0
- 73:     source_priority: dict[str, float] = field(default_factory=dict)
- 74: 
- 75:     steps: list[SearchStep] = field(default_factory=list)
- 76: 
- 77:     # Final summary
- 78:     summary: str = ""
- 79:     total_unique_chunks: int = 0
- 80:     total_unique_entities: int = 0
- 81:     sources_explored: dict[str, int] = field(default_factory=dict)
- 82: 
- 83:     def add_step(self, step: SearchStep) -> None:
- 84:         """Add a search step to the trace."""
- 85:         self.steps.append(step)
- 86: 
- 87:     def to_dict(self) -> dict[str, Any]:
- 88:         """Convert trace to dictionary for logging/storage."""
- 89:         return {
- 90:             "session_id": self.session_id,
- 91:             "original_query": self.original_query,
- 92:             "started_at": self.started_at.isoformat(),
- 93:             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
- 94:             "understanding_reasoning": self.understanding_reasoning,
- 95:             "complexity_score": self.complexity_score,
- 96:             "source_priority": self.source_priority,
- 97:             "steps": [
- 98:                 {
- 99:                     "step_number": s.step_number,
-100:                     "query": s.query,
-101:                     "reasoning": s.reasoning,
-102:                     "timestamp": s.timestamp.isoformat(),
-103:                     "total_chunks": s.total_chunks,
-104:                     "total_entities": s.total_entities,
-105:                     "sources_hit": s.sources_hit,
-106:                     "search_contributions": {
-107:                         "vector": s.vector_hits,
-108:                         "graph": s.graph_hits,
-109:                         "keyword": s.keyword_hits,
-110:                     },
-111:                     "entities_linked": s.entities_linked,
-112:                     "relationships_traversed": [
-113:                         {"from": f, "type": r, "to": t} for f, r, t in s.relationships_traversed
-114:                     ],
-115:                     "temporal_filter_applied": s.temporal_filter_applied,
-116:                     "time_range": (
-117:                         [
-118:                             s.time_range[0].isoformat() if s.time_range and s.time_range[0] else None,
-119:                             s.time_range[1].isoformat() if s.time_range and s.time_range[1] else None,
-120:                         ]
-121:                         if s.time_range
-122:                         else None
-123:                     ),
-124:                 }
-125:                 for s in self.steps
-126:             ],
-127:             "summary": self.summary,
-128:             "total_unique_chunks": self.total_unique_chunks,
-129:             "total_unique_entities": self.total_unique_entities,
-130:             "sources_explored": self.sources_explored,
-131:         }
-132: 
-133: 
-134: @dataclass
-135: class AgenticSearchStepResult:
-136:     """Yielded by search_stream for each completed step."""
-137: 
-138:     step_number: int
-139:     query: str
-140:     chunks: list[tuple[Chunk, float, str]]
-141:     entities: list[tuple[Entity, float]]
-142:     is_final: bool = False
-143:     metadata: dict[str, Any] = field(default_factory=dict)
-144: 
-145: 
-146: @dataclass
-147: class AgenticSearchResult:
-148:     """Result from agentic search."""
-149: 
-150:     # Combined results from all steps
-151:     chunks: list[tuple[Chunk, float, str]] = field(default_factory=list)
-152:     entities: list[tuple[Entity, float]] = field(default_factory=list)
-153: 
-154:     # Summary (generated without additional LLM call if possible)
-155:     summary: str = ""
-156: 
-157:     # Full trace
-158:     trace: AgenticSearchTrace | None = None
-159: 
-160:     # Query understanding (from single LLM call)
-161:     understanding: UnderstandingResult | None = None
-162: 
-163:     # Metadata
-164:     metadata: dict[str, Any] = field(default_factory=dict)
-165: 
-166: 
-167: class AgenticSearchAgent:
-168:     """Two-step exploration agent for deep search.
-169: 
-170:     EFFICIENCY: All LLM extraction happens in the initial query understanding.
-171:     The understanding result includes:
-172:     - Pre-computed follow-up queries with reasoning
-173:     - Source priority recommendations
-174:     - Search strategy (weights for vector/graph/keyword)
-175:     - Complexity assessment
-176: 
-177:     This eliminates additional LLM calls during exploration.
-178:     """
-179: 
-180:     def __init__(
-181:         self,
-182:         engine: HybridQueryEngine,
-183:         llm_config: LiteLLMConfig | None = None,
-184:     ) -> None:
-185:         """Initialize the agentic search agent.
-186: 
-187:         Args:
-188:             engine: The hybrid query engine to use
-189:             llm_config: LLM configuration (used by engine's query understanding)
-190:         """
-191:         self._engine = engine
-192:         self._llm_config = llm_config
-193: 
-194:     async def search(
-195:         self,
-196:         query: str,
-197:         namespace_id: UUID,
-198:         config: QueryConfig | None = None,
-199:         max_steps: int = 3,
-200:     ) -> AgenticSearchResult:
-201:         """Perform agentic search with multi-step exploration.
-202: 
-203:         The search process:
-204:         1. Initial query with comprehensive understanding (single LLM call)
-205:         2. Execute pre-computed follow-up queries (no additional LLM calls)
-206:         3. Merge and rank all results
-207: 
-208:         Args:
-209:             query: Original search query
-210:             namespace_id: Namespace to search in
-211:             config: Query configuration
-212:             max_steps: Maximum exploration steps (default 3)
-213: 
-214:         Returns:
-215:             AgenticSearchResult with combined results and trace
-216:         """
-217:         import uuid
-218: 
-219:         trace = AgenticSearchTrace(
-220:             session_id=str(uuid.uuid4()),
-221:             original_query=query,
-222:         )
-223: 
-224:         all_chunks: dict[str, tuple[Chunk, float, str]] = {}
-225:         all_entities: dict[str, tuple[Entity, float]] = {}
-226:         understanding: UnderstandingResult | None = None
-227: 
-228:         # Step 1: Initial search (this triggers comprehensive query understanding)
-229:         logger.info(f"Agentic search step 1: '{query[:50]}...'")
-230: 
-231:         step1_result = await self._engine.query(
-232:             query,
-233:             namespace_id,
-234:             config=config,
-235:             _lightweight_understanding=False,  # Full prompt for agentic step 1 (needs follow-ups)
-236:         )
-237: 
-238:         # Extract understanding from result metadata
-239:         if "understanding" in step1_result.metadata:
-240:             understanding_data = step1_result.metadata["understanding"]
-241:             trace.understanding_reasoning = understanding_data.get("reasoning", "")
-242:             trace.complexity_score = understanding_data.get("complexity_score", 0.5)
-243:             trace.source_priority = understanding_data.get("source_priority", {})
-244: 
-245:         # Analyze and record step 1
-246:         step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
-247:         trace.add_step(step1)
-248: 
-249:         # Collect results (batch fetch document sources for all chunks)
-250:         chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
-251:         for chunk, score in step1_result.chunks:
-252:             source = chunk_sources.get(str(chunk.id), "unknown")
-253:             all_chunks[str(chunk.id)] = (chunk, score, source)
-254: 
-255:         for entity, score in step1_result.entities:
-256:             all_entities[str(entity.id)] = (entity, score)
-257: 
-258:         # Step 2+: Execute pre-computed follow-up queries
-259:         if max_steps >= 2 and "understanding" in step1_result.metadata:
-260:             follow_up_queries = step1_result.metadata["understanding"].get("follow_up_queries", [])
-261: 
-262:             # Also check for queries generated from result analysis
-263:             additional_follow_ups = self._generate_additional_follow_ups(step1_result, step1)
-264:             all_follow_ups = list(follow_up_queries) + additional_follow_ups
-265: 
-266:             for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
-267:                 if isinstance(follow_up, dict):
-268:                     fq_query = follow_up.get("query", "")
-269:                     fq_reasoning = follow_up.get("reasoning", f"Follow-up query {i+1}")
-270:                 else:
-271:                     fq_query = str(follow_up)
-272:                     fq_reasoning = f"Pre-computed follow-up query {i+1}"
-273: 
-274:                 if not fq_query:
-275:                     continue
-276: 
-277:                 logger.info(f"Agentic search step {i+2}: '{fq_query[:50]}...'")
-278: 
-279:                 step_result = await self._engine.query(
-280:                     fq_query,
-281:                     namespace_id,
-282:                     config=config,
-283:                 )
-284: 
-285:                 step = self._analyze_results(step_result, fq_query, i + 2, fq_reasoning)
-286:                 trace.add_step(step)
-287: 
-288:                 # Collect new results (keep higher scores) - batch fetch sources
-289:                 step_chunk_sources = await self._get_chunk_sources_batch(step_result.chunks)
-290:                 for chunk, score in step_result.chunks:
-291:                     chunk_id = str(chunk.id)
-292:                     if chunk_id not in all_chunks or all_chunks[chunk_id][1] < score:
-293:                         source = step_chunk_sources.get(chunk_id, "unknown")
-294:                         all_chunks[chunk_id] = (chunk, score, source)
-295: 
-296:                 for entity, score in step_result.entities:
-297:                     entity_id = str(entity.id)
-298:                     if entity_id not in all_entities or all_entities[entity_id][1] < score:
-299:                         all_entities[entity_id] = (entity, score)
-300: 
-301:         # Generate summary (without additional LLM call)
-302:         summary = self._generate_summary_fast(query, all_chunks, all_entities, trace)
-303: 
-304:         # Finalize trace
-305:         trace.completed_at = datetime.utcnow()
-306:         trace.summary = summary
-307:         trace.total_unique_chunks = len(all_chunks)
-308:         trace.total_unique_entities = len(all_entities)
-309: 
-310:         # Count sources
-311:         for _, (_, _, source) in all_chunks.items():
-312:             trace.sources_explored[source] = trace.sources_explored.get(source, 0) + 1
-313: 
-314:         # Sort results by score
-315:         sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
-316:         sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
-317: 
-318:         # Aggregate search_methods from all steps for attribution
-319:         aggregated_search_methods = self._aggregate_search_methods(trace.steps)
-320: 
-321:         return AgenticSearchResult(
-322:             chunks=sorted_chunks,
-323:             entities=sorted_entities,
-324:             summary=summary,
-325:             trace=trace,
-326:             understanding=understanding,
-327:             metadata={
-328:                 "original_query": query,
-329:                 "total_steps": len(trace.steps),
-330:                 "sources_explored": trace.sources_explored,
-331:                 "complexity_score": trace.complexity_score,
-332:                 "search_methods": aggregated_search_methods,
-333:             },
-334:         )
-335: 
-336:     async def search_speculative(
-337:         self,
-338:         query: str,
-339:         namespace_id: UUID,
-340:         config: QueryConfig | None = None,
-341:         max_steps: int = 3,
-342:     ) -> AgenticSearchResult:
-343:         """Perform agentic search with speculative follow-up execution.
-344: 
-345:         Executes the main query, then runs all follow-up queries in parallel
-346:         (instead of sequentially), reducing total latency.
-347: 
-348:         Args:
-349:             query: Original search query
-350:             namespace_id: Namespace to search in
-351:             config: Query configuration
-352:             max_steps: Maximum exploration steps
-353: 
-354:         Returns:
-355:             AgenticSearchResult with combined results
-356:         """
-357:         import asyncio
-358:         import uuid as uuid_mod
-359: 
-360:         trace = AgenticSearchTrace(
-361:             session_id=str(uuid_mod.uuid4()),
-362:             original_query=query,
-363:         )
-364: 
-365:         all_chunks: dict[str, tuple[Chunk, float, str]] = {}
-366:         all_entities: dict[str, tuple[Entity, float]] = {}
-367: 
-368:         # Step 1: Initial search (triggers query understanding)
-369:         logger.info(f"Speculative search step 1: '{query[:50]}...'")
-370:         step1_result = await self._engine.query(query, namespace_id, config=config, _lightweight_understanding=False)
-371: 
-372:         if "understanding" in step1_result.metadata:
-373:             ud = step1_result.metadata["understanding"]
-374:             trace.understanding_reasoning = ud.get("reasoning", "")
-375:             trace.complexity_score = ud.get("complexity_score", 0.5)
-376:             trace.source_priority = ud.get("source_priority", {})
-377: 
-378:         step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
-379:         trace.add_step(step1)
-380: 
-381:         chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
-382:         for chunk, score in step1_result.chunks:
-383:             all_chunks[str(chunk.id)] = (chunk, score, chunk_sources.get(str(chunk.id), "unknown"))
-384:         for entity, score in step1_result.entities:
-385:             all_entities[str(entity.id)] = (entity, score)
-386: 
-387:         # Collect all follow-up queries
-388:         follow_up_queries = step1_result.metadata.get("understanding", {}).get("follow_up_queries", [])
-389:         additional = self._generate_additional_follow_ups(step1_result, step1)
-390:         all_follow_ups = list(follow_up_queries) + additional
-391:         follow_ups_to_run = all_follow_ups[: max_steps - 1]
-392: 
-393:         if follow_ups_to_run:
-394:             # Execute ALL follow-ups in parallel
-395:             async def run_follow_up(i: int, follow_up: Any) -> tuple[int, QueryResult, str]:
-396:                 fq_query = follow_up.get("query", "") if isinstance(follow_up, dict) else str(follow_up)
-397:                 fq_reasoning = (
-398:                     follow_up.get("reasoning", f"Follow-up {i + 2}")
-399:                     if isinstance(follow_up, dict)
-400:                     else f"Follow-up {i + 2}"
-401:                 )
-402:                 logger.info(f"Speculative search step {i + 2}: '{fq_query[:50]}...'")
-403:                 result = await self._engine.query(fq_query, namespace_id, config=config)
-404:                 return i, result, fq_reasoning
-405: 
-406:             tasks = [
-407:                 run_follow_up(i, fu)
-408:                 for i, fu in enumerate(follow_ups_to_run)
-409:                 if (fu.get("query", "") if isinstance(fu, dict) else str(fu))
-410:             ]
-411: 
-412:             results = await asyncio.gather(*tasks, return_exceptions=True)
-413: 
-414:             for r in results:
-415:                 if isinstance(r, Exception):
-416:                     logger.warning(f"Speculative follow-up failed: {r}")
-417:                     continue
-418:                 i, step_result, reasoning = r
-419:                 fq_query = follow_ups_to_run[i]
-420:                 fq_query_text = fq_query.get("query", "") if isinstance(fq_query, dict) else str(fq_query)
-421: 
-422:                 step = self._analyze_results(step_result, fq_query_text, i + 2, reasoning)
-423:                 trace.add_step(step)
-424: 
-425:                 step_sources = await self._get_chunk_sources_batch(step_result.chunks)
-426:                 for chunk, score in step_result.chunks:
-427:                     cid = str(chunk.id)
-428:                     if cid not in all_chunks or all_chunks[cid][1] < score:
-429:                         all_chunks[cid] = (chunk, score, step_sources.get(cid, "unknown"))
-430:                 for entity, score in step_result.entities:
-431:                     eid = str(entity.id)
-432:                     if eid not in all_entities or all_entities[eid][1] < score:
-433:                         all_entities[eid] = (entity, score)
-434: 
-435:         summary = self._generate_summary_fast(query, all_chunks, all_entities, trace)
-436:         trace.completed_at = datetime.utcnow()
-437:         trace.summary = summary
-438:         trace.total_unique_chunks = len(all_chunks)
-439:         trace.total_unique_entities = len(all_entities)
-440: 
-441:         for _, (_, _, source) in all_chunks.items():
-442:             trace.sources_explored[source] = trace.sources_explored.get(source, 0) + 1
-443: 
-444:         sorted_chunks = sorted(all_chunks.values(), key=lambda x: x[1], reverse=True)
-445:         sorted_entities = sorted(all_entities.values(), key=lambda x: x[1], reverse=True)
-446:         aggregated_search_methods = self._aggregate_search_methods(trace.steps)
-447: 
-448:         return AgenticSearchResult(
-449:             chunks=sorted_chunks,
-450:             entities=sorted_entities,
-451:             summary=summary,
-452:             trace=trace,
-453:             understanding=None,
-454:             metadata={
-455:                 "original_query": query,
-456:                 "total_steps": len(trace.steps),
-457:                 "sources_explored": trace.sources_explored,
-458:                 "complexity_score": trace.complexity_score,
-459:                 "search_methods": aggregated_search_methods,
-460:                 "speculative": True,
-461:             },
-462:         )
-463: 
-464:     async def search_stream(
-465:         self,
-466:         query: str,
-467:         namespace_id: UUID,
-468:         config: QueryConfig | None = None,
-469:         max_steps: int = 3,
-470:     ) -> AsyncGenerator[AgenticSearchStepResult]:
-471:         """Stream search results as each step completes.
-472: 
-473:         Yields partial results after each exploration step,
-474:         allowing callers to display incremental progress.
-475: 
-476:         Args:
-477:             query: Original search query
-478:             namespace_id: Namespace to search in
-479:             config: Query configuration
-480:             max_steps: Maximum exploration steps
-481: 
-482:         Yields:
-483:             AgenticSearchStepResult for each completed step
-484:         """
-485:         all_chunks: dict[str, tuple[Chunk, float, str]] = {}
-486:         all_entities: dict[str, tuple[Entity, float]] = {}
-487: 
-488:         # Step 1: Initial search
-489:         logger.info(f"Agentic stream step 1: '{query[:50]}...'")
-490:         step1_result = await self._engine.query(query, namespace_id, config=config, _lightweight_understanding=False)
-491: 
-492:         chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
-493:         for chunk, score in step1_result.chunks:
-494:             source = chunk_sources.get(str(chunk.id), "unknown")
-495:             all_chunks[str(chunk.id)] = (chunk, score, source)
-496:         for entity, score in step1_result.entities:
-497:             all_entities[str(entity.id)] = (entity, score)
-498: 
-499:         is_last = max_steps <= 1
-500:         yield AgenticSearchStepResult(
-501:             step_number=1,
-502:             query=query,
-503:             chunks=sorted(all_chunks.values(), key=lambda x: x[1], reverse=True),
-504:             entities=sorted(all_entities.values(), key=lambda x: x[1], reverse=True),
-505:             is_final=is_last,
-506:         )
-507: 
-508:         if is_last:
-509:             return
-510: 
-511:         # Follow-up steps
-512:         follow_up_queries = step1_result.metadata.get("understanding", {}).get("follow_up_queries", [])
-513:         step1_analysis = self._analyze_results(step1_result, query, 1, "Initial search")
-514:         additional = self._generate_additional_follow_ups(step1_result, step1_analysis)
-515:         all_follow_ups = list(follow_up_queries) + additional
-516: 
-517:         for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
-518:             fq_query = follow_up.get("query", "") if isinstance(follow_up, dict) else str(follow_up)
-519:             if not fq_query:
-520:                 continue
-521: 
-522:             logger.info(f"Agentic stream step {i + 2}: '{fq_query[:50]}...'")
-523:             step_result = await self._engine.query(fq_query, namespace_id, config=config)
-524: 
-525:             step_sources = await self._get_chunk_sources_batch(step_result.chunks)
-526:             for chunk, score in step_result.chunks:
-527:                 cid = str(chunk.id)
-528:                 if cid not in all_chunks or all_chunks[cid][1] < score:
-529:                     all_chunks[cid] = (chunk, score, step_sources.get(cid, "unknown"))
-530:             for entity, score in step_result.entities:
-531:                 eid = str(entity.id)
-532:                 if eid not in all_entities or all_entities[eid][1] < score:
-533:                     all_entities[eid] = (entity, score)
-534: 
-535:             is_last = i + 2 >= max_steps or i + 1 >= len(all_follow_ups[: max_steps - 1])
-536:             yield AgenticSearchStepResult(
-537:                 step_number=i + 2,
-538:                 query=fq_query,
-539:                 chunks=sorted(all_chunks.values(), key=lambda x: x[1], reverse=True),
-540:                 entities=sorted(all_entities.values(), key=lambda x: x[1], reverse=True),
-541:                 is_final=is_last,
-542:             )
-543: 
-544:     def _analyze_results(
-545:         self,
-546:         result: QueryResult,
-547:         query: str,
-548:         step_number: int,
-549:         reasoning: str,
-550:     ) -> SearchStep:
-551:         """Analyze search results and create a step record."""
-552:         step = SearchStep(
-553:             step_number=step_number,
-554:             query=query,
-555:             reasoning=reasoning,
-556:         )
-557: 
-558:         step.total_chunks = len(result.chunks)
-559:         step.total_entities = len(result.entities)
-560: 
-561:         # Extract search method contributions
-562:         if result.search_contributions:
-563:             step.vector_hits = result.search_contributions.vector.chunk_count
-564:             step.graph_hits = result.search_contributions.graph.chunk_count
-565:             step.keyword_hits = result.search_contributions.keyword.chunk_count
-566:             # Store full search methods data for attribution
-567:             step.search_methods_data = result.search_contributions.to_dict()
-568: 
-569:         # Extract graph info
-570:         if result.graph_info:
-571:             step.entities_linked = result.graph_info.entities_linked
-572:             step.relationships_traversed = result.graph_info.relationships_traversed
-573: 
-574:         # Extract temporal info
-575:         if result.temporal_info:
-576:             step.temporal_filter_applied = result.temporal_info.filter_applied
-577:             if result.temporal_info.time_start or result.temporal_info.time_end:
-578:                 step.time_range = (result.temporal_info.time_start, result.temporal_info.time_end)
-579: 
-580:         return step
-581: 
-582:     def _generate_additional_follow_ups(
-583:         self,
-584:         result: QueryResult,
-585:         analysis: SearchStep,
-586:     ) -> list[dict[str, Any]]:
-587:         """Generate additional follow-up queries based on result analysis.
-588: 
-589:         These are computed locally without LLM calls, based on:
-590:         - Under-represented sources
-591:         - High-scoring entities found
-592:         """
-593:         follow_ups = []
-594: 
-595:         # Check for source imbalance
-596:         if analysis.sources_hit:
-597:             total_hits = sum(analysis.sources_hit.values())
-598:             if total_hits > 0:
-599:                 dominant_source = max(analysis.sources_hit.items(), key=lambda x: x[1])
-600:                 if dominant_source[1] / total_hits > 0.8:
-601:                     # One source dominates - target others
-602:                     for source in ["linear", "notion", "attio", "gong"]:
-603:                         if source != dominant_source[0] and analysis.sources_hit.get(source, 0) == 0:
-604:                             follow_ups.append(
-605:                                 {
-606:                                     "query": f"{analysis.query} {source}",
-607:                                     "reasoning": f"Targeting under-represented source: {source}",
-608:                                 }
-609:                             )
-610:                             break
-611: 
-612:         # Explore top entities
-613:         if result.entities and len(result.entities) > 0:
-614:             top_entity = result.entities[0][0]
-615:             follow_ups.append(
-616:                 {
-617:                     "query": f"{top_entity.name} context details",
-618:                     "reasoning": f"Exploring top entity: {top_entity.name}",
-619:                 }
-620:             )
-621: 
-622:         return follow_ups[:2]  # Limit to 2 additional
-623: 
-624:     async def _get_chunk_source(self, chunk: Chunk, namespace_id: UUID) -> str:
-625:         """Get the source system for a chunk."""
-626:         try:
-627:             doc = await self._engine._storage.get_document(chunk.document_id)
-628:             if doc and doc.metadata:
-629:                 source = doc.metadata.custom.get("source_system", "")
-630:                 if not source and doc.metadata.source:
-631:                     source = doc.metadata.source.split("/")[0]
-632:                 return source or "unknown"
-633:         except Exception:
-634:             pass
-635:         return "unknown"
-636: 
-637:     async def _get_chunk_sources_batch(self, chunks: list[tuple[Chunk, float]]) -> dict[str, str]:
-638:         """Get source systems for multiple chunks in a single batch query.
-639: 
-640:         Args:
-641:             chunks: List of (chunk, score) tuples
-642: 
-643:         Returns:
-644:             Dictionary mapping chunk ID to source string
-645:         """
-646:         if not chunks:
-647:             return {}
-648: 
-649:         # Collect unique document IDs
-650:         doc_ids = list({chunk.document_id for chunk, _ in chunks})
-651: 
-652:         # Batch fetch all documents
-653:         docs_map = await self._engine._storage.get_documents_batch(doc_ids)
-654: 
-655:         # Build chunk_id -> source mapping
-656:         sources: dict[str, str] = {}
-657:         for chunk, _ in chunks:
-658:             doc = docs_map.get(chunk.document_id)
-659:             if doc and doc.metadata:
-660:                 source = doc.metadata.custom.get("source_system", "")
-661:                 if not source and doc.metadata.source:
-662:                     source = doc.metadata.source.split("/")[0]
-663:                 sources[str(chunk.id)] = source or "unknown"
-664:             else:
-665:                 sources[str(chunk.id)] = "unknown"
-666: 
-667:         return sources
-668: 
-669:     def _aggregate_search_methods(self, steps: list[SearchStep]) -> dict[str, Any]:
-670:         """Aggregate search methods data from all steps for attribution.
-671: 
-672:         Combines the chunk/entity IDs from all steps so results can be
-673:         attributed to their source search method(s).
-674:         """
-675:         # Aggregate all chunk and entity IDs by method
-676:         all_vector_chunks: set[str] = set()
-677:         all_graph_chunks: set[str] = set()
-678:         all_keyword_chunks: set[str] = set()
-679:         all_vector_entities: set[str] = set()
-680:         all_graph_entities: set[str] = set()
-681: 
-682:         for step in steps:
-683:             if not step.search_methods_data:
-684:                 continue
-685: 
-686:             by_method = step.search_methods_data.get("by_method", {})
-687: 
-688:             # Collect chunk IDs from each method
-689:             vector_data = by_method.get("vector", {})
-690:             all_vector_chunks.update(vector_data.get("chunks", {}).get("ids", []))
-691:             all_vector_entities.update(vector_data.get("entities", {}).get("ids", []))
-692: 
-693:             graph_data = by_method.get("graph", {})
-694:             all_graph_chunks.update(graph_data.get("chunks", {}).get("ids", []))
-695:             all_graph_entities.update(graph_data.get("entities", {}).get("ids", []))
-696: 
-697:             keyword_data = by_method.get("keyword", {})
-698:             all_keyword_chunks.update(keyword_data.get("chunks", {}).get("ids", []))
-699: 
-700:         # Compute overlaps
-701:         vector_graph_overlap = all_vector_chunks & all_graph_chunks
-702:         vector_keyword_overlap = all_vector_chunks & all_keyword_chunks
-703:         graph_keyword_overlap = all_graph_chunks & all_keyword_chunks
-704:         all_methods_overlap = all_vector_chunks & all_graph_chunks & all_keyword_chunks
-705: 
-706:         vector_only = all_vector_chunks - all_graph_chunks - all_keyword_chunks
-707:         graph_only = all_graph_chunks - all_vector_chunks - all_keyword_chunks
-708:         keyword_only = all_keyword_chunks - all_vector_chunks - all_graph_chunks
-709: 
-710:         vector_graph_entity_overlap = all_vector_entities & all_graph_entities
-711:         vector_only_entities = all_vector_entities - all_graph_entities
-712:         graph_only_entities = all_graph_entities - all_vector_entities
-713: 
-714:         return {
-715:             "chunk_overlap": {
-716:                 "vector_only": {"count": len(vector_only), "ids": list(vector_only)},
-717:                 "graph_only": {"count": len(graph_only), "ids": list(graph_only)},
-718:                 "keyword_only": {"count": len(keyword_only), "ids": list(keyword_only)},
-719:                 "vector_and_graph": {"count": len(vector_graph_overlap), "ids": list(vector_graph_overlap)},
-720:                 "vector_and_keyword": {"count": len(vector_keyword_overlap), "ids": list(vector_keyword_overlap)},
-721:                 "graph_and_keyword": {"count": len(graph_keyword_overlap), "ids": list(graph_keyword_overlap)},
-722:                 "all_three_methods": {"count": len(all_methods_overlap), "ids": list(all_methods_overlap)},
-723:             },
-724:             "entity_overlap": {
-725:                 "vector_only": {"count": len(vector_only_entities), "ids": list(vector_only_entities)},
-726:                 "graph_only": {"count": len(graph_only_entities), "ids": list(graph_only_entities)},
-727:                 "vector_and_graph": {
-728:                     "count": len(vector_graph_entity_overlap),
-729:                     "ids": list(vector_graph_entity_overlap),
-730:                 },
-731:             },
-732:         }
-733: 
-734:     def _generate_summary_fast(
-735:         self,
-736:         query: str,
-737:         chunks: dict[str, tuple[Chunk, float, str]],
-738:         entities: dict[str, tuple[Entity, float]],
-739:         trace: AgenticSearchTrace,
-740:     ) -> str:
-741:         """Generate a summary without additional LLM call.
-742: 
-743:         Uses structured data from the search to create a useful summary.
-744:         """
-745:         sources = {}
-746:         for _, (_, _, source) in chunks.items():
-747:             sources[source] = sources.get(source, 0) + 1
-748: 
-749:         source_parts = [f"{s}: {c}" for s, c in sorted(sources.items(), key=lambda x: -x[1])]
-750:         source_summary = ", ".join(source_parts) if source_parts else "none"
-751: 
-752:         entity_names = [e.name for e, _ in sorted(entities.values(), key=lambda x: -x[1])[:5]]
-753:         entity_summary = ", ".join(entity_names) if entity_names else "none found"
-754: 
-755:         # Build structured summary
-756:         parts = [
-757:             f"Found {len(chunks)} results across {len(sources)} sources ({source_summary}).",
-758:         ]
-759: 
-760:         if entity_names:
-761:             parts.append(f"Key entities: {entity_summary}.")
-762: 
-763:         parts.append(f"Explored in {len(trace.steps)} steps.")
-764: 
-765:         if trace.complexity_score > 0.7:
-766:             parts.append("Query was identified as complex, requiring multi-step exploration.")
-767: 
-768:         return " ".join(parts)
 ````
 
 ## File: src/khora/logging_config.py
@@ -36654,6 +36385,347 @@ README.md
 142:     app.include_router(sync.router)
 143: 
 144:     return app
+````
+
+## File: src/khora/config/llm.py
+````python
+  1: """LiteLLM configuration for unified LLM access.
+  2: 
+  3: Provides a unified interface to all LLM providers (OpenAI, Anthropic, Google, etc.)
+  4: with fallbacks and routing. Based on the memoryman/potemkin pattern.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: import os
+ 10: from pathlib import Path
+ 11: from typing import Any
+ 12: 
+ 13: import yaml
+ 14: from loguru import logger
+ 15: from pydantic import BaseModel, Field
+ 16: 
+ 17: 
+ 18: class LiteLLMConfig(BaseModel):
+ 19:     """Configuration for LiteLLM unified model access.
+ 20: 
+ 21:     This configuration provides a unified interface to all LLM providers
+ 22:     including OpenAI, Anthropic, Google, and others through LiteLLM.
+ 23:     """
+ 24: 
+ 25:     # Primary model configuration
+ 26:     model: str = Field(
+ 27:         default="gpt-4o-mini",
+ 28:         description="Primary model to use (e.g., gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)",
+ 29:     )
+ 30:     api_key_env: str = Field(
+ 31:         default="OPENAI_API_KEY",
+ 32:         description="Environment variable name for API key",
+ 33:     )
+ 34: 
+ 35:     # Model parameters
+ 36:     temperature: float = Field(
+ 37:         default=0.7,
+ 38:         ge=0.0,
+ 39:         le=2.0,
+ 40:         description="Sampling temperature for generation",
+ 41:     )
+ 42:     max_tokens: int = Field(
+ 43:         default=2000,
+ 44:         gt=0,
+ 45:         description="Maximum tokens to generate",
+ 46:     )
+ 47: 
+ 48:     # Request configuration
+ 49:     timeout: int = Field(
+ 50:         default=30,
+ 51:         gt=0,
+ 52:         description="Request timeout in seconds",
+ 53:     )
+ 54:     max_retries: int = Field(
+ 55:         default=3,
+ 56:         ge=0,
+ 57:         description="Maximum number of retries on failure",
+ 58:     )
+ 59:     retry_wait: int = Field(
+ 60:         default=2,
+ 61:         ge=0,
+ 62:         description="Wait time between retries in seconds",
+ 63:     )
+ 64: 
+ 65:     # Concurrency
+ 66:     max_concurrent_llm_calls: int = Field(
+ 67:         default=10,
+ 68:         gt=0,
+ 69:         description="Maximum concurrent LLM API calls",
+ 70:     )
+ 71: 
+ 72:     # Router configuration for fallbacks
+ 73:     model_list: list[dict[str, Any]] | None = Field(
+ 74:         default=None,
+ 75:         description="List of model configurations for router fallbacks",
+ 76:     )
+ 77:     router_settings: dict[str, Any] | None = Field(
+ 78:         default=None,
+ 79:         description="Router settings (routing_strategy, num_retries, etc.)",
+ 80:     )
+ 81: 
+ 82:     # Embedding model configuration
+ 83:     embedding_model: str = Field(
+ 84:         default="text-embedding-3-small",
+ 85:         description="Model to use for embeddings",
+ 86:     )
+ 87:     embedding_api_key_env: str | None = Field(
+ 88:         default=None,
+ 89:         description="Environment variable for embedding API key (defaults to api_key_env)",
+ 90:     )
+ 91:     embedding_dimension: int = Field(
+ 92:         default=1536,
+ 93:         gt=0,
+ 94:         description="Embedding vector dimension",
+ 95:     )
+ 96:     embed_concurrency: int = Field(
+ 97:         default=25,
+ 98:         gt=0,
+ 99:         description="Maximum concurrent embedding API calls",
+100:     )
+101: 
+102:     @classmethod
+103:     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
+104:         """Load configuration from a YAML file.
+105: 
+106:         Args:
+107:             path: Path to the YAML configuration file
+108: 
+109:         Returns:
+110:             LiteLLMConfig instance
+111:         """
+112:         path = Path(path)
+113:         with path.open() as f:
+114:             data = yaml.safe_load(f)
+115:         return cls.model_validate(data or {})
+116: 
+117:     @classmethod
+118:     def from_dict(cls, config: dict[str, Any]) -> LiteLLMConfig:
+119:         """Create configuration from a dictionary.
+120: 
+121:         Args:
+122:             config: Configuration dictionary (can be nested under 'llm' key)
+123: 
+124:         Returns:
+125:             LiteLLMConfig instance
+126:         """
+127:         # Handle nested configuration
+128:         if "llm" in config:
+129:             config = config["llm"]
+130: 
+131:         # Handle config_file path
+132:         if "config_file" in config:
+133:             return cls.from_yaml(config["config_file"])
+134: 
+135:         return cls.model_validate(config)
+136: 
+137:     def get_api_key(self) -> str:
+138:         """Get the API key from environment variable."""
+139:         key = os.environ.get(self.api_key_env, "")
+140:         if not key:
+141:             logger.warning(f"API key environment variable {self.api_key_env} not set")
+142:         return key
+143: 
+144:     def get_embedding_api_key(self) -> str:
+145:         """Get the embedding API key from environment variable."""
+146:         env_var = self.embedding_api_key_env or self.api_key_env
+147:         key = os.environ.get(env_var, "")
+148:         if not key:
+149:             logger.warning(f"Embedding API key environment variable {env_var} not set")
+150:         return key
+151: 
+152: 
+153: def configure_litellm(config: LiteLLMConfig | None = None) -> None:
+154:     """Configure LiteLLM with the given configuration.
+155: 
+156:     This function should be called once at application startup to configure
+157:     LiteLLM's global settings.
+158: 
+159:     Args:
+160:         config: LiteLLM configuration (uses defaults if None)
+161:     """
+162:     try:
+163:         import litellm
+164:     except ImportError:
+165:         logger.warning("litellm package not installed, skipping configuration")
+166:         return
+167: 
+168:     if config is None:
+169:         config = LiteLLMConfig()
+170: 
+171:     # Critical for compatibility across providers
+172:     litellm.drop_params = True
+173: 
+174:     # Disable verbose logging and telemetry
+175:     litellm.set_verbose = False
+176:     litellm.telemetry = False  # type: ignore[assignment]
+177: 
+178:     # Set up API keys from environment
+179:     api_key = config.get_api_key()
+180:     if api_key:
+181:         # LiteLLM uses provider-specific env vars, so we ensure they're set
+182:         if "openai" in config.model.lower() or config.model.startswith("gpt"):
+183:             os.environ.setdefault("OPENAI_API_KEY", api_key)
+184:         elif "claude" in config.model.lower() or "anthropic" in config.model.lower():
+185:             os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+186:         elif "gemini" in config.model.lower():
+187:             os.environ.setdefault("GOOGLE_API_KEY", api_key)
+188: 
+189:     logger.info(f"LiteLLM configured with model: {config.model}")
+190: 
+191: 
+192: def create_litellm_router(config: LiteLLMConfig) -> Any:
+193:     """Create a LiteLLM router for fallback handling.
+194: 
+195:     Args:
+196:         config: LiteLLM configuration with model_list
+197: 
+198:     Returns:
+199:         LiteLLM Router instance
+200:     """
+201:     try:
+202:         from litellm import Router
+203:     except ImportError:
+204:         logger.warning("litellm package not installed")
+205:         return None
+206: 
+207:     if not config.model_list:
+208:         logger.warning("No model_list configured, router not created")
+209:         return None
+210: 
+211:     router_settings = config.router_settings or {
+212:         "routing_strategy": "simple-shuffle",
+213:         "num_retries": config.max_retries,
+214:     }
+215: 
+216:     router = Router(
+217:         model_list=config.model_list,
+218:         **router_settings,
+219:     )
+220: 
+221:     logger.info(f"LiteLLM router created with {len(config.model_list)} models")
+222:     return router
+223: 
+224: 
+225: async def acompletion(
+226:     prompt: str,
+227:     config: LiteLLMConfig | None = None,
+228:     *,
+229:     system_prompt: str | None = None,
+230:     **kwargs: Any,
+231: ) -> str:
+232:     """Async completion with LiteLLM.
+233: 
+234:     Args:
+235:         prompt: User prompt
+236:         config: LiteLLM configuration (uses defaults if None)
+237:         system_prompt: Optional system prompt
+238:         **kwargs: Additional arguments passed to litellm.acompletion
+239: 
+240:     Returns:
+241:         Generated text response
+242:     """
+243:     try:
+244:         import litellm
+245:     except ImportError:
+246:         raise RuntimeError("litellm package not installed. Run: pip install litellm")
+247: 
+248:     if config is None:
+249:         config = LiteLLMConfig()
+250: 
+251:     messages = []
+252:     if system_prompt:
+253:         messages.append({"role": "system", "content": system_prompt})
+254:     messages.append({"role": "user", "content": prompt})
+255: 
+256:     import time as _time
+257: 
+258:     _t0 = _time.perf_counter()
+259:     response = await litellm.acompletion(
+260:         model=config.model,
+261:         messages=messages,
+262:         temperature=kwargs.pop("temperature", config.temperature),
+263:         max_tokens=kwargs.pop("max_tokens", config.max_tokens),
+264:         timeout=kwargs.pop("timeout", config.timeout),
+265:         num_retries=kwargs.pop("num_retries", config.max_retries),
+266:         **kwargs,
+267:     )
+268:     _latency = (_time.perf_counter() - _t0) * 1000
+269: 
+270:     # Record telemetry
+271:     from khora.telemetry import get_collector
+272: 
+273:     usage = getattr(response, "usage", None)
+274:     get_collector().record_llm_call(
+275:         operation=kwargs.get("_telemetry_op", "completion"),
+276:         model=config.model,
+277:         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+278:         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+279:         total_tokens=getattr(usage, "total_tokens", 0) or 0,
+280:         latency_ms=_latency,
+281:     )
+282: 
+283:     return response.choices[0].message.content
+284: 
+285: 
+286: async def aembedding(
+287:     text: str | list[str],
+288:     config: LiteLLMConfig | None = None,
+289:     **kwargs: Any,
+290: ) -> list[list[float]]:
+291:     """Async embedding generation with LiteLLM.
+292: 
+293:     Args:
+294:         text: Text or list of texts to embed
+295:         config: LiteLLM configuration (uses defaults if None)
+296:         **kwargs: Additional arguments passed to litellm.aembedding
+297: 
+298:     Returns:
+299:         List of embedding vectors
+300:     """
+301:     try:
+302:         import litellm
+303:     except ImportError:
+304:         raise RuntimeError("litellm package not installed. Run: pip install litellm")
+305: 
+306:     if config is None:
+307:         config = LiteLLMConfig()
+308: 
+309:     # Ensure text is a list
+310:     if isinstance(text, str):
+311:         text = [text]
+312: 
+313:     import time as _time
+314: 
+315:     _t0 = _time.perf_counter()
+316:     response = await litellm.aembedding(
+317:         model=config.embedding_model,
+318:         input=text,
+319:         timeout=kwargs.pop("timeout", config.timeout),
+320:         **kwargs,
+321:     )
+322:     _latency = (_time.perf_counter() - _t0) * 1000
+323: 
+324:     # Record telemetry
+325:     from khora.telemetry import get_collector
+326: 
+327:     usage = getattr(response, "usage", None)
+328:     get_collector().record_llm_call(
+329:         operation="embedding",
+330:         model=config.embedding_model,
+331:         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+332:         total_tokens=getattr(usage, "total_tokens", 0) or 0,
+333:         latency_ms=_latency,
+334:         metadata={"batch_size": len(text)},
+335:     )
+336: 
+337:     return [item["embedding"] for item in response.data]
 ````
 
 ## File: src/khora/core/models/entity.py
@@ -42433,44 +42505,72 @@ README.md
 15: ## Architecture
 16: 
 17: ```
-18: MemoryLake (facade) → Engine (graphrag default) → StorageCoordinator
+18: MemoryLake (facade) → Engine (graphrag | khora) → StorageCoordinator
 19:                                                   ├── PostgreSQL (documents, tenancy)
 20:                                                   ├── pgvector (embeddings)
 21:                                                   └── Graph backend (entities, relationships)
 22: ```
 23: 
-24: **Key entry points:**
-25: - `src/khora/memory_lake.py` - Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
-26: - `src/khora/engines/graphrag/engine.py` - Default engine implementation
-27: - `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
-28: - `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
-29: 
-30: **Multi-tenancy:** Organization → Workspace → MemoryNamespace
-31: 
-32: ## Usage
-33: 
-34: ```python
-35: async with MemoryLake("postgresql://...") as lake:
-36:     await lake.remember("content", title="Doc")
-37:     results = await lake.recall("query")
-38: ```
+24: **Pluggable Engines:**
+25: - **GraphRAG** (`engine="graphrag"`) - Full knowledge graph extraction, requires Neo4j/Kuzu
+26: - **Khora** (`engine="khora"`) - Temporal-first, cost-optimized, Neo4j optional
+27: 
+28: **Key entry points:**
+29: - `src/khora/memory_lake.py` - Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
+30: - `src/khora/engines/graphrag/engine.py` - GraphRAG engine (default)
+31: - `src/khora/engines/khora/engine.py` - Khora temporal-first engine
+32: - `src/khora/engines/khora/temporal_edges.py` - Bi-temporal edge storage
+33: - `src/khora/engines/khora/time_hierarchy.py` - Hierarchical time graph (Year→Quarter→Month→Week→Day)
+34: - `src/khora/engines/khora/skeleton.py` - PageRank-based skeleton indexing
+35: - `src/khora/engines/khora/backends/pgvector.py` - PostgreSQL+pgvector backend
+36: - `src/khora/engines/khora/backends/weaviate.py` - Weaviate backend
+37: - `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
+38: - `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
 39: 
-40: ## Key Patterns
+40: **Multi-tenancy:** Organization → Workspace → MemoryNamespace
 41: 
-42: - **Engines are pluggable** - See `khora.engines.protocol.MemoryEngineProtocol`
-43: - **Graph backends are interchangeable** - All implement `GraphBackend` in `storage/backends/base.py`
-44: - **Extraction skills are YAML-defined** - See `src/khora/extraction/skills/definitions/`
-45: - **Config via env vars** - `KHORA_DATABASE_URL`, `KHORA_NEO4J_URL`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
-46: 
-47: ## Testing
-48: 
-49: ```bash
-50: make test                           # Full suite
-51: uv run pytest tests/unit/test_memory_lake.py -v  # Single file
-52: uv run pytest -k "test_remember" -v              # By name
-53: ```
-54: 
-55: Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
+42: ## Usage
+43: 
+44: ```python
+45: async with MemoryLake("postgresql://...") as lake:
+46:     await lake.remember("content", title="Doc")
+47:     results = await lake.recall("query")
+48: ```
+49: 
+50: ## Key Patterns
+51: 
+52: - **Engines are pluggable** - See `khora.engines.protocol.MemoryEngineProtocol`
+53: - **Graph backends are interchangeable** - All implement `GraphBackend` in `storage/backends/base.py`
+54: - **Extraction skills are YAML-defined** - See `src/khora/extraction/skills/definitions/`
+55: - **Config via env vars** - `KHORA_DATABASE_URL`, `KHORA_NEO4J_URL`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
+56: 
+57: ## Engine Selection Guide
+58: 
+59: | Use Case | Engine | Reason |
+60: |----------|--------|--------|
+61: | Knowledge bases | `graphrag` | Rich entity/relationship extraction |
+62: | Entity exploration | `graphrag` | Graph traversal support |
+63: | Chat/message history | `khora` | Temporal-first, structured filters |
+64: | Event streams/logs | `khora` | Bi-temporal model |
+65: | Cost-sensitive apps | `khora` | 5-10x fewer LLM calls |
+66: | Simple infrastructure | `khora` | No Neo4j required |
+67: 
+68: **Khora engine features:**
+69: - Bi-temporal: `occurred_at` (event time) vs `ingested_at` (system time)
+70: - Skeleton indexing: PageRank identifies ~10% core chunks for LLM extraction
+71: - Time hierarchy: Year → Quarter → Month → Week → Day for range queries
+72: - Hybrid search: Vector + BM25 with configurable `hybrid_alpha`
+73: - Temporal filters: `author`, `channel`, `tags`, time ranges
+74: 
+75: ## Testing
+76: 
+77: ```bash
+78: make test                           # Full suite
+79: uv run pytest tests/unit/test_memory_lake.py -v  # Single file
+80: uv run pytest -k "test_remember" -v              # By name
+81: ```
+82: 
+83: Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
 ````
 
 ## File: src/khora/config/schema.py
@@ -47552,6 +47652,15 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-05 17:38:48 +0100
+**Message:** perf: parallelize batch operations for improved throughput
+
+**Files:**
+- REPOMIX.md
+- src/khora/config/llm.py
+- src/khora/engines/khora/engine.py
+- src/khora/engines/khora/temporal_edges.py
+
 ## Commit: 2026-02-05 17:25:21 +0100
 **Message:** fix: respect graph_config=None and ignore KHORA_NEO4J_URL env var
 
@@ -47750,11 +47859,3 @@ README.md
 **Files:**
 - pyproject.toml
 - uv.lock
-
-## Commit: 2026-02-03 16:22:22 +0100
-**Message:** fix: use json_schema format for gpt-5-nano extraction
-
-**Files:**
-- src/khora/extraction/extractors/llm.py
-- src/khora/pipelines/flows/ingest.py
-- src/khora/pipelines/tasks/extract.py
