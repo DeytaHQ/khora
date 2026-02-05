@@ -37,6 +37,51 @@ def _mock_config() -> MagicMock:
     return mock_config
 
 
+def _mock_engine() -> MagicMock:
+    """Create a mock engine with all required methods."""
+    mock_eng = MagicMock()
+
+    # Storage and query engine for deprecated property tests
+    mock_eng._storage = MagicMock()
+    mock_eng._query_engine = MagicMock()
+    mock_eng._embedder = MagicMock()
+
+    # Default namespace ID
+    mock_eng._default_namespace_id = None
+
+    # Lifecycle
+    mock_eng.connect = AsyncMock()
+    mock_eng.disconnect = AsyncMock()
+    mock_eng.health_check = AsyncMock(return_value={"status": "healthy"})
+
+    # Core operations
+    mock_eng.remember = AsyncMock()
+    mock_eng.recall = AsyncMock()
+    mock_eng.forget = AsyncMock()
+    mock_eng.remember_batch = AsyncMock()
+
+    # Namespace operations
+    mock_eng.get_or_create_default_namespace = AsyncMock(return_value=uuid4())
+    mock_eng.create_namespace = AsyncMock()
+    mock_eng.get_namespace = AsyncMock()
+    mock_eng.ensure_namespace = AsyncMock()
+
+    # Entity operations
+    mock_eng.get_entity = AsyncMock()
+    mock_eng.list_entities = AsyncMock(return_value=[])
+    mock_eng.find_related_entities = AsyncMock(return_value=[])
+
+    # Document operations
+    mock_eng.get_document = AsyncMock()
+    mock_eng.list_documents = AsyncMock(return_value=[])
+    mock_eng.search_entities = AsyncMock(return_value=[])
+
+    # Stats
+    mock_eng.stats = AsyncMock()
+
+    return mock_eng
+
+
 def _make_lake(*, connected: bool = False) -> MemoryLake:
     """Create a MemoryLake with mocked config, optionally pre-connected."""
     with patch("khora.memory_lake.load_config", return_value=_mock_config()):
@@ -44,9 +89,7 @@ def _make_lake(*, connected: bool = False) -> MemoryLake:
 
     if connected:
         lake._connected = True
-        lake._storage = MagicMock()
-        lake._embedder = MagicMock()
-        lake._query_engine = MagicMock()
+        lake._engine = _mock_engine()
 
     return lake
 
@@ -129,7 +172,7 @@ class TestMemoryLakeInit:
         """Default init loads config from env."""
         lake = _make_lake()
         assert lake._connected is False
-        assert lake._storage is None
+        assert lake._engine is None
 
     def test_init_with_config(self) -> None:
         """Init with explicit config skips load_config."""
@@ -162,8 +205,11 @@ class TestMemoryLakeInit:
     def test_connected_properties_return(self) -> None:
         """Accessing storage/query_engine after connect succeeds."""
         lake = _make_lake(connected=True)
-        assert lake.storage is lake._storage
-        assert lake.query_engine is lake._query_engine
+        # The deprecated properties access _storage and _query_engine from the engine
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            assert lake.storage is lake._engine._storage
+            assert lake.query_engine is lake._engine._query_engine
 
 
 # ---------------------------------------------------------------------------
@@ -176,48 +222,37 @@ class TestConnectDisconnect:
 
     @pytest.mark.asyncio
     async def test_connect(self) -> None:
-        """connect() creates storage, embedder, query engine and sets flag."""
+        """connect() creates engine and sets flag."""
         lake = _make_lake()
 
-        mock_coordinator = MagicMock()
-        mock_coordinator.connect = AsyncMock()
+        mock_engine = _mock_engine()
 
-        with (
-            patch("khora.memory_lake.create_storage_coordinator", return_value=mock_coordinator),
-            patch("khora.memory_lake.LiteLLMEmbedder") as mock_embedder_cls,
-            patch("khora.memory_lake.HybridQueryEngine"),
-            patch("khora.telemetry.init_telemetry", new_callable=AsyncMock),
-        ):
-            mock_embedder_cls.from_config.return_value = MagicMock()
+        with patch("khora.engines.create_engine", return_value=mock_engine):
             await lake.connect()
 
         assert lake._connected is True
-        assert lake._storage is mock_coordinator
-        mock_coordinator.connect.assert_awaited_once()
+        assert lake._engine is mock_engine
+        mock_engine.connect.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_connect_idempotent(self) -> None:
         """Calling connect() when already connected is a no-op."""
         lake = _make_lake(connected=True)
-        original_storage = lake._storage
+        original_engine = lake._engine
 
         await lake.connect()
 
-        assert lake._storage is original_storage
+        assert lake._engine is original_engine
 
     @pytest.mark.asyncio
     async def test_disconnect(self) -> None:
         """disconnect() tears down all components."""
         lake = _make_lake(connected=True)
-        lake._storage.disconnect = AsyncMock()
 
-        with patch("khora.telemetry.shutdown_telemetry", new_callable=AsyncMock):
-            await lake.disconnect()
+        await lake.disconnect()
 
         assert lake._connected is False
-        assert lake._storage is None
-        assert lake._embedder is None
-        assert lake._query_engine is None
+        assert lake._engine is None
 
     @pytest.mark.asyncio
     async def test_disconnect_idempotent(self) -> None:
@@ -265,11 +300,11 @@ class TestResolveNamespace:
         assert result == ns_id
 
     @pytest.mark.asyncio
-    async def test_none_creates_default(self) -> None:
-        """None resolves to default namespace."""
+    async def test_none_calls_get_or_create_default(self) -> None:
+        """None resolves via get_or_create_default_namespace on engine."""
         lake = _make_lake(connected=True)
         default_id = uuid4()
-        lake._default_namespace_id = default_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=default_id)
 
         result = await lake._resolve_namespace(None)
         assert result == default_id
@@ -279,7 +314,7 @@ class TestResolveNamespace:
         """Non-UUID string looks up namespace by slug."""
         lake = _make_lake(connected=True)
         default_id = uuid4()
-        lake._default_namespace_id = default_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=default_id)
 
         mock_ns = MagicMock()
         mock_ns.workspace_id = uuid4()
@@ -287,8 +322,8 @@ class TestResolveNamespace:
         found_ns = MagicMock()
         found_ns.id = uuid4()
 
-        lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
-        lake._storage.get_namespace_by_slug = AsyncMock(return_value=found_ns)
+        lake._engine._storage.get_namespace = AsyncMock(return_value=mock_ns)
+        lake._engine._storage.get_namespace_by_slug = AsyncMock(return_value=found_ns)
 
         result = await lake._resolve_namespace("my-namespace")
         assert result == found_ns.id
@@ -298,13 +333,13 @@ class TestResolveNamespace:
         """Non-UUID string that doesn't exist raises ValueError."""
         lake = _make_lake(connected=True)
         default_id = uuid4()
-        lake._default_namespace_id = default_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=default_id)
 
         mock_ns = MagicMock()
         mock_ns.workspace_id = uuid4()
 
-        lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
-        lake._storage.get_namespace_by_slug = AsyncMock(return_value=None)
+        lake._engine._storage.get_namespace = AsyncMock(return_value=mock_ns)
+        lake._engine._storage.get_namespace_by_slug = AsyncMock(return_value=None)
 
         with pytest.raises(ValueError, match="Namespace not found"):
             await lake._resolve_namespace("nonexistent")
@@ -316,64 +351,32 @@ class TestResolveNamespace:
 
 
 class TestRemember:
-    """Tests for remember() and _remember_inner()."""
+    """Tests for remember()."""
 
     @pytest.mark.asyncio
-    async def test_remember_new_document(self) -> None:
-        """remember() creates document and processes through pipeline."""
+    async def test_remember_delegates_to_engine(self) -> None:
+        """remember() delegates to engine.remember()."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
-        lake._config = _mock_config()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
-        mock_doc = MagicMock()
-        mock_doc.id = uuid4()
-
-        lake._storage.get_document_by_checksum = AsyncMock(return_value=None)
-        lake._storage.create_document = AsyncMock(return_value=mock_doc)
-
-        pipeline_result = {"chunks": 3, "entities": 2, "relationships": 1}
+        mock_result = RememberResult(
+            document_id=uuid4(),
+            namespace_id=ns_id,
+            chunks_created=3,
+            entities_extracted=2,
+            relationships_created=1,
+        )
+        lake._engine.remember = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch(
-                "khora.pipelines.flows.ingest.process_document", new_callable=AsyncMock, return_value=pipeline_result
-            ),
         ):
             result = await lake.remember("test content", title="Test")
 
-        assert result.document_id == mock_doc.id
-        assert result.namespace_id == ns_id
-        assert result.chunks_created == 3
-        assert result.entities_extracted == 2
-        assert result.relationships_created == 1
-
-    @pytest.mark.asyncio
-    async def test_remember_duplicate_document(self) -> None:
-        """remember() returns early for duplicate checksum."""
-        lake = _make_lake(connected=True)
-        ns_id = uuid4()
-        lake._default_namespace_id = ns_id
-        lake._config = _mock_config()
-
-        existing_doc = MagicMock()
-        existing_doc.id = uuid4()
-        existing_doc.chunk_count = 5
-        existing_doc.entity_count = 2
-        existing_doc.status = "completed"
-
-        lake._storage.get_document_by_checksum = AsyncMock(return_value=existing_doc)
-
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-        ):
-            result = await lake.remember("duplicate content")
-
-        assert result.document_id == existing_doc.id
-        assert result.metadata["duplicate"] is True
-        lake._storage.create_document.assert_not_called() if hasattr(lake._storage, "create_document") else None
+        assert result is mock_result
+        lake._engine.remember.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +391,7 @@ class TestRememberBatchLegacy:
     async def test_empty_batch(self) -> None:
         """Empty batch returns empty list."""
         lake = _make_lake(connected=True)
-        lake._default_namespace_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=uuid4())
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
@@ -401,7 +404,7 @@ class TestRememberBatchLegacy:
         """remember_batch_legacy() returns one RememberResult per document."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         lake._config = _mock_config()
 
         doc_id_1 = str(uuid4())
@@ -439,7 +442,7 @@ class TestRememberBatchLegacy:
         """Failed documents get padded with error results."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         lake._config = _mock_config()
 
         doc_id = str(uuid4())
@@ -478,23 +481,21 @@ class TestRecall:
     """Tests for recall()."""
 
     @pytest.mark.asyncio
-    async def test_recall_delegates_to_query_engine(self) -> None:
-        """recall() delegates to query_engine.query() and wraps result."""
+    async def test_recall_delegates_to_engine(self) -> None:
+        """recall() delegates to engine.recall() and returns result."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
-        mock_chunk = MagicMock()
-        mock_chunk.content = "found content"
-        mock_entity = MagicMock()
-
-        mock_query_result = MagicMock()
-        mock_query_result.chunks = [(mock_chunk, 0.9)]
-        mock_query_result.entities = [(mock_entity, 0.8)]
-        mock_query_result.get_context_text.return_value = "found content"
-        mock_query_result.metadata = {"mode": "HYBRID"}
-
-        lake._query_engine.query = AsyncMock(return_value=mock_query_result)
+        mock_result = RecallResult(
+            query="search query",
+            namespace_id=ns_id,
+            chunks=[("chunk", 0.9)],
+            entities=[("entity", 0.8)],
+            context_text="found content",
+            metadata={"mode": "HYBRID"},
+        )
+        lake._engine.recall = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -504,25 +505,25 @@ class TestRecall:
 
         assert isinstance(result, RecallResult)
         assert result.query == "search query"
-        assert result.namespace_id == ns_id
-        assert len(result.chunks) == 1
-        assert result.context_text == "found content"
+        lake._engine.recall.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_recall_passes_search_mode(self) -> None:
-        """recall() passes mode to QueryConfig."""
+        """recall() passes mode to engine."""
         from khora.query.engine import SearchMode
 
         lake = _make_lake(connected=True)
-        lake._default_namespace_id = uuid4()
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
-        mock_query_result = MagicMock()
-        mock_query_result.chunks = []
-        mock_query_result.entities = []
-        mock_query_result.get_context_text.return_value = ""
-        mock_query_result.metadata = {}
-
-        lake._query_engine.query = AsyncMock(return_value=mock_query_result)
+        mock_result = RecallResult(
+            query="test",
+            namespace_id=ns_id,
+            chunks=[],
+            entities=[],
+            context_text="",
+        )
+        lake._engine.recall = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -530,9 +531,8 @@ class TestRecall:
         ):
             await lake.recall("test", mode=SearchMode.VECTOR)
 
-        call_kwargs = lake._query_engine.query.call_args
-        config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
-        assert config.mode == SearchMode.VECTOR
+        call_kwargs = lake._engine.recall.call_args
+        assert call_kwargs.kwargs.get("mode") == SearchMode.VECTOR
 
 
 # ---------------------------------------------------------------------------
@@ -544,41 +544,29 @@ class TestForget:
     """Tests for forget()."""
 
     @pytest.mark.asyncio
-    async def test_forget_deletes_document(self) -> None:
-        """forget() calls storage.delete_document."""
+    async def test_forget_delegates_to_engine(self) -> None:
+        """forget() delegates to engine.forget()."""
         lake = _make_lake(connected=True)
         doc_id = uuid4()
 
-        lake._storage.delete_document = AsyncMock(return_value=True)
+        lake._engine.forget = AsyncMock(return_value=True)
 
         result = await lake.forget(doc_id)
         assert result is True
-        lake._storage.delete_document.assert_awaited_once_with(doc_id)
+        lake._engine.forget.assert_awaited_once_with(doc_id, None)
 
     @pytest.mark.asyncio
-    async def test_forget_wrong_namespace(self) -> None:
-        """forget() returns False when document is in a different namespace."""
+    async def test_forget_with_namespace(self) -> None:
+        """forget() resolves namespace and passes to engine."""
         lake = _make_lake(connected=True)
         doc_id = uuid4()
         ns_id = uuid4()
-        other_ns_id = uuid4()
 
-        mock_doc = MagicMock()
-        mock_doc.namespace_id = other_ns_id
-
-        lake._storage.get_document = AsyncMock(return_value=mock_doc)
+        lake._engine.forget = AsyncMock(return_value=False)
 
         result = await lake.forget(doc_id, namespace=ns_id)
         assert result is False
-
-    @pytest.mark.asyncio
-    async def test_forget_not_found(self) -> None:
-        """forget() returns False when document doesn't exist."""
-        lake = _make_lake(connected=True)
-        lake._storage.delete_document = AsyncMock(return_value=False)
-
-        result = await lake.forget(uuid4())
-        assert result is False
+        lake._engine.forget.assert_awaited_once_with(doc_id, ns_id)
 
 
 # ---------------------------------------------------------------------------
@@ -591,41 +579,41 @@ class TestEntityOperations:
 
     @pytest.mark.asyncio
     async def test_get_entity(self) -> None:
-        """get_entity delegates to storage."""
+        """get_entity delegates to engine."""
         lake = _make_lake(connected=True)
         entity_id = uuid4()
         mock_entity = MagicMock()
 
-        lake._storage.get_entity = AsyncMock(return_value=mock_entity)
+        lake._engine.get_entity = AsyncMock(return_value=mock_entity)
 
         result = await lake.get_entity(entity_id)
         assert result is mock_entity
-        lake._storage.get_entity.assert_awaited_once_with(entity_id)
+        lake._engine.get_entity.assert_awaited_once_with(entity_id)
 
     @pytest.mark.asyncio
     async def test_list_entities(self) -> None:
-        """list_entities delegates to storage with filters."""
+        """list_entities delegates to engine with filters."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         mock_entities = [MagicMock(), MagicMock()]
-        lake._storage.list_entities = AsyncMock(return_value=mock_entities)
+        lake._engine.list_entities = AsyncMock(return_value=mock_entities)
 
         result = await lake.list_entities(entity_type="PERSON", limit=50)
         assert result == mock_entities
-        lake._storage.list_entities.assert_awaited_once_with(ns_id, entity_type="PERSON", limit=50)
+        lake._engine.list_entities.assert_awaited_once_with(ns_id, entity_type="PERSON", limit=50)
 
     @pytest.mark.asyncio
     async def test_find_related_entities(self) -> None:
-        """find_related_entities delegates to query_engine."""
+        """find_related_entities delegates to engine."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         entity_id = uuid4()
 
         mock_related = [(MagicMock(), 0.8)]
-        lake._query_engine.find_related_entities = AsyncMock(return_value=mock_related)
+        lake._engine.find_related_entities = AsyncMock(return_value=mock_related)
 
         result = await lake.find_related_entities(entity_id, max_depth=3)
         assert result == mock_related
@@ -641,85 +629,38 @@ class TestNamespaceManagement:
 
     @pytest.mark.asyncio
     async def test_create_namespace(self) -> None:
-        """create_namespace creates and stores a namespace."""
+        """create_namespace delegates to engine."""
         lake = _make_lake(connected=True)
         ws_id = uuid4()
 
         mock_ns = MagicMock()
-        lake._storage.create_namespace = AsyncMock(return_value=mock_ns)
+        lake._engine.create_namespace = AsyncMock(return_value=mock_ns)
 
         result = await lake.create_namespace("test-ns", ws_id, description="Test")
         assert result is mock_ns
-        lake._storage.create_namespace.assert_awaited_once()
+        lake._engine.create_namespace.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_get_namespace(self) -> None:
-        """get_namespace delegates to storage."""
+        """get_namespace delegates to engine."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
         mock_ns = MagicMock()
 
-        lake._storage.get_namespace = AsyncMock(return_value=mock_ns)
+        lake._engine.get_namespace = AsyncMock(return_value=mock_ns)
 
         result = await lake.get_namespace(ns_id)
         assert result is mock_ns
 
     @pytest.mark.asyncio
-    async def test_get_or_create_default_namespace_cached(self) -> None:
-        """get_or_create_default_namespace returns cached ID."""
+    async def test_get_or_create_default_namespace(self) -> None:
+        """get_or_create_default_namespace delegates to engine."""
         lake = _make_lake(connected=True)
-        cached_id = uuid4()
-        lake._default_namespace_id = cached_id
+        default_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=default_id)
 
         result = await lake.get_or_create_default_namespace()
-        assert result == cached_id
-
-    @pytest.mark.asyncio
-    async def test_get_or_create_default_namespace_creates(self) -> None:
-        """get_or_create_default_namespace creates org/workspace/namespace."""
-        lake = _make_lake(connected=True)
-
-        mock_org = MagicMock()
-        mock_org.id = uuid4()
-        mock_ws = MagicMock()
-        mock_ws.id = uuid4()
-        mock_ns = MagicMock()
-        mock_ns.id = uuid4()
-
-        lake._storage.get_organization_by_slug = AsyncMock(return_value=None)
-        lake._storage.create_organization = AsyncMock(return_value=mock_org)
-        lake._storage.list_workspaces = AsyncMock(return_value=[])
-        lake._storage.create_workspace = AsyncMock(return_value=mock_ws)
-        lake._storage.list_namespaces = AsyncMock(return_value=[])
-        lake._storage.create_namespace = AsyncMock(return_value=mock_ns)
-
-        result = await lake.get_or_create_default_namespace()
-        assert result == mock_ns.id
-        assert lake._default_namespace_id == mock_ns.id
-
-    @pytest.mark.asyncio
-    async def test_get_or_create_default_reuses_existing(self) -> None:
-        """get_or_create_default_namespace reuses existing org/ws/ns."""
-        lake = _make_lake(connected=True)
-
-        mock_org = MagicMock()
-        mock_org.id = uuid4()
-        mock_ws = MagicMock()
-        mock_ws.id = uuid4()
-        mock_ns = MagicMock()
-        mock_ns.id = uuid4()
-
-        lake._storage.get_organization_by_slug = AsyncMock(return_value=mock_org)
-        lake._storage.list_workspaces = AsyncMock(return_value=[mock_ws])
-        lake._storage.list_namespaces = AsyncMock(return_value=[mock_ns])
-
-        result = await lake.get_or_create_default_namespace()
-        assert result == mock_ns.id
-        (
-            lake._storage.create_organization.assert_not_called()
-            if hasattr(lake._storage.create_organization, "assert_not_called")
-            else None
-        )
+        assert result == default_id
 
 
 # ---------------------------------------------------------------------------
@@ -739,30 +680,17 @@ class TestHealthCheck:
 
     @pytest.mark.asyncio
     async def test_healthy(self) -> None:
-        """Health check when healthy."""
+        """Health check delegates to engine."""
         lake = _make_lake(connected=True)
-        mock_health = MagicMock()
-        mock_health.is_healthy = True
-        mock_health.summary = {"relational": True, "vector": True}
-
-        lake._storage.health_check = AsyncMock(return_value=mock_health)
+        lake._engine.health_check = AsyncMock(
+            return_value={
+                "status": "healthy",
+                "storage": {"relational": True, "vector": True},
+            }
+        )
 
         result = await lake.health_check()
         assert result["status"] == "healthy"
-        assert result["storage"] == mock_health.summary
-
-    @pytest.mark.asyncio
-    async def test_degraded(self) -> None:
-        """Health check when degraded."""
-        lake = _make_lake(connected=True)
-        mock_health = MagicMock()
-        mock_health.is_healthy = False
-        mock_health.summary = {"relational": True, "vector": False}
-
-        lake._storage.health_check = AsyncMock(return_value=mock_health)
-
-        result = await lake.health_check()
-        assert result["status"] == "degraded"
 
 
 # ---------------------------------------------------------------------------
@@ -829,6 +757,13 @@ class TestSimplifiedConstructor:
             lake = MemoryLake(graph_url="bolt://custom:7687")
 
         assert lake._config.neo4j_url == "bolt://custom:7687"
+
+    def test_init_with_engine_parameter(self) -> None:
+        """Init with explicit engine parameter."""
+        with patch("khora.memory_lake.load_config", return_value=_mock_config()):
+            lake = MemoryLake(engine="graphrag")
+
+        assert lake._engine_name == "graphrag"
 
 
 # ---------------------------------------------------------------------------
@@ -908,18 +843,6 @@ class TestDeprecationWarnings:
         assert issubclass(w[0].category, DeprecationWarning)
         assert "lake.query_engine is deprecated" in str(w[0].message)
 
-    def test_internal_methods_no_warning(self) -> None:
-        """Internal _get_storage/_get_query_engine don't emit warnings."""
-        lake = _make_lake(connected=True)
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            _ = lake._get_storage()
-            _ = lake._get_query_engine()
-
-        # No deprecation warnings should be emitted
-        assert all(not issubclass(x.category, DeprecationWarning) for x in w)
-
 
 # ---------------------------------------------------------------------------
 # New API: Raw flag in recall
@@ -930,18 +853,20 @@ class TestRecallRawMode:
     """Tests for raw mode in recall()."""
 
     @pytest.mark.asyncio
-    async def test_raw_mode_disables_llm_features(self) -> None:
-        """raw=True disables all LLM features in QueryConfig."""
+    async def test_raw_mode_passed_to_engine(self) -> None:
+        """raw=True is passed to engine."""
         lake = _make_lake(connected=True)
-        lake._default_namespace_id = uuid4()
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
-        mock_query_result = MagicMock()
-        mock_query_result.chunks = []
-        mock_query_result.entities = []
-        mock_query_result.get_context_text.return_value = ""
-        mock_query_result.metadata = {}
-
-        lake._query_engine.query = AsyncMock(return_value=mock_query_result)
+        mock_result = RecallResult(
+            query="test",
+            namespace_id=ns_id,
+            chunks=[],
+            entities=[],
+            context_text="",
+        )
+        lake._engine.recall = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -949,44 +874,8 @@ class TestRecallRawMode:
         ):
             await lake.recall("test query", raw=True)
 
-        # Check the config passed to query_engine
-        call_kwargs = lake._query_engine.query.call_args
-        config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
-
-        assert config.enable_query_understanding is False
-        assert config.enable_query_expansion is False
-        assert config.enable_entity_extraction is False
-        assert config.enable_temporal_detection is False
-        assert config.enable_entity_linking is False
-        assert config.enable_reranking is False
-        assert config.enable_hyde is False
-
-    @pytest.mark.asyncio
-    async def test_raw_false_keeps_defaults(self) -> None:
-        """raw=False (default) keeps LLM features enabled."""
-        lake = _make_lake(connected=True)
-        lake._default_namespace_id = uuid4()
-
-        mock_query_result = MagicMock()
-        mock_query_result.chunks = []
-        mock_query_result.entities = []
-        mock_query_result.get_context_text.return_value = ""
-        mock_query_result.metadata = {}
-
-        lake._query_engine.query = AsyncMock(return_value=mock_query_result)
-
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-        ):
-            await lake.recall("test query", raw=False)
-
-        call_kwargs = lake._query_engine.query.call_args
-        config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
-
-        # Default values should be True
-        assert config.enable_query_understanding is True
-        assert config.enable_reranking is True
+        call_kwargs = lake._engine.recall.call_args
+        assert call_kwargs.kwargs.get("raw") is True
 
 
 # ---------------------------------------------------------------------------
@@ -999,97 +888,56 @@ class TestConvenienceMethods:
 
     @pytest.mark.asyncio
     async def test_get_document(self) -> None:
-        """get_document delegates to storage."""
+        """get_document delegates to engine."""
         lake = _make_lake(connected=True)
         doc_id = uuid4()
         mock_doc = MagicMock()
 
-        lake._storage.get_document = AsyncMock(return_value=mock_doc)
+        lake._engine.get_document = AsyncMock(return_value=mock_doc)
 
         result = await lake.get_document(doc_id)
         assert result is mock_doc
-        lake._storage.get_document.assert_awaited_once_with(doc_id)
+        lake._engine.get_document.assert_awaited_once_with(doc_id)
 
     @pytest.mark.asyncio
     async def test_list_documents(self) -> None:
-        """list_documents delegates to storage with namespace."""
+        """list_documents delegates to engine with namespace."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         mock_docs = [MagicMock(), MagicMock()]
-        lake._storage.list_documents = AsyncMock(return_value=mock_docs)
+        lake._engine.list_documents = AsyncMock(return_value=mock_docs)
 
         result = await lake.list_documents(limit=50)
         assert result == mock_docs
-        lake._storage.list_documents.assert_awaited_once_with(ns_id, limit=50)
+        lake._engine.list_documents.assert_awaited_once_with(ns_id, limit=50)
 
     @pytest.mark.asyncio
     async def test_search_entities(self) -> None:
-        """search_entities uses embedder and searches similar entities."""
+        """search_entities delegates to engine."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
-        # Mock embedder
-        lake._embedder = MagicMock()
-        lake._embedder.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
-
-        # Mock storage
-        entity_id = uuid4()
-        mock_entity = MagicMock()
-        lake._storage.search_similar_entities = AsyncMock(return_value=[(entity_id, 0.9)])
-        lake._storage.get_entity = AsyncMock(return_value=mock_entity)
+        mock_entities = [MagicMock()]
+        lake._engine.search_entities = AsyncMock(return_value=mock_entities)
 
         result = await lake.search_entities("test query", limit=5)
 
         assert len(result) == 1
-        assert result[0] is mock_entity
-        lake._embedder.embed.assert_awaited_once_with("test query")
+        lake._engine.search_entities.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_ensure_namespace_returns_existing(self) -> None:
-        """ensure_namespace returns existing namespace ID."""
+    async def test_ensure_namespace(self) -> None:
+        """ensure_namespace delegates to engine."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
+        lake._engine.ensure_namespace = AsyncMock(return_value=ns_id)
 
-        mock_org = MagicMock()
-        mock_org.id = uuid4()
-        mock_ws = MagicMock()
-        mock_ws.id = uuid4()
-        mock_ns = MagicMock()
-        mock_ns.id = uuid4()
-
-        lake._storage.get_organization_by_slug = AsyncMock(return_value=mock_org)
-        lake._storage.list_workspaces = AsyncMock(return_value=[mock_ws])
-        lake._storage.get_namespace_by_slug = AsyncMock(return_value=mock_ns)
-
-        result = await lake.ensure_namespace("my-namespace")
-        assert result == mock_ns.id
-
-    @pytest.mark.asyncio
-    async def test_ensure_namespace_creates_new(self) -> None:
-        """ensure_namespace creates new namespace when not found."""
-        lake = _make_lake(connected=True)
-        ns_id = uuid4()
-        lake._default_namespace_id = ns_id
-
-        mock_org = MagicMock()
-        mock_org.id = uuid4()
-        mock_ws = MagicMock()
-        mock_ws.id = uuid4()
-        mock_new_ns = MagicMock()
-        mock_new_ns.id = uuid4()
-
-        lake._storage.get_organization_by_slug = AsyncMock(return_value=mock_org)
-        lake._storage.list_workspaces = AsyncMock(return_value=[mock_ws])
-        lake._storage.get_namespace_by_slug = AsyncMock(return_value=None)
-        lake._storage.create_namespace = AsyncMock(return_value=mock_new_ns)
-
-        result = await lake.ensure_namespace("new-namespace", description="Test")
-        assert result == mock_new_ns.id
-        lake._storage.create_namespace.assert_awaited_once()
+        result = await lake.ensure_namespace("my-namespace", description="Test")
+        assert result == ns_id
+        lake._engine.ensure_namespace.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1104,7 +952,19 @@ class TestEnhancedRememberBatch:
     async def test_empty_batch_returns_batch_result(self) -> None:
         """Empty batch returns BatchResult with zeros."""
         lake = _make_lake(connected=True)
-        lake._default_namespace_id = uuid4()
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+        lake._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(
+                total=0,
+                processed=0,
+                skipped=0,
+                failed=0,
+                chunks=0,
+                entities=0,
+                relationships=0,
+            )
+        )
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -1121,31 +981,23 @@ class TestEnhancedRememberBatch:
         """remember_batch() returns BatchResult with aggregated stats."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._default_namespace_id = ns_id
-        lake._config = _mock_config()
-
-        ingest_result = {
-            "total_documents": 3,
-            "processed_documents": 2,
-            "skipped_documents": 1,
-            "failed_documents": 0,
-            "total_chunks": 10,
-            "total_entities": 5,
-            "total_relationships": 3,
-            "total_inferred_relationships": 2,
-            "per_document_results": [],
-        }
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+        lake._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(
+                total=3,
+                processed=2,
+                skipped=1,
+                failed=0,
+                chunks=10,
+                entities=5,
+                relationships=5,
+            )
+        )
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
-            patch("khora.memory_lake.LiteLLMEmbedder"),
-            patch("khora.extraction.expansion.entity_index.EntityIndex"),
         ):
-            # Mock list_entities for preload
-            lake._storage.list_entities = AsyncMock(return_value=[])
-
             result = await lake.remember_batch(
                 [
                     {"content": "Doc 1"},
@@ -1158,49 +1010,35 @@ class TestEnhancedRememberBatch:
         assert result.total == 3
         assert result.processed == 2
         assert result.skipped == 1
-        assert result.failed == 0
-        assert result.chunks == 10
-        assert result.entities == 5
-        assert result.relationships == 5  # 3 + 2 inferred
+        assert result.relationships == 5
 
-    @pytest.mark.asyncio
-    async def test_batch_with_progress_callback(self) -> None:
-        """remember_batch calls progress callback."""
-        lake = _make_lake(connected=True)
-        ns_id = uuid4()
-        lake._default_namespace_id = ns_id
-        lake._config = _mock_config()
 
-        ingest_result = {
-            "total_documents": 2,
-            "processed_documents": 2,
-            "skipped_documents": 0,
-            "failed_documents": 0,
-            "total_chunks": 5,
-            "total_entities": 2,
-            "total_relationships": 1,
-            "total_inferred_relationships": 0,
-            "per_document_results": [],
-        }
+# ---------------------------------------------------------------------------
+# Engine Registry Tests
+# ---------------------------------------------------------------------------
 
-        progress_calls = []
 
-        def on_progress(done, total):
-            progress_calls.append((done, total))
+class TestEngineRegistry:
+    """Tests for engine registry functions."""
 
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
-            patch("khora.memory_lake.LiteLLMEmbedder"),
-            patch("khora.extraction.expansion.entity_index.EntityIndex"),
-        ):
-            lake._storage.list_entities = AsyncMock(return_value=[])
+    def test_list_engines(self) -> None:
+        """list_engines returns available engines."""
+        from khora.engines import list_engines
 
-            await lake.remember_batch(
-                [{"content": "Doc 1"}, {"content": "Doc 2"}],
-                on_progress=on_progress,
-            )
+        engines = list_engines()
+        assert "graphrag" in engines
 
-        assert len(progress_calls) == 1
-        assert progress_calls[0] == (2, 2)
+    def test_register_engine(self) -> None:
+        """register_engine adds new engine to registry."""
+        from khora.engines import list_engines, register_engine
+
+        register_engine("test_engine", "test.module", "TestEngine")
+        engines = list_engines()
+        assert "test_engine" in engines
+
+    def test_create_engine_unknown_raises(self) -> None:
+        """create_engine raises for unknown engine."""
+        from khora.engines import create_engine
+
+        with pytest.raises(ValueError, match="Unknown engine"):
+            create_engine("nonexistent", _mock_config())

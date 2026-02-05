@@ -2,11 +2,13 @@
 
 This is the main entry point for using Khora as a library.
 Provides a simple, unified interface for memory storage and retrieval.
+
+The MemoryLake class is a thin facade that delegates to pluggable engines.
+The default engine is "graphrag" which uses knowledge graphs, vectors, and LLM extraction.
 """
 
 from __future__ import annotations
 
-import hashlib
 import warnings
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
@@ -16,14 +18,14 @@ from uuid import UUID
 
 from loguru import logger
 
-from khora.config import KhoraConfig, LiteLLMConfig, load_config
-from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
-from khora.extraction.embedders import LiteLLMEmbedder
-from khora.query import HybridQueryEngine, QueryConfig, SearchMode
-from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+from khora.config import KhoraConfig, load_config
+from khora.core.models import Document, Entity, MemoryNamespace
+from khora.query import SearchMode
 
 if TYPE_CHECKING:
-    pass
+    from khora.engines.protocol import MemoryEngineProtocol
+    from khora.query import HybridQueryEngine
+    from khora.storage import StorageConfig, StorageCoordinator
 
 
 @dataclass
@@ -83,6 +85,9 @@ class MemoryLake:
 
     Can be used as a context manager for automatic connection handling.
 
+    The MemoryLake is a facade that delegates to pluggable engines.
+    The default engine is "graphrag" which uses knowledge graphs and vector embeddings.
+
     Usage:
         # Simplest - from env vars (KHORA_DATABASE_URL)
         async with MemoryLake() as lake:
@@ -96,6 +101,10 @@ class MemoryLake:
         async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
             ...
 
+        # Explicit engine selection (same as default)
+        async with MemoryLake("postgresql://...", engine="graphrag") as lake:
+            ...
+
         # Full config
         async with MemoryLake(KhoraConfig(...)) as lake:
             ...
@@ -105,6 +114,7 @@ class MemoryLake:
         self,
         database_url: str | KhoraConfig | None = None,
         *,
+        engine: str = "graphrag",
         graph_url: str | None = None,
         embedding_model: str = "text-embedding-3-small",
         storage_config: StorageConfig | None = None,
@@ -113,6 +123,7 @@ class MemoryLake:
 
         Args:
             database_url: PostgreSQL URL, or full KhoraConfig, or None (reads KHORA_DATABASE_URL from env)
+            engine: Engine to use (default: "graphrag")
             graph_url: Optional Neo4j/graph database URL (bolt://user:pass@host:port)
             embedding_model: Embedding model to use (default: text-embedding-3-small)
             storage_config: Storage configuration (derived from config if None) - deprecated
@@ -126,6 +137,9 @@ class MemoryLake:
 
             # With graph
             lake = MemoryLake("postgresql://...", graph_url="bolt://...")
+
+            # Explicit engine selection
+            lake = MemoryLake("postgresql://...", engine="graphrag")
 
             # Full config
             lake = MemoryLake(KhoraConfig(...))
@@ -151,32 +165,11 @@ class MemoryLake:
             if embedding_model != "text-embedding-3-small":
                 self._config.llm.embedding_model = embedding_model
 
-        # Set up storage config
-        if storage_config:
-            self._storage_config = storage_config
-        else:
-            postgresql_url = self._config.get_postgresql_url()
-            graph_config = self._config.get_graph_config()
-            vector_config = self._config.get_vector_config()
-            self._storage_config = StorageConfig(
-                postgresql_url=postgresql_url,
-                pgvector_url=postgresql_url,  # pgvector uses same database as relational
-                neo4j_url=self._config.get_neo4j_url(),
-                neo4j_user=self._config.get_neo4j_user(),
-                neo4j_password=self._config.get_neo4j_password(),
-                neo4j_database=self._config.get_neo4j_database(),
-                pgvector_embedding_dimension=self._config.storage.embedding_dimension,
-                graph_config=graph_config,
-                vector_config=vector_config,
-            )
-
-        self._storage: StorageCoordinator | None = None
-        self._embedder: LiteLLMEmbedder | None = None
-        self._query_engine: HybridQueryEngine | None = None
+        # Store for deferred engine creation
+        self._engine_name = engine
+        self._storage_config = storage_config  # for backwards compat
+        self._engine: MemoryEngineProtocol | None = None
         self._connected = False
-
-        # Default namespace for simple usage
-        self._default_namespace_id: UUID | None = None
 
     async def connect(self) -> None:
         """Connect to all storage backends."""
@@ -185,35 +178,14 @@ class MemoryLake:
 
         logger.info("Connecting Memory Lake...")
 
-        # Create and connect storage
-        self._storage = create_storage_coordinator(self._storage_config)
-        await self._storage.connect()
+        from khora.engines import create_engine
 
-        # Create embedder
-        llm_config = LiteLLMConfig(
-            model=self._config.llm.model,
-            embedding_model=self._config.llm.embedding_model,
-            embedding_dimension=self._config.llm.embedding_dimension,
-            timeout=self._config.llm.timeout,
-            max_retries=self._config.llm.max_retries,
+        self._engine = create_engine(
+            self._engine_name,
+            self._config,
+            storage_config=self._storage_config,
         )
-        self._embedder = LiteLLMEmbedder.from_config(llm_config)
-
-        # Create query engine
-        self._query_engine = HybridQueryEngine(
-            storage=self._storage,
-            embedder=self._embedder,
-        )
-
-        # Initialize telemetry (no-op if KHORA_TELEMETRY_DATABASE_URL not set)
-        from khora.telemetry import init_telemetry
-        from khora.telemetry.config import TelemetryConfig
-
-        telemetry_cfg = TelemetryConfig(
-            database_url=self._config.telemetry_database_url,
-            service_name=self._config.telemetry_service_name,
-        )
-        await init_telemetry(telemetry_cfg)
+        await self._engine.connect()
 
         self._connected = True
         logger.info("Memory Lake connected")
@@ -225,19 +197,11 @@ class MemoryLake:
 
         logger.info("Disconnecting Memory Lake...")
 
-        # Shutdown telemetry
-        from khora.telemetry import shutdown_telemetry
+        if self._engine:
+            await self._engine.disconnect()
+            self._engine = None
 
-        await shutdown_telemetry()
-
-        if self._storage:
-            await self._storage.disconnect()
-            self._storage = None
-
-        self._embedder = None
-        self._query_engine = None
         self._connected = False
-
         logger.info("Memory Lake disconnected")
 
     async def __aenter__(self) -> MemoryLake:
@@ -248,6 +212,12 @@ class MemoryLake:
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         """Async context manager exit."""
         await self.disconnect()
+
+    def _get_engine(self) -> MemoryEngineProtocol:
+        """Get the engine (internal use)."""
+        if self._engine is None:
+            raise RuntimeError("Memory Lake not connected. Call connect() first.")
+        return self._engine
 
     @property
     def storage(self) -> StorageCoordinator:
@@ -266,9 +236,10 @@ class MemoryLake:
             DeprecationWarning,
             stacklevel=2,
         )
-        if self._storage is None:
-            raise RuntimeError("Memory Lake not connected. Call connect() first.")
-        return self._storage
+        engine = self._get_engine()
+        if hasattr(engine, "_storage") and engine._storage:
+            return engine._storage
+        raise AttributeError("Current engine does not expose storage")
 
     @property
     def query_engine(self) -> HybridQueryEngine:
@@ -284,21 +255,10 @@ class MemoryLake:
             DeprecationWarning,
             stacklevel=2,
         )
-        if self._query_engine is None:
-            raise RuntimeError("Memory Lake not connected. Call connect() first.")
-        return self._query_engine
-
-    def _get_storage(self) -> StorageCoordinator:
-        """Get storage coordinator (internal use, no deprecation warning)."""
-        if self._storage is None:
-            raise RuntimeError("Memory Lake not connected. Call connect() first.")
-        return self._storage
-
-    def _get_query_engine(self) -> HybridQueryEngine:
-        """Get query engine (internal use, no deprecation warning)."""
-        if self._query_engine is None:
-            raise RuntimeError("Memory Lake not connected. Call connect() first.")
-        return self._query_engine
+        engine = self._get_engine()
+        if hasattr(engine, "_query_engine") and engine._query_engine:
+            return engine._query_engine
+        raise AttributeError("Current engine does not expose query_engine")
 
     # =========================================================================
     # Namespace Management
@@ -323,56 +283,20 @@ class MemoryLake:
         Returns:
             Created MemoryNamespace
         """
-        namespace = MemoryNamespace(
-            workspace_id=workspace_id,
-            name=name,
+        return await self._get_engine().create_namespace(
+            name,
+            workspace_id,
             description=description,
-            config_overrides=config_overrides or {},
+            config_overrides=config_overrides,
         )
-        return await self._get_storage().create_namespace(namespace)
 
     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
         """Get a namespace by ID."""
-        return await self._get_storage().get_namespace(namespace_id)
+        return await self._get_engine().get_namespace(namespace_id)
 
     async def get_or_create_default_namespace(self) -> UUID:
         """Get or create a default namespace for simple usage."""
-        if self._default_namespace_id:
-            return self._default_namespace_id
-
-        # Try to find existing default namespace
-        # For simplicity, we'll create a default org/workspace/namespace
-        storage = self._get_storage()
-        default_org = await storage.get_organization_by_slug("default")
-        if not default_org:
-            default_org = await storage.create_organization(Organization(name="Default", slug="default"))
-
-        workspaces = await storage.list_workspaces(default_org.id)
-        if workspaces:
-            default_workspace = workspaces[0]
-        else:
-            default_workspace = await storage.create_workspace(
-                Workspace(
-                    organization_id=default_org.id,
-                    name="Default",
-                    slug="default",
-                )
-            )
-
-        namespaces = await storage.list_namespaces(default_workspace.id)
-        if namespaces:
-            default_namespace = namespaces[0]
-        else:
-            default_namespace = await storage.create_namespace(
-                MemoryNamespace(
-                    workspace_id=default_workspace.id,
-                    name="Default",
-                    slug="default",
-                )
-            )
-
-        self._default_namespace_id = default_namespace.id
-        return self._default_namespace_id
+        return await self._get_engine().get_or_create_default_namespace()
 
     # =========================================================================
     # Core API: remember, recall, forget
@@ -411,9 +335,10 @@ class MemoryLake:
 
         ensure_trace_id()
         try:
-            return await self._remember_inner(
+            namespace_id = await self._resolve_namespace(namespace)
+            return await self._get_engine().remember(
                 content,
-                namespace=namespace,
+                namespace_id,
                 title=title,
                 source=source,
                 metadata=metadata,
@@ -421,73 +346,6 @@ class MemoryLake:
             )
         finally:
             clear_trace_id()
-
-    async def _remember_inner(
-        self,
-        content: str,
-        *,
-        namespace: str | UUID | None = None,
-        title: str = "",
-        source: str = "",
-        metadata: dict[str, Any] | None = None,
-        skill_name: str = "general_entities",
-    ) -> RememberResult:
-        """Internal remember implementation with trace context already set."""
-        # Resolve namespace
-        namespace_id = await self._resolve_namespace(namespace)
-
-        # Compute checksum
-        checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-        storage = self._get_storage()
-
-        # Check for duplicate - skip if any document with same checksum exists
-        existing = await storage.get_document_by_checksum(namespace_id, checksum)
-        if existing:
-            logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
-            return RememberResult(
-                document_id=existing.id,
-                namespace_id=namespace_id,
-                chunks_created=existing.chunk_count,
-                entities_extracted=existing.entity_count,
-                relationships_created=0,
-                metadata={"duplicate": True, "status": str(existing.status)},
-            )
-
-        # Create document
-        doc_metadata = DocumentMetadata(
-            title=title,
-            source=source,
-            source_type="api",
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=metadata or {},
-        )
-        document = Document(
-            namespace_id=namespace_id,
-            content=content,
-            metadata=doc_metadata,
-        )
-        document = await storage.create_document(document)
-
-        # Process through pipeline
-        from khora.pipelines.flows.ingest import process_document
-
-        result = await process_document(
-            document,
-            storage,
-            skill_name=skill_name,
-            embedding_model=self._config.llm.embedding_model,
-            extraction_model=self._config.llm.extraction_model or self._config.llm.model,
-        )
-
-        return RememberResult(
-            document_id=document.id,
-            namespace_id=namespace_id,
-            chunks_created=result["chunks"],
-            entities_extracted=result["entities"],
-            relationships_created=result["relationships"],
-        )
 
     async def remember_batch(
         self,
@@ -532,9 +390,10 @@ class MemoryLake:
 
         ensure_trace_id()
         try:
-            return await self._remember_batch_inner(
+            namespace_id = await self._resolve_namespace(namespace)
+            return await self._get_engine().remember_batch(
                 documents,
-                namespace=namespace,
+                namespace_id,
                 skill_name=skill_name,
                 max_concurrent=max_concurrent,
                 deduplicate=deduplicate,
@@ -543,94 +402,6 @@ class MemoryLake:
             )
         finally:
             clear_trace_id()
-
-    async def _remember_batch_inner(
-        self,
-        documents: list[dict[str, Any]],
-        *,
-        namespace: str | UUID | None = None,
-        skill_name: str = "general_entities",
-        max_concurrent: int = 5,
-        deduplicate: bool = True,
-        infer_relationships: bool = True,
-        on_progress: Callable[[int, int], None] | None = None,
-    ) -> BatchResult:
-        """Internal remember_batch implementation using ingest_documents for shared EntityIndex."""
-        if not documents:
-            return BatchResult(
-                total=0,
-                processed=0,
-                skipped=0,
-                failed=0,
-                chunks=0,
-                entities=0,
-                relationships=0,
-            )
-
-        namespace_id = await self._resolve_namespace(namespace)
-
-        # Build doc dicts for ingest_documents
-        doc_inputs = []
-        for doc_data in documents:
-            doc_inputs.append(
-                {
-                    "content": doc_data.get("content", ""),
-                    "title": doc_data.get("title", ""),
-                    "source": doc_data.get("source", ""),
-                    "source_type": "api",
-                    "metadata": doc_data.get("metadata", {}),
-                }
-            )
-
-        from khora.pipelines.flows.ingest import ingest_documents
-
-        # Create a shared embedder for efficiency (uses LRU cache internally)
-        shared_embedder = LiteLLMEmbedder(model=self._config.llm.embedding_model)
-
-        # Create shared EntityIndex for cross-document deduplication if enabled
-        shared_entity_index = None
-        if deduplicate:
-            from khora.extraction.expansion.entity_index import EntityIndex
-
-            shared_entity_index = EntityIndex()
-
-            # Optionally preload existing entities for dedup against stored data
-            existing_entities = await self._get_storage().list_entities(namespace_id, limit=50000)
-            for entity in existing_entities:
-                shared_entity_index.add(entity)
-
-            if existing_entities:
-                logger.debug(f"Preloaded {len(existing_entities)} existing entities into EntityIndex")
-
-        result = await ingest_documents(
-            namespace_id,
-            doc_inputs,
-            self._get_storage(),
-            skill_name=skill_name,
-            embedding_model=self._config.llm.embedding_model,
-            extraction_model=self._config.llm.extraction_model or self._config.llm.model,
-            max_concurrent_documents=max_concurrent,
-            shared_embedder=shared_embedder,
-            shared_entity_index=shared_entity_index,
-            enable_expansion=infer_relationships,
-        )
-
-        # Call progress callback if provided
-        if on_progress:
-            processed = result.get("processed_documents", 0)
-            total = result.get("total_documents", len(documents))
-            on_progress(processed, total)
-
-        # Build BatchResult from aggregated stats
-        return BatchResult(
-            total=result.get("total_documents", len(documents)),
-            processed=result.get("processed_documents", 0),
-            skipped=result.get("skipped_documents", 0),
-            failed=result.get("failed_documents", 0),
-            chunks=result.get("total_chunks", 0),
-            entities=result.get("total_entities", 0),
-            relationships=result.get("total_relationships", 0) + result.get("total_inferred_relationships", 0),
-        )
 
     async def remember_batch_legacy(
         self,
@@ -670,10 +441,17 @@ class MemoryLake:
 
         from khora.pipelines.flows.ingest import ingest_documents
 
+        # Access storage through engine for backwards compat
+        engine = self._get_engine()
+        if not hasattr(engine, "_storage") or engine._storage is None:
+            raise RuntimeError("Engine does not support legacy batch operations")
+
+        storage = engine._storage
+
         result = await ingest_documents(
             namespace_id,
             doc_inputs,
-            self._get_storage(),
+            storage,
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
@@ -756,9 +534,10 @@ class MemoryLake:
 
         ensure_trace_id()
         try:
-            return await self._recall_inner(
+            namespace_id = await self._resolve_namespace(namespace)
+            return await self._get_engine().recall(
                 query,
-                namespace=namespace,
+                namespace_id,
                 limit=limit,
                 mode=mode,
                 min_similarity=min_similarity,
@@ -767,49 +546,6 @@ class MemoryLake:
             )
         finally:
             clear_trace_id()
-
-    async def _recall_inner(
-        self,
-        query: str,
-        *,
-        namespace: str | UUID | None = None,
-        limit: int = 10,
-        mode: SearchMode = SearchMode.HYBRID,
-        min_similarity: float = 0.0,
-        agentic: bool = False,
-        raw: bool = False,
-    ) -> RecallResult:
-        """Internal recall implementation with trace context already set."""
-        namespace_id = await self._resolve_namespace(namespace)
-
-        config = QueryConfig(
-            mode=mode,
-            max_chunks=limit,
-            max_entities=limit,
-            min_chunk_similarity=min_similarity,
-            min_entity_similarity=min_similarity,
-        )
-
-        # Raw mode: disable all LLM features
-        if raw:
-            config.enable_query_understanding = False
-            config.enable_query_expansion = False
-            config.enable_entity_extraction = False
-            config.enable_temporal_detection = False
-            config.enable_entity_linking = False
-            config.enable_reranking = False
-            config.enable_hyde = False
-
-        result = await self._get_query_engine().query(query, namespace_id, config=config, agentic=agentic)
-
-        return RecallResult(
-            query=query,
-            namespace_id=namespace_id,
-            chunks=result.chunks,
-            entities=result.entities,
-            context_text=result.get_context_text(max_chunks=limit),
-            metadata=result.metadata,
-        )
 
     async def forget(
         self,
@@ -826,17 +562,11 @@ class MemoryLake:
         Returns:
             True if deleted, False if not found
         """
-        storage = self._get_storage()
-
-        # Verify namespace if provided
+        namespace_id = None
         if namespace:
             namespace_id = await self._resolve_namespace(namespace)
-            document = await storage.get_document(document_id)
-            if document and document.namespace_id != namespace_id:
-                logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-                return False
 
-        return await storage.delete_document(document_id)
+        return await self._get_engine().forget(document_id, namespace_id)
 
     # =========================================================================
     # Entity Operations
@@ -844,7 +574,7 @@ class MemoryLake:
 
     async def get_entity(self, entity_id: UUID) -> Entity | None:
         """Get an entity by ID."""
-        return await self._get_storage().get_entity(entity_id)
+        return await self._get_engine().get_entity(entity_id)
 
     async def list_entities(
         self,
@@ -855,7 +585,7 @@ class MemoryLake:
     ) -> list[Entity]:
         """List entities in a namespace."""
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+        return await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
 
     async def find_related_entities(
         self,
@@ -867,7 +597,7 @@ class MemoryLake:
     ) -> list[tuple[Entity, float]]:
         """Find entities related to a given entity."""
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_query_engine().find_related_entities(
+        return await self._get_engine().find_related_entities(
             entity_id,
             namespace_id,
             max_depth=max_depth,
@@ -887,7 +617,7 @@ class MemoryLake:
         Returns:
             Document or None if not found
         """
-        return await self._get_storage().get_document(document_id)
+        return await self._get_engine().get_document(document_id)
 
     async def list_documents(
         self,
@@ -905,7 +635,7 @@ class MemoryLake:
             List of Documents
         """
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_storage().list_documents(namespace_id, limit=limit)
+        return await self._get_engine().list_documents(namespace_id, limit=limit)
 
     async def search_entities(
         self,
@@ -925,30 +655,7 @@ class MemoryLake:
             List of matching Entities (most similar first)
         """
         namespace_id = await self._resolve_namespace(namespace)
-
-        # Embed the query
-        if self._embedder is None:
-            raise RuntimeError("Memory Lake not connected. Call connect() first.")
-
-        query_embedding = await self._embedder.embed(query)
-
-        # Search similar entities
-        entity_ids_scores = await self._get_storage().search_similar_entities(
-            namespace_id,
-            query_embedding,
-            limit=limit,
-            min_similarity=0.0,
-        )
-
-        # Fetch full entities
-        storage = self._get_storage()
-        entities = []
-        for entity_id, _score in entity_ids_scores:
-            entity = await storage.get_entity(entity_id)
-            if entity:
-                entities.append(entity)
-
-        return entities
+        return await self._get_engine().search_entities(query, namespace_id, limit=limit)
 
     async def stats(self, *, namespace: str | UUID | None = None) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace.
@@ -960,43 +667,7 @@ class MemoryLake:
             Stats with document/chunk/entity/relationship counts
         """
         namespace_id = await self._resolve_namespace(namespace)
-        storage = self._get_storage()
-
-        # Get counts
-        documents = await storage.list_documents(namespace_id, limit=0)
-        doc_count = len(documents) if documents else 0
-
-        # For more accurate counts, query directly
-        # These may vary by backend implementation
-        try:
-            doc_count = await storage.count_documents(namespace_id)
-        except (AttributeError, NotImplementedError):
-            pass
-
-        try:
-            chunk_count = await storage.count_chunks(namespace_id)
-        except (AttributeError, NotImplementedError):
-            chunks = await storage.list_chunks(namespace_id, limit=0)
-            chunk_count = len(chunks) if chunks else 0
-
-        try:
-            entity_count = await storage.count_entities(namespace_id)
-        except (AttributeError, NotImplementedError):
-            entities = await storage.list_entities(namespace_id, limit=0)
-            entity_count = len(entities) if entities else 0
-
-        try:
-            relationship_count = await storage.count_relationships(namespace_id)
-        except (AttributeError, NotImplementedError):
-            rels = await storage.list_relationships(namespace_id, limit=0)
-            relationship_count = len(rels) if rels else 0
-
-        return Stats(
-            documents=doc_count,
-            chunks=chunk_count,
-            entities=entity_count,
-            relationships=relationship_count,
-        )
+        return await self._get_engine().stats(namespace_id)
 
     async def ensure_namespace(
         self,
@@ -1017,38 +688,7 @@ class MemoryLake:
         Returns:
             Namespace UUID
         """
-        storage = self._get_storage()
-
-        # Ensure default org/workspace exists
-        await self.get_or_create_default_namespace()
-
-        # Get default workspace
-        default_org = await storage.get_organization_by_slug("default")
-        if not default_org:
-            raise RuntimeError("Default organization not found")
-
-        workspaces = await storage.list_workspaces(default_org.id)
-        if not workspaces:
-            raise RuntimeError("Default workspace not found")
-
-        default_workspace = workspaces[0]
-
-        # Try to find namespace by slug
-        slug = name.lower().replace(" ", "-")
-        existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
-        if existing_ns:
-            return existing_ns.id
-
-        # Create new namespace
-        new_ns = await storage.create_namespace(
-            MemoryNamespace(
-                workspace_id=default_workspace.id,
-                name=name,
-                slug=slug,
-                description=description,
-            )
-        )
-        return new_ns.id
+        return await self._get_engine().ensure_namespace(name, description=description)
 
     # =========================================================================
     # Helpers
@@ -1069,7 +709,12 @@ class MemoryLake:
             pass
 
         # Look up by slug in default workspace
-        storage = self._get_storage()
+        # Access storage through engine for namespace lookup
+        engine = self._get_engine()
+        if not hasattr(engine, "_storage") or engine._storage is None:
+            raise RuntimeError("Engine does not support namespace lookup by slug")
+
+        storage = engine._storage
         default_ns_id = await self.get_or_create_default_namespace()
         default_ns = await storage.get_namespace(default_ns_id)
         if default_ns:
@@ -1081,15 +726,10 @@ class MemoryLake:
 
     async def health_check(self) -> dict[str, Any]:
         """Check health of all components."""
-        if not self._connected:
+        if not self._connected or self._engine is None:
             return {"status": "disconnected"}
 
-        storage_health = await self._get_storage().health_check()
-
-        return {
-            "status": "healthy" if storage_health.is_healthy else "degraded",
-            "storage": storage_health.summary,
-        }
+        return await self._engine.health_check()
 
 
 # Convenience function for one-off usage
@@ -1104,7 +744,7 @@ async def memory_lake(
             await lake.remember("Hello, world!")
             result = await lake.recall("greeting")
     """
-    lake = MemoryLake(config=config)
+    lake = MemoryLake(config)
     try:
         await lake.connect()
         yield lake

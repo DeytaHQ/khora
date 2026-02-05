@@ -107,7 +107,7 @@ class ChatEngine:
                     source = doc_cache[doc_id_str]
                 else:
                     try:
-                        doc = await self.lake.storage.get_document(chunk.document_id)
+                        doc = await self.lake.get_document(chunk.document_id)
                         if doc and doc.metadata:
                             source = doc.metadata.custom.get("source_system", "")
                             if not source:
