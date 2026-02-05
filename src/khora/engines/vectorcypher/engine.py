@@ -25,7 +25,7 @@ from loguru import logger
 from neo4j import AsyncGraphDatabase
 
 from khora.config import KhoraConfig, LiteLLMConfig
-from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+from khora.core.models import Chunk, Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.extraction.embedders import LiteLLMEmbedder
@@ -40,6 +40,7 @@ from .router import QueryComplexityRouter, RouterConfig
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
+    from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
 
 
@@ -309,6 +310,8 @@ class VectorCypherEngine:
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_model: str | None = None,
         occurred_at: datetime | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
@@ -320,6 +323,8 @@ class VectorCypherEngine:
             source: Document source
             metadata: Additional metadata
             skill_name: Extraction skill to use
+            expertise: ExpertiseConfig, expertise name string, or file path
+            extraction_model: LLM model for entity extraction (default: config model)
             occurred_at: When this content/event occurred (default: now)
 
         Returns:
@@ -361,6 +366,8 @@ class VectorCypherEngine:
         chunks_created, entities_extracted, relationships_created = await self._process_document(
             document,
             skill_name=skill_name,
+            expertise=expertise,
+            extraction_model=extraction_model,
             occurred_at=occurred_at or datetime.now(UTC),
         )
 
@@ -377,6 +384,8 @@ class VectorCypherEngine:
         document: Document,
         *,
         skill_name: str,
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_model: str | None = None,
         occurred_at: datetime,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
@@ -462,6 +471,9 @@ class VectorCypherEngine:
             entities_extracted, relationships_created = await self._run_skeleton_extraction(
                 temporal_chunks,
                 document.namespace_id,
+                skill_name=skill_name,
+                expertise=expertise,
+                extraction_model=extraction_model,
             )
 
         # Update document status
@@ -479,16 +491,29 @@ class VectorCypherEngine:
         self,
         chunks: list[TemporalChunk],
         namespace_id: UUID,
+        *,
+        skill_name: str = "general_entities",
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_model: str | None = None,
     ) -> tuple[int, int]:
         """Run skeleton-based entity extraction on core chunks only.
+
+        Uses the skeleton indexer to identify the top core chunks (by PageRank),
+        then runs full LLM extraction on those chunks and stores the results
+        in both Neo4j (entities, relationships, MENTIONED_IN links) and pgvector.
 
         Args:
             chunks: All chunks from the document
             namespace_id: Namespace ID
+            skill_name: Extraction skill to use
+            expertise: ExpertiseConfig, expertise name string, or file path
+            extraction_model: LLM model for extraction (default: config model)
 
         Returns:
             Tuple of (entities_extracted, relationships_created)
         """
+        from khora.pipelines.tasks.extract import extract_entities
+
         if not chunks:
             return 0, 0
 
@@ -503,28 +528,66 @@ class VectorCypherEngine:
             return 0, 0
 
         # Get core chunks
-        core_chunks = [c for c in chunks if c.id in core_ids]
+        core_temporal_chunks = [c for c in chunks if c.id in core_ids]
 
-        # Extract entities from core chunks
-        # For now, we use keyword extraction as a placeholder
-        # In production, this would use LLM extraction
-        entities_extracted = 0
-        entity_chunk_links: list[EntityChunkLink] = []
+        # Convert TemporalChunk -> Chunk for extract_entities()
+        chunk_objects = []
+        for tc in core_temporal_chunks:
+            chunk_objects.append(
+                Chunk(
+                    id=tc.id,
+                    namespace_id=tc.namespace_id,
+                    document_id=tc.document_id,
+                    content=tc.content,
+                    created_at=tc.created_at or tc.occurred_at,
+                )
+            )
 
-        for chunk in core_chunks:
-            # Extract keywords as pseudo-entities
-            keywords = skeleton._extract_keywords(chunk.content)
-            for keyword in list(keywords)[:10]:  # Limit per chunk
-                # In production, create actual Entity nodes
-                # For now, we track the link structure
-                entities_extracted += 1
+        # Run LLM extraction on core chunks
+        model = extraction_model or self._config.llm.model
+        entities, relationships = await extract_entities(
+            chunk_objects,
+            skill_name=skill_name,
+            expertise=expertise,
+            model=model,
+            max_concurrent=self._config.llm.max_concurrent_llm_calls,
+        )
 
-        # Store entity-chunk links
+        if not entities:
+            return 0, 0
+
+        storage = self._get_storage()
         dual_nodes = self._get_dual_nodes()
+
+        # Store entities in Neo4j + pgvector
+        await storage.upsert_entities_batch(namespace_id, entities)
+
+        # Store relationships in Neo4j
+        relationships_created = 0
+        if relationships:
+            relationships_created = await storage.create_relationships_batch(relationships)
+
+        # Build entity-chunk links from source_chunk_ids
+        entity_chunk_links: list[EntityChunkLink] = []
+        for entity in entities:
+            for chunk_id in entity.source_chunk_ids:
+                entity_chunk_links.append(
+                    EntityChunkLink(
+                        entity_id=entity.id,
+                        chunk_id=chunk_id,
+                    )
+                )
+
+        # Create MENTIONED_IN edges in Neo4j
         if entity_chunk_links:
             await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
 
-        return entities_extracted, 0
+        logger.debug(
+            f"Skeleton extraction: {len(entities)} entities, "
+            f"{relationships_created} relationships from {len(core_temporal_chunks)} core chunks"
+        )
+
+        return len(entities), relationships_created
 
     async def recall(
         self,
@@ -628,6 +691,8 @@ class VectorCypherEngine:
         namespace_id: UUID,
         *,
         skill_name: str = "general_entities",
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_model: str | None = None,
         max_concurrent: int = 10,
         deduplicate: bool = True,
         infer_relationships: bool = True,
@@ -727,6 +792,8 @@ class VectorCypherEngine:
                         source=doc_data.get("source", ""),
                         metadata=doc_metadata,
                         skill_name=skill_name,
+                        expertise=expertise,
+                        extraction_model=extraction_model,
                         occurred_at=occurred_at,
                     )
 

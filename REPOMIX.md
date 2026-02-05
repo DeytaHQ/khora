@@ -22394,7 +22394,7 @@ README.md
   25: from neo4j import AsyncGraphDatabase
   26: 
   27: from khora.config import KhoraConfig, LiteLLMConfig
-  28: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+  28: from khora.core.models import Chunk, Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
   29: from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
   30: from khora.engines.skeleton.skeleton import SkeletonIndexer
   31: from khora.extraction.embedders import LiteLLMEmbedder
@@ -22409,988 +22409,1055 @@ README.md
   40: if TYPE_CHECKING:
   41:     from neo4j import AsyncDriver
   42: 
-  43:     from khora.storage import StorageCoordinator
-  44: 
+  43:     from khora.extraction.skills import ExpertiseConfig
+  44:     from khora.storage import StorageCoordinator
   45: 
-  46: @dataclass
-  47: class VectorCypherConfig:
-  48:     """VectorCypher-specific configuration."""
-  49: 
-  50:     # Routing
-  51:     routing_enabled: bool = True
-  52:     routing_use_llm: bool = False
-  53: 
-  54:     # Skeleton indexing
-  55:     skeleton_core_ratio: float = 0.25  # 25% get full KG extraction
-  56: 
-  57:     # Graph traversal
-  58:     graph_default_depth: int = 2
-  59:     graph_max_depth: int = 4
-  60:     graph_max_entry_entities: int = 10
-  61: 
-  62:     # Fusion
-  63:     fusion_rrf_k: int = 60
-  64:     fusion_vector_weight: float = 0.6
-  65:     fusion_graph_weight: float = 0.4
-  66: 
-  67:     # Temporal
-  68:     temporal_recency_weight: float = 0.2
-  69:     temporal_recency_decay_days: int = 30
-  70: 
+  46: 
+  47: @dataclass
+  48: class VectorCypherConfig:
+  49:     """VectorCypher-specific configuration."""
+  50: 
+  51:     # Routing
+  52:     routing_enabled: bool = True
+  53:     routing_use_llm: bool = False
+  54: 
+  55:     # Skeleton indexing
+  56:     skeleton_core_ratio: float = 0.25  # 25% get full KG extraction
+  57: 
+  58:     # Graph traversal
+  59:     graph_default_depth: int = 2
+  60:     graph_max_depth: int = 4
+  61:     graph_max_entry_entities: int = 10
+  62: 
+  63:     # Fusion
+  64:     fusion_rrf_k: int = 60
+  65:     fusion_vector_weight: float = 0.6
+  66:     fusion_graph_weight: float = 0.4
+  67: 
+  68:     # Temporal
+  69:     temporal_recency_weight: float = 0.2
+  70:     temporal_recency_decay_days: int = 30
   71: 
-  72: class VectorCypherEngine:
-  73:     """VectorCypher engine - hybrid vector+graph retrieval with temporal support.
-  74: 
-  75:     Key features:
-  76:     - Dual retrieval: Vector similarity (pgvector) + graph traversal (Neo4j)
-  77:     - Smart routing: Route queries to optimal path (simple vs complex)
-  78:     - Skeleton indexing: Full KG extraction only for core 25% chunks
-  79:     - Bi-temporal model: Track occurred_at vs ingested_at
-  80:     - RRF fusion: Combine vector and graph scores
-  81: 
-  82:     Requirements:
-  83:     - PostgreSQL with pgvector extension
-  84:     - Neo4j (required, not optional like in SkeletonEngine)
-  85: 
-  86:     Usage:
-  87:         engine = VectorCypherEngine(config)
-  88:         await engine.connect()
-  89: 
-  90:         # Store with temporal context
-  91:         result = await engine.remember(
-  92:             "Meeting with John about Q1 planning",
-  93:             namespace_id,
-  94:             occurred_at=datetime(2024, 1, 15),
-  95:         )
-  96: 
-  97:         # Retrieve with hybrid search
-  98:         result = await engine.recall(
-  99:             "What did we discuss with John about planning?",
- 100:             namespace_id,
- 101:             graph_depth=2,
- 102:         )
- 103:     """
- 104: 
- 105:     def __init__(
- 106:         self,
- 107:         config: KhoraConfig,
- 108:         *,
- 109:         storage_config: StorageConfig | None = None,
- 110:         vectorcypher_config: VectorCypherConfig | None = None,
- 111:     ) -> None:
- 112:         """Initialize the VectorCypher engine.
- 113: 
- 114:         Args:
- 115:             config: KhoraConfig instance
- 116:             storage_config: Storage configuration (deprecated, derived from config)
- 117:             vectorcypher_config: VectorCypher-specific configuration
- 118:         """
- 119:         self._config = config
- 120:         self._vc_config = vectorcypher_config or VectorCypherConfig()
- 121: 
- 122:         # Build storage config
- 123:         if storage_config:
- 124:             self._storage_config = storage_config
- 125:         else:
- 126:             postgresql_url = config.get_postgresql_url()
- 127:             graph_config = config.get_graph_config()
- 128: 
- 129:             storage_kwargs: dict[str, Any] = {
- 130:                 "postgresql_url": postgresql_url,
- 131:                 "pgvector_url": postgresql_url,
- 132:                 "pgvector_embedding_dimension": config.storage.embedding_dimension,
- 133:                 "graph_config": graph_config,
- 134:                 "vector_config": config.get_vector_config(),
- 135:             }
- 136:             if graph_config is not None:
- 137:                 storage_kwargs["neo4j_url"] = config.get_neo4j_url()
- 138:                 storage_kwargs["neo4j_user"] = config.get_neo4j_user()
- 139:                 storage_kwargs["neo4j_password"] = config.get_neo4j_password()
- 140:                 storage_kwargs["neo4j_database"] = config.get_neo4j_database()
- 141: 
- 142:             self._storage_config = StorageConfig(**storage_kwargs)
- 143: 
- 144:         # Component instances (initialized on connect)
- 145:         self._storage: StorageCoordinator | None = None
- 146:         self._temporal_store = None
- 147:         self._neo4j_driver: AsyncDriver | None = None
- 148:         self._embedder: LiteLLMEmbedder | None = None
- 149:         self._retriever: VectorCypherRetriever | None = None
- 150:         self._dual_nodes: DualNodeManager | None = None
- 151:         self._router: QueryComplexityRouter | None = None
- 152:         self._connected = False
- 153: 
- 154:         # Default namespace cache
- 155:         self._default_namespace_id: UUID | None = None
- 156: 
- 157:     async def connect(self) -> None:
- 158:         """Connect to all storage backends."""
- 159:         if self._connected:
- 160:             return
- 161: 
- 162:         logger.info("Connecting VectorCypher engine...")
- 163: 
- 164:         # Create and connect relational storage
- 165:         self._storage = create_storage_coordinator(self._storage_config)
- 166:         await self._storage.connect()
- 167: 
- 168:         # Create and connect temporal vector store (pgvector)
- 169:         self._temporal_store = create_temporal_store("pgvector", self._config)
- 170:         await self._temporal_store.connect()
- 171: 
- 172:         # Connect to Neo4j (required for VectorCypher)
- 173:         neo4j_url = self._config.get_neo4j_url()
- 174:         if not neo4j_url:
- 175:             raise ValueError(
- 176:                 "Neo4j URL is required for VectorCypher engine. Set GENESIS_NEO4J_URL or configure graph_config."
- 177:             )
- 178: 
- 179:         self._neo4j_driver = AsyncGraphDatabase.driver(
- 180:             neo4j_url,
- 181:             auth=(self._config.get_neo4j_user(), self._config.get_neo4j_password()),
- 182:             max_connection_pool_size=50,
- 183:         )
- 184:         await self._neo4j_driver.verify_connectivity()
- 185: 
- 186:         # Create embedder
- 187:         llm_config = LiteLLMConfig(
- 188:             model=self._config.llm.model,
- 189:             embedding_model=self._config.llm.embedding_model,
- 190:             embedding_dimension=self._config.llm.embedding_dimension,
- 191:             timeout=self._config.llm.timeout,
- 192:             max_retries=self._config.llm.max_retries,
- 193:         )
- 194:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
- 195: 
- 196:         # Initialize dual node manager
- 197:         neo4j_database = self._config.get_neo4j_database() or "neo4j"
- 198:         self._dual_nodes = DualNodeManager(self._neo4j_driver, neo4j_database)
- 199:         await self._dual_nodes.ensure_indexes()
- 200: 
- 201:         # Initialize router
- 202:         router_config = RouterConfig(
- 203:             enabled=self._vc_config.routing_enabled,
- 204:             use_llm=self._vc_config.routing_use_llm,
- 205:             moderate_depth=1,
- 206:             complex_depth=self._vc_config.graph_default_depth,
- 207:         )
- 208:         self._router = QueryComplexityRouter(router_config)
- 209: 
- 210:         # Initialize retriever
- 211:         retriever_config = RetrieverConfig(
- 212:             default_depth=self._vc_config.graph_default_depth,
- 213:             max_depth=self._vc_config.graph_max_depth,
- 214:             max_entry_entities=self._vc_config.graph_max_entry_entities,
- 215:             rrf_k=self._vc_config.fusion_rrf_k,
- 216:             vector_weight=self._vc_config.fusion_vector_weight,
- 217:             graph_weight=self._vc_config.fusion_graph_weight,
- 218:             recency_weight=self._vc_config.temporal_recency_weight,
- 219:             recency_decay_days=self._vc_config.temporal_recency_decay_days,
- 220:         )
- 221:         self._retriever = VectorCypherRetriever(
- 222:             vector_store=self._temporal_store,
- 223:             neo4j_driver=self._neo4j_driver,
- 224:             embedder=self._embedder,
- 225:             database=neo4j_database,
- 226:             config=retriever_config,
- 227:         )
- 228: 
- 229:         # Initialize telemetry
- 230:         from khora.telemetry import init_telemetry
- 231:         from khora.telemetry.config import TelemetryConfig
- 232: 
- 233:         telemetry_cfg = TelemetryConfig(
- 234:             database_url=self._config.telemetry_database_url,
- 235:             service_name=self._config.telemetry_service_name,
- 236:         )
- 237:         await init_telemetry(telemetry_cfg)
- 238: 
- 239:         self._connected = True
- 240:         logger.info("VectorCypher engine connected")
- 241: 
- 242:     async def disconnect(self) -> None:
- 243:         """Disconnect from all storage backends."""
- 244:         if not self._connected:
- 245:             return
- 246: 
- 247:         logger.info("Disconnecting VectorCypher engine...")
- 248: 
- 249:         # Shutdown telemetry
- 250:         from khora.telemetry import shutdown_telemetry
- 251: 
- 252:         await shutdown_telemetry()
- 253: 
- 254:         if self._neo4j_driver:
- 255:             await self._neo4j_driver.close()
- 256:             self._neo4j_driver = None
- 257: 
- 258:         if self._temporal_store:
- 259:             await self._temporal_store.disconnect()
- 260:             self._temporal_store = None
- 261: 
- 262:         if self._storage:
- 263:             await self._storage.disconnect()
- 264:             self._storage = None
- 265: 
- 266:         self._embedder = None
- 267:         self._retriever = None
- 268:         self._dual_nodes = None
- 269:         self._router = None
- 270:         self._connected = False
- 271: 
- 272:         logger.info("VectorCypher engine disconnected")
- 273: 
- 274:     def _get_storage(self) -> StorageCoordinator:
- 275:         if self._storage is None:
- 276:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
- 277:         return self._storage
- 278: 
- 279:     def _get_temporal_store(self):
- 280:         if self._temporal_store is None:
- 281:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
- 282:         return self._temporal_store
- 283: 
- 284:     def _get_embedder(self) -> LiteLLMEmbedder:
- 285:         if self._embedder is None:
- 286:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
- 287:         return self._embedder
- 288: 
- 289:     def _get_retriever(self) -> VectorCypherRetriever:
- 290:         if self._retriever is None:
- 291:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
- 292:         return self._retriever
- 293: 
- 294:     def _get_dual_nodes(self) -> DualNodeManager:
- 295:         if self._dual_nodes is None:
- 296:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
- 297:         return self._dual_nodes
- 298: 
- 299:     # =========================================================================
- 300:     # Core API: remember, recall, forget
- 301:     # =========================================================================
- 302: 
- 303:     async def remember(
- 304:         self,
- 305:         content: str,
- 306:         namespace_id: UUID,
- 307:         *,
- 308:         title: str = "",
- 309:         source: str = "",
- 310:         metadata: dict[str, Any] | None = None,
- 311:         skill_name: str = "general_entities",
- 312:         occurred_at: datetime | None = None,
- 313:     ) -> RememberResult:
- 314:         """Store content in the memory engine.
- 315: 
- 316:         Args:
- 317:             content: Content to store
- 318:             namespace_id: Namespace to store in
- 319:             title: Document title
- 320:             source: Document source
- 321:             metadata: Additional metadata
- 322:             skill_name: Extraction skill to use
- 323:             occurred_at: When this content/event occurred (default: now)
- 324: 
- 325:         Returns:
- 326:             RememberResult with document_id and counts
- 327:         """
- 328:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
- 329:         storage = self._get_storage()
- 330: 
- 331:         # Check for duplicate
- 332:         existing = await storage.get_document_by_checksum(namespace_id, checksum)
- 333:         if existing:
- 334:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
- 335:             return RememberResult(
- 336:                 document_id=existing.id,
- 337:                 namespace_id=namespace_id,
- 338:                 chunks_created=existing.chunk_count,
- 339:                 entities_extracted=existing.entity_count,
- 340:                 relationships_created=0,
- 341:                 metadata={"duplicate": True, "status": str(existing.status)},
- 342:             )
- 343: 
- 344:         # Create document
- 345:         doc_metadata = DocumentMetadata(
- 346:             title=title,
- 347:             source=source,
- 348:             source_type="api",
- 349:             checksum=checksum,
- 350:             size_bytes=len(content.encode("utf-8")),
- 351:             custom=metadata or {},
- 352:         )
- 353:         document = Document(
- 354:             namespace_id=namespace_id,
- 355:             content=content,
- 356:             metadata=doc_metadata,
+  72: 
+  73: class VectorCypherEngine:
+  74:     """VectorCypher engine - hybrid vector+graph retrieval with temporal support.
+  75: 
+  76:     Key features:
+  77:     - Dual retrieval: Vector similarity (pgvector) + graph traversal (Neo4j)
+  78:     - Smart routing: Route queries to optimal path (simple vs complex)
+  79:     - Skeleton indexing: Full KG extraction only for core 25% chunks
+  80:     - Bi-temporal model: Track occurred_at vs ingested_at
+  81:     - RRF fusion: Combine vector and graph scores
+  82: 
+  83:     Requirements:
+  84:     - PostgreSQL with pgvector extension
+  85:     - Neo4j (required, not optional like in SkeletonEngine)
+  86: 
+  87:     Usage:
+  88:         engine = VectorCypherEngine(config)
+  89:         await engine.connect()
+  90: 
+  91:         # Store with temporal context
+  92:         result = await engine.remember(
+  93:             "Meeting with John about Q1 planning",
+  94:             namespace_id,
+  95:             occurred_at=datetime(2024, 1, 15),
+  96:         )
+  97: 
+  98:         # Retrieve with hybrid search
+  99:         result = await engine.recall(
+ 100:             "What did we discuss with John about planning?",
+ 101:             namespace_id,
+ 102:             graph_depth=2,
+ 103:         )
+ 104:     """
+ 105: 
+ 106:     def __init__(
+ 107:         self,
+ 108:         config: KhoraConfig,
+ 109:         *,
+ 110:         storage_config: StorageConfig | None = None,
+ 111:         vectorcypher_config: VectorCypherConfig | None = None,
+ 112:     ) -> None:
+ 113:         """Initialize the VectorCypher engine.
+ 114: 
+ 115:         Args:
+ 116:             config: KhoraConfig instance
+ 117:             storage_config: Storage configuration (deprecated, derived from config)
+ 118:             vectorcypher_config: VectorCypher-specific configuration
+ 119:         """
+ 120:         self._config = config
+ 121:         self._vc_config = vectorcypher_config or VectorCypherConfig()
+ 122: 
+ 123:         # Build storage config
+ 124:         if storage_config:
+ 125:             self._storage_config = storage_config
+ 126:         else:
+ 127:             postgresql_url = config.get_postgresql_url()
+ 128:             graph_config = config.get_graph_config()
+ 129: 
+ 130:             storage_kwargs: dict[str, Any] = {
+ 131:                 "postgresql_url": postgresql_url,
+ 132:                 "pgvector_url": postgresql_url,
+ 133:                 "pgvector_embedding_dimension": config.storage.embedding_dimension,
+ 134:                 "graph_config": graph_config,
+ 135:                 "vector_config": config.get_vector_config(),
+ 136:             }
+ 137:             if graph_config is not None:
+ 138:                 storage_kwargs["neo4j_url"] = config.get_neo4j_url()
+ 139:                 storage_kwargs["neo4j_user"] = config.get_neo4j_user()
+ 140:                 storage_kwargs["neo4j_password"] = config.get_neo4j_password()
+ 141:                 storage_kwargs["neo4j_database"] = config.get_neo4j_database()
+ 142: 
+ 143:             self._storage_config = StorageConfig(**storage_kwargs)
+ 144: 
+ 145:         # Component instances (initialized on connect)
+ 146:         self._storage: StorageCoordinator | None = None
+ 147:         self._temporal_store = None
+ 148:         self._neo4j_driver: AsyncDriver | None = None
+ 149:         self._embedder: LiteLLMEmbedder | None = None
+ 150:         self._retriever: VectorCypherRetriever | None = None
+ 151:         self._dual_nodes: DualNodeManager | None = None
+ 152:         self._router: QueryComplexityRouter | None = None
+ 153:         self._connected = False
+ 154: 
+ 155:         # Default namespace cache
+ 156:         self._default_namespace_id: UUID | None = None
+ 157: 
+ 158:     async def connect(self) -> None:
+ 159:         """Connect to all storage backends."""
+ 160:         if self._connected:
+ 161:             return
+ 162: 
+ 163:         logger.info("Connecting VectorCypher engine...")
+ 164: 
+ 165:         # Create and connect relational storage
+ 166:         self._storage = create_storage_coordinator(self._storage_config)
+ 167:         await self._storage.connect()
+ 168: 
+ 169:         # Create and connect temporal vector store (pgvector)
+ 170:         self._temporal_store = create_temporal_store("pgvector", self._config)
+ 171:         await self._temporal_store.connect()
+ 172: 
+ 173:         # Connect to Neo4j (required for VectorCypher)
+ 174:         neo4j_url = self._config.get_neo4j_url()
+ 175:         if not neo4j_url:
+ 176:             raise ValueError(
+ 177:                 "Neo4j URL is required for VectorCypher engine. Set GENESIS_NEO4J_URL or configure graph_config."
+ 178:             )
+ 179: 
+ 180:         self._neo4j_driver = AsyncGraphDatabase.driver(
+ 181:             neo4j_url,
+ 182:             auth=(self._config.get_neo4j_user(), self._config.get_neo4j_password()),
+ 183:             max_connection_pool_size=50,
+ 184:         )
+ 185:         await self._neo4j_driver.verify_connectivity()
+ 186: 
+ 187:         # Create embedder
+ 188:         llm_config = LiteLLMConfig(
+ 189:             model=self._config.llm.model,
+ 190:             embedding_model=self._config.llm.embedding_model,
+ 191:             embedding_dimension=self._config.llm.embedding_dimension,
+ 192:             timeout=self._config.llm.timeout,
+ 193:             max_retries=self._config.llm.max_retries,
+ 194:         )
+ 195:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
+ 196: 
+ 197:         # Initialize dual node manager
+ 198:         neo4j_database = self._config.get_neo4j_database() or "neo4j"
+ 199:         self._dual_nodes = DualNodeManager(self._neo4j_driver, neo4j_database)
+ 200:         await self._dual_nodes.ensure_indexes()
+ 201: 
+ 202:         # Initialize router
+ 203:         router_config = RouterConfig(
+ 204:             enabled=self._vc_config.routing_enabled,
+ 205:             use_llm=self._vc_config.routing_use_llm,
+ 206:             moderate_depth=1,
+ 207:             complex_depth=self._vc_config.graph_default_depth,
+ 208:         )
+ 209:         self._router = QueryComplexityRouter(router_config)
+ 210: 
+ 211:         # Initialize retriever
+ 212:         retriever_config = RetrieverConfig(
+ 213:             default_depth=self._vc_config.graph_default_depth,
+ 214:             max_depth=self._vc_config.graph_max_depth,
+ 215:             max_entry_entities=self._vc_config.graph_max_entry_entities,
+ 216:             rrf_k=self._vc_config.fusion_rrf_k,
+ 217:             vector_weight=self._vc_config.fusion_vector_weight,
+ 218:             graph_weight=self._vc_config.fusion_graph_weight,
+ 219:             recency_weight=self._vc_config.temporal_recency_weight,
+ 220:             recency_decay_days=self._vc_config.temporal_recency_decay_days,
+ 221:         )
+ 222:         self._retriever = VectorCypherRetriever(
+ 223:             vector_store=self._temporal_store,
+ 224:             neo4j_driver=self._neo4j_driver,
+ 225:             embedder=self._embedder,
+ 226:             database=neo4j_database,
+ 227:             config=retriever_config,
+ 228:         )
+ 229: 
+ 230:         # Initialize telemetry
+ 231:         from khora.telemetry import init_telemetry
+ 232:         from khora.telemetry.config import TelemetryConfig
+ 233: 
+ 234:         telemetry_cfg = TelemetryConfig(
+ 235:             database_url=self._config.telemetry_database_url,
+ 236:             service_name=self._config.telemetry_service_name,
+ 237:         )
+ 238:         await init_telemetry(telemetry_cfg)
+ 239: 
+ 240:         self._connected = True
+ 241:         logger.info("VectorCypher engine connected")
+ 242: 
+ 243:     async def disconnect(self) -> None:
+ 244:         """Disconnect from all storage backends."""
+ 245:         if not self._connected:
+ 246:             return
+ 247: 
+ 248:         logger.info("Disconnecting VectorCypher engine...")
+ 249: 
+ 250:         # Shutdown telemetry
+ 251:         from khora.telemetry import shutdown_telemetry
+ 252: 
+ 253:         await shutdown_telemetry()
+ 254: 
+ 255:         if self._neo4j_driver:
+ 256:             await self._neo4j_driver.close()
+ 257:             self._neo4j_driver = None
+ 258: 
+ 259:         if self._temporal_store:
+ 260:             await self._temporal_store.disconnect()
+ 261:             self._temporal_store = None
+ 262: 
+ 263:         if self._storage:
+ 264:             await self._storage.disconnect()
+ 265:             self._storage = None
+ 266: 
+ 267:         self._embedder = None
+ 268:         self._retriever = None
+ 269:         self._dual_nodes = None
+ 270:         self._router = None
+ 271:         self._connected = False
+ 272: 
+ 273:         logger.info("VectorCypher engine disconnected")
+ 274: 
+ 275:     def _get_storage(self) -> StorageCoordinator:
+ 276:         if self._storage is None:
+ 277:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
+ 278:         return self._storage
+ 279: 
+ 280:     def _get_temporal_store(self):
+ 281:         if self._temporal_store is None:
+ 282:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
+ 283:         return self._temporal_store
+ 284: 
+ 285:     def _get_embedder(self) -> LiteLLMEmbedder:
+ 286:         if self._embedder is None:
+ 287:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
+ 288:         return self._embedder
+ 289: 
+ 290:     def _get_retriever(self) -> VectorCypherRetriever:
+ 291:         if self._retriever is None:
+ 292:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
+ 293:         return self._retriever
+ 294: 
+ 295:     def _get_dual_nodes(self) -> DualNodeManager:
+ 296:         if self._dual_nodes is None:
+ 297:             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
+ 298:         return self._dual_nodes
+ 299: 
+ 300:     # =========================================================================
+ 301:     # Core API: remember, recall, forget
+ 302:     # =========================================================================
+ 303: 
+ 304:     async def remember(
+ 305:         self,
+ 306:         content: str,
+ 307:         namespace_id: UUID,
+ 308:         *,
+ 309:         title: str = "",
+ 310:         source: str = "",
+ 311:         metadata: dict[str, Any] | None = None,
+ 312:         skill_name: str = "general_entities",
+ 313:         expertise: ExpertiseConfig | str | None = None,
+ 314:         extraction_model: str | None = None,
+ 315:         occurred_at: datetime | None = None,
+ 316:     ) -> RememberResult:
+ 317:         """Store content in the memory engine.
+ 318: 
+ 319:         Args:
+ 320:             content: Content to store
+ 321:             namespace_id: Namespace to store in
+ 322:             title: Document title
+ 323:             source: Document source
+ 324:             metadata: Additional metadata
+ 325:             skill_name: Extraction skill to use
+ 326:             expertise: ExpertiseConfig, expertise name string, or file path
+ 327:             extraction_model: LLM model for entity extraction (default: config model)
+ 328:             occurred_at: When this content/event occurred (default: now)
+ 329: 
+ 330:         Returns:
+ 331:             RememberResult with document_id and counts
+ 332:         """
+ 333:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+ 334:         storage = self._get_storage()
+ 335: 
+ 336:         # Check for duplicate
+ 337:         existing = await storage.get_document_by_checksum(namespace_id, checksum)
+ 338:         if existing:
+ 339:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
+ 340:             return RememberResult(
+ 341:                 document_id=existing.id,
+ 342:                 namespace_id=namespace_id,
+ 343:                 chunks_created=existing.chunk_count,
+ 344:                 entities_extracted=existing.entity_count,
+ 345:                 relationships_created=0,
+ 346:                 metadata={"duplicate": True, "status": str(existing.status)},
+ 347:             )
+ 348: 
+ 349:         # Create document
+ 350:         doc_metadata = DocumentMetadata(
+ 351:             title=title,
+ 352:             source=source,
+ 353:             source_type="api",
+ 354:             checksum=checksum,
+ 355:             size_bytes=len(content.encode("utf-8")),
+ 356:             custom=metadata or {},
  357:         )
- 358:         document = await storage.create_document(document)
- 359: 
- 360:         # Process document
- 361:         chunks_created, entities_extracted, relationships_created = await self._process_document(
- 362:             document,
- 363:             skill_name=skill_name,
- 364:             occurred_at=occurred_at or datetime.now(UTC),
- 365:         )
- 366: 
- 367:         return RememberResult(
- 368:             document_id=document.id,
- 369:             namespace_id=namespace_id,
- 370:             chunks_created=chunks_created,
- 371:             entities_extracted=entities_extracted,
- 372:             relationships_created=relationships_created,
- 373:         )
- 374: 
- 375:     async def _process_document(
- 376:         self,
- 377:         document: Document,
- 378:         *,
- 379:         skill_name: str,
- 380:         occurred_at: datetime,
- 381:     ) -> tuple[int, int, int]:
- 382:         """Process a document into chunks with skeleton-based entity extraction.
- 383: 
- 384:         The VectorCypher pipeline:
- 385:         1. Chunk the document
- 386:         2. Embed all chunks
- 387:         3. Run skeleton indexing to identify core chunks (25%)
- 388:         4. Extract entities only from core chunks
- 389:         5. Store chunks in pgvector and create Chunk nodes in Neo4j
- 390:         6. Link entities to chunks via MENTIONED_IN
- 391:         """
- 392:         from khora.pipelines.chunking import create_chunker
- 393:         from khora.pipelines.chunking.config import ChunkerConfig
- 394: 
- 395:         storage = self._get_storage()
- 396:         embedder = self._get_embedder()
- 397:         temporal_store = self._get_temporal_store()
- 398:         dual_nodes = self._get_dual_nodes()
- 399: 
- 400:         # Create chunker
- 401:         chunker_config = ChunkerConfig(
- 402:             strategy=self._config.pipeline.chunking_strategy,
- 403:             chunk_size=self._config.pipeline.chunk_size,
- 404:             chunk_overlap=self._config.pipeline.chunk_overlap,
- 405:         )
- 406:         chunker = create_chunker(chunker_config)
- 407: 
- 408:         # Chunk the document
- 409:         raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
- 410: 
- 411:         if not raw_chunks:
- 412:             document.mark_completed(0, 0)
- 413:             await storage.update_document(document)
- 414:             return 0, 0, 0
- 415: 
- 416:         # Embed chunks in batch
- 417:         chunk_texts = [c.content for c in raw_chunks]
- 418:         embeddings = await embedder.embed_batch(chunk_texts)
+ 358:         document = Document(
+ 359:             namespace_id=namespace_id,
+ 360:             content=content,
+ 361:             metadata=doc_metadata,
+ 362:         )
+ 363:         document = await storage.create_document(document)
+ 364: 
+ 365:         # Process document
+ 366:         chunks_created, entities_extracted, relationships_created = await self._process_document(
+ 367:             document,
+ 368:             skill_name=skill_name,
+ 369:             expertise=expertise,
+ 370:             extraction_model=extraction_model,
+ 371:             occurred_at=occurred_at or datetime.now(UTC),
+ 372:         )
+ 373: 
+ 374:         return RememberResult(
+ 375:             document_id=document.id,
+ 376:             namespace_id=namespace_id,
+ 377:             chunks_created=chunks_created,
+ 378:             entities_extracted=entities_extracted,
+ 379:             relationships_created=relationships_created,
+ 380:         )
+ 381: 
+ 382:     async def _process_document(
+ 383:         self,
+ 384:         document: Document,
+ 385:         *,
+ 386:         skill_name: str,
+ 387:         expertise: ExpertiseConfig | str | None = None,
+ 388:         extraction_model: str | None = None,
+ 389:         occurred_at: datetime,
+ 390:     ) -> tuple[int, int, int]:
+ 391:         """Process a document into chunks with skeleton-based entity extraction.
+ 392: 
+ 393:         The VectorCypher pipeline:
+ 394:         1. Chunk the document
+ 395:         2. Embed all chunks
+ 396:         3. Run skeleton indexing to identify core chunks (25%)
+ 397:         4. Extract entities only from core chunks
+ 398:         5. Store chunks in pgvector and create Chunk nodes in Neo4j
+ 399:         6. Link entities to chunks via MENTIONED_IN
+ 400:         """
+ 401:         from khora.pipelines.chunking import create_chunker
+ 402:         from khora.pipelines.chunking.config import ChunkerConfig
+ 403: 
+ 404:         storage = self._get_storage()
+ 405:         embedder = self._get_embedder()
+ 406:         temporal_store = self._get_temporal_store()
+ 407:         dual_nodes = self._get_dual_nodes()
+ 408: 
+ 409:         # Create chunker
+ 410:         chunker_config = ChunkerConfig(
+ 411:             strategy=self._config.pipeline.chunking_strategy,
+ 412:             chunk_size=self._config.pipeline.chunk_size,
+ 413:             chunk_overlap=self._config.pipeline.chunk_overlap,
+ 414:         )
+ 415:         chunker = create_chunker(chunker_config)
+ 416: 
+ 417:         # Chunk the document
+ 418:         raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
  419: 
- 420:         # Extract metadata
- 421:         doc_metadata = document.metadata.custom if document.metadata else {}
- 422: 
- 423:         # Create temporal chunks
- 424:         temporal_chunks = []
- 425:         for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
- 426:             temporal_chunk = TemporalChunk(
- 427:                 id=None,
- 428:                 namespace_id=document.namespace_id,
- 429:                 document_id=document.id,
- 430:                 content=raw_chunk.content,
- 431:                 embedding=embedding,
- 432:                 occurred_at=occurred_at,
- 433:                 created_at=datetime.now(UTC),
- 434:                 source_system=doc_metadata.get("source_system"),
- 435:                 author=doc_metadata.get("author"),
- 436:                 channel=doc_metadata.get("channel"),
- 437:                 tags=doc_metadata.get("tags", []),
- 438:                 confidence=1.0,
- 439:                 metadata={
- 440:                     "chunk_index": i,
- 441:                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
- 442:                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
- 443:                 },
- 444:             )
- 445:             temporal_chunks.append(temporal_chunk)
- 446: 
- 447:         # Store in pgvector
- 448:         stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
- 449: 
- 450:         # Update temporal_chunks with assigned IDs
- 451:         for i, stored in enumerate(stored_chunks):
- 452:             temporal_chunks[i].id = stored.id
- 453: 
- 454:         # Create Chunk nodes in Neo4j
- 455:         await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
- 456: 
- 457:         # Skeleton-based entity extraction (for core chunks only)
- 458:         entities_extracted = 0
- 459:         relationships_created = 0
- 460: 
- 461:         if self._config.pipeline.extract_entities:
- 462:             entities_extracted, relationships_created = await self._run_skeleton_extraction(
- 463:                 temporal_chunks,
- 464:                 document.namespace_id,
- 465:             )
- 466: 
- 467:         # Update document status
- 468:         document.mark_completed(len(stored_chunks), entities_extracted)
- 469:         await storage.update_document(document)
- 470: 
- 471:         logger.debug(
- 472:             f"Processed document {document.id}: {len(stored_chunks)} chunks, "
- 473:             f"{entities_extracted} entities, {relationships_created} relationships"
- 474:         )
- 475: 
- 476:         return len(stored_chunks), entities_extracted, relationships_created
- 477: 
- 478:     async def _run_skeleton_extraction(
- 479:         self,
- 480:         chunks: list[TemporalChunk],
- 481:         namespace_id: UUID,
- 482:     ) -> tuple[int, int]:
- 483:         """Run skeleton-based entity extraction on core chunks only.
- 484: 
- 485:         Args:
- 486:             chunks: All chunks from the document
- 487:             namespace_id: Namespace ID
- 488: 
- 489:         Returns:
- 490:             Tuple of (entities_extracted, relationships_created)
- 491:         """
- 492:         if not chunks:
- 493:             return 0, 0
- 494: 
- 495:         # Build skeleton index
- 496:         skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
- 497:         skeleton.add_chunks_batch(chunks)
- 498:         core_ids = await asyncio.to_thread(skeleton.build_skeleton)
- 499: 
- 500:         logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
- 501: 
- 502:         if not core_ids:
- 503:             return 0, 0
+ 420:         if not raw_chunks:
+ 421:             document.mark_completed(0, 0)
+ 422:             await storage.update_document(document)
+ 423:             return 0, 0, 0
+ 424: 
+ 425:         # Embed chunks in batch
+ 426:         chunk_texts = [c.content for c in raw_chunks]
+ 427:         embeddings = await embedder.embed_batch(chunk_texts)
+ 428: 
+ 429:         # Extract metadata
+ 430:         doc_metadata = document.metadata.custom if document.metadata else {}
+ 431: 
+ 432:         # Create temporal chunks
+ 433:         temporal_chunks = []
+ 434:         for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+ 435:             temporal_chunk = TemporalChunk(
+ 436:                 id=None,
+ 437:                 namespace_id=document.namespace_id,
+ 438:                 document_id=document.id,
+ 439:                 content=raw_chunk.content,
+ 440:                 embedding=embedding,
+ 441:                 occurred_at=occurred_at,
+ 442:                 created_at=datetime.now(UTC),
+ 443:                 source_system=doc_metadata.get("source_system"),
+ 444:                 author=doc_metadata.get("author"),
+ 445:                 channel=doc_metadata.get("channel"),
+ 446:                 tags=doc_metadata.get("tags", []),
+ 447:                 confidence=1.0,
+ 448:                 metadata={
+ 449:                     "chunk_index": i,
+ 450:                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+ 451:                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+ 452:                 },
+ 453:             )
+ 454:             temporal_chunks.append(temporal_chunk)
+ 455: 
+ 456:         # Store in pgvector
+ 457:         stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+ 458: 
+ 459:         # Update temporal_chunks with assigned IDs
+ 460:         for i, stored in enumerate(stored_chunks):
+ 461:             temporal_chunks[i].id = stored.id
+ 462: 
+ 463:         # Create Chunk nodes in Neo4j
+ 464:         await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+ 465: 
+ 466:         # Skeleton-based entity extraction (for core chunks only)
+ 467:         entities_extracted = 0
+ 468:         relationships_created = 0
+ 469: 
+ 470:         if self._config.pipeline.extract_entities:
+ 471:             entities_extracted, relationships_created = await self._run_skeleton_extraction(
+ 472:                 temporal_chunks,
+ 473:                 document.namespace_id,
+ 474:                 skill_name=skill_name,
+ 475:                 expertise=expertise,
+ 476:                 extraction_model=extraction_model,
+ 477:             )
+ 478: 
+ 479:         # Update document status
+ 480:         document.mark_completed(len(stored_chunks), entities_extracted)
+ 481:         await storage.update_document(document)
+ 482: 
+ 483:         logger.debug(
+ 484:             f"Processed document {document.id}: {len(stored_chunks)} chunks, "
+ 485:             f"{entities_extracted} entities, {relationships_created} relationships"
+ 486:         )
+ 487: 
+ 488:         return len(stored_chunks), entities_extracted, relationships_created
+ 489: 
+ 490:     async def _run_skeleton_extraction(
+ 491:         self,
+ 492:         chunks: list[TemporalChunk],
+ 493:         namespace_id: UUID,
+ 494:         *,
+ 495:         skill_name: str = "general_entities",
+ 496:         expertise: ExpertiseConfig | str | None = None,
+ 497:         extraction_model: str | None = None,
+ 498:     ) -> tuple[int, int]:
+ 499:         """Run skeleton-based entity extraction on core chunks only.
+ 500: 
+ 501:         Uses the skeleton indexer to identify the top core chunks (by PageRank),
+ 502:         then runs full LLM extraction on those chunks and stores the results
+ 503:         in both Neo4j (entities, relationships, MENTIONED_IN links) and pgvector.
  504: 
- 505:         # Get core chunks
- 506:         core_chunks = [c for c in chunks if c.id in core_ids]
- 507: 
- 508:         # Extract entities from core chunks
- 509:         # For now, we use keyword extraction as a placeholder
- 510:         # In production, this would use LLM extraction
- 511:         entities_extracted = 0
- 512:         entity_chunk_links: list[EntityChunkLink] = []
- 513: 
- 514:         for chunk in core_chunks:
- 515:             # Extract keywords as pseudo-entities
- 516:             keywords = skeleton._extract_keywords(chunk.content)
- 517:             for keyword in list(keywords)[:10]:  # Limit per chunk
- 518:                 # In production, create actual Entity nodes
- 519:                 # For now, we track the link structure
- 520:                 entities_extracted += 1
- 521: 
- 522:         # Store entity-chunk links
- 523:         dual_nodes = self._get_dual_nodes()
- 524:         if entity_chunk_links:
- 525:             await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
+ 505:         Args:
+ 506:             chunks: All chunks from the document
+ 507:             namespace_id: Namespace ID
+ 508:             skill_name: Extraction skill to use
+ 509:             expertise: ExpertiseConfig, expertise name string, or file path
+ 510:             extraction_model: LLM model for extraction (default: config model)
+ 511: 
+ 512:         Returns:
+ 513:             Tuple of (entities_extracted, relationships_created)
+ 514:         """
+ 515:         from khora.pipelines.tasks.extract import extract_entities
+ 516: 
+ 517:         if not chunks:
+ 518:             return 0, 0
+ 519: 
+ 520:         # Build skeleton index
+ 521:         skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+ 522:         skeleton.add_chunks_batch(chunks)
+ 523:         core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+ 524: 
+ 525:         logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
  526: 
- 527:         return entities_extracted, 0
- 528: 
- 529:     async def recall(
- 530:         self,
- 531:         query: str,
- 532:         namespace_id: UUID,
- 533:         *,
- 534:         limit: int = 10,
- 535:         mode: SearchMode = SearchMode.HYBRID,
- 536:         min_similarity: float = 0.0,
- 537:         agentic: bool = False,
- 538:         raw: bool = False,
- 539:         # VectorCypher-specific parameters
- 540:         temporal_filter: TemporalFilter | None = None,
- 541:         graph_depth: int | None = None,
- 542:         hybrid_alpha: float | None = None,
- 543:     ) -> RecallResult:
- 544:         """Recall memories relevant to a query using VectorCypher.
+ 527:         if not core_ids:
+ 528:             return 0, 0
+ 529: 
+ 530:         # Get core chunks
+ 531:         core_temporal_chunks = [c for c in chunks if c.id in core_ids]
+ 532: 
+ 533:         # Convert TemporalChunk -> Chunk for extract_entities()
+ 534:         chunk_objects = []
+ 535:         for tc in core_temporal_chunks:
+ 536:             chunk_objects.append(
+ 537:                 Chunk(
+ 538:                     id=tc.id,
+ 539:                     namespace_id=tc.namespace_id,
+ 540:                     document_id=tc.document_id,
+ 541:                     content=tc.content,
+ 542:                     created_at=tc.created_at or tc.occurred_at,
+ 543:                 )
+ 544:             )
  545: 
- 546:         Args:
- 547:             query: Query text
- 548:             namespace_id: Namespace to search
- 549:             limit: Maximum number of results
- 550:             mode: Search mode (VECTOR, GRAPH, HYBRID)
- 551:             min_similarity: Minimum similarity threshold
- 552:             agentic: Whether to use agentic mode
- 553:             raw: Disable all LLM features
- 554:             temporal_filter: Temporal constraints
- 555:             graph_depth: Override graph traversal depth
- 556:             hybrid_alpha: Blend factor (0=graph, 1=vector)
- 557: 
- 558:         Returns:
- 559:             RecallResult with chunks, entities, and context
- 560:         """
- 561:         retriever = self._get_retriever()
- 562: 
- 563:         # Use VectorCypher retriever
- 564:         result = await retriever.retrieve(
- 565:             query=query,
- 566:             namespace_id=namespace_id,
- 567:             temporal_filter=temporal_filter,
- 568:             graph_depth=graph_depth,
- 569:             limit=limit,
- 570:         )
- 571: 
- 572:         # Build context text
- 573:         context_parts = []
- 574:         for chunk_dict, score in result.chunks:
- 575:             if isinstance(chunk_dict, dict):
- 576:                 context_parts.append(chunk_dict.get("content", ""))
- 577: 
- 578:         context_text = "\n\n---\n\n".join(context_parts[:limit])
- 579: 
- 580:         return RecallResult(
- 581:             query=query,
- 582:             namespace_id=namespace_id,
- 583:             chunks=result.chunks,
- 584:             entities=result.entities,
- 585:             context_text=context_text,
- 586:             metadata={
- 587:                 "engine": "vectorcypher",
- 588:                 "routing": result.routing_decision.complexity.value,
- 589:                 "use_graph": result.routing_decision.use_graph,
- 590:                 "graph_depth": result.routing_decision.graph_depth,
- 591:                 **result.metadata,
- 592:             },
- 593:         )
- 594: 
- 595:     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
- 596:         """Remove a memory from the engine."""
- 597:         storage = self._get_storage()
- 598:         temporal_store = self._get_temporal_store()
- 599:         dual_nodes = self._get_dual_nodes()
- 600: 
- 601:         # Verify namespace if provided
- 602:         if namespace_id:
- 603:             document = await storage.get_document(document_id)
- 604:             if document and document.namespace_id != namespace_id:
- 605:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
- 606:                 return False
- 607: 
- 608:         ns_id = namespace_id
- 609:         if not ns_id:
- 610:             document = await storage.get_document(document_id)
- 611:             if document:
- 612:                 ns_id = document.namespace_id
- 613:             else:
- 614:                 return False
- 615: 
- 616:         # Delete from Neo4j (Chunk nodes and relationships)
- 617:         await dual_nodes.delete_chunks_by_document(document_id, ns_id)
- 618: 
- 619:         # Delete from pgvector
- 620:         await temporal_store.delete_chunks_by_document(document_id, ns_id)
- 621: 
- 622:         # Delete from relational storage
- 623:         return await storage.delete_document(document_id)
- 624: 
- 625:     async def remember_batch(
- 626:         self,
- 627:         documents: list[dict[str, Any]],
- 628:         namespace_id: UUID,
- 629:         *,
- 630:         skill_name: str = "general_entities",
- 631:         max_concurrent: int = 10,
- 632:         deduplicate: bool = True,
- 633:         infer_relationships: bool = True,
- 634:         on_progress: Callable[[int, int], None] | None = None,
- 635:     ) -> BatchResult:
- 636:         """Store multiple documents with automatic optimization.
- 637: 
- 638:         Args:
- 639:             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
- 640:             namespace_id: Namespace to store documents in
- 641:             skill_name: Extraction skill to use
- 642:             max_concurrent: Maximum concurrent document processing
- 643:             deduplicate: Whether to skip duplicate documents
- 644:             infer_relationships: Whether to infer relationships
- 645:             on_progress: Callback for progress updates
- 646: 
- 647:         Returns:
- 648:             BatchResult with processing statistics
- 649:         """
- 650:         if not documents:
- 651:             return BatchResult(
- 652:                 total=0,
- 653:                 processed=0,
- 654:                 skipped=0,
- 655:                 failed=0,
- 656:                 chunks=0,
- 657:                 entities=0,
- 658:                 relationships=0,
- 659:             )
- 660: 
- 661:         storage = self._get_storage()
- 662:         total = len(documents)
+ 546:         # Run LLM extraction on core chunks
+ 547:         model = extraction_model or self._config.llm.model
+ 548:         entities, relationships = await extract_entities(
+ 549:             chunk_objects,
+ 550:             skill_name=skill_name,
+ 551:             expertise=expertise,
+ 552:             model=model,
+ 553:             max_concurrent=self._config.llm.max_concurrent_llm_calls,
+ 554:         )
+ 555: 
+ 556:         if not entities:
+ 557:             return 0, 0
+ 558: 
+ 559:         storage = self._get_storage()
+ 560:         dual_nodes = self._get_dual_nodes()
+ 561: 
+ 562:         # Store entities in Neo4j + pgvector
+ 563:         await storage.upsert_entities_batch(namespace_id, entities)
+ 564: 
+ 565:         # Store relationships in Neo4j
+ 566:         relationships_created = 0
+ 567:         if relationships:
+ 568:             relationships_created = await storage.create_relationships_batch(relationships)
+ 569: 
+ 570:         # Build entity-chunk links from source_chunk_ids
+ 571:         entity_chunk_links: list[EntityChunkLink] = []
+ 572:         for entity in entities:
+ 573:             for chunk_id in entity.source_chunk_ids:
+ 574:                 entity_chunk_links.append(
+ 575:                     EntityChunkLink(
+ 576:                         entity_id=entity.id,
+ 577:                         chunk_id=chunk_id,
+ 578:                     )
+ 579:                 )
+ 580: 
+ 581:         # Create MENTIONED_IN edges in Neo4j
+ 582:         if entity_chunk_links:
+ 583:             await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
+ 584: 
+ 585:         logger.debug(
+ 586:             f"Skeleton extraction: {len(entities)} entities, "
+ 587:             f"{relationships_created} relationships from {len(core_temporal_chunks)} core chunks"
+ 588:         )
+ 589: 
+ 590:         return len(entities), relationships_created
+ 591: 
+ 592:     async def recall(
+ 593:         self,
+ 594:         query: str,
+ 595:         namespace_id: UUID,
+ 596:         *,
+ 597:         limit: int = 10,
+ 598:         mode: SearchMode = SearchMode.HYBRID,
+ 599:         min_similarity: float = 0.0,
+ 600:         agentic: bool = False,
+ 601:         raw: bool = False,
+ 602:         # VectorCypher-specific parameters
+ 603:         temporal_filter: TemporalFilter | None = None,
+ 604:         graph_depth: int | None = None,
+ 605:         hybrid_alpha: float | None = None,
+ 606:     ) -> RecallResult:
+ 607:         """Recall memories relevant to a query using VectorCypher.
+ 608: 
+ 609:         Args:
+ 610:             query: Query text
+ 611:             namespace_id: Namespace to search
+ 612:             limit: Maximum number of results
+ 613:             mode: Search mode (VECTOR, GRAPH, HYBRID)
+ 614:             min_similarity: Minimum similarity threshold
+ 615:             agentic: Whether to use agentic mode
+ 616:             raw: Disable all LLM features
+ 617:             temporal_filter: Temporal constraints
+ 618:             graph_depth: Override graph traversal depth
+ 619:             hybrid_alpha: Blend factor (0=graph, 1=vector)
+ 620: 
+ 621:         Returns:
+ 622:             RecallResult with chunks, entities, and context
+ 623:         """
+ 624:         retriever = self._get_retriever()
+ 625: 
+ 626:         # Use VectorCypher retriever
+ 627:         result = await retriever.retrieve(
+ 628:             query=query,
+ 629:             namespace_id=namespace_id,
+ 630:             temporal_filter=temporal_filter,
+ 631:             graph_depth=graph_depth,
+ 632:             limit=limit,
+ 633:         )
+ 634: 
+ 635:         # Build context text
+ 636:         context_parts = []
+ 637:         for chunk_dict, score in result.chunks:
+ 638:             if isinstance(chunk_dict, dict):
+ 639:                 context_parts.append(chunk_dict.get("content", ""))
+ 640: 
+ 641:         context_text = "\n\n---\n\n".join(context_parts[:limit])
+ 642: 
+ 643:         return RecallResult(
+ 644:             query=query,
+ 645:             namespace_id=namespace_id,
+ 646:             chunks=result.chunks,
+ 647:             entities=result.entities,
+ 648:             context_text=context_text,
+ 649:             metadata={
+ 650:                 "engine": "vectorcypher",
+ 651:                 "routing": result.routing_decision.complexity.value,
+ 652:                 "use_graph": result.routing_decision.use_graph,
+ 653:                 "graph_depth": result.routing_decision.graph_depth,
+ 654:                 **result.metadata,
+ 655:             },
+ 656:         )
+ 657: 
+ 658:     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
+ 659:         """Remove a memory from the engine."""
+ 660:         storage = self._get_storage()
+ 661:         temporal_store = self._get_temporal_store()
+ 662:         dual_nodes = self._get_dual_nodes()
  663: 
- 664:         # Track results
- 665:         results: dict[str, int] = {
- 666:             "processed": 0,
- 667:             "skipped": 0,
- 668:             "failed": 0,
- 669:             "chunks": 0,
- 670:             "entities": 0,
- 671:             "relationships": 0,
- 672:         }
- 673:         results_lock = asyncio.Lock()
- 674:         progress_count = 0
- 675:         progress_lock = asyncio.Lock()
- 676: 
- 677:         # Compute checksums
- 678:         doc_checksums: list[str] = []
- 679:         for doc_data in documents:
- 680:             content = doc_data.get("content", "")
- 681:             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
- 682:             doc_checksums.append(checksum)
- 683: 
- 684:         # Batch lookup existing documents
- 685:         existing_docs: dict[str, Any] = {}
- 686:         if deduplicate:
- 687:             existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
- 688: 
- 689:         # Track in-flight checksums for intra-batch deduplication
- 690:         checksums_in_flight: set[str] = set()
- 691:         checksums_lock = asyncio.Lock()
- 692: 
- 693:         semaphore = asyncio.Semaphore(max_concurrent)
- 694: 
- 695:         async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
- 696:             nonlocal progress_count
- 697: 
- 698:             # Check for intra-batch duplicate
- 699:             async with checksums_lock:
- 700:                 if checksum in checksums_in_flight:
- 701:                     async with results_lock:
- 702:                         results["skipped"] += 1
- 703:                     return
- 704:                 checksums_in_flight.add(checksum)
- 705: 
- 706:             # Check if already exists
- 707:             if deduplicate and checksum in existing_docs:
- 708:                 async with results_lock:
- 709:                     results["skipped"] += 1
- 710:                 if on_progress:
- 711:                     async with progress_lock:
- 712:                         progress_count += 1
- 713:                         on_progress(progress_count, total)
- 714:                 return
- 715: 
- 716:             async with semaphore:
- 717:                 try:
- 718:                     doc_metadata = doc_data.get("metadata", {})
- 719:                     occurred_at = None
- 720:                     if "occurred_at" in doc_metadata:
- 721:                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
- 722: 
- 723:                     result = await self.remember(
- 724:                         doc_data.get("content", ""),
- 725:                         namespace_id,
- 726:                         title=doc_data.get("title", ""),
- 727:                         source=doc_data.get("source", ""),
- 728:                         metadata=doc_metadata,
- 729:                         skill_name=skill_name,
- 730:                         occurred_at=occurred_at,
- 731:                     )
- 732: 
- 733:                     async with results_lock:
- 734:                         if result.metadata.get("duplicate"):
- 735:                             results["skipped"] += 1
- 736:                         else:
- 737:                             results["processed"] += 1
- 738:                             results["chunks"] += result.chunks_created
- 739:                             results["entities"] += result.entities_extracted
- 740:                             results["relationships"] += result.relationships_created
+ 664:         # Verify namespace if provided
+ 665:         if namespace_id:
+ 666:             document = await storage.get_document(document_id)
+ 667:             if document and document.namespace_id != namespace_id:
+ 668:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
+ 669:                 return False
+ 670: 
+ 671:         ns_id = namespace_id
+ 672:         if not ns_id:
+ 673:             document = await storage.get_document(document_id)
+ 674:             if document:
+ 675:                 ns_id = document.namespace_id
+ 676:             else:
+ 677:                 return False
+ 678: 
+ 679:         # Delete from Neo4j (Chunk nodes and relationships)
+ 680:         await dual_nodes.delete_chunks_by_document(document_id, ns_id)
+ 681: 
+ 682:         # Delete from pgvector
+ 683:         await temporal_store.delete_chunks_by_document(document_id, ns_id)
+ 684: 
+ 685:         # Delete from relational storage
+ 686:         return await storage.delete_document(document_id)
+ 687: 
+ 688:     async def remember_batch(
+ 689:         self,
+ 690:         documents: list[dict[str, Any]],
+ 691:         namespace_id: UUID,
+ 692:         *,
+ 693:         skill_name: str = "general_entities",
+ 694:         expertise: ExpertiseConfig | str | None = None,
+ 695:         extraction_model: str | None = None,
+ 696:         max_concurrent: int = 10,
+ 697:         deduplicate: bool = True,
+ 698:         infer_relationships: bool = True,
+ 699:         on_progress: Callable[[int, int], None] | None = None,
+ 700:     ) -> BatchResult:
+ 701:         """Store multiple documents with automatic optimization.
+ 702: 
+ 703:         Args:
+ 704:             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
+ 705:             namespace_id: Namespace to store documents in
+ 706:             skill_name: Extraction skill to use
+ 707:             max_concurrent: Maximum concurrent document processing
+ 708:             deduplicate: Whether to skip duplicate documents
+ 709:             infer_relationships: Whether to infer relationships
+ 710:             on_progress: Callback for progress updates
+ 711: 
+ 712:         Returns:
+ 713:             BatchResult with processing statistics
+ 714:         """
+ 715:         if not documents:
+ 716:             return BatchResult(
+ 717:                 total=0,
+ 718:                 processed=0,
+ 719:                 skipped=0,
+ 720:                 failed=0,
+ 721:                 chunks=0,
+ 722:                 entities=0,
+ 723:                 relationships=0,
+ 724:             )
+ 725: 
+ 726:         storage = self._get_storage()
+ 727:         total = len(documents)
+ 728: 
+ 729:         # Track results
+ 730:         results: dict[str, int] = {
+ 731:             "processed": 0,
+ 732:             "skipped": 0,
+ 733:             "failed": 0,
+ 734:             "chunks": 0,
+ 735:             "entities": 0,
+ 736:             "relationships": 0,
+ 737:         }
+ 738:         results_lock = asyncio.Lock()
+ 739:         progress_count = 0
+ 740:         progress_lock = asyncio.Lock()
  741: 
- 742:                 except Exception as e:
- 743:                     logger.error(f"Failed to process document: {e}")
- 744:                     async with results_lock:
- 745:                         results["failed"] += 1
- 746: 
- 747:             if on_progress:
- 748:                 async with progress_lock:
- 749:                     progress_count += 1
- 750:                     on_progress(progress_count, total)
- 751: 
- 752:         await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
+ 742:         # Compute checksums
+ 743:         doc_checksums: list[str] = []
+ 744:         for doc_data in documents:
+ 745:             content = doc_data.get("content", "")
+ 746:             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+ 747:             doc_checksums.append(checksum)
+ 748: 
+ 749:         # Batch lookup existing documents
+ 750:         existing_docs: dict[str, Any] = {}
+ 751:         if deduplicate:
+ 752:             existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
  753: 
- 754:         return BatchResult(
- 755:             total=total,
- 756:             processed=results["processed"],
- 757:             skipped=results["skipped"],
- 758:             failed=results["failed"],
- 759:             chunks=results["chunks"],
- 760:             entities=results["entities"],
- 761:             relationships=results["relationships"],
- 762:         )
- 763: 
- 764:     def _parse_datetime(self, value: Any) -> datetime:
- 765:         """Parse a datetime value from various formats."""
- 766:         if isinstance(value, datetime):
- 767:             if value.tzinfo is None:
- 768:                 return value.replace(tzinfo=UTC)
- 769:             return value
- 770:         if isinstance(value, str):
- 771:             try:
- 772:                 return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
- 773:             except ValueError:
- 774:                 pass
- 775:             try:
- 776:                 dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
- 777:                 if dt.tzinfo is None:
- 778:                     dt = dt.replace(tzinfo=UTC)
- 779:                 return dt
- 780:             except ValueError:
- 781:                 pass
- 782:         raise ValueError(f"Cannot parse datetime: {value}")
- 783: 
- 784:     # =========================================================================
- 785:     # Namespace Management
- 786:     # =========================================================================
+ 754:         # Track in-flight checksums for intra-batch deduplication
+ 755:         checksums_in_flight: set[str] = set()
+ 756:         checksums_lock = asyncio.Lock()
+ 757: 
+ 758:         semaphore = asyncio.Semaphore(max_concurrent)
+ 759: 
+ 760:         async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
+ 761:             nonlocal progress_count
+ 762: 
+ 763:             # Check for intra-batch duplicate
+ 764:             async with checksums_lock:
+ 765:                 if checksum in checksums_in_flight:
+ 766:                     async with results_lock:
+ 767:                         results["skipped"] += 1
+ 768:                     return
+ 769:                 checksums_in_flight.add(checksum)
+ 770: 
+ 771:             # Check if already exists
+ 772:             if deduplicate and checksum in existing_docs:
+ 773:                 async with results_lock:
+ 774:                     results["skipped"] += 1
+ 775:                 if on_progress:
+ 776:                     async with progress_lock:
+ 777:                         progress_count += 1
+ 778:                         on_progress(progress_count, total)
+ 779:                 return
+ 780: 
+ 781:             async with semaphore:
+ 782:                 try:
+ 783:                     doc_metadata = doc_data.get("metadata", {})
+ 784:                     occurred_at = None
+ 785:                     if "occurred_at" in doc_metadata:
+ 786:                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
  787: 
- 788:     async def get_or_create_default_namespace(self) -> UUID:
- 789:         """Get or create a default namespace for simple usage."""
- 790:         if self._default_namespace_id:
- 791:             return self._default_namespace_id
- 792: 
- 793:         storage = self._get_storage()
- 794: 
- 795:         default_org = await storage.get_organization_by_slug("default")
- 796:         if not default_org:
- 797:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
- 798: 
- 799:         workspaces = await storage.list_workspaces(default_org.id)
- 800:         if workspaces:
- 801:             default_workspace = workspaces[0]
- 802:         else:
- 803:             default_workspace = await storage.create_workspace(
- 804:                 Workspace(
- 805:                     organization_id=default_org.id,
- 806:                     name="Default",
- 807:                     slug="default",
- 808:                 )
- 809:             )
- 810: 
- 811:         namespaces = await storage.list_namespaces(default_workspace.id)
- 812:         if namespaces:
- 813:             default_namespace = namespaces[0]
- 814:         else:
- 815:             default_namespace = await storage.create_namespace(
- 816:                 MemoryNamespace(
- 817:                     workspace_id=default_workspace.id,
- 818:                     name="Default",
- 819:                     slug="default",
- 820:                 )
- 821:             )
- 822: 
- 823:         self._default_namespace_id = default_namespace.id
- 824:         return self._default_namespace_id
- 825: 
- 826:     async def create_namespace(
- 827:         self,
- 828:         name: str,
- 829:         workspace_id: UUID,
- 830:         *,
- 831:         description: str = "",
- 832:         config_overrides: dict[str, Any] | None = None,
- 833:     ) -> MemoryNamespace:
- 834:         """Create a new memory namespace."""
- 835:         namespace = MemoryNamespace(
- 836:             workspace_id=workspace_id,
- 837:             name=name,
- 838:             description=description,
- 839:             config_overrides=config_overrides or {},
- 840:         )
- 841:         return await self._get_storage().create_namespace(namespace)
- 842: 
- 843:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
- 844:         """Get a namespace by ID."""
- 845:         return await self._get_storage().get_namespace(namespace_id)
- 846: 
- 847:     async def ensure_namespace(
- 848:         self,
- 849:         name: str,
- 850:         *,
- 851:         description: str = "",
- 852:     ) -> UUID:
- 853:         """Get or create a namespace by name."""
- 854:         storage = self._get_storage()
- 855: 
- 856:         await self.get_or_create_default_namespace()
- 857: 
- 858:         default_org = await storage.get_organization_by_slug("default")
- 859:         if not default_org:
- 860:             raise RuntimeError("Default organization not found")
+ 788:                     result = await self.remember(
+ 789:                         doc_data.get("content", ""),
+ 790:                         namespace_id,
+ 791:                         title=doc_data.get("title", ""),
+ 792:                         source=doc_data.get("source", ""),
+ 793:                         metadata=doc_metadata,
+ 794:                         skill_name=skill_name,
+ 795:                         expertise=expertise,
+ 796:                         extraction_model=extraction_model,
+ 797:                         occurred_at=occurred_at,
+ 798:                     )
+ 799: 
+ 800:                     async with results_lock:
+ 801:                         if result.metadata.get("duplicate"):
+ 802:                             results["skipped"] += 1
+ 803:                         else:
+ 804:                             results["processed"] += 1
+ 805:                             results["chunks"] += result.chunks_created
+ 806:                             results["entities"] += result.entities_extracted
+ 807:                             results["relationships"] += result.relationships_created
+ 808: 
+ 809:                 except Exception as e:
+ 810:                     logger.error(f"Failed to process document: {e}")
+ 811:                     async with results_lock:
+ 812:                         results["failed"] += 1
+ 813: 
+ 814:             if on_progress:
+ 815:                 async with progress_lock:
+ 816:                     progress_count += 1
+ 817:                     on_progress(progress_count, total)
+ 818: 
+ 819:         await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
+ 820: 
+ 821:         return BatchResult(
+ 822:             total=total,
+ 823:             processed=results["processed"],
+ 824:             skipped=results["skipped"],
+ 825:             failed=results["failed"],
+ 826:             chunks=results["chunks"],
+ 827:             entities=results["entities"],
+ 828:             relationships=results["relationships"],
+ 829:         )
+ 830: 
+ 831:     def _parse_datetime(self, value: Any) -> datetime:
+ 832:         """Parse a datetime value from various formats."""
+ 833:         if isinstance(value, datetime):
+ 834:             if value.tzinfo is None:
+ 835:                 return value.replace(tzinfo=UTC)
+ 836:             return value
+ 837:         if isinstance(value, str):
+ 838:             try:
+ 839:                 return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+ 840:             except ValueError:
+ 841:                 pass
+ 842:             try:
+ 843:                 dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+ 844:                 if dt.tzinfo is None:
+ 845:                     dt = dt.replace(tzinfo=UTC)
+ 846:                 return dt
+ 847:             except ValueError:
+ 848:                 pass
+ 849:         raise ValueError(f"Cannot parse datetime: {value}")
+ 850: 
+ 851:     # =========================================================================
+ 852:     # Namespace Management
+ 853:     # =========================================================================
+ 854: 
+ 855:     async def get_or_create_default_namespace(self) -> UUID:
+ 856:         """Get or create a default namespace for simple usage."""
+ 857:         if self._default_namespace_id:
+ 858:             return self._default_namespace_id
+ 859: 
+ 860:         storage = self._get_storage()
  861: 
- 862:         workspaces = await storage.list_workspaces(default_org.id)
- 863:         if not workspaces:
- 864:             raise RuntimeError("Default workspace not found")
+ 862:         default_org = await storage.get_organization_by_slug("default")
+ 863:         if not default_org:
+ 864:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
  865: 
- 866:         default_workspace = workspaces[0]
- 867: 
- 868:         slug = name.lower().replace(" ", "-")
- 869:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
- 870:         if existing_ns:
- 871:             return existing_ns.id
- 872: 
- 873:         new_ns = await storage.create_namespace(
- 874:             MemoryNamespace(
- 875:                 workspace_id=default_workspace.id,
- 876:                 name=name,
- 877:                 slug=slug,
- 878:                 description=description,
- 879:             )
- 880:         )
- 881:         return new_ns.id
- 882: 
- 883:     # =========================================================================
- 884:     # Entity Operations
- 885:     # =========================================================================
- 886: 
- 887:     async def get_entity(self, entity_id: UUID) -> Entity | None:
- 888:         """Get an entity by ID."""
- 889:         return await self._get_storage().get_entity(entity_id)
- 890: 
- 891:     async def list_entities(
- 892:         self,
- 893:         namespace_id: UUID,
- 894:         *,
- 895:         entity_type: str | None = None,
- 896:         limit: int = 100,
- 897:     ) -> list[Entity]:
- 898:         """List entities in a namespace."""
- 899:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
- 900: 
- 901:     async def find_related_entities(
- 902:         self,
- 903:         entity_id: UUID,
- 904:         namespace_id: UUID,
- 905:         *,
- 906:         max_depth: int = 2,
- 907:         limit: int = 20,
- 908:     ) -> list[tuple[Entity, float]]:
- 909:         """Find entities related to a given entity via graph traversal."""
- 910:         dual_nodes = self._get_dual_nodes()
- 911: 
- 912:         neighborhoods = await dual_nodes.get_entity_neighborhoods(
- 913:             entity_ids=[entity_id],
- 914:             namespace_id=namespace_id,
- 915:             depth=max_depth,
- 916:             limit_per_entity=limit,
- 917:         )
- 918: 
- 919:         results: list[tuple[Entity, float]] = []
- 920:         entity_infos = neighborhoods.get(str(entity_id), [])
- 921: 
- 922:         for info in entity_infos[:limit]:
- 923:             entity = await self._get_storage().get_entity(UUID(info["id"]))
- 924:             if entity:
- 925:                 score = 1.0 / (1 + info.get("distance", 1))
- 926:                 results.append((entity, score))
- 927: 
- 928:         return results
- 929: 
- 930:     async def search_entities(
- 931:         self,
- 932:         query: str,
- 933:         namespace_id: UUID,
- 934:         *,
- 935:         limit: int = 10,
- 936:     ) -> list[Entity]:
- 937:         """Search entities by query text using embedding similarity."""
- 938:         embedder = self._get_embedder()
- 939:         query_embedding = await embedder.embed(query)
- 940: 
- 941:         # Search via storage coordinator
- 942:         return await self._get_storage().search_entities_by_embedding(
- 943:             namespace_id=namespace_id,
- 944:             embedding=query_embedding,
- 945:             limit=limit,
- 946:         )
- 947: 
- 948:     # =========================================================================
- 949:     # Document Operations
+ 866:         workspaces = await storage.list_workspaces(default_org.id)
+ 867:         if workspaces:
+ 868:             default_workspace = workspaces[0]
+ 869:         else:
+ 870:             default_workspace = await storage.create_workspace(
+ 871:                 Workspace(
+ 872:                     organization_id=default_org.id,
+ 873:                     name="Default",
+ 874:                     slug="default",
+ 875:                 )
+ 876:             )
+ 877: 
+ 878:         namespaces = await storage.list_namespaces(default_workspace.id)
+ 879:         if namespaces:
+ 880:             default_namespace = namespaces[0]
+ 881:         else:
+ 882:             default_namespace = await storage.create_namespace(
+ 883:                 MemoryNamespace(
+ 884:                     workspace_id=default_workspace.id,
+ 885:                     name="Default",
+ 886:                     slug="default",
+ 887:                 )
+ 888:             )
+ 889: 
+ 890:         self._default_namespace_id = default_namespace.id
+ 891:         return self._default_namespace_id
+ 892: 
+ 893:     async def create_namespace(
+ 894:         self,
+ 895:         name: str,
+ 896:         workspace_id: UUID,
+ 897:         *,
+ 898:         description: str = "",
+ 899:         config_overrides: dict[str, Any] | None = None,
+ 900:     ) -> MemoryNamespace:
+ 901:         """Create a new memory namespace."""
+ 902:         namespace = MemoryNamespace(
+ 903:             workspace_id=workspace_id,
+ 904:             name=name,
+ 905:             description=description,
+ 906:             config_overrides=config_overrides or {},
+ 907:         )
+ 908:         return await self._get_storage().create_namespace(namespace)
+ 909: 
+ 910:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+ 911:         """Get a namespace by ID."""
+ 912:         return await self._get_storage().get_namespace(namespace_id)
+ 913: 
+ 914:     async def ensure_namespace(
+ 915:         self,
+ 916:         name: str,
+ 917:         *,
+ 918:         description: str = "",
+ 919:     ) -> UUID:
+ 920:         """Get or create a namespace by name."""
+ 921:         storage = self._get_storage()
+ 922: 
+ 923:         await self.get_or_create_default_namespace()
+ 924: 
+ 925:         default_org = await storage.get_organization_by_slug("default")
+ 926:         if not default_org:
+ 927:             raise RuntimeError("Default organization not found")
+ 928: 
+ 929:         workspaces = await storage.list_workspaces(default_org.id)
+ 930:         if not workspaces:
+ 931:             raise RuntimeError("Default workspace not found")
+ 932: 
+ 933:         default_workspace = workspaces[0]
+ 934: 
+ 935:         slug = name.lower().replace(" ", "-")
+ 936:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
+ 937:         if existing_ns:
+ 938:             return existing_ns.id
+ 939: 
+ 940:         new_ns = await storage.create_namespace(
+ 941:             MemoryNamespace(
+ 942:                 workspace_id=default_workspace.id,
+ 943:                 name=name,
+ 944:                 slug=slug,
+ 945:                 description=description,
+ 946:             )
+ 947:         )
+ 948:         return new_ns.id
+ 949: 
  950:     # =========================================================================
- 951: 
- 952:     async def get_document(self, document_id: UUID) -> Document | None:
- 953:         """Get a document by ID."""
- 954:         return await self._get_storage().get_document(document_id)
- 955: 
- 956:     async def list_documents(
- 957:         self,
- 958:         namespace_id: UUID,
- 959:         *,
- 960:         limit: int = 100,
- 961:     ) -> list[Document]:
- 962:         """List documents in a namespace."""
- 963:         return await self._get_storage().list_documents(namespace_id, limit=limit)
- 964: 
- 965:     async def stats(self, namespace_id: UUID) -> Stats:
- 966:         """Get document/chunk/entity/relationship counts for a namespace."""
- 967:         storage = self._get_storage()
- 968:         dual_nodes = self._get_dual_nodes()
- 969: 
- 970:         try:
- 971:             doc_count = await storage.count_documents(namespace_id)
- 972:         except (AttributeError, NotImplementedError):
- 973:             documents = await storage.list_documents(namespace_id, limit=0)
- 974:             doc_count = len(documents) if documents else 0
- 975: 
- 976:         # Get chunk count from Neo4j
- 977:         chunk_count = await dual_nodes.count_chunks(namespace_id)
+ 951:     # Entity Operations
+ 952:     # =========================================================================
+ 953: 
+ 954:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+ 955:         """Get an entity by ID."""
+ 956:         return await self._get_storage().get_entity(entity_id)
+ 957: 
+ 958:     async def list_entities(
+ 959:         self,
+ 960:         namespace_id: UUID,
+ 961:         *,
+ 962:         entity_type: str | None = None,
+ 963:         limit: int = 100,
+ 964:     ) -> list[Entity]:
+ 965:         """List entities in a namespace."""
+ 966:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+ 967: 
+ 968:     async def find_related_entities(
+ 969:         self,
+ 970:         entity_id: UUID,
+ 971:         namespace_id: UUID,
+ 972:         *,
+ 973:         max_depth: int = 2,
+ 974:         limit: int = 20,
+ 975:     ) -> list[tuple[Entity, float]]:
+ 976:         """Find entities related to a given entity via graph traversal."""
+ 977:         dual_nodes = self._get_dual_nodes()
  978: 
- 979:         try:
- 980:             entity_count = await storage.count_entities(namespace_id)
- 981:         except (AttributeError, NotImplementedError):
- 982:             entity_count = 0
- 983: 
- 984:         try:
- 985:             relationship_count = await storage.count_relationships(namespace_id)
- 986:         except (AttributeError, NotImplementedError):
- 987:             relationship_count = 0
+ 979:         neighborhoods = await dual_nodes.get_entity_neighborhoods(
+ 980:             entity_ids=[entity_id],
+ 981:             namespace_id=namespace_id,
+ 982:             depth=max_depth,
+ 983:             limit_per_entity=limit,
+ 984:         )
+ 985: 
+ 986:         results: list[tuple[Entity, float]] = []
+ 987:         entity_infos = neighborhoods.get(str(entity_id), [])
  988: 
- 989:         return Stats(
- 990:             documents=doc_count,
- 991:             chunks=chunk_count,
- 992:             entities=entity_count,
- 993:             relationships=relationship_count,
- 994:         )
- 995: 
- 996:     async def health_check(self) -> dict[str, Any]:
- 997:         """Check health of all components."""
- 998:         if not self._connected:
- 999:             return {"status": "disconnected"}
-1000: 
-1001:         storage_health = await self._get_storage().health_check()
-1002:         temporal_health = await self._get_temporal_store().health_check()
-1003: 
-1004:         # Check Neo4j
-1005:         neo4j_healthy = False
-1006:         if self._neo4j_driver:
-1007:             try:
-1008:                 await self._neo4j_driver.verify_connectivity()
-1009:                 neo4j_healthy = True
-1010:             except Exception:
-1011:                 pass
-1012: 
-1013:         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy" and neo4j_healthy
+ 989:         for info in entity_infos[:limit]:
+ 990:             entity = await self._get_storage().get_entity(UUID(info["id"]))
+ 991:             if entity:
+ 992:                 score = 1.0 / (1 + info.get("distance", 1))
+ 993:                 results.append((entity, score))
+ 994: 
+ 995:         return results
+ 996: 
+ 997:     async def search_entities(
+ 998:         self,
+ 999:         query: str,
+1000:         namespace_id: UUID,
+1001:         *,
+1002:         limit: int = 10,
+1003:     ) -> list[Entity]:
+1004:         """Search entities by query text using embedding similarity."""
+1005:         embedder = self._get_embedder()
+1006:         query_embedding = await embedder.embed(query)
+1007: 
+1008:         # Search via storage coordinator
+1009:         return await self._get_storage().search_entities_by_embedding(
+1010:             namespace_id=namespace_id,
+1011:             embedding=query_embedding,
+1012:             limit=limit,
+1013:         )
 1014: 
-1015:         return {
-1016:             "status": "healthy" if all_healthy else "degraded",
-1017:             "storage": storage_health.summary,
-1018:             "temporal_store": temporal_health,
-1019:             "neo4j": "healthy" if neo4j_healthy else "unhealthy",
-1020:             "engine": "vectorcypher",
-1021:         }
+1015:     # =========================================================================
+1016:     # Document Operations
+1017:     # =========================================================================
+1018: 
+1019:     async def get_document(self, document_id: UUID) -> Document | None:
+1020:         """Get a document by ID."""
+1021:         return await self._get_storage().get_document(document_id)
 1022: 
-1023: 
-1024: __all__ = ["VectorCypherConfig", "VectorCypherEngine"]
+1023:     async def list_documents(
+1024:         self,
+1025:         namespace_id: UUID,
+1026:         *,
+1027:         limit: int = 100,
+1028:     ) -> list[Document]:
+1029:         """List documents in a namespace."""
+1030:         return await self._get_storage().list_documents(namespace_id, limit=limit)
+1031: 
+1032:     async def stats(self, namespace_id: UUID) -> Stats:
+1033:         """Get document/chunk/entity/relationship counts for a namespace."""
+1034:         storage = self._get_storage()
+1035:         dual_nodes = self._get_dual_nodes()
+1036: 
+1037:         try:
+1038:             doc_count = await storage.count_documents(namespace_id)
+1039:         except (AttributeError, NotImplementedError):
+1040:             documents = await storage.list_documents(namespace_id, limit=0)
+1041:             doc_count = len(documents) if documents else 0
+1042: 
+1043:         # Get chunk count from Neo4j
+1044:         chunk_count = await dual_nodes.count_chunks(namespace_id)
+1045: 
+1046:         try:
+1047:             entity_count = await storage.count_entities(namespace_id)
+1048:         except (AttributeError, NotImplementedError):
+1049:             entity_count = 0
+1050: 
+1051:         try:
+1052:             relationship_count = await storage.count_relationships(namespace_id)
+1053:         except (AttributeError, NotImplementedError):
+1054:             relationship_count = 0
+1055: 
+1056:         return Stats(
+1057:             documents=doc_count,
+1058:             chunks=chunk_count,
+1059:             entities=entity_count,
+1060:             relationships=relationship_count,
+1061:         )
+1062: 
+1063:     async def health_check(self) -> dict[str, Any]:
+1064:         """Check health of all components."""
+1065:         if not self._connected:
+1066:             return {"status": "disconnected"}
+1067: 
+1068:         storage_health = await self._get_storage().health_check()
+1069:         temporal_health = await self._get_temporal_store().health_check()
+1070: 
+1071:         # Check Neo4j
+1072:         neo4j_healthy = False
+1073:         if self._neo4j_driver:
+1074:             try:
+1075:                 await self._neo4j_driver.verify_connectivity()
+1076:                 neo4j_healthy = True
+1077:             except Exception:
+1078:                 pass
+1079: 
+1080:         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy" and neo4j_healthy
+1081: 
+1082:         return {
+1083:             "status": "healthy" if all_healthy else "degraded",
+1084:             "storage": storage_health.summary,
+1085:             "temporal_store": temporal_health,
+1086:             "neo4j": "healthy" if neo4j_healthy else "unhealthy",
+1087:             "engine": "vectorcypher",
+1088:         }
+1089: 
+1090: 
+1091: __all__ = ["VectorCypherConfig", "VectorCypherEngine"]
 ````
 
 ## File: src/khora/engines/vectorcypher/retriever.py
@@ -50370,6 +50437,13 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-05 20:47:34 +0100
+**Message:** docs: fix ASCII diagram aesthetics
+
+**Files:**
+- REPOMIX.md
+- docs/architecture/storage-backends.md
+
 ## Commit: 2026-02-05 20:27:14 +0100
 **Message:** chore: bump version to 0.1.5
 
@@ -50627,9 +50701,3 @@ README.md
 
 **Files:**
 - src/khora/extraction/extractors/llm.py
-
-## Commit: 2026-02-04 10:09:51 +0100
-**Message:** fix: filter self-referential matches early in rule engine
-
-**Files:**
-- src/khora/extraction/expansion/rule_engine.py
