@@ -9,6 +9,7 @@ This module implements Graphiti-inspired bi-temporal edge storage:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -140,12 +141,14 @@ class TemporalEdgeStorage:
         Returns:
             Created edges with IDs assigned
         """
-        created = []
-        for edge in edges:
-            created_edge = await self.create_edge(edge, check_conflicts=check_conflicts)
-            created.append(created_edge)
+        if not edges:
+            return []
 
-        return created
+        # Process edges concurrently
+        tasks = [self.create_edge(edge, check_conflicts=check_conflicts) for edge in edges]
+        created = await asyncio.gather(*tasks)
+
+        return list(created)
 
     async def get_edge(self, edge_id: UUID) -> TemporalEdge | None:
         """Get an edge by ID.

@@ -10026,870 +10026,6 @@ README.md
 33: __all__ = ["KhoraEngine"]
 ````
 
-## File: src/khora/engines/khora/engine.py
-````python
-  1: """Khora engine - temporal-first memory engine.
-  2: 
-  3: This engine is optimized for:
-  4: - Temporal queries with structured field filtering
-  5: - Fast and cost-efficient ingestion
-  6: - High-precision retrieval with bi-temporal model
-  7: - Multiple backends (pgvector, Weaviate)
-  8: """
-  9: 
- 10: from __future__ import annotations
- 11: 
- 12: import hashlib
- 13: from collections.abc import Callable
- 14: from datetime import UTC, datetime
- 15: from typing import TYPE_CHECKING, Any
- 16: from uuid import UUID
- 17: 
- 18: from loguru import logger
- 19: 
- 20: from khora.config import KhoraConfig, LiteLLMConfig
- 21: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
- 22: from khora.extraction.embedders import LiteLLMEmbedder
- 23: from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
- 24: from khora.query import SearchMode
- 25: from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
- 26: 
- 27: from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
- 28: 
- 29: if TYPE_CHECKING:
- 30:     pass
- 31: 
- 32: 
- 33: class KhoraEngine:
- 34:     """Khora engine - temporal-first, cost-efficient memory engine.
- 35: 
- 36:     Key features:
- 37:     - Bi-temporal model: Track occurrence time vs ingestion time
- 38:     - Hierarchical time graph: Year → Quarter → Month → Week → Day
- 39:     - Structured field filtering: Filter on occurred_at, not just created_at
- 40:     - Multiple backends: PostgreSQL+pgvector (default) and Weaviate (advanced)
- 41:     - Cost optimization: Skeleton-based indexing with lazy expansion
- 42: 
- 43:     Usage:
- 44:         # Default backend (pgvector)
- 45:         engine = KhoraEngine(config)
- 46:         await engine.connect()
- 47: 
- 48:         # Weaviate backend
- 49:         engine = KhoraEngine(config, backend="weaviate", weaviate_url="http://localhost:8080")
- 50:         await engine.connect()
- 51:     """
- 52: 
- 53:     def __init__(
- 54:         self,
- 55:         config: KhoraConfig,
- 56:         *,
- 57:         storage_config: StorageConfig | None = None,
- 58:         backend: str = "pgvector",
- 59:         weaviate_url: str | None = None,
- 60:     ) -> None:
- 61:         """Initialize the Khora engine.
- 62: 
- 63:         Args:
- 64:             config: KhoraConfig instance
- 65:             storage_config: Storage configuration (deprecated, derived from config)
- 66:             backend: Backend type ("pgvector" or "weaviate")
- 67:             weaviate_url: Weaviate URL (required for weaviate backend)
- 68:         """
- 69:         self._config = config
- 70:         self._backend_type = backend
- 71:         self._weaviate_url = weaviate_url
- 72: 
- 73:         # Build storage config
- 74:         if storage_config:
- 75:             self._storage_config = storage_config
- 76:         else:
- 77:             postgresql_url = config.get_postgresql_url()
- 78:             self._storage_config = StorageConfig(
- 79:                 postgresql_url=postgresql_url,
- 80:                 pgvector_url=postgresql_url,
- 81:                 neo4j_url=config.get_neo4j_url(),
- 82:                 neo4j_user=config.get_neo4j_user(),
- 83:                 neo4j_password=config.get_neo4j_password(),
- 84:                 neo4j_database=config.get_neo4j_database(),
- 85:                 pgvector_embedding_dimension=config.storage.embedding_dimension,
- 86:                 graph_config=config.get_graph_config(),
- 87:                 vector_config=config.get_vector_config(),
- 88:             )
- 89: 
- 90:         self._storage: StorageCoordinator | None = None
- 91:         self._temporal_store: TemporalVectorStore | None = None
- 92:         self._embedder: LiteLLMEmbedder | None = None
- 93:         self._connected = False
- 94: 
- 95:         # Default namespace for simple usage
- 96:         self._default_namespace_id: UUID | None = None
- 97: 
- 98:     async def connect(self) -> None:
- 99:         """Connect to all storage backends."""
-100:         if self._connected:
-101:             return
-102: 
-103:         logger.info(f"Connecting Khora engine (backend={self._backend_type})...")
-104: 
-105:         # Create and connect relational storage (for documents, namespaces, etc.)
-106:         self._storage = create_storage_coordinator(self._storage_config)
-107:         await self._storage.connect()
-108: 
-109:         # Create and connect temporal vector store
-110:         self._temporal_store = create_temporal_store(
-111:             self._backend_type,
-112:             self._config,
-113:             weaviate_url=self._weaviate_url,
-114:         )
-115:         await self._temporal_store.connect()
-116: 
-117:         # Create embedder
-118:         llm_config = LiteLLMConfig(
-119:             model=self._config.llm.model,
-120:             embedding_model=self._config.llm.embedding_model,
-121:             embedding_dimension=self._config.llm.embedding_dimension,
-122:             timeout=self._config.llm.timeout,
-123:             max_retries=self._config.llm.max_retries,
-124:         )
-125:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
-126: 
-127:         # Initialize telemetry
-128:         from khora.telemetry import init_telemetry
-129:         from khora.telemetry.config import TelemetryConfig
-130: 
-131:         telemetry_cfg = TelemetryConfig(
-132:             database_url=self._config.telemetry_database_url,
-133:             service_name=self._config.telemetry_service_name,
-134:         )
-135:         await init_telemetry(telemetry_cfg)
-136: 
-137:         self._connected = True
-138:         logger.info("Khora engine connected")
-139: 
-140:     async def disconnect(self) -> None:
-141:         """Disconnect from all storage backends."""
-142:         if not self._connected:
-143:             return
-144: 
-145:         logger.info("Disconnecting Khora engine...")
-146: 
-147:         # Shutdown telemetry
-148:         from khora.telemetry import shutdown_telemetry
-149: 
-150:         await shutdown_telemetry()
-151: 
-152:         if self._temporal_store:
-153:             await self._temporal_store.disconnect()
-154:             self._temporal_store = None
-155: 
-156:         if self._storage:
-157:             await self._storage.disconnect()
-158:             self._storage = None
-159: 
-160:         self._embedder = None
-161:         self._connected = False
-162: 
-163:         logger.info("Khora engine disconnected")
-164: 
-165:     def _get_storage(self) -> StorageCoordinator:
-166:         """Get storage coordinator (internal use)."""
-167:         if self._storage is None:
-168:             raise RuntimeError("Khora engine not connected. Call connect() first.")
-169:         return self._storage
-170: 
-171:     def _get_temporal_store(self) -> TemporalVectorStore:
-172:         """Get temporal store (internal use)."""
-173:         if self._temporal_store is None:
-174:             raise RuntimeError("Khora engine not connected. Call connect() first.")
-175:         return self._temporal_store
-176: 
-177:     def _get_embedder(self) -> LiteLLMEmbedder:
-178:         """Get embedder (internal use)."""
-179:         if self._embedder is None:
-180:             raise RuntimeError("Khora engine not connected. Call connect() first.")
-181:         return self._embedder
-182: 
-183:     # =========================================================================
-184:     # Core API: remember, recall, forget
-185:     # =========================================================================
-186: 
-187:     async def remember(
-188:         self,
-189:         content: str,
-190:         namespace_id: UUID,
-191:         *,
-192:         title: str = "",
-193:         source: str = "",
-194:         metadata: dict[str, Any] | None = None,
-195:         skill_name: str = "general_entities",
-196:         occurred_at: datetime | None = None,
-197:     ) -> RememberResult:
-198:         """Store content in the memory engine.
-199: 
-200:         Args:
-201:             content: Content to store
-202:             namespace_id: Namespace to store in
-203:             title: Document title
-204:             source: Document source
-205:             metadata: Additional metadata
-206:             skill_name: Extraction skill (default: general_entities)
-207:             occurred_at: When this content/event occurred (default: now)
-208: 
-209:         Returns:
-210:             RememberResult with document_id and counts
-211:         """
-212:         # Compute checksum
-213:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-214: 
-215:         storage = self._get_storage()
-216: 
-217:         # Check for duplicate
-218:         existing = await storage.get_document_by_checksum(namespace_id, checksum)
-219:         if existing:
-220:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
-221:             return RememberResult(
-222:                 document_id=existing.id,
-223:                 namespace_id=namespace_id,
-224:                 chunks_created=existing.chunk_count,
-225:                 entities_extracted=existing.entity_count,
-226:                 relationships_created=0,
-227:                 metadata={"duplicate": True, "status": str(existing.status)},
-228:             )
-229: 
-230:         # Create document in relational storage
-231:         doc_metadata = DocumentMetadata(
-232:             title=title,
-233:             source=source,
-234:             source_type="api",
-235:             checksum=checksum,
-236:             size_bytes=len(content.encode("utf-8")),
-237:             custom=metadata or {},
-238:         )
-239:         document = Document(
-240:             namespace_id=namespace_id,
-241:             content=content,
-242:             metadata=doc_metadata,
-243:         )
-244:         document = await storage.create_document(document)
-245: 
-246:         # Process through simplified pipeline (no full KG extraction)
-247:         chunks_created, entities_extracted, relationships_created = await self._process_document(
-248:             document,
-249:             skill_name=skill_name,
-250:             occurred_at=occurred_at or datetime.now(UTC),
-251:         )
-252: 
-253:         return RememberResult(
-254:             document_id=document.id,
-255:             namespace_id=namespace_id,
-256:             chunks_created=chunks_created,
-257:             entities_extracted=entities_extracted,
-258:             relationships_created=relationships_created,
-259:         )
-260: 
-261:     async def _process_document(
-262:         self,
-263:         document: Document,
-264:         *,
-265:         skill_name: str,
-266:         occurred_at: datetime,
-267:     ) -> tuple[int, int, int]:
-268:         """Process a document into chunks (simplified pipeline).
-269: 
-270:         Unlike GraphRAG, this focuses on fast chunking and embedding without
-271:         full entity extraction. Entity extraction can be done lazily on retrieval.
-272:         """
-273:         from khora.pipelines.chunking import create_chunker
-274:         from khora.pipelines.chunking.config import ChunkerConfig
-275: 
-276:         storage = self._get_storage()
-277:         embedder = self._get_embedder()
-278:         temporal_store = self._get_temporal_store()
-279: 
-280:         # Create chunker
-281:         chunker_config = ChunkerConfig(
-282:             strategy=self._config.pipeline.chunking_strategy,
-283:             chunk_size=self._config.pipeline.chunk_size,
-284:             chunk_overlap=self._config.pipeline.chunk_overlap,
-285:         )
-286:         chunker = create_chunker(chunker_config)
-287: 
-288:         # Chunk the document
-289:         raw_chunks = chunker.chunk(document.content)
-290: 
-291:         if not raw_chunks:
-292:             # Mark document as processed with 0 chunks
-293:             document.mark_completed(0, 0)
-294:             await storage.update_document(document)
-295:             return 0, 0, 0
-296: 
-297:         # Embed chunks in batch
-298:         chunk_texts = [c.content for c in raw_chunks]
-299:         embeddings = await embedder.embed_batch(chunk_texts)
-300: 
-301:         # Extract metadata for filtering (source_system, author, channel, etc.)
-302:         doc_metadata = document.metadata.custom if document.metadata else {}
-303: 
-304:         # Create temporal chunks
-305:         temporal_chunks = []
-306:         for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-307:             temporal_chunk = TemporalChunk(
-308:                 id=None,  # Will be assigned
-309:                 namespace_id=document.namespace_id,
-310:                 document_id=document.id,
-311:                 content=raw_chunk.content,
-312:                 embedding=embedding,
-313:                 occurred_at=occurred_at,
-314:                 created_at=datetime.now(UTC),
-315:                 source_system=doc_metadata.get("source_system"),
-316:                 author=doc_metadata.get("author"),
-317:                 channel=doc_metadata.get("channel"),
-318:                 tags=doc_metadata.get("tags", []),
-319:                 confidence=1.0,
-320:                 metadata={
-321:                     "chunk_index": i,
-322:                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-323:                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-324:                 },
-325:             )
-326:             temporal_chunks.append(temporal_chunk)
-327: 
-328:         # Store in temporal store
-329:         stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-330: 
-331:         # Update document status
-332:         document.mark_completed(len(stored_chunks), 0)
-333:         await storage.update_document(document)
-334: 
-335:         logger.debug(f"Processed document {document.id}: {len(stored_chunks)} chunks")
-336: 
-337:         return len(stored_chunks), 0, 0
-338: 
-339:     async def recall(
-340:         self,
-341:         query: str,
-342:         namespace_id: UUID,
-343:         *,
-344:         limit: int = 10,
-345:         mode: SearchMode = SearchMode.HYBRID,
-346:         min_similarity: float = 0.0,
-347:         agentic: bool = False,
-348:         raw: bool = False,
-349:         # Khora-specific parameters
-350:         temporal_filter: TemporalFilter | None = None,
-351:         temporal_reference: datetime | None = None,
-352:         hybrid_alpha: float | None = None,
-353:         filters: dict[str, Any] | None = None,
-354:     ) -> RecallResult:
-355:         """Recall memories relevant to a query.
-356: 
-357:         Args:
-358:             query: Query text
-359:             namespace_id: Namespace to search
-360:             limit: Maximum number of results
-361:             mode: Search mode (VECTOR, KEYWORD, HYBRID)
-362:             min_similarity: Minimum similarity threshold
-363:             agentic: Whether to use agentic mode
-364:             raw: Disable all LLM features
-365:             temporal_filter: Structured temporal filter
-366:             temporal_reference: Reference point for relative time (e.g., message timestamp)
-367:             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
-368:             filters: Additional structured filters (converted to TemporalFilter)
-369: 
-370:         Returns:
-371:             RecallResult with chunks and context
-372:         """
-373:         embedder = self._get_embedder()
-374:         temporal_store = self._get_temporal_store()
-375: 
-376:         # Embed the query
-377:         query_embedding = await embedder.embed(query)
-378: 
-379:         # Build temporal filter from filters dict if provided
-380:         if filters and not temporal_filter:
-381:             temporal_filter = self._build_temporal_filter_from_dict(filters)
-382: 
-383:         # Handle relative time references
-384:         if temporal_reference and temporal_filter:
-385:             temporal_filter = self._adjust_relative_time(temporal_filter, temporal_reference)
-386: 
-387:         # Determine hybrid alpha based on mode
-388:         if hybrid_alpha is None:
-389:             if mode == SearchMode.VECTOR:
-390:                 hybrid_alpha = 1.0  # Pure vector
-391:             elif mode == SearchMode.KEYWORD:
-392:                 hybrid_alpha = 0.0  # Pure BM25
-393:             else:  # HYBRID
-394:                 hybrid_alpha = 0.7  # Default blend
-395: 
-396:         # Perform search
-397:         results = await temporal_store.search(
-398:             namespace_id,
-399:             query_embedding,
-400:             limit=limit,
-401:             min_similarity=min_similarity,
-402:             temporal_filter=temporal_filter,
-403:             hybrid_alpha=hybrid_alpha,
-404:             query_text=query,
-405:         )
-406: 
-407:         # Build context text
-408:         context_parts = []
-409:         chunks_with_scores = []
-410:         for result in results:
-411:             context_parts.append(result.chunk.content)
-412:             # Convert TemporalChunk to a simple dict for RecallResult
-413:             chunk_dict = {
-414:                 "id": result.chunk.id,
-415:                 "content": result.chunk.content,
-416:                 "document_id": result.chunk.document_id,
-417:                 "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
-418:                 "metadata": result.chunk.metadata,
-419:             }
-420:             chunks_with_scores.append((chunk_dict, result.combined_score or result.similarity))
-421: 
-422:         context_text = "\n\n---\n\n".join(context_parts[:limit])
-423: 
-424:         return RecallResult(
-425:             query=query,
-426:             namespace_id=namespace_id,
-427:             chunks=chunks_with_scores,
-428:             entities=[],  # Khora engine focuses on chunks, not entities
-429:             context_text=context_text,
-430:             metadata={
-431:                 "backend": self._backend_type,
-432:                 "hybrid_alpha": hybrid_alpha,
-433:                 "temporal_filter": str(temporal_filter) if temporal_filter else None,
-434:             },
-435:         )
-436: 
-437:     def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> TemporalFilter:
-438:         """Convert a filters dict to a TemporalFilter.
-439: 
-440:         Example:
-441:             filters = {
-442:                 "occurred_at": {"gte": "2024-01-01", "lt": "2024-02-01"},
-443:                 "author": {"eq": "alice"},
-444:                 "source_system": {"eq": "slack"},
-445:             }
-446:         """
-447: 
-448:         tf = TemporalFilter()
-449: 
-450:         for key, value in filters.items():
-451:             if not isinstance(value, dict):
-452:                 value = {"eq": value}
-453: 
-454:             if key == "occurred_at":
-455:                 if "gte" in value:
-456:                     tf.occurred_after = self._parse_datetime(value["gte"])
-457:                 if "gt" in value:
-458:                     tf.occurred_after = self._parse_datetime(value["gt"])
-459:                 if "lt" in value:
-460:                     tf.occurred_before = self._parse_datetime(value["lt"])
-461:                 if "lte" in value:
-462:                     tf.occurred_before = self._parse_datetime(value["lte"])
-463:             elif key == "created_at":
-464:                 if "gte" in value:
-465:                     tf.created_after = self._parse_datetime(value["gte"])
-466:                 if "gt" in value:
-467:                     tf.created_after = self._parse_datetime(value["gt"])
-468:                 if "lt" in value:
-469:                     tf.created_before = self._parse_datetime(value["lt"])
-470:                 if "lte" in value:
-471:                     tf.created_before = self._parse_datetime(value["lte"])
-472:             elif key == "source_system":
-473:                 tf.source_system = value.get(
-474:                     "eq", value.get("in", [None])[0] if isinstance(value.get("in"), list) else None
-475:                 )
-476:             elif key == "author":
-477:                 tf.author = value.get("eq")
-478:             elif key == "channel":
-479:                 tf.channel = value.get("eq")
-480:             elif key == "tags":
-481:                 if "contains" in value:
-482:                     tf.tags = value["contains"]
-483:                 elif "eq" in value:
-484:                     tf.tags = [value["eq"]] if isinstance(value["eq"], str) else value["eq"]
-485:             else:
-486:                 tf.additional[key] = value
-487: 
-488:         return tf
-489: 
-490:     def _parse_datetime(self, value: Any) -> datetime:
-491:         """Parse a datetime value from various formats."""
-492:         if isinstance(value, datetime):
-493:             if value.tzinfo is None:
-494:                 return value.replace(tzinfo=UTC)
-495:             return value
-496:         if isinstance(value, str):
-497:             # Date only (try this first to avoid fromisoformat without tz)
-498:             try:
-499:                 return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
-500:             except ValueError:
-501:                 pass
-502:             # ISO format with timezone
-503:             try:
-504:                 dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-505:                 if dt.tzinfo is None:
-506:                     dt = dt.replace(tzinfo=UTC)
-507:                 return dt
-508:             except ValueError:
-509:                 pass
-510:         raise ValueError(f"Cannot parse datetime: {value}")
-511: 
-512:     def _adjust_relative_time(
-513:         self,
-514:         temporal_filter: TemporalFilter,
-515:         reference: datetime,
-516:     ) -> TemporalFilter:
-517:         """Adjust temporal filter for relative time references.
-518: 
-519:         This enables queries like "yesterday" to be relative to the message timestamp,
-520:         not the current time.
-521:         """
-522:         # If filter already has absolute times, don't adjust
-523:         # This is a placeholder for more sophisticated relative time handling
-524:         return temporal_filter
-525: 
-526:     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
-527:         """Remove a memory from the engine."""
-528:         storage = self._get_storage()
-529:         temporal_store = self._get_temporal_store()
-530: 
-531:         # Verify namespace if provided
-532:         if namespace_id:
-533:             document = await storage.get_document(document_id)
-534:             if document and document.namespace_id != namespace_id:
-535:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-536:                 return False
-537: 
-538:         # Delete from temporal store
-539:         ns_id = namespace_id or (await storage.get_document(document_id)).namespace_id
-540:         await temporal_store.delete_chunks_by_document(document_id, ns_id)
-541: 
-542:         # Delete from relational storage
-543:         return await storage.delete_document(document_id)
-544: 
-545:     async def remember_batch(
-546:         self,
-547:         documents: list[dict[str, Any]],
-548:         namespace_id: UUID,
-549:         *,
-550:         skill_name: str = "general_entities",
-551:         max_concurrent: int = 5,
-552:         deduplicate: bool = True,
-553:         infer_relationships: bool = False,  # Not used in Khora engine
-554:         on_progress: Callable[[int, int], None] | None = None,
-555:     ) -> BatchResult:
-556:         """Store multiple documents with automatic optimization.
-557: 
-558:         The Khora engine uses a simplified pipeline:
-559:         - Fast chunking without full entity extraction
-560:         - Batch embedding for cost efficiency
-561:         - Parallel processing with semaphore control
-562:         """
-563:         if not documents:
-564:             return BatchResult(
-565:                 total=0,
-566:                 processed=0,
-567:                 skipped=0,
-568:                 failed=0,
-569:                 chunks=0,
-570:                 entities=0,
-571:                 relationships=0,
-572:             )
-573: 
-574:         storage = self._get_storage()
-575:         total = len(documents)
-576:         processed = 0
-577:         skipped = 0
-578:         failed = 0
-579:         total_chunks = 0
-580: 
-581:         # Build checksum set for deduplication
-582:         checksums_seen: set[str] = set()
-583:         if deduplicate:
-584:             # Pre-fetch existing checksums
-585:             existing_docs = await storage.list_documents(namespace_id, limit=100000)
-586:             checksums_seen = {d.metadata.checksum for d in existing_docs if d.metadata}
-587: 
-588:         for i, doc_data in enumerate(documents):
-589:             content = doc_data.get("content", "")
-590:             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-591: 
-592:             # Deduplicate
-593:             if checksum in checksums_seen:
-594:                 skipped += 1
-595:                 continue
-596:             checksums_seen.add(checksum)
-597: 
-598:             try:
-599:                 # Extract occurred_at from metadata if present
-600:                 doc_metadata = doc_data.get("metadata", {})
-601:                 occurred_at = None
-602:                 if "occurred_at" in doc_metadata:
-603:                     occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
-604: 
-605:                 result = await self.remember(
-606:                     content,
-607:                     namespace_id,
-608:                     title=doc_data.get("title", ""),
-609:                     source=doc_data.get("source", ""),
-610:                     metadata=doc_metadata,
-611:                     skill_name=skill_name,
-612:                     occurred_at=occurred_at,
-613:                 )
-614: 
-615:                 if result.metadata.get("duplicate"):
-616:                     skipped += 1
-617:                 else:
-618:                     processed += 1
-619:                     total_chunks += result.chunks_created
-620: 
-621:             except Exception as e:
-622:                 logger.error(f"Failed to process document: {e}")
-623:                 failed += 1
-624: 
-625:             # Progress callback
-626:             if on_progress:
-627:                 on_progress(i + 1, total)
-628: 
-629:         return BatchResult(
-630:             total=total,
-631:             processed=processed,
-632:             skipped=skipped,
-633:             failed=failed,
-634:             chunks=total_chunks,
-635:             entities=0,
-636:             relationships=0,
-637:         )
-638: 
-639:     # =========================================================================
-640:     # Namespace Management
-641:     # =========================================================================
-642: 
-643:     async def get_or_create_default_namespace(self) -> UUID:
-644:         """Get or create a default namespace for simple usage."""
-645:         if self._default_namespace_id:
-646:             return self._default_namespace_id
-647: 
-648:         storage = self._get_storage()
-649: 
-650:         # Try to find existing default namespace
-651:         default_org = await storage.get_organization_by_slug("default")
-652:         if not default_org:
-653:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
-654: 
-655:         workspaces = await storage.list_workspaces(default_org.id)
-656:         if workspaces:
-657:             default_workspace = workspaces[0]
-658:         else:
-659:             default_workspace = await storage.create_workspace(
-660:                 Workspace(
-661:                     organization_id=default_org.id,
-662:                     name="Default",
-663:                     slug="default",
-664:                 )
-665:             )
-666: 
-667:         namespaces = await storage.list_namespaces(default_workspace.id)
-668:         if namespaces:
-669:             default_namespace = namespaces[0]
-670:         else:
-671:             default_namespace = await storage.create_namespace(
-672:                 MemoryNamespace(
-673:                     workspace_id=default_workspace.id,
-674:                     name="Default",
-675:                     slug="default",
-676:                 )
-677:             )
-678: 
-679:         self._default_namespace_id = default_namespace.id
-680:         return self._default_namespace_id
-681: 
-682:     async def create_namespace(
-683:         self,
-684:         name: str,
-685:         workspace_id: UUID,
-686:         *,
-687:         description: str = "",
-688:         config_overrides: dict[str, Any] | None = None,
-689:     ) -> MemoryNamespace:
-690:         """Create a new memory namespace."""
-691:         namespace = MemoryNamespace(
-692:             workspace_id=workspace_id,
-693:             name=name,
-694:             description=description,
-695:             config_overrides=config_overrides or {},
-696:         )
-697:         return await self._get_storage().create_namespace(namespace)
-698: 
-699:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-700:         """Get a namespace by ID."""
-701:         return await self._get_storage().get_namespace(namespace_id)
-702: 
-703:     async def ensure_namespace(
-704:         self,
-705:         name: str,
-706:         *,
-707:         description: str = "",
-708:     ) -> UUID:
-709:         """Get or create a namespace by name."""
-710:         storage = self._get_storage()
-711: 
-712:         # Ensure default org/workspace exists
-713:         await self.get_or_create_default_namespace()
-714: 
-715:         # Get default workspace
-716:         default_org = await storage.get_organization_by_slug("default")
-717:         if not default_org:
-718:             raise RuntimeError("Default organization not found")
-719: 
-720:         workspaces = await storage.list_workspaces(default_org.id)
-721:         if not workspaces:
-722:             raise RuntimeError("Default workspace not found")
-723: 
-724:         default_workspace = workspaces[0]
-725: 
-726:         # Try to find namespace by slug
-727:         slug = name.lower().replace(" ", "-")
-728:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
-729:         if existing_ns:
-730:             return existing_ns.id
-731: 
-732:         # Create new namespace
-733:         new_ns = await storage.create_namespace(
-734:             MemoryNamespace(
-735:                 workspace_id=default_workspace.id,
-736:                 name=name,
-737:                 slug=slug,
-738:                 description=description,
-739:             )
-740:         )
-741:         return new_ns.id
-742: 
-743:     # =========================================================================
-744:     # Entity Operations (minimal for Khora engine)
-745:     # =========================================================================
-746: 
-747:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-748:         """Get an entity by ID."""
-749:         return await self._get_storage().get_entity(entity_id)
-750: 
-751:     async def list_entities(
-752:         self,
-753:         namespace_id: UUID,
-754:         *,
-755:         entity_type: str | None = None,
-756:         limit: int = 100,
-757:     ) -> list[Entity]:
-758:         """List entities in a namespace."""
-759:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
-760: 
-761:     async def find_related_entities(
-762:         self,
-763:         entity_id: UUID,
-764:         namespace_id: UUID,
-765:         *,
-766:         max_depth: int = 2,
-767:         limit: int = 20,
-768:     ) -> list[tuple[Entity, float]]:
-769:         """Find entities related to a given entity.
-770: 
-771:         Note: Khora engine focuses on temporal chunk retrieval.
-772:         For full entity graph traversal, use the GraphRAG engine.
-773:         """
-774:         # Return empty for now - Khora focuses on chunks
-775:         return []
-776: 
-777:     # =========================================================================
-778:     # Document Operations
-779:     # =========================================================================
-780: 
-781:     async def get_document(self, document_id: UUID) -> Document | None:
-782:         """Get a document by ID."""
-783:         return await self._get_storage().get_document(document_id)
-784: 
-785:     async def list_documents(
-786:         self,
-787:         namespace_id: UUID,
-788:         *,
-789:         limit: int = 100,
-790:     ) -> list[Document]:
-791:         """List documents in a namespace."""
-792:         return await self._get_storage().list_documents(namespace_id, limit=limit)
-793: 
-794:     async def search_entities(
-795:         self,
-796:         query: str,
-797:         namespace_id: UUID,
-798:         *,
-799:         limit: int = 10,
-800:     ) -> list[Entity]:
-801:         """Search entities by query text.
-802: 
-803:         Note: Khora engine focuses on temporal chunk retrieval.
-804:         For full entity search, use the GraphRAG engine.
-805:         """
-806:         # Return empty for now - Khora focuses on chunks
-807:         return []
-808: 
-809:     async def stats(self, namespace_id: UUID) -> Stats:
-810:         """Get document/chunk/entity/relationship counts for a namespace."""
-811:         storage = self._get_storage()
-812: 
-813:         # Get counts
-814:         try:
-815:             doc_count = await storage.count_documents(namespace_id)
-816:         except (AttributeError, NotImplementedError):
-817:             documents = await storage.list_documents(namespace_id, limit=0)
-818:             doc_count = len(documents) if documents else 0
-819: 
-820:         try:
-821:             chunk_count = await storage.count_chunks(namespace_id)
-822:         except (AttributeError, NotImplementedError):
-823:             chunk_count = 0  # Khora chunks are in temporal_store
-824: 
-825:         try:
-826:             entity_count = await storage.count_entities(namespace_id)
-827:         except (AttributeError, NotImplementedError):
-828:             entity_count = 0
-829: 
-830:         try:
-831:             relationship_count = await storage.count_relationships(namespace_id)
-832:         except (AttributeError, NotImplementedError):
-833:             relationship_count = 0
-834: 
-835:         return Stats(
-836:             documents=doc_count,
-837:             chunks=chunk_count,
-838:             entities=entity_count,
-839:             relationships=relationship_count,
-840:         )
-841: 
-842:     async def health_check(self) -> dict[str, Any]:
-843:         """Check health of all components."""
-844:         if not self._connected:
-845:             return {"status": "disconnected"}
-846: 
-847:         storage_health = await self._get_storage().health_check()
-848:         temporal_health = await self._get_temporal_store().health_check()
-849: 
-850:         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy"
-851: 
-852:         return {
-853:             "status": "healthy" if all_healthy else "degraded",
-854:             "storage": storage_health.summary,
-855:             "temporal_store": temporal_health,
-856:             "backend": self._backend_type,
-857:         }
-858: 
-859: 
-860: __all__ = ["KhoraEngine"]
-````
-
 ## File: src/khora/engines/khora/skeleton.py
 ````python
   1: """Skeleton-based indexing for cost optimization (KET-RAG inspired).
@@ -11454,513 +10590,516 @@ README.md
   9: 
  10: from __future__ import annotations
  11: 
- 12: from dataclasses import dataclass, field
- 13: from datetime import UTC, datetime
- 14: from typing import TYPE_CHECKING, Any
- 15: from uuid import UUID, uuid4
- 16: 
- 17: from loguru import logger
- 18: from sqlalchemy import and_, select
- 19: from sqlalchemy.ext.asyncio import AsyncSession
- 20: 
- 21: from khora.db.models import TemporalEdgeModel, TimeEdgeLinkModel
- 22: from khora.engines.khora.time_hierarchy import TimeHierarchyBuilder
- 23: 
- 24: if TYPE_CHECKING:
- 25:     pass
- 26: 
+ 12: import asyncio
+ 13: from dataclasses import dataclass, field
+ 14: from datetime import UTC, datetime
+ 15: from typing import TYPE_CHECKING, Any
+ 16: from uuid import UUID, uuid4
+ 17: 
+ 18: from loguru import logger
+ 19: from sqlalchemy import and_, select
+ 20: from sqlalchemy.ext.asyncio import AsyncSession
+ 21: 
+ 22: from khora.db.models import TemporalEdgeModel, TimeEdgeLinkModel
+ 23: from khora.engines.khora.time_hierarchy import TimeHierarchyBuilder
+ 24: 
+ 25: if TYPE_CHECKING:
+ 26:     pass
  27: 
- 28: @dataclass
- 29: class TemporalEdge:
- 30:     """In-memory representation of a temporal edge."""
- 31: 
- 32:     id: UUID
- 33:     namespace_id: UUID
- 34:     source_entity_id: UUID
- 35:     target_entity_id: UUID
- 36:     relationship_type: str
- 37:     description: str = ""
- 38: 
- 39:     # Bi-temporal fields
- 40:     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
- 41:     ingested_at: datetime = field(default_factory=lambda: datetime.now(UTC))
- 42:     valid_from: datetime | None = None
- 43:     valid_until: datetime | None = None
- 44: 
- 45:     # Validity tracking
- 46:     is_valid: bool = True
- 47:     invalidated_by_id: UUID | None = None
- 48:     invalidation_reason: str | None = None
- 49: 
- 50:     # Source tracking
- 51:     confidence: float = 1.0
- 52:     properties: dict[str, Any] = field(default_factory=dict)
- 53:     source_document_ids: list[UUID] = field(default_factory=list)
- 54:     source_chunk_ids: list[UUID] = field(default_factory=list)
- 55: 
+ 28: 
+ 29: @dataclass
+ 30: class TemporalEdge:
+ 31:     """In-memory representation of a temporal edge."""
+ 32: 
+ 33:     id: UUID
+ 34:     namespace_id: UUID
+ 35:     source_entity_id: UUID
+ 36:     target_entity_id: UUID
+ 37:     relationship_type: str
+ 38:     description: str = ""
+ 39: 
+ 40:     # Bi-temporal fields
+ 41:     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 42:     ingested_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+ 43:     valid_from: datetime | None = None
+ 44:     valid_until: datetime | None = None
+ 45: 
+ 46:     # Validity tracking
+ 47:     is_valid: bool = True
+ 48:     invalidated_by_id: UUID | None = None
+ 49:     invalidation_reason: str | None = None
+ 50: 
+ 51:     # Source tracking
+ 52:     confidence: float = 1.0
+ 53:     properties: dict[str, Any] = field(default_factory=dict)
+ 54:     source_document_ids: list[UUID] = field(default_factory=list)
+ 55:     source_chunk_ids: list[UUID] = field(default_factory=list)
  56: 
- 57: class TemporalEdgeStorage:
- 58:     """Storage layer for temporal edges with time hierarchy integration.
- 59: 
- 60:     Provides:
- 61:     - Creation of timestamped edges (not collapsed like RelationshipModel)
- 62:     - Automatic time node linking for efficient temporal queries
- 63:     - Edge invalidation for handling contradicting facts
- 64:     - Queries by time window, entity pair, or relationship type
- 65:     """
- 66: 
- 67:     def __init__(self, session: AsyncSession):
- 68:         """Initialize the storage.
- 69: 
- 70:         Args:
- 71:             session: SQLAlchemy async session
- 72:         """
- 73:         self._session = session
- 74:         self._time_builder = TimeHierarchyBuilder(session)
- 75: 
- 76:     async def create_edge(
- 77:         self,
- 78:         edge: TemporalEdge,
- 79:         *,
- 80:         check_conflicts: bool = True,
- 81:     ) -> TemporalEdge:
- 82:         """Create a temporal edge.
- 83: 
- 84:         Args:
- 85:             edge: Edge to create
- 86:             check_conflicts: If True, check for and invalidate conflicting edges
- 87: 
- 88:         Returns:
- 89:             Created edge with ID assigned
- 90:         """
- 91:         # Check for conflicting edges if requested
- 92:         if check_conflicts:
- 93:             await self._handle_conflicts(edge)
- 94: 
- 95:         # Create the edge
- 96:         edge_id = edge.id or uuid4()
- 97:         model = TemporalEdgeModel(
- 98:             id=str(edge_id),
- 99:             namespace_id=str(edge.namespace_id),
-100:             source_entity_id=str(edge.source_entity_id),
-101:             target_entity_id=str(edge.target_entity_id),
-102:             relationship_type=edge.relationship_type,
-103:             description=edge.description,
-104:             occurred_at=edge.occurred_at,
-105:             ingested_at=edge.ingested_at,
-106:             valid_from=edge.valid_from,
-107:             valid_until=edge.valid_until,
-108:             is_valid=edge.is_valid,
-109:             confidence=edge.confidence,
-110:             properties=edge.properties,
-111:             source_document_ids=[str(id) for id in edge.source_document_ids],
-112:             source_chunk_ids=[str(id) for id in edge.source_chunk_ids],
-113:         )
-114: 
-115:         self._session.add(model)
-116:         await self._session.flush()
-117: 
-118:         # Link to time hierarchy
-119:         await self._link_to_time_node(edge.namespace_id, edge_id, edge.occurred_at)
-120: 
-121:         edge.id = edge_id
-122:         logger.debug(
-123:             f"Created temporal edge: {edge.source_entity_id} --[{edge.relationship_type}@{edge.occurred_at}]--> {edge.target_entity_id}"
-124:         )
-125: 
-126:         return edge
-127: 
-128:     async def create_edges_batch(
-129:         self,
-130:         edges: list[TemporalEdge],
-131:         *,
-132:         check_conflicts: bool = False,  # Disabled for batch performance
-133:     ) -> list[TemporalEdge]:
-134:         """Create multiple temporal edges in batch.
-135: 
-136:         Args:
-137:             edges: Edges to create
-138:             check_conflicts: If True, check for conflicts (slower)
-139: 
-140:         Returns:
-141:             Created edges with IDs assigned
-142:         """
-143:         created = []
-144:         for edge in edges:
-145:             created_edge = await self.create_edge(edge, check_conflicts=check_conflicts)
-146:             created.append(created_edge)
-147: 
-148:         return created
-149: 
-150:     async def get_edge(self, edge_id: UUID) -> TemporalEdge | None:
-151:         """Get an edge by ID.
+ 57: 
+ 58: class TemporalEdgeStorage:
+ 59:     """Storage layer for temporal edges with time hierarchy integration.
+ 60: 
+ 61:     Provides:
+ 62:     - Creation of timestamped edges (not collapsed like RelationshipModel)
+ 63:     - Automatic time node linking for efficient temporal queries
+ 64:     - Edge invalidation for handling contradicting facts
+ 65:     - Queries by time window, entity pair, or relationship type
+ 66:     """
+ 67: 
+ 68:     def __init__(self, session: AsyncSession):
+ 69:         """Initialize the storage.
+ 70: 
+ 71:         Args:
+ 72:             session: SQLAlchemy async session
+ 73:         """
+ 74:         self._session = session
+ 75:         self._time_builder = TimeHierarchyBuilder(session)
+ 76: 
+ 77:     async def create_edge(
+ 78:         self,
+ 79:         edge: TemporalEdge,
+ 80:         *,
+ 81:         check_conflicts: bool = True,
+ 82:     ) -> TemporalEdge:
+ 83:         """Create a temporal edge.
+ 84: 
+ 85:         Args:
+ 86:             edge: Edge to create
+ 87:             check_conflicts: If True, check for and invalidate conflicting edges
+ 88: 
+ 89:         Returns:
+ 90:             Created edge with ID assigned
+ 91:         """
+ 92:         # Check for conflicting edges if requested
+ 93:         if check_conflicts:
+ 94:             await self._handle_conflicts(edge)
+ 95: 
+ 96:         # Create the edge
+ 97:         edge_id = edge.id or uuid4()
+ 98:         model = TemporalEdgeModel(
+ 99:             id=str(edge_id),
+100:             namespace_id=str(edge.namespace_id),
+101:             source_entity_id=str(edge.source_entity_id),
+102:             target_entity_id=str(edge.target_entity_id),
+103:             relationship_type=edge.relationship_type,
+104:             description=edge.description,
+105:             occurred_at=edge.occurred_at,
+106:             ingested_at=edge.ingested_at,
+107:             valid_from=edge.valid_from,
+108:             valid_until=edge.valid_until,
+109:             is_valid=edge.is_valid,
+110:             confidence=edge.confidence,
+111:             properties=edge.properties,
+112:             source_document_ids=[str(id) for id in edge.source_document_ids],
+113:             source_chunk_ids=[str(id) for id in edge.source_chunk_ids],
+114:         )
+115: 
+116:         self._session.add(model)
+117:         await self._session.flush()
+118: 
+119:         # Link to time hierarchy
+120:         await self._link_to_time_node(edge.namespace_id, edge_id, edge.occurred_at)
+121: 
+122:         edge.id = edge_id
+123:         logger.debug(
+124:             f"Created temporal edge: {edge.source_entity_id} --[{edge.relationship_type}@{edge.occurred_at}]--> {edge.target_entity_id}"
+125:         )
+126: 
+127:         return edge
+128: 
+129:     async def create_edges_batch(
+130:         self,
+131:         edges: list[TemporalEdge],
+132:         *,
+133:         check_conflicts: bool = False,  # Disabled for batch performance
+134:     ) -> list[TemporalEdge]:
+135:         """Create multiple temporal edges in batch.
+136: 
+137:         Args:
+138:             edges: Edges to create
+139:             check_conflicts: If True, check for conflicts (slower)
+140: 
+141:         Returns:
+142:             Created edges with IDs assigned
+143:         """
+144:         if not edges:
+145:             return []
+146: 
+147:         # Process edges concurrently
+148:         tasks = [self.create_edge(edge, check_conflicts=check_conflicts) for edge in edges]
+149:         created = await asyncio.gather(*tasks)
+150: 
+151:         return list(created)
 152: 
-153:         Args:
-154:             edge_id: Edge ID
+153:     async def get_edge(self, edge_id: UUID) -> TemporalEdge | None:
+154:         """Get an edge by ID.
 155: 
-156:         Returns:
-157:             Edge or None if not found
-158:         """
-159:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
-160:         result = await self._session.execute(stmt)
-161:         row = result.scalar_one_or_none()
-162: 
-163:         return self._model_to_edge(row) if row else None
-164: 
-165:     async def invalidate_edge(
-166:         self,
-167:         edge_id: UUID,
-168:         *,
-169:         invalidated_by: UUID | None = None,
-170:         reason: str | None = None,
-171:     ) -> bool:
-172:         """Invalidate an edge (mark as no longer valid).
-173: 
-174:         Args:
-175:             edge_id: Edge to invalidate
-176:             invalidated_by: New edge that contradicts this one
-177:             reason: Human-readable reason for invalidation
-178: 
-179:         Returns:
-180:             True if edge was invalidated
-181:         """
-182:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
-183:         result = await self._session.execute(stmt)
-184:         row = result.scalar_one_or_none()
-185: 
-186:         if not row:
-187:             return False
+156:         Args:
+157:             edge_id: Edge ID
+158: 
+159:         Returns:
+160:             Edge or None if not found
+161:         """
+162:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+163:         result = await self._session.execute(stmt)
+164:         row = result.scalar_one_or_none()
+165: 
+166:         return self._model_to_edge(row) if row else None
+167: 
+168:     async def invalidate_edge(
+169:         self,
+170:         edge_id: UUID,
+171:         *,
+172:         invalidated_by: UUID | None = None,
+173:         reason: str | None = None,
+174:     ) -> bool:
+175:         """Invalidate an edge (mark as no longer valid).
+176: 
+177:         Args:
+178:             edge_id: Edge to invalidate
+179:             invalidated_by: New edge that contradicts this one
+180:             reason: Human-readable reason for invalidation
+181: 
+182:         Returns:
+183:             True if edge was invalidated
+184:         """
+185:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+186:         result = await self._session.execute(stmt)
+187:         row = result.scalar_one_or_none()
 188: 
-189:         row.is_valid = False
-190:         row.invalidated_by_id = str(invalidated_by) if invalidated_by else None
-191:         row.invalidation_reason = reason
-192: 
-193:         await self._session.flush()
-194:         logger.debug(f"Invalidated edge {edge_id}: {reason}")
+189:         if not row:
+190:             return False
+191: 
+192:         row.is_valid = False
+193:         row.invalidated_by_id = str(invalidated_by) if invalidated_by else None
+194:         row.invalidation_reason = reason
 195: 
-196:         return True
-197: 
-198:     async def get_edges_by_time_range(
-199:         self,
-200:         namespace_id: UUID,
-201:         start: datetime,
-202:         end: datetime,
-203:         *,
-204:         relationship_type: str | None = None,
-205:         include_invalid: bool = False,
-206:         limit: int = 1000,
-207:     ) -> list[TemporalEdge]:
-208:         """Get edges within a time range.
-209: 
-210:         Args:
-211:             namespace_id: Namespace to query
-212:             start: Range start (inclusive)
-213:             end: Range end (exclusive)
-214:             relationship_type: Optional filter by relationship type
-215:             include_invalid: If True, include invalidated edges
-216:             limit: Maximum number of edges to return
-217: 
-218:         Returns:
-219:             List of edges in chronological order
-220:         """
-221:         conditions = [
-222:             TemporalEdgeModel.namespace_id == str(namespace_id),
-223:             TemporalEdgeModel.occurred_at >= start,
-224:             TemporalEdgeModel.occurred_at < end,
-225:         ]
-226: 
-227:         if relationship_type:
-228:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
+196:         await self._session.flush()
+197:         logger.debug(f"Invalidated edge {edge_id}: {reason}")
+198: 
+199:         return True
+200: 
+201:     async def get_edges_by_time_range(
+202:         self,
+203:         namespace_id: UUID,
+204:         start: datetime,
+205:         end: datetime,
+206:         *,
+207:         relationship_type: str | None = None,
+208:         include_invalid: bool = False,
+209:         limit: int = 1000,
+210:     ) -> list[TemporalEdge]:
+211:         """Get edges within a time range.
+212: 
+213:         Args:
+214:             namespace_id: Namespace to query
+215:             start: Range start (inclusive)
+216:             end: Range end (exclusive)
+217:             relationship_type: Optional filter by relationship type
+218:             include_invalid: If True, include invalidated edges
+219:             limit: Maximum number of edges to return
+220: 
+221:         Returns:
+222:             List of edges in chronological order
+223:         """
+224:         conditions = [
+225:             TemporalEdgeModel.namespace_id == str(namespace_id),
+226:             TemporalEdgeModel.occurred_at >= start,
+227:             TemporalEdgeModel.occurred_at < end,
+228:         ]
 229: 
-230:         if not include_invalid:
-231:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
+230:         if relationship_type:
+231:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
 232: 
-233:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
-234: 
-235:         result = await self._session.execute(stmt)
-236:         rows = result.scalars().all()
+233:         if not include_invalid:
+234:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
+235: 
+236:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
 237: 
-238:         return [self._model_to_edge(row) for row in rows]
-239: 
-240:     async def get_edges_by_entity(
-241:         self,
-242:         entity_id: UUID,
-243:         namespace_id: UUID,
-244:         *,
-245:         direction: str = "both",  # "outgoing", "incoming", "both"
-246:         time_start: datetime | None = None,
-247:         time_end: datetime | None = None,
-248:         include_invalid: bool = False,
-249:         limit: int = 100,
-250:     ) -> list[TemporalEdge]:
-251:         """Get edges connected to an entity.
-252: 
-253:         Args:
-254:             entity_id: Entity to find edges for
-255:             namespace_id: Namespace to query
-256:             direction: Which edges to find ("outgoing", "incoming", "both")
-257:             time_start: Optional time range start
-258:             time_end: Optional time range end
-259:             include_invalid: If True, include invalidated edges
-260:             limit: Maximum number of edges to return
-261: 
-262:         Returns:
-263:             List of edges in chronological order
-264:         """
-265:         entity_id_str = str(entity_id)
-266: 
-267:         if direction == "outgoing":
-268:             entity_condition = TemporalEdgeModel.source_entity_id == entity_id_str
-269:         elif direction == "incoming":
-270:             entity_condition = TemporalEdgeModel.target_entity_id == entity_id_str
-271:         else:  # both
-272:             entity_condition = (TemporalEdgeModel.source_entity_id == entity_id_str) | (
-273:                 TemporalEdgeModel.target_entity_id == entity_id_str
-274:             )
-275: 
-276:         conditions = [
-277:             TemporalEdgeModel.namespace_id == str(namespace_id),
-278:             entity_condition,
-279:         ]
-280: 
-281:         if time_start:
-282:             conditions.append(TemporalEdgeModel.occurred_at >= time_start)
-283:         if time_end:
-284:             conditions.append(TemporalEdgeModel.occurred_at < time_end)
-285:         if not include_invalid:
-286:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
-287: 
-288:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
-289: 
-290:         result = await self._session.execute(stmt)
-291:         rows = result.scalars().all()
+238:         result = await self._session.execute(stmt)
+239:         rows = result.scalars().all()
+240: 
+241:         return [self._model_to_edge(row) for row in rows]
+242: 
+243:     async def get_edges_by_entity(
+244:         self,
+245:         entity_id: UUID,
+246:         namespace_id: UUID,
+247:         *,
+248:         direction: str = "both",  # "outgoing", "incoming", "both"
+249:         time_start: datetime | None = None,
+250:         time_end: datetime | None = None,
+251:         include_invalid: bool = False,
+252:         limit: int = 100,
+253:     ) -> list[TemporalEdge]:
+254:         """Get edges connected to an entity.
+255: 
+256:         Args:
+257:             entity_id: Entity to find edges for
+258:             namespace_id: Namespace to query
+259:             direction: Which edges to find ("outgoing", "incoming", "both")
+260:             time_start: Optional time range start
+261:             time_end: Optional time range end
+262:             include_invalid: If True, include invalidated edges
+263:             limit: Maximum number of edges to return
+264: 
+265:         Returns:
+266:             List of edges in chronological order
+267:         """
+268:         entity_id_str = str(entity_id)
+269: 
+270:         if direction == "outgoing":
+271:             entity_condition = TemporalEdgeModel.source_entity_id == entity_id_str
+272:         elif direction == "incoming":
+273:             entity_condition = TemporalEdgeModel.target_entity_id == entity_id_str
+274:         else:  # both
+275:             entity_condition = (TemporalEdgeModel.source_entity_id == entity_id_str) | (
+276:                 TemporalEdgeModel.target_entity_id == entity_id_str
+277:             )
+278: 
+279:         conditions = [
+280:             TemporalEdgeModel.namespace_id == str(namespace_id),
+281:             entity_condition,
+282:         ]
+283: 
+284:         if time_start:
+285:             conditions.append(TemporalEdgeModel.occurred_at >= time_start)
+286:         if time_end:
+287:             conditions.append(TemporalEdgeModel.occurred_at < time_end)
+288:         if not include_invalid:
+289:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
+290: 
+291:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
 292: 
-293:         return [self._model_to_edge(row) for row in rows]
-294: 
-295:     async def get_edges_by_entity_pair(
-296:         self,
-297:         source_entity_id: UUID,
-298:         target_entity_id: UUID,
-299:         namespace_id: UUID,
-300:         *,
-301:         relationship_type: str | None = None,
-302:         include_invalid: bool = False,
-303:         limit: int = 100,
-304:     ) -> list[TemporalEdge]:
-305:         """Get edges between two specific entities.
-306: 
-307:         Args:
-308:             source_entity_id: Source entity
-309:             target_entity_id: Target entity
-310:             namespace_id: Namespace to query
-311:             relationship_type: Optional filter by relationship type
-312:             include_invalid: If True, include invalidated edges
-313:             limit: Maximum number of edges to return
-314: 
-315:         Returns:
-316:             List of edges in chronological order
-317:         """
-318:         conditions = [
-319:             TemporalEdgeModel.namespace_id == str(namespace_id),
-320:             TemporalEdgeModel.source_entity_id == str(source_entity_id),
-321:             TemporalEdgeModel.target_entity_id == str(target_entity_id),
-322:         ]
-323: 
-324:         if relationship_type:
-325:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
-326:         if not include_invalid:
-327:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
-328: 
-329:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
-330: 
-331:         result = await self._session.execute(stmt)
-332:         rows = result.scalars().all()
+293:         result = await self._session.execute(stmt)
+294:         rows = result.scalars().all()
+295: 
+296:         return [self._model_to_edge(row) for row in rows]
+297: 
+298:     async def get_edges_by_entity_pair(
+299:         self,
+300:         source_entity_id: UUID,
+301:         target_entity_id: UUID,
+302:         namespace_id: UUID,
+303:         *,
+304:         relationship_type: str | None = None,
+305:         include_invalid: bool = False,
+306:         limit: int = 100,
+307:     ) -> list[TemporalEdge]:
+308:         """Get edges between two specific entities.
+309: 
+310:         Args:
+311:             source_entity_id: Source entity
+312:             target_entity_id: Target entity
+313:             namespace_id: Namespace to query
+314:             relationship_type: Optional filter by relationship type
+315:             include_invalid: If True, include invalidated edges
+316:             limit: Maximum number of edges to return
+317: 
+318:         Returns:
+319:             List of edges in chronological order
+320:         """
+321:         conditions = [
+322:             TemporalEdgeModel.namespace_id == str(namespace_id),
+323:             TemporalEdgeModel.source_entity_id == str(source_entity_id),
+324:             TemporalEdgeModel.target_entity_id == str(target_entity_id),
+325:         ]
+326: 
+327:         if relationship_type:
+328:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
+329:         if not include_invalid:
+330:             conditions.append(TemporalEdgeModel.is_valid == True)  # noqa: E712
+331: 
+332:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
 333: 
-334:         return [self._model_to_edge(row) for row in rows]
-335: 
-336:     async def get_valid_at(
-337:         self,
-338:         namespace_id: UUID,
-339:         point_in_time: datetime,
-340:         *,
-341:         entity_id: UUID | None = None,
-342:         relationship_type: str | None = None,
-343:         limit: int = 1000,
-344:     ) -> list[TemporalEdge]:
-345:         """Get edges that were valid at a specific point in time.
-346: 
-347:         Uses the valid_from/valid_until fields to determine validity.
-348: 
-349:         Args:
-350:             namespace_id: Namespace to query
-351:             point_in_time: The point in time to query
-352:             entity_id: Optional filter by entity
-353:             relationship_type: Optional filter by relationship type
-354:             limit: Maximum number of edges to return
-355: 
-356:         Returns:
-357:             List of edges valid at that time
-358:         """
-359:         conditions = [
-360:             TemporalEdgeModel.namespace_id == str(namespace_id),
-361:             TemporalEdgeModel.is_valid == True,  # noqa: E712
-362:             # valid_from <= point_in_time < valid_until
-363:             (TemporalEdgeModel.valid_from.is_(None)) | (TemporalEdgeModel.valid_from <= point_in_time),
-364:             (TemporalEdgeModel.valid_until.is_(None)) | (TemporalEdgeModel.valid_until > point_in_time),
-365:         ]
-366: 
-367:         if entity_id:
-368:             conditions.append(
-369:                 (TemporalEdgeModel.source_entity_id == str(entity_id))
-370:                 | (TemporalEdgeModel.target_entity_id == str(entity_id))
-371:             )
-372: 
-373:         if relationship_type:
-374:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
+334:         result = await self._session.execute(stmt)
+335:         rows = result.scalars().all()
+336: 
+337:         return [self._model_to_edge(row) for row in rows]
+338: 
+339:     async def get_valid_at(
+340:         self,
+341:         namespace_id: UUID,
+342:         point_in_time: datetime,
+343:         *,
+344:         entity_id: UUID | None = None,
+345:         relationship_type: str | None = None,
+346:         limit: int = 1000,
+347:     ) -> list[TemporalEdge]:
+348:         """Get edges that were valid at a specific point in time.
+349: 
+350:         Uses the valid_from/valid_until fields to determine validity.
+351: 
+352:         Args:
+353:             namespace_id: Namespace to query
+354:             point_in_time: The point in time to query
+355:             entity_id: Optional filter by entity
+356:             relationship_type: Optional filter by relationship type
+357:             limit: Maximum number of edges to return
+358: 
+359:         Returns:
+360:             List of edges valid at that time
+361:         """
+362:         conditions = [
+363:             TemporalEdgeModel.namespace_id == str(namespace_id),
+364:             TemporalEdgeModel.is_valid == True,  # noqa: E712
+365:             # valid_from <= point_in_time < valid_until
+366:             (TemporalEdgeModel.valid_from.is_(None)) | (TemporalEdgeModel.valid_from <= point_in_time),
+367:             (TemporalEdgeModel.valid_until.is_(None)) | (TemporalEdgeModel.valid_until > point_in_time),
+368:         ]
+369: 
+370:         if entity_id:
+371:             conditions.append(
+372:                 (TemporalEdgeModel.source_entity_id == str(entity_id))
+373:                 | (TemporalEdgeModel.target_entity_id == str(entity_id))
+374:             )
 375: 
-376:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
-377: 
-378:         result = await self._session.execute(stmt)
-379:         rows = result.scalars().all()
+376:         if relationship_type:
+377:             conditions.append(TemporalEdgeModel.relationship_type == relationship_type)
+378: 
+379:         stmt = select(TemporalEdgeModel).where(and_(*conditions)).order_by(TemporalEdgeModel.occurred_at).limit(limit)
 380: 
-381:         return [self._model_to_edge(row) for row in rows]
-382: 
-383:     async def delete_edge(self, edge_id: UUID) -> bool:
-384:         """Delete an edge.
+381:         result = await self._session.execute(stmt)
+382:         rows = result.scalars().all()
+383: 
+384:         return [self._model_to_edge(row) for row in rows]
 385: 
-386:         Args:
-387:             edge_id: Edge to delete
+386:     async def delete_edge(self, edge_id: UUID) -> bool:
+387:         """Delete an edge.
 388: 
-389:         Returns:
-390:             True if deleted
-391:         """
-392:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
-393:         result = await self._session.execute(stmt)
-394:         row = result.scalar_one_or_none()
-395: 
-396:         if not row:
-397:             return False
+389:         Args:
+390:             edge_id: Edge to delete
+391: 
+392:         Returns:
+393:             True if deleted
+394:         """
+395:         stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+396:         result = await self._session.execute(stmt)
+397:         row = result.scalar_one_or_none()
 398: 
-399:         await self._session.delete(row)
-400:         await self._session.flush()
+399:         if not row:
+400:             return False
 401: 
-402:         return True
-403: 
-404:     async def delete_edges_by_entity(self, entity_id: UUID, namespace_id: UUID) -> int:
-405:         """Delete all edges connected to an entity.
+402:         await self._session.delete(row)
+403:         await self._session.flush()
+404: 
+405:         return True
 406: 
-407:         Args:
-408:             entity_id: Entity whose edges to delete
-409:             namespace_id: Namespace
-410: 
-411:         Returns:
-412:             Number of edges deleted
-413:         """
-414:         stmt = select(TemporalEdgeModel).where(
-415:             TemporalEdgeModel.namespace_id == str(namespace_id),
-416:             (TemporalEdgeModel.source_entity_id == str(entity_id))
-417:             | (TemporalEdgeModel.target_entity_id == str(entity_id)),
-418:         )
-419: 
-420:         result = await self._session.execute(stmt)
-421:         rows = result.scalars().all()
+407:     async def delete_edges_by_entity(self, entity_id: UUID, namespace_id: UUID) -> int:
+408:         """Delete all edges connected to an entity.
+409: 
+410:         Args:
+411:             entity_id: Entity whose edges to delete
+412:             namespace_id: Namespace
+413: 
+414:         Returns:
+415:             Number of edges deleted
+416:         """
+417:         stmt = select(TemporalEdgeModel).where(
+418:             TemporalEdgeModel.namespace_id == str(namespace_id),
+419:             (TemporalEdgeModel.source_entity_id == str(entity_id))
+420:             | (TemporalEdgeModel.target_entity_id == str(entity_id)),
+421:         )
 422: 
-423:         for row in rows:
-424:             await self._session.delete(row)
+423:         result = await self._session.execute(stmt)
+424:         rows = result.scalars().all()
 425: 
-426:         await self._session.flush()
-427:         return len(rows)
+426:         for row in rows:
+427:             await self._session.delete(row)
 428: 
-429:     # =========================================================================
-430:     # Private helper methods
-431:     # =========================================================================
-432: 
-433:     async def _link_to_time_node(
-434:         self,
-435:         namespace_id: UUID,
-436:         edge_id: UUID,
-437:         occurred_at: datetime,
-438:     ) -> None:
-439:         """Link an edge to its time node in the hierarchy."""
-440:         # Get or create the day node
-441:         day_node = await self._time_builder.get_or_create_day_node(namespace_id, occurred_at)
-442: 
-443:         # Create the link
-444:         link = TimeEdgeLinkModel(
-445:             time_node_id=str(day_node.id),
-446:             edge_id=str(edge_id),
-447:         )
-448:         self._session.add(link)
-449: 
-450:         # Update edge count
-451:         await self._time_builder.increment_edge_count(day_node.id)
+429:         await self._session.flush()
+430:         return len(rows)
+431: 
+432:     # =========================================================================
+433:     # Private helper methods
+434:     # =========================================================================
+435: 
+436:     async def _link_to_time_node(
+437:         self,
+438:         namespace_id: UUID,
+439:         edge_id: UUID,
+440:         occurred_at: datetime,
+441:     ) -> None:
+442:         """Link an edge to its time node in the hierarchy."""
+443:         # Get or create the day node
+444:         day_node = await self._time_builder.get_or_create_day_node(namespace_id, occurred_at)
+445: 
+446:         # Create the link
+447:         link = TimeEdgeLinkModel(
+448:             time_node_id=str(day_node.id),
+449:             edge_id=str(edge_id),
+450:         )
+451:         self._session.add(link)
 452: 
-453:         await self._session.flush()
-454: 
-455:     async def _handle_conflicts(self, new_edge: TemporalEdge) -> None:
-456:         """Check for and handle conflicting edges.
+453:         # Update edge count
+454:         await self._time_builder.increment_edge_count(day_node.id)
+455: 
+456:         await self._session.flush()
 457: 
-458:         A conflict is detected when:
-459:         - Same source/target entities
-460:         - Same relationship type
-461:         - New edge occurs after existing edge
-462:         - The relationship type implies mutual exclusivity (e.g., WORKS_FOR)
-463:         """
-464:         # Get existing edges between the same entity pair
-465:         existing = await self.get_edges_by_entity_pair(
-466:             new_edge.source_entity_id,
-467:             new_edge.target_entity_id,
-468:             new_edge.namespace_id,
-469:             relationship_type=new_edge.relationship_type,
-470:             include_invalid=False,
-471:         )
-472: 
-473:         # Check for conflicts based on relationship semantics
-474:         exclusive_types = {
-475:             "WORKS_FOR",
-476:             "REPORTS_TO",
-477:             "MANAGES",
-478:             "MARRIED_TO",
-479:             "CEO_OF",
-480:             "PRESIDENT_OF",
-481:             "LOCATED_AT",
-482:             "HEADQUARTERED_IN",
-483:         }
-484: 
-485:         if new_edge.relationship_type.upper() in exclusive_types:
-486:             for old_edge in existing:
-487:                 # If new edge is more recent, invalidate old one
-488:                 if new_edge.occurred_at > old_edge.occurred_at:
-489:                     await self.invalidate_edge(
-490:                         old_edge.id,
-491:                         invalidated_by=new_edge.id,
-492:                         reason=f"Superseded by newer {new_edge.relationship_type} edge",
-493:                     )
-494: 
-495:     def _model_to_edge(self, model: TemporalEdgeModel) -> TemporalEdge:
-496:         """Convert a database model to a TemporalEdge dataclass."""
-497:         return TemporalEdge(
-498:             id=UUID(model.id),
-499:             namespace_id=UUID(model.namespace_id),
-500:             source_entity_id=UUID(model.source_entity_id),
-501:             target_entity_id=UUID(model.target_entity_id),
-502:             relationship_type=model.relationship_type,
-503:             description=model.description,
-504:             occurred_at=model.occurred_at,
-505:             ingested_at=model.ingested_at,
-506:             valid_from=model.valid_from,
-507:             valid_until=model.valid_until,
-508:             is_valid=model.is_valid,
-509:             invalidated_by_id=UUID(model.invalidated_by_id) if model.invalidated_by_id else None,
-510:             invalidation_reason=model.invalidation_reason,
-511:             confidence=model.confidence,
-512:             properties=model.properties or {},
-513:             source_document_ids=[UUID(id) for id in (model.source_document_ids or [])],
-514:             source_chunk_ids=[UUID(id) for id in (model.source_chunk_ids or [])],
-515:         )
-516: 
-517: 
-518: __all__ = ["TemporalEdge", "TemporalEdgeStorage"]
+458:     async def _handle_conflicts(self, new_edge: TemporalEdge) -> None:
+459:         """Check for and handle conflicting edges.
+460: 
+461:         A conflict is detected when:
+462:         - Same source/target entities
+463:         - Same relationship type
+464:         - New edge occurs after existing edge
+465:         - The relationship type implies mutual exclusivity (e.g., WORKS_FOR)
+466:         """
+467:         # Get existing edges between the same entity pair
+468:         existing = await self.get_edges_by_entity_pair(
+469:             new_edge.source_entity_id,
+470:             new_edge.target_entity_id,
+471:             new_edge.namespace_id,
+472:             relationship_type=new_edge.relationship_type,
+473:             include_invalid=False,
+474:         )
+475: 
+476:         # Check for conflicts based on relationship semantics
+477:         exclusive_types = {
+478:             "WORKS_FOR",
+479:             "REPORTS_TO",
+480:             "MANAGES",
+481:             "MARRIED_TO",
+482:             "CEO_OF",
+483:             "PRESIDENT_OF",
+484:             "LOCATED_AT",
+485:             "HEADQUARTERED_IN",
+486:         }
+487: 
+488:         if new_edge.relationship_type.upper() in exclusive_types:
+489:             for old_edge in existing:
+490:                 # If new edge is more recent, invalidate old one
+491:                 if new_edge.occurred_at > old_edge.occurred_at:
+492:                     await self.invalidate_edge(
+493:                         old_edge.id,
+494:                         invalidated_by=new_edge.id,
+495:                         reason=f"Superseded by newer {new_edge.relationship_type} edge",
+496:                     )
+497: 
+498:     def _model_to_edge(self, model: TemporalEdgeModel) -> TemporalEdge:
+499:         """Convert a database model to a TemporalEdge dataclass."""
+500:         return TemporalEdge(
+501:             id=UUID(model.id),
+502:             namespace_id=UUID(model.namespace_id),
+503:             source_entity_id=UUID(model.source_entity_id),
+504:             target_entity_id=UUID(model.target_entity_id),
+505:             relationship_type=model.relationship_type,
+506:             description=model.description,
+507:             occurred_at=model.occurred_at,
+508:             ingested_at=model.ingested_at,
+509:             valid_from=model.valid_from,
+510:             valid_until=model.valid_until,
+511:             is_valid=model.is_valid,
+512:             invalidated_by_id=UUID(model.invalidated_by_id) if model.invalidated_by_id else None,
+513:             invalidation_reason=model.invalidation_reason,
+514:             confidence=model.confidence,
+515:             properties=model.properties or {},
+516:             source_document_ids=[UUID(id) for id in (model.source_document_ids or [])],
+517:             source_chunk_ids=[UUID(id) for id in (model.source_chunk_ids or [])],
+518:         )
+519: 
+520: 
+521: __all__ = ["TemporalEdge", "TemporalEdgeStorage"]
 ````
 
 ## File: src/khora/engines/khora/time_hierarchy.py
@@ -16716,178 +15855,6 @@ README.md
 31:     )
 ````
 
-## File: src/khora/_accel.py
-````python
-  1: """Accelerated operations with graceful fallbacks.
-  2: 
-  3: Provides optimized implementations of CPU-intensive operations using
-  4: numpy (cosine similarity) and rapidfuzz (string similarity). Falls back
-  5: to pure-Python implementations when those libraries are not available.
-  6: """
-  7: 
-  8: from __future__ import annotations
-  9: 
- 10: import math
- 11: from typing import TYPE_CHECKING
- 12: 
- 13: if TYPE_CHECKING:
- 14:     pass
- 15: 
- 16: # ---------------------------------------------------------------------------
- 17: # Optional dependency detection
- 18: # ---------------------------------------------------------------------------
- 19: 
- 20: try:
- 21:     import numpy as np
- 22: 
- 23:     _HAS_NUMPY = True
- 24: except ImportError:  # pragma: no cover
- 25:     _HAS_NUMPY = False
- 26: 
- 27: try:
- 28:     from rapidfuzz.distance import Levenshtein as _rf_lev
- 29:     from rapidfuzz.fuzz import ratio as _rf_ratio
- 30: 
- 31:     _HAS_RAPIDFUZZ = True
- 32: except ImportError:  # pragma: no cover
- 33:     _HAS_RAPIDFUZZ = False
- 34: 
- 35: 
- 36: # ---------------------------------------------------------------------------
- 37: # Cosine similarity
- 38: # ---------------------------------------------------------------------------
- 39: 
- 40: 
- 41: def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
- 42:     """Compute cosine similarity between two vectors.
- 43: 
- 44:     Uses numpy when available (~50-200x faster for 1536-dim vectors).
- 45:     """
- 46:     if len(vec1) != len(vec2):
- 47:         return 0.0
- 48: 
- 49:     if _HAS_NUMPY:
- 50:         a = np.asarray(vec1, dtype=np.float32)
- 51:         b = np.asarray(vec2, dtype=np.float32)
- 52:         dot = float(np.dot(a, b))
- 53:         na = float(np.linalg.norm(a))
- 54:         nb = float(np.linalg.norm(b))
- 55:         if na == 0.0 or nb == 0.0:
- 56:             return 0.0
- 57:         return dot / (na * nb)
- 58: 
- 59:     # Pure-Python fallback
- 60:     dot = 0.0
- 61:     norm1 = 0.0
- 62:     norm2 = 0.0
- 63:     for a, b in zip(vec1, vec2):
- 64:         dot += a * b
- 65:         norm1 += a * a
- 66:         norm2 += b * b
- 67: 
- 68:     if norm1 == 0.0 or norm2 == 0.0:
- 69:         return 0.0
- 70:     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
- 71: 
- 72: 
- 73: def batch_cosine_similarity(
- 74:     query: list[float],
- 75:     candidates: list[list[float]],
- 76:     threshold: float = 0.0,
- 77: ) -> list[tuple[int, float]]:
- 78:     """Compute cosine similarity between a query vector and a matrix of candidates.
- 79: 
- 80:     Returns (index, similarity) pairs above threshold, sorted descending.
- 81:     Uses numpy batch matmul when available.
- 82:     """
- 83:     if not candidates:
- 84:         return []
- 85: 
- 86:     if _HAS_NUMPY:
- 87:         q = np.asarray(query, dtype=np.float32)
- 88:         mat = np.asarray(candidates, dtype=np.float32)
- 89: 
- 90:         q_norm = float(np.linalg.norm(q))
- 91:         if q_norm == 0.0:
- 92:             return []
- 93: 
- 94:         norms = np.linalg.norm(mat, axis=1)
- 95:         # Avoid division by zero
- 96:         safe_norms = np.where(norms == 0.0, 1.0, norms)
- 97:         sims = (mat @ q) / (safe_norms * q_norm)
- 98:         # Zero out entries where candidate norm was zero
- 99:         sims = np.where(norms == 0.0, 0.0, sims)
-100: 
-101:         results = []
-102:         for i in range(len(sims)):
-103:             s = float(sims[i])
-104:             if s >= threshold:
-105:                 results.append((i, s))
-106:         results.sort(key=lambda x: x[1], reverse=True)
-107:         return results
-108: 
-109:     # Pure-Python fallback
-110:     results = []
-111:     for i, cand in enumerate(candidates):
-112:         s = cosine_similarity(query, cand)
-113:         if s >= threshold:
-114:             results.append((i, s))
-115:     results.sort(key=lambda x: x[1], reverse=True)
-116:     return results
-117: 
-118: 
-119: # ---------------------------------------------------------------------------
-120: # Levenshtein similarity
-121: # ---------------------------------------------------------------------------
-122: 
-123: 
-124: def levenshtein_similarity(s1: str, s2: str) -> float:
-125:     """Normalized Levenshtein similarity (1.0 = identical).
-126: 
-127:     Uses rapidfuzz when available (~5-10x faster).
-128:     """
-129:     a, b = s1.lower(), s2.lower()
-130:     if a == b:
-131:         return 1.0
-132:     if not a or not b:
-133:         return 0.0
-134: 
-135:     if _HAS_RAPIDFUZZ:
-136:         return _rf_lev.normalized_similarity(a, b)
-137: 
-138:     # Pure-Python single-row DP fallback
-139:     la, lb = len(a), len(b)
-140:     prev = list(range(lb + 1))
-141:     for i in range(1, la + 1):
-142:         curr = [i] + [0] * lb
-143:         for j in range(1, lb + 1):
-144:             cost = 0 if a[i - 1] == b[j - 1] else 1
-145:             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-146:         prev = curr
-147: 
-148:     distance = prev[lb]
-149:     return 1.0 - (distance / max(la, lb))
-150: 
-151: 
-152: # ---------------------------------------------------------------------------
-153: # Sequence matching (SequenceMatcher replacement)
-154: # ---------------------------------------------------------------------------
-155: 
-156: 
-157: def sequence_match_ratio(s1: str, s2: str) -> float:
-158:     """Compute sequence match ratio between two strings.
-159: 
-160:     Uses rapidfuzz.fuzz.ratio when available (~3-10x faster than
-161:     difflib.SequenceMatcher). Returns a float in [0.0, 1.0].
-162:     """
-163:     if _HAS_RAPIDFUZZ:
-164:         return _rf_ratio(s1, s2) / 100.0
-165: 
-166:     from difflib import SequenceMatcher
-167: 
-168:     return SequenceMatcher(None, s1, s2).ratio()
-````
-
 ## File: tests/unit/engines/__init__.py
 ````python
 1: """Unit tests for Khora engines."""
@@ -18570,180 +17537,6 @@ README.md
 115:         """Entity source_tool should default to empty string."""
 116:         entity = Entity(name="Test")
 117:         assert entity.source_tool == ""
-````
-
-## File: tests/unit/test_config_backends.py
-````python
-  1: """Tests for discriminated-union backend config parsing and backwards compatibility."""
-  2: 
-  3: import pytest
-  4: 
-  5: from khora.config.schema import (
-  6:     ArcadeDBGraphConfig,
-  7:     ArcadeDBVectorConfig,
-  8:     KhoraConfig,
-  9:     KuzuConfig,
- 10:     MemgraphConfig,
- 11:     Neo4jConfig,
- 12:     PgVectorConfig,
- 13:     StorageSettings,
- 14: )
- 15: 
- 16: 
- 17: @pytest.mark.unit
- 18: class TestStorageSettingsBackwardsCompat:
- 19:     """Legacy flat fields should still work and be migrated to new-style configs."""
- 20: 
- 21:     def test_legacy_neo4j_fields_migrated(self):
- 22:         settings = StorageSettings(
- 23:             neo4j_url="bolt://localhost:7687",
- 24:             neo4j_user="admin",
- 25:             neo4j_password="secret",
- 26:             neo4j_database="mydb",
- 27:         )
- 28:         assert isinstance(settings.graph, Neo4jConfig)
- 29:         assert settings.graph.url == "bolt://localhost:7687"
- 30:         assert settings.graph.user == "admin"
- 31:         assert settings.graph.password == "secret"
- 32:         assert settings.graph.database == "mydb"
- 33: 
- 34:     def test_legacy_pgvector_fields_migrated(self):
- 35:         settings = StorageSettings(
- 36:             pgvector_url="postgresql://localhost:5432/vectors",
- 37:             embedding_dimension=768,
- 38:         )
- 39:         assert isinstance(settings.vector, PgVectorConfig)
- 40:         assert settings.vector.url == "postgresql://localhost:5432/vectors"
- 41:         assert settings.vector.embedding_dimension == 768
- 42: 
- 43:     def test_new_style_graph_config_takes_precedence(self):
- 44:         settings = StorageSettings(
- 45:             neo4j_url="bolt://old:7687",
- 46:             graph=KuzuConfig(database_path="/tmp/kuzu"),
- 47:         )
- 48:         assert isinstance(settings.graph, KuzuConfig)
- 49:         assert settings.graph.database_path == "/tmp/kuzu"
- 50: 
- 51:     def test_new_style_vector_config_takes_precedence(self):
- 52:         settings = StorageSettings(
- 53:             pgvector_url="postgresql://old:5432/db",
- 54:             vector=ArcadeDBVectorConfig(url="http://localhost:2480"),
- 55:         )
- 56:         assert isinstance(settings.vector, ArcadeDBVectorConfig)
- 57:         assert settings.vector.url == "http://localhost:2480"
- 58: 
- 59:     def test_defaults(self):
- 60:         settings = StorageSettings()
- 61:         # Graph backend is optional - None by default
- 62:         assert settings.graph is None
- 63:         assert isinstance(settings.vector, PgVectorConfig)
- 64:         assert settings.vector.url is None
- 65: 
- 66: 
- 67: @pytest.mark.unit
- 68: class TestDiscriminatedUnionParsing:
- 69:     """Discriminated union configs parsed from dict/YAML."""
- 70: 
- 71:     def test_kuzu_config_from_dict(self):
- 72:         settings = StorageSettings.model_validate(
- 73:             {
- 74:                 "graph": {"backend": "kuzu", "database_path": "/data/kuzu"},
- 75:             }
- 76:         )
- 77:         assert isinstance(settings.graph, KuzuConfig)
- 78:         assert settings.graph.database_path == "/data/kuzu"
- 79: 
- 80:     def test_memgraph_config_from_dict(self):
- 81:         settings = StorageSettings.model_validate(
- 82:             {
- 83:                 "graph": {"backend": "memgraph", "url": "bolt://mg:7687"},
- 84:             }
- 85:         )
- 86:         assert isinstance(settings.graph, MemgraphConfig)
- 87:         assert settings.graph.url == "bolt://mg:7687"
- 88: 
- 89:     def test_arcadedb_graph_config_from_dict(self):
- 90:         settings = StorageSettings.model_validate(
- 91:             {
- 92:                 "graph": {"backend": "arcadedb", "url": "http://arcade:2480"},
- 93:             }
- 94:         )
- 95:         assert isinstance(settings.graph, ArcadeDBGraphConfig)
- 96:         assert settings.graph.url == "http://arcade:2480"
- 97: 
- 98:     def test_arcadedb_vector_config_from_dict(self):
- 99:         settings = StorageSettings.model_validate(
-100:             {
-101:                 "vector": {"backend": "arcadedb", "url": "http://arcade:2480", "embedding_dimension": 768},
-102:             }
-103:         )
-104:         assert isinstance(settings.vector, ArcadeDBVectorConfig)
-105:         assert settings.vector.embedding_dimension == 768
-106: 
-107:     def test_neo4j_is_default_graph_backend(self):
-108:         settings = StorageSettings.model_validate(
-109:             {
-110:                 "graph": {"backend": "neo4j", "url": "bolt://neo:7687"},
-111:             }
-112:         )
-113:         assert isinstance(settings.graph, Neo4jConfig)
-114: 
-115:     def test_pgvector_is_default_vector_backend(self):
-116:         settings = StorageSettings.model_validate(
-117:             {
-118:                 "vector": {"backend": "pgvector", "url": "postgresql://pg:5432/db"},
-119:             }
-120:         )
-121:         assert isinstance(settings.vector, PgVectorConfig)
-122: 
-123: 
-124: @pytest.mark.unit
-125: class TestKhoraConfigGraphHelpers:
-126:     """KhoraConfig.get_graph_config() / get_vector_config() work correctly."""
-127: 
-128:     def test_get_graph_config_neo4j(self):
-129:         config = KhoraConfig(
-130:             neo4j_url="bolt://neo4j:pass@localhost:7687",
-131:         )
-132:         graph = config.get_graph_config()
-133:         assert isinstance(graph, Neo4jConfig)
-134:         assert graph.url == "bolt://localhost:7687"
-135:         assert graph.user == "neo4j"
-136:         assert graph.password == "pass"
-137: 
-138:     def test_get_graph_config_kuzu(self):
-139:         config = KhoraConfig(
-140:             storage=StorageSettings(
-141:                 graph=KuzuConfig(database_path="/tmp/kuzu_test"),
-142:             ),
-143:         )
-144:         graph = config.get_graph_config()
-145:         assert isinstance(graph, KuzuConfig)
-146:         assert graph.database_path == "/tmp/kuzu_test"
-147: 
-148:     def test_get_vector_config_defaults_to_postgresql_url(self):
-149:         config = KhoraConfig(
-150:             database_url="postgresql://localhost:5432/khora",
-151:         )
-152:         vector = config.get_vector_config()
-153:         assert isinstance(vector, PgVectorConfig)
-154:         assert vector.url == "postgresql://localhost:5432/khora"
-155: 
-156: 
-157: @pytest.mark.unit
-158: class TestArcadeDBDualRole:
-159:     """ArcadeDB dual-role detection."""
-160: 
-161:     def test_both_graph_and_vector_arcadedb(self):
-162:         settings = StorageSettings.model_validate(
-163:             {
-164:                 "graph": {"backend": "arcadedb", "url": "http://localhost:2480"},
-165:                 "vector": {"backend": "arcadedb", "url": "http://localhost:2480"},
-166:             }
-167:         )
-168:         assert isinstance(settings.graph, ArcadeDBGraphConfig)
-169:         assert isinstance(settings.vector, ArcadeDBVectorConfig)
-170:         assert settings.graph.url == settings.vector.url
 ````
 
 ## File: tests/unit/test_conversation_chunker.py
@@ -22606,435 +21399,6 @@ README.md
 159:         assert call["metadata"] == {"chunk_count": 42}
 ````
 
-## File: src/khora/api/routes/status.py
-````python
- 1: """Status endpoints for Khora API."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: import khora
-11: 
-12: router = APIRouter()
-13: 
-14: 
-15: @router.get("/status")
-16: async def status_check(request: Request) -> dict[str, Any]:
-17:     """Basic status check endpoint.
-18: 
-19:     Returns:
-20:         Status with timestamp and version
-21:     """
-22:     return {
-23:         "status": "ok",
-24:         "timestamp": datetime.now(UTC).isoformat(),
-25:         "version": khora.__version__,
-26:         "service": "khora",
-27:     }
-28: 
-29: 
-30: @router.get("/health")
-31: async def health_check(request: Request) -> dict[str, Any]:
-32:     """Health check endpoint for orchestration systems.
-33: 
-34:     Returns:
-35:         Health status with timestamp
-36:     """
-37:     return {
-38:         "status": "healthy",
-39:         "timestamp": datetime.now(UTC).isoformat(),
-40:         "version": khora.__version__,
-41:     }
-42: 
-43: 
-44: @router.get("/health/ready")
-45: async def readiness_check(request: Request) -> dict[str, Any]:
-46:     """Readiness check for Kubernetes/orchestration.
-47: 
-48:     Checks that all required services are available.
-49: 
-50:     Returns:
-51:         Readiness status with component checks
-52:     """
-53:     config = request.app.state.config
-54:     checks: dict[str, bool] = {}
-55: 
-56:     # TODO: Add actual health checks for:
-57:     # - Database connections
-58:     # - External services
-59: 
-60:     # For now, return basic status
-61:     checks["config_loaded"] = config is not None
-62: 
-63:     all_healthy = all(checks.values())
-64: 
-65:     return {
-66:         "status": "ready" if all_healthy else "not_ready",
-67:         "timestamp": datetime.now(UTC).isoformat(),
-68:         "checks": checks,
-69:     }
-70: 
-71: 
-72: @router.get("/health/live")
-73: async def liveness_check() -> dict[str, Any]:
-74:     """Liveness check for Kubernetes/orchestration.
-75: 
-76:     Simple check that the application is running.
-77: 
-78:     Returns:
-79:         Liveness status
-80:     """
-81:     return {
-82:         "status": "alive",
-83:         "timestamp": datetime.now(UTC).isoformat(),
-84:     }
-````
-
-## File: src/khora/config/llm.py
-````python
-  1: """LiteLLM configuration for unified LLM access.
-  2: 
-  3: Provides a unified interface to all LLM providers (OpenAI, Anthropic, Google, etc.)
-  4: with fallbacks and routing. Based on the memoryman/potemkin pattern.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import os
- 10: from pathlib import Path
- 11: from typing import Any
- 12: 
- 13: import yaml
- 14: from loguru import logger
- 15: from pydantic import BaseModel, Field
- 16: 
- 17: 
- 18: class LiteLLMConfig(BaseModel):
- 19:     """Configuration for LiteLLM unified model access.
- 20: 
- 21:     This configuration provides a unified interface to all LLM providers
- 22:     including OpenAI, Anthropic, Google, and others through LiteLLM.
- 23:     """
- 24: 
- 25:     # Primary model configuration
- 26:     model: str = Field(
- 27:         default="gpt-4o-mini",
- 28:         description="Primary model to use (e.g., gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)",
- 29:     )
- 30:     api_key_env: str = Field(
- 31:         default="OPENAI_API_KEY",
- 32:         description="Environment variable name for API key",
- 33:     )
- 34: 
- 35:     # Model parameters
- 36:     temperature: float = Field(
- 37:         default=0.7,
- 38:         ge=0.0,
- 39:         le=2.0,
- 40:         description="Sampling temperature for generation",
- 41:     )
- 42:     max_tokens: int = Field(
- 43:         default=2000,
- 44:         gt=0,
- 45:         description="Maximum tokens to generate",
- 46:     )
- 47: 
- 48:     # Request configuration
- 49:     timeout: int = Field(
- 50:         default=30,
- 51:         gt=0,
- 52:         description="Request timeout in seconds",
- 53:     )
- 54:     max_retries: int = Field(
- 55:         default=3,
- 56:         ge=0,
- 57:         description="Maximum number of retries on failure",
- 58:     )
- 59:     retry_wait: int = Field(
- 60:         default=2,
- 61:         ge=0,
- 62:         description="Wait time between retries in seconds",
- 63:     )
- 64: 
- 65:     # Concurrency
- 66:     max_concurrent_llm_calls: int = Field(
- 67:         default=10,
- 68:         gt=0,
- 69:         description="Maximum concurrent LLM API calls",
- 70:     )
- 71: 
- 72:     # Router configuration for fallbacks
- 73:     model_list: list[dict[str, Any]] | None = Field(
- 74:         default=None,
- 75:         description="List of model configurations for router fallbacks",
- 76:     )
- 77:     router_settings: dict[str, Any] | None = Field(
- 78:         default=None,
- 79:         description="Router settings (routing_strategy, num_retries, etc.)",
- 80:     )
- 81: 
- 82:     # Embedding model configuration
- 83:     embedding_model: str = Field(
- 84:         default="text-embedding-3-small",
- 85:         description="Model to use for embeddings",
- 86:     )
- 87:     embedding_api_key_env: str | None = Field(
- 88:         default=None,
- 89:         description="Environment variable for embedding API key (defaults to api_key_env)",
- 90:     )
- 91:     embedding_dimension: int = Field(
- 92:         default=1536,
- 93:         gt=0,
- 94:         description="Embedding vector dimension",
- 95:     )
- 96:     embed_concurrency: int = Field(
- 97:         default=10,
- 98:         gt=0,
- 99:         description="Maximum concurrent embedding API calls",
-100:     )
-101: 
-102:     @classmethod
-103:     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
-104:         """Load configuration from a YAML file.
-105: 
-106:         Args:
-107:             path: Path to the YAML configuration file
-108: 
-109:         Returns:
-110:             LiteLLMConfig instance
-111:         """
-112:         path = Path(path)
-113:         with path.open() as f:
-114:             data = yaml.safe_load(f)
-115:         return cls.model_validate(data or {})
-116: 
-117:     @classmethod
-118:     def from_dict(cls, config: dict[str, Any]) -> LiteLLMConfig:
-119:         """Create configuration from a dictionary.
-120: 
-121:         Args:
-122:             config: Configuration dictionary (can be nested under 'llm' key)
-123: 
-124:         Returns:
-125:             LiteLLMConfig instance
-126:         """
-127:         # Handle nested configuration
-128:         if "llm" in config:
-129:             config = config["llm"]
-130: 
-131:         # Handle config_file path
-132:         if "config_file" in config:
-133:             return cls.from_yaml(config["config_file"])
-134: 
-135:         return cls.model_validate(config)
-136: 
-137:     def get_api_key(self) -> str:
-138:         """Get the API key from environment variable."""
-139:         key = os.environ.get(self.api_key_env, "")
-140:         if not key:
-141:             logger.warning(f"API key environment variable {self.api_key_env} not set")
-142:         return key
-143: 
-144:     def get_embedding_api_key(self) -> str:
-145:         """Get the embedding API key from environment variable."""
-146:         env_var = self.embedding_api_key_env or self.api_key_env
-147:         key = os.environ.get(env_var, "")
-148:         if not key:
-149:             logger.warning(f"Embedding API key environment variable {env_var} not set")
-150:         return key
-151: 
-152: 
-153: def configure_litellm(config: LiteLLMConfig | None = None) -> None:
-154:     """Configure LiteLLM with the given configuration.
-155: 
-156:     This function should be called once at application startup to configure
-157:     LiteLLM's global settings.
-158: 
-159:     Args:
-160:         config: LiteLLM configuration (uses defaults if None)
-161:     """
-162:     try:
-163:         import litellm
-164:     except ImportError:
-165:         logger.warning("litellm package not installed, skipping configuration")
-166:         return
-167: 
-168:     if config is None:
-169:         config = LiteLLMConfig()
-170: 
-171:     # Critical for compatibility across providers
-172:     litellm.drop_params = True
-173: 
-174:     # Disable verbose logging and telemetry
-175:     litellm.set_verbose = False
-176:     litellm.telemetry = False  # type: ignore[assignment]
-177: 
-178:     # Set up API keys from environment
-179:     api_key = config.get_api_key()
-180:     if api_key:
-181:         # LiteLLM uses provider-specific env vars, so we ensure they're set
-182:         if "openai" in config.model.lower() or config.model.startswith("gpt"):
-183:             os.environ.setdefault("OPENAI_API_KEY", api_key)
-184:         elif "claude" in config.model.lower() or "anthropic" in config.model.lower():
-185:             os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
-186:         elif "gemini" in config.model.lower():
-187:             os.environ.setdefault("GOOGLE_API_KEY", api_key)
-188: 
-189:     logger.info(f"LiteLLM configured with model: {config.model}")
-190: 
-191: 
-192: def create_litellm_router(config: LiteLLMConfig) -> Any:
-193:     """Create a LiteLLM router for fallback handling.
-194: 
-195:     Args:
-196:         config: LiteLLM configuration with model_list
-197: 
-198:     Returns:
-199:         LiteLLM Router instance
-200:     """
-201:     try:
-202:         from litellm import Router
-203:     except ImportError:
-204:         logger.warning("litellm package not installed")
-205:         return None
-206: 
-207:     if not config.model_list:
-208:         logger.warning("No model_list configured, router not created")
-209:         return None
-210: 
-211:     router_settings = config.router_settings or {
-212:         "routing_strategy": "simple-shuffle",
-213:         "num_retries": config.max_retries,
-214:     }
-215: 
-216:     router = Router(
-217:         model_list=config.model_list,
-218:         **router_settings,
-219:     )
-220: 
-221:     logger.info(f"LiteLLM router created with {len(config.model_list)} models")
-222:     return router
-223: 
-224: 
-225: async def acompletion(
-226:     prompt: str,
-227:     config: LiteLLMConfig | None = None,
-228:     *,
-229:     system_prompt: str | None = None,
-230:     **kwargs: Any,
-231: ) -> str:
-232:     """Async completion with LiteLLM.
-233: 
-234:     Args:
-235:         prompt: User prompt
-236:         config: LiteLLM configuration (uses defaults if None)
-237:         system_prompt: Optional system prompt
-238:         **kwargs: Additional arguments passed to litellm.acompletion
-239: 
-240:     Returns:
-241:         Generated text response
-242:     """
-243:     try:
-244:         import litellm
-245:     except ImportError:
-246:         raise RuntimeError("litellm package not installed. Run: pip install litellm")
-247: 
-248:     if config is None:
-249:         config = LiteLLMConfig()
-250: 
-251:     messages = []
-252:     if system_prompt:
-253:         messages.append({"role": "system", "content": system_prompt})
-254:     messages.append({"role": "user", "content": prompt})
-255: 
-256:     import time as _time
-257: 
-258:     _t0 = _time.perf_counter()
-259:     response = await litellm.acompletion(
-260:         model=config.model,
-261:         messages=messages,
-262:         temperature=kwargs.pop("temperature", config.temperature),
-263:         max_tokens=kwargs.pop("max_tokens", config.max_tokens),
-264:         timeout=kwargs.pop("timeout", config.timeout),
-265:         num_retries=kwargs.pop("num_retries", config.max_retries),
-266:         **kwargs,
-267:     )
-268:     _latency = (_time.perf_counter() - _t0) * 1000
-269: 
-270:     # Record telemetry
-271:     from khora.telemetry import get_collector
-272: 
-273:     usage = getattr(response, "usage", None)
-274:     get_collector().record_llm_call(
-275:         operation=kwargs.get("_telemetry_op", "completion"),
-276:         model=config.model,
-277:         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-278:         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-279:         total_tokens=getattr(usage, "total_tokens", 0) or 0,
-280:         latency_ms=_latency,
-281:     )
-282: 
-283:     return response.choices[0].message.content
-284: 
-285: 
-286: async def aembedding(
-287:     text: str | list[str],
-288:     config: LiteLLMConfig | None = None,
-289:     **kwargs: Any,
-290: ) -> list[list[float]]:
-291:     """Async embedding generation with LiteLLM.
-292: 
-293:     Args:
-294:         text: Text or list of texts to embed
-295:         config: LiteLLM configuration (uses defaults if None)
-296:         **kwargs: Additional arguments passed to litellm.aembedding
-297: 
-298:     Returns:
-299:         List of embedding vectors
-300:     """
-301:     try:
-302:         import litellm
-303:     except ImportError:
-304:         raise RuntimeError("litellm package not installed. Run: pip install litellm")
-305: 
-306:     if config is None:
-307:         config = LiteLLMConfig()
-308: 
-309:     # Ensure text is a list
-310:     if isinstance(text, str):
-311:         text = [text]
-312: 
-313:     import time as _time
-314: 
-315:     _t0 = _time.perf_counter()
-316:     response = await litellm.aembedding(
-317:         model=config.embedding_model,
-318:         input=text,
-319:         timeout=kwargs.pop("timeout", config.timeout),
-320:         **kwargs,
-321:     )
-322:     _latency = (_time.perf_counter() - _t0) * 1000
-323: 
-324:     # Record telemetry
-325:     from khora.telemetry import get_collector
-326: 
-327:     usage = getattr(response, "usage", None)
-328:     get_collector().record_llm_call(
-329:         operation="embedding",
-330:         model=config.embedding_model,
-331:         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-332:         total_tokens=getattr(usage, "total_tokens", 0) or 0,
-333:         latency_ms=_latency,
-334:         metadata={"batch_size": len(text)},
-335:     )
-336: 
-337:     return [item["embedding"] for item in response.data]
-````
-
 ## File: src/khora/engines/khora/backends/pgvector.py
 ````python
   1: """PostgreSQL+pgvector backend for the Khora engine.
@@ -23588,6 +21952,919 @@ README.md
 549: __all__ = ["PgVectorTemporalStore"]
 ````
 
+## File: src/khora/engines/khora/engine.py
+````python
+  1: """Khora engine - temporal-first memory engine.
+  2: 
+  3: This engine is optimized for:
+  4: - Temporal queries with structured field filtering
+  5: - Fast and cost-efficient ingestion
+  6: - High-precision retrieval with bi-temporal model
+  7: - Multiple backends (pgvector, Weaviate)
+  8: """
+  9: 
+ 10: from __future__ import annotations
+ 11: 
+ 12: import asyncio
+ 13: import hashlib
+ 14: from collections.abc import Callable
+ 15: from datetime import UTC, datetime
+ 16: from typing import TYPE_CHECKING, Any
+ 17: from uuid import UUID
+ 18: 
+ 19: from loguru import logger
+ 20: 
+ 21: from khora.config import KhoraConfig, LiteLLMConfig
+ 22: from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+ 23: from khora.extraction.embedders import LiteLLMEmbedder
+ 24: from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
+ 25: from khora.query import SearchMode
+ 26: from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+ 27: 
+ 28: from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
+ 29: 
+ 30: if TYPE_CHECKING:
+ 31:     pass
+ 32: 
+ 33: 
+ 34: class KhoraEngine:
+ 35:     """Khora engine - temporal-first, cost-efficient memory engine.
+ 36: 
+ 37:     Key features:
+ 38:     - Bi-temporal model: Track occurrence time vs ingestion time
+ 39:     - Hierarchical time graph: Year → Quarter → Month → Week → Day
+ 40:     - Structured field filtering: Filter on occurred_at, not just created_at
+ 41:     - Multiple backends: PostgreSQL+pgvector (default) and Weaviate (advanced)
+ 42:     - Cost optimization: Skeleton-based indexing with lazy expansion
+ 43: 
+ 44:     Usage:
+ 45:         # Default backend (pgvector)
+ 46:         engine = KhoraEngine(config)
+ 47:         await engine.connect()
+ 48: 
+ 49:         # Weaviate backend
+ 50:         engine = KhoraEngine(config, backend="weaviate", weaviate_url="http://localhost:8080")
+ 51:         await engine.connect()
+ 52:     """
+ 53: 
+ 54:     def __init__(
+ 55:         self,
+ 56:         config: KhoraConfig,
+ 57:         *,
+ 58:         storage_config: StorageConfig | None = None,
+ 59:         backend: str = "pgvector",
+ 60:         weaviate_url: str | None = None,
+ 61:     ) -> None:
+ 62:         """Initialize the Khora engine.
+ 63: 
+ 64:         Args:
+ 65:             config: KhoraConfig instance
+ 66:             storage_config: Storage configuration (deprecated, derived from config)
+ 67:             backend: Backend type ("pgvector" or "weaviate")
+ 68:             weaviate_url: Weaviate URL (required for weaviate backend)
+ 69:         """
+ 70:         self._config = config
+ 71:         self._backend_type = backend
+ 72:         self._weaviate_url = weaviate_url
+ 73: 
+ 74:         # Build storage config
+ 75:         if storage_config:
+ 76:             self._storage_config = storage_config
+ 77:         else:
+ 78:             postgresql_url = config.get_postgresql_url()
+ 79:             graph_config = config.get_graph_config()
+ 80: 
+ 81:             # Only use legacy neo4j_url fields when graph_config is explicitly set
+ 82:             # This prevents environment variables (KHORA_NEO4J_URL) from overriding
+ 83:             # the explicit graph_config=None setting
+ 84:             storage_kwargs: dict[str, Any] = {
+ 85:                 "postgresql_url": postgresql_url,
+ 86:                 "pgvector_url": postgresql_url,
+ 87:                 "pgvector_embedding_dimension": config.storage.embedding_dimension,
+ 88:                 "graph_config": graph_config,
+ 89:                 "vector_config": config.get_vector_config(),
+ 90:             }
+ 91:             if graph_config is not None:
+ 92:                 # Only pass legacy neo4j fields when graph is configured
+ 93:                 storage_kwargs["neo4j_url"] = config.get_neo4j_url()
+ 94:                 storage_kwargs["neo4j_user"] = config.get_neo4j_user()
+ 95:                 storage_kwargs["neo4j_password"] = config.get_neo4j_password()
+ 96:                 storage_kwargs["neo4j_database"] = config.get_neo4j_database()
+ 97: 
+ 98:             self._storage_config = StorageConfig(**storage_kwargs)
+ 99: 
+100:         self._storage: StorageCoordinator | None = None
+101:         self._temporal_store: TemporalVectorStore | None = None
+102:         self._embedder: LiteLLMEmbedder | None = None
+103:         self._connected = False
+104: 
+105:         # Default namespace for simple usage
+106:         self._default_namespace_id: UUID | None = None
+107: 
+108:     async def connect(self) -> None:
+109:         """Connect to all storage backends."""
+110:         if self._connected:
+111:             return
+112: 
+113:         logger.info(f"Connecting Khora engine (backend={self._backend_type})...")
+114: 
+115:         # Create and connect relational storage (for documents, namespaces, etc.)
+116:         self._storage = create_storage_coordinator(self._storage_config)
+117:         await self._storage.connect()
+118: 
+119:         # Create and connect temporal vector store
+120:         self._temporal_store = create_temporal_store(
+121:             self._backend_type,
+122:             self._config,
+123:             weaviate_url=self._weaviate_url,
+124:         )
+125:         await self._temporal_store.connect()
+126: 
+127:         # Create embedder
+128:         llm_config = LiteLLMConfig(
+129:             model=self._config.llm.model,
+130:             embedding_model=self._config.llm.embedding_model,
+131:             embedding_dimension=self._config.llm.embedding_dimension,
+132:             timeout=self._config.llm.timeout,
+133:             max_retries=self._config.llm.max_retries,
+134:         )
+135:         self._embedder = LiteLLMEmbedder.from_config(llm_config)
+136: 
+137:         # Initialize telemetry
+138:         from khora.telemetry import init_telemetry
+139:         from khora.telemetry.config import TelemetryConfig
+140: 
+141:         telemetry_cfg = TelemetryConfig(
+142:             database_url=self._config.telemetry_database_url,
+143:             service_name=self._config.telemetry_service_name,
+144:         )
+145:         await init_telemetry(telemetry_cfg)
+146: 
+147:         self._connected = True
+148:         logger.info("Khora engine connected")
+149: 
+150:     async def disconnect(self) -> None:
+151:         """Disconnect from all storage backends."""
+152:         if not self._connected:
+153:             return
+154: 
+155:         logger.info("Disconnecting Khora engine...")
+156: 
+157:         # Shutdown telemetry
+158:         from khora.telemetry import shutdown_telemetry
+159: 
+160:         await shutdown_telemetry()
+161: 
+162:         if self._temporal_store:
+163:             await self._temporal_store.disconnect()
+164:             self._temporal_store = None
+165: 
+166:         if self._storage:
+167:             await self._storage.disconnect()
+168:             self._storage = None
+169: 
+170:         self._embedder = None
+171:         self._connected = False
+172: 
+173:         logger.info("Khora engine disconnected")
+174: 
+175:     def _get_storage(self) -> StorageCoordinator:
+176:         """Get storage coordinator (internal use)."""
+177:         if self._storage is None:
+178:             raise RuntimeError("Khora engine not connected. Call connect() first.")
+179:         return self._storage
+180: 
+181:     def _get_temporal_store(self) -> TemporalVectorStore:
+182:         """Get temporal store (internal use)."""
+183:         if self._temporal_store is None:
+184:             raise RuntimeError("Khora engine not connected. Call connect() first.")
+185:         return self._temporal_store
+186: 
+187:     def _get_embedder(self) -> LiteLLMEmbedder:
+188:         """Get embedder (internal use)."""
+189:         if self._embedder is None:
+190:             raise RuntimeError("Khora engine not connected. Call connect() first.")
+191:         return self._embedder
+192: 
+193:     # =========================================================================
+194:     # Core API: remember, recall, forget
+195:     # =========================================================================
+196: 
+197:     async def remember(
+198:         self,
+199:         content: str,
+200:         namespace_id: UUID,
+201:         *,
+202:         title: str = "",
+203:         source: str = "",
+204:         metadata: dict[str, Any] | None = None,
+205:         skill_name: str = "general_entities",
+206:         occurred_at: datetime | None = None,
+207:     ) -> RememberResult:
+208:         """Store content in the memory engine.
+209: 
+210:         Args:
+211:             content: Content to store
+212:             namespace_id: Namespace to store in
+213:             title: Document title
+214:             source: Document source
+215:             metadata: Additional metadata
+216:             skill_name: Extraction skill (default: general_entities)
+217:             occurred_at: When this content/event occurred (default: now)
+218: 
+219:         Returns:
+220:             RememberResult with document_id and counts
+221:         """
+222:         # Compute checksum
+223:         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+224: 
+225:         storage = self._get_storage()
+226: 
+227:         # Check for duplicate
+228:         existing = await storage.get_document_by_checksum(namespace_id, checksum)
+229:         if existing:
+230:             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
+231:             return RememberResult(
+232:                 document_id=existing.id,
+233:                 namespace_id=namespace_id,
+234:                 chunks_created=existing.chunk_count,
+235:                 entities_extracted=existing.entity_count,
+236:                 relationships_created=0,
+237:                 metadata={"duplicate": True, "status": str(existing.status)},
+238:             )
+239: 
+240:         # Create document in relational storage
+241:         doc_metadata = DocumentMetadata(
+242:             title=title,
+243:             source=source,
+244:             source_type="api",
+245:             checksum=checksum,
+246:             size_bytes=len(content.encode("utf-8")),
+247:             custom=metadata or {},
+248:         )
+249:         document = Document(
+250:             namespace_id=namespace_id,
+251:             content=content,
+252:             metadata=doc_metadata,
+253:         )
+254:         document = await storage.create_document(document)
+255: 
+256:         # Process through simplified pipeline (no full KG extraction)
+257:         chunks_created, entities_extracted, relationships_created = await self._process_document(
+258:             document,
+259:             skill_name=skill_name,
+260:             occurred_at=occurred_at or datetime.now(UTC),
+261:         )
+262: 
+263:         return RememberResult(
+264:             document_id=document.id,
+265:             namespace_id=namespace_id,
+266:             chunks_created=chunks_created,
+267:             entities_extracted=entities_extracted,
+268:             relationships_created=relationships_created,
+269:         )
+270: 
+271:     async def _process_document(
+272:         self,
+273:         document: Document,
+274:         *,
+275:         skill_name: str,
+276:         occurred_at: datetime,
+277:     ) -> tuple[int, int, int]:
+278:         """Process a document into chunks (simplified pipeline).
+279: 
+280:         Unlike GraphRAG, this focuses on fast chunking and embedding without
+281:         full entity extraction. Entity extraction can be done lazily on retrieval.
+282:         """
+283:         from khora.pipelines.chunking import create_chunker
+284:         from khora.pipelines.chunking.config import ChunkerConfig
+285: 
+286:         storage = self._get_storage()
+287:         embedder = self._get_embedder()
+288:         temporal_store = self._get_temporal_store()
+289: 
+290:         # Create chunker
+291:         chunker_config = ChunkerConfig(
+292:             strategy=self._config.pipeline.chunking_strategy,
+293:             chunk_size=self._config.pipeline.chunk_size,
+294:             chunk_overlap=self._config.pipeline.chunk_overlap,
+295:         )
+296:         chunker = create_chunker(chunker_config)
+297: 
+298:         # Chunk the document
+299:         raw_chunks = chunker.chunk(document.content)
+300: 
+301:         if not raw_chunks:
+302:             # Mark document as processed with 0 chunks
+303:             document.mark_completed(0, 0)
+304:             await storage.update_document(document)
+305:             return 0, 0, 0
+306: 
+307:         # Embed chunks in batch
+308:         chunk_texts = [c.content for c in raw_chunks]
+309:         embeddings = await embedder.embed_batch(chunk_texts)
+310: 
+311:         # Extract metadata for filtering (source_system, author, channel, etc.)
+312:         doc_metadata = document.metadata.custom if document.metadata else {}
+313: 
+314:         # Create temporal chunks
+315:         temporal_chunks = []
+316:         for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+317:             temporal_chunk = TemporalChunk(
+318:                 id=None,  # Will be assigned
+319:                 namespace_id=document.namespace_id,
+320:                 document_id=document.id,
+321:                 content=raw_chunk.content,
+322:                 embedding=embedding,
+323:                 occurred_at=occurred_at,
+324:                 created_at=datetime.now(UTC),
+325:                 source_system=doc_metadata.get("source_system"),
+326:                 author=doc_metadata.get("author"),
+327:                 channel=doc_metadata.get("channel"),
+328:                 tags=doc_metadata.get("tags", []),
+329:                 confidence=1.0,
+330:                 metadata={
+331:                     "chunk_index": i,
+332:                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+333:                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+334:                 },
+335:             )
+336:             temporal_chunks.append(temporal_chunk)
+337: 
+338:         # Store in temporal store
+339:         stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+340: 
+341:         # Update document status
+342:         document.mark_completed(len(stored_chunks), 0)
+343:         await storage.update_document(document)
+344: 
+345:         logger.debug(f"Processed document {document.id}: {len(stored_chunks)} chunks")
+346: 
+347:         return len(stored_chunks), 0, 0
+348: 
+349:     async def recall(
+350:         self,
+351:         query: str,
+352:         namespace_id: UUID,
+353:         *,
+354:         limit: int = 10,
+355:         mode: SearchMode = SearchMode.HYBRID,
+356:         min_similarity: float = 0.0,
+357:         agentic: bool = False,
+358:         raw: bool = False,
+359:         # Khora-specific parameters
+360:         temporal_filter: TemporalFilter | None = None,
+361:         temporal_reference: datetime | None = None,
+362:         hybrid_alpha: float | None = None,
+363:         filters: dict[str, Any] | None = None,
+364:     ) -> RecallResult:
+365:         """Recall memories relevant to a query.
+366: 
+367:         Args:
+368:             query: Query text
+369:             namespace_id: Namespace to search
+370:             limit: Maximum number of results
+371:             mode: Search mode (VECTOR, KEYWORD, HYBRID)
+372:             min_similarity: Minimum similarity threshold
+373:             agentic: Whether to use agentic mode
+374:             raw: Disable all LLM features
+375:             temporal_filter: Structured temporal filter
+376:             temporal_reference: Reference point for relative time (e.g., message timestamp)
+377:             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
+378:             filters: Additional structured filters (converted to TemporalFilter)
+379: 
+380:         Returns:
+381:             RecallResult with chunks and context
+382:         """
+383:         embedder = self._get_embedder()
+384:         temporal_store = self._get_temporal_store()
+385: 
+386:         # Embed the query
+387:         query_embedding = await embedder.embed(query)
+388: 
+389:         # Build temporal filter from filters dict if provided
+390:         if filters and not temporal_filter:
+391:             temporal_filter = self._build_temporal_filter_from_dict(filters)
+392: 
+393:         # Handle relative time references
+394:         if temporal_reference and temporal_filter:
+395:             temporal_filter = self._adjust_relative_time(temporal_filter, temporal_reference)
+396: 
+397:         # Determine hybrid alpha based on mode
+398:         if hybrid_alpha is None:
+399:             if mode == SearchMode.VECTOR:
+400:                 hybrid_alpha = 1.0  # Pure vector
+401:             elif mode == SearchMode.KEYWORD:
+402:                 hybrid_alpha = 0.0  # Pure BM25
+403:             else:  # HYBRID
+404:                 hybrid_alpha = 0.7  # Default blend
+405: 
+406:         # Perform search
+407:         results = await temporal_store.search(
+408:             namespace_id,
+409:             query_embedding,
+410:             limit=limit,
+411:             min_similarity=min_similarity,
+412:             temporal_filter=temporal_filter,
+413:             hybrid_alpha=hybrid_alpha,
+414:             query_text=query,
+415:         )
+416: 
+417:         # Build context text
+418:         context_parts = []
+419:         chunks_with_scores = []
+420:         for result in results:
+421:             context_parts.append(result.chunk.content)
+422:             # Convert TemporalChunk to a simple dict for RecallResult
+423:             chunk_dict = {
+424:                 "id": result.chunk.id,
+425:                 "content": result.chunk.content,
+426:                 "document_id": result.chunk.document_id,
+427:                 "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
+428:                 "metadata": result.chunk.metadata,
+429:             }
+430:             chunks_with_scores.append((chunk_dict, result.combined_score or result.similarity))
+431: 
+432:         context_text = "\n\n---\n\n".join(context_parts[:limit])
+433: 
+434:         return RecallResult(
+435:             query=query,
+436:             namespace_id=namespace_id,
+437:             chunks=chunks_with_scores,
+438:             entities=[],  # Khora engine focuses on chunks, not entities
+439:             context_text=context_text,
+440:             metadata={
+441:                 "backend": self._backend_type,
+442:                 "hybrid_alpha": hybrid_alpha,
+443:                 "temporal_filter": str(temporal_filter) if temporal_filter else None,
+444:             },
+445:         )
+446: 
+447:     def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> TemporalFilter:
+448:         """Convert a filters dict to a TemporalFilter.
+449: 
+450:         Example:
+451:             filters = {
+452:                 "occurred_at": {"gte": "2024-01-01", "lt": "2024-02-01"},
+453:                 "author": {"eq": "alice"},
+454:                 "source_system": {"eq": "slack"},
+455:             }
+456:         """
+457: 
+458:         tf = TemporalFilter()
+459: 
+460:         for key, value in filters.items():
+461:             if not isinstance(value, dict):
+462:                 value = {"eq": value}
+463: 
+464:             if key == "occurred_at":
+465:                 if "gte" in value:
+466:                     tf.occurred_after = self._parse_datetime(value["gte"])
+467:                 if "gt" in value:
+468:                     tf.occurred_after = self._parse_datetime(value["gt"])
+469:                 if "lt" in value:
+470:                     tf.occurred_before = self._parse_datetime(value["lt"])
+471:                 if "lte" in value:
+472:                     tf.occurred_before = self._parse_datetime(value["lte"])
+473:             elif key == "created_at":
+474:                 if "gte" in value:
+475:                     tf.created_after = self._parse_datetime(value["gte"])
+476:                 if "gt" in value:
+477:                     tf.created_after = self._parse_datetime(value["gt"])
+478:                 if "lt" in value:
+479:                     tf.created_before = self._parse_datetime(value["lt"])
+480:                 if "lte" in value:
+481:                     tf.created_before = self._parse_datetime(value["lte"])
+482:             elif key == "source_system":
+483:                 tf.source_system = value.get(
+484:                     "eq", value.get("in", [None])[0] if isinstance(value.get("in"), list) else None
+485:                 )
+486:             elif key == "author":
+487:                 tf.author = value.get("eq")
+488:             elif key == "channel":
+489:                 tf.channel = value.get("eq")
+490:             elif key == "tags":
+491:                 if "contains" in value:
+492:                     tf.tags = value["contains"]
+493:                 elif "eq" in value:
+494:                     tf.tags = [value["eq"]] if isinstance(value["eq"], str) else value["eq"]
+495:             else:
+496:                 tf.additional[key] = value
+497: 
+498:         return tf
+499: 
+500:     def _parse_datetime(self, value: Any) -> datetime:
+501:         """Parse a datetime value from various formats."""
+502:         if isinstance(value, datetime):
+503:             if value.tzinfo is None:
+504:                 return value.replace(tzinfo=UTC)
+505:             return value
+506:         if isinstance(value, str):
+507:             # Date only (try this first to avoid fromisoformat without tz)
+508:             try:
+509:                 return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+510:             except ValueError:
+511:                 pass
+512:             # ISO format with timezone
+513:             try:
+514:                 dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+515:                 if dt.tzinfo is None:
+516:                     dt = dt.replace(tzinfo=UTC)
+517:                 return dt
+518:             except ValueError:
+519:                 pass
+520:         raise ValueError(f"Cannot parse datetime: {value}")
+521: 
+522:     def _adjust_relative_time(
+523:         self,
+524:         temporal_filter: TemporalFilter,
+525:         reference: datetime,
+526:     ) -> TemporalFilter:
+527:         """Adjust temporal filter for relative time references.
+528: 
+529:         This enables queries like "yesterday" to be relative to the message timestamp,
+530:         not the current time.
+531:         """
+532:         # If filter already has absolute times, don't adjust
+533:         # This is a placeholder for more sophisticated relative time handling
+534:         return temporal_filter
+535: 
+536:     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
+537:         """Remove a memory from the engine."""
+538:         storage = self._get_storage()
+539:         temporal_store = self._get_temporal_store()
+540: 
+541:         # Verify namespace if provided
+542:         if namespace_id:
+543:             document = await storage.get_document(document_id)
+544:             if document and document.namespace_id != namespace_id:
+545:                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
+546:                 return False
+547: 
+548:         # Delete from temporal store
+549:         ns_id = namespace_id or (await storage.get_document(document_id)).namespace_id
+550:         await temporal_store.delete_chunks_by_document(document_id, ns_id)
+551: 
+552:         # Delete from relational storage
+553:         return await storage.delete_document(document_id)
+554: 
+555:     async def remember_batch(
+556:         self,
+557:         documents: list[dict[str, Any]],
+558:         namespace_id: UUID,
+559:         *,
+560:         skill_name: str = "general_entities",
+561:         max_concurrent: int = 10,
+562:         deduplicate: bool = True,
+563:         infer_relationships: bool = False,  # Not used in Khora engine
+564:         on_progress: Callable[[int, int], None] | None = None,
+565:     ) -> BatchResult:
+566:         """Store multiple documents with automatic optimization.
+567: 
+568:         The Khora engine uses a simplified pipeline:
+569:         - Fast chunking without full entity extraction
+570:         - Batch embedding for cost efficiency
+571:         - Parallel processing with semaphore control
+572: 
+573:         Args:
+574:             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
+575:             namespace_id: Namespace to store documents in
+576:             skill_name: Extraction skill to use
+577:             max_concurrent: Maximum concurrent document processing (default 10)
+578:             deduplicate: Whether to skip duplicate documents
+579:             infer_relationships: Not used in Khora engine
+580:             on_progress: Callback for progress updates (completed, total)
+581: 
+582:         Returns:
+583:             BatchResult with processing statistics
+584:         """
+585:         if not documents:
+586:             return BatchResult(
+587:                 total=0,
+588:                 processed=0,
+589:                 skipped=0,
+590:                 failed=0,
+591:                 chunks=0,
+592:                 entities=0,
+593:                 relationships=0,
+594:             )
+595: 
+596:         storage = self._get_storage()
+597:         total = len(documents)
+598: 
+599:         # Track results with thread-safe counters
+600:         results: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "chunks": 0}
+601:         results_lock = asyncio.Lock()
+602:         progress_count = 0
+603:         progress_lock = asyncio.Lock()
+604: 
+605:         # For deduplication within the batch, track checksums we've started processing
+606:         checksums_in_flight: set[str] = set()
+607:         checksums_lock = asyncio.Lock()
+608: 
+609:         semaphore = asyncio.Semaphore(max_concurrent)
+610: 
+611:         async def process_document(doc_data: dict[str, Any]) -> None:
+612:             """Process a single document with semaphore control."""
+613:             nonlocal progress_count
+614: 
+615:             content = doc_data.get("content", "")
+616:             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+617: 
+618:             # Check for duplicate within the batch (before acquiring semaphore)
+619:             async with checksums_lock:
+620:                 if checksum in checksums_in_flight:
+621:                     async with results_lock:
+622:                         results["skipped"] += 1
+623:                     return
+624:                 checksums_in_flight.add(checksum)
+625: 
+626:             # Check for duplicate in storage (using efficient per-document lookup)
+627:             if deduplicate:
+628:                 existing = await storage.get_document_by_checksum(namespace_id, checksum)
+629:                 if existing:
+630:                     async with results_lock:
+631:                         results["skipped"] += 1
+632:                     # Update progress
+633:                     if on_progress:
+634:                         async with progress_lock:
+635:                             progress_count += 1
+636:                             on_progress(progress_count, total)
+637:                     return
+638: 
+639:             async with semaphore:
+640:                 try:
+641:                     # Extract occurred_at from metadata if present
+642:                     doc_metadata = doc_data.get("metadata", {})
+643:                     occurred_at = None
+644:                     if "occurred_at" in doc_metadata:
+645:                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+646: 
+647:                     result = await self.remember(
+648:                         content,
+649:                         namespace_id,
+650:                         title=doc_data.get("title", ""),
+651:                         source=doc_data.get("source", ""),
+652:                         metadata=doc_metadata,
+653:                         skill_name=skill_name,
+654:                         occurred_at=occurred_at,
+655:                     )
+656: 
+657:                     async with results_lock:
+658:                         if result.metadata.get("duplicate"):
+659:                             results["skipped"] += 1
+660:                         else:
+661:                             results["processed"] += 1
+662:                             results["chunks"] += result.chunks_created
+663: 
+664:                 except Exception as e:
+665:                     logger.error(f"Failed to process document: {e}")
+666:                     async with results_lock:
+667:                         results["failed"] += 1
+668: 
+669:             # Update progress
+670:             if on_progress:
+671:                 async with progress_lock:
+672:                     progress_count += 1
+673:                     on_progress(progress_count, total)
+674: 
+675:         # Process all documents concurrently with semaphore control
+676:         await asyncio.gather(*[process_document(doc) for doc in documents])
+677: 
+678:         return BatchResult(
+679:             total=total,
+680:             processed=results["processed"],
+681:             skipped=results["skipped"],
+682:             failed=results["failed"],
+683:             chunks=results["chunks"],
+684:             entities=0,
+685:             relationships=0,
+686:         )
+687: 
+688:     # =========================================================================
+689:     # Namespace Management
+690:     # =========================================================================
+691: 
+692:     async def get_or_create_default_namespace(self) -> UUID:
+693:         """Get or create a default namespace for simple usage."""
+694:         if self._default_namespace_id:
+695:             return self._default_namespace_id
+696: 
+697:         storage = self._get_storage()
+698: 
+699:         # Try to find existing default namespace
+700:         default_org = await storage.get_organization_by_slug("default")
+701:         if not default_org:
+702:             default_org = await storage.create_organization(Organization(name="Default", slug="default"))
+703: 
+704:         workspaces = await storage.list_workspaces(default_org.id)
+705:         if workspaces:
+706:             default_workspace = workspaces[0]
+707:         else:
+708:             default_workspace = await storage.create_workspace(
+709:                 Workspace(
+710:                     organization_id=default_org.id,
+711:                     name="Default",
+712:                     slug="default",
+713:                 )
+714:             )
+715: 
+716:         namespaces = await storage.list_namespaces(default_workspace.id)
+717:         if namespaces:
+718:             default_namespace = namespaces[0]
+719:         else:
+720:             default_namespace = await storage.create_namespace(
+721:                 MemoryNamespace(
+722:                     workspace_id=default_workspace.id,
+723:                     name="Default",
+724:                     slug="default",
+725:                 )
+726:             )
+727: 
+728:         self._default_namespace_id = default_namespace.id
+729:         return self._default_namespace_id
+730: 
+731:     async def create_namespace(
+732:         self,
+733:         name: str,
+734:         workspace_id: UUID,
+735:         *,
+736:         description: str = "",
+737:         config_overrides: dict[str, Any] | None = None,
+738:     ) -> MemoryNamespace:
+739:         """Create a new memory namespace."""
+740:         namespace = MemoryNamespace(
+741:             workspace_id=workspace_id,
+742:             name=name,
+743:             description=description,
+744:             config_overrides=config_overrides or {},
+745:         )
+746:         return await self._get_storage().create_namespace(namespace)
+747: 
+748:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+749:         """Get a namespace by ID."""
+750:         return await self._get_storage().get_namespace(namespace_id)
+751: 
+752:     async def ensure_namespace(
+753:         self,
+754:         name: str,
+755:         *,
+756:         description: str = "",
+757:     ) -> UUID:
+758:         """Get or create a namespace by name."""
+759:         storage = self._get_storage()
+760: 
+761:         # Ensure default org/workspace exists
+762:         await self.get_or_create_default_namespace()
+763: 
+764:         # Get default workspace
+765:         default_org = await storage.get_organization_by_slug("default")
+766:         if not default_org:
+767:             raise RuntimeError("Default organization not found")
+768: 
+769:         workspaces = await storage.list_workspaces(default_org.id)
+770:         if not workspaces:
+771:             raise RuntimeError("Default workspace not found")
+772: 
+773:         default_workspace = workspaces[0]
+774: 
+775:         # Try to find namespace by slug
+776:         slug = name.lower().replace(" ", "-")
+777:         existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
+778:         if existing_ns:
+779:             return existing_ns.id
+780: 
+781:         # Create new namespace
+782:         new_ns = await storage.create_namespace(
+783:             MemoryNamespace(
+784:                 workspace_id=default_workspace.id,
+785:                 name=name,
+786:                 slug=slug,
+787:                 description=description,
+788:             )
+789:         )
+790:         return new_ns.id
+791: 
+792:     # =========================================================================
+793:     # Entity Operations (minimal for Khora engine)
+794:     # =========================================================================
+795: 
+796:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+797:         """Get an entity by ID."""
+798:         return await self._get_storage().get_entity(entity_id)
+799: 
+800:     async def list_entities(
+801:         self,
+802:         namespace_id: UUID,
+803:         *,
+804:         entity_type: str | None = None,
+805:         limit: int = 100,
+806:     ) -> list[Entity]:
+807:         """List entities in a namespace."""
+808:         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+809: 
+810:     async def find_related_entities(
+811:         self,
+812:         entity_id: UUID,
+813:         namespace_id: UUID,
+814:         *,
+815:         max_depth: int = 2,
+816:         limit: int = 20,
+817:     ) -> list[tuple[Entity, float]]:
+818:         """Find entities related to a given entity.
+819: 
+820:         Note: Khora engine focuses on temporal chunk retrieval.
+821:         For full entity graph traversal, use the GraphRAG engine.
+822:         """
+823:         # Return empty for now - Khora focuses on chunks
+824:         return []
+825: 
+826:     # =========================================================================
+827:     # Document Operations
+828:     # =========================================================================
+829: 
+830:     async def get_document(self, document_id: UUID) -> Document | None:
+831:         """Get a document by ID."""
+832:         return await self._get_storage().get_document(document_id)
+833: 
+834:     async def list_documents(
+835:         self,
+836:         namespace_id: UUID,
+837:         *,
+838:         limit: int = 100,
+839:     ) -> list[Document]:
+840:         """List documents in a namespace."""
+841:         return await self._get_storage().list_documents(namespace_id, limit=limit)
+842: 
+843:     async def search_entities(
+844:         self,
+845:         query: str,
+846:         namespace_id: UUID,
+847:         *,
+848:         limit: int = 10,
+849:     ) -> list[Entity]:
+850:         """Search entities by query text.
+851: 
+852:         Note: Khora engine focuses on temporal chunk retrieval.
+853:         For full entity search, use the GraphRAG engine.
+854:         """
+855:         # Return empty for now - Khora focuses on chunks
+856:         return []
+857: 
+858:     async def stats(self, namespace_id: UUID) -> Stats:
+859:         """Get document/chunk/entity/relationship counts for a namespace."""
+860:         storage = self._get_storage()
+861: 
+862:         # Get counts
+863:         try:
+864:             doc_count = await storage.count_documents(namespace_id)
+865:         except (AttributeError, NotImplementedError):
+866:             documents = await storage.list_documents(namespace_id, limit=0)
+867:             doc_count = len(documents) if documents else 0
+868: 
+869:         try:
+870:             chunk_count = await storage.count_chunks(namespace_id)
+871:         except (AttributeError, NotImplementedError):
+872:             chunk_count = 0  # Khora chunks are in temporal_store
+873: 
+874:         try:
+875:             entity_count = await storage.count_entities(namespace_id)
+876:         except (AttributeError, NotImplementedError):
+877:             entity_count = 0
+878: 
+879:         try:
+880:             relationship_count = await storage.count_relationships(namespace_id)
+881:         except (AttributeError, NotImplementedError):
+882:             relationship_count = 0
+883: 
+884:         return Stats(
+885:             documents=doc_count,
+886:             chunks=chunk_count,
+887:             entities=entity_count,
+888:             relationships=relationship_count,
+889:         )
+890: 
+891:     async def health_check(self) -> dict[str, Any]:
+892:         """Check health of all components."""
+893:         if not self._connected:
+894:             return {"status": "disconnected"}
+895: 
+896:         storage_health = await self._get_storage().health_check()
+897:         temporal_health = await self._get_temporal_store().health_check()
+898: 
+899:         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy"
+900: 
+901:         return {
+902:             "status": "healthy" if all_healthy else "degraded",
+903:             "storage": storage_health.summary,
+904:             "temporal_store": temporal_health,
+905:             "backend": self._backend_type,
+906:         }
+907: 
+908: 
+909: __all__ = ["KhoraEngine"]
+````
+
 ## File: src/khora/engines/__init__.py
 ````python
  1: """Engine registry and factory for pluggable memory engines.
@@ -24119,6 +23396,706 @@ README.md
 425:         # This would create relationships like SAME_AS or REFERENCES
 426:         # For now, return empty list - implementation depends on requirements
 427:         return []
+````
+
+## File: src/khora/extraction/expansion/rule_engine.py
+````python
+  1: """Configurable rule evaluation engine.
+  2: 
+  3: Provides a generic rule evaluation system for both correlation rules
+  4: and inference rules defined in expertise configurations.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: import re
+ 10: from dataclasses import dataclass, field
+ 11: from typing import TYPE_CHECKING, Any
+ 12: 
+ 13: from loguru import logger
+ 14: 
+ 15: if TYPE_CHECKING:
+ 16:     from khora.core.models import Entity, Relationship
+ 17:     from khora.extraction.skills import CorrelationRule, ExpertiseConfig, InferenceRule
+ 18: 
+ 19: 
+ 20: @dataclass
+ 21: class RuleMatch:
+ 22:     """Result of a rule match."""
+ 23: 
+ 24:     rule_name: str
+ 25:     matched_value: str | None = None
+ 26:     matched_entities: list[Entity] = field(default_factory=list)
+ 27:     matched_relationships: list[Relationship] = field(default_factory=list)
+ 28:     confidence: float = 1.0
+ 29:     metadata: dict[str, Any] = field(default_factory=dict)
+ 30: 
+ 31: 
+ 32: @dataclass
+ 33: class RuleEvaluationContext:
+ 34:     """Context for rule evaluation containing available data."""
+ 35: 
+ 36:     entities: list[Entity] = field(default_factory=list)
+ 37:     relationships: list[Relationship] = field(default_factory=list)
+ 38:     entity_index: dict[str, list[Entity]] = field(default_factory=dict)  # name -> entities
+ 39:     type_index: dict[str, list[Entity]] = field(default_factory=dict)  # type -> entities
+ 40:     relationship_index: dict[str, list[Relationship]] = field(default_factory=dict)  # type -> relationships
+ 41:     # New: Index relationships by entity for fast chain lookups
+ 42:     rels_by_source: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> outgoing rels
+ 43:     rels_by_target: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> incoming rels
+ 44:     entity_by_id: dict[str, Entity] = field(default_factory=dict)  # entity_id -> entity
+ 45: 
+ 46:     @classmethod
+ 47:     def from_data(
+ 48:         cls,
+ 49:         entities: list[Entity],
+ 50:         relationships: list[Relationship],
+ 51:     ) -> RuleEvaluationContext:
+ 52:         """Create context with built indices."""
+ 53:         ctx = cls(entities=entities, relationships=relationships)
+ 54: 
+ 55:         # Build entity indices
+ 56:         for entity in entities:
+ 57:             # Index by name (lowercase for matching)
+ 58:             name_key = entity.name.lower()
+ 59:             if name_key not in ctx.entity_index:
+ 60:                 ctx.entity_index[name_key] = []
+ 61:             ctx.entity_index[name_key].append(entity)
+ 62: 
+ 63:             # Index by type
+ 64:             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+ 65:             if type_key not in ctx.type_index:
+ 66:                 ctx.type_index[type_key] = []
+ 67:             ctx.type_index[type_key].append(entity)
+ 68: 
+ 69:             # Index by ID for fast lookup
+ 70:             ctx.entity_by_id[str(entity.id)] = entity
+ 71: 
+ 72:         # Build relationship indices
+ 73:         for rel in relationships:
+ 74:             rel_type = str(
+ 75:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+ 76:             )
+ 77:             if rel_type not in ctx.relationship_index:
+ 78:                 ctx.relationship_index[rel_type] = []
+ 79:             ctx.relationship_index[rel_type].append(rel)
+ 80: 
+ 81:             # Index by source entity for fast chain lookups
+ 82:             source_key = str(rel.source_entity_id)
+ 83:             if source_key not in ctx.rels_by_source:
+ 84:                 ctx.rels_by_source[source_key] = []
+ 85:             ctx.rels_by_source[source_key].append(rel)
+ 86: 
+ 87:             # Index by target entity
+ 88:             target_key = str(rel.target_entity_id)
+ 89:             if target_key not in ctx.rels_by_target:
+ 90:                 ctx.rels_by_target[target_key] = []
+ 91:             ctx.rels_by_target[target_key].append(rel)
+ 92: 
+ 93:         return ctx
+ 94: 
+ 95:     def update(
+ 96:         self,
+ 97:         new_entities: list[Entity],
+ 98:         new_relationships: list[Relationship],
+ 99:     ) -> None:
+100:         """Incrementally add new entities and relationships to the context.
+101: 
+102:         Avoids a full rebuild when only a few items have been added.
+103:         """
+104:         for entity in new_entities:
+105:             if entity not in self.entities:
+106:                 self.entities.append(entity)
+107: 
+108:                 name_key = entity.name.lower()
+109:                 if name_key not in self.entity_index:
+110:                     self.entity_index[name_key] = []
+111:                 self.entity_index[name_key].append(entity)
+112: 
+113:                 type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+114:                 if type_key not in self.type_index:
+115:                     self.type_index[type_key] = []
+116:                 self.type_index[type_key].append(entity)
+117: 
+118:                 self.entity_by_id[str(entity.id)] = entity
+119: 
+120:         for rel in new_relationships:
+121:             if rel not in self.relationships:
+122:                 self.relationships.append(rel)
+123: 
+124:                 rel_type = str(
+125:                     rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+126:                 )
+127:                 if rel_type not in self.relationship_index:
+128:                     self.relationship_index[rel_type] = []
+129:                 self.relationship_index[rel_type].append(rel)
+130: 
+131:                 source_key = str(rel.source_entity_id)
+132:                 if source_key not in self.rels_by_source:
+133:                     self.rels_by_source[source_key] = []
+134:                 self.rels_by_source[source_key].append(rel)
+135: 
+136:                 target_key = str(rel.target_entity_id)
+137:                 if target_key not in self.rels_by_target:
+138:                     self.rels_by_target[target_key] = []
+139:                 self.rels_by_target[target_key].append(rel)
+140: 
+141: 
+142: # Type hierarchy for flexible matching
+143: # Child types can match parent types in inference rules
+144: # e.g., EMPLOYEE matches rules expecting PERSON
+145: TYPE_HIERARCHY: dict[str, list[str]] = {
+146:     "EMPLOYEE": ["PERSON"],
+147:     "EXTERNAL_PERSON": ["PERSON"],
+148:     "COMPANY": ["ORGANIZATION"],
+149:     "DEPARTMENT": ["ORGANIZATION"],
+150:     "TEAM": ["ORGANIZATION"],
+151:     "MESSAGE": ["CONTENT"],
+152:     "PAGE": ["CONTENT", "DOCUMENT"],
+153:     "ISSUE": ["WORK_ITEM", "CONTENT"],
+154:     "SALES_NOTE": ["CONTENT", "NOTE"],
+155:     "CALL": ["EVENT", "MEETING"],
+156:     "DEAL": ["OPPORTUNITY"],
+157:     "PROJECT": ["WORK_ITEM"],
+158:     "CYCLE": ["WORK_ITEM", "SPRINT"],
+159: }
+160: 
+161: 
+162: def types_match(actual_type: str, expected_type: str) -> bool:
+163:     """Check if actual type matches expected, considering type hierarchy.
+164: 
+165:     Args:
+166:         actual_type: The actual entity type from the graph
+167:         expected_type: The expected type from the inference rule
+168: 
+169:     Returns:
+170:         True if types match directly or via hierarchy
+171:     """
+172:     # Direct match
+173:     if actual_type == expected_type:
+174:         return True
+175: 
+176:     # Check if actual is a subtype of expected (e.g., EMPLOYEE matches PERSON)
+177:     parents = TYPE_HIERARCHY.get(actual_type, [])
+178:     if expected_type in parents:
+179:         return True
+180: 
+181:     # Check reverse: if expected is a subtype of actual (e.g., PERSON matches EMPLOYEE)
+182:     # This allows rules written for specific types to match more generic extractions
+183:     parents_of_expected = TYPE_HIERARCHY.get(expected_type, [])
+184:     if actual_type in parents_of_expected:
+185:         return True
+186: 
+187:     return False
+188: 
+189: 
+190: class RuleEngine:
+191:     """Engine for evaluating correlation and inference rules.
+192: 
+193:     Supports:
+194:     - Pattern-based matching (regex)
+195:     - Field-based matching
+196:     - Multi-condition inference rules
+197:     - Confidence scoring
+198:     - Type hierarchy matching (EMPLOYEE matches rules expecting PERSON)
+199:     """
+200: 
+201:     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
+202:         """Initialize the rule engine.
+203: 
+204:         Args:
+205:             expertise: ExpertiseConfig with rules to evaluate
+206:         """
+207:         self._expertise = expertise
+208:         self._compiled_patterns: dict[str, re.Pattern] = {}
+209: 
+210:     def evaluate_correlation_rules(
+211:         self,
+212:         text: str,
+213:         context: RuleEvaluationContext,
+214:     ) -> list[RuleMatch]:
+215:         """Evaluate correlation rules against text and context.
+216: 
+217:         Args:
+218:             text: Text to search for patterns
+219:             context: Evaluation context with entities and relationships
+220: 
+221:         Returns:
+222:             List of rule matches
+223:         """
+224:         if not self._expertise:
+225:             return []
+226: 
+227:         matches = []
+228:         for rule in self._expertise.correlation_rules:
+229:             rule_matches = self._evaluate_correlation_rule(rule, text, context)
+230:             matches.extend(rule_matches)
+231: 
+232:         return matches
+233: 
+234:     def evaluate_inference_rules(
+235:         self,
+236:         context: RuleEvaluationContext,
+237:     ) -> list[RuleMatch]:
+238:         """Evaluate inference rules against the context.
+239: 
+240:         Inference rules create new relationships based on existing patterns.
+241: 
+242:         Args:
+243:             context: Evaluation context with entities and relationships
+244: 
+245:         Returns:
+246:             List of rule matches that would create new relationships
+247:         """
+248:         if not self._expertise:
+249:             return []
+250: 
+251:         matches = []
+252:         for rule in self._expertise.inference_rules:
+253:             rule_matches = self._evaluate_inference_rule(rule, context)
+254:             matches.extend(rule_matches)
+255: 
+256:         return matches
+257: 
+258:     def find_pattern_matches(
+259:         self,
+260:         pattern: str,
+261:         text: str,
+262:     ) -> list[tuple[str, int, int]]:
+263:         """Find all pattern matches in text.
+264: 
+265:         Args:
+266:             pattern: Regex pattern to match
+267:             text: Text to search
+268: 
+269:         Returns:
+270:             List of (matched_value, start, end) tuples
+271:         """
+272:         compiled = self._get_compiled_pattern(pattern)
+273:         if not compiled:
+274:             return []
+275: 
+276:         matches = []
+277:         for match in compiled.finditer(text):
+278:             matches.append((match.group(), match.start(), match.end()))
+279: 
+280:         return matches
+281: 
+282:     def match_entities_by_field(
+283:         self,
+284:         entities: list[Entity],
+285:         field_name: str,
+286:         field_value: Any,
+287:     ) -> list[Entity]:
+288:         """Find entities matching a field value.
+289: 
+290:         Args:
+291:             entities: Entities to search
+292:             field_name: Attribute field name
+293:             field_value: Value to match
+294: 
+295:         Returns:
+296:             Matching entities
+297:         """
+298:         matches = []
+299:         for entity in entities:
+300:             entity_value = entity.attributes.get(field_name)
+301:             if entity_value is None:
+302:                 continue
+303: 
+304:             # Normalize for comparison
+305:             if isinstance(entity_value, str) and isinstance(field_value, str):
+306:                 if entity_value.lower() == field_value.lower():
+307:                     matches.append(entity)
+308:             elif entity_value == field_value:
+309:                 matches.append(entity)
+310: 
+311:         return matches
+312: 
+313:     def _evaluate_correlation_rule(
+314:         self,
+315:         rule: CorrelationRule,
+316:         text: str,
+317:         context: RuleEvaluationContext,
+318:     ) -> list[RuleMatch]:
+319:         """Evaluate a single correlation rule."""
+320:         matches = []
+321: 
+322:         # Pattern-based matching
+323:         if rule.pattern:
+324:             pattern_matches = self.find_pattern_matches(rule.pattern, text)
+325:             for matched_value, start, end in pattern_matches:
+326:                 # Find entities that might match this value
+327:                 matched_entities = self._find_entities_for_pattern_match(matched_value, rule.entity_types, context)
+328: 
+329:                 matches.append(
+330:                     RuleMatch(
+331:                         rule_name=rule.name,
+332:                         matched_value=matched_value,
+333:                         matched_entities=matched_entities,
+334:                         confidence=rule.confidence,
+335:                         metadata={
+336:                             "start": start,
+337:                             "end": end,
+338:                             "creates_relationship": rule.creates_relationship,
+339:                         },
+340:                     )
+341:                 )
+342: 
+343:         # Field-based matching
+344:         if rule.match_fields:
+345:             # This requires comparing entities against each other
+346:             field_matches = self._find_field_matches(rule, context)
+347:             matches.extend(field_matches)
+348: 
+349:         return matches
+350: 
+351:     def _evaluate_inference_rule(
+352:         self,
+353:         rule: InferenceRule,
+354:         context: RuleEvaluationContext,
+355:         *,
+356:         max_matches: int = 1000,
+357:     ) -> list[RuleMatch]:
+358:         """Evaluate a single inference rule.
+359: 
+360:         Uses indexed lookups for O(1) entity access and O(k) chain lookups
+361:         where k is the number of relationships per entity (typically small).
+362:         """
+363:         if not rule.when or len(rule.when) < 1:
+364:             return []
+365: 
+366:         matches = []
+367: 
+368:         # Get relationships matching the first condition
+369:         first_condition = rule.when[0]
+370:         first_rels = context.relationship_index.get(first_condition.relationship, [])
+371: 
+372:         # Diagnostic: Log how many relationships match before filtering
+373:         before_filter_count = len(first_rels)
+374: 
+375:         # Filter by source/target type if specified
+376:         first_rels = self._filter_relationships_by_types(
+377:             first_rels, first_condition.source_type, first_condition.target_type, context
+378:         )
+379: 
+380:         # Diagnostic: Log filtering results for debugging
+381:         if before_filter_count > 0 and len(first_rels) == 0:
+382:             logger.debug(
+383:                 f"Rule '{rule.name}': {before_filter_count} {first_condition.relationship} rels "
+384:                 f"all filtered out by type filter (need {first_condition.source_type}->{first_condition.target_type})"
+385:             )
+386: 
+387:         if len(rule.when) == 1:
+388:             # Single condition rule
+389:             for rel in first_rels:
+390:                 if len(matches) >= max_matches:
+391:                     break
+392:                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
+393:                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
+394: 
+395:                 if source_entity and target_entity:
+396:                     # Resolve which entities would be used for the inferred relationship
+397:                     entity_map = {"first": {"source": source_entity, "target": target_entity}}
+398:                     inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
+399:                     inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
+400: 
+401:                     # Skip self-referential matches early (don't count against rule limit)
+402:                     if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
+403:                         continue
+404: 
+405:                     matches.append(
+406:                         RuleMatch(
+407:                             rule_name=rule.name,
+408:                             matched_relationships=[rel],
+409:                             matched_entities=[source_entity, target_entity],
+410:                             confidence=rule.confidence,
+411:                             metadata={
+412:                                 "then_relationship": rule.then_relationship,
+413:                                 "then_source": rule.then_source,
+414:                                 "then_target": rule.then_target,
+415:                                 "first": {"source": source_entity, "target": target_entity},
+416:                             },
+417:                         )
+418:                     )
+419:         else:
+420:             # Multi-condition rule - use indexed lookups for O(k) instead of O(n)
+421:             second_condition = rule.when[1]
+422:             second_rel_type = second_condition.relationship
+423: 
+424:             for rel1 in first_rels:
+425:                 if len(matches) >= max_matches:
+426:                     break
+427: 
+428:                 # Get candidate second relationships connected to rel1's entities
+429:                 # Instead of iterating ALL second_rels, only check those connected to rel1
+430:                 candidate_rels: list[Relationship] = []
+431: 
+432:                 # Chain pattern: rel1.target -> rel2.source
+433:                 target_key = str(rel1.target_entity_id)
+434:                 for rel2 in context.rels_by_source.get(target_key, []):
+435:                     rel2_type = str(
+436:                         rel2.relationship_type.value
+437:                         if hasattr(rel2.relationship_type, "value")
+438:                         else rel2.relationship_type
+439:                     )
+440:                     if rel2_type == second_rel_type:
+441:                         candidate_rels.append(rel2)
+442: 
+443:                 # Shared source pattern: rel1.source == rel2.source
+444:                 source_key = str(rel1.source_entity_id)
+445:                 for rel2 in context.rels_by_source.get(source_key, []):
+446:                     rel2_type = str(
+447:                         rel2.relationship_type.value
+448:                         if hasattr(rel2.relationship_type, "value")
+449:                         else rel2.relationship_type
+450:                     )
+451:                     if rel2_type == second_rel_type and rel2 not in candidate_rels:
+452:                         candidate_rels.append(rel2)
+453: 
+454:                 # Shared target pattern: rel1.target == rel2.target
+455:                 for rel2 in context.rels_by_target.get(target_key, []):
+456:                     rel2_type = str(
+457:                         rel2.relationship_type.value
+458:                         if hasattr(rel2.relationship_type, "value")
+459:                         else rel2.relationship_type
+460:                     )
+461:                     if rel2_type == second_rel_type and rel2 not in candidate_rels:
+462:                         candidate_rels.append(rel2)
+463: 
+464:                 # Filter candidates by type
+465:                 candidate_rels = self._filter_relationships_by_types(
+466:                     candidate_rels, second_condition.source_type, second_condition.target_type, context
+467:                 )
+468: 
+469:                 # Create matches from candidates
+470:                 for rel2 in candidate_rels:
+471:                     if len(matches) >= max_matches:
+472:                         break
+473:                     source1 = self._find_entity_by_id(rel1.source_entity_id, context)
+474:                     target1 = self._find_entity_by_id(rel1.target_entity_id, context)
+475:                     source2 = self._find_entity_by_id(rel2.source_entity_id, context)
+476:                     target2 = self._find_entity_by_id(rel2.target_entity_id, context)
+477: 
+478:                     if all([source1, target1, source2, target2]):
+479:                         # Resolve which entities would be used for the inferred relationship
+480:                         entity_map = {
+481:                             "first": {"source": source1, "target": target1},
+482:                             "second": {"source": source2, "target": target2},
+483:                         }
+484:                         inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
+485:                         inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
+486: 
+487:                         # Skip self-referential matches early (don't count against rule limit)
+488:                         if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
+489:                             continue
+490: 
+491:                         matches.append(
+492:                             RuleMatch(
+493:                                 rule_name=rule.name,
+494:                                 matched_relationships=[rel1, rel2],
+495:                                 matched_entities=[source1, target1, source2, target2],
+496:                                 confidence=rule.confidence,
+497:                                 metadata={
+498:                                     "then_relationship": rule.then_relationship,
+499:                                     "then_source": rule.then_source,
+500:                                     "then_target": rule.then_target,
+501:                                     "first": {"source": source1, "target": target1},
+502:                                     "second": {"source": source2, "target": target2},
+503:                                 },
+504:                             )
+505:                         )
+506: 
+507:         return matches
+508: 
+509:     def _find_entities_for_pattern_match(
+510:         self,
+511:         matched_value: str,
+512:         entity_types: list[str],
+513:         context: RuleEvaluationContext,
+514:     ) -> list[Entity]:
+515:         """Find entities that might match a pattern value.
+516: 
+517:         Uses type hierarchy matching so EMPLOYEE matches expected type PERSON.
+518:         """
+519:         candidates = []
+520: 
+521:         # Check entity names
+522:         name_key = matched_value.lower()
+523:         if name_key in context.entity_index:
+524:             candidates.extend(context.entity_index[name_key])
+525: 
+526:         # Check entity attributes for the matched value
+527:         for entity in context.entities:
+528:             for attr_value in entity.attributes.values():
+529:                 if isinstance(attr_value, str) and matched_value in attr_value:
+530:                     if entity not in candidates:
+531:                         candidates.append(entity)
+532:                     break
+533: 
+534:         # Filter by entity types if specified, using hierarchy matching
+535:         if entity_types:
+536:             filtered = []
+537:             for e in candidates:
+538:                 actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
+539:                 # Check if actual type matches any of the expected types via hierarchy
+540:                 if any(types_match(actual_type, expected_type) for expected_type in entity_types):
+541:                     filtered.append(e)
+542:             candidates = filtered
+543: 
+544:         return candidates
+545: 
+546:     def _find_field_matches(
+547:         self,
+548:         rule: CorrelationRule,
+549:         context: RuleEvaluationContext,
+550:     ) -> list[RuleMatch]:
+551:         """Find entities that match on specified fields."""
+552:         matches = []
+553: 
+554:         # Filter entities by type
+555:         candidates = []
+556:         if rule.entity_types:
+557:             for entity_type in rule.entity_types:
+558:                 candidates.extend(context.type_index.get(entity_type, []))
+559:         else:
+560:             candidates = context.entities
+561: 
+562:         # Group entities by field values
+563:         for field_name in rule.match_fields:
+564:             field_groups: dict[Any, list[Entity]] = {}
+565:             for entity in candidates:
+566:                 field_value = entity.attributes.get(field_name)
+567:                 if field_value:
+568:                     # Normalize string values
+569:                     if isinstance(field_value, str):
+570:                         field_value = field_value.lower()
+571:                     if field_value not in field_groups:
+572:                         field_groups[field_value] = []
+573:                     field_groups[field_value].append(entity)
+574: 
+575:             # Create matches for groups with multiple entities
+576:             for field_value, entities in field_groups.items():
+577:                 if len(entities) > 1:
+578:                     matches.append(
+579:                         RuleMatch(
+580:                             rule_name=rule.name,
+581:                             matched_value=str(field_value),
+582:                             matched_entities=entities,
+583:                             confidence=rule.confidence,
+584:                             metadata={
+585:                                 "match_field": field_name,
+586:                                 "creates_relationship": rule.creates_relationship,
+587:                             },
+588:                         )
+589:                     )
+590: 
+591:         return matches
+592: 
+593:     def _filter_relationships_by_types(
+594:         self,
+595:         relationships: list[Relationship],
+596:         source_type: str | None,
+597:         target_type: str | None,
+598:         context: RuleEvaluationContext,
+599:     ) -> list[Relationship]:
+600:         """Filter relationships by source and target entity types.
+601: 
+602:         Uses type hierarchy matching so EMPLOYEE matches rules expecting PERSON,
+603:         and vice versa.
+604:         """
+605:         if not source_type and not target_type:
+606:             return relationships
+607: 
+608:         filtered = []
+609:         for rel in relationships:
+610:             source_entity = self._find_entity_by_id(rel.source_entity_id, context)
+611:             target_entity = self._find_entity_by_id(rel.target_entity_id, context)
+612: 
+613:             if not source_entity or not target_entity:
+614:                 continue
+615: 
+616:             # Get actual entity types
+617:             actual_source_type = str(
+618:                 source_entity.entity_type.value
+619:                 if hasattr(source_entity.entity_type, "value")
+620:                 else source_entity.entity_type
+621:             )
+622:             actual_target_type = str(
+623:                 target_entity.entity_type.value
+624:                 if hasattr(target_entity.entity_type, "value")
+625:                 else target_entity.entity_type
+626:             )
+627: 
+628:             # Use hierarchy-aware type matching
+629:             source_matches = not source_type or types_match(actual_source_type, source_type)
+630:             target_matches = not target_type or types_match(actual_target_type, target_type)
+631: 
+632:             if source_matches and target_matches:
+633:                 filtered.append(rel)
+634: 
+635:         return filtered
+636: 
+637:     def _find_entity_by_id(
+638:         self,
+639:         entity_id: Any,
+640:         context: RuleEvaluationContext,
+641:     ) -> Entity | None:
+642:         """Find entity by ID in context using indexed lookup."""
+643:         return context.entity_by_id.get(str(entity_id))
+644: 
+645:     def _resolve_entity_ref(
+646:         self,
+647:         ref: str,
+648:         entity_map: dict[str, dict[str, Entity]],
+649:     ) -> Entity | None:
+650:         """Resolve an entity reference like 'first.source' or 'second.target'.
+651: 
+652:         Args:
+653:             ref: Reference string (e.g., 'first.source', 'second.target')
+654:             entity_map: Map of group name to source/target entities
+655: 
+656:         Returns:
+657:             Resolved entity or None if reference is invalid
+658:         """
+659:         parts = ref.split(".")
+660:         if len(parts) != 2:
+661:             return None
+662: 
+663:         group, position = parts
+664:         group_entities = entity_map.get(group)
+665:         if not group_entities:
+666:             return None
+667: 
+668:         return group_entities.get(position)
+669: 
+670:     def _relationships_connect(
+671:         self,
+672:         rel1: Relationship,
+673:         rel2: Relationship,
+674:         context: RuleEvaluationContext,
+675:     ) -> bool:
+676:         """Check if two relationships connect (share an entity)."""
+677:         # Check if rel1's target is rel2's source (chain pattern)
+678:         if rel1.target_entity_id == rel2.source_entity_id:
+679:             return True
+680:         # Check if they share source or target
+681:         if rel1.source_entity_id == rel2.source_entity_id:
+682:             return True
+683:         if rel1.target_entity_id == rel2.target_entity_id:
+684:             return True
+685:         return False
+686: 
+687:     def _get_compiled_pattern(self, pattern: str) -> re.Pattern | None:
+688:         """Get or compile a regex pattern."""
+689:         if pattern not in self._compiled_patterns:
+690:             try:
+691:                 self._compiled_patterns[pattern] = re.compile(pattern, re.IGNORECASE)
+692:             except re.error as e:
+693:                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
+694:                 return None
+695: 
+696:         return self._compiled_patterns[pattern]
 ````
 
 ## File: src/khora/pipelines/flows/__init__.py
@@ -29539,6 +29516,352 @@ README.md
 79: )
 ````
 
+## File: src/khora/_accel.py
+````python
+  1: """Accelerated operations with graceful fallbacks.
+  2: 
+  3: Provides optimized implementations of CPU-intensive operations using
+  4: numpy (cosine similarity) and rapidfuzz (string similarity). Falls back
+  5: to pure-Python implementations when those libraries are not available.
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: import math
+ 11: from typing import TYPE_CHECKING
+ 12: 
+ 13: if TYPE_CHECKING:
+ 14:     pass
+ 15: 
+ 16: # ---------------------------------------------------------------------------
+ 17: # Optional dependency detection
+ 18: # ---------------------------------------------------------------------------
+ 19: 
+ 20: try:
+ 21:     import numpy as np
+ 22: 
+ 23:     _HAS_NUMPY = True
+ 24: except ImportError:  # pragma: no cover
+ 25:     _HAS_NUMPY = False
+ 26: 
+ 27: try:
+ 28:     from rapidfuzz.distance import Levenshtein as _rf_lev
+ 29:     from rapidfuzz.fuzz import ratio as _rf_ratio
+ 30: 
+ 31:     _HAS_RAPIDFUZZ = True
+ 32: except ImportError:  # pragma: no cover
+ 33:     _HAS_RAPIDFUZZ = False
+ 34: 
+ 35: 
+ 36: # ---------------------------------------------------------------------------
+ 37: # Cosine similarity
+ 38: # ---------------------------------------------------------------------------
+ 39: 
+ 40: 
+ 41: def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+ 42:     """Compute cosine similarity between two vectors.
+ 43: 
+ 44:     Uses numpy when available (~50-200x faster for 1536-dim vectors).
+ 45:     """
+ 46:     if len(vec1) != len(vec2):
+ 47:         return 0.0
+ 48: 
+ 49:     if _HAS_NUMPY:
+ 50:         a = np.asarray(vec1, dtype=np.float32)
+ 51:         b = np.asarray(vec2, dtype=np.float32)
+ 52:         dot = float(np.dot(a, b))
+ 53:         na = float(np.linalg.norm(a))
+ 54:         nb = float(np.linalg.norm(b))
+ 55:         if na == 0.0 or nb == 0.0:
+ 56:             return 0.0
+ 57:         return dot / (na * nb)
+ 58: 
+ 59:     # Pure-Python fallback
+ 60:     dot = 0.0
+ 61:     norm1 = 0.0
+ 62:     norm2 = 0.0
+ 63:     for a, b in zip(vec1, vec2):
+ 64:         dot += a * b
+ 65:         norm1 += a * a
+ 66:         norm2 += b * b
+ 67: 
+ 68:     if norm1 == 0.0 or norm2 == 0.0:
+ 69:         return 0.0
+ 70:     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
+ 71: 
+ 72: 
+ 73: def batch_cosine_similarity(
+ 74:     query: list[float],
+ 75:     candidates: list[list[float]],
+ 76:     threshold: float = 0.0,
+ 77: ) -> list[tuple[int, float]]:
+ 78:     """Compute cosine similarity between a query vector and a matrix of candidates.
+ 79: 
+ 80:     Returns (index, similarity) pairs above threshold, sorted descending.
+ 81:     Uses numpy batch matmul when available.
+ 82:     """
+ 83:     if not candidates:
+ 84:         return []
+ 85: 
+ 86:     if _HAS_NUMPY:
+ 87:         q = np.asarray(query, dtype=np.float32)
+ 88:         mat = np.asarray(candidates, dtype=np.float32)
+ 89: 
+ 90:         q_norm = float(np.linalg.norm(q))
+ 91:         if q_norm == 0.0:
+ 92:             return []
+ 93: 
+ 94:         norms = np.linalg.norm(mat, axis=1)
+ 95:         # Avoid division by zero
+ 96:         safe_norms = np.where(norms == 0.0, 1.0, norms)
+ 97:         sims = (mat @ q) / (safe_norms * q_norm)
+ 98:         # Zero out entries where candidate norm was zero
+ 99:         sims = np.where(norms == 0.0, 0.0, sims)
+100: 
+101:         results = []
+102:         for i in range(len(sims)):
+103:             s = float(sims[i])
+104:             if s >= threshold:
+105:                 results.append((i, s))
+106:         results.sort(key=lambda x: x[1], reverse=True)
+107:         return results
+108: 
+109:     # Pure-Python fallback
+110:     results = []
+111:     for i, cand in enumerate(candidates):
+112:         s = cosine_similarity(query, cand)
+113:         if s >= threshold:
+114:             results.append((i, s))
+115:     results.sort(key=lambda x: x[1], reverse=True)
+116:     return results
+117: 
+118: 
+119: # ---------------------------------------------------------------------------
+120: # Levenshtein similarity
+121: # ---------------------------------------------------------------------------
+122: 
+123: 
+124: def levenshtein_similarity(s1: str, s2: str) -> float:
+125:     """Normalized Levenshtein similarity (1.0 = identical).
+126: 
+127:     Uses rapidfuzz when available (~5-10x faster).
+128:     """
+129:     a, b = s1.lower(), s2.lower()
+130:     if a == b:
+131:         return 1.0
+132:     if not a or not b:
+133:         return 0.0
+134: 
+135:     if _HAS_RAPIDFUZZ:
+136:         return _rf_lev.normalized_similarity(a, b)
+137: 
+138:     # Pure-Python single-row DP fallback
+139:     la, lb = len(a), len(b)
+140:     prev = list(range(lb + 1))
+141:     for i in range(1, la + 1):
+142:         curr = [i] + [0] * lb
+143:         for j in range(1, lb + 1):
+144:             cost = 0 if a[i - 1] == b[j - 1] else 1
+145:             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+146:         prev = curr
+147: 
+148:     distance = prev[lb]
+149:     return 1.0 - (distance / max(la, lb))
+150: 
+151: 
+152: # ---------------------------------------------------------------------------
+153: # Sequence matching (SequenceMatcher replacement)
+154: # ---------------------------------------------------------------------------
+155: 
+156: 
+157: def sequence_match_ratio(s1: str, s2: str) -> float:
+158:     """Compute sequence match ratio between two strings.
+159: 
+160:     Uses rapidfuzz.fuzz.ratio when available (~3-10x faster than
+161:     difflib.SequenceMatcher). Returns a float in [0.0, 1.0].
+162:     """
+163:     if _HAS_RAPIDFUZZ:
+164:         return _rf_ratio(s1, s2) / 100.0
+165: 
+166:     from difflib import SequenceMatcher
+167: 
+168:     return SequenceMatcher(None, s1, s2).ratio()
+````
+
+## File: tests/unit/test_config_backends.py
+````python
+  1: """Tests for discriminated-union backend config parsing and backwards compatibility."""
+  2: 
+  3: import pytest
+  4: 
+  5: from khora.config.schema import (
+  6:     ArcadeDBGraphConfig,
+  7:     ArcadeDBVectorConfig,
+  8:     KhoraConfig,
+  9:     KuzuConfig,
+ 10:     MemgraphConfig,
+ 11:     Neo4jConfig,
+ 12:     PgVectorConfig,
+ 13:     StorageSettings,
+ 14: )
+ 15: 
+ 16: 
+ 17: @pytest.mark.unit
+ 18: class TestStorageSettingsBackwardsCompat:
+ 19:     """Legacy flat fields should still work and be migrated to new-style configs."""
+ 20: 
+ 21:     def test_legacy_neo4j_fields_migrated(self):
+ 22:         settings = StorageSettings(
+ 23:             neo4j_url="bolt://localhost:7687",
+ 24:             neo4j_user="admin",
+ 25:             neo4j_password="secret",
+ 26:             neo4j_database="mydb",
+ 27:         )
+ 28:         assert isinstance(settings.graph, Neo4jConfig)
+ 29:         assert settings.graph.url == "bolt://localhost:7687"
+ 30:         assert settings.graph.user == "admin"
+ 31:         assert settings.graph.password == "secret"
+ 32:         assert settings.graph.database == "mydb"
+ 33: 
+ 34:     def test_legacy_pgvector_fields_migrated(self):
+ 35:         settings = StorageSettings(
+ 36:             pgvector_url="postgresql://localhost:5432/vectors",
+ 37:             embedding_dimension=768,
+ 38:         )
+ 39:         assert isinstance(settings.vector, PgVectorConfig)
+ 40:         assert settings.vector.url == "postgresql://localhost:5432/vectors"
+ 41:         assert settings.vector.embedding_dimension == 768
+ 42: 
+ 43:     def test_new_style_graph_config_takes_precedence(self):
+ 44:         settings = StorageSettings(
+ 45:             neo4j_url="bolt://old:7687",
+ 46:             graph=KuzuConfig(database_path="/tmp/kuzu"),
+ 47:         )
+ 48:         assert isinstance(settings.graph, KuzuConfig)
+ 49:         assert settings.graph.database_path == "/tmp/kuzu"
+ 50: 
+ 51:     def test_new_style_vector_config_takes_precedence(self):
+ 52:         settings = StorageSettings(
+ 53:             pgvector_url="postgresql://old:5432/db",
+ 54:             vector=ArcadeDBVectorConfig(url="http://localhost:2480"),
+ 55:         )
+ 56:         assert isinstance(settings.vector, ArcadeDBVectorConfig)
+ 57:         assert settings.vector.url == "http://localhost:2480"
+ 58: 
+ 59:     def test_defaults(self):
+ 60:         settings = StorageSettings()
+ 61:         # Graph backend is optional - None by default
+ 62:         assert settings.graph is None
+ 63:         assert isinstance(settings.vector, PgVectorConfig)
+ 64:         assert settings.vector.url is None
+ 65: 
+ 66: 
+ 67: @pytest.mark.unit
+ 68: class TestDiscriminatedUnionParsing:
+ 69:     """Discriminated union configs parsed from dict/YAML."""
+ 70: 
+ 71:     def test_kuzu_config_from_dict(self):
+ 72:         settings = StorageSettings.model_validate(
+ 73:             {
+ 74:                 "graph": {"backend": "kuzu", "database_path": "/data/kuzu"},
+ 75:             }
+ 76:         )
+ 77:         assert isinstance(settings.graph, KuzuConfig)
+ 78:         assert settings.graph.database_path == "/data/kuzu"
+ 79: 
+ 80:     def test_memgraph_config_from_dict(self):
+ 81:         settings = StorageSettings.model_validate(
+ 82:             {
+ 83:                 "graph": {"backend": "memgraph", "url": "bolt://mg:7687"},
+ 84:             }
+ 85:         )
+ 86:         assert isinstance(settings.graph, MemgraphConfig)
+ 87:         assert settings.graph.url == "bolt://mg:7687"
+ 88: 
+ 89:     def test_arcadedb_graph_config_from_dict(self):
+ 90:         settings = StorageSettings.model_validate(
+ 91:             {
+ 92:                 "graph": {"backend": "arcadedb", "url": "http://arcade:2480"},
+ 93:             }
+ 94:         )
+ 95:         assert isinstance(settings.graph, ArcadeDBGraphConfig)
+ 96:         assert settings.graph.url == "http://arcade:2480"
+ 97: 
+ 98:     def test_arcadedb_vector_config_from_dict(self):
+ 99:         settings = StorageSettings.model_validate(
+100:             {
+101:                 "vector": {"backend": "arcadedb", "url": "http://arcade:2480", "embedding_dimension": 768},
+102:             }
+103:         )
+104:         assert isinstance(settings.vector, ArcadeDBVectorConfig)
+105:         assert settings.vector.embedding_dimension == 768
+106: 
+107:     def test_neo4j_is_default_graph_backend(self):
+108:         settings = StorageSettings.model_validate(
+109:             {
+110:                 "graph": {"backend": "neo4j", "url": "bolt://neo:7687"},
+111:             }
+112:         )
+113:         assert isinstance(settings.graph, Neo4jConfig)
+114: 
+115:     def test_pgvector_is_default_vector_backend(self):
+116:         settings = StorageSettings.model_validate(
+117:             {
+118:                 "vector": {"backend": "pgvector", "url": "postgresql://pg:5432/db"},
+119:             }
+120:         )
+121:         assert isinstance(settings.vector, PgVectorConfig)
+122: 
+123: 
+124: @pytest.mark.unit
+125: class TestKhoraConfigGraphHelpers:
+126:     """KhoraConfig.get_graph_config() / get_vector_config() work correctly."""
+127: 
+128:     def test_get_graph_config_neo4j(self):
+129:         config = KhoraConfig(
+130:             neo4j_url="bolt://neo4j:pass@localhost:7687",
+131:         )
+132:         graph = config.get_graph_config()
+133:         assert isinstance(graph, Neo4jConfig)
+134:         assert graph.url == "bolt://localhost:7687"
+135:         assert graph.user == "neo4j"
+136:         assert graph.password == "pass"
+137: 
+138:     def test_get_graph_config_kuzu(self):
+139:         config = KhoraConfig(
+140:             storage=StorageSettings(
+141:                 graph=KuzuConfig(database_path="/tmp/kuzu_test"),
+142:             ),
+143:         )
+144:         graph = config.get_graph_config()
+145:         assert isinstance(graph, KuzuConfig)
+146:         assert graph.database_path == "/tmp/kuzu_test"
+147: 
+148:     def test_get_vector_config_defaults_to_postgresql_url(self):
+149:         config = KhoraConfig(
+150:             database_url="postgresql://localhost:5432/khora",
+151:         )
+152:         vector = config.get_vector_config()
+153:         assert isinstance(vector, PgVectorConfig)
+154:         assert vector.url == "postgresql://localhost:5432/khora"
+155: 
+156: 
+157: @pytest.mark.unit
+158: class TestArcadeDBDualRole:
+159:     """ArcadeDB dual-role detection."""
+160: 
+161:     def test_both_graph_and_vector_arcadedb(self):
+162:         settings = StorageSettings.model_validate(
+163:             {
+164:                 "graph": {"backend": "arcadedb", "url": "http://localhost:2480"},
+165:                 "vector": {"backend": "arcadedb", "url": "http://localhost:2480"},
+166:             }
+167:         )
+168:         assert isinstance(settings.graph, ArcadeDBGraphConfig)
+169:         assert isinstance(settings.vector, ArcadeDBVectorConfig)
+170:         assert settings.graph.url == settings.vector.url
+````
+
 ## File: tests/unit/test_entity_resolution.py
 ````python
   1: """Unit tests for extraction/entity_resolution.py — Entity resolution."""
@@ -32141,6 +32464,94 @@ README.md
 807: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
+## File: src/khora/api/routes/status.py
+````python
+ 1: """Status endpoints for Khora API."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
+ 7: 
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: import khora
+11: 
+12: router = APIRouter()
+13: 
+14: 
+15: @router.get("/status")
+16: async def status_check(request: Request) -> dict[str, Any]:
+17:     """Basic status check endpoint.
+18: 
+19:     Returns:
+20:         Status with timestamp and version
+21:     """
+22:     return {
+23:         "status": "ok",
+24:         "timestamp": datetime.now(UTC).isoformat(),
+25:         "version": khora.__version__,
+26:         "service": "khora",
+27:     }
+28: 
+29: 
+30: @router.get("/health")
+31: async def health_check(request: Request) -> dict[str, Any]:
+32:     """Health check endpoint for orchestration systems.
+33: 
+34:     Returns:
+35:         Health status with timestamp
+36:     """
+37:     return {
+38:         "status": "healthy",
+39:         "timestamp": datetime.now(UTC).isoformat(),
+40:         "version": khora.__version__,
+41:     }
+42: 
+43: 
+44: @router.get("/health/ready")
+45: async def readiness_check(request: Request) -> dict[str, Any]:
+46:     """Readiness check for Kubernetes/orchestration.
+47: 
+48:     Checks that all required services are available.
+49: 
+50:     Returns:
+51:         Readiness status with component checks
+52:     """
+53:     config = request.app.state.config
+54:     checks: dict[str, bool] = {}
+55: 
+56:     # TODO: Add actual health checks for:
+57:     # - Database connections
+58:     # - External services
+59: 
+60:     # For now, return basic status
+61:     checks["config_loaded"] = config is not None
+62: 
+63:     all_healthy = all(checks.values())
+64: 
+65:     return {
+66:         "status": "ready" if all_healthy else "not_ready",
+67:         "timestamp": datetime.now(UTC).isoformat(),
+68:         "checks": checks,
+69:     }
+70: 
+71: 
+72: @router.get("/health/live")
+73: async def liveness_check() -> dict[str, Any]:
+74:     """Liveness check for Kubernetes/orchestration.
+75: 
+76:     Simple check that the application is running.
+77: 
+78:     Returns:
+79:         Liveness status
+80:     """
+81:     return {
+82:         "status": "alive",
+83:         "timestamp": datetime.now(UTC).isoformat(),
+84:     }
+````
+
 ## File: src/khora/cli/__init__.py
 ````python
  1: """Command-line interface for Khora."""
@@ -32196,6 +32607,347 @@ README.md
 51: 
 52: 
 53: __all__ = ["cli", "main"]
+````
+
+## File: src/khora/config/llm.py
+````python
+  1: """LiteLLM configuration for unified LLM access.
+  2: 
+  3: Provides a unified interface to all LLM providers (OpenAI, Anthropic, Google, etc.)
+  4: with fallbacks and routing. Based on the memoryman/potemkin pattern.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: import os
+ 10: from pathlib import Path
+ 11: from typing import Any
+ 12: 
+ 13: import yaml
+ 14: from loguru import logger
+ 15: from pydantic import BaseModel, Field
+ 16: 
+ 17: 
+ 18: class LiteLLMConfig(BaseModel):
+ 19:     """Configuration for LiteLLM unified model access.
+ 20: 
+ 21:     This configuration provides a unified interface to all LLM providers
+ 22:     including OpenAI, Anthropic, Google, and others through LiteLLM.
+ 23:     """
+ 24: 
+ 25:     # Primary model configuration
+ 26:     model: str = Field(
+ 27:         default="gpt-4o-mini",
+ 28:         description="Primary model to use (e.g., gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)",
+ 29:     )
+ 30:     api_key_env: str = Field(
+ 31:         default="OPENAI_API_KEY",
+ 32:         description="Environment variable name for API key",
+ 33:     )
+ 34: 
+ 35:     # Model parameters
+ 36:     temperature: float = Field(
+ 37:         default=0.7,
+ 38:         ge=0.0,
+ 39:         le=2.0,
+ 40:         description="Sampling temperature for generation",
+ 41:     )
+ 42:     max_tokens: int = Field(
+ 43:         default=2000,
+ 44:         gt=0,
+ 45:         description="Maximum tokens to generate",
+ 46:     )
+ 47: 
+ 48:     # Request configuration
+ 49:     timeout: int = Field(
+ 50:         default=30,
+ 51:         gt=0,
+ 52:         description="Request timeout in seconds",
+ 53:     )
+ 54:     max_retries: int = Field(
+ 55:         default=3,
+ 56:         ge=0,
+ 57:         description="Maximum number of retries on failure",
+ 58:     )
+ 59:     retry_wait: int = Field(
+ 60:         default=2,
+ 61:         ge=0,
+ 62:         description="Wait time between retries in seconds",
+ 63:     )
+ 64: 
+ 65:     # Concurrency
+ 66:     max_concurrent_llm_calls: int = Field(
+ 67:         default=10,
+ 68:         gt=0,
+ 69:         description="Maximum concurrent LLM API calls",
+ 70:     )
+ 71: 
+ 72:     # Router configuration for fallbacks
+ 73:     model_list: list[dict[str, Any]] | None = Field(
+ 74:         default=None,
+ 75:         description="List of model configurations for router fallbacks",
+ 76:     )
+ 77:     router_settings: dict[str, Any] | None = Field(
+ 78:         default=None,
+ 79:         description="Router settings (routing_strategy, num_retries, etc.)",
+ 80:     )
+ 81: 
+ 82:     # Embedding model configuration
+ 83:     embedding_model: str = Field(
+ 84:         default="text-embedding-3-small",
+ 85:         description="Model to use for embeddings",
+ 86:     )
+ 87:     embedding_api_key_env: str | None = Field(
+ 88:         default=None,
+ 89:         description="Environment variable for embedding API key (defaults to api_key_env)",
+ 90:     )
+ 91:     embedding_dimension: int = Field(
+ 92:         default=1536,
+ 93:         gt=0,
+ 94:         description="Embedding vector dimension",
+ 95:     )
+ 96:     embed_concurrency: int = Field(
+ 97:         default=25,
+ 98:         gt=0,
+ 99:         description="Maximum concurrent embedding API calls",
+100:     )
+101: 
+102:     @classmethod
+103:     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
+104:         """Load configuration from a YAML file.
+105: 
+106:         Args:
+107:             path: Path to the YAML configuration file
+108: 
+109:         Returns:
+110:             LiteLLMConfig instance
+111:         """
+112:         path = Path(path)
+113:         with path.open() as f:
+114:             data = yaml.safe_load(f)
+115:         return cls.model_validate(data or {})
+116: 
+117:     @classmethod
+118:     def from_dict(cls, config: dict[str, Any]) -> LiteLLMConfig:
+119:         """Create configuration from a dictionary.
+120: 
+121:         Args:
+122:             config: Configuration dictionary (can be nested under 'llm' key)
+123: 
+124:         Returns:
+125:             LiteLLMConfig instance
+126:         """
+127:         # Handle nested configuration
+128:         if "llm" in config:
+129:             config = config["llm"]
+130: 
+131:         # Handle config_file path
+132:         if "config_file" in config:
+133:             return cls.from_yaml(config["config_file"])
+134: 
+135:         return cls.model_validate(config)
+136: 
+137:     def get_api_key(self) -> str:
+138:         """Get the API key from environment variable."""
+139:         key = os.environ.get(self.api_key_env, "")
+140:         if not key:
+141:             logger.warning(f"API key environment variable {self.api_key_env} not set")
+142:         return key
+143: 
+144:     def get_embedding_api_key(self) -> str:
+145:         """Get the embedding API key from environment variable."""
+146:         env_var = self.embedding_api_key_env or self.api_key_env
+147:         key = os.environ.get(env_var, "")
+148:         if not key:
+149:             logger.warning(f"Embedding API key environment variable {env_var} not set")
+150:         return key
+151: 
+152: 
+153: def configure_litellm(config: LiteLLMConfig | None = None) -> None:
+154:     """Configure LiteLLM with the given configuration.
+155: 
+156:     This function should be called once at application startup to configure
+157:     LiteLLM's global settings.
+158: 
+159:     Args:
+160:         config: LiteLLM configuration (uses defaults if None)
+161:     """
+162:     try:
+163:         import litellm
+164:     except ImportError:
+165:         logger.warning("litellm package not installed, skipping configuration")
+166:         return
+167: 
+168:     if config is None:
+169:         config = LiteLLMConfig()
+170: 
+171:     # Critical for compatibility across providers
+172:     litellm.drop_params = True
+173: 
+174:     # Disable verbose logging and telemetry
+175:     litellm.set_verbose = False
+176:     litellm.telemetry = False  # type: ignore[assignment]
+177: 
+178:     # Set up API keys from environment
+179:     api_key = config.get_api_key()
+180:     if api_key:
+181:         # LiteLLM uses provider-specific env vars, so we ensure they're set
+182:         if "openai" in config.model.lower() or config.model.startswith("gpt"):
+183:             os.environ.setdefault("OPENAI_API_KEY", api_key)
+184:         elif "claude" in config.model.lower() or "anthropic" in config.model.lower():
+185:             os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+186:         elif "gemini" in config.model.lower():
+187:             os.environ.setdefault("GOOGLE_API_KEY", api_key)
+188: 
+189:     logger.info(f"LiteLLM configured with model: {config.model}")
+190: 
+191: 
+192: def create_litellm_router(config: LiteLLMConfig) -> Any:
+193:     """Create a LiteLLM router for fallback handling.
+194: 
+195:     Args:
+196:         config: LiteLLM configuration with model_list
+197: 
+198:     Returns:
+199:         LiteLLM Router instance
+200:     """
+201:     try:
+202:         from litellm import Router
+203:     except ImportError:
+204:         logger.warning("litellm package not installed")
+205:         return None
+206: 
+207:     if not config.model_list:
+208:         logger.warning("No model_list configured, router not created")
+209:         return None
+210: 
+211:     router_settings = config.router_settings or {
+212:         "routing_strategy": "simple-shuffle",
+213:         "num_retries": config.max_retries,
+214:     }
+215: 
+216:     router = Router(
+217:         model_list=config.model_list,
+218:         **router_settings,
+219:     )
+220: 
+221:     logger.info(f"LiteLLM router created with {len(config.model_list)} models")
+222:     return router
+223: 
+224: 
+225: async def acompletion(
+226:     prompt: str,
+227:     config: LiteLLMConfig | None = None,
+228:     *,
+229:     system_prompt: str | None = None,
+230:     **kwargs: Any,
+231: ) -> str:
+232:     """Async completion with LiteLLM.
+233: 
+234:     Args:
+235:         prompt: User prompt
+236:         config: LiteLLM configuration (uses defaults if None)
+237:         system_prompt: Optional system prompt
+238:         **kwargs: Additional arguments passed to litellm.acompletion
+239: 
+240:     Returns:
+241:         Generated text response
+242:     """
+243:     try:
+244:         import litellm
+245:     except ImportError:
+246:         raise RuntimeError("litellm package not installed. Run: pip install litellm")
+247: 
+248:     if config is None:
+249:         config = LiteLLMConfig()
+250: 
+251:     messages = []
+252:     if system_prompt:
+253:         messages.append({"role": "system", "content": system_prompt})
+254:     messages.append({"role": "user", "content": prompt})
+255: 
+256:     import time as _time
+257: 
+258:     _t0 = _time.perf_counter()
+259:     response = await litellm.acompletion(
+260:         model=config.model,
+261:         messages=messages,
+262:         temperature=kwargs.pop("temperature", config.temperature),
+263:         max_tokens=kwargs.pop("max_tokens", config.max_tokens),
+264:         timeout=kwargs.pop("timeout", config.timeout),
+265:         num_retries=kwargs.pop("num_retries", config.max_retries),
+266:         **kwargs,
+267:     )
+268:     _latency = (_time.perf_counter() - _t0) * 1000
+269: 
+270:     # Record telemetry
+271:     from khora.telemetry import get_collector
+272: 
+273:     usage = getattr(response, "usage", None)
+274:     get_collector().record_llm_call(
+275:         operation=kwargs.get("_telemetry_op", "completion"),
+276:         model=config.model,
+277:         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+278:         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+279:         total_tokens=getattr(usage, "total_tokens", 0) or 0,
+280:         latency_ms=_latency,
+281:     )
+282: 
+283:     return response.choices[0].message.content
+284: 
+285: 
+286: async def aembedding(
+287:     text: str | list[str],
+288:     config: LiteLLMConfig | None = None,
+289:     **kwargs: Any,
+290: ) -> list[list[float]]:
+291:     """Async embedding generation with LiteLLM.
+292: 
+293:     Args:
+294:         text: Text or list of texts to embed
+295:         config: LiteLLM configuration (uses defaults if None)
+296:         **kwargs: Additional arguments passed to litellm.aembedding
+297: 
+298:     Returns:
+299:         List of embedding vectors
+300:     """
+301:     try:
+302:         import litellm
+303:     except ImportError:
+304:         raise RuntimeError("litellm package not installed. Run: pip install litellm")
+305: 
+306:     if config is None:
+307:         config = LiteLLMConfig()
+308: 
+309:     # Ensure text is a list
+310:     if isinstance(text, str):
+311:         text = [text]
+312: 
+313:     import time as _time
+314: 
+315:     _t0 = _time.perf_counter()
+316:     response = await litellm.aembedding(
+317:         model=config.embedding_model,
+318:         input=text,
+319:         timeout=kwargs.pop("timeout", config.timeout),
+320:         **kwargs,
+321:     )
+322:     _latency = (_time.perf_counter() - _t0) * 1000
+323: 
+324:     # Record telemetry
+325:     from khora.telemetry import get_collector
+326: 
+327:     usage = getattr(response, "usage", None)
+328:     get_collector().record_llm_call(
+329:         operation="embedding",
+330:         model=config.embedding_model,
+331:         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+332:         total_tokens=getattr(usage, "total_tokens", 0) or 0,
+333:         latency_ms=_latency,
+334:         metadata={"batch_size": len(text)},
+335:     )
+336: 
+337:     return [item["embedding"] for item in response.data]
 ````
 
 ## File: src/khora/db/models.py
@@ -33225,706 +33977,6 @@ README.md
 244:             "token_keys": len(self._token),
 245:             "type_groups": len(self._type),
 246:         }
-````
-
-## File: src/khora/extraction/expansion/rule_engine.py
-````python
-  1: """Configurable rule evaluation engine.
-  2: 
-  3: Provides a generic rule evaluation system for both correlation rules
-  4: and inference rules defined in expertise configurations.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: import re
- 10: from dataclasses import dataclass, field
- 11: from typing import TYPE_CHECKING, Any
- 12: 
- 13: from loguru import logger
- 14: 
- 15: if TYPE_CHECKING:
- 16:     from khora.core.models import Entity, Relationship
- 17:     from khora.extraction.skills import CorrelationRule, ExpertiseConfig, InferenceRule
- 18: 
- 19: 
- 20: @dataclass
- 21: class RuleMatch:
- 22:     """Result of a rule match."""
- 23: 
- 24:     rule_name: str
- 25:     matched_value: str | None = None
- 26:     matched_entities: list[Entity] = field(default_factory=list)
- 27:     matched_relationships: list[Relationship] = field(default_factory=list)
- 28:     confidence: float = 1.0
- 29:     metadata: dict[str, Any] = field(default_factory=dict)
- 30: 
- 31: 
- 32: @dataclass
- 33: class RuleEvaluationContext:
- 34:     """Context for rule evaluation containing available data."""
- 35: 
- 36:     entities: list[Entity] = field(default_factory=list)
- 37:     relationships: list[Relationship] = field(default_factory=list)
- 38:     entity_index: dict[str, list[Entity]] = field(default_factory=dict)  # name -> entities
- 39:     type_index: dict[str, list[Entity]] = field(default_factory=dict)  # type -> entities
- 40:     relationship_index: dict[str, list[Relationship]] = field(default_factory=dict)  # type -> relationships
- 41:     # New: Index relationships by entity for fast chain lookups
- 42:     rels_by_source: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> outgoing rels
- 43:     rels_by_target: dict[str, list[Relationship]] = field(default_factory=dict)  # entity_id -> incoming rels
- 44:     entity_by_id: dict[str, Entity] = field(default_factory=dict)  # entity_id -> entity
- 45: 
- 46:     @classmethod
- 47:     def from_data(
- 48:         cls,
- 49:         entities: list[Entity],
- 50:         relationships: list[Relationship],
- 51:     ) -> RuleEvaluationContext:
- 52:         """Create context with built indices."""
- 53:         ctx = cls(entities=entities, relationships=relationships)
- 54: 
- 55:         # Build entity indices
- 56:         for entity in entities:
- 57:             # Index by name (lowercase for matching)
- 58:             name_key = entity.name.lower()
- 59:             if name_key not in ctx.entity_index:
- 60:                 ctx.entity_index[name_key] = []
- 61:             ctx.entity_index[name_key].append(entity)
- 62: 
- 63:             # Index by type
- 64:             type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
- 65:             if type_key not in ctx.type_index:
- 66:                 ctx.type_index[type_key] = []
- 67:             ctx.type_index[type_key].append(entity)
- 68: 
- 69:             # Index by ID for fast lookup
- 70:             ctx.entity_by_id[str(entity.id)] = entity
- 71: 
- 72:         # Build relationship indices
- 73:         for rel in relationships:
- 74:             rel_type = str(
- 75:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
- 76:             )
- 77:             if rel_type not in ctx.relationship_index:
- 78:                 ctx.relationship_index[rel_type] = []
- 79:             ctx.relationship_index[rel_type].append(rel)
- 80: 
- 81:             # Index by source entity for fast chain lookups
- 82:             source_key = str(rel.source_entity_id)
- 83:             if source_key not in ctx.rels_by_source:
- 84:                 ctx.rels_by_source[source_key] = []
- 85:             ctx.rels_by_source[source_key].append(rel)
- 86: 
- 87:             # Index by target entity
- 88:             target_key = str(rel.target_entity_id)
- 89:             if target_key not in ctx.rels_by_target:
- 90:                 ctx.rels_by_target[target_key] = []
- 91:             ctx.rels_by_target[target_key].append(rel)
- 92: 
- 93:         return ctx
- 94: 
- 95:     def update(
- 96:         self,
- 97:         new_entities: list[Entity],
- 98:         new_relationships: list[Relationship],
- 99:     ) -> None:
-100:         """Incrementally add new entities and relationships to the context.
-101: 
-102:         Avoids a full rebuild when only a few items have been added.
-103:         """
-104:         for entity in new_entities:
-105:             if entity not in self.entities:
-106:                 self.entities.append(entity)
-107: 
-108:                 name_key = entity.name.lower()
-109:                 if name_key not in self.entity_index:
-110:                     self.entity_index[name_key] = []
-111:                 self.entity_index[name_key].append(entity)
-112: 
-113:                 type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
-114:                 if type_key not in self.type_index:
-115:                     self.type_index[type_key] = []
-116:                 self.type_index[type_key].append(entity)
-117: 
-118:                 self.entity_by_id[str(entity.id)] = entity
-119: 
-120:         for rel in new_relationships:
-121:             if rel not in self.relationships:
-122:                 self.relationships.append(rel)
-123: 
-124:                 rel_type = str(
-125:                     rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-126:                 )
-127:                 if rel_type not in self.relationship_index:
-128:                     self.relationship_index[rel_type] = []
-129:                 self.relationship_index[rel_type].append(rel)
-130: 
-131:                 source_key = str(rel.source_entity_id)
-132:                 if source_key not in self.rels_by_source:
-133:                     self.rels_by_source[source_key] = []
-134:                 self.rels_by_source[source_key].append(rel)
-135: 
-136:                 target_key = str(rel.target_entity_id)
-137:                 if target_key not in self.rels_by_target:
-138:                     self.rels_by_target[target_key] = []
-139:                 self.rels_by_target[target_key].append(rel)
-140: 
-141: 
-142: # Type hierarchy for flexible matching
-143: # Child types can match parent types in inference rules
-144: # e.g., EMPLOYEE matches rules expecting PERSON
-145: TYPE_HIERARCHY: dict[str, list[str]] = {
-146:     "EMPLOYEE": ["PERSON"],
-147:     "EXTERNAL_PERSON": ["PERSON"],
-148:     "COMPANY": ["ORGANIZATION"],
-149:     "DEPARTMENT": ["ORGANIZATION"],
-150:     "TEAM": ["ORGANIZATION"],
-151:     "MESSAGE": ["CONTENT"],
-152:     "PAGE": ["CONTENT", "DOCUMENT"],
-153:     "ISSUE": ["WORK_ITEM", "CONTENT"],
-154:     "SALES_NOTE": ["CONTENT", "NOTE"],
-155:     "CALL": ["EVENT", "MEETING"],
-156:     "DEAL": ["OPPORTUNITY"],
-157:     "PROJECT": ["WORK_ITEM"],
-158:     "CYCLE": ["WORK_ITEM", "SPRINT"],
-159: }
-160: 
-161: 
-162: def types_match(actual_type: str, expected_type: str) -> bool:
-163:     """Check if actual type matches expected, considering type hierarchy.
-164: 
-165:     Args:
-166:         actual_type: The actual entity type from the graph
-167:         expected_type: The expected type from the inference rule
-168: 
-169:     Returns:
-170:         True if types match directly or via hierarchy
-171:     """
-172:     # Direct match
-173:     if actual_type == expected_type:
-174:         return True
-175: 
-176:     # Check if actual is a subtype of expected (e.g., EMPLOYEE matches PERSON)
-177:     parents = TYPE_HIERARCHY.get(actual_type, [])
-178:     if expected_type in parents:
-179:         return True
-180: 
-181:     # Check reverse: if expected is a subtype of actual (e.g., PERSON matches EMPLOYEE)
-182:     # This allows rules written for specific types to match more generic extractions
-183:     parents_of_expected = TYPE_HIERARCHY.get(expected_type, [])
-184:     if actual_type in parents_of_expected:
-185:         return True
-186: 
-187:     return False
-188: 
-189: 
-190: class RuleEngine:
-191:     """Engine for evaluating correlation and inference rules.
-192: 
-193:     Supports:
-194:     - Pattern-based matching (regex)
-195:     - Field-based matching
-196:     - Multi-condition inference rules
-197:     - Confidence scoring
-198:     - Type hierarchy matching (EMPLOYEE matches rules expecting PERSON)
-199:     """
-200: 
-201:     def __init__(self, expertise: ExpertiseConfig | None = None) -> None:
-202:         """Initialize the rule engine.
-203: 
-204:         Args:
-205:             expertise: ExpertiseConfig with rules to evaluate
-206:         """
-207:         self._expertise = expertise
-208:         self._compiled_patterns: dict[str, re.Pattern] = {}
-209: 
-210:     def evaluate_correlation_rules(
-211:         self,
-212:         text: str,
-213:         context: RuleEvaluationContext,
-214:     ) -> list[RuleMatch]:
-215:         """Evaluate correlation rules against text and context.
-216: 
-217:         Args:
-218:             text: Text to search for patterns
-219:             context: Evaluation context with entities and relationships
-220: 
-221:         Returns:
-222:             List of rule matches
-223:         """
-224:         if not self._expertise:
-225:             return []
-226: 
-227:         matches = []
-228:         for rule in self._expertise.correlation_rules:
-229:             rule_matches = self._evaluate_correlation_rule(rule, text, context)
-230:             matches.extend(rule_matches)
-231: 
-232:         return matches
-233: 
-234:     def evaluate_inference_rules(
-235:         self,
-236:         context: RuleEvaluationContext,
-237:     ) -> list[RuleMatch]:
-238:         """Evaluate inference rules against the context.
-239: 
-240:         Inference rules create new relationships based on existing patterns.
-241: 
-242:         Args:
-243:             context: Evaluation context with entities and relationships
-244: 
-245:         Returns:
-246:             List of rule matches that would create new relationships
-247:         """
-248:         if not self._expertise:
-249:             return []
-250: 
-251:         matches = []
-252:         for rule in self._expertise.inference_rules:
-253:             rule_matches = self._evaluate_inference_rule(rule, context)
-254:             matches.extend(rule_matches)
-255: 
-256:         return matches
-257: 
-258:     def find_pattern_matches(
-259:         self,
-260:         pattern: str,
-261:         text: str,
-262:     ) -> list[tuple[str, int, int]]:
-263:         """Find all pattern matches in text.
-264: 
-265:         Args:
-266:             pattern: Regex pattern to match
-267:             text: Text to search
-268: 
-269:         Returns:
-270:             List of (matched_value, start, end) tuples
-271:         """
-272:         compiled = self._get_compiled_pattern(pattern)
-273:         if not compiled:
-274:             return []
-275: 
-276:         matches = []
-277:         for match in compiled.finditer(text):
-278:             matches.append((match.group(), match.start(), match.end()))
-279: 
-280:         return matches
-281: 
-282:     def match_entities_by_field(
-283:         self,
-284:         entities: list[Entity],
-285:         field_name: str,
-286:         field_value: Any,
-287:     ) -> list[Entity]:
-288:         """Find entities matching a field value.
-289: 
-290:         Args:
-291:             entities: Entities to search
-292:             field_name: Attribute field name
-293:             field_value: Value to match
-294: 
-295:         Returns:
-296:             Matching entities
-297:         """
-298:         matches = []
-299:         for entity in entities:
-300:             entity_value = entity.attributes.get(field_name)
-301:             if entity_value is None:
-302:                 continue
-303: 
-304:             # Normalize for comparison
-305:             if isinstance(entity_value, str) and isinstance(field_value, str):
-306:                 if entity_value.lower() == field_value.lower():
-307:                     matches.append(entity)
-308:             elif entity_value == field_value:
-309:                 matches.append(entity)
-310: 
-311:         return matches
-312: 
-313:     def _evaluate_correlation_rule(
-314:         self,
-315:         rule: CorrelationRule,
-316:         text: str,
-317:         context: RuleEvaluationContext,
-318:     ) -> list[RuleMatch]:
-319:         """Evaluate a single correlation rule."""
-320:         matches = []
-321: 
-322:         # Pattern-based matching
-323:         if rule.pattern:
-324:             pattern_matches = self.find_pattern_matches(rule.pattern, text)
-325:             for matched_value, start, end in pattern_matches:
-326:                 # Find entities that might match this value
-327:                 matched_entities = self._find_entities_for_pattern_match(matched_value, rule.entity_types, context)
-328: 
-329:                 matches.append(
-330:                     RuleMatch(
-331:                         rule_name=rule.name,
-332:                         matched_value=matched_value,
-333:                         matched_entities=matched_entities,
-334:                         confidence=rule.confidence,
-335:                         metadata={
-336:                             "start": start,
-337:                             "end": end,
-338:                             "creates_relationship": rule.creates_relationship,
-339:                         },
-340:                     )
-341:                 )
-342: 
-343:         # Field-based matching
-344:         if rule.match_fields:
-345:             # This requires comparing entities against each other
-346:             field_matches = self._find_field_matches(rule, context)
-347:             matches.extend(field_matches)
-348: 
-349:         return matches
-350: 
-351:     def _evaluate_inference_rule(
-352:         self,
-353:         rule: InferenceRule,
-354:         context: RuleEvaluationContext,
-355:         *,
-356:         max_matches: int = 1000,
-357:     ) -> list[RuleMatch]:
-358:         """Evaluate a single inference rule.
-359: 
-360:         Uses indexed lookups for O(1) entity access and O(k) chain lookups
-361:         where k is the number of relationships per entity (typically small).
-362:         """
-363:         if not rule.when or len(rule.when) < 1:
-364:             return []
-365: 
-366:         matches = []
-367: 
-368:         # Get relationships matching the first condition
-369:         first_condition = rule.when[0]
-370:         first_rels = context.relationship_index.get(first_condition.relationship, [])
-371: 
-372:         # Diagnostic: Log how many relationships match before filtering
-373:         before_filter_count = len(first_rels)
-374: 
-375:         # Filter by source/target type if specified
-376:         first_rels = self._filter_relationships_by_types(
-377:             first_rels, first_condition.source_type, first_condition.target_type, context
-378:         )
-379: 
-380:         # Diagnostic: Log filtering results for debugging
-381:         if before_filter_count > 0 and len(first_rels) == 0:
-382:             logger.debug(
-383:                 f"Rule '{rule.name}': {before_filter_count} {first_condition.relationship} rels "
-384:                 f"all filtered out by type filter (need {first_condition.source_type}->{first_condition.target_type})"
-385:             )
-386: 
-387:         if len(rule.when) == 1:
-388:             # Single condition rule
-389:             for rel in first_rels:
-390:                 if len(matches) >= max_matches:
-391:                     break
-392:                 source_entity = self._find_entity_by_id(rel.source_entity_id, context)
-393:                 target_entity = self._find_entity_by_id(rel.target_entity_id, context)
-394: 
-395:                 if source_entity and target_entity:
-396:                     # Resolve which entities would be used for the inferred relationship
-397:                     entity_map = {"first": {"source": source_entity, "target": target_entity}}
-398:                     inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
-399:                     inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
-400: 
-401:                     # Skip self-referential matches early (don't count against rule limit)
-402:                     if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
-403:                         continue
-404: 
-405:                     matches.append(
-406:                         RuleMatch(
-407:                             rule_name=rule.name,
-408:                             matched_relationships=[rel],
-409:                             matched_entities=[source_entity, target_entity],
-410:                             confidence=rule.confidence,
-411:                             metadata={
-412:                                 "then_relationship": rule.then_relationship,
-413:                                 "then_source": rule.then_source,
-414:                                 "then_target": rule.then_target,
-415:                                 "first": {"source": source_entity, "target": target_entity},
-416:                             },
-417:                         )
-418:                     )
-419:         else:
-420:             # Multi-condition rule - use indexed lookups for O(k) instead of O(n)
-421:             second_condition = rule.when[1]
-422:             second_rel_type = second_condition.relationship
-423: 
-424:             for rel1 in first_rels:
-425:                 if len(matches) >= max_matches:
-426:                     break
-427: 
-428:                 # Get candidate second relationships connected to rel1's entities
-429:                 # Instead of iterating ALL second_rels, only check those connected to rel1
-430:                 candidate_rels: list[Relationship] = []
-431: 
-432:                 # Chain pattern: rel1.target -> rel2.source
-433:                 target_key = str(rel1.target_entity_id)
-434:                 for rel2 in context.rels_by_source.get(target_key, []):
-435:                     rel2_type = str(
-436:                         rel2.relationship_type.value
-437:                         if hasattr(rel2.relationship_type, "value")
-438:                         else rel2.relationship_type
-439:                     )
-440:                     if rel2_type == second_rel_type:
-441:                         candidate_rels.append(rel2)
-442: 
-443:                 # Shared source pattern: rel1.source == rel2.source
-444:                 source_key = str(rel1.source_entity_id)
-445:                 for rel2 in context.rels_by_source.get(source_key, []):
-446:                     rel2_type = str(
-447:                         rel2.relationship_type.value
-448:                         if hasattr(rel2.relationship_type, "value")
-449:                         else rel2.relationship_type
-450:                     )
-451:                     if rel2_type == second_rel_type and rel2 not in candidate_rels:
-452:                         candidate_rels.append(rel2)
-453: 
-454:                 # Shared target pattern: rel1.target == rel2.target
-455:                 for rel2 in context.rels_by_target.get(target_key, []):
-456:                     rel2_type = str(
-457:                         rel2.relationship_type.value
-458:                         if hasattr(rel2.relationship_type, "value")
-459:                         else rel2.relationship_type
-460:                     )
-461:                     if rel2_type == second_rel_type and rel2 not in candidate_rels:
-462:                         candidate_rels.append(rel2)
-463: 
-464:                 # Filter candidates by type
-465:                 candidate_rels = self._filter_relationships_by_types(
-466:                     candidate_rels, second_condition.source_type, second_condition.target_type, context
-467:                 )
-468: 
-469:                 # Create matches from candidates
-470:                 for rel2 in candidate_rels:
-471:                     if len(matches) >= max_matches:
-472:                         break
-473:                     source1 = self._find_entity_by_id(rel1.source_entity_id, context)
-474:                     target1 = self._find_entity_by_id(rel1.target_entity_id, context)
-475:                     source2 = self._find_entity_by_id(rel2.source_entity_id, context)
-476:                     target2 = self._find_entity_by_id(rel2.target_entity_id, context)
-477: 
-478:                     if all([source1, target1, source2, target2]):
-479:                         # Resolve which entities would be used for the inferred relationship
-480:                         entity_map = {
-481:                             "first": {"source": source1, "target": target1},
-482:                             "second": {"source": source2, "target": target2},
-483:                         }
-484:                         inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
-485:                         inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
-486: 
-487:                         # Skip self-referential matches early (don't count against rule limit)
-488:                         if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
-489:                             continue
-490: 
-491:                         matches.append(
-492:                             RuleMatch(
-493:                                 rule_name=rule.name,
-494:                                 matched_relationships=[rel1, rel2],
-495:                                 matched_entities=[source1, target1, source2, target2],
-496:                                 confidence=rule.confidence,
-497:                                 metadata={
-498:                                     "then_relationship": rule.then_relationship,
-499:                                     "then_source": rule.then_source,
-500:                                     "then_target": rule.then_target,
-501:                                     "first": {"source": source1, "target": target1},
-502:                                     "second": {"source": source2, "target": target2},
-503:                                 },
-504:                             )
-505:                         )
-506: 
-507:         return matches
-508: 
-509:     def _find_entities_for_pattern_match(
-510:         self,
-511:         matched_value: str,
-512:         entity_types: list[str],
-513:         context: RuleEvaluationContext,
-514:     ) -> list[Entity]:
-515:         """Find entities that might match a pattern value.
-516: 
-517:         Uses type hierarchy matching so EMPLOYEE matches expected type PERSON.
-518:         """
-519:         candidates = []
-520: 
-521:         # Check entity names
-522:         name_key = matched_value.lower()
-523:         if name_key in context.entity_index:
-524:             candidates.extend(context.entity_index[name_key])
-525: 
-526:         # Check entity attributes for the matched value
-527:         for entity in context.entities:
-528:             for attr_value in entity.attributes.values():
-529:                 if isinstance(attr_value, str) and matched_value in attr_value:
-530:                     if entity not in candidates:
-531:                         candidates.append(entity)
-532:                     break
-533: 
-534:         # Filter by entity types if specified, using hierarchy matching
-535:         if entity_types:
-536:             filtered = []
-537:             for e in candidates:
-538:                 actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
-539:                 # Check if actual type matches any of the expected types via hierarchy
-540:                 if any(types_match(actual_type, expected_type) for expected_type in entity_types):
-541:                     filtered.append(e)
-542:             candidates = filtered
-543: 
-544:         return candidates
-545: 
-546:     def _find_field_matches(
-547:         self,
-548:         rule: CorrelationRule,
-549:         context: RuleEvaluationContext,
-550:     ) -> list[RuleMatch]:
-551:         """Find entities that match on specified fields."""
-552:         matches = []
-553: 
-554:         # Filter entities by type
-555:         candidates = []
-556:         if rule.entity_types:
-557:             for entity_type in rule.entity_types:
-558:                 candidates.extend(context.type_index.get(entity_type, []))
-559:         else:
-560:             candidates = context.entities
-561: 
-562:         # Group entities by field values
-563:         for field_name in rule.match_fields:
-564:             field_groups: dict[Any, list[Entity]] = {}
-565:             for entity in candidates:
-566:                 field_value = entity.attributes.get(field_name)
-567:                 if field_value:
-568:                     # Normalize string values
-569:                     if isinstance(field_value, str):
-570:                         field_value = field_value.lower()
-571:                     if field_value not in field_groups:
-572:                         field_groups[field_value] = []
-573:                     field_groups[field_value].append(entity)
-574: 
-575:             # Create matches for groups with multiple entities
-576:             for field_value, entities in field_groups.items():
-577:                 if len(entities) > 1:
-578:                     matches.append(
-579:                         RuleMatch(
-580:                             rule_name=rule.name,
-581:                             matched_value=str(field_value),
-582:                             matched_entities=entities,
-583:                             confidence=rule.confidence,
-584:                             metadata={
-585:                                 "match_field": field_name,
-586:                                 "creates_relationship": rule.creates_relationship,
-587:                             },
-588:                         )
-589:                     )
-590: 
-591:         return matches
-592: 
-593:     def _filter_relationships_by_types(
-594:         self,
-595:         relationships: list[Relationship],
-596:         source_type: str | None,
-597:         target_type: str | None,
-598:         context: RuleEvaluationContext,
-599:     ) -> list[Relationship]:
-600:         """Filter relationships by source and target entity types.
-601: 
-602:         Uses type hierarchy matching so EMPLOYEE matches rules expecting PERSON,
-603:         and vice versa.
-604:         """
-605:         if not source_type and not target_type:
-606:             return relationships
-607: 
-608:         filtered = []
-609:         for rel in relationships:
-610:             source_entity = self._find_entity_by_id(rel.source_entity_id, context)
-611:             target_entity = self._find_entity_by_id(rel.target_entity_id, context)
-612: 
-613:             if not source_entity or not target_entity:
-614:                 continue
-615: 
-616:             # Get actual entity types
-617:             actual_source_type = str(
-618:                 source_entity.entity_type.value
-619:                 if hasattr(source_entity.entity_type, "value")
-620:                 else source_entity.entity_type
-621:             )
-622:             actual_target_type = str(
-623:                 target_entity.entity_type.value
-624:                 if hasattr(target_entity.entity_type, "value")
-625:                 else target_entity.entity_type
-626:             )
-627: 
-628:             # Use hierarchy-aware type matching
-629:             source_matches = not source_type or types_match(actual_source_type, source_type)
-630:             target_matches = not target_type or types_match(actual_target_type, target_type)
-631: 
-632:             if source_matches and target_matches:
-633:                 filtered.append(rel)
-634: 
-635:         return filtered
-636: 
-637:     def _find_entity_by_id(
-638:         self,
-639:         entity_id: Any,
-640:         context: RuleEvaluationContext,
-641:     ) -> Entity | None:
-642:         """Find entity by ID in context using indexed lookup."""
-643:         return context.entity_by_id.get(str(entity_id))
-644: 
-645:     def _resolve_entity_ref(
-646:         self,
-647:         ref: str,
-648:         entity_map: dict[str, dict[str, Entity]],
-649:     ) -> Entity | None:
-650:         """Resolve an entity reference like 'first.source' or 'second.target'.
-651: 
-652:         Args:
-653:             ref: Reference string (e.g., 'first.source', 'second.target')
-654:             entity_map: Map of group name to source/target entities
-655: 
-656:         Returns:
-657:             Resolved entity or None if reference is invalid
-658:         """
-659:         parts = ref.split(".")
-660:         if len(parts) != 2:
-661:             return None
-662: 
-663:         group, position = parts
-664:         group_entities = entity_map.get(group)
-665:         if not group_entities:
-666:             return None
-667: 
-668:         return group_entities.get(position)
-669: 
-670:     def _relationships_connect(
-671:         self,
-672:         rel1: Relationship,
-673:         rel2: Relationship,
-674:         context: RuleEvaluationContext,
-675:     ) -> bool:
-676:         """Check if two relationships connect (share an entity)."""
-677:         # Check if rel1's target is rel2's source (chain pattern)
-678:         if rel1.target_entity_id == rel2.source_entity_id:
-679:             return True
-680:         # Check if they share source or target
-681:         if rel1.source_entity_id == rel2.source_entity_id:
-682:             return True
-683:         if rel1.target_entity_id == rel2.target_entity_id:
-684:             return True
-685:         return False
-686: 
-687:     def _get_compiled_pattern(self, pattern: str) -> re.Pattern | None:
-688:         """Get or compile a regex pattern."""
-689:         if pattern not in self._compiled_patterns:
-690:             try:
-691:                 self._compiled_patterns[pattern] = re.compile(pattern, re.IGNORECASE)
-692:             except re.error as e:
-693:                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
-694:                 return None
-695: 
-696:         return self._compiled_patterns[pattern]
 ````
 
 ## File: src/khora/extraction/entity_resolution.py
@@ -35123,93 +35175,6 @@ README.md
 79: 
 80:     # Keep uvicorn access logs visible
 81:     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
-````
-
-## File: tests/unit/test_api.py
-````python
- 1: """Tests for API module."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
- 7: 
- 8: import khora
- 9: 
-10: 
-11: @pytest.mark.unit
-12: class TestStatusEndpoints:
-13:     """Tests for status check endpoints."""
-14: 
-15:     def test_status_check(self, test_client: TestClient) -> None:
-16:         """Test basic status check endpoint."""
-17:         response = test_client.get("/status")
-18: 
-19:         assert response.status_code == 200
-20:         data = response.json()
-21:         assert data["status"] == "ok"
-22:         assert "timestamp" in data
-23:         assert data["version"] == khora.__version__
-24:         assert data["service"] == "khora"
-25: 
-26:     def test_health_check(self, test_client: TestClient) -> None:
-27:         """Test health check endpoint."""
-28:         response = test_client.get("/health")
-29: 
-30:         assert response.status_code == 200
-31:         data = response.json()
-32:         assert data["status"] == "healthy"
-33:         assert "timestamp" in data
-34:         assert data["version"] == khora.__version__
-35: 
-36:     def test_readiness_check(self, test_client: TestClient) -> None:
-37:         """Test readiness check endpoint."""
-38:         response = test_client.get("/health/ready")
-39: 
-40:         assert response.status_code == 200
-41:         data = response.json()
-42:         assert data["status"] in ["ready", "not_ready"]
-43:         assert "timestamp" in data
-44:         assert "checks" in data
-45: 
-46:     def test_liveness_check(self, test_client: TestClient) -> None:
-47:         """Test liveness check endpoint."""
-48:         response = test_client.get("/health/live")
-49: 
-50:         assert response.status_code == 200
-51:         data = response.json()
-52:         assert data["status"] == "alive"
-53:         assert "timestamp" in data
-54: 
-55: 
-56: @pytest.mark.unit
-57: class TestConfig:
-58:     """Tests for configuration."""
-59: 
-60:     def test_default_config(self) -> None:
-61:         """Test default configuration values."""
-62:         from khora.config import KhoraConfig
-63: 
-64:         config = KhoraConfig()
-65:         assert config.app_name == "khora"
-66:         assert config.environment == "development"
-67:         assert config.debug is False
-68:         assert config.api_host == "127.0.0.1"
-69:         assert config.api_port == 8000
-70:         assert config.auth_enabled is True
-71: 
-72:     def test_config_from_env(self, monkeypatch) -> None:
-73:         """Test configuration from environment variables."""
-74:         from khora.config import KhoraConfig
-75: 
-76:         monkeypatch.setenv("KHORA_DEBUG", "true")
-77:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-78:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-79: 
-80:         config = KhoraConfig()
-81:         assert config.debug is True
-82:         assert config.api_port == 9000
-83:         assert config.environment == "staging"
 ````
 
 ## File: tests/unit/test_entity_index.py
@@ -36929,6 +36894,93 @@ README.md
 234: 
 235:             return self.occurred_at + timedelta(seconds=self.duration_seconds)
 236:         return None
+````
+
+## File: tests/unit/test_api.py
+````python
+ 1: """Tests for API module."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
+ 7: 
+ 8: import khora
+ 9: 
+10: 
+11: @pytest.mark.unit
+12: class TestStatusEndpoints:
+13:     """Tests for status check endpoints."""
+14: 
+15:     def test_status_check(self, test_client: TestClient) -> None:
+16:         """Test basic status check endpoint."""
+17:         response = test_client.get("/status")
+18: 
+19:         assert response.status_code == 200
+20:         data = response.json()
+21:         assert data["status"] == "ok"
+22:         assert "timestamp" in data
+23:         assert data["version"] == khora.__version__
+24:         assert data["service"] == "khora"
+25: 
+26:     def test_health_check(self, test_client: TestClient) -> None:
+27:         """Test health check endpoint."""
+28:         response = test_client.get("/health")
+29: 
+30:         assert response.status_code == 200
+31:         data = response.json()
+32:         assert data["status"] == "healthy"
+33:         assert "timestamp" in data
+34:         assert data["version"] == khora.__version__
+35: 
+36:     def test_readiness_check(self, test_client: TestClient) -> None:
+37:         """Test readiness check endpoint."""
+38:         response = test_client.get("/health/ready")
+39: 
+40:         assert response.status_code == 200
+41:         data = response.json()
+42:         assert data["status"] in ["ready", "not_ready"]
+43:         assert "timestamp" in data
+44:         assert "checks" in data
+45: 
+46:     def test_liveness_check(self, test_client: TestClient) -> None:
+47:         """Test liveness check endpoint."""
+48:         response = test_client.get("/health/live")
+49: 
+50:         assert response.status_code == 200
+51:         data = response.json()
+52:         assert data["status"] == "alive"
+53:         assert "timestamp" in data
+54: 
+55: 
+56: @pytest.mark.unit
+57: class TestConfig:
+58:     """Tests for configuration."""
+59: 
+60:     def test_default_config(self) -> None:
+61:         """Test default configuration values."""
+62:         from khora.config import KhoraConfig
+63: 
+64:         config = KhoraConfig()
+65:         assert config.app_name == "khora"
+66:         assert config.environment == "development"
+67:         assert config.debug is False
+68:         assert config.api_host == "127.0.0.1"
+69:         assert config.api_port == 8000
+70:         assert config.auth_enabled is True
+71: 
+72:     def test_config_from_env(self, monkeypatch) -> None:
+73:         """Test configuration from environment variables."""
+74:         from khora.config import KhoraConfig
+75: 
+76:         monkeypatch.setenv("KHORA_DEBUG", "true")
+77:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+78:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+79: 
+80:         config = KhoraConfig()
+81:         assert config.debug is True
+82:         assert config.api_port == 9000
+83:         assert config.environment == "staging"
 ````
 
 ## File: src/khora/extraction/expansion/expander.py
@@ -42362,6 +42414,65 @@ README.md
 909:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
+## File: CLAUDE.md
+````markdown
+ 1: # Khora
+ 2: 
+ 3: Memory Lake combining knowledge graphs (Neo4j/Kuzu/Memgraph), vector database (pgvector), and PostgreSQL for unified knowledge storage and retrieval.
+ 4: 
+ 5: ## Commands
+ 6: 
+ 7: ```bash
+ 8: make test              # Run tests (pytest, coverage ≥50%)
+ 9: make format            # Format code (black, isort, ruff)
+10: make lint              # Lint + typecheck
+11: uv run khora serve --reload  # Dev server
+12: uv run alembic upgrade head  # Run migrations
+13: ```
+14: 
+15: ## Architecture
+16: 
+17: ```
+18: MemoryLake (facade) → Engine (graphrag default) → StorageCoordinator
+19:                                                   ├── PostgreSQL (documents, tenancy)
+20:                                                   ├── pgvector (embeddings)
+21:                                                   └── Graph backend (entities, relationships)
+22: ```
+23: 
+24: **Key entry points:**
+25: - `src/khora/memory_lake.py` - Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
+26: - `src/khora/engines/graphrag/engine.py` - Default engine implementation
+27: - `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
+28: - `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
+29: 
+30: **Multi-tenancy:** Organization → Workspace → MemoryNamespace
+31: 
+32: ## Usage
+33: 
+34: ```python
+35: async with MemoryLake("postgresql://...") as lake:
+36:     await lake.remember("content", title="Doc")
+37:     results = await lake.recall("query")
+38: ```
+39: 
+40: ## Key Patterns
+41: 
+42: - **Engines are pluggable** - See `khora.engines.protocol.MemoryEngineProtocol`
+43: - **Graph backends are interchangeable** - All implement `GraphBackend` in `storage/backends/base.py`
+44: - **Extraction skills are YAML-defined** - See `src/khora/extraction/skills/definitions/`
+45: - **Config via env vars** - `KHORA_DATABASE_URL`, `KHORA_NEO4J_URL`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
+46: 
+47: ## Testing
+48: 
+49: ```bash
+50: make test                           # Full suite
+51: uv run pytest tests/unit/test_memory_lake.py -v  # Single file
+52: uv run pytest -k "test_remember" -v              # By name
+53: ```
+54: 
+55: Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
+````
+
 ## File: src/khora/config/schema.py
 ````python
   1: """Pydantic configuration models for Khora."""
@@ -42901,65 +43012,6 @@ README.md
 535:                 embedding_dimension=self.storage.embedding_dimension,
 536:             )
 537:         return vector
-````
-
-## File: CLAUDE.md
-````markdown
- 1: # Khora
- 2: 
- 3: Memory Lake combining knowledge graphs (Neo4j/Kuzu/Memgraph), vector database (pgvector), and PostgreSQL for unified knowledge storage and retrieval.
- 4: 
- 5: ## Commands
- 6: 
- 7: ```bash
- 8: make test              # Run tests (pytest, coverage ≥50%)
- 9: make format            # Format code (black, isort, ruff)
-10: make lint              # Lint + typecheck
-11: uv run khora serve --reload  # Dev server
-12: uv run alembic upgrade head  # Run migrations
-13: ```
-14: 
-15: ## Architecture
-16: 
-17: ```
-18: MemoryLake (facade) → Engine (graphrag default) → StorageCoordinator
-19:                                                   ├── PostgreSQL (documents, tenancy)
-20:                                                   ├── pgvector (embeddings)
-21:                                                   └── Graph backend (entities, relationships)
-22: ```
-23: 
-24: **Key entry points:**
-25: - `src/khora/memory_lake.py` - Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
-26: - `src/khora/engines/graphrag/engine.py` - Default engine implementation
-27: - `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
-28: - `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
-29: 
-30: **Multi-tenancy:** Organization → Workspace → MemoryNamespace
-31: 
-32: ## Usage
-33: 
-34: ```python
-35: async with MemoryLake("postgresql://...") as lake:
-36:     await lake.remember("content", title="Doc")
-37:     results = await lake.recall("query")
-38: ```
-39: 
-40: ## Key Patterns
-41: 
-42: - **Engines are pluggable** - See `khora.engines.protocol.MemoryEngineProtocol`
-43: - **Graph backends are interchangeable** - All implement `GraphBackend` in `storage/backends/base.py`
-44: - **Extraction skills are YAML-defined** - See `src/khora/extraction/skills/definitions/`
-45: - **Config via env vars** - `KHORA_DATABASE_URL`, `KHORA_NEO4J_URL`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
-46: 
-47: ## Testing
-48: 
-49: ```bash
-50: make test                           # Full suite
-51: uv run pytest tests/unit/test_memory_lake.py -v  # Single file
-52: uv run pytest -k "test_remember" -v              # By name
-53: ```
-54: 
-55: Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
 ````
 
 ## File: src/khora/query/engine.py
@@ -47500,6 +47552,25 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-05 17:25:21 +0100
+**Message:** fix: respect graph_config=None and ignore KHORA_NEO4J_URL env var
+
+**Files:**
+- src/khora/engines/khora/engine.py
+
+## Commit: 2026-02-05 17:10:06 +0100
+**Message:** fix: use dynamic version and fix legacy neo4j_url handling
+
+**Files:**
+- REPOMIX.md
+- src/khora/_accel.py
+- src/khora/api/routes/status.py
+- src/khora/config/llm.py
+- src/khora/config/schema.py
+- tests/unit/test_api.py
+- tests/unit/test_config_backends.py
+- uv.lock
+
 ## Commit: 2026-02-05 17:00:51 +0100
 **Message:** chore: bump version to 0.1.1
 
@@ -47687,15 +47758,3 @@ README.md
 - src/khora/extraction/extractors/llm.py
 - src/khora/pipelines/flows/ingest.py
 - src/khora/pipelines/tasks/extract.py
-
-## Commit: 2026-02-03 16:05:33 +0100
-**Message:** fix: handle empty/invalid LLM responses in extraction
-
-**Files:**
-- src/khora/extraction/extractors/llm.py
-
-## Commit: 2026-02-03 15:51:08 +0100
-**Message:** feat: support per-document extraction model override
-
-**Files:**
-- src/khora/pipelines/flows/ingest.py

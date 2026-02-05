@@ -9,6 +9,7 @@ This engine is optimized for:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -557,7 +558,7 @@ class KhoraEngine:
         namespace_id: UUID,
         *,
         skill_name: str = "general_entities",
-        max_concurrent: int = 5,
+        max_concurrent: int = 10,
         deduplicate: bool = True,
         infer_relationships: bool = False,  # Not used in Khora engine
         on_progress: Callable[[int, int], None] | None = None,
@@ -568,6 +569,18 @@ class KhoraEngine:
         - Fast chunking without full entity extraction
         - Batch embedding for cost efficiency
         - Parallel processing with semaphore control
+
+        Args:
+            documents: List of document dicts with 'content', 'title', 'source', 'metadata'
+            namespace_id: Namespace to store documents in
+            skill_name: Extraction skill to use
+            max_concurrent: Maximum concurrent document processing (default 10)
+            deduplicate: Whether to skip duplicate documents
+            infer_relationships: Not used in Khora engine
+            on_progress: Callback for progress updates (completed, total)
+
+        Returns:
+            BatchResult with processing statistics
         """
         if not documents:
             return BatchResult(
@@ -582,65 +595,92 @@ class KhoraEngine:
 
         storage = self._get_storage()
         total = len(documents)
-        processed = 0
-        skipped = 0
-        failed = 0
-        total_chunks = 0
 
-        # Build checksum set for deduplication
-        checksums_seen: set[str] = set()
-        if deduplicate:
-            # Pre-fetch existing checksums
-            existing_docs = await storage.list_documents(namespace_id, limit=100000)
-            checksums_seen = {d.metadata.checksum for d in existing_docs if d.metadata}
+        # Track results with thread-safe counters
+        results: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "chunks": 0}
+        results_lock = asyncio.Lock()
+        progress_count = 0
+        progress_lock = asyncio.Lock()
 
-        for i, doc_data in enumerate(documents):
+        # For deduplication within the batch, track checksums we've started processing
+        checksums_in_flight: set[str] = set()
+        checksums_lock = asyncio.Lock()
+
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def process_document(doc_data: dict[str, Any]) -> None:
+            """Process a single document with semaphore control."""
+            nonlocal progress_count
+
             content = doc_data.get("content", "")
             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-            # Deduplicate
-            if checksum in checksums_seen:
-                skipped += 1
-                continue
-            checksums_seen.add(checksum)
+            # Check for duplicate within the batch (before acquiring semaphore)
+            async with checksums_lock:
+                if checksum in checksums_in_flight:
+                    async with results_lock:
+                        results["skipped"] += 1
+                    return
+                checksums_in_flight.add(checksum)
 
-            try:
-                # Extract occurred_at from metadata if present
-                doc_metadata = doc_data.get("metadata", {})
-                occurred_at = None
-                if "occurred_at" in doc_metadata:
-                    occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+            # Check for duplicate in storage (using efficient per-document lookup)
+            if deduplicate:
+                existing = await storage.get_document_by_checksum(namespace_id, checksum)
+                if existing:
+                    async with results_lock:
+                        results["skipped"] += 1
+                    # Update progress
+                    if on_progress:
+                        async with progress_lock:
+                            progress_count += 1
+                            on_progress(progress_count, total)
+                    return
 
-                result = await self.remember(
-                    content,
-                    namespace_id,
-                    title=doc_data.get("title", ""),
-                    source=doc_data.get("source", ""),
-                    metadata=doc_metadata,
-                    skill_name=skill_name,
-                    occurred_at=occurred_at,
-                )
+            async with semaphore:
+                try:
+                    # Extract occurred_at from metadata if present
+                    doc_metadata = doc_data.get("metadata", {})
+                    occurred_at = None
+                    if "occurred_at" in doc_metadata:
+                        occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
 
-                if result.metadata.get("duplicate"):
-                    skipped += 1
-                else:
-                    processed += 1
-                    total_chunks += result.chunks_created
+                    result = await self.remember(
+                        content,
+                        namespace_id,
+                        title=doc_data.get("title", ""),
+                        source=doc_data.get("source", ""),
+                        metadata=doc_metadata,
+                        skill_name=skill_name,
+                        occurred_at=occurred_at,
+                    )
 
-            except Exception as e:
-                logger.error(f"Failed to process document: {e}")
-                failed += 1
+                    async with results_lock:
+                        if result.metadata.get("duplicate"):
+                            results["skipped"] += 1
+                        else:
+                            results["processed"] += 1
+                            results["chunks"] += result.chunks_created
 
-            # Progress callback
+                except Exception as e:
+                    logger.error(f"Failed to process document: {e}")
+                    async with results_lock:
+                        results["failed"] += 1
+
+            # Update progress
             if on_progress:
-                on_progress(i + 1, total)
+                async with progress_lock:
+                    progress_count += 1
+                    on_progress(progress_count, total)
+
+        # Process all documents concurrently with semaphore control
+        await asyncio.gather(*[process_document(doc) for doc in documents])
 
         return BatchResult(
             total=total,
-            processed=processed,
-            skipped=skipped,
-            failed=failed,
-            chunks=total_chunks,
+            processed=results["processed"],
+            skipped=results["skipped"],
+            failed=results["failed"],
+            chunks=results["chunks"],
             entities=0,
             relationships=0,
         )
