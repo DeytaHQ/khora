@@ -989,15 +989,21 @@ Return ONLY valid JSON, no other text."""
 
             entities = []
             for e in data.get("entities", []):
+                # Skip malformed entities (LLM sometimes returns strings instead of dicts)
+                if not isinstance(e, dict):
+                    logger.debug(f"Skipping malformed entity (not a dict): {type(e)}")
+                    continue
+
                 # Parse temporal info if present
                 temporal = None
                 if "temporal" in e and e["temporal"]:
                     t = e["temporal"]
-                    temporal = TemporalInfo(
-                        mentioned_at=t.get("mentioned_at"),
-                        valid_from=t.get("valid_from"),
-                        valid_until=t.get("valid_until"),
-                    )
+                    if isinstance(t, dict):
+                        temporal = TemporalInfo(
+                            mentioned_at=t.get("mentioned_at"),
+                            valid_from=t.get("valid_from"),
+                            valid_until=t.get("valid_until"),
+                        )
 
                 # Ensure attributes is a dict (LLM sometimes returns a list)
                 attrs = e.get("attributes", {})
@@ -1018,15 +1024,21 @@ Return ONLY valid JSON, no other text."""
 
             relationships = []
             for r in data.get("relationships", []):
+                # Skip malformed relationships (LLM sometimes returns strings instead of dicts)
+                if not isinstance(r, dict):
+                    logger.debug(f"Skipping malformed relationship (not a dict): {type(r)}")
+                    continue
+
                 # Parse temporal info if present
                 temporal = None
                 if "temporal" in r and r["temporal"]:
                     t = r["temporal"]
-                    temporal = TemporalInfo(
-                        occurred_at=t.get("occurred_at"),
-                        valid_from=t.get("valid_from"),
-                        valid_until=t.get("valid_until"),
-                    )
+                    if isinstance(t, dict):
+                        temporal = TemporalInfo(
+                            occurred_at=t.get("occurred_at"),
+                            valid_from=t.get("valid_from"),
+                            valid_until=t.get("valid_until"),
+                        )
 
                 relationships.append(
                     ExtractedRelationship(
@@ -1042,6 +1054,11 @@ Return ONLY valid JSON, no other text."""
 
             events = []
             for ev in data.get("events", []):
+                # Skip malformed events (LLM sometimes returns strings instead of dicts)
+                if not isinstance(ev, dict):
+                    logger.debug(f"Skipping malformed event (not a dict): {type(ev)}")
+                    continue
+
                 events.append(
                     ExtractedEvent(
                         description=ev.get("description") or "",
