@@ -65,6 +65,8 @@ memgraph = ["neo4j>=6.1.0"]  # Memgraph uses bolt protocol via neo4j driver
 arcadedb = ["httpx>=0.28.0"]
 # All graph backends
 graph-all = ["neo4j>=6.1.0", "kuzu>=0.8.0", "httpx>=0.28.0"]
+# Weaviate vector database
+weaviate = ["weaviate-client>=4.10.0"]
 # All backends
 all-backends = [
     "neo4j>=6.1.0",
@@ -72,6 +74,7 @@ all-backends = [
     "asyncpg>=0.31.0",
     "pgvector>=0.4.2",
     "httpx>=0.28.0",
+    "weaviate-client>=4.10.0",
 ]
 # Neural reranking
 reranking = [
@@ -115,6 +118,9 @@ omit = [
     "tests/*",
     "*/test_*.py",
     "*/__pycache__/*",
+    # Khora engine backends require database connections for testing
+    "*/engines/khora/backends/pgvector.py",
+    "*/engines/khora/backends/weaviate.py",
 ]
 
 [tool.coverage.report]

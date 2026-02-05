@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 # Registry: name -> (module_path, class_name)
 _ENGINE_REGISTRY: dict[str, tuple[str, str]] = {
     "graphrag": ("khora.engines.graphrag.engine", "GraphRAGEngine"),
+    "khora": ("khora.engines.khora.engine", "KhoraEngine"),
 }
 
 

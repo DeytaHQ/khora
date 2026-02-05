@@ -608,3 +608,168 @@ class ExpertiseDefinitionModel(Base):
 
     def __repr__(self) -> str:
         return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"
+
+
+# =============================================================================
+# Temporal Models for Khora Engine
+# =============================================================================
+
+
+class TimeGranularity:
+    """Time granularity levels for hierarchical time graph."""
+
+    YEAR = "year"
+    QUARTER = "quarter"
+    MONTH = "month"
+    WEEK = "week"
+    DAY = "day"
+
+
+class TimeNodeModel(Base):
+    """Hierarchical time graph node for temporal navigation.
+
+    Enables efficient temporal queries by organizing time into a hierarchy:
+    Year → Quarter → Month → Week → Day
+
+    Each node can have a summary embedding for temporal range queries.
+    """
+
+    __tablename__ = "time_nodes"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    namespace_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # Time hierarchy
+    granularity: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # year, quarter, month, week, day
+    start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("time_nodes.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+
+    # Display name (e.g., "2024", "Q1 2024", "January 2024", "Week 1 2024", "2024-01-15")
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Temporal summary for range queries
+    summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+
+    # Stats for optimization
+    edge_count: Mapped[int] = mapped_column(Integer, default=0)
+    entity_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+    )
+
+    # Self-referential relationship for hierarchy
+    parent: Mapped[TimeNodeModel | None] = relationship("TimeNodeModel", remote_side=[id], backref="children")
+
+    __table_args__ = (
+        # Unique constraint: one node per namespace/granularity/start_time
+        UniqueConstraint("namespace_id", "granularity", "start_time", name="uq_time_node_namespace_granularity_start"),
+        # Index for range queries
+        Index("ix_time_nodes_namespace_range", "namespace_id", "start_time", "end_time"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<TimeNode(id={self.id!r}, name={self.name!r}, granularity={self.granularity})>"
+
+
+class TemporalEdgeModel(Base):
+    """Temporal relationship edge with explicit timestamps.
+
+    Unlike RelationshipModel which collapses multiple observations into one edge,
+    TemporalEdgeModel stores each timestamped observation as a distinct edge.
+    This enables precise temporal queries like "who worked with whom in Q1 2024?"
+    """
+
+    __tablename__ = "temporal_edges"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    namespace_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_entity_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_entity_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    relationship_type: Mapped[str] = mapped_column(String(64), default="RELATES_TO", index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+
+    # Bi-temporal model: when did this happen vs when did we learn about it
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Temporal validity window (when is this fact considered true)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Edge invalidation tracking
+    is_valid: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    invalidated_by_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("temporal_edges.id", ondelete="SET NULL"), nullable=True
+    )
+    invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Confidence and source tracking
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+    source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Relationships
+    namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel")
+    source_entity: Mapped[EntityModel] = relationship("EntityModel", foreign_keys=[source_entity_id])
+    target_entity: Mapped[EntityModel] = relationship("EntityModel", foreign_keys=[target_entity_id])
+    invalidated_by: Mapped[TemporalEdgeModel | None] = relationship("TemporalEdgeModel", remote_side=[id])
+
+    __table_args__ = (
+        # BRIN index for time-series optimization (99% space savings vs btree)
+        Index("ix_temporal_edges_occurred_brin", "occurred_at", postgresql_using="brin"),
+        # Composite index for entity pair + time queries
+        Index(
+            "ix_temporal_edges_entities_time",
+            "source_entity_id",
+            "target_entity_id",
+            "occurred_at",
+        ),
+        # Index for validity queries
+        Index("ix_temporal_edges_valid_range", "valid_from", "valid_until"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<TemporalEdge(id={self.id!r}, type={self.relationship_type}, occurred_at={self.occurred_at})>"
+
+
+class TimeEdgeLinkModel(Base):
+    """Link between time nodes and temporal edges for efficient time-based navigation.
+
+    This join table enables queries like "give me all edges in January 2024"
+    without scanning the entire temporal_edges table.
+    """
+
+    __tablename__ = "time_edge_links"
+
+    time_node_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("time_nodes.id", ondelete="CASCADE"), primary_key=True
+    )
+    edge_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("temporal_edges.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    # Relationships
+    time_node: Mapped[TimeNodeModel] = relationship("TimeNodeModel")
+    edge: Mapped[TemporalEdgeModel] = relationship("TemporalEdgeModel")
+
+    def __repr__(self) -> str:
+        return f"<TimeEdgeLink(time_node_id={self.time_node_id!r}, edge_id={self.edge_id!r})>"
