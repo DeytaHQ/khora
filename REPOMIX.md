@@ -12725,6 +12725,25 @@ README.md
 287:         )
 ````
 
+## File: src/khora/pipelines/flows/__init__.py
+````python
+ 1: """Pipeline flows for Khora Memory Lake."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from .expansion import expand_knowledge_graph, unify_entities
+ 6: from .ingest import backfill_entity_embeddings, ingest_documents
+ 7: from .sync import sync_source
+ 8: 
+ 9: __all__ = [
+10:     "ingest_documents",
+11:     "backfill_entity_embeddings",
+12:     "sync_source",
+13:     "expand_knowledge_graph",
+14:     "unify_entities",
+15: ]
+````
+
 ## File: src/khora/pipelines/flows/sync.py
 ````python
   1: """Source synchronization flows for Khora Memory Lake.
@@ -20874,6 +20893,151 @@ README.md
 159:         assert call["metadata"] == {"chunk_count": 42}
 ````
 
+## File: src/khora/api/routes/status.py
+````python
+ 1: """Status endpoints for Khora API."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from datetime import UTC, datetime
+ 6: from typing import Any
+ 7: 
+ 8: from fastapi import APIRouter, Request
+ 9: 
+10: import khora
+11: 
+12: router = APIRouter()
+13: 
+14: 
+15: @router.get("/status")
+16: async def status_check(request: Request) -> dict[str, Any]:
+17:     """Basic status check endpoint.
+18: 
+19:     Returns:
+20:         Status with timestamp and version
+21:     """
+22:     return {
+23:         "status": "ok",
+24:         "timestamp": datetime.now(UTC).isoformat(),
+25:         "version": khora.__version__,
+26:         "service": "khora",
+27:     }
+28: 
+29: 
+30: @router.get("/health")
+31: async def health_check(request: Request) -> dict[str, Any]:
+32:     """Health check endpoint for orchestration systems.
+33: 
+34:     Returns:
+35:         Health status with timestamp
+36:     """
+37:     return {
+38:         "status": "healthy",
+39:         "timestamp": datetime.now(UTC).isoformat(),
+40:         "version": khora.__version__,
+41:     }
+42: 
+43: 
+44: @router.get("/health/ready")
+45: async def readiness_check(request: Request) -> dict[str, Any]:
+46:     """Readiness check for Kubernetes/orchestration.
+47: 
+48:     Checks that all required services are available.
+49: 
+50:     Returns:
+51:         Readiness status with component checks
+52:     """
+53:     config = request.app.state.config
+54:     checks: dict[str, bool] = {}
+55: 
+56:     # TODO: Add actual health checks for:
+57:     # - Database connections
+58:     # - External services
+59: 
+60:     # For now, return basic status
+61:     checks["config_loaded"] = config is not None
+62: 
+63:     all_healthy = all(checks.values())
+64: 
+65:     return {
+66:         "status": "ready" if all_healthy else "not_ready",
+67:         "timestamp": datetime.now(UTC).isoformat(),
+68:         "checks": checks,
+69:     }
+70: 
+71: 
+72: @router.get("/health/live")
+73: async def liveness_check() -> dict[str, Any]:
+74:     """Liveness check for Kubernetes/orchestration.
+75: 
+76:     Simple check that the application is running.
+77: 
+78:     Returns:
+79:         Liveness status
+80:     """
+81:     return {
+82:         "status": "alive",
+83:         "timestamp": datetime.now(UTC).isoformat(),
+84:     }
+````
+
+## File: src/khora/cli/__init__.py
+````python
+ 1: """Command-line interface for Khora."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from pathlib import Path
+ 6: 
+ 7: import click
+ 8: 
+ 9: from ..logging_config import setup_logging
+10: from .server import serve
+11: 
+12: 
+13: @click.group()
+14: @click.version_option(version="0.1.0")
+15: @click.option(
+16:     "--log-level",
+17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+18:     default="INFO",
+19:     help="Set logging level",
+20: )
+21: @click.option(
+22:     "--json-logs",
+23:     is_flag=True,
+24:     help="Output logs in JSON format for structured logging",
+25: )
+26: @click.option(
+27:     "--log-file",
+28:     type=click.Path(path_type=Path),
+29:     help="Write logs to file (in addition to console)",
+30: )
+31: @click.pass_context
+32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
+33:     """Khora - Deyta's memory lake and materialization of knowledge.
+34: 
+35:     Commands:
+36:     - serve: Start the FastAPI server for API access
+37:     """
+38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
+39:     ctx.ensure_object(dict)
+40:     ctx.obj["log_level"] = log_level
+41:     ctx.obj["json_logs"] = json_logs
+42: 
+43: 
+44: # Register commands
+45: cli.add_command(serve)
+46: 
+47: 
+48: def main() -> None:
+49:     """Main entry point."""
+50:     cli()
+51: 
+52: 
+53: __all__ = ["cli", "main"]
+````
+
 ## File: src/khora/engines/khora/backends/pgvector.py
 ````python
   1: """PostgreSQL+pgvector backend for the Khora engine.
@@ -23183,25 +23347,6 @@ README.md
 694:                 return None
 695: 
 696:         return self._compiled_patterns[pattern]
-````
-
-## File: src/khora/pipelines/flows/__init__.py
-````python
- 1: """Pipeline flows for Khora Memory Lake."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from .expansion import expand_knowledge_graph, unify_entities
- 6: from .ingest import backfill_entity_embeddings, ingest_documents
- 7: from .sync import sync_source
- 8: 
- 9: __all__ = [
-10:     "ingest_documents",
-11:     "backfill_entity_embeddings",
-12:     "sync_source",
-13:     "expand_knowledge_graph",
-14:     "unify_entities",
-15: ]
 ````
 
 ## File: src/khora/pipelines/flows/expansion.py
@@ -31512,1032 +31657,152 @@ README.md
 186:         assert result == []
 ````
 
-## File: README.md
-````markdown
-  1: # Khora
+## File: src/khora/api/app.py
+````python
+  1: """FastAPI application factory for Khora."""
   2: 
-  3: > *"Khora is the receptacle, the space, the matrix in which all things come to be."*
-  4: > *— Plato, Timaeus*
-  5: 
-  6: In Plato's cosmology, **Khora** (χώρα) is the primordial receptacle—neither being nor non-being, but the space that receives all forms and gives them place. It is the nurse of becoming, the womb of the cosmos where the eternal Forms find material expression. Khora does not impose form; it receives, holds, and makes manifestation possible.
-  7: 
-  8: This project embodies that philosophy: **Khora is a memory lake**—a receptacle for knowledge that receives information from disparate sources, holds it in structured form, and enables its retrieval through multiple paths of inquiry. Just as Plato's Khora mediates between the intelligible and sensible worlds, this Memory Lake bridges raw data and meaningful knowledge through semantic extraction, graph relationships, and temporal context.
+  3: from __future__ import annotations
+  4: 
+  5: import time
+  6: from collections.abc import AsyncGenerator
+  7: from contextlib import asynccontextmanager
+  8: from typing import TYPE_CHECKING
   9: 
- 10: ---
- 11: 
- 12: ## Overview
- 13: 
- 14: Khora is a **Memory Lake** system that combines three storage paradigms:
- 15: 
- 16: - **Knowledge Graph** (Neo4j) — Entities and their relationships
- 17: - **Vector Database** (pgvector) — Semantic embeddings for similarity search
- 18: - **Relational Database** (PostgreSQL) — Documents, events, and metadata
+ 10: from fastapi import FastAPI, Request
+ 11: from fastapi.middleware.cors import CORSMiddleware
+ 12: from loguru import logger
+ 13: from starlette.middleware.base import BaseHTTPMiddleware
+ 14: 
+ 15: from .routes import memory, namespaces, status, sync
+ 16: 
+ 17: if TYPE_CHECKING:
+ 18:     from ..config import KhoraConfig
  19: 
- 20: It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
- 21: 
- 22: ### Key Features
+ 20: 
+ 21: class LoggingMiddleware(BaseHTTPMiddleware):
+ 22:     """Middleware to log all requests and responses."""
  23: 
- 24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
- 25: - **Pluggable Engines**: Choose GraphRAG (knowledge graphs) or Khora (temporal-first)
- 26: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
- 27: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
- 28: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
- 29: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
- 30: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
- 31: - **Semantic Extraction**: LLM-powered entity and relationship extraction
- 32: 
- 33: ---
+ 24:     async def dispatch(self, request: Request, call_next):
+ 25:         start_time = time.time()
+ 26:         method = request.method
+ 27:         path = request.url.path
+ 28:         query = str(request.url.query) if request.url.query else ""
+ 29:         client_host = request.client.host if request.client else "unknown"
+ 30: 
+ 31:         # Log incoming request with client info
+ 32:         query_str = f"?{query}" if query else ""
+ 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
  34: 
- 35: ## Pluggable Engines
- 36: 
- 37: Khora supports two engines with different strengths:
+ 35:         try:
+ 36:             response = await call_next(request)
+ 37:             duration = (time.time() - start_time) * 1000
  38: 
- 39: | Engine | Focus | Best For | LLM Cost |
- 40: |--------|-------|----------|----------|
- 41: | **GraphRAG** | Knowledge graphs | Knowledge bases, entity exploration | Higher |
- 42: | **Khora** | Temporal events | Chat logs, events, cost-sensitive apps | 5-10x lower |
- 43: 
- 44: ### GraphRAG Engine (Default)
- 45: 
- 46: Full knowledge graph construction with entity and relationship extraction:
- 47: 
- 48: ```python
- 49: from khora import MemoryLake
- 50: 
- 51: async with MemoryLake("postgresql://...", engine="graphrag") as lake:
- 52:     # Extracts entities and relationships from all content
- 53:     result = await lake.remember("Einstein developed relativity in 1905.")
- 54:     print(f"Extracted {result.entities_extracted} entities")
- 55: 
- 56:     # Graph-based retrieval
- 57:     entities = await lake.list_entities(entity_type="PERSON")
- 58:     related = await lake.find_related_entities(entity_id, max_depth=2)
- 59: ```
+ 39:             # Log response with status code
+ 40:             if response.status_code < 400:
+ 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 42:             elif response.status_code < 500:
+ 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 44:             else:
+ 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
+ 46: 
+ 47:             return response
+ 48:         except Exception as e:
+ 49:             duration = (time.time() - start_time) * 1000
+ 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
+ 51:             raise
+ 52: 
+ 53: 
+ 54: @asynccontextmanager
+ 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+ 56:     """Application lifespan manager for startup/shutdown events."""
+ 57:     from ..db.session import close_db, run_migrations
+ 58:     from ..memory_lake import MemoryLake
+ 59:     from .deps import set_memory_lake
  60: 
- 61: **Requirements:** PostgreSQL + pgvector + Neo4j/Kuzu/Memgraph
- 62: 
- 63: ### Khora Engine (Temporal-First)
- 64: 
- 65: Cost-optimized engine with bi-temporal model and skeleton indexing:
+ 61:     # Startup
+ 62:     logger.info("Starting Khora API server...")
+ 63: 
+ 64:     # Run database migrations
+ 65:     await run_migrations()
  66: 
- 67: ```python
- 68: from khora import MemoryLake
- 69: 
- 70: async with MemoryLake("postgresql://...", engine="khora") as lake:
- 71:     # Store with temporal metadata
- 72:     result = await lake.remember(
- 73:         "Team standup notes",
- 74:         metadata={
- 75:             "occurred_at": "2024-01-15T09:00:00Z",
- 76:             "author": "alice@company.com",
- 77:             "channel": "engineering"
- 78:         }
- 79:     )
+ 67:     # Initialize Memory Lake
+ 68:     config = app.state.config
+ 69:     lake = MemoryLake(config=config)
+ 70:     try:
+ 71:         await lake.connect()
+ 72:         set_memory_lake(lake)
+ 73:         app.state.memory_lake = lake
+ 74:         logger.info("Memory Lake initialized")
+ 75:     except Exception as e:
+ 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
+ 77:         app.state.memory_lake = None
+ 78: 
+ 79:     yield
  80: 
- 81:     # Temporal and structured filtering
- 82:     results = await lake.recall(
- 83:         "What decisions were made?",
- 84:         temporal_filter={
- 85:             "occurred_after": "2024-01-01",
- 86:             "author": "alice@company.com"
- 87:         },
- 88:         hybrid_alpha=0.7  # 70% vector, 30% BM25
- 89:     )
- 90: ```
+ 81:     # Shutdown
+ 82:     logger.info("Shutting down Khora API server...")
+ 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
+ 84:         await app.state.memory_lake.disconnect()
+ 85:     else:
+ 86:         # If MemoryLake wasn't initialized, still shut down telemetry
+ 87:         from ..telemetry import shutdown_telemetry
+ 88: 
+ 89:         await shutdown_telemetry()
+ 90:     await close_db()
  91: 
- 92: **Requirements:** PostgreSQL + pgvector only (Neo4j optional)
- 93: 
- 94: See [Engine Comparison](docs/engines/engine-comparison.md) for detailed guidance.
+ 92: 
+ 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
+ 94:     """Create and configure the FastAPI application.
  95: 
- 96: ---
- 97: 
- 98: ## Documentation
- 99: 
-100: Comprehensive documentation is available in the [`docs/`](docs/) directory:
-101: 
-102: | Topic | Description |
-103: |-------|-------------|
-104: | **Engines** | |
-105: | [Khora Engine](docs/engines/khora-engine.md) | Temporal-first engine documentation |
-106: | [Engine Comparison](docs/engines/engine-comparison.md) | GraphRAG vs Khora comparison |
-107: | [Temporal Model](docs/engines/temporal-model.md) | Bi-temporal design deep dive |
-108: | [Skeleton Indexing](docs/engines/skeleton-indexing.md) | Cost optimization via PageRank |
-109: | [Hybrid Search](docs/engines/hybrid-search.md) | Vector + BM25 fusion |
-110: | **Architecture** | |
-111: | [Overview](docs/architecture/overview.md) | System design, components, data flow |
-112: | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
-113: | [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
-114: | [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
-115: | **Data Models** | |
-116: | [Overview](docs/data-models/overview.md) | Model relationships and purposes |
-117: | [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
-118: | [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
-119: | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
-120: | **Extraction Pipeline** | |
-121: | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
-122: | [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
-123: | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
-124: | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
-125: | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
-126: | [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
-127: | [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
-128: | **Query Engine** | |
-129: | [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
-130: | [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
-131: | [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
-132: | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
-133: | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
-134: | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
-135: | **Planning** | |
-136: | [Roadmap](docs/roadmap.md) | Future improvements and features |
-137: | **References** | |
-138: | [References](docs/REFERENCES.md) | Research papers and inspirations |
-139: 
-140: ---
-141: 
-142: ## Installation
+ 96:     Args:
+ 97:         config: Optional application configuration
+ 98: 
+ 99:     Returns:
+100:         Configured FastAPI application
+101:     """
+102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
+103:     from ..logging_config import setup_logging
+104: 
+105:     setup_logging(level="INFO")
+106: 
+107:     if config is None:
+108:         from ..config import load_config
+109: 
+110:         config = load_config()
+111: 
+112:     app = FastAPI(
+113:         title="Khora",
+114:         description="Deyta's memory lake and materialization of knowledge",
+115:         version="0.1.0",
+116:         lifespan=lifespan,
+117:         debug=config.debug,
+118:     )
+119: 
+120:     # Store config in app state
+121:     app.state.config = config
+122: 
+123:     # Configure CORS
+124:     app.add_middleware(
+125:         CORSMiddleware,
+126:         allow_origins=["*"] if config.debug else [],
+127:         allow_credentials=True,
+128:         allow_methods=["*"],
+129:         allow_headers=["*"],
+130:     )
+131: 
+132:     # Add request logging
+133:     app.add_middleware(LoggingMiddleware)
+134: 
+135:     # Register routes
+136:     # Status endpoint is public (no auth)
+137:     app.include_router(status.router, tags=["status"])
+138: 
+139:     # Memory Lake API routes
+140:     app.include_router(memory.router)
+141:     app.include_router(namespaces.router)
+142:     app.include_router(sync.router)
 143: 
-144: ### Prerequisites
-145: 
-146: - Python 3.13+
-147: - [uv](https://github.com/astral-sh/uv) for package management
-148: - PostgreSQL with pgvector extension
-149: - Neo4j (optional, for graph features)
-150: 
-151: ### Quick Install
-152: 
-153: ```bash
-154: # Clone and install
-155: git clone https://github.com/DeytaHQ/khora.git
-156: cd khora
-157: uv sync --all-extras
-158: 
-159: # Install pre-commit hooks
-160: uv run prek install
-161: ```
-162: 
-163: ### Start Development Databases
-164: 
-165: ```bash
-166: # Start PostgreSQL and Neo4j via Docker
-167: make dev
-168: 
-169: # Run database migrations
-170: uv run alembic upgrade head
-171: ```
-172: 
-173: ---
-174: 
-175: ## Usage
-176: 
-177: ### As a Library
-178: 
-179: The primary interface is the `MemoryLake` class:
-180: 
-181: ```python
-182: from khora import MemoryLake, SearchMode
-183: 
-184: async def main():
-185:     # Simplest - reads KHORA_DATABASE_URL from environment
-186:     async with MemoryLake() as lake:
-187:         # Store a memory
-188:         result = await lake.remember(
-189:             "Albert Einstein developed the theory of relativity in 1905.",
-190:             title="Einstein Biography",
-191:             source="wikipedia",
-192:         )
-193:         print(f"Stored document: {result.document_id}")
-194:         print(f"Extracted {result.entities_extracted} entities")
-195: 
-196:         # Recall relevant memories
-197:         memories = await lake.recall(
-198:             "Who developed relativity?",
-199:             limit=5,
-200:             mode=SearchMode.HYBRID,  # vector + graph + keyword
-201:         )
-202:         print(f"Found {len(memories.chunks)} relevant chunks")
-203:         print(f"Context: {memories.context_text}")
-204: 
-205:         # Explore entity relationships
-206:         entities = await lake.list_entities(entity_type="PERSON")
-207:         for entity in entities:
-208:             related = await lake.find_related_entities(entity.id, max_depth=2)
-209:             print(f"{entity.name} is related to {len(related)} entities")
-210: 
-211:         # Forget a memory
-212:         await lake.forget(result.document_id)
-213: 
-214: import asyncio
-215: asyncio.run(main())
-216: ```
-217: 
-218: ### Simplified Constructor
-219: 
-220: The `MemoryLake` constructor supports multiple initialization patterns:
-221: 
-222: ```python
-223: from khora import MemoryLake, KhoraConfig
-224: 
-225: # 1. From environment variables (KHORA_DATABASE_URL)
-226: lake = MemoryLake()
-227: 
-228: # 2. Explicit database URL
-229: lake = MemoryLake("postgresql://localhost/mydb")
-230: 
-231: # 3. With graph backend
-232: lake = MemoryLake(
-233:     "postgresql://localhost/mydb",
-234:     graph_url="bolt://localhost:7687",
-235: )
-236: 
-237: # 4. Custom embedding model
-238: lake = MemoryLake(
-239:     "postgresql://localhost/mydb",
-240:     embedding_model="text-embedding-3-large",
-241: )
-242: 
-243: # 5. Full configuration object (for advanced use)
-244: config = KhoraConfig(
-245:     database_url="postgresql://localhost/mydb",
-246:     neo4j_url="bolt://localhost:7687",
-247: )
-248: lake = MemoryLake(config)
-249: ```
-250: 
-251: ### Batch Ingestion
-252: 
-253: For efficient bulk document ingestion:
-254: 
-255: ```python
-256: from khora import MemoryLake
-257: 
-258: async with MemoryLake(database_url) as lake:
-259:     # Batch ingestion with automatic optimization
-260:     result = await lake.remember_batch(
-261:         [
-262:             {"content": "Document 1 text...", "title": "Doc 1"},
-263:             {"content": "Document 2 text...", "title": "Doc 2"},
-264:             {"content": "Document 3 text...", "title": "Doc 3"},
-265:         ],
-266:         deduplicate=True,           # Cross-document entity deduplication
-267:         infer_relationships=True,   # Relationship inference after ingestion
-268:         on_progress=lambda done, total: print(f"Progress: {done}/{total}"),
-269:     )
-270: 
-271:     print(f"Processed: {result.processed}/{result.total} documents")
-272:     print(f"Chunks: {result.chunks}, Entities: {result.entities}")
-273:     print(f"Relationships: {result.relationships}")
-274: ```
-275: 
-276: ### Raw Search (No LLM Features)
-277: 
-278: For benchmarks or simple searches without LLM overhead:
-279: 
-280: ```python
-281: # Skip query understanding, entity linking, reranking, HyDE
-282: results = await lake.recall(
-283:     "search query",
-284:     mode=SearchMode.ALL,
-285:     raw=True,  # Disables all LLM features
-286: )
-287: ```
-288: 
-289: ### Search Modes
-290: 
-291: ```python
-292: from khora import MemoryLake, SearchMode
-293: 
-294: async with MemoryLake() as lake:
-295:     # Vector-only search (semantic similarity)
-296:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
-297: 
-298:     # Graph-only search (entity relationships)
-299:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
-300: 
-301:     # Hybrid search (combines all sources with RRF)
-302:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
-303: 
-304:     # All sources (returns results from each separately)
-305:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
-306: ```
-307: 
-308: ### Multi-Tenancy
-309: 
-310: ```python
-311: from khora import MemoryLake
-312: 
-313: async with MemoryLake() as lake:
-314:     # Simple: Get or create a namespace by name
-315:     namespace_id = await lake.ensure_namespace("physics", description="Physics research")
-316: 
-317:     # Store memories in specific namespace
-318:     await lake.remember(
-319:         "Important research findings...",
-320:         namespace=namespace_id,
-321:     )
-322: 
-323:     # Query within namespace (isolated from other namespaces)
-324:     results = await lake.recall("findings", namespace=namespace_id)
-325: 
-326:     # Get namespace statistics
-327:     stats = await lake.stats(namespace=namespace_id)
-328:     print(f"Documents: {stats.documents}, Entities: {stats.entities}")
-329: ```
-330: 
-331: ### As a Service
-332: 
-333: ```bash
-334: # Start the API server
-335: uv run khora serve --reload
-336: 
-337: # Or with Docker
-338: docker compose up
-339: ```
-340: 
-341: #### API Endpoints
-342: 
-343: **Memory Operations:**
-344: ```bash
-345: # Store a memory
-346: curl -X POST http://localhost:8100/memory/remember \
-347:   -H "Content-Type: application/json" \
-348:   -d '{
-349:     "content": "Einstein developed relativity in 1905.",
-350:     "title": "Physics History",
-351:     "skill_name": "general_entities"
-352:   }'
-353: 
-354: # Recall memories
-355: curl -X POST http://localhost:8100/memory/recall \
-356:   -H "Content-Type: application/json" \
-357:   -d '{
-358:     "query": "Who developed relativity?",
-359:     "limit": 10,
-360:     "mode": "hybrid"
-361:   }'
-362: 
-363: # Get a document
-364: curl http://localhost:8100/memory/documents/{document_id}
-365: 
-366: # List entities
-367: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
-368: 
-369: # Get related entities
-370: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
-371: 
-372: # Forget a memory
-373: curl -X DELETE http://localhost:8100/memory/forget \
-374:   -H "Content-Type: application/json" \
-375:   -d '{"document_id": "uuid-here"}'
-376: ```
-377: 
-378: **Namespace Management:**
-379: ```bash
-380: # Create organization
-381: curl -X POST http://localhost:8100/namespaces/organizations \
-382:   -H "Content-Type: application/json" \
-383:   -d '{"name": "Acme Corp", "slug": "acme"}'
-384: 
-385: # Create workspace
-386: curl -X POST http://localhost:8100/namespaces/workspaces \
-387:   -H "Content-Type: application/json" \
-388:   -d '{"organization_id": "org-uuid", "name": "Research"}'
-389: 
-390: # Create namespace
-391: curl -X POST http://localhost:8100/namespaces/ \
-392:   -H "Content-Type: application/json" \
-393:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
-394: ```
-395: 
-396: **Sync & Pipelines:**
-397: ```bash
-398: # Ingest documents
-399: curl -X POST http://localhost:8100/sync/ingest \
-400:   -H "Content-Type: application/json" \
-401:   -d '{
-402:     "namespace_id": "ns-uuid",
-403:     "documents": [{"content": "Document text..."}],
-404:     "skill_name": "general_entities"
-405:   }'
-406: 
-407: # List available pipelines
-408: curl http://localhost:8100/sync/pipelines
-409: ```
-410: 
-411: **Health Checks:**
-412: ```bash
-413: curl http://localhost:8100/status        # Service status
-414: curl http://localhost:8100/health        # Health check
-415: curl http://localhost:8100/health/ready  # Readiness probe
-416: curl http://localhost:8100/health/live   # Liveness probe
-417: ```
-418: 
-419: ---
-420: 
-421: ## Architecture
-422: 
-423: ```
-424: ┌─────────────────────────────────────────────────────────────────────────────┐
-425: │                              MemoryLake API                                  │
-426: │                         (Library + FastAPI Service)                          │
-427: ├─────────────────────────────────────────────────────────────────────────────┤
-428: │                                                                              │
-429: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
-430: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
-431: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
-432: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
-433: │         │                  │                  │                  │          │
-434: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
-435: │                          Storage Coordinator                                 │
-436: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
-437: │         │                   │                   │                            │
-438: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
-439: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
-440: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
-441: │  │ Documents)  │     │             │     │            │     │            │ │
-442: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
-443: │                                                                              │
-444: └──────────────────────────────────────────────────────────────────────────────┘
-445: ```
-446: 
-447: ### Core Components
-448: 
-449: | Component | Purpose |
-450: |-----------|---------|
-451: | `MemoryLake` | Primary API for remember/recall/forget operations |
-452: | `StorageCoordinator` | Orchestrates all storage backends |
-453: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
-454: | `PipelineManager` | Manages Prefect ingestion flows |
-455: | `ACLEnforcer` | Cross-layer permission enforcement |
-456: 
-457: ### Storage Backends
-458: 
-459: | Backend | Technology | Purpose |
-460: |---------|------------|---------|
-461: | Relational | PostgreSQL | Documents, events, permissions, metadata |
-462: | Vector | pgvector | Embeddings for semantic similarity search |
-463: | Graph | Neo4j | Entity nodes and relationship edges |
-464: | Event Store | PostgreSQL | Immutable event log for sourcing |
-465: 
-466: ### Data Flow
-467: 
-468: 1. **Ingestion** (Three-Phase Pipeline)
-469:    - Phase 1: Stage documents, compute checksums, detect duplicates
-470:    - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
-471:    - Phase 3 (optional): Cross-document entity unification and relationship inference
-472: 
-473: 2. **Query** (Hybrid Search)
-474:    - Execute vector, graph, and keyword searches in parallel
-475:    - Apply Reciprocal Rank Fusion to combine results
-476:    - Filter by ACL and temporal context
-477: 
-478: 3. **Event Sourcing**
-479:    - All changes recorded as immutable events
-480:    - Enables temporal queries ("state as of date X")
-481:    - Complete audit trail for compliance
-482: 
-483: ---
-484: 
-485: ## Configuration
-486: 
-487: ### Environment Variables
-488: 
-489: | Variable | Description | Default |
-490: |----------|-------------|---------|
-491: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
-492: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
-493: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
-494: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
-495: | `KHORA_DEBUG` | Enable debug mode | `false` |
-496: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
-497: | `KHORA_API_PORT` | API server port | `8100` |
-498: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
-499: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
-500: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
-501: 
-502: ### LiteLLM Configuration
-503: 
-504: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
-505: 
-506: ```yaml
-507: # examples/config/litellm/openai.yaml
-508: model: "gpt-4o-mini"
-509: api_key_env: "OPENAI_API_KEY"
-510: temperature: 0.7
-511: max_tokens: 8192
-512: embedding_model: "text-embedding-3-small"
-513: ```
-514: 
-515: ```yaml
-516: # examples/config/litellm/claude.yaml
-517: model: "claude-sonnet-4-20250514"
-518: api_key_env: "ANTHROPIC_API_KEY"
-519: temperature: 0.7
-520: max_tokens: 8192
-521: 
-522: # Router with fallbacks
-523: model_list:
-524:   - model_name: claude-sonnet-4
-525:     litellm_params:
-526:       model: claude-sonnet-4-20250514
-527:       api_key: os.environ/ANTHROPIC_API_KEY
-528:   - model_name: claude-sonnet-4
-529:     litellm_params:
-530:       model: claude-3-5-sonnet-20241022
-531:       api_key: os.environ/ANTHROPIC_API_KEY
-532: ```
-533: 
-534: ### Extraction Skills
-535: 
-536: Configure entity extraction in your code:
-537: 
-538: ```python
-539: from khora.extraction.skills import ExtractionSkill
-540: 
-541: skill = ExtractionSkill(
-542:     name="custom_entities",
-543:     description="Extract domain-specific entities",
-544:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
-545:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
-546: )
-547: 
-548: await lake.remember(content, skill_name="custom_entities")
-549: ```
-550: 
-551: ---
-552: 
-553: ## Project Structure
-554: 
-555: ```
-556: khora/
-557: ├── src/khora/
-558: │   ├── __init__.py              # Package exports
-559: │   ├── memory_lake.py           # Primary MemoryLake class
-560: │   ├── api/                     # FastAPI application
-561: │   │   ├── app.py               # App factory with lifespan
-562: │   │   ├── deps.py              # Dependency injection
-563: │   │   └── routes/              # API endpoints
-564: │   │       ├── memory.py        # Remember/recall/forget
-565: │   │       ├── namespaces.py    # Multi-tenancy management
-566: │   │       ├── sync.py          # Ingestion pipelines
-567: │   │       └── status.py        # Health checks
-568: │   ├── acl/                     # Access control
-569: │   │   ├── checker.py           # Permission checking
-570: │   │   └── enforcer.py          # Cross-layer enforcement
-571: │   ├── cli/                     # Command-line interface
-572: │   ├── config/                  # Configuration
-573: │   │   ├── schema.py            # Pydantic settings
-574: │   │   ├── llm.py               # LiteLLM configuration
-575: │   │   └── resolver.py          # Hierarchical config
-576: │   ├── core/models/             # Domain models
-577: │   │   ├── document.py          # Document, Chunk
-578: │   │   ├── entity.py            # Entity, Relationship
-579: │   │   ├── event.py             # MemoryEvent (sourcing)
-580: │   │   └── tenancy.py           # Org, Workspace, Namespace
-581: │   ├── db/                      # Database layer
-582: │   │   ├── models.py            # SQLAlchemy ORM
-583: │   │   └── session.py           # Async session management
-584: │   ├── extraction/              # Content processing
-585: │   │   ├── chunkers/            # Text chunking strategies
-586: │   │   ├── embedders/           # Embedding generation
-587: │   │   ├── extractors/          # Entity extraction
-588: │   │   └── skills/              # Extraction configurations
-589: │   ├── pipelines/               # Prefect workflows
-590: │   │   ├── flows/               # Ingestion and sync flows
-591: │   │   ├── tasks/               # Individual pipeline tasks
-592: │   │   ├── manager.py           # Pipeline orchestration
-593: │   │   └── registry.py          # Pipeline registration
-594: │   ├── query/                   # Search engine
-595: │   │   ├── engine.py            # HybridQueryEngine
-596: │   │   ├── fusion.py            # Reciprocal Rank Fusion
-597: │   │   └── temporal.py          # Time-based queries
-598: │   └── storage/                 # Storage backends
-599: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
-600: │       ├── coordinator.py       # Backend orchestration
-601: │       ├── event_store.py       # Event sourcing
-602: │       └── factory.py           # Storage initialization
-603: ├── tests/                       # Test suite
-604: ├── alembic/                     # Database migrations
-605: ├── examples/config/             # Example configurations
-606: ├── docker-compose.yml           # Development services
-607: └── pyproject.toml               # Project configuration
-608: ```
-609: 
-610: ---
-611: 
-612: ## Development
-613: 
-614: ### Commands
-615: 
-616: ```bash
-617: # Start development server
-618: uv run khora serve --reload --no-auth
-619: 
-620: # Run tests with coverage
-621: make test
-622: 
-623: # Format code
-624: make format
-625: 
-626: # Run linting
-627: make lint
-628: 
-629: # Run all pre-commit hooks
-630: make prek
-631: 
-632: # Start development databases
-633: make dev
-634: 
-635: # Stop development databases
-636: make down
-637: ```
-638: 
-639: ### Database Migrations
-640: 
-641: ```bash
-642: # Run all migrations
-643: uv run alembic upgrade head
-644: 
-645: # Create a new migration
-646: uv run alembic revision --autogenerate -m "Add new table"
-647: 
-648: # Rollback one migration
-649: uv run alembic downgrade -1
-650: ```
-651: 
-652: ### Testing
-653: 
-654: ```bash
-655: # Run all tests
-656: make test
-657: 
-658: # Run specific test file
-659: uv run pytest tests/unit/test_api.py -v
-660: 
-661: # Run with markers
-662: uv run pytest -m unit        # Unit tests only
-663: uv run pytest -m integration # Integration tests
-664: uv run pytest -m e2e         # End-to-end tests
-665: ```
-666: 
-667: ---
-668: 
-669: ## API Reference
-670: 
-671: ### MemoryLake Class
-672: 
-673: #### Constructor
-674: 
-675: ```python
-676: class MemoryLake:
-677:     def __init__(
-678:         self,
-679:         database_url: str | KhoraConfig | None = None,
-680:         *,
-681:         graph_url: str | None = None,
-682:         embedding_model: str = "text-embedding-3-small",
-683:     ):
-684:         """Initialize the Memory Lake.
-685: 
-686:         Args:
-687:             database_url: PostgreSQL URL, KhoraConfig, or None (reads from env)
-688:             graph_url: Optional Neo4j URL (bolt://user:pass@host:port)
-689:             embedding_model: Embedding model to use
-690:         """
-691: ```
-692: 
-693: #### Core Methods
-694: 
-695: ```python
-696:     async def remember(
-697:         self,
-698:         content: str,
-699:         *,
-700:         namespace: str | UUID | None = None,
-701:         title: str = "",
-702:         source: str = "",
-703:         metadata: dict = {},
-704:         skill_name: str = "general_entities",
-705:     ) -> RememberResult:
-706:         """Store content in the memory lake."""
-707: 
-708:     async def remember_batch(
-709:         self,
-710:         documents: list[dict],
-711:         *,
-712:         namespace: str | UUID | None = None,
-713:         skill_name: str = "general_entities",
-714:         max_concurrent: int = 5,
-715:         deduplicate: bool = True,
-716:         infer_relationships: bool = True,
-717:         on_progress: Callable[[int, int], None] | None = None,
-718:     ) -> BatchResult:
-719:         """Store multiple documents with automatic optimization."""
-720: 
-721:     async def recall(
-722:         self,
-723:         query: str,
-724:         *,
-725:         namespace: str | UUID | None = None,
-726:         limit: int = 10,
-727:         mode: SearchMode = SearchMode.HYBRID,
-728:         min_similarity: float = 0.0,
-729:         agentic: bool = False,
-730:         raw: bool = False,  # Skip all LLM features
-731:     ) -> RecallResult:
-732:         """Recall memories relevant to a query."""
-733: 
-734:     async def forget(
-735:         self,
-736:         document_id: UUID,
-737:         *,
-738:         namespace: str | UUID | None = None,
-739:     ) -> bool:
-740:         """Remove a memory from the lake."""
-741: ```
-742: 
-743: #### Convenience Methods
-744: 
-745: ```python
-746:     async def ensure_namespace(
-747:         self,
-748:         name: str,
-749:         *,
-750:         description: str = "",
-751:     ) -> UUID:
-752:         """Get or create a namespace by name."""
-753: 
-754:     async def get_document(self, document_id: UUID) -> Document | None:
-755:         """Get a document by ID."""
-756: 
-757:     async def list_documents(
-758:         self,
-759:         *,
-760:         namespace: str | UUID | None = None,
-761:         limit: int = 100,
-762:     ) -> list[Document]:
-763:         """List documents in a namespace."""
-764: 
-765:     async def search_entities(
-766:         self,
-767:         query: str,
-768:         *,
-769:         namespace: str | UUID | None = None,
-770:         limit: int = 10,
-771:     ) -> list[Entity]:
-772:         """Search entities by query text using embedding similarity."""
-773: 
-774:     async def stats(
-775:         self,
-776:         *,
-777:         namespace: str | UUID | None = None,
-778:     ) -> Stats:
-779:         """Get document/chunk/entity/relationship counts."""
-780: 
-781:     async def list_entities(
-782:         self,
-783:         *,
-784:         namespace: str | UUID | None = None,
-785:         entity_type: str | None = None,
-786:         limit: int = 100,
-787:     ) -> list[Entity]:
-788:         """List entities in a namespace."""
-789: 
-790:     async def find_related_entities(
-791:         self,
-792:         entity_id: UUID,
-793:         *,
-794:         max_depth: int = 2,
-795:         limit: int = 20,
-796:     ) -> list[tuple[Entity, float]]:
-797:         """Find entities related to a given entity."""
-798: ```
-799: 
-800: ### Data Classes
-801: 
-802: ```python
-803: @dataclass
-804: class RememberResult:
-805:     """Result of a remember() operation."""
-806:     document_id: UUID
-807:     namespace_id: UUID
-808:     chunks_created: int
-809:     entities_extracted: int
-810:     relationships_created: int
-811:     metadata: dict[str, Any]
-812: 
-813: @dataclass
-814: class RecallResult:
-815:     """Result of a recall() operation."""
-816:     query: str
-817:     namespace_id: UUID
-818:     chunks: list[tuple[Chunk, float]]
-819:     entities: list[tuple[Entity, float]]
-820:     context_text: str
-821:     metadata: dict[str, Any]
-822: 
-823: @dataclass
-824: class BatchResult:
-825:     """Result of remember_batch() operation."""
-826:     total: int        # Total documents submitted
-827:     processed: int    # Successfully processed
-828:     skipped: int      # Skipped (duplicates)
-829:     failed: int       # Failed to process
-830:     chunks: int       # Total chunks created
-831:     entities: int     # Total entities extracted
-832:     relationships: int # Total relationships created
-833: 
-834: @dataclass
-835: class Stats:
-836:     """Namespace statistics from stats()."""
-837:     documents: int
-838:     chunks: int
-839:     entities: int
-840:     relationships: int
-841: ```
-842: 
-843: ### Search Modes
-844: 
-845: | Mode | Description |
-846: |------|-------------|
-847: | `VECTOR` | Semantic similarity search using embeddings |
-848: | `GRAPH` | Entity and relationship traversal |
-849: | `HYBRID` | Combined vector + graph + keyword with RRF fusion |
-850: | `ALL` | All sources (vector, graph, keyword) |
-851: 
-852: ### Entity Types
-853: 
-854: | Type | Description |
-855: |------|-------------|
-856: | `PERSON` | Individual people |
-857: | `ORGANIZATION` | Companies, institutions |
-858: | `LOCATION` | Places, addresses |
-859: | `CONCEPT` | Abstract ideas, theories |
-860: | `EVENT` | Occurrences, incidents |
-861: | `TECHNOLOGY` | Tools, platforms, languages |
-862: | `PRODUCT` | Goods, services |
-863: | `DOCUMENT` | Referenced documents |
-864: | `OTHER` | Uncategorized entities |
-865: 
-866: ### Deprecation Notices
-867: 
-868: The following properties emit `DeprecationWarning` and will be removed in a future version:
-869: 
-870: | Deprecated | Replacement |
-871: |------------|-------------|
-872: | `lake.storage` | Use `lake.get_document()`, `lake.list_documents()`, `lake.stats()` |
-873: | `lake.query_engine` | Use `lake.recall()` with `raw=True` for unprocessed search |
-874: 
-875: ---
-876: 
-877: ## License
-878: 
-879: Copyright (c) 2024-2025 Deyta. All rights reserved.
-````
-
-## File: src/khora/api/routes/status.py
-````python
- 1: """Status endpoints for Khora API."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from datetime import UTC, datetime
- 6: from typing import Any
- 7: 
- 8: from fastapi import APIRouter, Request
- 9: 
-10: import khora
-11: 
-12: router = APIRouter()
-13: 
-14: 
-15: @router.get("/status")
-16: async def status_check(request: Request) -> dict[str, Any]:
-17:     """Basic status check endpoint.
-18: 
-19:     Returns:
-20:         Status with timestamp and version
-21:     """
-22:     return {
-23:         "status": "ok",
-24:         "timestamp": datetime.now(UTC).isoformat(),
-25:         "version": khora.__version__,
-26:         "service": "khora",
-27:     }
-28: 
-29: 
-30: @router.get("/health")
-31: async def health_check(request: Request) -> dict[str, Any]:
-32:     """Health check endpoint for orchestration systems.
-33: 
-34:     Returns:
-35:         Health status with timestamp
-36:     """
-37:     return {
-38:         "status": "healthy",
-39:         "timestamp": datetime.now(UTC).isoformat(),
-40:         "version": khora.__version__,
-41:     }
-42: 
-43: 
-44: @router.get("/health/ready")
-45: async def readiness_check(request: Request) -> dict[str, Any]:
-46:     """Readiness check for Kubernetes/orchestration.
-47: 
-48:     Checks that all required services are available.
-49: 
-50:     Returns:
-51:         Readiness status with component checks
-52:     """
-53:     config = request.app.state.config
-54:     checks: dict[str, bool] = {}
-55: 
-56:     # TODO: Add actual health checks for:
-57:     # - Database connections
-58:     # - External services
-59: 
-60:     # For now, return basic status
-61:     checks["config_loaded"] = config is not None
-62: 
-63:     all_healthy = all(checks.values())
-64: 
-65:     return {
-66:         "status": "ready" if all_healthy else "not_ready",
-67:         "timestamp": datetime.now(UTC).isoformat(),
-68:         "checks": checks,
-69:     }
-70: 
-71: 
-72: @router.get("/health/live")
-73: async def liveness_check() -> dict[str, Any]:
-74:     """Liveness check for Kubernetes/orchestration.
-75: 
-76:     Simple check that the application is running.
-77: 
-78:     Returns:
-79:         Liveness status
-80:     """
-81:     return {
-82:         "status": "alive",
-83:         "timestamp": datetime.now(UTC).isoformat(),
-84:     }
-````
-
-## File: src/khora/cli/__init__.py
-````python
- 1: """Command-line interface for Khora."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from pathlib import Path
- 6: 
- 7: import click
- 8: 
- 9: from ..logging_config import setup_logging
-10: from .server import serve
-11: 
-12: 
-13: @click.group()
-14: @click.version_option(version="0.1.0")
-15: @click.option(
-16:     "--log-level",
-17:     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
-18:     default="INFO",
-19:     help="Set logging level",
-20: )
-21: @click.option(
-22:     "--json-logs",
-23:     is_flag=True,
-24:     help="Output logs in JSON format for structured logging",
-25: )
-26: @click.option(
-27:     "--log-file",
-28:     type=click.Path(path_type=Path),
-29:     help="Write logs to file (in addition to console)",
-30: )
-31: @click.pass_context
-32: def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-33:     """Khora - Deyta's memory lake and materialization of knowledge.
-34: 
-35:     Commands:
-36:     - serve: Start the FastAPI server for API access
-37:     """
-38:     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
-39:     ctx.ensure_object(dict)
-40:     ctx.obj["log_level"] = log_level
-41:     ctx.obj["json_logs"] = json_logs
-42: 
-43: 
-44: # Register commands
-45: cli.add_command(serve)
-46: 
-47: 
-48: def main() -> None:
-49:     """Main entry point."""
-50:     cli()
-51: 
-52: 
-53: __all__ = ["cli", "main"]
+144:     return app
 ````
 
 ## File: src/khora/db/models.py
@@ -34908,6 +34173,93 @@ README.md
 81:     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 ````
 
+## File: tests/unit/test_api.py
+````python
+ 1: """Tests for API module."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: import pytest
+ 6: from fastapi.testclient import TestClient
+ 7: 
+ 8: import khora
+ 9: 
+10: 
+11: @pytest.mark.unit
+12: class TestStatusEndpoints:
+13:     """Tests for status check endpoints."""
+14: 
+15:     def test_status_check(self, test_client: TestClient) -> None:
+16:         """Test basic status check endpoint."""
+17:         response = test_client.get("/status")
+18: 
+19:         assert response.status_code == 200
+20:         data = response.json()
+21:         assert data["status"] == "ok"
+22:         assert "timestamp" in data
+23:         assert data["version"] == khora.__version__
+24:         assert data["service"] == "khora"
+25: 
+26:     def test_health_check(self, test_client: TestClient) -> None:
+27:         """Test health check endpoint."""
+28:         response = test_client.get("/health")
+29: 
+30:         assert response.status_code == 200
+31:         data = response.json()
+32:         assert data["status"] == "healthy"
+33:         assert "timestamp" in data
+34:         assert data["version"] == khora.__version__
+35: 
+36:     def test_readiness_check(self, test_client: TestClient) -> None:
+37:         """Test readiness check endpoint."""
+38:         response = test_client.get("/health/ready")
+39: 
+40:         assert response.status_code == 200
+41:         data = response.json()
+42:         assert data["status"] in ["ready", "not_ready"]
+43:         assert "timestamp" in data
+44:         assert "checks" in data
+45: 
+46:     def test_liveness_check(self, test_client: TestClient) -> None:
+47:         """Test liveness check endpoint."""
+48:         response = test_client.get("/health/live")
+49: 
+50:         assert response.status_code == 200
+51:         data = response.json()
+52:         assert data["status"] == "alive"
+53:         assert "timestamp" in data
+54: 
+55: 
+56: @pytest.mark.unit
+57: class TestConfig:
+58:     """Tests for configuration."""
+59: 
+60:     def test_default_config(self) -> None:
+61:         """Test default configuration values."""
+62:         from khora.config import KhoraConfig
+63: 
+64:         config = KhoraConfig()
+65:         assert config.app_name == "khora"
+66:         assert config.environment == "development"
+67:         assert config.debug is False
+68:         assert config.api_host == "127.0.0.1"
+69:         assert config.api_port == 8000
+70:         assert config.auth_enabled is True
+71: 
+72:     def test_config_from_env(self, monkeypatch) -> None:
+73:         """Test configuration from environment variables."""
+74:         from khora.config import KhoraConfig
+75: 
+76:         monkeypatch.setenv("KHORA_DEBUG", "true")
+77:         monkeypatch.setenv("KHORA_API_PORT", "9000")
+78:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
+79: 
+80:         config = KhoraConfig()
+81:         assert config.debug is True
+82:         assert config.api_port == 9000
+83:         assert config.environment == "staging"
+````
+
 ## File: tests/unit/test_entity_index.py
 ````python
   1: """Tests for EntityIndex — the in-memory blocking index for entity resolution."""
@@ -36239,152 +35591,887 @@ README.md
 1044:             create_engine("nonexistent", _mock_config())
 ````
 
-## File: src/khora/api/app.py
-````python
-  1: """FastAPI application factory for Khora."""
+## File: README.md
+````markdown
+  1: # Khora
   2: 
-  3: from __future__ import annotations
-  4: 
-  5: import time
-  6: from collections.abc import AsyncGenerator
-  7: from contextlib import asynccontextmanager
-  8: from typing import TYPE_CHECKING
+  3: > *"Khora is the receptacle, the space, the matrix in which all things come to be."*
+  4: > *— Plato, Timaeus*
+  5: 
+  6: In Plato's cosmology, **Khora** (χώρα) is the primordial receptacle—neither being nor non-being, but the space that receives all forms and gives them place. It is the nurse of becoming, the womb of the cosmos where the eternal Forms find material expression. Khora does not impose form; it receives, holds, and makes manifestation possible.
+  7: 
+  8: This project embodies that philosophy: **Khora is a memory lake**—a receptacle for knowledge that receives information from disparate sources, holds it in structured form, and enables its retrieval through multiple paths of inquiry. Just as Plato's Khora mediates between the intelligible and sensible worlds, this Memory Lake bridges raw data and meaningful knowledge through semantic extraction, graph relationships, and temporal context.
   9: 
- 10: from fastapi import FastAPI, Request
- 11: from fastapi.middleware.cors import CORSMiddleware
- 12: from loguru import logger
- 13: from starlette.middleware.base import BaseHTTPMiddleware
- 14: 
- 15: from .routes import memory, namespaces, status, sync
- 16: 
- 17: if TYPE_CHECKING:
- 18:     from ..config import KhoraConfig
+ 10: ---
+ 11: 
+ 12: ## Overview
+ 13: 
+ 14: Khora is a **Memory Lake** system that combines three storage paradigms:
+ 15: 
+ 16: - **Knowledge Graph** (Neo4j) — Entities and their relationships
+ 17: - **Vector Database** (pgvector) — Semantic embeddings for similarity search
+ 18: - **Relational Database** (PostgreSQL) — Documents, events, and metadata
  19: 
- 20: 
- 21: class LoggingMiddleware(BaseHTTPMiddleware):
- 22:     """Middleware to log all requests and responses."""
+ 20: It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
+ 21: 
+ 22: ### Key Features
  23: 
- 24:     async def dispatch(self, request: Request, call_next):
- 25:         start_time = time.time()
- 26:         method = request.method
- 27:         path = request.url.path
- 28:         query = str(request.url.query) if request.url.query else ""
- 29:         client_host = request.client.host if request.client else "unknown"
- 30: 
- 31:         # Log incoming request with client info
- 32:         query_str = f"?{query}" if query else ""
- 33:         logger.info(f"-> {method} {path}{query_str} from {client_host}")
+ 24: - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
+ 25: - **Pluggable Engines**: Choose GraphRAG (knowledge graphs) or Khora (temporal-first)
+ 26: - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
+ 27: - **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
+ 28: - **Event Sourcing**: Immutable event log for temporal queries and audit trails
+ 29: - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
+ 30: - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
+ 31: - **Semantic Extraction**: LLM-powered entity and relationship extraction
+ 32: 
+ 33: ---
  34: 
- 35:         try:
- 36:             response = await call_next(request)
- 37:             duration = (time.time() - start_time) * 1000
+ 35: ## Pluggable Engines
+ 36: 
+ 37: Khora supports two engines with different strengths:
  38: 
- 39:             # Log response with status code
- 40:             if response.status_code < 400:
- 41:                 logger.info(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 42:             elif response.status_code < 500:
- 43:                 logger.warning(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 44:             else:
- 45:                 logger.error(f"<- {method} {path} - {response.status_code} ({duration:.1f}ms)")
- 46: 
- 47:             return response
- 48:         except Exception as e:
- 49:             duration = (time.time() - start_time) * 1000
- 50:             logger.exception(f"<- {method} {path} - ERROR: {e} ({duration:.1f}ms)")
- 51:             raise
- 52: 
- 53: 
- 54: @asynccontextmanager
- 55: async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
- 56:     """Application lifespan manager for startup/shutdown events."""
- 57:     from ..db.session import close_db, run_migrations
- 58:     from ..memory_lake import MemoryLake
- 59:     from .deps import set_memory_lake
+ 39: | Engine | Focus | Best For | LLM Cost |
+ 40: |--------|-------|----------|----------|
+ 41: | **GraphRAG** | Knowledge graphs | Knowledge bases, entity exploration | Higher |
+ 42: | **Khora** | Temporal events | Chat logs, events, cost-sensitive apps | 5-10x lower |
+ 43: 
+ 44: ### GraphRAG Engine (Default)
+ 45: 
+ 46: Full knowledge graph construction with entity and relationship extraction:
+ 47: 
+ 48: ```python
+ 49: from khora import MemoryLake
+ 50: 
+ 51: async with MemoryLake("postgresql://...", engine="graphrag") as lake:
+ 52:     # Extracts entities and relationships from all content
+ 53:     result = await lake.remember("Einstein developed relativity in 1905.")
+ 54:     print(f"Extracted {result.entities_extracted} entities")
+ 55: 
+ 56:     # Graph-based retrieval
+ 57:     entities = await lake.list_entities(entity_type="PERSON")
+ 58:     related = await lake.find_related_entities(entity_id, max_depth=2)
+ 59: ```
  60: 
- 61:     # Startup
- 62:     logger.info("Starting Khora API server...")
- 63: 
- 64:     # Run database migrations
- 65:     await run_migrations()
+ 61: **Requirements:** PostgreSQL + pgvector + Neo4j/Kuzu/Memgraph
+ 62: 
+ 63: ### Khora Engine (Temporal-First)
+ 64: 
+ 65: Cost-optimized engine with bi-temporal model and skeleton indexing:
  66: 
- 67:     # Initialize Memory Lake
- 68:     config = app.state.config
- 69:     lake = MemoryLake(config=config)
- 70:     try:
- 71:         await lake.connect()
- 72:         set_memory_lake(lake)
- 73:         app.state.memory_lake = lake
- 74:         logger.info("Memory Lake initialized")
- 75:     except Exception as e:
- 76:         logger.warning(f"Memory Lake initialization failed (service will run with limited functionality): {e}")
- 77:         app.state.memory_lake = None
- 78: 
- 79:     yield
+ 67: ```python
+ 68: from khora import MemoryLake
+ 69: 
+ 70: async with MemoryLake("postgresql://...", engine="khora") as lake:
+ 71:     # Store with temporal metadata
+ 72:     result = await lake.remember(
+ 73:         "Team standup notes",
+ 74:         metadata={
+ 75:             "occurred_at": "2024-01-15T09:00:00Z",
+ 76:             "author": "alice@company.com",
+ 77:             "channel": "engineering"
+ 78:         }
+ 79:     )
  80: 
- 81:     # Shutdown
- 82:     logger.info("Shutting down Khora API server...")
- 83:     if hasattr(app.state, "memory_lake") and app.state.memory_lake:
- 84:         await app.state.memory_lake.disconnect()
- 85:     else:
- 86:         # If MemoryLake wasn't initialized, still shut down telemetry
- 87:         from ..telemetry import shutdown_telemetry
- 88: 
- 89:         await shutdown_telemetry()
- 90:     await close_db()
+ 81:     # Temporal and structured filtering
+ 82:     results = await lake.recall(
+ 83:         "What decisions were made?",
+ 84:         temporal_filter={
+ 85:             "occurred_after": "2024-01-01",
+ 86:             "author": "alice@company.com"
+ 87:         },
+ 88:         hybrid_alpha=0.7  # 70% vector, 30% BM25
+ 89:     )
+ 90: ```
  91: 
- 92: 
- 93: def create_app(config: KhoraConfig | None = None) -> FastAPI:
- 94:     """Create and configure the FastAPI application.
+ 92: **Requirements:** PostgreSQL + pgvector only (Neo4j optional)
+ 93: 
+ 94: See [Engine Comparison](docs/engines/engine-comparison.md) for detailed guidance.
  95: 
- 96:     Args:
- 97:         config: Optional application configuration
- 98: 
- 99:     Returns:
-100:         Configured FastAPI application
-101:     """
-102:     # Setup logging (important for reload mode where CLI setup doesn't carry over)
-103:     from ..logging_config import setup_logging
-104: 
-105:     setup_logging(level="INFO")
-106: 
-107:     if config is None:
-108:         from ..config import load_config
-109: 
-110:         config = load_config()
-111: 
-112:     app = FastAPI(
-113:         title="Khora",
-114:         description="Deyta's memory lake and materialization of knowledge",
-115:         version="0.1.0",
-116:         lifespan=lifespan,
-117:         debug=config.debug,
-118:     )
-119: 
-120:     # Store config in app state
-121:     app.state.config = config
-122: 
-123:     # Configure CORS
-124:     app.add_middleware(
-125:         CORSMiddleware,
-126:         allow_origins=["*"] if config.debug else [],
-127:         allow_credentials=True,
-128:         allow_methods=["*"],
-129:         allow_headers=["*"],
-130:     )
-131: 
-132:     # Add request logging
-133:     app.add_middleware(LoggingMiddleware)
-134: 
-135:     # Register routes
-136:     # Status endpoint is public (no auth)
-137:     app.include_router(status.router, tags=["status"])
-138: 
-139:     # Memory Lake API routes
-140:     app.include_router(memory.router)
-141:     app.include_router(namespaces.router)
-142:     app.include_router(sync.router)
+ 96: ---
+ 97: 
+ 98: ## Documentation
+ 99: 
+100: Comprehensive documentation is available in the [`docs/`](docs/) directory:
+101: 
+102: | Topic | Description |
+103: |-------|-------------|
+104: | **Engines** | |
+105: | [Khora Engine](docs/engines/khora-engine.md) | Temporal-first engine documentation |
+106: | [Engine Comparison](docs/engines/engine-comparison.md) | GraphRAG vs Khora comparison |
+107: | [Temporal Model](docs/engines/temporal-model.md) | Bi-temporal design deep dive |
+108: | [Skeleton Indexing](docs/engines/skeleton-indexing.md) | Cost optimization via PageRank |
+109: | [Hybrid Search](docs/engines/hybrid-search.md) | Vector + BM25 fusion |
+110: | **Architecture** | |
+111: | [Overview](docs/architecture/overview.md) | System design, components, data flow |
+112: | [Storage Backends](docs/architecture/storage-backends.md) | PostgreSQL, pgvector, Neo4j configuration |
+113: | [Multi-Tenancy](docs/architecture/multi-tenancy.md) | Organization → Workspace → Namespace hierarchy |
+114: | [Event Sourcing](docs/architecture/event-sourcing.md) | Immutable event log, audit trails |
+115: | **Data Models** | |
+116: | [Overview](docs/data-models/overview.md) | Model relationships and purposes |
+117: | [Documents & Chunks](docs/data-models/documents-chunks.md) | Content storage and chunking |
+118: | [Knowledge Graph](docs/data-models/knowledge-graph.md) | Entities, relationships, episodes |
+119: | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
+120: | **Extraction Pipeline** | |
+121: | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
+122: | [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
+123: | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
+124: | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
+125: | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
+126: | [Expertise System](docs/extraction/expertise-system.md) | Domain-specific extraction configuration |
+127: | [Semantic Expansion](docs/extraction/semantic-expansion.md) | Entity unification and relationship inference |
+128: | **Query Engine** | |
+129: | [Overview](docs/query-engine/overview.md) | HybridQueryEngine architecture |
+130: | [Search Modes](docs/query-engine/search-modes.md) | Vector, graph, keyword, hybrid search |
+131: | [Query Understanding](docs/query-engine/query-understanding.md) | LLM-based query analysis |
+132: | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
+133: | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
+134: | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
+135: | **Planning** | |
+136: | [Roadmap](docs/roadmap.md) | Future improvements and features |
+137: | **References** | |
+138: | [References](docs/REFERENCES.md) | Research papers and inspirations |
+139: 
+140: ---
+141: 
+142: ## Installation
 143: 
-144:     return app
+144: ### Prerequisites
+145: 
+146: - Python 3.13+
+147: - [uv](https://github.com/astral-sh/uv) for package management
+148: - PostgreSQL with pgvector extension
+149: - Neo4j (optional, for graph features)
+150: 
+151: ### Quick Install
+152: 
+153: ```bash
+154: # Clone and install
+155: git clone https://github.com/DeytaHQ/khora.git
+156: cd khora
+157: uv sync --all-extras
+158: 
+159: # Install pre-commit hooks
+160: uv run prek install
+161: ```
+162: 
+163: ### Start Development Databases
+164: 
+165: ```bash
+166: # Start PostgreSQL and Neo4j via Docker
+167: make dev
+168: 
+169: # Run database migrations
+170: uv run alembic upgrade head
+171: ```
+172: 
+173: ---
+174: 
+175: ## Usage
+176: 
+177: ### As a Library
+178: 
+179: The primary interface is the `MemoryLake` class:
+180: 
+181: ```python
+182: from khora import MemoryLake, SearchMode
+183: 
+184: async def main():
+185:     # Simplest - reads KHORA_DATABASE_URL from environment
+186:     async with MemoryLake() as lake:
+187:         # Store a memory
+188:         result = await lake.remember(
+189:             "Albert Einstein developed the theory of relativity in 1905.",
+190:             title="Einstein Biography",
+191:             source="wikipedia",
+192:         )
+193:         print(f"Stored document: {result.document_id}")
+194:         print(f"Extracted {result.entities_extracted} entities")
+195: 
+196:         # Recall relevant memories
+197:         memories = await lake.recall(
+198:             "Who developed relativity?",
+199:             limit=5,
+200:             mode=SearchMode.HYBRID,  # vector + graph + keyword
+201:         )
+202:         print(f"Found {len(memories.chunks)} relevant chunks")
+203:         print(f"Context: {memories.context_text}")
+204: 
+205:         # Explore entity relationships
+206:         entities = await lake.list_entities(entity_type="PERSON")
+207:         for entity in entities:
+208:             related = await lake.find_related_entities(entity.id, max_depth=2)
+209:             print(f"{entity.name} is related to {len(related)} entities")
+210: 
+211:         # Forget a memory
+212:         await lake.forget(result.document_id)
+213: 
+214: import asyncio
+215: asyncio.run(main())
+216: ```
+217: 
+218: ### Simplified Constructor
+219: 
+220: The `MemoryLake` constructor supports multiple initialization patterns:
+221: 
+222: ```python
+223: from khora import MemoryLake, KhoraConfig
+224: 
+225: # 1. From environment variables (KHORA_DATABASE_URL)
+226: lake = MemoryLake()
+227: 
+228: # 2. Explicit database URL
+229: lake = MemoryLake("postgresql://localhost/mydb")
+230: 
+231: # 3. With graph backend
+232: lake = MemoryLake(
+233:     "postgresql://localhost/mydb",
+234:     graph_url="bolt://localhost:7687",
+235: )
+236: 
+237: # 4. Custom embedding model
+238: lake = MemoryLake(
+239:     "postgresql://localhost/mydb",
+240:     embedding_model="text-embedding-3-large",
+241: )
+242: 
+243: # 5. Full configuration object (for advanced use)
+244: config = KhoraConfig(
+245:     database_url="postgresql://localhost/mydb",
+246:     neo4j_url="bolt://localhost:7687",
+247: )
+248: lake = MemoryLake(config)
+249: ```
+250: 
+251: ### Batch Ingestion
+252: 
+253: For efficient bulk document ingestion:
+254: 
+255: ```python
+256: from khora import MemoryLake
+257: 
+258: async with MemoryLake(database_url) as lake:
+259:     # Batch ingestion with automatic optimization
+260:     result = await lake.remember_batch(
+261:         [
+262:             {"content": "Document 1 text...", "title": "Doc 1"},
+263:             {"content": "Document 2 text...", "title": "Doc 2"},
+264:             {"content": "Document 3 text...", "title": "Doc 3"},
+265:         ],
+266:         deduplicate=True,           # Cross-document entity deduplication
+267:         infer_relationships=True,   # Relationship inference after ingestion
+268:         on_progress=lambda done, total: print(f"Progress: {done}/{total}"),
+269:     )
+270: 
+271:     print(f"Processed: {result.processed}/{result.total} documents")
+272:     print(f"Chunks: {result.chunks}, Entities: {result.entities}")
+273:     print(f"Relationships: {result.relationships}")
+274: ```
+275: 
+276: ### Raw Search (No LLM Features)
+277: 
+278: For benchmarks or simple searches without LLM overhead:
+279: 
+280: ```python
+281: # Skip query understanding, entity linking, reranking, HyDE
+282: results = await lake.recall(
+283:     "search query",
+284:     mode=SearchMode.ALL,
+285:     raw=True,  # Disables all LLM features
+286: )
+287: ```
+288: 
+289: ### Search Modes
+290: 
+291: ```python
+292: from khora import MemoryLake, SearchMode
+293: 
+294: async with MemoryLake() as lake:
+295:     # Vector-only search (semantic similarity)
+296:     results = await lake.recall("quantum physics", mode=SearchMode.VECTOR)
+297: 
+298:     # Graph-only search (entity relationships)
+299:     results = await lake.recall("Einstein collaborators", mode=SearchMode.GRAPH)
+300: 
+301:     # Hybrid search (combines all sources with RRF)
+302:     results = await lake.recall("relativity theory", mode=SearchMode.HYBRID)
+303: 
+304:     # All sources (returns results from each separately)
+305:     results = await lake.recall("physics discoveries", mode=SearchMode.ALL)
+306: ```
+307: 
+308: ### Multi-Tenancy
+309: 
+310: ```python
+311: from khora import MemoryLake
+312: 
+313: async with MemoryLake() as lake:
+314:     # Simple: Get or create a namespace by name
+315:     namespace_id = await lake.ensure_namespace("physics", description="Physics research")
+316: 
+317:     # Store memories in specific namespace
+318:     await lake.remember(
+319:         "Important research findings...",
+320:         namespace=namespace_id,
+321:     )
+322: 
+323:     # Query within namespace (isolated from other namespaces)
+324:     results = await lake.recall("findings", namespace=namespace_id)
+325: 
+326:     # Get namespace statistics
+327:     stats = await lake.stats(namespace=namespace_id)
+328:     print(f"Documents: {stats.documents}, Entities: {stats.entities}")
+329: ```
+330: 
+331: ### As a Service
+332: 
+333: ```bash
+334: # Start the API server
+335: uv run khora serve --reload
+336: 
+337: # Or with Docker
+338: docker compose up
+339: ```
+340: 
+341: #### API Endpoints
+342: 
+343: **Memory Operations:**
+344: ```bash
+345: # Store a memory
+346: curl -X POST http://localhost:8100/memory/remember \
+347:   -H "Content-Type: application/json" \
+348:   -d '{
+349:     "content": "Einstein developed relativity in 1905.",
+350:     "title": "Physics History",
+351:     "skill_name": "general_entities"
+352:   }'
+353: 
+354: # Recall memories
+355: curl -X POST http://localhost:8100/memory/recall \
+356:   -H "Content-Type: application/json" \
+357:   -d '{
+358:     "query": "Who developed relativity?",
+359:     "limit": 10,
+360:     "mode": "hybrid"
+361:   }'
+362: 
+363: # Get a document
+364: curl http://localhost:8100/memory/documents/{document_id}
+365: 
+366: # List entities
+367: curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
+368: 
+369: # Get related entities
+370: curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
+371: 
+372: # Forget a memory
+373: curl -X DELETE http://localhost:8100/memory/forget \
+374:   -H "Content-Type: application/json" \
+375:   -d '{"document_id": "uuid-here"}'
+376: ```
+377: 
+378: **Namespace Management:**
+379: ```bash
+380: # Create organization
+381: curl -X POST http://localhost:8100/namespaces/organizations \
+382:   -H "Content-Type: application/json" \
+383:   -d '{"name": "Acme Corp", "slug": "acme"}'
+384: 
+385: # Create workspace
+386: curl -X POST http://localhost:8100/namespaces/workspaces \
+387:   -H "Content-Type: application/json" \
+388:   -d '{"organization_id": "org-uuid", "name": "Research"}'
+389: 
+390: # Create namespace
+391: curl -X POST http://localhost:8100/namespaces/ \
+392:   -H "Content-Type: application/json" \
+393:   -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
+394: ```
+395: 
+396: **Sync & Pipelines:**
+397: ```bash
+398: # Ingest documents
+399: curl -X POST http://localhost:8100/sync/ingest \
+400:   -H "Content-Type: application/json" \
+401:   -d '{
+402:     "namespace_id": "ns-uuid",
+403:     "documents": [{"content": "Document text..."}],
+404:     "skill_name": "general_entities"
+405:   }'
+406: 
+407: # List available pipelines
+408: curl http://localhost:8100/sync/pipelines
+409: ```
+410: 
+411: **Health Checks:**
+412: ```bash
+413: curl http://localhost:8100/status        # Service status
+414: curl http://localhost:8100/health        # Health check
+415: curl http://localhost:8100/health/ready  # Readiness probe
+416: curl http://localhost:8100/health/live   # Liveness probe
+417: ```
+418: 
+419: ---
+420: 
+421: ## Architecture
+422: 
+423: ```
+424: ┌─────────────────────────────────────────────────────────────────────────────┐
+425: │                              MemoryLake API                                  │
+426: │                         (Library + FastAPI Service)                          │
+427: ├─────────────────────────────────────────────────────────────────────────────┤
+428: │                                                                              │
+429: │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
+430: │  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
+431: │  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
+432: │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
+433: │         │                  │                  │                  │          │
+434: ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
+435: │                          Storage Coordinator                                 │
+436: ├─────────┬───────────────────┬───────────────────┬───────────────────────────┤
+437: │         │                   │                   │                            │
+438: │  ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐     ┌────────────┐ │
+439: │  │ PostgreSQL  │     │  pgvector   │     │   Neo4j    │     │  LiteLLM   │ │
+440: │  │  (Events,   │     │ (Embeddings)│     │  (Graph)   │     │  (Models)  │ │
+441: │  │ Documents)  │     │             │     │            │     │            │ │
+442: │  └─────────────┘     └─────────────┘     └────────────┘     └────────────┘ │
+443: │                                                                              │
+444: └──────────────────────────────────────────────────────────────────────────────┘
+445: ```
+446: 
+447: ### Core Components
+448: 
+449: | Component | Purpose |
+450: |-----------|---------|
+451: | `MemoryLake` | Primary API for remember/recall/forget operations |
+452: | `StorageCoordinator` | Orchestrates all storage backends |
+453: | `HybridQueryEngine` | Combines vector, graph, and keyword search |
+454: | `PipelineManager` | Manages Prefect ingestion flows |
+455: | `ACLEnforcer` | Cross-layer permission enforcement |
+456: 
+457: ### Storage Backends
+458: 
+459: | Backend | Technology | Purpose |
+460: |---------|------------|---------|
+461: | Relational | PostgreSQL | Documents, events, permissions, metadata |
+462: | Vector | pgvector | Embeddings for semantic similarity search |
+463: | Graph | Neo4j | Entity nodes and relationship edges |
+464: | Event Store | PostgreSQL | Immutable event log for sourcing |
+465: 
+466: ### Data Flow
+467: 
+468: 1. **Ingestion** (Three-Phase Pipeline)
+469:    - Phase 1: Stage documents, compute checksums, detect duplicates
+470:    - Phase 2: Chunk text, then generate embeddings and extract entities concurrently
+471:    - Phase 3 (optional): Cross-document entity unification and relationship inference
+472: 
+473: 2. **Query** (Hybrid Search)
+474:    - Execute vector, graph, and keyword searches in parallel
+475:    - Apply Reciprocal Rank Fusion to combine results
+476:    - Filter by ACL and temporal context
+477: 
+478: 3. **Event Sourcing**
+479:    - All changes recorded as immutable events
+480:    - Enables temporal queries ("state as of date X")
+481:    - Complete audit trail for compliance
+482: 
+483: ---
+484: 
+485: ## Configuration
+486: 
+487: ### Environment Variables
+488: 
+489: | Variable | Description | Default |
+490: |----------|-------------|---------|
+491: | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
+492: | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
+493: | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
+494: | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
+495: | `KHORA_DEBUG` | Enable debug mode | `false` |
+496: | `KHORA_API_HOST` | API server host | `127.0.0.1` |
+497: | `KHORA_API_PORT` | API server port | `8100` |
+498: | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
+499: | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
+500: | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
+501: 
+502: ### LiteLLM Configuration
+503: 
+504: Khora uses LiteLLM for unified model access. Configure in `examples/config/litellm/`:
+505: 
+506: ```yaml
+507: # examples/config/litellm/openai.yaml
+508: model: "gpt-4o-mini"
+509: api_key_env: "OPENAI_API_KEY"
+510: temperature: 0.7
+511: max_tokens: 8192
+512: embedding_model: "text-embedding-3-small"
+513: ```
+514: 
+515: ```yaml
+516: # examples/config/litellm/claude.yaml
+517: model: "claude-sonnet-4-20250514"
+518: api_key_env: "ANTHROPIC_API_KEY"
+519: temperature: 0.7
+520: max_tokens: 8192
+521: 
+522: # Router with fallbacks
+523: model_list:
+524:   - model_name: claude-sonnet-4
+525:     litellm_params:
+526:       model: claude-sonnet-4-20250514
+527:       api_key: os.environ/ANTHROPIC_API_KEY
+528:   - model_name: claude-sonnet-4
+529:     litellm_params:
+530:       model: claude-3-5-sonnet-20241022
+531:       api_key: os.environ/ANTHROPIC_API_KEY
+532: ```
+533: 
+534: ### Extraction Skills
+535: 
+536: Configure entity extraction in your code:
+537: 
+538: ```python
+539: from khora.extraction.skills import ExtractionSkill
+540: 
+541: skill = ExtractionSkill(
+542:     name="custom_entities",
+543:     description="Extract domain-specific entities",
+544:     entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
+545:     relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
+546: )
+547: 
+548: await lake.remember(content, skill_name="custom_entities")
+549: ```
+550: 
+551: ---
+552: 
+553: ## Project Structure
+554: 
+555: ```
+556: khora/
+557: ├── src/khora/
+558: │   ├── __init__.py              # Package exports
+559: │   ├── memory_lake.py           # Primary MemoryLake class
+560: │   ├── api/                     # FastAPI application
+561: │   │   ├── app.py               # App factory with lifespan
+562: │   │   ├── deps.py              # Dependency injection
+563: │   │   └── routes/              # API endpoints
+564: │   │       ├── memory.py        # Remember/recall/forget
+565: │   │       ├── namespaces.py    # Multi-tenancy management
+566: │   │       ├── sync.py          # Ingestion pipelines
+567: │   │       └── status.py        # Health checks
+568: │   ├── acl/                     # Access control
+569: │   │   ├── checker.py           # Permission checking
+570: │   │   └── enforcer.py          # Cross-layer enforcement
+571: │   ├── cli/                     # Command-line interface
+572: │   ├── config/                  # Configuration
+573: │   │   ├── schema.py            # Pydantic settings
+574: │   │   ├── llm.py               # LiteLLM configuration
+575: │   │   └── resolver.py          # Hierarchical config
+576: │   ├── core/models/             # Domain models
+577: │   │   ├── document.py          # Document, Chunk
+578: │   │   ├── entity.py            # Entity, Relationship
+579: │   │   ├── event.py             # MemoryEvent (sourcing)
+580: │   │   └── tenancy.py           # Org, Workspace, Namespace
+581: │   ├── db/                      # Database layer
+582: │   │   ├── models.py            # SQLAlchemy ORM
+583: │   │   └── session.py           # Async session management
+584: │   ├── extraction/              # Content processing
+585: │   │   ├── chunkers/            # Text chunking strategies
+586: │   │   ├── embedders/           # Embedding generation
+587: │   │   ├── extractors/          # Entity extraction
+588: │   │   └── skills/              # Extraction configurations
+589: │   ├── pipelines/               # Prefect workflows
+590: │   │   ├── flows/               # Ingestion and sync flows
+591: │   │   ├── tasks/               # Individual pipeline tasks
+592: │   │   ├── manager.py           # Pipeline orchestration
+593: │   │   └── registry.py          # Pipeline registration
+594: │   ├── query/                   # Search engine
+595: │   │   ├── engine.py            # HybridQueryEngine
+596: │   │   ├── fusion.py            # Reciprocal Rank Fusion
+597: │   │   └── temporal.py          # Time-based queries
+598: │   └── storage/                 # Storage backends
+599: │       ├── backends/            # PostgreSQL, pgvector, Neo4j
+600: │       ├── coordinator.py       # Backend orchestration
+601: │       ├── event_store.py       # Event sourcing
+602: │       └── factory.py           # Storage initialization
+603: ├── tests/                       # Test suite
+604: ├── alembic/                     # Database migrations
+605: ├── examples/config/             # Example configurations
+606: ├── docker-compose.yml           # Development services
+607: └── pyproject.toml               # Project configuration
+608: ```
+609: 
+610: ---
+611: 
+612: ## Development
+613: 
+614: ### Commands
+615: 
+616: ```bash
+617: # Start development server
+618: uv run khora serve --reload --no-auth
+619: 
+620: # Run tests with coverage
+621: make test
+622: 
+623: # Format code
+624: make format
+625: 
+626: # Run linting
+627: make lint
+628: 
+629: # Run all pre-commit hooks
+630: make prek
+631: 
+632: # Start development databases
+633: make dev
+634: 
+635: # Stop development databases
+636: make down
+637: ```
+638: 
+639: ### Database Migrations
+640: 
+641: ```bash
+642: # Run all migrations
+643: uv run alembic upgrade head
+644: 
+645: # Create a new migration
+646: uv run alembic revision --autogenerate -m "Add new table"
+647: 
+648: # Rollback one migration
+649: uv run alembic downgrade -1
+650: ```
+651: 
+652: ### Testing
+653: 
+654: ```bash
+655: # Run all tests
+656: make test
+657: 
+658: # Run specific test file
+659: uv run pytest tests/unit/test_api.py -v
+660: 
+661: # Run with markers
+662: uv run pytest -m unit        # Unit tests only
+663: uv run pytest -m integration # Integration tests
+664: uv run pytest -m e2e         # End-to-end tests
+665: ```
+666: 
+667: ---
+668: 
+669: ## API Reference
+670: 
+671: ### MemoryLake Class
+672: 
+673: #### Constructor
+674: 
+675: ```python
+676: class MemoryLake:
+677:     def __init__(
+678:         self,
+679:         database_url: str | KhoraConfig | None = None,
+680:         *,
+681:         graph_url: str | None = None,
+682:         embedding_model: str = "text-embedding-3-small",
+683:     ):
+684:         """Initialize the Memory Lake.
+685: 
+686:         Args:
+687:             database_url: PostgreSQL URL, KhoraConfig, or None (reads from env)
+688:             graph_url: Optional Neo4j URL (bolt://user:pass@host:port)
+689:             embedding_model: Embedding model to use
+690:         """
+691: ```
+692: 
+693: #### Core Methods
+694: 
+695: ```python
+696:     async def remember(
+697:         self,
+698:         content: str,
+699:         *,
+700:         namespace: str | UUID | None = None,
+701:         title: str = "",
+702:         source: str = "",
+703:         metadata: dict = {},
+704:         skill_name: str = "general_entities",
+705:     ) -> RememberResult:
+706:         """Store content in the memory lake."""
+707: 
+708:     async def remember_batch(
+709:         self,
+710:         documents: list[dict],
+711:         *,
+712:         namespace: str | UUID | None = None,
+713:         skill_name: str = "general_entities",
+714:         max_concurrent: int = 5,
+715:         deduplicate: bool = True,
+716:         infer_relationships: bool = True,
+717:         on_progress: Callable[[int, int], None] | None = None,
+718:     ) -> BatchResult:
+719:         """Store multiple documents with automatic optimization."""
+720: 
+721:     async def recall(
+722:         self,
+723:         query: str,
+724:         *,
+725:         namespace: str | UUID | None = None,
+726:         limit: int = 10,
+727:         mode: SearchMode = SearchMode.HYBRID,
+728:         min_similarity: float = 0.0,
+729:         agentic: bool = False,
+730:         raw: bool = False,  # Skip all LLM features
+731:     ) -> RecallResult:
+732:         """Recall memories relevant to a query."""
+733: 
+734:     async def forget(
+735:         self,
+736:         document_id: UUID,
+737:         *,
+738:         namespace: str | UUID | None = None,
+739:     ) -> bool:
+740:         """Remove a memory from the lake."""
+741: ```
+742: 
+743: #### Convenience Methods
+744: 
+745: ```python
+746:     async def ensure_namespace(
+747:         self,
+748:         name: str,
+749:         *,
+750:         description: str = "",
+751:     ) -> UUID:
+752:         """Get or create a namespace by name."""
+753: 
+754:     async def get_document(self, document_id: UUID) -> Document | None:
+755:         """Get a document by ID."""
+756: 
+757:     async def list_documents(
+758:         self,
+759:         *,
+760:         namespace: str | UUID | None = None,
+761:         limit: int = 100,
+762:     ) -> list[Document]:
+763:         """List documents in a namespace."""
+764: 
+765:     async def search_entities(
+766:         self,
+767:         query: str,
+768:         *,
+769:         namespace: str | UUID | None = None,
+770:         limit: int = 10,
+771:     ) -> list[Entity]:
+772:         """Search entities by query text using embedding similarity."""
+773: 
+774:     async def stats(
+775:         self,
+776:         *,
+777:         namespace: str | UUID | None = None,
+778:     ) -> Stats:
+779:         """Get document/chunk/entity/relationship counts."""
+780: 
+781:     async def list_entities(
+782:         self,
+783:         *,
+784:         namespace: str | UUID | None = None,
+785:         entity_type: str | None = None,
+786:         limit: int = 100,
+787:     ) -> list[Entity]:
+788:         """List entities in a namespace."""
+789: 
+790:     async def find_related_entities(
+791:         self,
+792:         entity_id: UUID,
+793:         *,
+794:         max_depth: int = 2,
+795:         limit: int = 20,
+796:     ) -> list[tuple[Entity, float]]:
+797:         """Find entities related to a given entity."""
+798: ```
+799: 
+800: ### Data Classes
+801: 
+802: ```python
+803: @dataclass
+804: class RememberResult:
+805:     """Result of a remember() operation."""
+806:     document_id: UUID
+807:     namespace_id: UUID
+808:     chunks_created: int
+809:     entities_extracted: int
+810:     relationships_created: int
+811:     metadata: dict[str, Any]
+812: 
+813: @dataclass
+814: class RecallResult:
+815:     """Result of a recall() operation."""
+816:     query: str
+817:     namespace_id: UUID
+818:     chunks: list[tuple[Chunk, float]]
+819:     entities: list[tuple[Entity, float]]
+820:     context_text: str
+821:     metadata: dict[str, Any]
+822: 
+823: @dataclass
+824: class BatchResult:
+825:     """Result of remember_batch() operation."""
+826:     total: int        # Total documents submitted
+827:     processed: int    # Successfully processed
+828:     skipped: int      # Skipped (duplicates)
+829:     failed: int       # Failed to process
+830:     chunks: int       # Total chunks created
+831:     entities: int     # Total entities extracted
+832:     relationships: int # Total relationships created
+833: 
+834: @dataclass
+835: class Stats:
+836:     """Namespace statistics from stats()."""
+837:     documents: int
+838:     chunks: int
+839:     entities: int
+840:     relationships: int
+841: ```
+842: 
+843: ### Search Modes
+844: 
+845: | Mode | Description |
+846: |------|-------------|
+847: | `VECTOR` | Semantic similarity search using embeddings |
+848: | `GRAPH` | Entity and relationship traversal |
+849: | `HYBRID` | Combined vector + graph + keyword with RRF fusion |
+850: | `ALL` | All sources (vector, graph, keyword) |
+851: 
+852: ### Entity Types
+853: 
+854: | Type | Description |
+855: |------|-------------|
+856: | `PERSON` | Individual people |
+857: | `ORGANIZATION` | Companies, institutions |
+858: | `LOCATION` | Places, addresses |
+859: | `CONCEPT` | Abstract ideas, theories |
+860: | `EVENT` | Occurrences, incidents |
+861: | `TECHNOLOGY` | Tools, platforms, languages |
+862: | `PRODUCT` | Goods, services |
+863: | `DOCUMENT` | Referenced documents |
+864: | `OTHER` | Uncategorized entities |
+865: 
+866: ### Deprecation Notices
+867: 
+868: The following properties emit `DeprecationWarning` and will be removed in a future version:
+869: 
+870: | Deprecated | Replacement |
+871: |------------|-------------|
+872: | `lake.storage` | Use `lake.get_document()`, `lake.list_documents()`, `lake.stats()` |
+873: | `lake.query_engine` | Use `lake.recall()` with `raw=True` for unprocessed search |
+874: 
+875: ---
+876: 
+877: ## License
+878: 
+879: Copyright (c) 2024-2025 Deyta. All rights reserved.
 ````
 
 ## File: src/khora/config/llm.py
@@ -36966,382 +37053,6 @@ README.md
 234: 
 235:             return self.occurred_at + timedelta(seconds=self.duration_seconds)
 236:         return None
-````
-
-## File: tests/unit/test_api.py
-````python
- 1: """Tests for API module."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: import pytest
- 6: from fastapi.testclient import TestClient
- 7: 
- 8: import khora
- 9: 
-10: 
-11: @pytest.mark.unit
-12: class TestStatusEndpoints:
-13:     """Tests for status check endpoints."""
-14: 
-15:     def test_status_check(self, test_client: TestClient) -> None:
-16:         """Test basic status check endpoint."""
-17:         response = test_client.get("/status")
-18: 
-19:         assert response.status_code == 200
-20:         data = response.json()
-21:         assert data["status"] == "ok"
-22:         assert "timestamp" in data
-23:         assert data["version"] == khora.__version__
-24:         assert data["service"] == "khora"
-25: 
-26:     def test_health_check(self, test_client: TestClient) -> None:
-27:         """Test health check endpoint."""
-28:         response = test_client.get("/health")
-29: 
-30:         assert response.status_code == 200
-31:         data = response.json()
-32:         assert data["status"] == "healthy"
-33:         assert "timestamp" in data
-34:         assert data["version"] == khora.__version__
-35: 
-36:     def test_readiness_check(self, test_client: TestClient) -> None:
-37:         """Test readiness check endpoint."""
-38:         response = test_client.get("/health/ready")
-39: 
-40:         assert response.status_code == 200
-41:         data = response.json()
-42:         assert data["status"] in ["ready", "not_ready"]
-43:         assert "timestamp" in data
-44:         assert "checks" in data
-45: 
-46:     def test_liveness_check(self, test_client: TestClient) -> None:
-47:         """Test liveness check endpoint."""
-48:         response = test_client.get("/health/live")
-49: 
-50:         assert response.status_code == 200
-51:         data = response.json()
-52:         assert data["status"] == "alive"
-53:         assert "timestamp" in data
-54: 
-55: 
-56: @pytest.mark.unit
-57: class TestConfig:
-58:     """Tests for configuration."""
-59: 
-60:     def test_default_config(self) -> None:
-61:         """Test default configuration values."""
-62:         from khora.config import KhoraConfig
-63: 
-64:         config = KhoraConfig()
-65:         assert config.app_name == "khora"
-66:         assert config.environment == "development"
-67:         assert config.debug is False
-68:         assert config.api_host == "127.0.0.1"
-69:         assert config.api_port == 8000
-70:         assert config.auth_enabled is True
-71: 
-72:     def test_config_from_env(self, monkeypatch) -> None:
-73:         """Test configuration from environment variables."""
-74:         from khora.config import KhoraConfig
-75: 
-76:         monkeypatch.setenv("KHORA_DEBUG", "true")
-77:         monkeypatch.setenv("KHORA_API_PORT", "9000")
-78:         monkeypatch.setenv("KHORA_ENVIRONMENT", "staging")
-79: 
-80:         config = KhoraConfig()
-81:         assert config.debug is True
-82:         assert config.api_port == 9000
-83:         assert config.environment == "staging"
-````
-
-## File: src/khora/extraction/expansion/expander.py
-````python
-  1: """Semantic expander for knowledge graph enhancement.
-  2: 
-  3: Orchestrates cross-tool entity unification and relationship inference
-  4: to enrich extracted knowledge graphs.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from dataclasses import dataclass, field
- 10: from typing import TYPE_CHECKING
- 11: from uuid import UUID
- 12: 
- 13: from loguru import logger
- 14: 
- 15: from .cross_tool_unifier import CrossToolUnifier
- 16: from .relationship_inferrer import RelationshipInferrer, to_relationship
- 17: 
- 18: if TYPE_CHECKING:
- 19:     from khora.core.models import Entity, Relationship
- 20:     from khora.extraction.skills import ExpertiseConfig
- 21: 
- 22:     from .entity_index import EntityIndex
- 23: 
- 24: 
- 25: @dataclass
- 26: class ExpansionResult:
- 27:     """Result of semantic expansion."""
- 28: 
- 29:     # Unified entities (after deduplication)
- 30:     entities: list[Entity] = field(default_factory=list)
- 31: 
- 32:     # Updated existing relationships
- 33:     relationships: list[Relationship] = field(default_factory=list)
- 34: 
- 35:     # New inferred relationships
- 36:     inferred_relationships: list[Relationship] = field(default_factory=list)
- 37: 
- 38:     # Statistics
- 39:     original_entity_count: int = 0
- 40:     merged_entity_count: int = 0
- 41:     original_relationship_count: int = 0
- 42:     inferred_relationship_count: int = 0
- 43: 
- 44:     # Mapping for provenance tracking
- 45:     entity_mapping: dict[UUID, UUID] = field(default_factory=dict)
- 46: 
- 47:     @property
- 48:     def total_entities(self) -> int:
- 49:         """Total entities after expansion."""
- 50:         return len(self.entities)
- 51: 
- 52:     @property
- 53:     def total_relationships(self) -> int:
- 54:         """Total relationships after expansion."""
- 55:         return len(self.relationships) + len(self.inferred_relationships)
- 56: 
- 57:     @property
- 58:     def all_relationships(self) -> list[Relationship]:
- 59:         """All relationships (existing + inferred)."""
- 60:         return self.relationships + self.inferred_relationships
- 61: 
- 62: 
- 63: class SemanticExpander:
- 64:     """Orchestrates semantic expansion of knowledge graphs.
- 65: 
- 66:     Combines:
- 67:     - Cross-tool entity unification
- 68:     - Relationship inference
- 69:     - LLM-powered expansion (future)
- 70: 
- 71:     Example usage:
- 72:         from khora.extraction.expansion import SemanticExpander
- 73:         from khora.extraction.skills import load_expertise
- 74: 
- 75:         expertise = load_expertise("saas_expert")
- 76:         expander = SemanticExpander(expertise=expertise)
- 77: 
- 78:         result = await expander.expand(
- 79:             entities=extracted_entities,
- 80:             relationships=extracted_relationships,
- 81:         )
- 82:     """
- 83: 
- 84:     def __init__(
- 85:         self,
- 86:         expertise: ExpertiseConfig | None = None,
- 87:         *,
- 88:         enable_unification: bool = True,
- 89:         enable_inference: bool = True,
- 90:         inference_depth: int = 2,
- 91:         embedding_threshold: float = 0.85,
- 92:         fuzzy_threshold: float = 0.85,
- 93:         min_inference_confidence: float = 0.3,
- 94:     ) -> None:
- 95:         """Initialize the semantic expander.
- 96: 
- 97:         Args:
- 98:             expertise: ExpertiseConfig with expansion rules
- 99:             enable_unification: Whether to run cross-tool unification
-100:             enable_inference: Whether to run relationship inference
-101:             inference_depth: Number of inference passes
-102:             embedding_threshold: Similarity threshold for embedding matching
-103:             fuzzy_threshold: Threshold for fuzzy string matching
-104:             min_inference_confidence: Minimum confidence for inferred relationships
-105:         """
-106:         self._expertise = expertise
-107:         self._enable_unification = enable_unification
-108:         self._enable_inference = enable_inference
-109:         self._inference_depth = inference_depth
-110: 
-111:         # Apply expertise settings if available
-112:         if expertise and expertise.expansion:
-113:             self._enable_unification = expertise.expansion.cross_tool_unification
-114:             self._enable_inference = expertise.expansion.relationship_inference
-115:             self._inference_depth = expertise.expansion.depth
-116: 
-117:         if expertise and expertise.confidence:
-118:             min_inference_confidence = expertise.confidence.min_inferred
-119: 
-120:         # Initialize components
-121:         self._unifier = CrossToolUnifier(
-122:             expertise=expertise,
-123:             embedding_threshold=embedding_threshold,
-124:             fuzzy_threshold=fuzzy_threshold,
-125:         )
-126:         self._inferrer = RelationshipInferrer(
-127:             expertise=expertise,
-128:             min_confidence=min_inference_confidence,
-129:         )
-130: 
-131:     async def expand(
-132:         self,
-133:         entities: list[Entity],
-134:         relationships: list[Relationship],
-135:         *,
-136:         namespace_id: UUID | None = None,
-137:         entity_index: EntityIndex | None = None,
-138:     ) -> ExpansionResult:
-139:         """Expand the knowledge graph.
-140: 
-141:         Runs unification and inference phases based on configuration.
-142: 
-143:         Args:
-144:             entities: Entities to expand
-145:             relationships: Relationships to expand
-146:             namespace_id: Namespace ID for new relationships
-147: 
-148:         Returns:
-149:             ExpansionResult with expanded graph
-150:         """
-151:         result = ExpansionResult(
-152:             original_entity_count=len(entities),
-153:             original_relationship_count=len(relationships),
-154:         )
-155: 
-156:         if not entities:
-157:             return result
-158: 
-159:         # Determine namespace
-160:         if namespace_id is None and entities:
-161:             namespace_id = entities[0].namespace_id
-162: 
-163:         current_entities = list(entities)
-164:         current_relationships = list(relationships)
-165:         logger.debug(
-166:             f"Starting expansion with {len(current_entities)} entities, {len(current_relationships)} relationships"
-167:         )
-168: 
-169:         # Phase 1: Cross-tool entity unification
-170:         if self._enable_unification:
-171:             logger.debug("Running cross-tool entity unification...")
-172:             import time as _time
-173: 
-174:             from khora.telemetry import get_collector
-175: 
-176:             _t0 = _time.perf_counter()
-177:             unification_result = self._unifier.unify(
-178:                 current_entities,
-179:                 current_relationships,
-180:                 use_embeddings=True,
-181:                 use_fuzzy=True,
-182:                 entity_index=entity_index,
-183:             )
-184:             get_collector().record_pipeline_stage(
-185:                 pipeline="expansion",
-186:                 stage="cross_tool_unification",
-187:                 latency_ms=(_time.perf_counter() - _t0) * 1000,
-188:                 input_count=len(current_entities),
-189:                 output_count=len(unification_result.unified_entities),
-190:                 namespace_id=namespace_id,
-191:                 metadata={"merged": unification_result.entities_merged},
-192:             )
-193: 
-194:             current_entities = unification_result.unified_entities
-195:             current_relationships = unification_result.updated_relationships
-196:             result.entity_mapping = unification_result.entity_mapping
-197:             result.merged_entity_count = unification_result.entities_merged
-198: 
-199:             logger.debug(
-200:                 f"Unified {result.original_entity_count} entities into {len(current_entities)} "
-201:                 f"({result.merged_entity_count} merged)"
-202:             )
-203: 
-204:         # Phase 2: Relationship inference
-205:         inferred_relationships: list[Relationship] = []
-206:         if self._enable_inference and self._expertise:
-207:             logger.debug(f"Running relationship inference (depth={self._inference_depth})...")
-208:             _t0 = _time.perf_counter()
-209:             inferred = self._inferrer.infer(
-210:                 current_entities,
-211:                 current_relationships,
-212:                 depth=self._inference_depth,
-213:             )
-214: 
-215:             # Convert to domain relationships
-216:             inferred_relationships = [to_relationship(inf, namespace_id) for inf in inferred]
-217:             result.inferred_relationship_count = len(inferred_relationships)
-218: 
-219:             get_collector().record_pipeline_stage(
-220:                 pipeline="expansion",
-221:                 stage="relationship_inference",
-222:                 latency_ms=(_time.perf_counter() - _t0) * 1000,
-223:                 input_count=len(current_entities) + len(current_relationships),
-224:                 output_count=len(inferred_relationships),
-225:                 namespace_id=namespace_id,
-226:                 metadata={"depth": self._inference_depth},
-227:             )
-228: 
-229:             logger.debug(f"Inferred {len(inferred_relationships)} new relationships")
-230: 
-231:         # Build final result
-232:         result.entities = current_entities
-233:         result.relationships = current_relationships
-234:         result.inferred_relationships = inferred_relationships
-235: 
-236:         return result
-237: 
-238:     def expand_sync(
-239:         self,
-240:         entities: list[Entity],
-241:         relationships: list[Relationship],
-242:         *,
-243:         namespace_id: UUID | None = None,
-244:     ) -> ExpansionResult:
-245:         """Synchronous version of expand.
-246: 
-247:         Useful for non-async contexts or when LLM expansion is not needed.
-248:         """
-249:         import asyncio
-250: 
-251:         return asyncio.get_event_loop().run_until_complete(
-252:             self.expand(entities, relationships, namespace_id=namespace_id)
-253:         )
-254: 
-255:     @classmethod
-256:     def from_expertise(cls, expertise: ExpertiseConfig) -> SemanticExpander:
-257:         """Create expander from expertise configuration.
-258: 
-259:         Args:
-260:             expertise: ExpertiseConfig to use
-261: 
-262:         Returns:
-263:             Configured SemanticExpander
-264:         """
-265:         return cls(
-266:             expertise=expertise,
-267:             enable_unification=expertise.expansion.cross_tool_unification,
-268:             enable_inference=expertise.expansion.relationship_inference,
-269:             inference_depth=expertise.expansion.depth,
-270:         )
-271: 
-272:     @classmethod
-273:     def from_expertise_name(cls, name: str) -> SemanticExpander:
-274:         """Create expander from expertise name.
-275: 
-276:         Args:
-277:             name: Name of expertise to load
-278: 
-279:         Returns:
-280:             Configured SemanticExpander
-281:         """
-282:         from khora.extraction.skills import load_expertise
-283: 
-284:         expertise = load_expertise(f"builtin:{name}")
-285:         return cls.from_expertise(expertise)
 ````
 
 ## File: src/khora/storage/backends/base.py
@@ -37965,6 +37676,295 @@ README.md
 617:     ) -> int:
 618:         """Count events matching criteria."""
 619:         ...
+````
+
+## File: src/khora/extraction/expansion/expander.py
+````python
+  1: """Semantic expander for knowledge graph enhancement.
+  2: 
+  3: Orchestrates cross-tool entity unification and relationship inference
+  4: to enrich extracted knowledge graphs.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from dataclasses import dataclass, field
+ 10: from typing import TYPE_CHECKING
+ 11: from uuid import UUID
+ 12: 
+ 13: from loguru import logger
+ 14: 
+ 15: from .cross_tool_unifier import CrossToolUnifier
+ 16: from .relationship_inferrer import RelationshipInferrer, to_relationship
+ 17: 
+ 18: if TYPE_CHECKING:
+ 19:     from khora.core.models import Entity, Relationship
+ 20:     from khora.extraction.skills import ExpertiseConfig
+ 21: 
+ 22:     from .entity_index import EntityIndex
+ 23: 
+ 24: 
+ 25: @dataclass
+ 26: class ExpansionResult:
+ 27:     """Result of semantic expansion."""
+ 28: 
+ 29:     # Unified entities (after deduplication)
+ 30:     entities: list[Entity] = field(default_factory=list)
+ 31: 
+ 32:     # Updated existing relationships
+ 33:     relationships: list[Relationship] = field(default_factory=list)
+ 34: 
+ 35:     # New inferred relationships
+ 36:     inferred_relationships: list[Relationship] = field(default_factory=list)
+ 37: 
+ 38:     # Statistics
+ 39:     original_entity_count: int = 0
+ 40:     merged_entity_count: int = 0
+ 41:     original_relationship_count: int = 0
+ 42:     inferred_relationship_count: int = 0
+ 43: 
+ 44:     # Mapping for provenance tracking
+ 45:     entity_mapping: dict[UUID, UUID] = field(default_factory=dict)
+ 46: 
+ 47:     @property
+ 48:     def total_entities(self) -> int:
+ 49:         """Total entities after expansion."""
+ 50:         return len(self.entities)
+ 51: 
+ 52:     @property
+ 53:     def total_relationships(self) -> int:
+ 54:         """Total relationships after expansion."""
+ 55:         return len(self.relationships) + len(self.inferred_relationships)
+ 56: 
+ 57:     @property
+ 58:     def all_relationships(self) -> list[Relationship]:
+ 59:         """All relationships (existing + inferred)."""
+ 60:         return self.relationships + self.inferred_relationships
+ 61: 
+ 62: 
+ 63: class SemanticExpander:
+ 64:     """Orchestrates semantic expansion of knowledge graphs.
+ 65: 
+ 66:     Combines:
+ 67:     - Cross-tool entity unification
+ 68:     - Relationship inference
+ 69:     - LLM-powered expansion (future)
+ 70: 
+ 71:     Example usage:
+ 72:         from khora.extraction.expansion import SemanticExpander
+ 73:         from khora.extraction.skills import load_expertise
+ 74: 
+ 75:         expertise = load_expertise("saas_expert")
+ 76:         expander = SemanticExpander(expertise=expertise)
+ 77: 
+ 78:         result = await expander.expand(
+ 79:             entities=extracted_entities,
+ 80:             relationships=extracted_relationships,
+ 81:         )
+ 82:     """
+ 83: 
+ 84:     def __init__(
+ 85:         self,
+ 86:         expertise: ExpertiseConfig | None = None,
+ 87:         *,
+ 88:         enable_unification: bool = True,
+ 89:         enable_inference: bool = True,
+ 90:         inference_depth: int = 2,
+ 91:         embedding_threshold: float = 0.85,
+ 92:         fuzzy_threshold: float = 0.85,
+ 93:         min_inference_confidence: float = 0.3,
+ 94:     ) -> None:
+ 95:         """Initialize the semantic expander.
+ 96: 
+ 97:         Args:
+ 98:             expertise: ExpertiseConfig with expansion rules
+ 99:             enable_unification: Whether to run cross-tool unification
+100:             enable_inference: Whether to run relationship inference
+101:             inference_depth: Number of inference passes
+102:             embedding_threshold: Similarity threshold for embedding matching
+103:             fuzzy_threshold: Threshold for fuzzy string matching
+104:             min_inference_confidence: Minimum confidence for inferred relationships
+105:         """
+106:         self._expertise = expertise
+107:         self._enable_unification = enable_unification
+108:         self._enable_inference = enable_inference
+109:         self._inference_depth = inference_depth
+110: 
+111:         # Apply expertise settings if available
+112:         if expertise and expertise.expansion:
+113:             self._enable_unification = expertise.expansion.cross_tool_unification
+114:             self._enable_inference = expertise.expansion.relationship_inference
+115:             self._inference_depth = expertise.expansion.depth
+116: 
+117:         if expertise and expertise.confidence:
+118:             min_inference_confidence = expertise.confidence.min_inferred
+119: 
+120:         # Initialize components
+121:         self._unifier = CrossToolUnifier(
+122:             expertise=expertise,
+123:             embedding_threshold=embedding_threshold,
+124:             fuzzy_threshold=fuzzy_threshold,
+125:         )
+126:         self._inferrer = RelationshipInferrer(
+127:             expertise=expertise,
+128:             min_confidence=min_inference_confidence,
+129:         )
+130: 
+131:     async def expand(
+132:         self,
+133:         entities: list[Entity],
+134:         relationships: list[Relationship],
+135:         *,
+136:         namespace_id: UUID | None = None,
+137:         entity_index: EntityIndex | None = None,
+138:     ) -> ExpansionResult:
+139:         """Expand the knowledge graph.
+140: 
+141:         Runs unification and inference phases based on configuration.
+142: 
+143:         Args:
+144:             entities: Entities to expand
+145:             relationships: Relationships to expand
+146:             namespace_id: Namespace ID for new relationships
+147: 
+148:         Returns:
+149:             ExpansionResult with expanded graph
+150:         """
+151:         result = ExpansionResult(
+152:             original_entity_count=len(entities),
+153:             original_relationship_count=len(relationships),
+154:         )
+155: 
+156:         if not entities:
+157:             return result
+158: 
+159:         # Determine namespace
+160:         if namespace_id is None and entities:
+161:             namespace_id = entities[0].namespace_id
+162: 
+163:         current_entities = list(entities)
+164:         current_relationships = list(relationships)
+165:         logger.debug(
+166:             f"Starting expansion with {len(current_entities)} entities, {len(current_relationships)} relationships"
+167:         )
+168: 
+169:         # Phase 1: Cross-tool entity unification
+170:         if self._enable_unification:
+171:             logger.debug("Running cross-tool entity unification...")
+172:             import time as _time
+173: 
+174:             from khora.telemetry import get_collector
+175: 
+176:             _t0 = _time.perf_counter()
+177:             unification_result = self._unifier.unify(
+178:                 current_entities,
+179:                 current_relationships,
+180:                 use_embeddings=True,
+181:                 use_fuzzy=True,
+182:                 entity_index=entity_index,
+183:             )
+184:             get_collector().record_pipeline_stage(
+185:                 pipeline="expansion",
+186:                 stage="cross_tool_unification",
+187:                 latency_ms=(_time.perf_counter() - _t0) * 1000,
+188:                 input_count=len(current_entities),
+189:                 output_count=len(unification_result.unified_entities),
+190:                 namespace_id=namespace_id,
+191:                 metadata={"merged": unification_result.entities_merged},
+192:             )
+193: 
+194:             current_entities = unification_result.unified_entities
+195:             current_relationships = unification_result.updated_relationships
+196:             result.entity_mapping = unification_result.entity_mapping
+197:             result.merged_entity_count = unification_result.entities_merged
+198: 
+199:             logger.debug(
+200:                 f"Unified {result.original_entity_count} entities into {len(current_entities)} "
+201:                 f"({result.merged_entity_count} merged)"
+202:             )
+203: 
+204:         # Phase 2: Relationship inference
+205:         inferred_relationships: list[Relationship] = []
+206:         if self._enable_inference and self._expertise:
+207:             logger.debug(f"Running relationship inference (depth={self._inference_depth})...")
+208:             _t0 = _time.perf_counter()
+209:             inferred = self._inferrer.infer(
+210:                 current_entities,
+211:                 current_relationships,
+212:                 depth=self._inference_depth,
+213:             )
+214: 
+215:             # Convert to domain relationships
+216:             inferred_relationships = [to_relationship(inf, namespace_id) for inf in inferred]
+217:             result.inferred_relationship_count = len(inferred_relationships)
+218: 
+219:             get_collector().record_pipeline_stage(
+220:                 pipeline="expansion",
+221:                 stage="relationship_inference",
+222:                 latency_ms=(_time.perf_counter() - _t0) * 1000,
+223:                 input_count=len(current_entities) + len(current_relationships),
+224:                 output_count=len(inferred_relationships),
+225:                 namespace_id=namespace_id,
+226:                 metadata={"depth": self._inference_depth},
+227:             )
+228: 
+229:             logger.debug(f"Inferred {len(inferred_relationships)} new relationships")
+230: 
+231:         # Build final result
+232:         result.entities = current_entities
+233:         result.relationships = current_relationships
+234:         result.inferred_relationships = inferred_relationships
+235: 
+236:         return result
+237: 
+238:     def expand_sync(
+239:         self,
+240:         entities: list[Entity],
+241:         relationships: list[Relationship],
+242:         *,
+243:         namespace_id: UUID | None = None,
+244:     ) -> ExpansionResult:
+245:         """Synchronous version of expand.
+246: 
+247:         Useful for non-async contexts or when LLM expansion is not needed.
+248:         """
+249:         import asyncio
+250: 
+251:         return asyncio.get_event_loop().run_until_complete(
+252:             self.expand(entities, relationships, namespace_id=namespace_id)
+253:         )
+254: 
+255:     @classmethod
+256:     def from_expertise(cls, expertise: ExpertiseConfig) -> SemanticExpander:
+257:         """Create expander from expertise configuration.
+258: 
+259:         Args:
+260:             expertise: ExpertiseConfig to use
+261: 
+262:         Returns:
+263:             Configured SemanticExpander
+264:         """
+265:         return cls(
+266:             expertise=expertise,
+267:             enable_unification=expertise.expansion.cross_tool_unification,
+268:             enable_inference=expertise.expansion.relationship_inference,
+269:             inference_depth=expertise.expansion.depth,
+270:         )
+271: 
+272:     @classmethod
+273:     def from_expertise_name(cls, name: str) -> SemanticExpander:
+274:         """Create expander from expertise name.
+275: 
+276:         Args:
+277:             name: Name of expertise to load
+278: 
+279:         Returns:
+280:             Configured SemanticExpander
+281:         """
+282:         from khora.extraction.skills import load_expertise
+283: 
+284:         expertise = load_expertise(f"builtin:{name}")
+285:         return cls.from_expertise(expertise)
 ````
 
 ## File: src/khora/chat/engine.py
@@ -40817,762 +40817,6 @@ README.md
 1062:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
-## File: src/khora/memory_lake.py
-````python
-  1: """MemoryLake - Primary API for Khora Memory Lake.
-  2: 
-  3: This is the main entry point for using Khora as a library.
-  4: Provides a simple, unified interface for memory storage and retrieval.
-  5: 
-  6: The MemoryLake class is a thin facade that delegates to pluggable engines.
-  7: The default engine is "graphrag" which uses knowledge graphs, vectors, and LLM extraction.
-  8: """
-  9: 
- 10: from __future__ import annotations
- 11: 
- 12: import warnings
- 13: from collections.abc import AsyncGenerator, Callable
- 14: from contextlib import asynccontextmanager
- 15: from dataclasses import dataclass, field
- 16: from typing import TYPE_CHECKING, Any
- 17: from uuid import UUID
- 18: 
- 19: from loguru import logger
- 20: 
- 21: from khora.config import KhoraConfig, load_config
- 22: from khora.core.models import Document, Entity, MemoryNamespace
- 23: from khora.query import SearchMode
- 24: 
- 25: if TYPE_CHECKING:
- 26:     from khora.engines.protocol import MemoryEngineProtocol
- 27:     from khora.query import HybridQueryEngine
- 28:     from khora.storage import StorageConfig, StorageCoordinator
- 29: 
- 30: 
- 31: @dataclass
- 32: class RememberResult:
- 33:     """Result of a remember operation."""
- 34: 
- 35:     document_id: UUID
- 36:     namespace_id: UUID
- 37:     chunks_created: int
- 38:     entities_extracted: int
- 39:     relationships_created: int
- 40:     metadata: dict[str, Any] = field(default_factory=dict)
- 41: 
- 42: 
- 43: @dataclass
- 44: class BatchResult:
- 45:     """Result of remember_batch() operation."""
- 46: 
- 47:     total: int
- 48:     processed: int
- 49:     skipped: int
- 50:     failed: int
- 51:     chunks: int
- 52:     entities: int
- 53:     relationships: int
- 54: 
- 55: 
- 56: @dataclass
- 57: class Stats:
- 58:     """Namespace statistics."""
- 59: 
- 60:     documents: int
- 61:     chunks: int
- 62:     entities: int
- 63:     relationships: int
- 64: 
- 65: 
- 66: @dataclass
- 67: class RecallResult:
- 68:     """Result of a recall operation."""
- 69: 
- 70:     query: str
- 71:     namespace_id: UUID
- 72:     chunks: list[tuple[Any, float]]
- 73:     entities: list[tuple[Any, float]]
- 74:     context_text: str
- 75:     metadata: dict[str, Any] = field(default_factory=dict)
- 76: 
- 77: 
- 78: class MemoryLake:
- 79:     """Primary interface for Khora Memory Lake.
- 80: 
- 81:     Provides a simple API for storing and retrieving memories:
- 82:     - remember(): Store content in the memory lake
- 83:     - recall(): Retrieve relevant memories for a query
- 84:     - forget(): Remove memories
- 85: 
- 86:     Can be used as a context manager for automatic connection handling.
- 87: 
- 88:     The MemoryLake is a facade that delegates to pluggable engines.
- 89:     The default engine is "graphrag" which uses knowledge graphs and vector embeddings.
- 90: 
- 91:     Usage:
- 92:         # Simplest - from env vars (KHORA_DATABASE_URL)
- 93:         async with MemoryLake() as lake:
- 94:             await lake.remember("Important fact...", namespace="my-ns")
- 95: 
- 96:         # Common - explicit database URL
- 97:         async with MemoryLake("postgresql://localhost/mydb") as lake:
- 98:             results = await lake.recall("What do I know about...", namespace="my-ns")
- 99: 
-100:         # With graph backend
-101:         async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
-102:             ...
-103: 
-104:         # Explicit engine selection (same as default)
-105:         async with MemoryLake("postgresql://...", engine="graphrag") as lake:
-106:             ...
-107: 
-108:         # Full config
-109:         async with MemoryLake(KhoraConfig(...)) as lake:
-110:             ...
-111:     """
-112: 
-113:     def __init__(
-114:         self,
-115:         database_url: str | KhoraConfig | None = None,
-116:         *,
-117:         engine: str = "graphrag",
-118:         graph_url: str | None = None,
-119:         embedding_model: str = "text-embedding-3-small",
-120:         storage_config: StorageConfig | None = None,
-121:     ) -> None:
-122:         """Initialize the Memory Lake.
-123: 
-124:         Args:
-125:             database_url: PostgreSQL URL, or full KhoraConfig, or None (reads KHORA_DATABASE_URL from env)
-126:             engine: Engine to use (default: "graphrag")
-127:             graph_url: Optional Neo4j/graph database URL (bolt://user:pass@host:port)
-128:             embedding_model: Embedding model to use (default: text-embedding-3-small)
-129:             storage_config: Storage configuration (derived from config if None) - deprecated
-130: 
-131:         Examples:
-132:             # Simplest - from env vars
-133:             lake = MemoryLake()
-134: 
-135:             # Common - explicit database
-136:             lake = MemoryLake("postgresql://localhost/mydb")
-137: 
-138:             # With graph
-139:             lake = MemoryLake("postgresql://...", graph_url="bolt://...")
-140: 
-141:             # Explicit engine selection
-142:             lake = MemoryLake("postgresql://...", engine="graphrag")
-143: 
-144:             # Full config
-145:             lake = MemoryLake(KhoraConfig(...))
-146:         """
-147:         # Handle overloaded first argument
-148:         if isinstance(database_url, KhoraConfig):
-149:             self._config = database_url
-150:         elif isinstance(database_url, str):
-151:             # Build config from URL parameters
-152:             self._config = KhoraConfig(
-153:                 database_url=database_url,
-154:                 neo4j_url=graph_url,
-155:             )
-156:             # Override embedding model if non-default
-157:             if embedding_model != "text-embedding-3-small":
-158:                 self._config.llm.embedding_model = embedding_model
-159:         else:
-160:             # None - load from env/file
-161:             self._config = load_config()
-162:             # Apply overrides if provided
-163:             if graph_url:
-164:                 self._config.neo4j_url = graph_url
-165:             if embedding_model != "text-embedding-3-small":
-166:                 self._config.llm.embedding_model = embedding_model
-167: 
-168:         # Store for deferred engine creation
-169:         self._engine_name = engine
-170:         self._storage_config = storage_config  # for backwards compat
-171:         self._engine: MemoryEngineProtocol | None = None
-172:         self._connected = False
-173: 
-174:     async def connect(self) -> None:
-175:         """Connect to all storage backends."""
-176:         if self._connected:
-177:             return
-178: 
-179:         logger.info("Connecting Memory Lake...")
-180: 
-181:         from khora.engines import create_engine
-182: 
-183:         self._engine = create_engine(
-184:             self._engine_name,
-185:             self._config,
-186:             storage_config=self._storage_config,
-187:         )
-188:         await self._engine.connect()
-189: 
-190:         self._connected = True
-191:         logger.info("Memory Lake connected")
-192: 
-193:     async def disconnect(self) -> None:
-194:         """Disconnect from all storage backends."""
-195:         if not self._connected:
-196:             return
-197: 
-198:         logger.info("Disconnecting Memory Lake...")
-199: 
-200:         if self._engine:
-201:             await self._engine.disconnect()
-202:             self._engine = None
-203: 
-204:         self._connected = False
-205:         logger.info("Memory Lake disconnected")
-206: 
-207:     async def __aenter__(self) -> MemoryLake:
-208:         """Async context manager entry."""
-209:         await self.connect()
-210:         return self
-211: 
-212:     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-213:         """Async context manager exit."""
-214:         await self.disconnect()
-215: 
-216:     def _get_engine(self) -> MemoryEngineProtocol:
-217:         """Get the engine (internal use)."""
-218:         if self._engine is None:
-219:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
-220:         return self._engine
-221: 
-222:     @property
-223:     def storage(self) -> StorageCoordinator:
-224:         """Get the storage coordinator.
-225: 
-226:         .. deprecated::
-227:             Direct access to storage is deprecated. Use MemoryLake methods instead:
-228:             - lake.get_document() instead of lake.storage.get_document()
-229:             - lake.list_documents() instead of lake.storage.list_documents()
-230:             - lake.search_entities() instead of lake.storage.search_entities()
-231:             - lake.stats() instead of querying storage directly
-232:         """
-233:         warnings.warn(
-234:             "lake.storage is deprecated. Use lake.get_document(), lake.list_documents(), "
-235:             "lake.search_entities(), lake.stats() instead.",
-236:             DeprecationWarning,
-237:             stacklevel=2,
-238:         )
-239:         engine = self._get_engine()
-240:         if hasattr(engine, "_storage") and engine._storage:
-241:             return engine._storage
-242:         raise AttributeError("Current engine does not expose storage")
-243: 
-244:     @property
-245:     def query_engine(self) -> HybridQueryEngine:
-246:         """Get the query engine.
-247: 
-248:         .. deprecated::
-249:             Direct access to query_engine is deprecated. Use lake.recall() instead.
-250:             For unprocessed search without LLM features, use lake.recall(query, raw=True).
-251:         """
-252:         warnings.warn(
-253:             "lake.query_engine is deprecated. Use lake.recall() instead. "
-254:             "For raw search without LLM features, use lake.recall(query, raw=True).",
-255:             DeprecationWarning,
-256:             stacklevel=2,
-257:         )
-258:         engine = self._get_engine()
-259:         if hasattr(engine, "_query_engine") and engine._query_engine:
-260:             return engine._query_engine
-261:         raise AttributeError("Current engine does not expose query_engine")
-262: 
-263:     # =========================================================================
-264:     # Namespace Management
-265:     # =========================================================================
-266: 
-267:     async def create_namespace(
-268:         self,
-269:         name: str,
-270:         workspace_id: UUID,
-271:         *,
-272:         description: str = "",
-273:         config_overrides: dict[str, Any] | None = None,
-274:     ) -> MemoryNamespace:
-275:         """Create a new memory namespace.
-276: 
-277:         Args:
-278:             name: Namespace name
-279:             workspace_id: Parent workspace ID
-280:             description: Optional description
-281:             config_overrides: Optional configuration overrides
-282: 
-283:         Returns:
-284:             Created MemoryNamespace
-285:         """
-286:         return await self._get_engine().create_namespace(
-287:             name,
-288:             workspace_id,
-289:             description=description,
-290:             config_overrides=config_overrides,
-291:         )
-292: 
-293:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-294:         """Get a namespace by ID."""
-295:         return await self._get_engine().get_namespace(namespace_id)
-296: 
-297:     async def get_or_create_default_namespace(self) -> UUID:
-298:         """Get or create a default namespace for simple usage."""
-299:         return await self._get_engine().get_or_create_default_namespace()
-300: 
-301:     # =========================================================================
-302:     # Core API: remember, recall, forget
-303:     # =========================================================================
-304: 
-305:     async def remember(
-306:         self,
-307:         content: str,
-308:         *,
-309:         namespace: str | UUID | None = None,
-310:         title: str = "",
-311:         source: str = "",
-312:         metadata: dict[str, Any] | None = None,
-313:         skill_name: str = "general_entities",
-314:     ) -> RememberResult:
-315:         """Store content in the memory lake.
-316: 
-317:         This is the primary method for adding memories. It:
-318:         1. Creates a document
-319:         2. Chunks the content
-320:         3. Generates embeddings
-321:         4. Extracts entities and relationships
-322: 
-323:         Args:
-324:             content: Content to remember
-325:             namespace: Namespace name, ID, or None for default
-326:             title: Optional title for the content
-327:             source: Optional source identifier
-328:             metadata: Optional metadata
-329:             skill_name: Extraction skill to use
-330: 
-331:         Returns:
-332:             RememberResult with details
-333:         """
-334:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-335: 
-336:         ensure_trace_id()
-337:         try:
-338:             namespace_id = await self._resolve_namespace(namespace)
-339:             return await self._get_engine().remember(
-340:                 content,
-341:                 namespace_id,
-342:                 title=title,
-343:                 source=source,
-344:                 metadata=metadata,
-345:                 skill_name=skill_name,
-346:             )
-347:         finally:
-348:             clear_trace_id()
-349: 
-350:     async def remember_batch(
-351:         self,
-352:         documents: list[dict[str, Any]],
-353:         *,
-354:         namespace: str | UUID | None = None,
-355:         skill_name: str = "general_entities",
-356:         max_concurrent: int = 5,
-357:         deduplicate: bool = True,
-358:         infer_relationships: bool = True,
-359:         on_progress: Callable[[int, int], None] | None = None,
-360:     ) -> BatchResult:
-361:         """Store multiple documents with automatic optimization.
-362: 
-363:         Handles internally:
-364:         - Shared embedder with LRU cache (reused across batches)
-365:         - Entity deduplication via EntityIndex
-366:         - Multi-phase resolution (smart mode)
-367:         - Relationship inference
-368: 
-369:         This is more efficient than calling remember() for each document
-370:         as it processes documents in parallel with controlled concurrency
-371:         and shares resources across documents.
-372: 
-373:         Args:
-374:             documents: List of document dicts with keys:
-375:                 - content: str (required)
-376:                 - title: str (optional)
-377:                 - source: str (optional)
-378:                 - metadata: dict (optional)
-379:             namespace: Namespace name, ID, or None for default
-380:             skill_name: Extraction skill to use
-381:             max_concurrent: Maximum concurrent document processing
-382:             deduplicate: Deduplicate entities across documents (default: True)
-383:             infer_relationships: Infer relationships after ingestion (default: True)
-384:             on_progress: Callback(processed_count, total_count) for progress updates
-385: 
-386:         Returns:
-387:             BatchResult with aggregated statistics
-388:         """
-389:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-390: 
-391:         ensure_trace_id()
-392:         try:
-393:             namespace_id = await self._resolve_namespace(namespace)
-394:             return await self._get_engine().remember_batch(
-395:                 documents,
-396:                 namespace_id,
-397:                 skill_name=skill_name,
-398:                 max_concurrent=max_concurrent,
-399:                 deduplicate=deduplicate,
-400:                 infer_relationships=infer_relationships,
-401:                 on_progress=on_progress,
-402:             )
-403:         finally:
-404:             clear_trace_id()
-405: 
-406:     async def remember_batch_legacy(
-407:         self,
-408:         documents: list[dict[str, Any]],
-409:         *,
-410:         namespace: str | UUID | None = None,
-411:         skill_name: str = "general_entities",
-412:         max_concurrent: int = 5,
-413:     ) -> list[RememberResult]:
-414:         """Store multiple documents - legacy version returning list of RememberResult.
-415: 
-416:         .. deprecated::
-417:             Use remember_batch() which returns BatchResult with aggregated stats.
-418:             This method is kept for backwards compatibility.
-419:         """
-420:         warnings.warn(
-421:             "remember_batch_legacy() is deprecated. Use remember_batch() which returns BatchResult.",
-422:             DeprecationWarning,
-423:             stacklevel=2,
-424:         )
-425:         if not documents:
-426:             return []
-427: 
-428:         namespace_id = await self._resolve_namespace(namespace)
-429: 
-430:         doc_inputs = []
-431:         for doc_data in documents:
-432:             doc_inputs.append(
-433:                 {
-434:                     "content": doc_data.get("content", ""),
-435:                     "title": doc_data.get("title", ""),
-436:                     "source": doc_data.get("source", ""),
-437:                     "source_type": "api",
-438:                     "metadata": doc_data.get("metadata", {}),
-439:                 }
-440:             )
-441: 
-442:         from khora.pipelines.flows.ingest import ingest_documents
-443: 
-444:         # Access storage through engine for backwards compat
-445:         engine = self._get_engine()
-446:         if not hasattr(engine, "_storage") or engine._storage is None:
-447:             raise RuntimeError("Engine does not support legacy batch operations")
-448: 
-449:         storage = engine._storage
-450: 
-451:         result = await ingest_documents(
-452:             namespace_id,
-453:             doc_inputs,
-454:             storage,
-455:             skill_name=skill_name,
-456:             embedding_model=self._config.llm.embedding_model,
-457:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
-458:             max_concurrent_documents=max_concurrent,
-459:         )
-460: 
-461:         per_doc = result.get("per_document_results", [])
-462:         final_results: list[RememberResult] = []
-463:         for doc_result in per_doc:
-464:             final_results.append(
-465:                 RememberResult(
-466:                     document_id=UUID(doc_result["document_id"]),
-467:                     namespace_id=namespace_id,
-468:                     chunks_created=doc_result.get("chunks", 0),
-469:                     entities_extracted=doc_result.get("entities", 0),
-470:                     relationships_created=doc_result.get("relationships", 0),
-471:                 )
-472:             )
-473: 
-474:         failed_count = result.get("failed_documents", 0)
-475:         for _ in range(failed_count):
-476:             final_results.append(
-477:                 RememberResult(
-478:                     document_id=UUID("00000000-0000-0000-0000-000000000000"),
-479:                     namespace_id=namespace_id,
-480:                     chunks_created=0,
-481:                     entities_extracted=0,
-482:                     relationships_created=0,
-483:                     metadata={"failed": True},
-484:                 )
-485:             )
-486: 
-487:         return final_results
-488: 
-489:     async def recall(
-490:         self,
-491:         query: str,
-492:         *,
-493:         namespace: str | UUID | None = None,
-494:         limit: int = 10,
-495:         mode: SearchMode = SearchMode.HYBRID,
-496:         min_similarity: float = 0.0,
-497:         agentic: bool = False,
-498:         raw: bool = False,
-499:     ) -> RecallResult:
-500:         """Recall memories relevant to a query.
-501: 
-502:         This is the primary method for retrieving memories. It:
-503:         1. Uses LLM to understand query (entities, temporal refs, etc.)
-504:         2. Searches across vector, graph, and keyword indexes
-505:         3. Fuses results using Reciprocal Rank Fusion
-506:         4. Returns ranked results
-507: 
-508:         When agentic=True, uses multi-step exploration:
-509:         1. Initial comprehensive search with query understanding
-510:         2. Executes pre-computed follow-up queries for deeper exploration
-511:         3. Explores under-represented sources
-512:         4. Returns combined results with full trace
-513: 
-514:         When raw=True, skips all LLM features:
-515:         - Query understanding
-516:         - Entity linking
-517:         - Reranking
-518:         - HyDE expansion
-519:         This is useful for benchmarks and simple searches.
-520: 
-521:         Args:
-522:             query: Query text
-523:             namespace: Namespace name, ID, or None for default
-524:             limit: Maximum results to return
-525:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
-526:             min_similarity: Minimum similarity threshold
-527:             agentic: If True, use multi-step agentic search (default: False)
-528:             raw: If True, skip all LLM features (default: False)
-529: 
-530:         Returns:
-531:             RecallResult with matched memories
-532:         """
-533:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-534: 
-535:         ensure_trace_id()
-536:         try:
-537:             namespace_id = await self._resolve_namespace(namespace)
-538:             return await self._get_engine().recall(
-539:                 query,
-540:                 namespace_id,
-541:                 limit=limit,
-542:                 mode=mode,
-543:                 min_similarity=min_similarity,
-544:                 agentic=agentic,
-545:                 raw=raw,
-546:             )
-547:         finally:
-548:             clear_trace_id()
-549: 
-550:     async def forget(
-551:         self,
-552:         document_id: UUID,
-553:         *,
-554:         namespace: str | UUID | None = None,
-555:     ) -> bool:
-556:         """Remove a memory from the lake.
-557: 
-558:         Args:
-559:             document_id: ID of the document to remove
-560:             namespace: Namespace for verification (optional)
-561: 
-562:         Returns:
-563:             True if deleted, False if not found
-564:         """
-565:         namespace_id = None
-566:         if namespace:
-567:             namespace_id = await self._resolve_namespace(namespace)
-568: 
-569:         return await self._get_engine().forget(document_id, namespace_id)
-570: 
-571:     # =========================================================================
-572:     # Entity Operations
-573:     # =========================================================================
-574: 
-575:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-576:         """Get an entity by ID."""
-577:         return await self._get_engine().get_entity(entity_id)
-578: 
-579:     async def list_entities(
-580:         self,
-581:         *,
-582:         namespace: str | UUID | None = None,
-583:         entity_type: str | None = None,
-584:         limit: int = 100,
-585:     ) -> list[Entity]:
-586:         """List entities in a namespace."""
-587:         namespace_id = await self._resolve_namespace(namespace)
-588:         return await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
-589: 
-590:     async def find_related_entities(
-591:         self,
-592:         entity_id: UUID,
-593:         *,
-594:         namespace: str | UUID | None = None,
-595:         max_depth: int = 2,
-596:         limit: int = 20,
-597:     ) -> list[tuple[Entity, float]]:
-598:         """Find entities related to a given entity."""
-599:         namespace_id = await self._resolve_namespace(namespace)
-600:         return await self._get_engine().find_related_entities(
-601:             entity_id,
-602:             namespace_id,
-603:             max_depth=max_depth,
-604:             limit=limit,
-605:         )
-606: 
-607:     # =========================================================================
-608:     # Document Operations (Convenience Methods)
-609:     # =========================================================================
-610: 
-611:     async def get_document(self, document_id: UUID) -> Document | None:
-612:         """Get a document by ID.
-613: 
-614:         Args:
-615:             document_id: Document UUID
-616: 
-617:         Returns:
-618:             Document or None if not found
-619:         """
-620:         return await self._get_engine().get_document(document_id)
-621: 
-622:     async def list_documents(
-623:         self,
-624:         *,
-625:         namespace: str | UUID | None = None,
-626:         limit: int = 100,
-627:     ) -> list[Document]:
-628:         """List documents in a namespace.
-629: 
-630:         Args:
-631:             namespace: Namespace name, ID, or None for default
-632:             limit: Maximum documents to return
-633: 
-634:         Returns:
-635:             List of Documents
-636:         """
-637:         namespace_id = await self._resolve_namespace(namespace)
-638:         return await self._get_engine().list_documents(namespace_id, limit=limit)
-639: 
-640:     async def search_entities(
-641:         self,
-642:         query: str,
-643:         *,
-644:         namespace: str | UUID | None = None,
-645:         limit: int = 10,
-646:     ) -> list[Entity]:
-647:         """Search entities by query text using embedding similarity.
-648: 
-649:         Args:
-650:             query: Search query text
-651:             namespace: Namespace name, ID, or None for default
-652:             limit: Maximum entities to return
-653: 
-654:         Returns:
-655:             List of matching Entities (most similar first)
-656:         """
-657:         namespace_id = await self._resolve_namespace(namespace)
-658:         return await self._get_engine().search_entities(query, namespace_id, limit=limit)
-659: 
-660:     async def stats(self, *, namespace: str | UUID | None = None) -> Stats:
-661:         """Get document/chunk/entity/relationship counts for a namespace.
-662: 
-663:         Args:
-664:             namespace: Namespace name, ID, or None for default
-665: 
-666:         Returns:
-667:             Stats with document/chunk/entity/relationship counts
-668:         """
-669:         namespace_id = await self._resolve_namespace(namespace)
-670:         return await self._get_engine().stats(namespace_id)
-671: 
-672:     async def ensure_namespace(
-673:         self,
-674:         name: str,
-675:         *,
-676:         description: str = "",
-677:     ) -> UUID:
-678:         """Get or create a namespace by name.
-679: 
-680:         Creates the default organization and workspace if they don't exist.
-681:         This is a convenience method for simple usage where you just want
-682:         a namespace by name without managing the full hierarchy.
-683: 
-684:         Args:
-685:             name: Namespace name (will be slugified)
-686:             description: Optional description
-687: 
-688:         Returns:
-689:             Namespace UUID
-690:         """
-691:         return await self._get_engine().ensure_namespace(name, description=description)
-692: 
-693:     # =========================================================================
-694:     # Helpers
-695:     # =========================================================================
-696: 
-697:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
-698:         """Resolve a namespace reference to a UUID."""
-699:         if namespace is None:
-700:             return await self.get_or_create_default_namespace()
-701: 
-702:         if isinstance(namespace, UUID):
-703:             return namespace
-704: 
-705:         # Try to parse as UUID
-706:         try:
-707:             return UUID(namespace)
-708:         except ValueError:
-709:             pass
-710: 
-711:         # Look up by slug in default workspace
-712:         # Access storage through engine for namespace lookup
-713:         engine = self._get_engine()
-714:         if not hasattr(engine, "_storage") or engine._storage is None:
-715:             raise RuntimeError("Engine does not support namespace lookup by slug")
-716: 
-717:         storage = engine._storage
-718:         default_ns_id = await self.get_or_create_default_namespace()
-719:         default_ns = await storage.get_namespace(default_ns_id)
-720:         if default_ns:
-721:             ns = await storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
-722:             if ns:
-723:                 return ns.id
-724: 
-725:         raise ValueError(f"Namespace not found: {namespace}")
-726: 
-727:     async def health_check(self) -> dict[str, Any]:
-728:         """Check health of all components."""
-729:         if not self._connected or self._engine is None:
-730:             return {"status": "disconnected"}
-731: 
-732:         return await self._engine.health_check()
-733: 
-734: 
-735: # Convenience function for one-off usage
-736: @asynccontextmanager
-737: async def memory_lake(
-738:     config: KhoraConfig | None = None,
-739: ) -> AsyncGenerator[MemoryLake]:
-740:     """Context manager for one-off Memory Lake usage.
-741: 
-742:     Usage:
-743:         async with memory_lake() as lake:
-744:             await lake.remember("Hello, world!")
-745:             result = await lake.recall("greeting")
-746:     """
-747:     lake = MemoryLake(config)
-748:     try:
-749:         await lake.connect()
-750:         yield lake
-751:     finally:
-752:         await lake.disconnect()
-````
-
 ## File: src/khora/storage/coordinator.py
 ````python
   1: """Storage coordinator that orchestrates all backends.
@@ -42486,91 +41730,760 @@ README.md
 909:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
-## File: CLAUDE.md
-````markdown
- 1: # Khora
- 2: 
- 3: Memory Lake combining knowledge graphs (Neo4j/Kuzu/Memgraph), vector database (pgvector), and PostgreSQL for unified knowledge storage and retrieval.
- 4: 
- 5: ## Commands
- 6: 
- 7: ```bash
- 8: make test              # Run tests (pytest, coverage ≥50%)
- 9: make format            # Format code (black, isort, ruff)
-10: make lint              # Lint + typecheck
-11: uv run khora serve --reload  # Dev server
-12: uv run alembic upgrade head  # Run migrations
-13: ```
-14: 
-15: ## Architecture
-16: 
-17: ```
-18: MemoryLake (facade) → Engine (graphrag | khora) → StorageCoordinator
-19:                                                   ├── PostgreSQL (documents, tenancy)
-20:                                                   ├── pgvector (embeddings)
-21:                                                   └── Graph backend (entities, relationships)
-22: ```
-23: 
-24: **Pluggable Engines:**
-25: - **GraphRAG** (`engine="graphrag"`) - Full knowledge graph extraction, requires Neo4j/Kuzu
-26: - **Khora** (`engine="khora"`) - Temporal-first, cost-optimized, Neo4j optional
-27: 
-28: **Key entry points:**
-29: - `src/khora/memory_lake.py` - Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
-30: - `src/khora/engines/graphrag/engine.py` - GraphRAG engine (default)
-31: - `src/khora/engines/khora/engine.py` - Khora temporal-first engine
-32: - `src/khora/engines/khora/temporal_edges.py` - Bi-temporal edge storage
-33: - `src/khora/engines/khora/time_hierarchy.py` - Hierarchical time graph (Year→Quarter→Month→Week→Day)
-34: - `src/khora/engines/khora/skeleton.py` - PageRank-based skeleton indexing
-35: - `src/khora/engines/khora/backends/pgvector.py` - PostgreSQL+pgvector backend
-36: - `src/khora/engines/khora/backends/weaviate.py` - Weaviate backend
-37: - `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
-38: - `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
-39: 
-40: **Multi-tenancy:** Organization → Workspace → MemoryNamespace
-41: 
-42: ## Usage
-43: 
-44: ```python
-45: async with MemoryLake("postgresql://...") as lake:
-46:     await lake.remember("content", title="Doc")
-47:     results = await lake.recall("query")
-48: ```
-49: 
-50: ## Key Patterns
-51: 
-52: - **Engines are pluggable** - See `khora.engines.protocol.MemoryEngineProtocol`
-53: - **Graph backends are interchangeable** - All implement `GraphBackend` in `storage/backends/base.py`
-54: - **Extraction skills are YAML-defined** - See `src/khora/extraction/skills/definitions/`
-55: - **Config via env vars** - `KHORA_DATABASE_URL`, `KHORA_NEO4J_URL`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
-56: 
-57: ## Engine Selection Guide
-58: 
-59: | Use Case | Engine | Reason |
-60: |----------|--------|--------|
-61: | Knowledge bases | `graphrag` | Rich entity/relationship extraction |
-62: | Entity exploration | `graphrag` | Graph traversal support |
-63: | Chat/message history | `khora` | Temporal-first, structured filters |
-64: | Event streams/logs | `khora` | Bi-temporal model |
-65: | Cost-sensitive apps | `khora` | 5-10x fewer LLM calls |
-66: | Simple infrastructure | `khora` | No Neo4j required |
-67: 
-68: **Khora engine features:**
-69: - Bi-temporal: `occurred_at` (event time) vs `ingested_at` (system time)
-70: - Skeleton indexing: PageRank identifies ~10% core chunks for LLM extraction
-71: - Time hierarchy: Year → Quarter → Month → Week → Day for range queries
-72: - Hybrid search: Vector + BM25 with configurable `hybrid_alpha`
-73: - Temporal filters: `author`, `channel`, `tags`, time ranges
-74: 
-75: ## Testing
-76: 
-77: ```bash
-78: make test                           # Full suite
-79: uv run pytest tests/unit/test_memory_lake.py -v  # Single file
-80: uv run pytest -k "test_remember" -v              # By name
-81: ```
-82: 
-83: Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
+## File: src/khora/memory_lake.py
+````python
+  1: """MemoryLake - Primary API for Khora Memory Lake.
+  2: 
+  3: This is the main entry point for using Khora as a library.
+  4: Provides a simple, unified interface for memory storage and retrieval.
+  5: 
+  6: The MemoryLake class is a thin facade that delegates to pluggable engines.
+  7: The default engine is "graphrag" which uses knowledge graphs, vectors, and LLM extraction.
+  8: """
+  9: 
+ 10: from __future__ import annotations
+ 11: 
+ 12: import warnings
+ 13: from collections.abc import AsyncGenerator, Callable
+ 14: from contextlib import asynccontextmanager
+ 15: from dataclasses import dataclass, field
+ 16: from typing import TYPE_CHECKING, Any
+ 17: from uuid import UUID
+ 18: 
+ 19: from loguru import logger
+ 20: 
+ 21: from khora.config import KhoraConfig, load_config
+ 22: from khora.core.models import Document, Entity, MemoryNamespace
+ 23: from khora.query import SearchMode
+ 24: 
+ 25: if TYPE_CHECKING:
+ 26:     from khora.engines.protocol import MemoryEngineProtocol
+ 27:     from khora.query import HybridQueryEngine
+ 28:     from khora.storage import StorageConfig, StorageCoordinator
+ 29: 
+ 30: 
+ 31: @dataclass
+ 32: class RememberResult:
+ 33:     """Result of a remember operation."""
+ 34: 
+ 35:     document_id: UUID
+ 36:     namespace_id: UUID
+ 37:     chunks_created: int
+ 38:     entities_extracted: int
+ 39:     relationships_created: int
+ 40:     metadata: dict[str, Any] = field(default_factory=dict)
+ 41: 
+ 42: 
+ 43: @dataclass
+ 44: class BatchResult:
+ 45:     """Result of remember_batch() operation."""
+ 46: 
+ 47:     total: int
+ 48:     processed: int
+ 49:     skipped: int
+ 50:     failed: int
+ 51:     chunks: int
+ 52:     entities: int
+ 53:     relationships: int
+ 54: 
+ 55: 
+ 56: @dataclass
+ 57: class Stats:
+ 58:     """Namespace statistics."""
+ 59: 
+ 60:     documents: int
+ 61:     chunks: int
+ 62:     entities: int
+ 63:     relationships: int
+ 64: 
+ 65: 
+ 66: @dataclass
+ 67: class RecallResult:
+ 68:     """Result of a recall operation."""
+ 69: 
+ 70:     query: str
+ 71:     namespace_id: UUID
+ 72:     chunks: list[tuple[Any, float]]
+ 73:     entities: list[tuple[Any, float]]
+ 74:     context_text: str
+ 75:     metadata: dict[str, Any] = field(default_factory=dict)
+ 76: 
+ 77: 
+ 78: class MemoryLake:
+ 79:     """Primary interface for Khora Memory Lake.
+ 80: 
+ 81:     Provides a simple API for storing and retrieving memories:
+ 82:     - remember(): Store content in the memory lake
+ 83:     - recall(): Retrieve relevant memories for a query
+ 84:     - forget(): Remove memories
+ 85: 
+ 86:     Can be used as a context manager for automatic connection handling.
+ 87: 
+ 88:     The MemoryLake is a facade that delegates to pluggable engines.
+ 89:     The default engine is "graphrag" which uses knowledge graphs and vector embeddings.
+ 90: 
+ 91:     Usage:
+ 92:         # Simplest - from env vars (KHORA_DATABASE_URL)
+ 93:         async with MemoryLake() as lake:
+ 94:             await lake.remember("Important fact...", namespace="my-ns")
+ 95: 
+ 96:         # Common - explicit database URL
+ 97:         async with MemoryLake("postgresql://localhost/mydb") as lake:
+ 98:             results = await lake.recall("What do I know about...", namespace="my-ns")
+ 99: 
+100:         # With graph backend
+101:         async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
+102:             ...
+103: 
+104:         # Explicit engine selection (same as default)
+105:         async with MemoryLake("postgresql://...", engine="graphrag") as lake:
+106:             ...
+107: 
+108:         # Full config
+109:         async with MemoryLake(KhoraConfig(...)) as lake:
+110:             ...
+111:     """
+112: 
+113:     def __init__(
+114:         self,
+115:         database_url: str | KhoraConfig | None = None,
+116:         *,
+117:         engine: str = "graphrag",
+118:         graph_url: str | None = None,
+119:         embedding_model: str = "text-embedding-3-small",
+120:         storage_config: StorageConfig | None = None,
+121:     ) -> None:
+122:         """Initialize the Memory Lake.
+123: 
+124:         Args:
+125:             database_url: PostgreSQL URL, or full KhoraConfig, or None (reads KHORA_DATABASE_URL from env)
+126:             engine: Engine to use (default: "graphrag")
+127:             graph_url: Optional Neo4j/graph database URL (bolt://user:pass@host:port)
+128:             embedding_model: Embedding model to use (default: text-embedding-3-small)
+129:             storage_config: Storage configuration (derived from config if None) - deprecated
+130: 
+131:         Examples:
+132:             # Simplest - from env vars
+133:             lake = MemoryLake()
+134: 
+135:             # Common - explicit database
+136:             lake = MemoryLake("postgresql://localhost/mydb")
+137: 
+138:             # With graph
+139:             lake = MemoryLake("postgresql://...", graph_url="bolt://...")
+140: 
+141:             # Explicit engine selection
+142:             lake = MemoryLake("postgresql://...", engine="graphrag")
+143: 
+144:             # Full config
+145:             lake = MemoryLake(KhoraConfig(...))
+146:         """
+147:         # Handle overloaded first argument
+148:         if isinstance(database_url, KhoraConfig):
+149:             self._config = database_url
+150:         elif isinstance(database_url, str):
+151:             # Build config from URL parameters
+152:             self._config = KhoraConfig(
+153:                 database_url=database_url,
+154:                 neo4j_url=graph_url,
+155:             )
+156:             # Override embedding model if non-default
+157:             if embedding_model != "text-embedding-3-small":
+158:                 self._config.llm.embedding_model = embedding_model
+159:         else:
+160:             # None - load from env/file
+161:             self._config = load_config()
+162:             # Apply overrides if provided
+163:             if graph_url:
+164:                 self._config.neo4j_url = graph_url
+165:             if embedding_model != "text-embedding-3-small":
+166:                 self._config.llm.embedding_model = embedding_model
+167: 
+168:         # Store for deferred engine creation
+169:         self._engine_name = engine
+170:         self._storage_config = storage_config  # for backwards compat
+171:         self._engine: MemoryEngineProtocol | None = None
+172:         self._connected = False
+173: 
+174:     async def connect(self) -> None:
+175:         """Connect to all storage backends."""
+176:         if self._connected:
+177:             return
+178: 
+179:         logger.info("Connecting Memory Lake...")
+180: 
+181:         from khora.engines import create_engine
+182: 
+183:         self._engine = create_engine(
+184:             self._engine_name,
+185:             self._config,
+186:             storage_config=self._storage_config,
+187:         )
+188:         await self._engine.connect()
+189: 
+190:         self._connected = True
+191:         logger.info("Memory Lake connected")
+192: 
+193:     async def disconnect(self) -> None:
+194:         """Disconnect from all storage backends."""
+195:         if not self._connected:
+196:             return
+197: 
+198:         logger.info("Disconnecting Memory Lake...")
+199: 
+200:         if self._engine:
+201:             await self._engine.disconnect()
+202:             self._engine = None
+203: 
+204:         self._connected = False
+205:         logger.info("Memory Lake disconnected")
+206: 
+207:     async def __aenter__(self) -> MemoryLake:
+208:         """Async context manager entry."""
+209:         await self.connect()
+210:         return self
+211: 
+212:     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+213:         """Async context manager exit."""
+214:         await self.disconnect()
+215: 
+216:     def _get_engine(self) -> MemoryEngineProtocol:
+217:         """Get the engine (internal use)."""
+218:         if self._engine is None:
+219:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+220:         return self._engine
+221: 
+222:     @property
+223:     def storage(self) -> StorageCoordinator:
+224:         """Get the storage coordinator.
+225: 
+226:         .. deprecated::
+227:             Direct access to storage is deprecated. Use MemoryLake methods instead:
+228:             - lake.get_document() instead of lake.storage.get_document()
+229:             - lake.list_documents() instead of lake.storage.list_documents()
+230:             - lake.search_entities() instead of lake.storage.search_entities()
+231:             - lake.stats() instead of querying storage directly
+232:         """
+233:         warnings.warn(
+234:             "lake.storage is deprecated. Use lake.get_document(), lake.list_documents(), "
+235:             "lake.search_entities(), lake.stats() instead.",
+236:             DeprecationWarning,
+237:             stacklevel=2,
+238:         )
+239:         engine = self._get_engine()
+240:         if hasattr(engine, "_storage") and engine._storage:
+241:             return engine._storage
+242:         raise AttributeError("Current engine does not expose storage")
+243: 
+244:     @property
+245:     def query_engine(self) -> HybridQueryEngine:
+246:         """Get the query engine.
+247: 
+248:         .. deprecated::
+249:             Direct access to query_engine is deprecated. Use lake.recall() instead.
+250:             For unprocessed search without LLM features, use lake.recall(query, raw=True).
+251:         """
+252:         warnings.warn(
+253:             "lake.query_engine is deprecated. Use lake.recall() instead. "
+254:             "For raw search without LLM features, use lake.recall(query, raw=True).",
+255:             DeprecationWarning,
+256:             stacklevel=2,
+257:         )
+258:         engine = self._get_engine()
+259:         if hasattr(engine, "_query_engine") and engine._query_engine:
+260:             return engine._query_engine
+261:         raise AttributeError("Current engine does not expose query_engine")
+262: 
+263:     # =========================================================================
+264:     # Namespace Management
+265:     # =========================================================================
+266: 
+267:     async def create_namespace(
+268:         self,
+269:         name: str,
+270:         workspace_id: UUID,
+271:         *,
+272:         description: str = "",
+273:         config_overrides: dict[str, Any] | None = None,
+274:     ) -> MemoryNamespace:
+275:         """Create a new memory namespace.
+276: 
+277:         Args:
+278:             name: Namespace name
+279:             workspace_id: Parent workspace ID
+280:             description: Optional description
+281:             config_overrides: Optional configuration overrides
+282: 
+283:         Returns:
+284:             Created MemoryNamespace
+285:         """
+286:         return await self._get_engine().create_namespace(
+287:             name,
+288:             workspace_id,
+289:             description=description,
+290:             config_overrides=config_overrides,
+291:         )
+292: 
+293:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+294:         """Get a namespace by ID."""
+295:         return await self._get_engine().get_namespace(namespace_id)
+296: 
+297:     async def get_or_create_default_namespace(self) -> UUID:
+298:         """Get or create a default namespace for simple usage."""
+299:         return await self._get_engine().get_or_create_default_namespace()
+300: 
+301:     # =========================================================================
+302:     # Core API: remember, recall, forget
+303:     # =========================================================================
+304: 
+305:     async def remember(
+306:         self,
+307:         content: str,
+308:         *,
+309:         namespace: str | UUID | None = None,
+310:         title: str = "",
+311:         source: str = "",
+312:         metadata: dict[str, Any] | None = None,
+313:         skill_name: str = "general_entities",
+314:     ) -> RememberResult:
+315:         """Store content in the memory lake.
+316: 
+317:         This is the primary method for adding memories. It:
+318:         1. Creates a document
+319:         2. Chunks the content
+320:         3. Generates embeddings
+321:         4. Extracts entities and relationships
+322: 
+323:         Args:
+324:             content: Content to remember
+325:             namespace: Namespace name, ID, or None for default
+326:             title: Optional title for the content
+327:             source: Optional source identifier
+328:             metadata: Optional metadata
+329:             skill_name: Extraction skill to use
+330: 
+331:         Returns:
+332:             RememberResult with details
+333:         """
+334:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+335: 
+336:         ensure_trace_id()
+337:         try:
+338:             namespace_id = await self._resolve_namespace(namespace)
+339:             return await self._get_engine().remember(
+340:                 content,
+341:                 namespace_id,
+342:                 title=title,
+343:                 source=source,
+344:                 metadata=metadata,
+345:                 skill_name=skill_name,
+346:             )
+347:         finally:
+348:             clear_trace_id()
+349: 
+350:     async def remember_batch(
+351:         self,
+352:         documents: list[dict[str, Any]],
+353:         *,
+354:         namespace: str | UUID | None = None,
+355:         skill_name: str = "general_entities",
+356:         max_concurrent: int = 5,
+357:         deduplicate: bool = True,
+358:         infer_relationships: bool = True,
+359:         on_progress: Callable[[int, int], None] | None = None,
+360:     ) -> BatchResult:
+361:         """Store multiple documents with automatic optimization.
+362: 
+363:         Handles internally:
+364:         - Shared embedder with LRU cache (reused across batches)
+365:         - Entity deduplication via EntityIndex
+366:         - Multi-phase resolution (smart mode)
+367:         - Relationship inference
+368: 
+369:         This is more efficient than calling remember() for each document
+370:         as it processes documents in parallel with controlled concurrency
+371:         and shares resources across documents.
+372: 
+373:         Args:
+374:             documents: List of document dicts with keys:
+375:                 - content: str (required)
+376:                 - title: str (optional)
+377:                 - source: str (optional)
+378:                 - metadata: dict (optional)
+379:             namespace: Namespace name, ID, or None for default
+380:             skill_name: Extraction skill to use
+381:             max_concurrent: Maximum concurrent document processing
+382:             deduplicate: Deduplicate entities across documents (default: True)
+383:             infer_relationships: Infer relationships after ingestion (default: True)
+384:             on_progress: Callback(processed_count, total_count) for progress updates
+385: 
+386:         Returns:
+387:             BatchResult with aggregated statistics
+388:         """
+389:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+390: 
+391:         ensure_trace_id()
+392:         try:
+393:             namespace_id = await self._resolve_namespace(namespace)
+394:             return await self._get_engine().remember_batch(
+395:                 documents,
+396:                 namespace_id,
+397:                 skill_name=skill_name,
+398:                 max_concurrent=max_concurrent,
+399:                 deduplicate=deduplicate,
+400:                 infer_relationships=infer_relationships,
+401:                 on_progress=on_progress,
+402:             )
+403:         finally:
+404:             clear_trace_id()
+405: 
+406:     async def remember_batch_legacy(
+407:         self,
+408:         documents: list[dict[str, Any]],
+409:         *,
+410:         namespace: str | UUID | None = None,
+411:         skill_name: str = "general_entities",
+412:         max_concurrent: int = 5,
+413:     ) -> list[RememberResult]:
+414:         """Store multiple documents - legacy version returning list of RememberResult.
+415: 
+416:         .. deprecated::
+417:             Use remember_batch() which returns BatchResult with aggregated stats.
+418:             This method is kept for backwards compatibility.
+419:         """
+420:         warnings.warn(
+421:             "remember_batch_legacy() is deprecated. Use remember_batch() which returns BatchResult.",
+422:             DeprecationWarning,
+423:             stacklevel=2,
+424:         )
+425:         if not documents:
+426:             return []
+427: 
+428:         namespace_id = await self._resolve_namespace(namespace)
+429: 
+430:         doc_inputs = []
+431:         for doc_data in documents:
+432:             doc_inputs.append(
+433:                 {
+434:                     "content": doc_data.get("content", ""),
+435:                     "title": doc_data.get("title", ""),
+436:                     "source": doc_data.get("source", ""),
+437:                     "source_type": "api",
+438:                     "metadata": doc_data.get("metadata", {}),
+439:                 }
+440:             )
+441: 
+442:         from khora.pipelines.flows.ingest import ingest_documents
+443: 
+444:         # Access storage through engine for backwards compat
+445:         engine = self._get_engine()
+446:         if not hasattr(engine, "_storage") or engine._storage is None:
+447:             raise RuntimeError("Engine does not support legacy batch operations")
+448: 
+449:         storage = engine._storage
+450: 
+451:         result = await ingest_documents(
+452:             namespace_id,
+453:             doc_inputs,
+454:             storage,
+455:             skill_name=skill_name,
+456:             embedding_model=self._config.llm.embedding_model,
+457:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+458:             max_concurrent_documents=max_concurrent,
+459:         )
+460: 
+461:         per_doc = result.get("per_document_results", [])
+462:         final_results: list[RememberResult] = []
+463:         for doc_result in per_doc:
+464:             final_results.append(
+465:                 RememberResult(
+466:                     document_id=UUID(doc_result["document_id"]),
+467:                     namespace_id=namespace_id,
+468:                     chunks_created=doc_result.get("chunks", 0),
+469:                     entities_extracted=doc_result.get("entities", 0),
+470:                     relationships_created=doc_result.get("relationships", 0),
+471:                 )
+472:             )
+473: 
+474:         failed_count = result.get("failed_documents", 0)
+475:         for _ in range(failed_count):
+476:             final_results.append(
+477:                 RememberResult(
+478:                     document_id=UUID("00000000-0000-0000-0000-000000000000"),
+479:                     namespace_id=namespace_id,
+480:                     chunks_created=0,
+481:                     entities_extracted=0,
+482:                     relationships_created=0,
+483:                     metadata={"failed": True},
+484:                 )
+485:             )
+486: 
+487:         return final_results
+488: 
+489:     async def recall(
+490:         self,
+491:         query: str,
+492:         *,
+493:         namespace: str | UUID | None = None,
+494:         limit: int = 10,
+495:         mode: SearchMode = SearchMode.HYBRID,
+496:         min_similarity: float = 0.0,
+497:         agentic: bool = False,
+498:         raw: bool = False,
+499:     ) -> RecallResult:
+500:         """Recall memories relevant to a query.
+501: 
+502:         This is the primary method for retrieving memories. It:
+503:         1. Uses LLM to understand query (entities, temporal refs, etc.)
+504:         2. Searches across vector, graph, and keyword indexes
+505:         3. Fuses results using Reciprocal Rank Fusion
+506:         4. Returns ranked results
+507: 
+508:         When agentic=True, uses multi-step exploration:
+509:         1. Initial comprehensive search with query understanding
+510:         2. Executes pre-computed follow-up queries for deeper exploration
+511:         3. Explores under-represented sources
+512:         4. Returns combined results with full trace
+513: 
+514:         When raw=True, skips all LLM features:
+515:         - Query understanding
+516:         - Entity linking
+517:         - Reranking
+518:         - HyDE expansion
+519:         This is useful for benchmarks and simple searches.
+520: 
+521:         Args:
+522:             query: Query text
+523:             namespace: Namespace name, ID, or None for default
+524:             limit: Maximum results to return
+525:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
+526:             min_similarity: Minimum similarity threshold
+527:             agentic: If True, use multi-step agentic search (default: False)
+528:             raw: If True, skip all LLM features (default: False)
+529: 
+530:         Returns:
+531:             RecallResult with matched memories
+532:         """
+533:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+534: 
+535:         ensure_trace_id()
+536:         try:
+537:             namespace_id = await self._resolve_namespace(namespace)
+538:             return await self._get_engine().recall(
+539:                 query,
+540:                 namespace_id,
+541:                 limit=limit,
+542:                 mode=mode,
+543:                 min_similarity=min_similarity,
+544:                 agentic=agentic,
+545:                 raw=raw,
+546:             )
+547:         finally:
+548:             clear_trace_id()
+549: 
+550:     async def forget(
+551:         self,
+552:         document_id: UUID,
+553:         *,
+554:         namespace: str | UUID | None = None,
+555:     ) -> bool:
+556:         """Remove a memory from the lake.
+557: 
+558:         Args:
+559:             document_id: ID of the document to remove
+560:             namespace: Namespace for verification (optional)
+561: 
+562:         Returns:
+563:             True if deleted, False if not found
+564:         """
+565:         namespace_id = None
+566:         if namespace:
+567:             namespace_id = await self._resolve_namespace(namespace)
+568: 
+569:         return await self._get_engine().forget(document_id, namespace_id)
+570: 
+571:     # =========================================================================
+572:     # Entity Operations
+573:     # =========================================================================
+574: 
+575:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+576:         """Get an entity by ID."""
+577:         return await self._get_engine().get_entity(entity_id)
+578: 
+579:     async def list_entities(
+580:         self,
+581:         *,
+582:         namespace: str | UUID | None = None,
+583:         entity_type: str | None = None,
+584:         limit: int = 100,
+585:     ) -> list[Entity]:
+586:         """List entities in a namespace."""
+587:         namespace_id = await self._resolve_namespace(namespace)
+588:         return await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+589: 
+590:     async def find_related_entities(
+591:         self,
+592:         entity_id: UUID,
+593:         *,
+594:         namespace: str | UUID | None = None,
+595:         max_depth: int = 2,
+596:         limit: int = 20,
+597:     ) -> list[tuple[Entity, float]]:
+598:         """Find entities related to a given entity."""
+599:         namespace_id = await self._resolve_namespace(namespace)
+600:         return await self._get_engine().find_related_entities(
+601:             entity_id,
+602:             namespace_id,
+603:             max_depth=max_depth,
+604:             limit=limit,
+605:         )
+606: 
+607:     # =========================================================================
+608:     # Document Operations (Convenience Methods)
+609:     # =========================================================================
+610: 
+611:     async def get_document(self, document_id: UUID) -> Document | None:
+612:         """Get a document by ID.
+613: 
+614:         Args:
+615:             document_id: Document UUID
+616: 
+617:         Returns:
+618:             Document or None if not found
+619:         """
+620:         return await self._get_engine().get_document(document_id)
+621: 
+622:     async def list_documents(
+623:         self,
+624:         *,
+625:         namespace: str | UUID | None = None,
+626:         limit: int = 100,
+627:     ) -> list[Document]:
+628:         """List documents in a namespace.
+629: 
+630:         Args:
+631:             namespace: Namespace name, ID, or None for default
+632:             limit: Maximum documents to return
+633: 
+634:         Returns:
+635:             List of Documents
+636:         """
+637:         namespace_id = await self._resolve_namespace(namespace)
+638:         return await self._get_engine().list_documents(namespace_id, limit=limit)
+639: 
+640:     async def search_entities(
+641:         self,
+642:         query: str,
+643:         *,
+644:         namespace: str | UUID | None = None,
+645:         limit: int = 10,
+646:     ) -> list[Entity]:
+647:         """Search entities by query text using embedding similarity.
+648: 
+649:         Args:
+650:             query: Search query text
+651:             namespace: Namespace name, ID, or None for default
+652:             limit: Maximum entities to return
+653: 
+654:         Returns:
+655:             List of matching Entities (most similar first)
+656:         """
+657:         namespace_id = await self._resolve_namespace(namespace)
+658:         return await self._get_engine().search_entities(query, namespace_id, limit=limit)
+659: 
+660:     async def stats(self, *, namespace: str | UUID | None = None) -> Stats:
+661:         """Get document/chunk/entity/relationship counts for a namespace.
+662: 
+663:         Args:
+664:             namespace: Namespace name, ID, or None for default
+665: 
+666:         Returns:
+667:             Stats with document/chunk/entity/relationship counts
+668:         """
+669:         namespace_id = await self._resolve_namespace(namespace)
+670:         return await self._get_engine().stats(namespace_id)
+671: 
+672:     async def ensure_namespace(
+673:         self,
+674:         name: str,
+675:         *,
+676:         description: str = "",
+677:     ) -> UUID:
+678:         """Get or create a namespace by name.
+679: 
+680:         Creates the default organization and workspace if they don't exist.
+681:         This is a convenience method for simple usage where you just want
+682:         a namespace by name without managing the full hierarchy.
+683: 
+684:         Args:
+685:             name: Namespace name (will be slugified)
+686:             description: Optional description
+687: 
+688:         Returns:
+689:             Namespace UUID
+690:         """
+691:         return await self._get_engine().ensure_namespace(name, description=description)
+692: 
+693:     # =========================================================================
+694:     # Helpers
+695:     # =========================================================================
+696: 
+697:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
+698:         """Resolve a namespace reference to a UUID."""
+699:         if namespace is None:
+700:             return await self.get_or_create_default_namespace()
+701: 
+702:         if isinstance(namespace, UUID):
+703:             return namespace
+704: 
+705:         # Try to parse as UUID
+706:         try:
+707:             return UUID(namespace)
+708:         except ValueError:
+709:             pass
+710: 
+711:         # Look up by slug in default workspace
+712:         # Access storage through engine for namespace lookup
+713:         engine = self._get_engine()
+714:         if not hasattr(engine, "_storage") or engine._storage is None:
+715:             raise RuntimeError("Engine does not support namespace lookup by slug")
+716: 
+717:         storage = engine._storage
+718:         default_ns_id = await self.get_or_create_default_namespace()
+719:         default_ns = await storage.get_namespace(default_ns_id)
+720:         if default_ns:
+721:             ns = await storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
+722:             if ns:
+723:                 return ns.id
+724: 
+725:         raise ValueError(f"Namespace not found: {namespace}")
+726: 
+727:     async def health_check(self) -> dict[str, Any]:
+728:         """Check health of all components."""
+729:         if not self._connected or self._engine is None:
+730:             return {"status": "disconnected"}
+731: 
+732:         return await self._engine.health_check()
+733: 
+734: 
+735: # Convenience function for one-off usage
+736: @asynccontextmanager
+737: async def memory_lake(
+738:     config: KhoraConfig | None = None,
+739: ) -> AsyncGenerator[MemoryLake]:
+740:     """Context manager for one-off Memory Lake usage.
+741: 
+742:     Usage:
+743:         async with memory_lake() as lake:
+744:             await lake.remember("Hello, world!")
+745:             result = await lake.recall("greeting")
+746:     """
+747:     lake = MemoryLake(config)
+748:     try:
+749:         await lake.connect()
+750:         yield lake
+751:     finally:
+752:         await lake.disconnect()
 ````
 
 ## File: src/khora/config/schema.py
@@ -44667,6 +44580,93 @@ README.md
 1549:         )
 ````
 
+## File: CLAUDE.md
+````markdown
+ 1: # Khora
+ 2: 
+ 3: Memory Lake combining knowledge graphs (Neo4j/Kuzu/Memgraph), vector database (pgvector), and PostgreSQL for unified knowledge storage and retrieval.
+ 4: 
+ 5: ## Commands
+ 6: 
+ 7: ```bash
+ 8: make test              # Run tests (pytest, coverage ≥50%)
+ 9: make format            # Format code (black, isort, ruff)
+10: make lint              # Lint + typecheck
+11: uv run khora serve --reload  # Dev server
+12: uv run alembic upgrade head  # Run migrations
+13: ```
+14: 
+15: ## Architecture
+16: 
+17: ```
+18: MemoryLake (facade) → Engine (graphrag | khora) → StorageCoordinator
+19:                                                   ├── PostgreSQL (documents, tenancy)
+20:                                                   ├── pgvector (embeddings)
+21:                                                   └── Graph backend (entities, relationships)
+22: ```
+23: 
+24: **Pluggable Engines:**
+25: - **GraphRAG** (`engine="graphrag"`) - Full knowledge graph extraction, requires Neo4j/Kuzu
+26: - **Khora** (`engine="khora"`) - Temporal-first, cost-optimized, Neo4j optional
+27: 
+28: **Key entry points:**
+29: - `src/khora/memory_lake.py` - Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
+30: - `src/khora/engines/graphrag/engine.py` - GraphRAG engine (default)
+31: - `src/khora/engines/khora/engine.py` - Khora temporal-first engine
+32: - `src/khora/engines/khora/temporal_edges.py` - Bi-temporal edge storage
+33: - `src/khora/engines/khora/time_hierarchy.py` - Hierarchical time graph (Year→Quarter→Month→Week→Day)
+34: - `src/khora/engines/khora/skeleton.py` - PageRank-based skeleton indexing
+35: - `src/khora/engines/khora/backends/pgvector.py` - PostgreSQL+pgvector backend
+36: - `src/khora/engines/khora/backends/weaviate.py` - Weaviate backend
+37: - `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
+38: - `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
+39: 
+40: **Multi-tenancy:** Organization → Workspace → MemoryNamespace
+41: 
+42: ## Usage
+43: 
+44: ```python
+45: async with MemoryLake("postgresql://...") as lake:
+46:     await lake.remember("content", title="Doc")
+47:     results = await lake.recall("query")
+48: ```
+49: 
+50: ## Key Patterns
+51: 
+52: - **Engines are pluggable** - See `khora.engines.protocol.MemoryEngineProtocol`
+53: - **Graph backends are interchangeable** - All implement `GraphBackend` in `storage/backends/base.py`
+54: - **Extraction skills are YAML-defined** - See `src/khora/extraction/skills/definitions/`
+55: - **Config via env vars** - `KHORA_DATABASE_URL`, `KHORA_NEO4J_URL`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
+56: 
+57: ## Engine Selection Guide
+58: 
+59: | Use Case | Engine | Reason |
+60: |----------|--------|--------|
+61: | Knowledge bases | `graphrag` | Rich entity/relationship extraction |
+62: | Entity exploration | `graphrag` | Graph traversal support |
+63: | Chat/message history | `khora` | Temporal-first, structured filters |
+64: | Event streams/logs | `khora` | Bi-temporal model |
+65: | Cost-sensitive apps | `khora` | 5-10x fewer LLM calls |
+66: | Simple infrastructure | `khora` | No Neo4j required |
+67: 
+68: **Khora engine features:**
+69: - Bi-temporal: `occurred_at` (event time) vs `ingested_at` (system time)
+70: - Skeleton indexing: PageRank identifies ~10% core chunks for LLM extraction
+71: - Time hierarchy: Year → Quarter → Month → Week → Day for range queries
+72: - Hybrid search: Vector + BM25 with configurable `hybrid_alpha`
+73: - Temporal filters: `author`, `channel`, `tags`, time ranges
+74: 
+75: ## Testing
+76: 
+77: ```bash
+78: make test                           # Full suite
+79: uv run pytest tests/unit/test_memory_lake.py -v  # Single file
+80: uv run pytest -k "test_remember" -v              # By name
+81: ```
+82: 
+83: Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
+````
+
 ## File: src/khora/storage/backends/pgvector.py
 ````python
   1: """pgvector backend for vector embeddings storage.
@@ -45368,1090 +45368,6 @@ README.md
 56:     "list_engines",
 57:     "register_engine",
 58: ]
-````
-
-## File: src/khora/extraction/extractors/llm.py
-````python
-   1: """LLM-based entity extraction using LiteLLM."""
-   2: 
-   3: from __future__ import annotations
-   4: 
-   5: import asyncio
-   6: import json
-   7: from typing import TYPE_CHECKING, Any
-   8: 
-   9: from loguru import logger
-  10: from tenacity import AsyncRetrying, before_sleep_log, stop_after_attempt, wait_exponential
-  11: 
-  12: from .base import (
-  13:     EntityExtractor,
-  14:     ExtractedEntity,
-  15:     ExtractedEvent,
-  16:     ExtractedRelationship,
-  17:     ExtractionResult,
-  18:     TemporalInfo,
-  19: )
-  20: 
-  21: if TYPE_CHECKING:
-  22:     from khora.config import LiteLLMConfig
-  23:     from khora.extraction.skills import ExpertiseConfig
-  24: 
-  25: 
-  26: # Default entity types to extract
-  27: DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
-  28: 
-  29: # Default relationship types to use
-  30: DEFAULT_RELATIONSHIP_TYPES = [
-  31:     "WORKS_FOR",
-  32:     "KNOWS",
-  33:     "MANAGES",
-  34:     "PART_OF",
-  35:     "LOCATED_IN",
-  36:     "DEPENDS_ON",
-  37:     "IMPLEMENTS",
-  38:     "RELATES_TO",
-  39:     "ASSOCIATED_WITH",
-  40: ]
-  41: 
-  42: # Default system prompt for extraction
-  43: DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
-  44: 
-  45: # Extraction prompt template with temporal awareness
-  46: EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
-  47: 
-  48: Entity types to extract: {entity_types}
-  49: Relationship types to use: {relationship_types}
-  50: 
-  51: Text:
-  52: {text}
-  53: 
-  54: Return a JSON object with the following structure:
-  55: {{
-  56:     "entities": [
-  57:         {{
-  58:             "name": "entity name (canonical form, properly capitalized)",
-  59:             "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|PRODUCT|DATE|etc",
-  60:             "description": "brief description of the entity",
-  61:             "attributes": {{"key": "value"}},
-  62:             "aliases": ["alternative names", "nicknames", "abbreviations"],
-  63:             "temporal": {{
-  64:                 "mentioned_at": "when entity is mentioned (if temporal context exists)",
-  65:                 "valid_from": "ISO date or null if entity validity period is mentioned",
-  66:                 "valid_until": "ISO date or null if entity validity period ends"
-  67:             }}
-  68:         }}
-  69:     ],
-  70:     "relationships": [
-  71:         {{
-  72:             "source_entity": "source entity name (must match an entity above)",
-  73:             "target_entity": "target entity name (must match an entity above)",
-  74:             "relationship_type": "WORKS_FOR|KNOWS|MANAGES|REPORTS_TO|COLLABORATES_WITH|OWNS|PART_OF|LOCATED_IN|RELATES_TO|DEPENDS_ON|IMPLEMENTS|PRECEDES|FOLLOWS|ASSOCIATED_WITH|etc",
-  75:             "description": "brief description of relationship",
-  76:             "temporal": {{
-  77:                 "occurred_at": "when relationship occurred/started",
-  78:                 "valid_from": "ISO date or null if relationship has time bounds",
-  79:                 "valid_until": "ISO date or null if relationship ended"
-  80:             }}
-  81:         }}
-  82:     ],
-  83:     "events": [
-  84:         {{
-  85:             "description": "what happened",
-  86:             "occurred_at": "when it occurred (ISO date or descriptive)",
-  87:             "participants": ["entity names involved"],
-  88:             "event_type": "MEETING|DECISION|MILESTONE|ANNOUNCEMENT|INCIDENT|etc"
-  89:         }}
-  90:     ]
-  91: }}
-  92: 
-  93: Guidelines:
-  94: - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
-  95: - Include aliases for entities that have multiple names/abbreviations
-  96: - Extract temporal information when dates, times, or relative time references appear
-  97: - For events, capture the when, who, and what
-  98: - Be thorough but precise - only extract entities that are clearly mentioned
-  99: - Ensure relationship source/target names match extracted entity names exactly
- 100: 
- 101: Return ONLY valid JSON, no other text."""
- 102: 
- 103: 
- 104: class LLMEntityExtractor(EntityExtractor):
- 105:     """LLM-based entity extractor using LiteLLM.
- 106: 
- 107:     Uses an LLM to extract entities and relationships from text
- 108:     through structured JSON output.
- 109:     """
- 110: 
- 111:     # Models that require json_schema format instead of json_object
- 112:     # OpenAI models with structured output support need explicit json_schema
- 113:     # to ensure additionalProperties: false is properly set on all nested objects
- 114:     MODELS_REQUIRING_JSON_SCHEMA: set[str] = {
- 115:         "gpt-4o",
- 116:         "gpt-4o-mini",
- 117:         "gpt-4o-2024-05-13",
- 118:         "gpt-4o-2024-08-06",
- 119:         "gpt-4o-2024-11-20",
- 120:         "gpt-4o-mini-2024-07-18",
- 121:         "gpt-4-turbo",
- 122:         "gpt-4-turbo-preview",
- 123:         "o1",
- 124:         "o1-mini",
- 125:         "o1-preview",
- 126:         "o3-mini",
- 127:     }
- 128: 
- 129:     # Model input token multipliers for adaptive batching
- 130:     # Multiplier is applied to max_tokens to get max_input_tokens budget
- 131:     # Higher values for large context models (128K+), lower for smaller context
- 132:     MODEL_INPUT_MULTIPLIERS: dict[str, int] = {
- 133:         # Large context models (128K+) - can be more aggressive
- 134:         "gpt-4o": 8,
- 135:         "gpt-4o-2024-05-13": 8,
- 136:         "gpt-4o-2024-08-06": 8,
- 137:         "gpt-4o-2024-11-20": 8,
- 138:         "gpt-4.1": 8,
- 139:         "gpt-4.1-mini": 5,  # 128K context but smaller model
- 140:         "gpt-4o-mini": 5,
- 141:         "gpt-4o-mini-2024-07-18": 5,
- 142:         "o1": 8,
- 143:         "o1-mini": 5,
- 144:         "o3-mini": 5,
- 145:         # Medium context models (32K)
- 146:         "gpt-4-turbo": 4,
- 147:         "gpt-4-turbo-preview": 4,
- 148:         # Smaller context models (8K-16K) - conservative
- 149:         "gpt-4": 2,
- 150:         "gpt-3.5-turbo": 2,
- 151:         # Claude models
- 152:         "claude-3-opus": 8,
- 153:         "claude-3-sonnet": 8,
- 154:         "claude-3-haiku": 5,
- 155:     }
- 156:     DEFAULT_INPUT_MULTIPLIER = 3  # Fallback for unknown models
- 157: 
- 158:     def __init__(
- 159:         self,
- 160:         model: str = "gpt-4o-mini",
- 161:         *,
- 162:         temperature: float = 0.3,  # Lower for more consistent extraction
- 163:         max_tokens: int = 4000,
- 164:         timeout: int = 60,
- 165:         max_retries: int = 3,
- 166:         max_concurrent: int = 5,
- 167:         retry_wait: float = 1.0,
- 168:     ) -> None:
- 169:         """Initialize the LLM entity extractor.
- 170: 
- 171:         Args:
- 172:             model: LLM model to use
- 173:             temperature: Sampling temperature
- 174:             max_tokens: Maximum tokens in response
- 175:             timeout: Request timeout in seconds
- 176:             max_retries: Maximum retries on failure
- 177:             max_concurrent: Maximum concurrent extractions
- 178:             retry_wait: Base wait time (seconds) for exponential backoff between retries
- 179:         """
- 180:         self._model = model
- 181:         self._temperature = temperature
- 182:         self._max_tokens = max_tokens
- 183:         self._timeout = timeout
- 184:         self._max_retries = max_retries
- 185:         self._retry_wait = retry_wait
- 186:         self._semaphore = asyncio.Semaphore(max_concurrent)
- 187: 
- 188:     def _estimate_tokens(self, text: str) -> int:
- 189:         """Estimate token count for text.
- 190: 
- 191:         Uses ~3 chars per token as a conservative heuristic for English text.
- 192:         This slightly overestimates to provide safety margin.
- 193:         """
- 194:         return len(text) // 3
- 195: 
- 196:     def _get_input_multiplier(self) -> int:
- 197:         """Get input token multiplier based on model.
- 198: 
- 199:         Returns the multiplier to apply to max_tokens for calculating
- 200:         the input token budget for adaptive batching.
- 201:         """
- 202:         # Check exact match first
- 203:         if self._model in self.MODEL_INPUT_MULTIPLIERS:
- 204:             return self.MODEL_INPUT_MULTIPLIERS[self._model]
- 205:         # Check prefix matches (e.g., "gpt-4o-mini" matches "gpt-4o-mini-...")
- 206:         for model_prefix, multiplier in self.MODEL_INPUT_MULTIPLIERS.items():
- 207:             if self._model.startswith(model_prefix):
- 208:                 return multiplier
- 209:         return self.DEFAULT_INPUT_MULTIPLIER
- 210: 
- 211:     def _create_adaptive_batches(
- 212:         self,
- 213:         texts: list[str],
- 214:         max_batch_size: int,
- 215:         max_input_tokens: int,
- 216:         prompt_overhead: int = 500,
- 217:     ) -> list[list[str]]:
- 218:         """Create batches that fit within token budget.
- 219: 
- 220:         Groups texts greedily until hitting the input token budget or
- 221:         max batch size, whichever comes first.
- 222: 
- 223:         Args:
- 224:             texts: List of texts to batch
- 225:             max_batch_size: Maximum number of texts per batch
- 226:             max_input_tokens: Token budget for input
- 227:             prompt_overhead: Estimated tokens for system prompt and instructions
- 228: 
- 229:         Returns:
- 230:             List of text batches
- 231:         """
- 232:         batches: list[list[str]] = []
- 233:         current_batch: list[str] = []
- 234:         current_tokens = prompt_overhead
- 235: 
- 236:         for text in texts:
- 237:             # Match truncation in _extract_multi_batch (4000 chars)
- 238:             text_tokens = self._estimate_tokens(text[:4000])
- 239: 
- 240:             # Check if adding this text would exceed budget or max batch size
- 241:             if current_batch and (
- 242:                 current_tokens + text_tokens > max_input_tokens or len(current_batch) >= max_batch_size
- 243:             ):
- 244:                 batches.append(current_batch)
- 245:                 current_batch = []
- 246:                 current_tokens = prompt_overhead
- 247: 
- 248:             current_batch.append(text)
- 249:             current_tokens += text_tokens
- 250: 
- 251:         if current_batch:
- 252:             batches.append(current_batch)
- 253: 
- 254:         return batches
- 255: 
- 256:     def _get_response_format(self) -> dict[str, Any]:
- 257:         """Get the appropriate response_format based on the model.
- 258: 
- 259:         Some models (like gpt-5-nano) require json_schema format with
- 260:         strict structured outputs, while others work with json_object.
- 261:         """
- 262:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
- 263:             return {
- 264:                 "type": "json_schema",
- 265:                 "json_schema": {
- 266:                     "name": "extraction_result",
- 267:                     "strict": True,
- 268:                     "schema": {
- 269:                         "type": "object",
- 270:                         "properties": {
- 271:                             "entities": {
- 272:                                 "type": "array",
- 273:                                 "items": {
- 274:                                     "type": "object",
- 275:                                     "properties": {
- 276:                                         "name": {"type": "string"},
- 277:                                         "entity_type": {"type": "string"},
- 278:                                         "description": {"type": "string"},
- 279:                                         "aliases": {"type": "array", "items": {"type": "string"}},
- 280:                                     },
- 281:                                     "required": ["name", "entity_type", "description", "aliases"],
- 282:                                     "additionalProperties": False,
- 283:                                 },
- 284:                             },
- 285:                             "relationships": {
- 286:                                 "type": "array",
- 287:                                 "items": {
- 288:                                     "type": "object",
- 289:                                     "properties": {
- 290:                                         "source_entity": {"type": "string"},
- 291:                                         "target_entity": {"type": "string"},
- 292:                                         "relationship_type": {"type": "string"},
- 293:                                         "description": {"type": "string"},
- 294:                                     },
- 295:                                     "required": ["source_entity", "target_entity", "relationship_type", "description"],
- 296:                                     "additionalProperties": False,
- 297:                                 },
- 298:                             },
- 299:                             "events": {
- 300:                                 "type": "array",
- 301:                                 "items": {
- 302:                                     "type": "object",
- 303:                                     "properties": {
- 304:                                         "description": {"type": "string"},
- 305:                                         "event_type": {"type": "string"},
- 306:                                         "occurred_at": {"type": ["string", "null"]},
- 307:                                         "participants": {"type": "array", "items": {"type": "string"}},
- 308:                                     },
- 309:                                     "required": ["description", "event_type", "occurred_at", "participants"],
- 310:                                     "additionalProperties": False,
- 311:                                 },
- 312:                             },
- 313:                         },
- 314:                         "required": ["entities", "relationships", "events"],
- 315:                         "additionalProperties": False,
- 316:                     },
- 317:                 },
- 318:             }
- 319:         return {"type": "json_object"}
- 320: 
- 321:     def _get_multi_response_format(self) -> dict[str, Any]:
- 322:         """Get the appropriate response_format for multi-section batch extraction.
- 323: 
- 324:         Similar to _get_response_format but wraps entities/relationships/events
- 325:         in a "sections" array for batch processing.
- 326:         """
- 327:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
- 328:             section_schema = {
- 329:                 "type": "object",
- 330:                 "properties": {
- 331:                     "entities": {
- 332:                         "type": "array",
- 333:                         "items": {
- 334:                             "type": "object",
- 335:                             "properties": {
- 336:                                 "name": {"type": "string"},
- 337:                                 "entity_type": {"type": "string"},
- 338:                                 "description": {"type": "string"},
- 339:                                 "aliases": {"type": "array", "items": {"type": "string"}},
- 340:                             },
- 341:                             "required": ["name", "entity_type", "description", "aliases"],
- 342:                             "additionalProperties": False,
- 343:                         },
- 344:                     },
- 345:                     "relationships": {
- 346:                         "type": "array",
- 347:                         "items": {
- 348:                             "type": "object",
- 349:                             "properties": {
- 350:                                 "source_entity": {"type": "string"},
- 351:                                 "target_entity": {"type": "string"},
- 352:                                 "relationship_type": {"type": "string"},
- 353:                                 "description": {"type": "string"},
- 354:                             },
- 355:                             "required": ["source_entity", "target_entity", "relationship_type", "description"],
- 356:                             "additionalProperties": False,
- 357:                         },
- 358:                     },
- 359:                     "events": {
- 360:                         "type": "array",
- 361:                         "items": {
- 362:                             "type": "object",
- 363:                             "properties": {
- 364:                                 "description": {"type": "string"},
- 365:                                 "event_type": {"type": "string"},
- 366:                                 "occurred_at": {"type": ["string", "null"]},
- 367:                                 "participants": {"type": "array", "items": {"type": "string"}},
- 368:                             },
- 369:                             "required": ["description", "event_type", "occurred_at", "participants"],
- 370:                             "additionalProperties": False,
- 371:                         },
- 372:                     },
- 373:                 },
- 374:                 "required": ["entities", "relationships", "events"],
- 375:                 "additionalProperties": False,
- 376:             }
- 377:             return {
- 378:                 "type": "json_schema",
- 379:                 "json_schema": {
- 380:                     "name": "multi_extraction_result",
- 381:                     "strict": True,
- 382:                     "schema": {
- 383:                         "type": "object",
- 384:                         "properties": {
- 385:                             "sections": {
- 386:                                 "type": "array",
- 387:                                 "items": section_schema,
- 388:                             },
- 389:                         },
- 390:                         "required": ["sections"],
- 391:                         "additionalProperties": False,
- 392:                     },
- 393:                 },
- 394:             }
- 395:         return {"type": "json_object"}
- 396: 
- 397:     @classmethod
- 398:     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
- 399:         """Create extractor from LiteLLM configuration.
- 400: 
- 401:         Args:
- 402:             config: LiteLLMConfig instance
- 403: 
- 404:         Returns:
- 405:             Configured LLMEntityExtractor
- 406:         """
- 407:         return cls(
- 408:             model=config.model,
- 409:             temperature=0.3,  # Override for extraction
- 410:             max_tokens=config.max_tokens,
- 411:             timeout=config.timeout,
- 412:             max_retries=config.max_retries,
- 413:             max_concurrent=config.max_concurrent_llm_calls,
- 414:             retry_wait=config.retry_wait,
- 415:         )
- 416: 
- 417:     async def extract(
- 418:         self,
- 419:         text: str,
- 420:         *,
- 421:         entity_types: list[str] | None = None,
- 422:         expertise: ExpertiseConfig | None = None,
- 423:         context: dict[str, Any] | None = None,
- 424:     ) -> ExtractionResult:
- 425:         """Extract entities and relationships from text.
- 426: 
- 427:         Args:
- 428:             text: Text to extract from
- 429:             entity_types: Optional list of entity types to extract
- 430:             expertise: Optional ExpertiseConfig for domain-specific extraction
- 431:             context: Optional context dict for prompt template rendering
- 432: 
- 433:         Returns:
- 434:             ExtractionResult containing entities and relationships
- 435:         """
- 436:         if not text.strip():
- 437:             return ExtractionResult()
- 438: 
- 439:         # Determine entity types from expertise or fallback
- 440:         if expertise:
- 441:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
- 442:         else:
- 443:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
- 444: 
- 445:         try:
- 446:             import litellm
- 447:         except ImportError:
- 448:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
- 449: 
- 450:         # Render prompts based on expertise
- 451:         system_prompt = self._render_system_prompt(expertise, context)
- 452:         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
- 453: 
- 454:         try:
- 455:             async for attempt in AsyncRetrying(
- 456:                 stop=stop_after_attempt(self._max_retries),
- 457:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
- 458:                 before_sleep=before_sleep_log(logger, "WARNING"),
- 459:                 reraise=True,
- 460:             ):
- 461:                 with attempt:
- 462:                     async with self._semaphore:
- 463:                         import time as _time
- 464: 
- 465:                         _t0 = _time.perf_counter()
- 466:                         response = await litellm.acompletion(
- 467:                             model=self._model,
- 468:                             messages=[
- 469:                                 {"role": "system", "content": system_prompt},
- 470:                                 {"role": "user", "content": extraction_prompt},
- 471:                             ],
- 472:                             temperature=self._temperature,
- 473:                             max_tokens=self._max_tokens,
- 474:                             timeout=self._timeout,
- 475:                             response_format=self._get_response_format(),
- 476:                         )
- 477:                         _latency = (_time.perf_counter() - _t0) * 1000
- 478: 
- 479:                         # Record telemetry
- 480:                         from khora.telemetry import get_collector
- 481: 
- 482:                         usage = getattr(response, "usage", None)
- 483:                         get_collector().record_llm_call(
- 484:                             operation="entity_extraction",
- 485:                             model=self._model,
- 486:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
- 487:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
- 488:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
- 489:                             latency_ms=_latency,
- 490:                         )
- 491: 
- 492:                     content = response.choices[0].message.content
- 493:                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
- 494: 
- 495:                     # Check for truncated response (hit max_tokens limit)
- 496:                     if finish_reason == "length":
- 497:                         model_used = getattr(response, "model", self._model)
- 498:                         logger.warning(
- 499:                             f"LLM response truncated (finish_reason=length) in extraction. "
- 500:                             f"Model: {model_used}. Consider increasing max_tokens."
- 501:                         )
- 502:                         return ExtractionResult(
- 503:                             metadata={"error": "truncated_response", "finish_reason": finish_reason}
- 504:                         )
- 505: 
- 506:                     result = self._parse_response(content)
- 507: 
- 508:                     # Apply confidence filtering from expertise if available
- 509:                     if expertise:
- 510:                         result = self._filter_by_confidence(result, expertise)
- 511: 
- 512:                     return result
- 513:         except Exception as e:
- 514:             logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
- 515:             return ExtractionResult(metadata={"error": str(e)})
- 516: 
- 517:     def _render_system_prompt(
- 518:         self,
- 519:         expertise: ExpertiseConfig | None,
- 520:         context: dict[str, Any] | None,
- 521:     ) -> str:
- 522:         """Render the system prompt, optionally using expertise config."""
- 523:         if not expertise or not expertise.system_prompt:
- 524:             return DEFAULT_SYSTEM_PROMPT
- 525: 
- 526:         try:
- 527:             from khora.extraction.skills.composer import ExpertiseComposer
- 528: 
- 529:             composer = ExpertiseComposer()
- 530:             return composer.render_prompt(
- 531:                 expertise.system_prompt,
- 532:                 expertise=expertise,
- 533:                 context=context,
- 534:             )
- 535:         except Exception as e:
- 536:             logger.warning(f"Failed to render system prompt: {e}")
- 537:             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
- 538: 
- 539:     def _build_tool_context(self, expertise: ExpertiseConfig | None, context: dict[str, Any] | None) -> str:
- 540:         """Build tool-specific context block for the extraction prompt.
- 541: 
- 542:         When expertise has tool_schemas populated and the context identifies
- 543:         a source_tool, this injects structured field knowledge so the LLM
- 544:         understands the data format it's extracting from.
- 545: 
- 546:         Args:
- 547:             expertise: Optional ExpertiseConfig with tool_schemas
- 548:             context: Optional context dict with source_tool key
- 549: 
- 550:         Returns:
- 551:             Tool context string to prepend to the text, or empty string
- 552:         """
- 553:         if not expertise or not expertise.tool_schemas or not context:
- 554:             return ""
- 555: 
- 556:         source_tool = context.get("source_tool", "")
- 557:         if not source_tool:
- 558:             return ""
- 559: 
- 560:         schema = expertise.tool_schemas.get(source_tool)
- 561:         if not schema:
- 562:             return ""
- 563: 
- 564:         lines = [f"\nSOURCE CONTEXT: This content comes from {source_tool}."]
- 565:         for obj_type, obj_schema in schema.items():
- 566:             if not isinstance(obj_schema, dict):
- 567:                 continue
- 568:             fields = obj_schema.get("fields", [])
- 569:             if fields:
- 570:                 lines.append(f"  {obj_type} fields: {', '.join(str(f) for f in fields)}")
- 571:             for key, values in obj_schema.items():
- 572:                 if key != "fields" and isinstance(values, list):
- 573:                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
- 574: 
- 575:         # Add attribute schema hints from entity types
- 576:         if expertise.entity_types:
- 577:             lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
- 578:             for et in expertise.entity_types:
- 579:                 required = et.attributes.get("required", [])
- 580:                 optional = et.attributes.get("optional", [])
- 581:                 if required or optional:
- 582:                     parts = []
- 583:                     if required:
- 584:                         parts.append(f"required: {', '.join(required)}")
- 585:                     if optional:
- 586:                         parts.append(f"optional: {', '.join(optional)}")
- 587:                     lines.append(f"  {et.name}: {'; '.join(parts)}")
- 588: 
- 589:         return "\n".join(lines)
- 590: 
- 591:     def _render_extraction_prompt(
- 592:         self,
- 593:         text: str,
- 594:         entity_types: list[str],
- 595:         expertise: ExpertiseConfig | None,
- 596:         context: dict[str, Any] | None,
- 597:     ) -> str:
- 598:         """Render the extraction prompt, optionally using expertise config."""
- 599:         # Build tool context for SaaS-aware extraction
- 600:         tool_context = self._build_tool_context(expertise, context)
- 601: 
- 602:         # If expertise has a custom extraction prompt, use it
- 603:         if expertise and expertise.extraction_prompt:
- 604:             logger.debug(
- 605:                 f"Using custom extraction_prompt from expertise '{expertise.name}' "
- 606:                 f"({len(expertise.extraction_prompt)} chars)"
- 607:             )
- 608:             try:
- 609:                 from khora.extraction.skills.composer import ExpertiseComposer
- 610: 
- 611:                 composer = ExpertiseComposer()
- 612:                 # Get relationship types from expertise
- 613:                 relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
- 614: 
- 615:                 prompt_context = {
- 616:                     **(context or {}),
- 617:                     "text": text[:8000],
- 618:                     "entity_types": entity_types,
- 619:                     "relationship_types": relationship_types,
- 620:                     "tool_context": tool_context,
- 621:                 }
- 622:                 return composer.render_prompt(
- 623:                     expertise.extraction_prompt,
- 624:                     expertise=expertise,
- 625:                     context=prompt_context,
- 626:                 )
- 627:             except Exception as e:
- 628:                 logger.warning(f"Failed to render extraction prompt: {e}")
- 629: 
- 630:         # Use default extraction prompt
- 631:         logger.debug("Using DEFAULT_EXTRACTION_PROMPT (no custom prompt in expertise)")
- 632:         # Use default extraction prompt with optional tool context
- 633:         # Get relationship types from expertise or defaults
- 634:         if expertise:
- 635:             relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
- 636:         else:
- 637:             relationship_types = DEFAULT_RELATIONSHIP_TYPES
- 638: 
- 639:         prompt = EXTRACTION_PROMPT.format(
- 640:             entity_types=", ".join(entity_types),
- 641:             relationship_types=", ".join(relationship_types),
- 642:             text=text[:8000],  # Truncate very long texts
- 643:         )
- 644:         if tool_context:
- 645:             prompt = tool_context + "\n\n" + prompt
- 646:         return prompt
- 647: 
- 648:     def _filter_by_confidence(
- 649:         self,
- 650:         result: ExtractionResult,
- 651:         expertise: ExpertiseConfig,
- 652:     ) -> ExtractionResult:
- 653:         """Filter extraction results by confidence thresholds from expertise."""
- 654:         min_entity = expertise.confidence.min_entity
- 655:         min_relationship = expertise.confidence.min_relationship
- 656: 
- 657:         filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
- 658:         filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
- 659: 
- 660:         return ExtractionResult(
- 661:             entities=filtered_entities,
- 662:             relationships=filtered_relationships,
- 663:             events=result.events,
- 664:             metadata=result.metadata,
- 665:         )
- 666: 
- 667:     async def extract_batch(
- 668:         self,
- 669:         texts: list[str],
- 670:         *,
- 671:         entity_types: list[str] | None = None,
- 672:         expertise: ExpertiseConfig | None = None,
- 673:         context: dict[str, Any] | None = None,
- 674:     ) -> list[ExtractionResult]:
- 675:         """Extract from multiple texts concurrently.
- 676: 
- 677:         Args:
- 678:             texts: List of texts to extract from
- 679:             entity_types: Optional list of entity types to extract
- 680:             expertise: Optional ExpertiseConfig for domain-specific extraction
- 681:             context: Optional context dict for prompt template rendering
- 682: 
- 683:         Returns:
- 684:             List of ExtractionResult objects
- 685:         """
- 686:         if not texts:
- 687:             return []
- 688: 
- 689:         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
- 690:         return await asyncio.gather(*tasks)
- 691: 
- 692:     async def extract_multi(
- 693:         self,
- 694:         texts: list[str],
- 695:         *,
- 696:         entity_types: list[str] | None = None,
- 697:         expertise: ExpertiseConfig | None = None,
- 698:         context: dict[str, Any] | None = None,
- 699:         batch_size: int = 5,
- 700:         max_input_tokens: int | None = None,
- 701:     ) -> list[ExtractionResult]:
- 702:         """Extract entities from multiple texts in grouped LLM calls.
- 703: 
- 704:         Groups texts into batches using adaptive token-budget-based batching,
- 705:         reducing API round-trips while avoiding context overflow.
- 706: 
- 707:         Args:
- 708:             texts: List of texts to extract from
- 709:             entity_types: Optional list of entity types to extract
- 710:             expertise: Optional ExpertiseConfig for domain-specific extraction
- 711:             context: Optional context dict for prompt template rendering
- 712:             batch_size: Maximum number of texts per LLM call (fallback/cap)
- 713:             max_input_tokens: Token budget for input. If None, auto-calculated
- 714:                 from max_tokens using model-aware multipliers.
- 715: 
- 716:         Returns:
- 717:             List of ExtractionResult objects (one per input text)
- 718:         """
- 719:         if not texts:
- 720:             return []
- 721: 
- 722:         if expertise:
- 723:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
- 724:         else:
- 725:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
- 726: 
- 727:         try:
- 728:             import litellm
- 729:         except ImportError:
- 730:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
- 731: 
- 732:         # Calculate max_input_tokens from model if not provided
- 733:         if max_input_tokens is None:
- 734:             multiplier = self._get_input_multiplier()
- 735:             max_input_tokens = self._max_tokens * multiplier
- 736:             logger.debug(
- 737:                 f"Using adaptive batching: model={self._model}, "
- 738:                 f"multiplier={multiplier}x, max_input_tokens={max_input_tokens}"
- 739:             )
- 740: 
- 741:         # Create adaptive batches based on token budget
- 742:         batches = self._create_adaptive_batches(
- 743:             texts,
- 744:             max_batch_size=batch_size,
- 745:             max_input_tokens=max_input_tokens,
- 746:         )
- 747:         logger.debug(f"Created {len(batches)} batches from {len(texts)} texts")
- 748:         all_results: list[ExtractionResult] = []
- 749: 
- 750:         # Build system prompt from expertise if available
- 751:         system_prompt = self._render_system_prompt(expertise, context)
- 752:         tool_context = self._build_tool_context(expertise, context)
- 753: 
- 754:         async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
- 755:             results = await self._extract_multi_batch(
- 756:                 batch,
- 757:                 entity_types,
- 758:                 litellm,
- 759:                 system_prompt=system_prompt,
- 760:                 tool_context=tool_context,
- 761:                 expertise=expertise,
- 762:                 context=context,
- 763:             )
- 764: 
- 765:             # Check if batch failed (all results have errors) - fallback to single extraction
- 766:             all_failed = all(r.metadata.get("error") for r in results)
- 767:             if all_failed and len(batch) > 1:
- 768:                 logger.info(
- 769:                     f"Batch extraction failed for {len(batch)} texts, " f"falling back to single-document extraction"
- 770:                 )
- 771:                 # Extract documents one at a time
- 772:                 single_results = []
- 773:                 for text in batch:
- 774:                     result = await self.extract(
- 775:                         text,
- 776:                         entity_types=entity_types,
- 777:                         expertise=expertise,
- 778:                         context=context,
- 779:                     )
- 780:                     single_results.append(result)
- 781:                 results = single_results
- 782: 
- 783:             if expertise:
- 784:                 results = [self._filter_by_confidence(r, expertise) for r in results]
- 785:             return results
- 786: 
- 787:         batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
- 788:         for results in batch_results:
- 789:             all_results.extend(results)
- 790: 
- 791:         return all_results
- 792: 
- 793:     async def _extract_multi_batch(
- 794:         self,
- 795:         texts: list[str],
- 796:         entity_types: list[str],
- 797:         litellm: Any,
- 798:         *,
- 799:         system_prompt: str | None = None,
- 800:         tool_context: str | None = None,
- 801:         expertise: ExpertiseConfig | None = None,
- 802:         context: dict[str, Any] | None = None,
- 803:     ) -> list[ExtractionResult]:
- 804:         """Extract from a batch of texts in a single LLM call."""
- 805:         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
- 806: 
- 807:         # If expertise has custom extraction prompt, use it with multi-section adaptation
- 808:         if expertise and expertise.extraction_prompt:
- 809:             from khora.extraction.skills.composer import ExpertiseComposer
- 810: 
- 811:             composer = ExpertiseComposer()
- 812:             # Append multi-section response format to the text
- 813:             multi_text = (
- 814:                 sections
- 815:                 + """
- 816: 
- 817: ## MULTI-SECTION RESPONSE FORMAT:
- 818: Return a JSON object with a "sections" array, one object per input section:
- 819: {"sections": [
- 820:     {"entities": [...], "relationships": [...], "events": [...]},
- 821:     ...
- 822: ]}
- 823: Each section follows the entity/relationship format from the instructions above."""
- 824:             )
- 825: 
- 826:             # Get relationship types from expertise
- 827:             relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
- 828: 
- 829:             prompt_context = {
- 830:                 **(context or {}),
- 831:                 "text": multi_text,
- 832:                 "entity_types": entity_types,
- 833:                 "relationship_types": relationship_types,
- 834:                 "tool_context": tool_context or "",
- 835:             }
- 836:             try:
- 837:                 prompt = composer.render_prompt(
- 838:                     expertise.extraction_prompt,
- 839:                     expertise=expertise,
- 840:                     context=prompt_context,
- 841:                 )
- 842:             except Exception as e:
- 843:                 logger.warning(f"Failed to render extraction prompt for batch: {e}")
- 844:                 # Fall through to default prompt below
- 845:                 expertise = None
- 846: 
- 847:         # Fallback to hardcoded prompt (existing behavior)
- 848:         if not expertise or not expertise.extraction_prompt:
- 849:             # Get relationship types - expertise may exist but without custom extraction_prompt
- 850:             if expertise:
- 851:                 relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
- 852:             else:
- 853:                 relationship_types = DEFAULT_RELATIONSHIP_TYPES
- 854: 
- 855:             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
- 856:             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
- 857: 
- 858: Entity types to find: {", ".join(entity_types)}
- 859: Relationship types to use: {", ".join(relationship_types)}
- 860: 
- 861: {sections}
- 862: 
- 863: Return a JSON object with a "sections" array, one object per section:
- 864: {{"sections": [
- 865:     {{"entities": [...], "relationships": [...], "events": [...]}},
- 866:     ...
- 867: ]}}
- 868: 
- 869: Each section follows the same entity/relationship/event format.
- 870: Return ONLY valid JSON, no other text."""
- 871: 
- 872:         try:
- 873:             async for attempt in AsyncRetrying(
- 874:                 stop=stop_after_attempt(self._max_retries),
- 875:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
- 876:                 before_sleep=before_sleep_log(logger, "WARNING"),
- 877:                 reraise=True,
- 878:             ):
- 879:                 with attempt:
- 880:                     async with self._semaphore:
- 881:                         import time as _time
- 882: 
- 883:                         _t0 = _time.perf_counter()
- 884:                         response = await litellm.acompletion(
- 885:                             model=self._model,
- 886:                             messages=[
- 887:                                 {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
- 888:                                 {"role": "user", "content": prompt},
- 889:                             ],
- 890:                             temperature=self._temperature,
- 891:                             max_tokens=self._max_tokens,
- 892:                             timeout=self._timeout,
- 893:                             response_format=self._get_multi_response_format(),
- 894:                         )
- 895:                         _latency = (_time.perf_counter() - _t0) * 1000
- 896: 
- 897:                         # Record telemetry
- 898:                         from khora.telemetry import get_collector
- 899: 
- 900:                         usage = getattr(response, "usage", None)
- 901:                         get_collector().record_llm_call(
- 902:                             operation="entity_extraction_multi",
- 903:                             model=self._model,
- 904:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
- 905:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
- 906:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
- 907:                             latency_ms=_latency,
- 908:                             metadata={"batch_size": len(texts)},
- 909:                         )
- 910: 
- 911:                     content = response.choices[0].message.content
- 912:                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
- 913:                     model_used = getattr(response, "model", self._model)
- 914: 
- 915:                     if not content:
- 916:                         # Log more details about the response for debugging
- 917:                         logger.warning(
- 918:                             f"Empty response content from LLM in batch extraction. "
- 919:                             f"Model: {model_used}, finish_reason: {finish_reason}, "
- 920:                             f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
- 921:                         )
- 922:                         return [
- 923:                             ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
- 924:                             for _ in texts
- 925:                         ]
- 926: 
- 927:                     # Check for truncated response (hit max_tokens limit)
- 928:                     if finish_reason == "length":
- 929:                         logger.warning(
- 930:                             f"LLM response truncated (finish_reason=length) in batch extraction. "
- 931:                             f"Model: {model_used}, batch_size: {len(texts)}. "
- 932:                             f"Consider increasing max_tokens or reducing batch size."
- 933:                         )
- 934:                         # Don't retry - truncation will happen again. Return empty results.
- 935:                         return [
- 936:                             ExtractionResult(metadata={"error": "truncated_response", "finish_reason": finish_reason})
- 937:                             for _ in texts
- 938:                         ]
- 939: 
- 940:                     # Parse JSON with error handling - don't retry on parse errors
- 941:                     try:
- 942:                         data = json.loads(content)
- 943:                     except json.JSONDecodeError as json_err:
- 944:                         # Log details to help diagnose the issue
- 945:                         logger.warning(
- 946:                             f"JSON parse error in batch extraction (finish_reason={finish_reason}): {json_err}. "
- 947:                             f"Model: {model_used}, content_length: {len(content)}, "
- 948:                             f"content_preview: {content[:200]}..."
- 949:                         )
- 950:                         # Raise to trigger retry - model may produce valid JSON on next attempt
- 951:                         raise
- 952: 
- 953:                     if not isinstance(data, dict):
- 954:                         logger.warning(f"Batch response is not a dict: {type(data)}")
- 955:                         return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]
- 956:                     sections_data = data.get("sections", [])
- 957: 
- 958:                     results: list[ExtractionResult] = []
- 959:                     for i, text in enumerate(texts):
- 960:                         if i < len(sections_data):
- 961:                             results.append(self._parse_response(sections_data[i]))
- 962:                         else:
- 963:                             results.append(ExtractionResult())
- 964: 
- 965:                     return results
- 966:         except Exception as e:
- 967:             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
- 968:             return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
- 969: 
- 970:     def _parse_response(self, content: str | dict | None) -> ExtractionResult:
- 971:         """Parse the LLM response into an ExtractionResult.
- 972: 
- 973:         Accepts either a JSON string or a pre-parsed dict to avoid
- 974:         unnecessary json.dumps/json.loads round-trips in batch mode.
- 975:         """
- 976:         try:
- 977:             # Handle None or empty content
- 978:             if content is None or content == "":
- 979:                 logger.warning("Empty response content from LLM")
- 980:                 return ExtractionResult(metadata={"error": "empty_response"})
- 981: 
- 982:             # Accept pre-parsed dict directly (from extract_multi_batch)
- 983:             data = content if isinstance(content, dict) else json.loads(content)
- 984: 
- 985:             # Ensure data is actually a dict (not a string that parsed as string)
- 986:             if not isinstance(data, dict):
- 987:                 logger.warning(f"Response parsed but is not a dict: {type(data)}")
- 988:                 return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
- 989: 
- 990:             entities = []
- 991:             for e in data.get("entities", []):
- 992:                 # Parse temporal info if present
- 993:                 temporal = None
- 994:                 if "temporal" in e and e["temporal"]:
- 995:                     t = e["temporal"]
- 996:                     temporal = TemporalInfo(
- 997:                         mentioned_at=t.get("mentioned_at"),
- 998:                         valid_from=t.get("valid_from"),
- 999:                         valid_until=t.get("valid_until"),
-1000:                     )
-1001: 
-1002:                 # Ensure attributes is a dict (LLM sometimes returns a list)
-1003:                 attrs = e.get("attributes", {})
-1004:                 if not isinstance(attrs, dict):
-1005:                     attrs = {}
-1006: 
-1007:                 entities.append(
-1008:                     ExtractedEntity(
-1009:                         name=e.get("name") or "",
-1010:                         entity_type=e.get("entity_type") or "CONCEPT",
-1011:                         description=e.get("description") or "",
-1012:                         attributes=attrs,
-1013:                         aliases=e.get("aliases") or [],
-1014:                         temporal=temporal,
-1015:                         confidence=e.get("confidence") or 0.9,
-1016:                     )
-1017:                 )
-1018: 
-1019:             relationships = []
-1020:             for r in data.get("relationships", []):
-1021:                 # Parse temporal info if present
-1022:                 temporal = None
-1023:                 if "temporal" in r and r["temporal"]:
-1024:                     t = r["temporal"]
-1025:                     temporal = TemporalInfo(
-1026:                         occurred_at=t.get("occurred_at"),
-1027:                         valid_from=t.get("valid_from"),
-1028:                         valid_until=t.get("valid_until"),
-1029:                     )
-1030: 
-1031:                 relationships.append(
-1032:                     ExtractedRelationship(
-1033:                         source_entity=r.get("source_entity") or "",
-1034:                         target_entity=r.get("target_entity") or "",
-1035:                         relationship_type=r.get("relationship_type") or "RELATES_TO",
-1036:                         description=r.get("description") or "",
-1037:                         properties=r.get("properties") or {},
-1038:                         temporal=temporal,
-1039:                         confidence=r.get("confidence") or 0.9,
-1040:                     )
-1041:                 )
-1042: 
-1043:             events = []
-1044:             for ev in data.get("events", []):
-1045:                 events.append(
-1046:                     ExtractedEvent(
-1047:                         description=ev.get("description") or "",
-1048:                         event_type=ev.get("event_type") or "EVENT",
-1049:                         occurred_at=ev.get("occurred_at"),
-1050:                         participants=ev.get("participants") or [],
-1051:                         confidence=ev.get("confidence") or 0.9,
-1052:                     )
-1053:                 )
-1054: 
-1055:             return ExtractionResult(
-1056:                 entities=entities,
-1057:                 relationships=relationships,
-1058:                 events=events,
-1059:             )
-1060: 
-1061:         except json.JSONDecodeError as e:
-1062:             logger.warning(f"Failed to parse extraction response as JSON: {e}")
-1063:             # Try to extract JSON from the response
-1064:             return self._extract_json_from_text(content)
-1065: 
-1066:     def _extract_json_from_text(self, text: str) -> ExtractionResult:
-1067:         """Try to extract JSON from text that may contain other content."""
-1068:         import re
-1069: 
-1070:         # Look for JSON object in the text
-1071:         json_match = re.search(r"\{[\s\S]*\}", text)
-1072:         if json_match:
-1073:             try:
-1074:                 data = json.loads(json_match.group())
-1075:                 return self._parse_response(json.dumps(data))
-1076:             except json.JSONDecodeError:
-1077:                 pass
-1078: 
-1079:         logger.warning("Could not extract valid JSON from response")
-1080:         return ExtractionResult(metadata={"raw_response": text[:500]})
 ````
 
 ## File: src/khora/pipelines/flows/ingest.py
@@ -47458,11 +46374,1112 @@ README.md
 1000:     }
 ````
 
+## File: src/khora/extraction/extractors/llm.py
+````python
+   1: """LLM-based entity extraction using LiteLLM."""
+   2: 
+   3: from __future__ import annotations
+   4: 
+   5: import asyncio
+   6: import json
+   7: from typing import TYPE_CHECKING, Any
+   8: 
+   9: from loguru import logger
+  10: from tenacity import AsyncRetrying, before_sleep_log, stop_after_attempt, wait_exponential
+  11: 
+  12: from .base import (
+  13:     EntityExtractor,
+  14:     ExtractedEntity,
+  15:     ExtractedEvent,
+  16:     ExtractedRelationship,
+  17:     ExtractionResult,
+  18:     TemporalInfo,
+  19: )
+  20: 
+  21: if TYPE_CHECKING:
+  22:     from khora.config import LiteLLMConfig
+  23:     from khora.extraction.skills import ExpertiseConfig
+  24: 
+  25: 
+  26: # Default entity types to extract
+  27: DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
+  28: 
+  29: # Default relationship types to use
+  30: DEFAULT_RELATIONSHIP_TYPES = [
+  31:     "WORKS_FOR",
+  32:     "KNOWS",
+  33:     "MANAGES",
+  34:     "PART_OF",
+  35:     "LOCATED_IN",
+  36:     "DEPENDS_ON",
+  37:     "IMPLEMENTS",
+  38:     "RELATES_TO",
+  39:     "ASSOCIATED_WITH",
+  40: ]
+  41: 
+  42: # Default system prompt for extraction
+  43: DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
+  44: 
+  45: # Extraction prompt template with temporal awareness
+  46: EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
+  47: 
+  48: Entity types to extract: {entity_types}
+  49: Relationship types to use: {relationship_types}
+  50: 
+  51: Text:
+  52: {text}
+  53: 
+  54: Return a JSON object with the following structure:
+  55: {{
+  56:     "entities": [
+  57:         {{
+  58:             "name": "entity name (canonical form, properly capitalized)",
+  59:             "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|PRODUCT|DATE|etc",
+  60:             "description": "brief description of the entity",
+  61:             "attributes": {{"key": "value"}},
+  62:             "aliases": ["alternative names", "nicknames", "abbreviations"],
+  63:             "temporal": {{
+  64:                 "mentioned_at": "when entity is mentioned (if temporal context exists)",
+  65:                 "valid_from": "ISO date or null if entity validity period is mentioned",
+  66:                 "valid_until": "ISO date or null if entity validity period ends"
+  67:             }}
+  68:         }}
+  69:     ],
+  70:     "relationships": [
+  71:         {{
+  72:             "source_entity": "source entity name (must match an entity above)",
+  73:             "target_entity": "target entity name (must match an entity above)",
+  74:             "relationship_type": "WORKS_FOR|KNOWS|MANAGES|REPORTS_TO|COLLABORATES_WITH|OWNS|PART_OF|LOCATED_IN|RELATES_TO|DEPENDS_ON|IMPLEMENTS|PRECEDES|FOLLOWS|ASSOCIATED_WITH|etc",
+  75:             "description": "brief description of relationship",
+  76:             "temporal": {{
+  77:                 "occurred_at": "when relationship occurred/started",
+  78:                 "valid_from": "ISO date or null if relationship has time bounds",
+  79:                 "valid_until": "ISO date or null if relationship ended"
+  80:             }}
+  81:         }}
+  82:     ],
+  83:     "events": [
+  84:         {{
+  85:             "description": "what happened",
+  86:             "occurred_at": "when it occurred (ISO date or descriptive)",
+  87:             "participants": ["entity names involved"],
+  88:             "event_type": "MEETING|DECISION|MILESTONE|ANNOUNCEMENT|INCIDENT|etc"
+  89:         }}
+  90:     ]
+  91: }}
+  92: 
+  93: Guidelines:
+  94: - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
+  95: - Include aliases for entities that have multiple names/abbreviations
+  96: - Extract temporal information when dates, times, or relative time references appear
+  97: - For events, capture the when, who, and what
+  98: - Be thorough but precise - only extract entities that are clearly mentioned
+  99: - Ensure relationship source/target names match extracted entity names exactly
+ 100: 
+ 101: Return ONLY valid JSON, no other text."""
+ 102: 
+ 103: 
+ 104: class LLMEntityExtractor(EntityExtractor):
+ 105:     """LLM-based entity extractor using LiteLLM.
+ 106: 
+ 107:     Uses an LLM to extract entities and relationships from text
+ 108:     through structured JSON output.
+ 109:     """
+ 110: 
+ 111:     # Models that require json_schema format instead of json_object
+ 112:     # OpenAI models with structured output support need explicit json_schema
+ 113:     # to ensure additionalProperties: false is properly set on all nested objects
+ 114:     MODELS_REQUIRING_JSON_SCHEMA: set[str] = {
+ 115:         "gpt-4o",
+ 116:         "gpt-4o-mini",
+ 117:         "gpt-4o-2024-05-13",
+ 118:         "gpt-4o-2024-08-06",
+ 119:         "gpt-4o-2024-11-20",
+ 120:         "gpt-4o-mini-2024-07-18",
+ 121:         "gpt-4-turbo",
+ 122:         "gpt-4-turbo-preview",
+ 123:         "o1",
+ 124:         "o1-mini",
+ 125:         "o1-preview",
+ 126:         "o3-mini",
+ 127:     }
+ 128: 
+ 129:     # Model input token multipliers for adaptive batching
+ 130:     # Multiplier is applied to max_tokens to get max_input_tokens budget
+ 131:     # Higher values for large context models (128K+), lower for smaller context
+ 132:     MODEL_INPUT_MULTIPLIERS: dict[str, int] = {
+ 133:         # Large context models (128K+) - can be more aggressive
+ 134:         "gpt-4o": 8,
+ 135:         "gpt-4o-2024-05-13": 8,
+ 136:         "gpt-4o-2024-08-06": 8,
+ 137:         "gpt-4o-2024-11-20": 8,
+ 138:         "gpt-4.1": 8,
+ 139:         "gpt-4.1-mini": 5,  # 128K context but smaller model
+ 140:         "gpt-4o-mini": 5,
+ 141:         "gpt-4o-mini-2024-07-18": 5,
+ 142:         "o1": 8,
+ 143:         "o1-mini": 5,
+ 144:         "o3-mini": 5,
+ 145:         # Medium context models (32K)
+ 146:         "gpt-4-turbo": 4,
+ 147:         "gpt-4-turbo-preview": 4,
+ 148:         # Smaller context models (8K-16K) - conservative
+ 149:         "gpt-4": 2,
+ 150:         "gpt-3.5-turbo": 2,
+ 151:         # Claude models
+ 152:         "claude-3-opus": 8,
+ 153:         "claude-3-sonnet": 8,
+ 154:         "claude-3-haiku": 5,
+ 155:     }
+ 156:     DEFAULT_INPUT_MULTIPLIER = 3  # Fallback for unknown models
+ 157: 
+ 158:     def __init__(
+ 159:         self,
+ 160:         model: str = "gpt-4o-mini",
+ 161:         *,
+ 162:         temperature: float = 0.3,  # Lower for more consistent extraction
+ 163:         max_tokens: int = 4000,
+ 164:         timeout: int = 60,
+ 165:         max_retries: int = 3,
+ 166:         max_concurrent: int = 5,
+ 167:         retry_wait: float = 1.0,
+ 168:     ) -> None:
+ 169:         """Initialize the LLM entity extractor.
+ 170: 
+ 171:         Args:
+ 172:             model: LLM model to use
+ 173:             temperature: Sampling temperature
+ 174:             max_tokens: Maximum tokens in response
+ 175:             timeout: Request timeout in seconds
+ 176:             max_retries: Maximum retries on failure
+ 177:             max_concurrent: Maximum concurrent extractions
+ 178:             retry_wait: Base wait time (seconds) for exponential backoff between retries
+ 179:         """
+ 180:         self._model = model
+ 181:         self._temperature = temperature
+ 182:         self._max_tokens = max_tokens
+ 183:         self._timeout = timeout
+ 184:         self._max_retries = max_retries
+ 185:         self._retry_wait = retry_wait
+ 186:         self._semaphore = asyncio.Semaphore(max_concurrent)
+ 187: 
+ 188:     def _estimate_tokens(self, text: str) -> int:
+ 189:         """Estimate token count for text.
+ 190: 
+ 191:         Uses ~3 chars per token as a conservative heuristic for English text.
+ 192:         This slightly overestimates to provide safety margin.
+ 193:         """
+ 194:         return len(text) // 3
+ 195: 
+ 196:     def _get_input_multiplier(self) -> int:
+ 197:         """Get input token multiplier based on model.
+ 198: 
+ 199:         Returns the multiplier to apply to max_tokens for calculating
+ 200:         the input token budget for adaptive batching.
+ 201:         """
+ 202:         # Check exact match first
+ 203:         if self._model in self.MODEL_INPUT_MULTIPLIERS:
+ 204:             return self.MODEL_INPUT_MULTIPLIERS[self._model]
+ 205:         # Check prefix matches (e.g., "gpt-4o-mini" matches "gpt-4o-mini-...")
+ 206:         for model_prefix, multiplier in self.MODEL_INPUT_MULTIPLIERS.items():
+ 207:             if self._model.startswith(model_prefix):
+ 208:                 return multiplier
+ 209:         return self.DEFAULT_INPUT_MULTIPLIER
+ 210: 
+ 211:     def _create_adaptive_batches(
+ 212:         self,
+ 213:         texts: list[str],
+ 214:         max_batch_size: int,
+ 215:         max_input_tokens: int,
+ 216:         prompt_overhead: int = 500,
+ 217:     ) -> list[list[str]]:
+ 218:         """Create batches that fit within token budget.
+ 219: 
+ 220:         Groups texts greedily until hitting the input token budget or
+ 221:         max batch size, whichever comes first.
+ 222: 
+ 223:         Args:
+ 224:             texts: List of texts to batch
+ 225:             max_batch_size: Maximum number of texts per batch
+ 226:             max_input_tokens: Token budget for input
+ 227:             prompt_overhead: Estimated tokens for system prompt and instructions
+ 228: 
+ 229:         Returns:
+ 230:             List of text batches
+ 231:         """
+ 232:         batches: list[list[str]] = []
+ 233:         current_batch: list[str] = []
+ 234:         current_tokens = prompt_overhead
+ 235: 
+ 236:         for text in texts:
+ 237:             # Match truncation in _extract_multi_batch (4000 chars)
+ 238:             text_tokens = self._estimate_tokens(text[:4000])
+ 239: 
+ 240:             # Check if adding this text would exceed budget or max batch size
+ 241:             if current_batch and (
+ 242:                 current_tokens + text_tokens > max_input_tokens or len(current_batch) >= max_batch_size
+ 243:             ):
+ 244:                 batches.append(current_batch)
+ 245:                 current_batch = []
+ 246:                 current_tokens = prompt_overhead
+ 247: 
+ 248:             current_batch.append(text)
+ 249:             current_tokens += text_tokens
+ 250: 
+ 251:         if current_batch:
+ 252:             batches.append(current_batch)
+ 253: 
+ 254:         return batches
+ 255: 
+ 256:     def _get_response_format(self) -> dict[str, Any]:
+ 257:         """Get the appropriate response_format based on the model.
+ 258: 
+ 259:         Some models (like gpt-5-nano) require json_schema format with
+ 260:         strict structured outputs, while others work with json_object.
+ 261:         """
+ 262:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+ 263:             return {
+ 264:                 "type": "json_schema",
+ 265:                 "json_schema": {
+ 266:                     "name": "extraction_result",
+ 267:                     "strict": True,
+ 268:                     "schema": {
+ 269:                         "type": "object",
+ 270:                         "properties": {
+ 271:                             "entities": {
+ 272:                                 "type": "array",
+ 273:                                 "items": {
+ 274:                                     "type": "object",
+ 275:                                     "properties": {
+ 276:                                         "name": {"type": "string"},
+ 277:                                         "entity_type": {"type": "string"},
+ 278:                                         "description": {"type": "string"},
+ 279:                                         "aliases": {"type": "array", "items": {"type": "string"}},
+ 280:                                     },
+ 281:                                     "required": ["name", "entity_type", "description", "aliases"],
+ 282:                                     "additionalProperties": False,
+ 283:                                 },
+ 284:                             },
+ 285:                             "relationships": {
+ 286:                                 "type": "array",
+ 287:                                 "items": {
+ 288:                                     "type": "object",
+ 289:                                     "properties": {
+ 290:                                         "source_entity": {"type": "string"},
+ 291:                                         "target_entity": {"type": "string"},
+ 292:                                         "relationship_type": {"type": "string"},
+ 293:                                         "description": {"type": "string"},
+ 294:                                     },
+ 295:                                     "required": ["source_entity", "target_entity", "relationship_type", "description"],
+ 296:                                     "additionalProperties": False,
+ 297:                                 },
+ 298:                             },
+ 299:                             "events": {
+ 300:                                 "type": "array",
+ 301:                                 "items": {
+ 302:                                     "type": "object",
+ 303:                                     "properties": {
+ 304:                                         "description": {"type": "string"},
+ 305:                                         "event_type": {"type": "string"},
+ 306:                                         "occurred_at": {"type": ["string", "null"]},
+ 307:                                         "participants": {"type": "array", "items": {"type": "string"}},
+ 308:                                     },
+ 309:                                     "required": ["description", "event_type", "occurred_at", "participants"],
+ 310:                                     "additionalProperties": False,
+ 311:                                 },
+ 312:                             },
+ 313:                         },
+ 314:                         "required": ["entities", "relationships", "events"],
+ 315:                         "additionalProperties": False,
+ 316:                     },
+ 317:                 },
+ 318:             }
+ 319:         return {"type": "json_object"}
+ 320: 
+ 321:     def _get_multi_response_format(self) -> dict[str, Any]:
+ 322:         """Get the appropriate response_format for multi-section batch extraction.
+ 323: 
+ 324:         Similar to _get_response_format but wraps entities/relationships/events
+ 325:         in a "sections" array for batch processing.
+ 326:         """
+ 327:         if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+ 328:             section_schema = {
+ 329:                 "type": "object",
+ 330:                 "properties": {
+ 331:                     "entities": {
+ 332:                         "type": "array",
+ 333:                         "items": {
+ 334:                             "type": "object",
+ 335:                             "properties": {
+ 336:                                 "name": {"type": "string"},
+ 337:                                 "entity_type": {"type": "string"},
+ 338:                                 "description": {"type": "string"},
+ 339:                                 "aliases": {"type": "array", "items": {"type": "string"}},
+ 340:                             },
+ 341:                             "required": ["name", "entity_type", "description", "aliases"],
+ 342:                             "additionalProperties": False,
+ 343:                         },
+ 344:                     },
+ 345:                     "relationships": {
+ 346:                         "type": "array",
+ 347:                         "items": {
+ 348:                             "type": "object",
+ 349:                             "properties": {
+ 350:                                 "source_entity": {"type": "string"},
+ 351:                                 "target_entity": {"type": "string"},
+ 352:                                 "relationship_type": {"type": "string"},
+ 353:                                 "description": {"type": "string"},
+ 354:                             },
+ 355:                             "required": ["source_entity", "target_entity", "relationship_type", "description"],
+ 356:                             "additionalProperties": False,
+ 357:                         },
+ 358:                     },
+ 359:                     "events": {
+ 360:                         "type": "array",
+ 361:                         "items": {
+ 362:                             "type": "object",
+ 363:                             "properties": {
+ 364:                                 "description": {"type": "string"},
+ 365:                                 "event_type": {"type": "string"},
+ 366:                                 "occurred_at": {"type": ["string", "null"]},
+ 367:                                 "participants": {"type": "array", "items": {"type": "string"}},
+ 368:                             },
+ 369:                             "required": ["description", "event_type", "occurred_at", "participants"],
+ 370:                             "additionalProperties": False,
+ 371:                         },
+ 372:                     },
+ 373:                 },
+ 374:                 "required": ["entities", "relationships", "events"],
+ 375:                 "additionalProperties": False,
+ 376:             }
+ 377:             return {
+ 378:                 "type": "json_schema",
+ 379:                 "json_schema": {
+ 380:                     "name": "multi_extraction_result",
+ 381:                     "strict": True,
+ 382:                     "schema": {
+ 383:                         "type": "object",
+ 384:                         "properties": {
+ 385:                             "sections": {
+ 386:                                 "type": "array",
+ 387:                                 "items": section_schema,
+ 388:                             },
+ 389:                         },
+ 390:                         "required": ["sections"],
+ 391:                         "additionalProperties": False,
+ 392:                     },
+ 393:                 },
+ 394:             }
+ 395:         return {"type": "json_object"}
+ 396: 
+ 397:     @classmethod
+ 398:     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
+ 399:         """Create extractor from LiteLLM configuration.
+ 400: 
+ 401:         Args:
+ 402:             config: LiteLLMConfig instance
+ 403: 
+ 404:         Returns:
+ 405:             Configured LLMEntityExtractor
+ 406:         """
+ 407:         return cls(
+ 408:             model=config.model,
+ 409:             temperature=0.3,  # Override for extraction
+ 410:             max_tokens=config.max_tokens,
+ 411:             timeout=config.timeout,
+ 412:             max_retries=config.max_retries,
+ 413:             max_concurrent=config.max_concurrent_llm_calls,
+ 414:             retry_wait=config.retry_wait,
+ 415:         )
+ 416: 
+ 417:     async def extract(
+ 418:         self,
+ 419:         text: str,
+ 420:         *,
+ 421:         entity_types: list[str] | None = None,
+ 422:         expertise: ExpertiseConfig | None = None,
+ 423:         context: dict[str, Any] | None = None,
+ 424:     ) -> ExtractionResult:
+ 425:         """Extract entities and relationships from text.
+ 426: 
+ 427:         Args:
+ 428:             text: Text to extract from
+ 429:             entity_types: Optional list of entity types to extract
+ 430:             expertise: Optional ExpertiseConfig for domain-specific extraction
+ 431:             context: Optional context dict for prompt template rendering
+ 432: 
+ 433:         Returns:
+ 434:             ExtractionResult containing entities and relationships
+ 435:         """
+ 436:         if not text.strip():
+ 437:             return ExtractionResult()
+ 438: 
+ 439:         # Determine entity types from expertise or fallback
+ 440:         if expertise:
+ 441:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+ 442:         else:
+ 443:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
+ 444: 
+ 445:         try:
+ 446:             import litellm
+ 447:         except ImportError:
+ 448:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
+ 449: 
+ 450:         # Render prompts based on expertise
+ 451:         system_prompt = self._render_system_prompt(expertise, context)
+ 452:         extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
+ 453: 
+ 454:         try:
+ 455:             async for attempt in AsyncRetrying(
+ 456:                 stop=stop_after_attempt(self._max_retries),
+ 457:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+ 458:                 before_sleep=before_sleep_log(logger, "WARNING"),
+ 459:                 reraise=True,
+ 460:             ):
+ 461:                 with attempt:
+ 462:                     async with self._semaphore:
+ 463:                         import time as _time
+ 464: 
+ 465:                         _t0 = _time.perf_counter()
+ 466:                         response = await litellm.acompletion(
+ 467:                             model=self._model,
+ 468:                             messages=[
+ 469:                                 {"role": "system", "content": system_prompt},
+ 470:                                 {"role": "user", "content": extraction_prompt},
+ 471:                             ],
+ 472:                             temperature=self._temperature,
+ 473:                             max_tokens=self._max_tokens,
+ 474:                             timeout=self._timeout,
+ 475:                             response_format=self._get_response_format(),
+ 476:                         )
+ 477:                         _latency = (_time.perf_counter() - _t0) * 1000
+ 478: 
+ 479:                         # Record telemetry
+ 480:                         from khora.telemetry import get_collector
+ 481: 
+ 482:                         usage = getattr(response, "usage", None)
+ 483:                         get_collector().record_llm_call(
+ 484:                             operation="entity_extraction",
+ 485:                             model=self._model,
+ 486:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+ 487:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+ 488:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
+ 489:                             latency_ms=_latency,
+ 490:                         )
+ 491: 
+ 492:                     content = response.choices[0].message.content
+ 493:                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+ 494: 
+ 495:                     # Check for truncated response (hit max_tokens limit)
+ 496:                     if finish_reason == "length":
+ 497:                         model_used = getattr(response, "model", self._model)
+ 498:                         logger.warning(
+ 499:                             f"LLM response truncated (finish_reason=length) in extraction. "
+ 500:                             f"Model: {model_used}. Consider increasing max_tokens."
+ 501:                         )
+ 502:                         return ExtractionResult(
+ 503:                             metadata={"error": "truncated_response", "finish_reason": finish_reason}
+ 504:                         )
+ 505: 
+ 506:                     result = self._parse_response(content)
+ 507: 
+ 508:                     # Apply confidence filtering from expertise if available
+ 509:                     if expertise:
+ 510:                         result = self._filter_by_confidence(result, expertise)
+ 511: 
+ 512:                     return result
+ 513:         except Exception as e:
+ 514:             logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
+ 515:             return ExtractionResult(metadata={"error": str(e)})
+ 516: 
+ 517:     def _render_system_prompt(
+ 518:         self,
+ 519:         expertise: ExpertiseConfig | None,
+ 520:         context: dict[str, Any] | None,
+ 521:     ) -> str:
+ 522:         """Render the system prompt, optionally using expertise config."""
+ 523:         if not expertise or not expertise.system_prompt:
+ 524:             return DEFAULT_SYSTEM_PROMPT
+ 525: 
+ 526:         try:
+ 527:             from khora.extraction.skills.composer import ExpertiseComposer
+ 528: 
+ 529:             composer = ExpertiseComposer()
+ 530:             return composer.render_prompt(
+ 531:                 expertise.system_prompt,
+ 532:                 expertise=expertise,
+ 533:                 context=context,
+ 534:             )
+ 535:         except Exception as e:
+ 536:             logger.warning(f"Failed to render system prompt: {e}")
+ 537:             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
+ 538: 
+ 539:     def _build_tool_context(self, expertise: ExpertiseConfig | None, context: dict[str, Any] | None) -> str:
+ 540:         """Build tool-specific context block for the extraction prompt.
+ 541: 
+ 542:         When expertise has tool_schemas populated and the context identifies
+ 543:         a source_tool, this injects structured field knowledge so the LLM
+ 544:         understands the data format it's extracting from.
+ 545: 
+ 546:         Args:
+ 547:             expertise: Optional ExpertiseConfig with tool_schemas
+ 548:             context: Optional context dict with source_tool key
+ 549: 
+ 550:         Returns:
+ 551:             Tool context string to prepend to the text, or empty string
+ 552:         """
+ 553:         if not expertise or not expertise.tool_schemas or not context:
+ 554:             return ""
+ 555: 
+ 556:         source_tool = context.get("source_tool", "")
+ 557:         if not source_tool:
+ 558:             return ""
+ 559: 
+ 560:         schema = expertise.tool_schemas.get(source_tool)
+ 561:         if not schema:
+ 562:             return ""
+ 563: 
+ 564:         lines = [f"\nSOURCE CONTEXT: This content comes from {source_tool}."]
+ 565:         for obj_type, obj_schema in schema.items():
+ 566:             if not isinstance(obj_schema, dict):
+ 567:                 continue
+ 568:             fields = obj_schema.get("fields", [])
+ 569:             if fields:
+ 570:                 lines.append(f"  {obj_type} fields: {', '.join(str(f) for f in fields)}")
+ 571:             for key, values in obj_schema.items():
+ 572:                 if key != "fields" and isinstance(values, list):
+ 573:                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
+ 574: 
+ 575:         # Add attribute schema hints from entity types
+ 576:         if expertise.entity_types:
+ 577:             lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
+ 578:             for et in expertise.entity_types:
+ 579:                 required = et.attributes.get("required", [])
+ 580:                 optional = et.attributes.get("optional", [])
+ 581:                 if required or optional:
+ 582:                     parts = []
+ 583:                     if required:
+ 584:                         parts.append(f"required: {', '.join(required)}")
+ 585:                     if optional:
+ 586:                         parts.append(f"optional: {', '.join(optional)}")
+ 587:                     lines.append(f"  {et.name}: {'; '.join(parts)}")
+ 588: 
+ 589:         return "\n".join(lines)
+ 590: 
+ 591:     def _render_extraction_prompt(
+ 592:         self,
+ 593:         text: str,
+ 594:         entity_types: list[str],
+ 595:         expertise: ExpertiseConfig | None,
+ 596:         context: dict[str, Any] | None,
+ 597:     ) -> str:
+ 598:         """Render the extraction prompt, optionally using expertise config."""
+ 599:         # Build tool context for SaaS-aware extraction
+ 600:         tool_context = self._build_tool_context(expertise, context)
+ 601: 
+ 602:         # If expertise has a custom extraction prompt, use it
+ 603:         if expertise and expertise.extraction_prompt:
+ 604:             logger.debug(
+ 605:                 f"Using custom extraction_prompt from expertise '{expertise.name}' "
+ 606:                 f"({len(expertise.extraction_prompt)} chars)"
+ 607:             )
+ 608:             try:
+ 609:                 from khora.extraction.skills.composer import ExpertiseComposer
+ 610: 
+ 611:                 composer = ExpertiseComposer()
+ 612:                 # Get relationship types from expertise
+ 613:                 relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+ 614: 
+ 615:                 prompt_context = {
+ 616:                     **(context or {}),
+ 617:                     "text": text[:8000],
+ 618:                     "entity_types": entity_types,
+ 619:                     "relationship_types": relationship_types,
+ 620:                     "tool_context": tool_context,
+ 621:                 }
+ 622:                 return composer.render_prompt(
+ 623:                     expertise.extraction_prompt,
+ 624:                     expertise=expertise,
+ 625:                     context=prompt_context,
+ 626:                 )
+ 627:             except Exception as e:
+ 628:                 logger.warning(f"Failed to render extraction prompt: {e}")
+ 629: 
+ 630:         # Use default extraction prompt
+ 631:         logger.debug("Using DEFAULT_EXTRACTION_PROMPT (no custom prompt in expertise)")
+ 632:         # Use default extraction prompt with optional tool context
+ 633:         # Get relationship types from expertise or defaults
+ 634:         if expertise:
+ 635:             relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+ 636:         else:
+ 637:             relationship_types = DEFAULT_RELATIONSHIP_TYPES
+ 638: 
+ 639:         prompt = EXTRACTION_PROMPT.format(
+ 640:             entity_types=", ".join(entity_types),
+ 641:             relationship_types=", ".join(relationship_types),
+ 642:             text=text[:8000],  # Truncate very long texts
+ 643:         )
+ 644:         if tool_context:
+ 645:             prompt = tool_context + "\n\n" + prompt
+ 646:         return prompt
+ 647: 
+ 648:     def _filter_by_confidence(
+ 649:         self,
+ 650:         result: ExtractionResult,
+ 651:         expertise: ExpertiseConfig,
+ 652:     ) -> ExtractionResult:
+ 653:         """Filter extraction results by confidence thresholds from expertise."""
+ 654:         min_entity = expertise.confidence.min_entity
+ 655:         min_relationship = expertise.confidence.min_relationship
+ 656: 
+ 657:         filtered_entities = [e for e in result.entities if e.confidence >= min_entity]
+ 658:         filtered_relationships = [r for r in result.relationships if r.confidence >= min_relationship]
+ 659: 
+ 660:         return ExtractionResult(
+ 661:             entities=filtered_entities,
+ 662:             relationships=filtered_relationships,
+ 663:             events=result.events,
+ 664:             metadata=result.metadata,
+ 665:         )
+ 666: 
+ 667:     async def extract_batch(
+ 668:         self,
+ 669:         texts: list[str],
+ 670:         *,
+ 671:         entity_types: list[str] | None = None,
+ 672:         expertise: ExpertiseConfig | None = None,
+ 673:         context: dict[str, Any] | None = None,
+ 674:     ) -> list[ExtractionResult]:
+ 675:         """Extract from multiple texts concurrently.
+ 676: 
+ 677:         Args:
+ 678:             texts: List of texts to extract from
+ 679:             entity_types: Optional list of entity types to extract
+ 680:             expertise: Optional ExpertiseConfig for domain-specific extraction
+ 681:             context: Optional context dict for prompt template rendering
+ 682: 
+ 683:         Returns:
+ 684:             List of ExtractionResult objects
+ 685:         """
+ 686:         if not texts:
+ 687:             return []
+ 688: 
+ 689:         tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
+ 690:         return await asyncio.gather(*tasks)
+ 691: 
+ 692:     async def extract_multi(
+ 693:         self,
+ 694:         texts: list[str],
+ 695:         *,
+ 696:         entity_types: list[str] | None = None,
+ 697:         expertise: ExpertiseConfig | None = None,
+ 698:         context: dict[str, Any] | None = None,
+ 699:         batch_size: int = 5,
+ 700:         max_input_tokens: int | None = None,
+ 701:     ) -> list[ExtractionResult]:
+ 702:         """Extract entities from multiple texts in grouped LLM calls.
+ 703: 
+ 704:         Groups texts into batches using adaptive token-budget-based batching,
+ 705:         reducing API round-trips while avoiding context overflow.
+ 706: 
+ 707:         Args:
+ 708:             texts: List of texts to extract from
+ 709:             entity_types: Optional list of entity types to extract
+ 710:             expertise: Optional ExpertiseConfig for domain-specific extraction
+ 711:             context: Optional context dict for prompt template rendering
+ 712:             batch_size: Maximum number of texts per LLM call (fallback/cap)
+ 713:             max_input_tokens: Token budget for input. If None, auto-calculated
+ 714:                 from max_tokens using model-aware multipliers.
+ 715: 
+ 716:         Returns:
+ 717:             List of ExtractionResult objects (one per input text)
+ 718:         """
+ 719:         if not texts:
+ 720:             return []
+ 721: 
+ 722:         if expertise:
+ 723:             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
+ 724:         else:
+ 725:             entity_types = entity_types or DEFAULT_ENTITY_TYPES
+ 726: 
+ 727:         try:
+ 728:             import litellm
+ 729:         except ImportError:
+ 730:             raise RuntimeError("litellm package not installed. Run: pip install litellm")
+ 731: 
+ 732:         # Calculate max_input_tokens from model if not provided
+ 733:         if max_input_tokens is None:
+ 734:             multiplier = self._get_input_multiplier()
+ 735:             max_input_tokens = self._max_tokens * multiplier
+ 736:             logger.debug(
+ 737:                 f"Using adaptive batching: model={self._model}, "
+ 738:                 f"multiplier={multiplier}x, max_input_tokens={max_input_tokens}"
+ 739:             )
+ 740: 
+ 741:         # Create adaptive batches based on token budget
+ 742:         batches = self._create_adaptive_batches(
+ 743:             texts,
+ 744:             max_batch_size=batch_size,
+ 745:             max_input_tokens=max_input_tokens,
+ 746:         )
+ 747:         logger.debug(f"Created {len(batches)} batches from {len(texts)} texts")
+ 748:         all_results: list[ExtractionResult] = []
+ 749: 
+ 750:         # Build system prompt from expertise if available
+ 751:         system_prompt = self._render_system_prompt(expertise, context)
+ 752:         tool_context = self._build_tool_context(expertise, context)
+ 753: 
+ 754:         async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
+ 755:             results = await self._extract_multi_batch(
+ 756:                 batch,
+ 757:                 entity_types,
+ 758:                 litellm,
+ 759:                 system_prompt=system_prompt,
+ 760:                 tool_context=tool_context,
+ 761:                 expertise=expertise,
+ 762:                 context=context,
+ 763:             )
+ 764: 
+ 765:             # Check if batch failed (all results have errors) - fallback to single extraction
+ 766:             all_failed = all(r.metadata.get("error") for r in results)
+ 767:             if all_failed and len(batch) > 1:
+ 768:                 logger.info(
+ 769:                     f"Batch extraction failed for {len(batch)} texts, " f"falling back to single-document extraction"
+ 770:                 )
+ 771:                 # Extract documents one at a time
+ 772:                 single_results = []
+ 773:                 for text in batch:
+ 774:                     result = await self.extract(
+ 775:                         text,
+ 776:                         entity_types=entity_types,
+ 777:                         expertise=expertise,
+ 778:                         context=context,
+ 779:                     )
+ 780:                     single_results.append(result)
+ 781:                 results = single_results
+ 782: 
+ 783:             if expertise:
+ 784:                 results = [self._filter_by_confidence(r, expertise) for r in results]
+ 785:             return results
+ 786: 
+ 787:         batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
+ 788:         for results in batch_results:
+ 789:             all_results.extend(results)
+ 790: 
+ 791:         return all_results
+ 792: 
+ 793:     async def _extract_multi_batch(
+ 794:         self,
+ 795:         texts: list[str],
+ 796:         entity_types: list[str],
+ 797:         litellm: Any,
+ 798:         *,
+ 799:         system_prompt: str | None = None,
+ 800:         tool_context: str | None = None,
+ 801:         expertise: ExpertiseConfig | None = None,
+ 802:         context: dict[str, Any] | None = None,
+ 803:     ) -> list[ExtractionResult]:
+ 804:         """Extract from a batch of texts in a single LLM call."""
+ 805:         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
+ 806: 
+ 807:         # If expertise has custom extraction prompt, use it with multi-section adaptation
+ 808:         if expertise and expertise.extraction_prompt:
+ 809:             from khora.extraction.skills.composer import ExpertiseComposer
+ 810: 
+ 811:             composer = ExpertiseComposer()
+ 812:             # Append multi-section response format to the text
+ 813:             multi_text = (
+ 814:                 sections
+ 815:                 + """
+ 816: 
+ 817: ## MULTI-SECTION RESPONSE FORMAT:
+ 818: Return a JSON object with a "sections" array, one object per input section:
+ 819: {"sections": [
+ 820:     {"entities": [...], "relationships": [...], "events": [...]},
+ 821:     ...
+ 822: ]}
+ 823: Each section follows the entity/relationship format from the instructions above."""
+ 824:             )
+ 825: 
+ 826:             # Get relationship types from expertise
+ 827:             relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+ 828: 
+ 829:             prompt_context = {
+ 830:                 **(context or {}),
+ 831:                 "text": multi_text,
+ 832:                 "entity_types": entity_types,
+ 833:                 "relationship_types": relationship_types,
+ 834:                 "tool_context": tool_context or "",
+ 835:             }
+ 836:             try:
+ 837:                 prompt = composer.render_prompt(
+ 838:                     expertise.extraction_prompt,
+ 839:                     expertise=expertise,
+ 840:                     context=prompt_context,
+ 841:                 )
+ 842:             except Exception as e:
+ 843:                 logger.warning(f"Failed to render extraction prompt for batch: {e}")
+ 844:                 # Fall through to default prompt below
+ 845:                 expertise = None
+ 846: 
+ 847:         # Fallback to hardcoded prompt (existing behavior)
+ 848:         if not expertise or not expertise.extraction_prompt:
+ 849:             # Get relationship types - expertise may exist but without custom extraction_prompt
+ 850:             if expertise:
+ 851:                 relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+ 852:             else:
+ 853:                 relationship_types = DEFAULT_RELATIONSHIP_TYPES
+ 854: 
+ 855:             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
+ 856:             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
+ 857: 
+ 858: Entity types to find: {", ".join(entity_types)}
+ 859: Relationship types to use: {", ".join(relationship_types)}
+ 860: 
+ 861: {sections}
+ 862: 
+ 863: Return a JSON object with a "sections" array, one object per section:
+ 864: {{"sections": [
+ 865:     {{"entities": [...], "relationships": [...], "events": [...]}},
+ 866:     ...
+ 867: ]}}
+ 868: 
+ 869: Each section follows the same entity/relationship/event format.
+ 870: Return ONLY valid JSON, no other text."""
+ 871: 
+ 872:         try:
+ 873:             async for attempt in AsyncRetrying(
+ 874:                 stop=stop_after_attempt(self._max_retries),
+ 875:                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+ 876:                 before_sleep=before_sleep_log(logger, "WARNING"),
+ 877:                 reraise=True,
+ 878:             ):
+ 879:                 with attempt:
+ 880:                     async with self._semaphore:
+ 881:                         import time as _time
+ 882: 
+ 883:                         _t0 = _time.perf_counter()
+ 884:                         response = await litellm.acompletion(
+ 885:                             model=self._model,
+ 886:                             messages=[
+ 887:                                 {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+ 888:                                 {"role": "user", "content": prompt},
+ 889:                             ],
+ 890:                             temperature=self._temperature,
+ 891:                             max_tokens=self._max_tokens,
+ 892:                             timeout=self._timeout,
+ 893:                             response_format=self._get_multi_response_format(),
+ 894:                         )
+ 895:                         _latency = (_time.perf_counter() - _t0) * 1000
+ 896: 
+ 897:                         # Record telemetry
+ 898:                         from khora.telemetry import get_collector
+ 899: 
+ 900:                         usage = getattr(response, "usage", None)
+ 901:                         get_collector().record_llm_call(
+ 902:                             operation="entity_extraction_multi",
+ 903:                             model=self._model,
+ 904:                             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+ 905:                             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+ 906:                             total_tokens=getattr(usage, "total_tokens", 0) or 0,
+ 907:                             latency_ms=_latency,
+ 908:                             metadata={"batch_size": len(texts)},
+ 909:                         )
+ 910: 
+ 911:                     content = response.choices[0].message.content
+ 912:                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+ 913:                     model_used = getattr(response, "model", self._model)
+ 914: 
+ 915:                     if not content:
+ 916:                         # Log more details about the response for debugging
+ 917:                         logger.warning(
+ 918:                             f"Empty response content from LLM in batch extraction. "
+ 919:                             f"Model: {model_used}, finish_reason: {finish_reason}, "
+ 920:                             f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
+ 921:                         )
+ 922:                         return [
+ 923:                             ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
+ 924:                             for _ in texts
+ 925:                         ]
+ 926: 
+ 927:                     # Check for truncated response (hit max_tokens limit)
+ 928:                     if finish_reason == "length":
+ 929:                         logger.warning(
+ 930:                             f"LLM response truncated (finish_reason=length) in batch extraction. "
+ 931:                             f"Model: {model_used}, batch_size: {len(texts)}. "
+ 932:                             f"Consider increasing max_tokens or reducing batch size."
+ 933:                         )
+ 934:                         # Don't retry - truncation will happen again. Return empty results.
+ 935:                         return [
+ 936:                             ExtractionResult(metadata={"error": "truncated_response", "finish_reason": finish_reason})
+ 937:                             for _ in texts
+ 938:                         ]
+ 939: 
+ 940:                     # Parse JSON with error handling - don't retry on parse errors
+ 941:                     try:
+ 942:                         data = json.loads(content)
+ 943:                     except json.JSONDecodeError as json_err:
+ 944:                         # Log details to help diagnose the issue
+ 945:                         logger.warning(
+ 946:                             f"JSON parse error in batch extraction (finish_reason={finish_reason}): {json_err}. "
+ 947:                             f"Model: {model_used}, content_length: {len(content)}, "
+ 948:                             f"content_preview: {content[:200]}..."
+ 949:                         )
+ 950:                         # Raise to trigger retry - model may produce valid JSON on next attempt
+ 951:                         raise
+ 952: 
+ 953:                     if not isinstance(data, dict):
+ 954:                         logger.warning(f"Batch response is not a dict: {type(data)}")
+ 955:                         return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]
+ 956:                     sections_data = data.get("sections", [])
+ 957: 
+ 958:                     results: list[ExtractionResult] = []
+ 959:                     for i, text in enumerate(texts):
+ 960:                         if i < len(sections_data):
+ 961:                             results.append(self._parse_response(sections_data[i]))
+ 962:                         else:
+ 963:                             results.append(ExtractionResult())
+ 964: 
+ 965:                     return results
+ 966:         except Exception as e:
+ 967:             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
+ 968:             return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
+ 969: 
+ 970:     def _parse_response(self, content: str | dict | None) -> ExtractionResult:
+ 971:         """Parse the LLM response into an ExtractionResult.
+ 972: 
+ 973:         Accepts either a JSON string or a pre-parsed dict to avoid
+ 974:         unnecessary json.dumps/json.loads round-trips in batch mode.
+ 975:         """
+ 976:         try:
+ 977:             # Handle None or empty content
+ 978:             if content is None or content == "":
+ 979:                 logger.warning("Empty response content from LLM")
+ 980:                 return ExtractionResult(metadata={"error": "empty_response"})
+ 981: 
+ 982:             # Accept pre-parsed dict directly (from extract_multi_batch)
+ 983:             data = content if isinstance(content, dict) else json.loads(content)
+ 984: 
+ 985:             # Ensure data is actually a dict (not a string that parsed as string)
+ 986:             if not isinstance(data, dict):
+ 987:                 logger.warning(f"Response parsed but is not a dict: {type(data)}")
+ 988:                 return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
+ 989: 
+ 990:             entities = []
+ 991:             for e in data.get("entities", []):
+ 992:                 # Skip malformed entities (LLM sometimes returns strings instead of dicts)
+ 993:                 if not isinstance(e, dict):
+ 994:                     logger.debug(f"Skipping malformed entity (not a dict): {type(e)}")
+ 995:                     continue
+ 996: 
+ 997:                 # Parse temporal info if present
+ 998:                 temporal = None
+ 999:                 if "temporal" in e and e["temporal"]:
+1000:                     t = e["temporal"]
+1001:                     if isinstance(t, dict):
+1002:                         temporal = TemporalInfo(
+1003:                             mentioned_at=t.get("mentioned_at"),
+1004:                             valid_from=t.get("valid_from"),
+1005:                             valid_until=t.get("valid_until"),
+1006:                         )
+1007: 
+1008:                 # Ensure attributes is a dict (LLM sometimes returns a list)
+1009:                 attrs = e.get("attributes", {})
+1010:                 if not isinstance(attrs, dict):
+1011:                     attrs = {}
+1012: 
+1013:                 entities.append(
+1014:                     ExtractedEntity(
+1015:                         name=e.get("name") or "",
+1016:                         entity_type=e.get("entity_type") or "CONCEPT",
+1017:                         description=e.get("description") or "",
+1018:                         attributes=attrs,
+1019:                         aliases=e.get("aliases") or [],
+1020:                         temporal=temporal,
+1021:                         confidence=e.get("confidence") or 0.9,
+1022:                     )
+1023:                 )
+1024: 
+1025:             relationships = []
+1026:             for r in data.get("relationships", []):
+1027:                 # Skip malformed relationships (LLM sometimes returns strings instead of dicts)
+1028:                 if not isinstance(r, dict):
+1029:                     logger.debug(f"Skipping malformed relationship (not a dict): {type(r)}")
+1030:                     continue
+1031: 
+1032:                 # Parse temporal info if present
+1033:                 temporal = None
+1034:                 if "temporal" in r and r["temporal"]:
+1035:                     t = r["temporal"]
+1036:                     if isinstance(t, dict):
+1037:                         temporal = TemporalInfo(
+1038:                             occurred_at=t.get("occurred_at"),
+1039:                             valid_from=t.get("valid_from"),
+1040:                             valid_until=t.get("valid_until"),
+1041:                         )
+1042: 
+1043:                 relationships.append(
+1044:                     ExtractedRelationship(
+1045:                         source_entity=r.get("source_entity") or "",
+1046:                         target_entity=r.get("target_entity") or "",
+1047:                         relationship_type=r.get("relationship_type") or "RELATES_TO",
+1048:                         description=r.get("description") or "",
+1049:                         properties=r.get("properties") or {},
+1050:                         temporal=temporal,
+1051:                         confidence=r.get("confidence") or 0.9,
+1052:                     )
+1053:                 )
+1054: 
+1055:             events = []
+1056:             for ev in data.get("events", []):
+1057:                 # Skip malformed events (LLM sometimes returns strings instead of dicts)
+1058:                 if not isinstance(ev, dict):
+1059:                     logger.debug(f"Skipping malformed event (not a dict): {type(ev)}")
+1060:                     continue
+1061: 
+1062:                 events.append(
+1063:                     ExtractedEvent(
+1064:                         description=ev.get("description") or "",
+1065:                         event_type=ev.get("event_type") or "EVENT",
+1066:                         occurred_at=ev.get("occurred_at"),
+1067:                         participants=ev.get("participants") or [],
+1068:                         confidence=ev.get("confidence") or 0.9,
+1069:                     )
+1070:                 )
+1071: 
+1072:             return ExtractionResult(
+1073:                 entities=entities,
+1074:                 relationships=relationships,
+1075:                 events=events,
+1076:             )
+1077: 
+1078:         except json.JSONDecodeError as e:
+1079:             logger.warning(f"Failed to parse extraction response as JSON: {e}")
+1080:             # Try to extract JSON from the response
+1081:             return self._extract_json_from_text(content)
+1082: 
+1083:     def _extract_json_from_text(self, text: str) -> ExtractionResult:
+1084:         """Try to extract JSON from text that may contain other content."""
+1085:         import re
+1086: 
+1087:         # Look for JSON object in the text
+1088:         json_match = re.search(r"\{[\s\S]*\}", text)
+1089:         if json_match:
+1090:             try:
+1091:                 data = json.loads(json_match.group())
+1092:                 return self._parse_response(json.dumps(data))
+1093:             except json.JSONDecodeError:
+1094:                 pass
+1095: 
+1096:         logger.warning("Could not extract valid JSON from response")
+1097:         return ExtractionResult(metadata={"raw_response": text[:500]})
+````
+
 ## File: pyproject.toml
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.1.1"
+  3: version = "0.1.2"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -47651,6 +47668,26 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-02-05 18:07:31 +0100
+**Message:** fix: handle malformed LLM responses in entity extraction
+
+**Files:**
+- src/khora/extraction/extractors/llm.py
+
+## Commit: 2026-02-05 18:05:47 +0100
+**Message:** docs: add Khora engine and dual-engine documentation
+
+**Files:**
+- CLAUDE.md
+- README.md
+- REPOMIX.md
+- docs/REFERENCES.md
+- docs/engines/engine-comparison.md
+- docs/engines/hybrid-search.md
+- docs/engines/khora-engine.md
+- docs/engines/skeleton-indexing.md
+- docs/engines/temporal-model.md
 
 ## Commit: 2026-02-05 17:38:48 +0100
 **Message:** perf: parallelize batch operations for improved throughput
@@ -47846,16 +47883,3 @@ README.md
 
 **Files:**
 - src/khora/extraction/extractors/llm.py
-
-## Commit: 2026-02-03 16:33:01 +0100
-**Message:** fix: set additionalProperties to false for strict json_schema
-
-**Files:**
-- src/khora/extraction/extractors/llm.py
-
-## Commit: 2026-02-03 16:23:07 +0100
-**Message:** chore: bump version to 0.0.30
-
-**Files:**
-- pyproject.toml
-- uv.lock
