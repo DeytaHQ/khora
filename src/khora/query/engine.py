@@ -2213,6 +2213,8 @@ class HybridQueryEngine:
     ) -> list[tuple[Entity, float]]:
         """Find entities related to a given entity through the graph.
 
+        Uses batch entity fetching to avoid N+1 queries for better performance.
+
         Args:
             entity_id: Starting entity
             namespace_id: Namespace to search in
@@ -2228,14 +2230,25 @@ class HybridQueryEngine:
             limit=limit,
         )
 
+        entity_nodes = neighborhood.get("entities", [])
+        if not entity_nodes:
+            return []
+
+        # Collect all entity IDs for batch fetch
+        entity_ids = [UUID(node["id"]) for node in entity_nodes]
+
+        # Batch fetch all entities in a single query (avoids N+1)
+        entities_map = await self._storage.get_entities_batch(entity_ids)
+
+        # Score based on path length (shorter = higher score)
+        # This is simplified - full impl would consider actual path lengths
+        base_score = 1.0 / (1 + len(neighborhood.get("relationships", [])))
+
         entities = []
-        for node in neighborhood.get("entities", []):
-            entity = await self._storage.get_entity(UUID(node["id"]))
-            if entity:
-                # Score based on path length (shorter = higher score)
-                # This is simplified - full impl would consider actual path lengths
-                score = 1.0 / (1 + len(neighborhood.get("relationships", [])))
-                entities.append((entity, score))
+        for node in entity_nodes:
+            eid = UUID(node["id"])
+            if eid in entities_map:
+                entities.append((entities_map[eid], base_score))
 
         return entities
 

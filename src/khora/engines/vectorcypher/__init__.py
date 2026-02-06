@@ -22,7 +22,14 @@ Usage:
 
 from .dual_nodes import ChunkNode, DualNodeManager, EntityChunkLink
 from .engine import VectorCypherConfig, VectorCypherEngine
-from .fusion import FusedResult, apply_recency_boost, normalize_scores, reciprocal_rank_fusion, weighted_rrf
+from .fusion import (
+    FusedResult,
+    apply_recency_boost,
+    normalize_scores,
+    reciprocal_rank_fusion,
+    weighted_rrf,
+    weighted_rrf_normalized,
+)
 from .retriever import RetrieverConfig, VectorCypherResult, VectorCypherRetriever
 from .router import QueryComplexity, QueryComplexityRouter, RouterConfig, RoutingDecision
 
@@ -49,4 +56,5 @@ __all__ = [
     "normalize_scores",
     "reciprocal_rank_fusion",
     "weighted_rrf",
+    "weighted_rrf_normalized",
 ]

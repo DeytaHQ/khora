@@ -635,20 +635,22 @@ class TestFindRelatedEntities:
 
     @pytest.mark.asyncio
     async def test_returns_scored_entities(self) -> None:
-        """find_related_entities returns (entity, score) tuples."""
+        """find_related_entities returns (entity, score) tuples using batch fetch."""
         storage = MagicMock()
         entity_id = uuid4()
+        neighbor_id = uuid4()
 
         mock_entity = MagicMock()
-        mock_entity.id = entity_id
+        mock_entity.id = neighbor_id
 
         storage.get_neighborhood = AsyncMock(
             return_value={
-                "entities": [{"id": str(uuid4())}],
+                "entities": [{"id": str(neighbor_id)}],
                 "relationships": [{"from": "a", "to": "b"}],
             }
         )
-        storage.get_entity = AsyncMock(return_value=mock_entity)
+        # Use batch method instead of individual get_entity
+        storage.get_entities_batch = AsyncMock(return_value={neighbor_id: mock_entity})
 
         config = QueryConfig(
             enable_query_understanding=False,
