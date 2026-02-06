@@ -17189,174 +17189,272 @@ README.md
  67:         "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_document_namespace " "ON chunks (document_id, namespace_id)"),
  68:         "purpose": "Document-to-chunk lookups",
  69:     },
- 70: ]
- 71: 
- 72: #: Tables to run ANALYZE on after index creation.
- 73: PG_ANALYZE_TABLES = ["chunks", "documents", "entities", "relationships"]
- 74: 
- 75: # ---------------------------------------------------------------------------
- 76: # Neo4j indexes and constraints
- 77: # ---------------------------------------------------------------------------
- 78: 
- 79: NEO4J_INDEXES = [
- 80:     {
- 81:         "name": "entity_namespace_name_type",
- 82:         "cypher": (
- 83:             "CREATE INDEX entity_namespace_name_type IF NOT EXISTS "
- 84:             "FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)"
- 85:         ),
- 86:         "purpose": "Primary entity lookup (composite)",
- 87:     },
- 88:     {
- 89:         "name": "entity_namespace_id_unique",
- 90:         "cypher": (
- 91:             "CREATE CONSTRAINT entity_namespace_id_unique IF NOT EXISTS "
- 92:             "FOR (e:Entity) REQUIRE (e.namespace_id, e.id) IS UNIQUE"
- 93:         ),
- 94:         "purpose": "Prevent duplicate entities",
- 95:     },
- 96:     {
- 97:         "name": "entity_fulltext",
- 98:         "cypher": (
- 99:             "CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS " "FOR (e:Entity) ON EACH [e.name, e.description]"
-100:         ),
-101:         "purpose": "Fuzzy name/description search",
-102:     },
-103:     {
-104:         "name": "episode_namespace_occurred",
-105:         "cypher": (
-106:             "CREATE INDEX episode_namespace_occurred IF NOT EXISTS "
-107:             "FOR (e:Episode) ON (e.namespace_id, e.occurred_at)"
-108:         ),
-109:         "purpose": "Temporal episode queries",
-110:     },
-111:     {
-112:         "name": "relates_to_weight",
-113:         "cypher": ("CREATE INDEX relates_to_weight IF NOT EXISTS " "FOR ()-[r:RELATES_TO]-() ON (r.weight)"),
-114:         "purpose": "Weighted traversal",
-115:     },
-116:     {
-117:         "name": "mentioned_in_confidence",
-118:         "cypher": (
-119:             "CREATE INDEX mentioned_in_confidence IF NOT EXISTS " "FOR ()-[r:MENTIONED_IN]-() ON (r.confidence)"
-120:         ),
-121:         "purpose": "Confidence filtering",
-122:     },
-123: ]
-124: 
-125: 
-126: # ---------------------------------------------------------------------------
-127: # Public API
-128: # ---------------------------------------------------------------------------
-129: 
-130: 
-131: async def optimize_postgresql(engine) -> dict:
-132:     """Create optimal PostgreSQL indexes and run ANALYZE.
-133: 
-134:     Executes raw DDL against the provided SQLAlchemy async engine,
-135:     so that callers don't need to provide a raw connection URL.
-136: 
-137:     Args:
-138:         engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
-139: 
-140:     Returns:
-141:         Dict with ``indexes_created``, ``tables_analyzed``, and ``errors``.
-142:     """
-143:     from sqlalchemy import text
-144: 
-145:     result = {
-146:         "indexes_created": 0,
-147:         "tables_analyzed": 0,
-148:         "errors": [],
-149:     }
-150: 
-151:     async with engine.begin() as conn:
-152:         for idx in PG_INDEXES:
-153:             try:
-154:                 logger.debug(f"Creating index {idx['name']} ({idx['purpose']})")
-155:                 await conn.execute(text(idx["sql"]))
-156:                 result["indexes_created"] += 1
-157:             except Exception as e:
-158:                 msg = f"Index {idx['name']}: {e}"
-159:                 result["errors"].append(msg)
-160:                 logger.warning(msg)
-161: 
-162:         for table in PG_ANALYZE_TABLES:
-163:             try:
-164:                 logger.debug(f"Analyzing table {table}")
-165:                 await conn.execute(text(f"ANALYZE {table}"))
-166:                 result["tables_analyzed"] += 1
-167:             except Exception as e:
-168:                 msg = f"ANALYZE {table}: {e}"
-169:                 result["errors"].append(msg)
-170:                 logger.warning(msg)
-171: 
-172:     return result
-173: 
-174: 
-175: async def optimize_neo4j(driver, *, database: str = "neo4j") -> dict:
-176:     """Create optimal Neo4j indexes and constraints.
-177: 
-178:     Args:
-179:         driver: An ``neo4j.AsyncDriver`` instance.
-180:         database: Neo4j database name.
-181: 
-182:     Returns:
-183:         Dict with ``indexes_created`` and ``errors``.
-184:     """
-185:     result = {
-186:         "indexes_created": 0,
-187:         "errors": [],
-188:     }
-189: 
-190:     async with driver.session(database=database) as session:
-191:         for idx in NEO4J_INDEXES:
-192:             try:
-193:                 logger.debug(f"Creating Neo4j index {idx['name']} ({idx['purpose']})")
-194:                 await session.run(idx["cypher"])
-195:                 result["indexes_created"] += 1
-196:             except Exception as e:
-197:                 msg = f"Neo4j index {idx['name']}: {e}"
-198:                 result["errors"].append(msg)
-199:                 logger.warning(msg)
-200: 
-201:     return result
-202: 
-203: 
-204: async def optimize_storage(coordinator) -> dict:
-205:     """Run all optimizations against a connected StorageCoordinator.
-206: 
-207:     This is the main entry point for callers that already have a
-208:     ``StorageCoordinator`` (e.g. via ``MemoryLake.storage``).
-209: 
-210:     Args:
-211:         coordinator: A connected ``StorageCoordinator`` instance.
-212: 
-213:     Returns:
-214:         Combined results: ``{"postgresql": {...}, "neo4j": {...}}``.
-215:     """
-216:     results: dict[str, dict | None] = {"postgresql": None, "neo4j": None}
-217: 
-218:     # Optimize PostgreSQL / pgvector (they share the same engine)
-219:     backend = coordinator.vector or coordinator.relational
-220:     if backend is not None:
-221:         engine = getattr(backend, "_engine", None)
-222:         if engine is not None:
-223:             results["postgresql"] = await optimize_postgresql(engine)
-224:         else:
-225:             logger.warning("No SQLAlchemy engine found on backend; skipping PostgreSQL optimization")
-226: 
-227:     # Optimize Neo4j
-228:     graph = coordinator.graph
-229:     if graph is not None:
-230:         driver = getattr(graph, "_driver", None)
-231:         database = getattr(graph, "_database", "neo4j")
-232:         if driver is not None:
-233:             results["neo4j"] = await optimize_neo4j(driver, database=database)
-234:         else:
-235:             logger.warning("No Neo4j driver found on backend; skipping Neo4j optimization")
-236: 
-237:     return results
+ 70:     # --- Synced from models.py __table_args__ for catch-up on existing databases ---
+ 71:     {
+ 72:         "name": "ix_documents_namespace_source_type",
+ 73:         "sql": (
+ 74:             "CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type " "ON documents (namespace_id, source_type)"
+ 75:         ),
+ 76:         "purpose": "Document queries filtered by source_type within namespace",
+ 77:     },
+ 78:     {
+ 79:         "name": "ix_entities_namespace_mentions",
+ 80:         "sql": (
+ 81:             "CREATE INDEX IF NOT EXISTS ix_entities_namespace_mentions "
+ 82:             "ON entities (namespace_id, mention_count DESC)"
+ 83:         ),
+ 84:         "purpose": "Entity importance ranking (top N entities in namespace)",
+ 85:     },
+ 86:     {
+ 87:         "name": "ix_relationships_namespace_type",
+ 88:         "sql": (
+ 89:             "CREATE INDEX IF NOT EXISTS ix_relationships_namespace_type "
+ 90:             "ON relationships (namespace_id, relationship_type)"
+ 91:         ),
+ 92:         "purpose": "Graph-emulated queries filtering by relationship type within namespace",
+ 93:     },
+ 94:     {
+ 95:         "name": "ix_relationships_target_source",
+ 96:         "sql": (
+ 97:             "CREATE INDEX IF NOT EXISTS ix_relationships_target_source "
+ 98:             "ON relationships (target_entity_id, source_entity_id)"
+ 99:         ),
+100:         "purpose": "Reverse traversal (inbound relationships)",
+101:     },
+102: ]
+103: 
+104: #: Tables to run ANALYZE on after index creation.
+105: PG_ANALYZE_TABLES = ["chunks", "documents", "entities", "relationships"]
+106: 
+107: # ---------------------------------------------------------------------------
+108: # Neo4j indexes and constraints
+109: # ---------------------------------------------------------------------------
+110: 
+111: NEO4J_INDEXES = [
+112:     {
+113:         "name": "entity_namespace_name_type",
+114:         "cypher": (
+115:             "CREATE INDEX entity_namespace_name_type IF NOT EXISTS "
+116:             "FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)"
+117:         ),
+118:         "purpose": "Primary entity lookup (composite)",
+119:     },
+120:     {
+121:         "name": "entity_namespace_id_unique",
+122:         "cypher": (
+123:             "CREATE CONSTRAINT entity_namespace_id_unique IF NOT EXISTS "
+124:             "FOR (e:Entity) REQUIRE (e.namespace_id, e.id) IS UNIQUE"
+125:         ),
+126:         "purpose": "Prevent duplicate entities",
+127:     },
+128:     {
+129:         "name": "entity_fulltext",
+130:         "cypher": (
+131:             "CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS " "FOR (e:Entity) ON EACH [e.name, e.description]"
+132:         ),
+133:         "purpose": "Fuzzy name/description search",
+134:     },
+135:     {
+136:         "name": "episode_namespace_occurred",
+137:         "cypher": (
+138:             "CREATE INDEX episode_namespace_occurred IF NOT EXISTS "
+139:             "FOR (e:Episode) ON (e.namespace_id, e.occurred_at)"
+140:         ),
+141:         "purpose": "Temporal episode queries",
+142:     },
+143:     {
+144:         "name": "relates_to_weight",
+145:         "cypher": ("CREATE INDEX relates_to_weight IF NOT EXISTS " "FOR ()-[r:RELATES_TO]-() ON (r.weight)"),
+146:         "purpose": "Weighted traversal",
+147:     },
+148:     {
+149:         "name": "mentioned_in_confidence",
+150:         "cypher": (
+151:             "CREATE INDEX mentioned_in_confidence IF NOT EXISTS " "FOR ()-[r:MENTIONED_IN]-() ON (r.confidence)"
+152:         ),
+153:         "purpose": "Confidence filtering",
+154:     },
+155:     # --- Synced from neo4j.py _create_indexes for catch-up on existing databases ---
+156:     {
+157:         "name": "entity_ns_type",
+158:         "cypher": ("CREATE INDEX entity_ns_type IF NOT EXISTS " "FOR (e:Entity) ON (e.namespace_id, e.entity_type)"),
+159:         "purpose": "Entity namespace + type composite (list queries filtering by type)",
+160:     },
+161:     {
+162:         "name": "entity_source_tool",
+163:         "cypher": "CREATE INDEX entity_source_tool IF NOT EXISTS FOR (e:Entity) ON (e.source_tool)",
+164:         "purpose": "Source-aware queries (e.g. what does Slack say about X?)",
+165:     },
+166:     {
+167:         "name": "entity_confidence",
+168:         "cypher": "CREATE INDEX entity_confidence IF NOT EXISTS FOR (e:Entity) ON (e.confidence)",
+169:         "purpose": "Entity confidence threshold filtering",
+170:     },
+171:     {
+172:         "name": "rel_collaborates_ns",
+173:         "cypher": "CREATE INDEX rel_collaborates_ns IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.namespace_id)",
+174:         "purpose": "Namespace filtering on COLLABORATES_WITH",
+175:     },
+176:     {
+177:         "name": "rel_associated_ns",
+178:         "cypher": "CREATE INDEX rel_associated_ns IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.namespace_id)",
+179:         "purpose": "Namespace filtering on ASSOCIATED_WITH",
+180:     },
+181:     {
+182:         "name": "rel_depends_ns",
+183:         "cypher": "CREATE INDEX rel_depends_ns IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.namespace_id)",
+184:         "purpose": "Namespace filtering on DEPENDS_ON",
+185:     },
+186:     {
+187:         "name": "rel_owns_ns",
+188:         "cypher": "CREATE INDEX rel_owns_ns IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.namespace_id)",
+189:         "purpose": "Namespace filtering on OWNS",
+190:     },
+191:     {
+192:         "name": "rel_works_for_ns",
+193:         "cypher": "CREATE INDEX rel_works_for_ns IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.namespace_id)",
+194:         "purpose": "Namespace filtering on WORKS_FOR",
+195:     },
+196:     {
+197:         "name": "rel_implements_ns",
+198:         "cypher": "CREATE INDEX rel_implements_ns IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.namespace_id)",
+199:         "purpose": "Namespace filtering on IMPLEMENTS",
+200:     },
+201:     {
+202:         "name": "rel_part_of_ns",
+203:         "cypher": "CREATE INDEX rel_part_of_ns IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.namespace_id)",
+204:         "purpose": "Namespace filtering on PART_OF",
+205:     },
+206:     {
+207:         "name": "rel_collaborates_conf",
+208:         "cypher": "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
+209:         "purpose": "Confidence filtering on COLLABORATES_WITH",
+210:     },
+211:     {
+212:         "name": "rel_associated_conf",
+213:         "cypher": "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",
+214:         "purpose": "Confidence filtering on ASSOCIATED_WITH",
+215:     },
+216:     {
+217:         "name": "rel_depends_conf",
+218:         "cypher": "CREATE INDEX rel_depends_conf IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
+219:         "purpose": "Confidence filtering on DEPENDS_ON",
+220:     },
+221: ]
+222: 
+223: 
+224: # ---------------------------------------------------------------------------
+225: # Public API
+226: # ---------------------------------------------------------------------------
+227: 
+228: 
+229: async def optimize_postgresql(engine) -> dict:
+230:     """Create optimal PostgreSQL indexes and run ANALYZE.
+231: 
+232:     Executes raw DDL against the provided SQLAlchemy async engine,
+233:     so that callers don't need to provide a raw connection URL.
+234: 
+235:     Args:
+236:         engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+237: 
+238:     Returns:
+239:         Dict with ``indexes_created``, ``tables_analyzed``, and ``errors``.
+240:     """
+241:     from sqlalchemy import text
+242: 
+243:     result = {
+244:         "indexes_created": 0,
+245:         "tables_analyzed": 0,
+246:         "errors": [],
+247:     }
+248: 
+249:     async with engine.begin() as conn:
+250:         for idx in PG_INDEXES:
+251:             try:
+252:                 logger.debug(f"Creating index {idx['name']} ({idx['purpose']})")
+253:                 await conn.execute(text(idx["sql"]))
+254:                 result["indexes_created"] += 1
+255:             except Exception as e:
+256:                 msg = f"Index {idx['name']}: {e}"
+257:                 result["errors"].append(msg)
+258:                 logger.warning(msg)
+259: 
+260:         for table in PG_ANALYZE_TABLES:
+261:             try:
+262:                 logger.debug(f"Analyzing table {table}")
+263:                 await conn.execute(text(f"ANALYZE {table}"))
+264:                 result["tables_analyzed"] += 1
+265:             except Exception as e:
+266:                 msg = f"ANALYZE {table}: {e}"
+267:                 result["errors"].append(msg)
+268:                 logger.warning(msg)
+269: 
+270:     return result
+271: 
+272: 
+273: async def optimize_neo4j(driver, *, database: str = "neo4j") -> dict:
+274:     """Create optimal Neo4j indexes and constraints.
+275: 
+276:     Args:
+277:         driver: An ``neo4j.AsyncDriver`` instance.
+278:         database: Neo4j database name.
+279: 
+280:     Returns:
+281:         Dict with ``indexes_created`` and ``errors``.
+282:     """
+283:     result = {
+284:         "indexes_created": 0,
+285:         "errors": [],
+286:     }
+287: 
+288:     async with driver.session(database=database) as session:
+289:         for idx in NEO4J_INDEXES:
+290:             try:
+291:                 logger.debug(f"Creating Neo4j index {idx['name']} ({idx['purpose']})")
+292:                 await session.run(idx["cypher"])
+293:                 result["indexes_created"] += 1
+294:             except Exception as e:
+295:                 msg = f"Neo4j index {idx['name']}: {e}"
+296:                 result["errors"].append(msg)
+297:                 logger.warning(msg)
+298: 
+299:     return result
+300: 
+301: 
+302: async def optimize_storage(coordinator) -> dict:
+303:     """Run all optimizations against a connected StorageCoordinator.
+304: 
+305:     This is the main entry point for callers that already have a
+306:     ``StorageCoordinator`` (e.g. via ``MemoryLake.storage``).
+307: 
+308:     Args:
+309:         coordinator: A connected ``StorageCoordinator`` instance.
+310: 
+311:     Returns:
+312:         Combined results: ``{"postgresql": {...}, "neo4j": {...}}``.
+313:     """
+314:     results: dict[str, dict | None] = {"postgresql": None, "neo4j": None}
+315: 
+316:     # Optimize PostgreSQL / pgvector (they share the same engine)
+317:     backend = coordinator.vector or coordinator.relational
+318:     if backend is not None:
+319:         engine = getattr(backend, "_engine", None)
+320:         if engine is not None:
+321:             results["postgresql"] = await optimize_postgresql(engine)
+322:         else:
+323:             logger.warning("No SQLAlchemy engine found on backend; skipping PostgreSQL optimization")
+324: 
+325:     # Optimize Neo4j
+326:     graph = coordinator.graph
+327:     if graph is not None:
+328:         driver = getattr(graph, "_driver", None)
+329:         database = getattr(graph, "_database", "neo4j")
+330:         if driver is not None:
+331:             results["neo4j"] = await optimize_neo4j(driver, database=database)
+332:         else:
+333:             logger.warning("No Neo4j driver found on backend; skipping Neo4j optimization")
+334: 
+335:     return results
 ````
 
 ## File: src/khora/telemetry/config.py
@@ -22153,569 +22251,577 @@ README.md
 210:         "ChunkModel", back_populates="document", cascade="all, delete-orphan"
 211:     )
 212: 
-213:     __table_args__ = (Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),)
-214: 
-215:     def __repr__(self) -> str:
-216:         return f"<Document(id={self.id!r}, title={self.title!r})>"
+213:     __table_args__ = (
+214:         Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),
+215:         Index("ix_documents_namespace_source_type", "namespace_id", "source_type"),
+216:     )
 217: 
-218: 
-219: class ChunkModel(Base):
-220:     """Chunk of text from a document with embedding."""
+218:     def __repr__(self) -> str:
+219:         return f"<Document(id={self.id!r}, title={self.title!r})>"
+220: 
 221: 
-222:     __tablename__ = "chunks"
-223: 
-224:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-225:     namespace_id: Mapped[str] = mapped_column(
-226:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-227:     )
-228:     document_id: Mapped[str] = mapped_column(
-229:         UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+222: class ChunkModel(Base):
+223:     """Chunk of text from a document with embedding."""
+224: 
+225:     __tablename__ = "chunks"
+226: 
+227:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+228:     namespace_id: Mapped[str] = mapped_column(
+229:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
 230:     )
-231:     content: Mapped[str] = mapped_column(Text, nullable=False)
-232: 
-233:     # Chunk metadata
-234:     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
-235:     start_char: Mapped[int] = mapped_column(Integer, default=0)
-236:     end_char: Mapped[int] = mapped_column(Integer, default=0)
-237:     token_count: Mapped[int] = mapped_column(Integer, default=0)
-238:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-239: 
-240:     # Embedding (pgvector)
-241:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-242:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
-243: 
-244:     # Full-text search (generated tsvector column)
-245:     content_tsv: Mapped[Any | None] = mapped_column(
-246:         TSVECTOR,
-247:         Computed("to_tsvector('english', content)", persisted=True),
-248:         nullable=True,
-249:     )
-250: 
-251:     # Timestamps
-252:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+231:     document_id: Mapped[str] = mapped_column(
+232:         UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+233:     )
+234:     content: Mapped[str] = mapped_column(Text, nullable=False)
+235: 
+236:     # Chunk metadata
+237:     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+238:     start_char: Mapped[int] = mapped_column(Integer, default=0)
+239:     end_char: Mapped[int] = mapped_column(Integer, default=0)
+240:     token_count: Mapped[int] = mapped_column(Integer, default=0)
+241:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+242: 
+243:     # Embedding (pgvector)
+244:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+245:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+246: 
+247:     # Full-text search (generated tsvector column)
+248:     content_tsv: Mapped[Any | None] = mapped_column(
+249:         TSVECTOR,
+250:         Computed("to_tsvector('english', content)", persisted=True),
+251:         nullable=True,
+252:     )
 253: 
-254:     # Relationships
-255:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="chunks")
-256:     document: Mapped[DocumentModel] = relationship("DocumentModel", back_populates="chunks")
-257: 
-258:     __table_args__ = (
-259:         Index("ix_chunks_document_index", "document_id", "chunk_index"),
-260:         # Vector similarity index (HNSW for better recall)
-261:         Index(
-262:             "ix_chunks_embedding_hnsw",
-263:             "embedding",
-264:             postgresql_using="hnsw",
-265:             postgresql_with={"m": 16, "ef_construction": 64},
-266:             postgresql_ops={"embedding": "vector_cosine_ops"},
-267:         ),
-268:         # GIN index for full-text search
-269:         Index(
-270:             "ix_chunks_content_tsv",
-271:             "content_tsv",
-272:             postgresql_using="gin",
-273:         ),
-274:     )
-275: 
-276:     def __repr__(self) -> str:
-277:         return f"<Chunk(id={self.id!r}, document_id={self.document_id!r}, index={self.chunk_index})>"
+254:     # Timestamps
+255:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+256: 
+257:     # Relationships
+258:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="chunks")
+259:     document: Mapped[DocumentModel] = relationship("DocumentModel", back_populates="chunks")
+260: 
+261:     __table_args__ = (
+262:         Index("ix_chunks_document_index", "document_id", "chunk_index"),
+263:         # Vector similarity index (HNSW for better recall)
+264:         Index(
+265:             "ix_chunks_embedding_hnsw",
+266:             "embedding",
+267:             postgresql_using="hnsw",
+268:             postgresql_with={"m": 16, "ef_construction": 64},
+269:             postgresql_ops={"embedding": "vector_cosine_ops"},
+270:         ),
+271:         # GIN index for full-text search
+272:         Index(
+273:             "ix_chunks_content_tsv",
+274:             "content_tsv",
+275:             postgresql_using="gin",
+276:         ),
+277:     )
 278: 
-279: 
-280: # =============================================================================
-281: # Entity Models
-282: # =============================================================================
-283: 
-284: 
-285: class EntityModel(Base):
-286:     """Entity extracted from documents (stored in both PostgreSQL and Neo4j)."""
+279:     def __repr__(self) -> str:
+280:         return f"<Chunk(id={self.id!r}, document_id={self.document_id!r}, index={self.chunk_index})>"
+281: 
+282: 
+283: # =============================================================================
+284: # Entity Models
+285: # =============================================================================
+286: 
 287: 
-288:     __tablename__ = "entities"
-289: 
-290:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-291:     namespace_id: Mapped[str] = mapped_column(
-292:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-293:     )
-294:     name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
-295:     entity_type: Mapped[str] = mapped_column(
-296:         String(64),
-297:         default="CONCEPT",
-298:         index=True,
-299:     )
-300:     description: Mapped[str] = mapped_column(Text, default="")
-301: 
-302:     # Attributes and sources
-303:     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-304:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-305:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-306:     mention_count: Mapped[int] = mapped_column(Integer, default=1)
-307: 
-308:     # Embedding for entity similarity
-309:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-310:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
-311: 
-312:     # Temporal validity
-313:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-314:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-315: 
-316:     # Confidence
-317:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+288: class EntityModel(Base):
+289:     """Entity extracted from documents (stored in both PostgreSQL and Neo4j)."""
+290: 
+291:     __tablename__ = "entities"
+292: 
+293:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+294:     namespace_id: Mapped[str] = mapped_column(
+295:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+296:     )
+297:     name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+298:     entity_type: Mapped[str] = mapped_column(
+299:         String(64),
+300:         default="CONCEPT",
+301:         index=True,
+302:     )
+303:     description: Mapped[str] = mapped_column(Text, default="")
+304: 
+305:     # Attributes and sources
+306:     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+307:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+308:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+309:     mention_count: Mapped[int] = mapped_column(Integer, default=1)
+310: 
+311:     # Embedding for entity similarity
+312:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+313:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+314: 
+315:     # Temporal validity
+316:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+317:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 318: 
-319:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-320:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-321:     updated_at: Mapped[datetime] = mapped_column(
-322:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-323:     )
-324: 
-325:     # Relationships
-326:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="entities")
+319:     # Confidence
+320:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+321: 
+322:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+323:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+324:     updated_at: Mapped[datetime] = mapped_column(
+325:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+326:     )
 327: 
-328:     __table_args__ = (
-329:         Index("ix_entities_namespace_name_type", "namespace_id", "name", "entity_type"),
-330:         Index(
-331:             "ix_entities_embedding_hnsw",
-332:             "embedding",
-333:             postgresql_using="hnsw",
-334:             postgresql_with={"m": 16, "ef_construction": 64},
-335:             postgresql_ops={"embedding": "vector_cosine_ops"},
-336:         ),
-337:     )
-338: 
-339:     def __repr__(self) -> str:
-340:         return f"<Entity(id={self.id!r}, name={self.name!r}, type={self.entity_type})>"
-341: 
+328:     # Relationships
+329:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="entities")
+330: 
+331:     __table_args__ = (
+332:         Index("ix_entities_namespace_name_type", "namespace_id", "name", "entity_type"),
+333:         Index(
+334:             "ix_entities_embedding_hnsw",
+335:             "embedding",
+336:             postgresql_using="hnsw",
+337:             postgresql_with={"m": 16, "ef_construction": 64},
+338:             postgresql_ops={"embedding": "vector_cosine_ops"},
+339:         ),
+340:         Index("ix_entities_namespace_mentions", "namespace_id", mention_count.desc()),
+341:     )
 342: 
-343: class RelationshipModel(Base):
-344:     """Relationship between entities (stored in both PostgreSQL and Neo4j)."""
+343:     def __repr__(self) -> str:
+344:         return f"<Entity(id={self.id!r}, name={self.name!r}, type={self.entity_type})>"
 345: 
-346:     __tablename__ = "relationships"
-347: 
-348:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-349:     namespace_id: Mapped[str] = mapped_column(
-350:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-351:     )
-352:     source_entity_id: Mapped[str] = mapped_column(
-353:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
-354:     )
-355:     target_entity_id: Mapped[str] = mapped_column(
-356:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
-357:     )
-358:     relationship_type: Mapped[str] = mapped_column(
-359:         String(64),
-360:         default="RELATES_TO",
-361:         index=True,
-362:     )
-363:     description: Mapped[str] = mapped_column(Text, default="")
-364: 
-365:     # Properties and sources
-366:     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-367:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-368:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-369: 
-370:     # Temporal validity
-371:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-372:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+346: 
+347: class RelationshipModel(Base):
+348:     """Relationship between entities (stored in both PostgreSQL and Neo4j)."""
+349: 
+350:     __tablename__ = "relationships"
+351: 
+352:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+353:     namespace_id: Mapped[str] = mapped_column(
+354:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+355:     )
+356:     source_entity_id: Mapped[str] = mapped_column(
+357:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+358:     )
+359:     target_entity_id: Mapped[str] = mapped_column(
+360:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+361:     )
+362:     relationship_type: Mapped[str] = mapped_column(
+363:         String(64),
+364:         default="RELATES_TO",
+365:         index=True,
+366:     )
+367:     description: Mapped[str] = mapped_column(Text, default="")
+368: 
+369:     # Properties and sources
+370:     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+371:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+372:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
 373: 
-374:     # Confidence and weight
-375:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
-376:     weight: Mapped[float] = mapped_column(Float, default=1.0)
+374:     # Temporal validity
+375:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+376:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 377: 
-378:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-379:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-380:     updated_at: Mapped[datetime] = mapped_column(
-381:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-382:     )
-383: 
-384:     # Relationships
-385:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="relationships")
-386: 
-387:     __table_args__ = (Index("ix_relationships_entities", "source_entity_id", "target_entity_id"),)
-388: 
-389:     def __repr__(self) -> str:
-390:         return f"<Relationship(id={self.id!r}, type={self.relationship_type})>"
-391: 
-392: 
-393: class EpisodeModel(Base):
-394:     """Episodic memory representing a temporal event."""
-395: 
-396:     __tablename__ = "episodes"
-397: 
-398:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-399:     namespace_id: Mapped[str] = mapped_column(
-400:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-401:     )
-402:     name: Mapped[str] = mapped_column(String(512), nullable=False)
-403:     description: Mapped[str] = mapped_column(Text, default="")
-404: 
-405:     # Temporal bounds
-406:     occurred_at: Mapped[datetime] = mapped_column(
-407:         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
-408:     )
-409:     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
-410: 
-411:     # Associated entities
-412:     entity_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-413: 
-414:     # Sources
-415:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-416:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-417: 
-418:     # Embedding
-419:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-420:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+378:     # Confidence and weight
+379:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+380:     weight: Mapped[float] = mapped_column(Float, default=1.0)
+381: 
+382:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+383:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+384:     updated_at: Mapped[datetime] = mapped_column(
+385:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+386:     )
+387: 
+388:     # Relationships
+389:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="relationships")
+390: 
+391:     __table_args__ = (
+392:         Index("ix_relationships_entities", "source_entity_id", "target_entity_id"),
+393:         Index("ix_relationships_namespace_type", "namespace_id", "relationship_type"),
+394:         Index("ix_relationships_target_source", "target_entity_id", "source_entity_id"),
+395:     )
+396: 
+397:     def __repr__(self) -> str:
+398:         return f"<Relationship(id={self.id!r}, type={self.relationship_type})>"
+399: 
+400: 
+401: class EpisodeModel(Base):
+402:     """Episodic memory representing a temporal event."""
+403: 
+404:     __tablename__ = "episodes"
+405: 
+406:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+407:     namespace_id: Mapped[str] = mapped_column(
+408:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+409:     )
+410:     name: Mapped[str] = mapped_column(String(512), nullable=False)
+411:     description: Mapped[str] = mapped_column(Text, default="")
+412: 
+413:     # Temporal bounds
+414:     occurred_at: Mapped[datetime] = mapped_column(
+415:         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+416:     )
+417:     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+418: 
+419:     # Associated entities
+420:     entity_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
 421: 
-422:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-423:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-424:     updated_at: Mapped[datetime] = mapped_column(
-425:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-426:     )
-427: 
-428:     # Relationships
-429:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="episodes")
-430: 
-431:     def __repr__(self) -> str:
-432:         return f"<Episode(id={self.id!r}, name={self.name!r})>"
-433: 
-434: 
-435: # =============================================================================
-436: # Event Sourcing Model
-437: # =============================================================================
+422:     # Sources
+423:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+424:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+425: 
+426:     # Embedding
+427:     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+428:     embedding_model: Mapped[str] = mapped_column(String(128), default="")
+429: 
+430:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+431:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+432:     updated_at: Mapped[datetime] = mapped_column(
+433:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+434:     )
+435: 
+436:     # Relationships
+437:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="episodes")
 438: 
-439: 
-440: class MemoryEventModel(Base):
-441:     """Immutable event log for event sourcing."""
+439:     def __repr__(self) -> str:
+440:         return f"<Episode(id={self.id!r}, name={self.name!r})>"
+441: 
 442: 
-443:     __tablename__ = "memory_events"
-444: 
-445:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-446:     namespace_id: Mapped[str] = mapped_column(
-447:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-448:     )
-449:     event_type: Mapped[str] = mapped_column(
-450:         Enum(EventType, name="event_type", create_constraint=True),
-451:         nullable=False,
-452:         index=True,
-453:     )
-454:     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
-455: 
-456:     # Resource reference
-457:     resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-458:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
-459: 
-460:     # Event data
-461:     data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-462:     previous_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+443: # =============================================================================
+444: # Event Sourcing Model
+445: # =============================================================================
+446: 
+447: 
+448: class MemoryEventModel(Base):
+449:     """Immutable event log for event sourcing."""
+450: 
+451:     __tablename__ = "memory_events"
+452: 
+453:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+454:     namespace_id: Mapped[str] = mapped_column(
+455:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+456:     )
+457:     event_type: Mapped[str] = mapped_column(
+458:         Enum(EventType, name="event_type", create_constraint=True),
+459:         nullable=False,
+460:         index=True,
+461:     )
+462:     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
 463: 
-464:     # Actor info
-465:     actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-466:     actor_type: Mapped[str] = mapped_column(String(64), default="system")
+464:     # Resource reference
+465:     resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+466:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
 467: 
-468:     # Correlation
-469:     correlation_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
-470: 
-471:     # Version
-472:     version: Mapped[int] = mapped_column(Integer, default=1)
-473: 
-474:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+468:     # Event data
+469:     data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+470:     previous_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+471: 
+472:     # Actor info
+473:     actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+474:     actor_type: Mapped[str] = mapped_column(String(64), default="system")
 475: 
-476:     # Relationships
-477:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="events")
+476:     # Correlation
+477:     correlation_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
 478: 
-479:     __table_args__ = (
-480:         Index("ix_events_resource", "resource_type", "resource_id"),
-481:         Index("ix_events_namespace_timestamp", "namespace_id", "timestamp"),
-482:     )
+479:     # Version
+480:     version: Mapped[int] = mapped_column(Integer, default=1)
+481: 
+482:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
 483: 
-484:     def __repr__(self) -> str:
-485:         return f"<MemoryEvent(id={self.id!r}, type={self.event_type})>"
+484:     # Relationships
+485:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="events")
 486: 
-487: 
-488: # =============================================================================
-489: # ACL / Permissions Model
-490: # =============================================================================
+487:     __table_args__ = (
+488:         Index("ix_events_resource", "resource_type", "resource_id"),
+489:         Index("ix_events_namespace_timestamp", "namespace_id", "timestamp"),
+490:     )
 491: 
-492: 
-493: class PermissionModel(Base):
-494:     """Permission entry for ACL-based access control."""
+492:     def __repr__(self) -> str:
+493:         return f"<MemoryEvent(id={self.id!r}, type={self.event_type})>"
+494: 
 495: 
-496:     __tablename__ = "permissions"
-497: 
-498:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+496: # =============================================================================
+497: # ACL / Permissions Model
+498: # =============================================================================
 499: 
-500:     # The principal (who has the permission)
-501:     principal_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # user, role, api_key
-502:     principal_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+500: 
+501: class PermissionModel(Base):
+502:     """Permission entry for ACL-based access control."""
 503: 
-504:     # The resource (what the permission applies to)
-505:     resource_type: Mapped[str] = mapped_column(
-506:         String(64), nullable=False, index=True
-507:     )  # organization, workspace, namespace
-508:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
-509: 
-510:     # The permission level
-511:     permission: Mapped[str] = mapped_column(String(64), nullable=False)  # read, write, admin, owner
-512: 
-513:     # Inheritance
-514:     inherited_from_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-515:     inherited_from_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
-516: 
-517:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-518:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-519:     updated_at: Mapped[datetime] = mapped_column(
-520:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-521:     )
-522: 
-523:     __table_args__ = (
-524:         UniqueConstraint(
-525:             "principal_type", "principal_id", "resource_type", "resource_id", "permission", name="uq_permission"
-526:         ),
-527:         Index("ix_permissions_principal", "principal_type", "principal_id"),
-528:         Index("ix_permissions_resource", "resource_type", "resource_id"),
+504:     __tablename__ = "permissions"
+505: 
+506:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+507: 
+508:     # The principal (who has the permission)
+509:     principal_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # user, role, api_key
+510:     principal_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+511: 
+512:     # The resource (what the permission applies to)
+513:     resource_type: Mapped[str] = mapped_column(
+514:         String(64), nullable=False, index=True
+515:     )  # organization, workspace, namespace
+516:     resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
+517: 
+518:     # The permission level
+519:     permission: Mapped[str] = mapped_column(String(64), nullable=False)  # read, write, admin, owner
+520: 
+521:     # Inheritance
+522:     inherited_from_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+523:     inherited_from_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+524: 
+525:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+526:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+527:     updated_at: Mapped[datetime] = mapped_column(
+528:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
 529:     )
 530: 
-531:     def __repr__(self) -> str:
-532:         return f"<Permission({self.principal_type}:{self.principal_id} -> {self.resource_type}:{self.resource_id} = {self.permission})>"
-533: 
-534: 
-535: # =============================================================================
-536: # Sync Checkpoint Model (for incremental updates)
-537: # =============================================================================
+531:     __table_args__ = (
+532:         UniqueConstraint(
+533:             "principal_type", "principal_id", "resource_type", "resource_id", "permission", name="uq_permission"
+534:         ),
+535:         Index("ix_permissions_principal", "principal_type", "principal_id"),
+536:         Index("ix_permissions_resource", "resource_type", "resource_id"),
+537:     )
 538: 
-539: 
-540: class SyncCheckpointModel(Base):
-541:     """Sync checkpoint for tracking incremental updates from external sources."""
+539:     def __repr__(self) -> str:
+540:         return f"<Permission({self.principal_type}:{self.principal_id} -> {self.resource_type}:{self.resource_id} = {self.permission})>"
+541: 
 542: 
-543:     __tablename__ = "sync_checkpoints"
-544: 
-545:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-546:     namespace_id: Mapped[str] = mapped_column(
-547:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-548:     )
-549:     source: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # e.g., "github", "notion", "slack"
-550:     checkpoint: Mapped[str] = mapped_column(Text, nullable=False)  # Source-specific checkpoint value
-551:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-552:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-553:     updated_at: Mapped[datetime] = mapped_column(
-554:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-555:     )
-556: 
-557:     __table_args__ = (UniqueConstraint("namespace_id", "source", name="uq_sync_checkpoint_namespace_source"),)
-558: 
-559:     def __repr__(self) -> str:
-560:         return f"<SyncCheckpoint(namespace_id={self.namespace_id!r}, source={self.source!r})>"
-561: 
-562: 
-563: # =============================================================================
-564: # Expertise Definition Model
-565: # =============================================================================
+543: # =============================================================================
+544: # Sync Checkpoint Model (for incremental updates)
+545: # =============================================================================
+546: 
+547: 
+548: class SyncCheckpointModel(Base):
+549:     """Sync checkpoint for tracking incremental updates from external sources."""
+550: 
+551:     __tablename__ = "sync_checkpoints"
+552: 
+553:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+554:     namespace_id: Mapped[str] = mapped_column(
+555:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+556:     )
+557:     source: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # e.g., "github", "notion", "slack"
+558:     checkpoint: Mapped[str] = mapped_column(Text, nullable=False)  # Source-specific checkpoint value
+559:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+560:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+561:     updated_at: Mapped[datetime] = mapped_column(
+562:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+563:     )
+564: 
+565:     __table_args__ = (UniqueConstraint("namespace_id", "source", name="uq_sync_checkpoint_namespace_source"),)
 566: 
-567: 
-568: class ExpertiseDefinitionModel(Base):
-569:     """Stored expertise configuration for a namespace.
+567:     def __repr__(self) -> str:
+568:         return f"<SyncCheckpoint(namespace_id={self.namespace_id!r}, source={self.source!r})>"
+569: 
 570: 
-571:     Allows namespaces to have custom expertise definitions that control
-572:     entity extraction, relationship types, correlation rules, and inference rules.
-573:     """
+571: # =============================================================================
+572: # Expertise Definition Model
+573: # =============================================================================
 574: 
-575:     __tablename__ = "expertise_definitions"
-576: 
-577:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-578:     namespace_id: Mapped[str] = mapped_column(
-579:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-580:     )
-581:     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-582:     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
-583:     description: Mapped[str] = mapped_column(Text, default="")
+575: 
+576: class ExpertiseDefinitionModel(Base):
+577:     """Stored expertise configuration for a namespace.
+578: 
+579:     Allows namespaces to have custom expertise definitions that control
+580:     entity extraction, relationship types, correlation rules, and inference rules.
+581:     """
+582: 
+583:     __tablename__ = "expertise_definitions"
 584: 
-585:     # The full expertise configuration as JSONB
-586:     # Contains: entity_types, relationship_types, tool_schemas, correlation_rules,
-587:     # inference_rules, confidence, expansion, system_prompt, extraction_prompt
-588:     config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-589: 
-590:     # Status
-591:     is_active: Mapped[bool] = mapped_column(default=True, index=True)
+585:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+586:     namespace_id: Mapped[str] = mapped_column(
+587:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+588:     )
+589:     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+590:     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
+591:     description: Mapped[str] = mapped_column(Text, default="")
 592: 
-593:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-594:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-595:     updated_at: Mapped[datetime] = mapped_column(
-596:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-597:     )
-598: 
-599:     # Relationships
-600:     namespace: Mapped[MemoryNamespaceModel] = relationship(
-601:         "MemoryNamespaceModel", back_populates="expertise_definitions"
-602:     )
-603: 
-604:     __table_args__ = (
-605:         UniqueConstraint("namespace_id", "name", name="uq_expertise_namespace_name"),
-606:         Index("ix_expertise_namespace_active", "namespace_id", "is_active"),
-607:     )
-608: 
-609:     def __repr__(self) -> str:
-610:         return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"
+593:     # The full expertise configuration as JSONB
+594:     # Contains: entity_types, relationship_types, tool_schemas, correlation_rules,
+595:     # inference_rules, confidence, expansion, system_prompt, extraction_prompt
+596:     config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+597: 
+598:     # Status
+599:     is_active: Mapped[bool] = mapped_column(default=True, index=True)
+600: 
+601:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+602:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+603:     updated_at: Mapped[datetime] = mapped_column(
+604:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+605:     )
+606: 
+607:     # Relationships
+608:     namespace: Mapped[MemoryNamespaceModel] = relationship(
+609:         "MemoryNamespaceModel", back_populates="expertise_definitions"
+610:     )
 611: 
-612: 
-613: # =============================================================================
-614: # Temporal Models for Khora Engine
-615: # =============================================================================
+612:     __table_args__ = (
+613:         UniqueConstraint("namespace_id", "name", name="uq_expertise_namespace_name"),
+614:         Index("ix_expertise_namespace_active", "namespace_id", "is_active"),
+615:     )
 616: 
-617: 
-618: class TimeGranularity:
-619:     """Time granularity levels for hierarchical time graph."""
+617:     def __repr__(self) -> str:
+618:         return f"<ExpertiseDefinition(id={self.id!r}, name={self.name!r}, version={self.version!r})>"
+619: 
 620: 
-621:     YEAR = "year"
-622:     QUARTER = "quarter"
-623:     MONTH = "month"
-624:     WEEK = "week"
-625:     DAY = "day"
-626: 
-627: 
-628: class TimeNodeModel(Base):
-629:     """Hierarchical time graph node for temporal navigation.
-630: 
-631:     Enables efficient temporal queries by organizing time into a hierarchy:
-632:     Year → Quarter → Month → Week → Day
-633: 
-634:     Each node can have a summary embedding for temporal range queries.
-635:     """
-636: 
-637:     __tablename__ = "time_nodes"
+621: # =============================================================================
+622: # Temporal Models for Khora Engine
+623: # =============================================================================
+624: 
+625: 
+626: class TimeGranularity:
+627:     """Time granularity levels for hierarchical time graph."""
+628: 
+629:     YEAR = "year"
+630:     QUARTER = "quarter"
+631:     MONTH = "month"
+632:     WEEK = "week"
+633:     DAY = "day"
+634: 
+635: 
+636: class TimeNodeModel(Base):
+637:     """Hierarchical time graph node for temporal navigation.
 638: 
-639:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-640:     namespace_id: Mapped[str] = mapped_column(
-641:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-642:     )
-643: 
-644:     # Time hierarchy
-645:     granularity: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # year, quarter, month, week, day
-646:     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-647:     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-648:     parent_id: Mapped[str | None] = mapped_column(
-649:         UUID(as_uuid=False), ForeignKey("time_nodes.id", ondelete="CASCADE"), nullable=True, index=True
+639:     Enables efficient temporal queries by organizing time into a hierarchy:
+640:     Year → Quarter → Month → Week → Day
+641: 
+642:     Each node can have a summary embedding for temporal range queries.
+643:     """
+644: 
+645:     __tablename__ = "time_nodes"
+646: 
+647:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+648:     namespace_id: Mapped[str] = mapped_column(
+649:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
 650:     )
 651: 
-652:     # Display name (e.g., "2024", "Q1 2024", "January 2024", "Week 1 2024", "2024-01-15")
-653:     name: Mapped[str] = mapped_column(String(64), nullable=False)
-654: 
-655:     # Temporal summary for range queries
-656:     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-657:     summary_embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-658: 
-659:     # Stats for optimization
-660:     edge_count: Mapped[int] = mapped_column(Integer, default=0)
-661:     entity_count: Mapped[int] = mapped_column(Integer, default=0)
+652:     # Time hierarchy
+653:     granularity: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # year, quarter, month, week, day
+654:     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+655:     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+656:     parent_id: Mapped[str | None] = mapped_column(
+657:         UUID(as_uuid=False), ForeignKey("time_nodes.id", ondelete="CASCADE"), nullable=True, index=True
+658:     )
+659: 
+660:     # Display name (e.g., "2024", "Q1 2024", "January 2024", "Week 1 2024", "2024-01-15")
+661:     name: Mapped[str] = mapped_column(String(64), nullable=False)
 662: 
-663:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-664:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-665:     updated_at: Mapped[datetime] = mapped_column(
-666:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-667:     )
-668: 
-669:     # Self-referential relationship for hierarchy
-670:     parent: Mapped[TimeNodeModel | None] = relationship("TimeNodeModel", remote_side=[id], backref="children")
-671: 
-672:     __table_args__ = (
-673:         # Unique constraint: one node per namespace/granularity/start_time
-674:         UniqueConstraint("namespace_id", "granularity", "start_time", name="uq_time_node_namespace_granularity_start"),
-675:         # Index for range queries
-676:         Index("ix_time_nodes_namespace_range", "namespace_id", "start_time", "end_time"),
-677:     )
-678: 
-679:     def __repr__(self) -> str:
-680:         return f"<TimeNode(id={self.id!r}, name={self.name!r}, granularity={self.granularity})>"
-681: 
-682: 
-683: class TemporalEdgeModel(Base):
-684:     """Temporal relationship edge with explicit timestamps.
-685: 
-686:     Unlike RelationshipModel which collapses multiple observations into one edge,
-687:     TemporalEdgeModel stores each timestamped observation as a distinct edge.
-688:     This enables precise temporal queries like "who worked with whom in Q1 2024?"
-689:     """
+663:     # Temporal summary for range queries
+664:     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+665:     summary_embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+666: 
+667:     # Stats for optimization
+668:     edge_count: Mapped[int] = mapped_column(Integer, default=0)
+669:     entity_count: Mapped[int] = mapped_column(Integer, default=0)
+670: 
+671:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+672:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+673:     updated_at: Mapped[datetime] = mapped_column(
+674:         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+675:     )
+676: 
+677:     # Self-referential relationship for hierarchy
+678:     parent: Mapped[TimeNodeModel | None] = relationship("TimeNodeModel", remote_side=[id], backref="children")
+679: 
+680:     __table_args__ = (
+681:         # Unique constraint: one node per namespace/granularity/start_time
+682:         UniqueConstraint("namespace_id", "granularity", "start_time", name="uq_time_node_namespace_granularity_start"),
+683:         # Index for range queries
+684:         Index("ix_time_nodes_namespace_range", "namespace_id", "start_time", "end_time"),
+685:     )
+686: 
+687:     def __repr__(self) -> str:
+688:         return f"<TimeNode(id={self.id!r}, name={self.name!r}, granularity={self.granularity})>"
+689: 
 690: 
-691:     __tablename__ = "temporal_edges"
-692: 
-693:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-694:     namespace_id: Mapped[str] = mapped_column(
-695:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
-696:     )
-697:     source_entity_id: Mapped[str] = mapped_column(
-698:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
-699:     )
-700:     target_entity_id: Mapped[str] = mapped_column(
-701:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
-702:     )
-703:     relationship_type: Mapped[str] = mapped_column(String(64), default="RELATES_TO", index=True)
-704:     description: Mapped[str] = mapped_column(Text, default="")
-705: 
-706:     # Bi-temporal model: when did this happen vs when did we learn about it
-707:     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-708:     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-709: 
-710:     # Temporal validity window (when is this fact considered true)
-711:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-712:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+691: class TemporalEdgeModel(Base):
+692:     """Temporal relationship edge with explicit timestamps.
+693: 
+694:     Unlike RelationshipModel which collapses multiple observations into one edge,
+695:     TemporalEdgeModel stores each timestamped observation as a distinct edge.
+696:     This enables precise temporal queries like "who worked with whom in Q1 2024?"
+697:     """
+698: 
+699:     __tablename__ = "temporal_edges"
+700: 
+701:     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+702:     namespace_id: Mapped[str] = mapped_column(
+703:         UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+704:     )
+705:     source_entity_id: Mapped[str] = mapped_column(
+706:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+707:     )
+708:     target_entity_id: Mapped[str] = mapped_column(
+709:         UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+710:     )
+711:     relationship_type: Mapped[str] = mapped_column(String(64), default="RELATES_TO", index=True)
+712:     description: Mapped[str] = mapped_column(Text, default="")
 713: 
-714:     # Edge invalidation tracking
-715:     is_valid: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-716:     invalidated_by_id: Mapped[str | None] = mapped_column(
-717:         UUID(as_uuid=False), ForeignKey("temporal_edges.id", ondelete="SET NULL"), nullable=True
-718:     )
-719:     invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-720: 
-721:     # Confidence and source tracking
-722:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
-723:     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-724:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-725:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-726: 
-727:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-728:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-729: 
-730:     # Relationships
-731:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel")
-732:     source_entity: Mapped[EntityModel] = relationship("EntityModel", foreign_keys=[source_entity_id])
-733:     target_entity: Mapped[EntityModel] = relationship("EntityModel", foreign_keys=[target_entity_id])
-734:     invalidated_by: Mapped[TemporalEdgeModel | None] = relationship("TemporalEdgeModel", remote_side=[id])
-735: 
-736:     __table_args__ = (
-737:         # BRIN index for time-series optimization (99% space savings vs btree)
-738:         Index("ix_temporal_edges_occurred_brin", "occurred_at", postgresql_using="brin"),
-739:         # Composite index for entity pair + time queries
-740:         Index(
-741:             "ix_temporal_edges_entities_time",
-742:             "source_entity_id",
-743:             "target_entity_id",
-744:             "occurred_at",
-745:         ),
-746:         # Index for validity queries
-747:         Index("ix_temporal_edges_valid_range", "valid_from", "valid_until"),
-748:     )
-749: 
-750:     def __repr__(self) -> str:
-751:         return f"<TemporalEdge(id={self.id!r}, type={self.relationship_type}, occurred_at={self.occurred_at})>"
-752: 
-753: 
-754: class TimeEdgeLinkModel(Base):
-755:     """Link between time nodes and temporal edges for efficient time-based navigation.
-756: 
-757:     This join table enables queries like "give me all edges in January 2024"
-758:     without scanning the entire temporal_edges table.
-759:     """
+714:     # Bi-temporal model: when did this happen vs when did we learn about it
+715:     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+716:     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+717: 
+718:     # Temporal validity window (when is this fact considered true)
+719:     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+720:     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+721: 
+722:     # Edge invalidation tracking
+723:     is_valid: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+724:     invalidated_by_id: Mapped[str | None] = mapped_column(
+725:         UUID(as_uuid=False), ForeignKey("temporal_edges.id", ondelete="SET NULL"), nullable=True
+726:     )
+727:     invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+728: 
+729:     # Confidence and source tracking
+730:     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+731:     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+732:     source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+733:     source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+734: 
+735:     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+736:     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+737: 
+738:     # Relationships
+739:     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel")
+740:     source_entity: Mapped[EntityModel] = relationship("EntityModel", foreign_keys=[source_entity_id])
+741:     target_entity: Mapped[EntityModel] = relationship("EntityModel", foreign_keys=[target_entity_id])
+742:     invalidated_by: Mapped[TemporalEdgeModel | None] = relationship("TemporalEdgeModel", remote_side=[id])
+743: 
+744:     __table_args__ = (
+745:         # BRIN index for time-series optimization (99% space savings vs btree)
+746:         Index("ix_temporal_edges_occurred_brin", "occurred_at", postgresql_using="brin"),
+747:         # Composite index for entity pair + time queries
+748:         Index(
+749:             "ix_temporal_edges_entities_time",
+750:             "source_entity_id",
+751:             "target_entity_id",
+752:             "occurred_at",
+753:         ),
+754:         # Index for validity queries
+755:         Index("ix_temporal_edges_valid_range", "valid_from", "valid_until"),
+756:     )
+757: 
+758:     def __repr__(self) -> str:
+759:         return f"<TemporalEdge(id={self.id!r}, type={self.relationship_type}, occurred_at={self.occurred_at})>"
 760: 
-761:     __tablename__ = "time_edge_links"
-762: 
-763:     time_node_id: Mapped[str] = mapped_column(
-764:         UUID(as_uuid=False), ForeignKey("time_nodes.id", ondelete="CASCADE"), primary_key=True
-765:     )
-766:     edge_id: Mapped[str] = mapped_column(
-767:         UUID(as_uuid=False), ForeignKey("temporal_edges.id", ondelete="CASCADE"), primary_key=True
-768:     )
-769: 
-770:     # Relationships
-771:     time_node: Mapped[TimeNodeModel] = relationship("TimeNodeModel")
-772:     edge: Mapped[TemporalEdgeModel] = relationship("TemporalEdgeModel")
-773: 
-774:     def __repr__(self) -> str:
-775:         return f"<TimeEdgeLink(time_node_id={self.time_node_id!r}, edge_id={self.edge_id!r})>"
+761: 
+762: class TimeEdgeLinkModel(Base):
+763:     """Link between time nodes and temporal edges for efficient time-based navigation.
+764: 
+765:     This join table enables queries like "give me all edges in January 2024"
+766:     without scanning the entire temporal_edges table.
+767:     """
+768: 
+769:     __tablename__ = "time_edge_links"
+770: 
+771:     time_node_id: Mapped[str] = mapped_column(
+772:         UUID(as_uuid=False), ForeignKey("time_nodes.id", ondelete="CASCADE"), primary_key=True
+773:     )
+774:     edge_id: Mapped[str] = mapped_column(
+775:         UUID(as_uuid=False), ForeignKey("temporal_edges.id", ondelete="CASCADE"), primary_key=True
+776:     )
+777: 
+778:     # Relationships
+779:     time_node: Mapped[TimeNodeModel] = relationship("TimeNodeModel")
+780:     edge: Mapped[TemporalEdgeModel] = relationship("TemporalEdgeModel")
+781: 
+782:     def __repr__(self) -> str:
+783:         return f"<TimeEdgeLink(time_node_id={self.time_node_id!r}, edge_id={self.edge_id!r})>"
 ````
 
 ## File: src/khora/engines/vectorcypher/dual_nodes.py
@@ -42187,940 +42293,958 @@ README.md
  126:             "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
  127:             # Composite index for MERGE pattern (namespace_id, name, entity_type)
  128:             "CREATE INDEX entity_ns_name_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)",
- 129:             # Episode indexes
- 130:             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
- 131:             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
- 132:             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
- 133:         ]
- 134: 
- 135:         # Relationship property indexes require Neo4j ≥5.7 or Enterprise Edition
- 136:         rel_indexes = [
- 137:             "CREATE INDEX rel_namespace IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.namespace_id)",
- 138:         ]
- 139: 
- 140:         async with self._driver.session(database=self._database) as session:
- 141:             for index in indexes:
- 142:                 try:
- 143:                     await session.run(index)
- 144:                 except Exception as e:
- 145:                     logger.debug(f"Index creation: {e}")
- 146: 
- 147:             for index in rel_indexes:
- 148:                 try:
- 149:                     await session.run(index)
- 150:                 except Exception as e:
- 151:                     logger.warning(f"Relationship index creation skipped (may require Neo4j ≥5.7 or Enterprise): {e}")
- 152: 
- 153:     def _get_driver(self) -> AsyncDriver:
- 154:         """Get the Neo4j driver."""
- 155:         if self._driver is None:
- 156:             raise RuntimeError("Backend not connected. Call connect() first.")
- 157:         return self._driver
- 158: 
- 159:     # =========================================================================
- 160:     # Entity operations
- 161:     # =========================================================================
- 162: 
- 163:     async def create_entity(self, entity: Entity) -> Entity:
- 164:         """Create an entity node in the graph."""
- 165:         driver = self._get_driver()
- 166: 
- 167:         async def _create(tx: AsyncManagedTransaction) -> None:
- 168:             query = """
- 169:             CREATE (e:Entity {
- 170:                 id: $id,
- 171:                 namespace_id: $namespace_id,
- 172:                 name: $name,
- 173:                 entity_type: $entity_type,
- 174:                 description: $description,
- 175:                 attributes: $attributes,
- 176:                 source_document_ids: $source_document_ids,
- 177:                 source_chunk_ids: $source_chunk_ids,
- 178:                 mention_count: $mention_count,
- 179:                 valid_from: $valid_from,
- 180:                 valid_until: $valid_until,
- 181:                 confidence: $confidence,
- 182:                 metadata: $metadata,
- 183:                 created_at: $created_at,
- 184:                 updated_at: $updated_at
- 185:             })
- 186:             """
- 187:             await tx.run(
- 188:                 query,
- 189:                 id=str(entity.id),
- 190:                 namespace_id=str(entity.namespace_id),
- 191:                 name=entity.name,
- 192:                 entity_type=(
- 193:                     entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
- 194:                 ),
- 195:                 description=entity.description,
- 196:                 attributes=_serialize_dict(entity.attributes),
- 197:                 source_document_ids=[str(d) for d in entity.source_document_ids],
- 198:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
- 199:                 mention_count=entity.mention_count,
- 200:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
- 201:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
- 202:                 confidence=entity.confidence,
- 203:                 metadata=_serialize_dict(entity.metadata),
- 204:                 created_at=entity.created_at.isoformat(),
- 205:                 updated_at=entity.updated_at.isoformat(),
- 206:             )
- 207: 
- 208:         async with driver.session(database=self._database) as session:
- 209:             await session.execute_write(_create)
- 210: 
- 211:         return entity
- 212: 
- 213:     async def get_entity(self, entity_id: UUID) -> Entity | None:
- 214:         """Get an entity by ID."""
- 215:         driver = self._get_driver()
- 216: 
- 217:         async with driver.session(database=self._database) as session:
- 218:             result = await session.run(
- 219:                 "MATCH (e:Entity {id: $id}) RETURN e",
- 220:                 id=str(entity_id),
- 221:             )
- 222:             record = await result.single()
- 223:             if record:
- 224:                 return self._record_to_entity(record["e"])
- 225:             return None
- 226: 
- 227:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
- 228:         """Get an entity by name and type (for deduplication)."""
- 229:         driver = self._get_driver()
+ 129:             # Composite: namespace + type (for list queries filtering by type without name)
+ 130:             "CREATE INDEX entity_ns_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.entity_type)",
+ 131:             # Entity source_tool (for source-aware queries)
+ 132:             "CREATE INDEX entity_source_tool IF NOT EXISTS FOR (e:Entity) ON (e.source_tool)",
+ 133:             # Entity confidence (for threshold filtering: min_entity_confidence)
+ 134:             "CREATE INDEX entity_confidence IF NOT EXISTS FOR (e:Entity) ON (e.confidence)",
+ 135:             # Episode indexes
+ 136:             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
+ 137:             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
+ 138:             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
+ 139:         ]
+ 140: 
+ 141:         # Relationship property indexes require Neo4j ≥5.7 or Enterprise Edition
+ 142:         rel_indexes = [
+ 143:             "CREATE INDEX rel_namespace IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.namespace_id)",
+ 144:             # namespace_id on high-volume relationship types
+ 145:             "CREATE INDEX rel_collaborates_ns IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.namespace_id)",
+ 146:             "CREATE INDEX rel_associated_ns IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.namespace_id)",
+ 147:             "CREATE INDEX rel_depends_ns IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.namespace_id)",
+ 148:             "CREATE INDEX rel_owns_ns IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.namespace_id)",
+ 149:             "CREATE INDEX rel_works_for_ns IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.namespace_id)",
+ 150:             "CREATE INDEX rel_implements_ns IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.namespace_id)",
+ 151:             "CREATE INDEX rel_part_of_ns IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.namespace_id)",
+ 152:             # confidence on highest-volume relationship types
+ 153:             "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
+ 154:             "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",
+ 155:             "CREATE INDEX rel_depends_conf IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
+ 156:         ]
+ 157: 
+ 158:         async with self._driver.session(database=self._database) as session:
+ 159:             for index in indexes:
+ 160:                 try:
+ 161:                     await session.run(index)
+ 162:                 except Exception as e:
+ 163:                     logger.debug(f"Index creation: {e}")
+ 164: 
+ 165:             for index in rel_indexes:
+ 166:                 try:
+ 167:                     await session.run(index)
+ 168:                 except Exception as e:
+ 169:                     logger.warning(f"Relationship index creation skipped (may require Neo4j ≥5.7 or Enterprise): {e}")
+ 170: 
+ 171:     def _get_driver(self) -> AsyncDriver:
+ 172:         """Get the Neo4j driver."""
+ 173:         if self._driver is None:
+ 174:             raise RuntimeError("Backend not connected. Call connect() first.")
+ 175:         return self._driver
+ 176: 
+ 177:     # =========================================================================
+ 178:     # Entity operations
+ 179:     # =========================================================================
+ 180: 
+ 181:     async def create_entity(self, entity: Entity) -> Entity:
+ 182:         """Create an entity node in the graph."""
+ 183:         driver = self._get_driver()
+ 184: 
+ 185:         async def _create(tx: AsyncManagedTransaction) -> None:
+ 186:             query = """
+ 187:             CREATE (e:Entity {
+ 188:                 id: $id,
+ 189:                 namespace_id: $namespace_id,
+ 190:                 name: $name,
+ 191:                 entity_type: $entity_type,
+ 192:                 description: $description,
+ 193:                 attributes: $attributes,
+ 194:                 source_document_ids: $source_document_ids,
+ 195:                 source_chunk_ids: $source_chunk_ids,
+ 196:                 mention_count: $mention_count,
+ 197:                 valid_from: $valid_from,
+ 198:                 valid_until: $valid_until,
+ 199:                 confidence: $confidence,
+ 200:                 metadata: $metadata,
+ 201:                 created_at: $created_at,
+ 202:                 updated_at: $updated_at
+ 203:             })
+ 204:             """
+ 205:             await tx.run(
+ 206:                 query,
+ 207:                 id=str(entity.id),
+ 208:                 namespace_id=str(entity.namespace_id),
+ 209:                 name=entity.name,
+ 210:                 entity_type=(
+ 211:                     entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
+ 212:                 ),
+ 213:                 description=entity.description,
+ 214:                 attributes=_serialize_dict(entity.attributes),
+ 215:                 source_document_ids=[str(d) for d in entity.source_document_ids],
+ 216:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+ 217:                 mention_count=entity.mention_count,
+ 218:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
+ 219:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
+ 220:                 confidence=entity.confidence,
+ 221:                 metadata=_serialize_dict(entity.metadata),
+ 222:                 created_at=entity.created_at.isoformat(),
+ 223:                 updated_at=entity.updated_at.isoformat(),
+ 224:             )
+ 225: 
+ 226:         async with driver.session(database=self._database) as session:
+ 227:             await session.execute_write(_create)
+ 228: 
+ 229:         return entity
  230: 
- 231:         async with driver.session(database=self._database) as session:
- 232:             result = await session.run(
- 233:                 """
- 234:                 MATCH (e:Entity {namespace_id: $namespace_id, name: $name, entity_type: $entity_type})
- 235:                 RETURN e
- 236:                 LIMIT 1
- 237:                 """,
- 238:                 namespace_id=str(namespace_id),
- 239:                 name=name,
- 240:                 entity_type=entity_type,
- 241:             )
- 242:             record = await result.single()
- 243:             if record:
- 244:                 return self._record_to_entity(record["e"])
- 245:             return None
- 246: 
- 247:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
- 248:         """Fetch multiple entities in a single query.
- 249: 
- 250:         Args:
- 251:             entity_ids: List of entity IDs to fetch
- 252: 
- 253:         Returns:
- 254:             Dictionary mapping entity ID to Entity object
- 255:         """
- 256:         if not entity_ids:
- 257:             return {}
- 258: 
- 259:         driver = self._get_driver()
- 260:         id_strings = [str(eid) for eid in entity_ids]
- 261: 
- 262:         async with driver.session(database=self._database) as session:
- 263:             result = await session.run(
- 264:                 """
- 265:                 MATCH (e:Entity)
- 266:                 WHERE e.id IN $ids
- 267:                 RETURN e
- 268:                 """,
- 269:                 ids=id_strings,
- 270:             )
- 271:             records = await result.data()
- 272:             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
- 273: 
- 274:     async def update_entity(self, entity: Entity) -> Entity:
- 275:         """Update an entity."""
- 276:         driver = self._get_driver()
- 277: 
- 278:         async def _update(tx: AsyncManagedTransaction) -> None:
- 279:             query = """
- 280:             MATCH (e:Entity {id: $id})
- 281:             SET e.name = $name,
- 282:                 e.description = $description,
- 283:                 e.attributes = $attributes,
- 284:                 e.source_document_ids = $source_document_ids,
- 285:                 e.source_chunk_ids = $source_chunk_ids,
- 286:                 e.mention_count = $mention_count,
- 287:                 e.valid_from = $valid_from,
- 288:                 e.valid_until = $valid_until,
- 289:                 e.confidence = $confidence,
- 290:                 e.metadata = $metadata,
- 291:                 e.updated_at = $updated_at
- 292:             """
- 293:             await tx.run(
- 294:                 query,
- 295:                 id=str(entity.id),
- 296:                 name=entity.name,
- 297:                 description=entity.description,
- 298:                 attributes=_serialize_dict(entity.attributes),
- 299:                 source_document_ids=[str(d) for d in entity.source_document_ids],
- 300:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
- 301:                 mention_count=entity.mention_count,
- 302:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
- 303:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
- 304:                 confidence=entity.confidence,
- 305:                 metadata=_serialize_dict(entity.metadata),
- 306:                 updated_at=entity.updated_at.isoformat(),
- 307:             )
- 308: 
- 309:         async with driver.session(database=self._database) as session:
- 310:             await session.execute_write(_update)
- 311: 
- 312:         return entity
- 313: 
- 314:     async def delete_entity(self, entity_id: UUID) -> bool:
- 315:         """Delete an entity and its relationships."""
- 316:         driver = self._get_driver()
- 317: 
- 318:         async def _delete(tx: AsyncManagedTransaction) -> int:
- 319:             result = await tx.run(
- 320:                 """
- 321:                 MATCH (e:Entity {id: $id})
- 322:                 DETACH DELETE e
- 323:                 RETURN count(e) as deleted
- 324:                 """,
- 325:                 id=str(entity_id),
- 326:             )
- 327:             record = await result.single()
- 328:             return record["deleted"] if record else 0
+ 231:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+ 232:         """Get an entity by ID."""
+ 233:         driver = self._get_driver()
+ 234: 
+ 235:         async with driver.session(database=self._database) as session:
+ 236:             result = await session.run(
+ 237:                 "MATCH (e:Entity {id: $id}) RETURN e",
+ 238:                 id=str(entity_id),
+ 239:             )
+ 240:             record = await result.single()
+ 241:             if record:
+ 242:                 return self._record_to_entity(record["e"])
+ 243:             return None
+ 244: 
+ 245:     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+ 246:         """Get an entity by name and type (for deduplication)."""
+ 247:         driver = self._get_driver()
+ 248: 
+ 249:         async with driver.session(database=self._database) as session:
+ 250:             result = await session.run(
+ 251:                 """
+ 252:                 MATCH (e:Entity {namespace_id: $namespace_id, name: $name, entity_type: $entity_type})
+ 253:                 RETURN e
+ 254:                 LIMIT 1
+ 255:                 """,
+ 256:                 namespace_id=str(namespace_id),
+ 257:                 name=name,
+ 258:                 entity_type=entity_type,
+ 259:             )
+ 260:             record = await result.single()
+ 261:             if record:
+ 262:                 return self._record_to_entity(record["e"])
+ 263:             return None
+ 264: 
+ 265:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+ 266:         """Fetch multiple entities in a single query.
+ 267: 
+ 268:         Args:
+ 269:             entity_ids: List of entity IDs to fetch
+ 270: 
+ 271:         Returns:
+ 272:             Dictionary mapping entity ID to Entity object
+ 273:         """
+ 274:         if not entity_ids:
+ 275:             return {}
+ 276: 
+ 277:         driver = self._get_driver()
+ 278:         id_strings = [str(eid) for eid in entity_ids]
+ 279: 
+ 280:         async with driver.session(database=self._database) as session:
+ 281:             result = await session.run(
+ 282:                 """
+ 283:                 MATCH (e:Entity)
+ 284:                 WHERE e.id IN $ids
+ 285:                 RETURN e
+ 286:                 """,
+ 287:                 ids=id_strings,
+ 288:             )
+ 289:             records = await result.data()
+ 290:             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
+ 291: 
+ 292:     async def update_entity(self, entity: Entity) -> Entity:
+ 293:         """Update an entity."""
+ 294:         driver = self._get_driver()
+ 295: 
+ 296:         async def _update(tx: AsyncManagedTransaction) -> None:
+ 297:             query = """
+ 298:             MATCH (e:Entity {id: $id})
+ 299:             SET e.name = $name,
+ 300:                 e.description = $description,
+ 301:                 e.attributes = $attributes,
+ 302:                 e.source_document_ids = $source_document_ids,
+ 303:                 e.source_chunk_ids = $source_chunk_ids,
+ 304:                 e.mention_count = $mention_count,
+ 305:                 e.valid_from = $valid_from,
+ 306:                 e.valid_until = $valid_until,
+ 307:                 e.confidence = $confidence,
+ 308:                 e.metadata = $metadata,
+ 309:                 e.updated_at = $updated_at
+ 310:             """
+ 311:             await tx.run(
+ 312:                 query,
+ 313:                 id=str(entity.id),
+ 314:                 name=entity.name,
+ 315:                 description=entity.description,
+ 316:                 attributes=_serialize_dict(entity.attributes),
+ 317:                 source_document_ids=[str(d) for d in entity.source_document_ids],
+ 318:                 source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
+ 319:                 mention_count=entity.mention_count,
+ 320:                 valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
+ 321:                 valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
+ 322:                 confidence=entity.confidence,
+ 323:                 metadata=_serialize_dict(entity.metadata),
+ 324:                 updated_at=entity.updated_at.isoformat(),
+ 325:             )
+ 326: 
+ 327:         async with driver.session(database=self._database) as session:
+ 328:             await session.execute_write(_update)
  329: 
- 330:         async with driver.session(database=self._database) as session:
- 331:             deleted = await session.execute_write(_delete)
- 332:             return deleted > 0
- 333: 
- 334:     async def list_entities(
- 335:         self,
- 336:         namespace_id: UUID,
- 337:         *,
- 338:         entity_type: str | None = None,
- 339:         limit: int = 100,
- 340:         offset: int = 0,
- 341:     ) -> list[Entity]:
- 342:         """List entities in a namespace."""
- 343:         driver = self._get_driver()
- 344: 
- 345:         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
- 346:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+ 330:         return entity
+ 331: 
+ 332:     async def delete_entity(self, entity_id: UUID) -> bool:
+ 333:         """Delete an entity and its relationships."""
+ 334:         driver = self._get_driver()
+ 335: 
+ 336:         async def _delete(tx: AsyncManagedTransaction) -> int:
+ 337:             result = await tx.run(
+ 338:                 """
+ 339:                 MATCH (e:Entity {id: $id})
+ 340:                 DETACH DELETE e
+ 341:                 RETURN count(e) as deleted
+ 342:                 """,
+ 343:                 id=str(entity_id),
+ 344:             )
+ 345:             record = await result.single()
+ 346:             return record["deleted"] if record else 0
  347: 
- 348:         if entity_type:
- 349:             query += " WHERE e.entity_type = $entity_type"
- 350:             params["entity_type"] = entity_type
+ 348:         async with driver.session(database=self._database) as session:
+ 349:             deleted = await session.execute_write(_delete)
+ 350:             return deleted > 0
  351: 
- 352:         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
- 353:         params["offset"] = offset
- 354:         params["limit"] = limit
- 355: 
- 356:         async with driver.session(database=self._database) as session:
- 357:             result = await session.run(query, **params)
- 358:             records = await result.data()
- 359:             return [self._record_to_entity(r["e"]) for r in records]
- 360: 
- 361:     async def upsert_entities_batch(
- 362:         self,
- 363:         namespace_id: UUID,
- 364:         entities: list[Entity],
- 365:         *,
- 366:         batch_size: int = 50,
- 367:     ) -> list[tuple[Entity, bool]]:
- 368:         """Batch upsert entities using UNWIND + MERGE.
+ 352:     async def list_entities(
+ 353:         self,
+ 354:         namespace_id: UUID,
+ 355:         *,
+ 356:         entity_type: str | None = None,
+ 357:         limit: int = 100,
+ 358:         offset: int = 0,
+ 359:     ) -> list[Entity]:
+ 360:         """List entities in a namespace."""
+ 361:         driver = self._get_driver()
+ 362: 
+ 363:         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
+ 364:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+ 365: 
+ 366:         if entity_type:
+ 367:             query += " WHERE e.entity_type = $entity_type"
+ 368:             params["entity_type"] = entity_type
  369: 
- 370:         Matches on (namespace_id, name, entity_type).  Creates if new,
- 371:         updates if existing.  Returns (entity, is_new) tuples.
- 372:         """
- 373:         if not entities:
- 374:             return []
- 375: 
- 376:         driver = self._get_driver()
- 377:         results: list[tuple[Entity, bool]] = []
+ 370:         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
+ 371:         params["offset"] = offset
+ 372:         params["limit"] = limit
+ 373: 
+ 374:         async with driver.session(database=self._database) as session:
+ 375:             result = await session.run(query, **params)
+ 376:             records = await result.data()
+ 377:             return [self._record_to_entity(r["e"]) for r in records]
  378: 
- 379:         for start in range(0, len(entities), batch_size):
- 380:             batch = entities[start : start + batch_size]
- 381:             rows = [
- 382:                 {
- 383:                     "id": str(e.id),
- 384:                     "namespace_id": str(e.namespace_id),
- 385:                     "name": e.name,
- 386:                     "entity_type": (e.entity_type.value if isinstance(e.entity_type, EntityType) else e.entity_type),
- 387:                     "description": e.description,
- 388:                     "attributes": _serialize_dict(e.attributes),
- 389:                     "source_document_ids": [str(d) for d in e.source_document_ids],
- 390:                     "source_chunk_ids": [str(c) for c in e.source_chunk_ids],
- 391:                     "mention_count": e.mention_count,
- 392:                     "valid_from": e.valid_from.isoformat() if e.valid_from else None,
- 393:                     "valid_until": e.valid_until.isoformat() if e.valid_until else None,
- 394:                     "confidence": e.confidence,
- 395:                     "metadata": _serialize_dict(e.metadata),
- 396:                     "created_at": e.created_at.isoformat(),
- 397:                     "updated_at": e.updated_at.isoformat(),
- 398:                 }
- 399:                 for e in batch
- 400:             ]
- 401: 
- 402:             async def _upsert_batch(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
- 403:                 result = await tx.run(
- 404:                     """
- 405:                     UNWIND $rows AS row
- 406:                     MERGE (e:Entity {namespace_id: row.namespace_id, name: row.name, entity_type: row.entity_type})
- 407:                     ON CREATE SET
- 408:                         e.id = row.id,
- 409:                         e.description = row.description,
- 410:                         e.attributes = row.attributes,
- 411:                         e.source_document_ids = row.source_document_ids,
- 412:                         e.source_chunk_ids = row.source_chunk_ids,
- 413:                         e.mention_count = row.mention_count,
- 414:                         e.valid_from = row.valid_from,
- 415:                         e.valid_until = row.valid_until,
- 416:                         e.confidence = row.confidence,
- 417:                         e.metadata = row.metadata,
- 418:                         e.created_at = row.created_at,
- 419:                         e.updated_at = row.updated_at
- 420:                     ON MATCH SET
- 421:                         e.description = CASE WHEN size(row.description) > size(coalesce(e.description, ''))
- 422:                             THEN row.description ELSE e.description END,
- 423:                         e.attributes = row.attributes,
- 424:                         e.source_document_ids = e.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN e.source_document_ids],
- 425:                         e.source_chunk_ids = e.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN e.source_chunk_ids],
- 426:                         e.mention_count = e.mention_count + row.mention_count,
- 427:                         e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
- 428:                         e.updated_at = row.updated_at
- 429:                     RETURN e.id AS id, e.name AS name, row.id AS input_id,
- 430:                            CASE WHEN e.id = row.id THEN true ELSE false END AS is_new
- 431:                     """,
- 432:                     rows=rows,
- 433:                 )
- 434:                 return await result.data()
- 435: 
- 436:             async with driver.session(database=self._database) as session:
- 437:                 records = await session.execute_write(_upsert_batch)
- 438: 
- 439:             # Build result mapping
- 440:             input_id_to_entity = {str(e.id): e for e in batch}
- 441:             for record in records:
- 442:                 entity = input_id_to_entity.get(record["input_id"])
- 443:                 if entity is not None:
- 444:                     # Sync entity ID with what Neo4j actually has
- 445:                     neo4j_id = record["id"]
- 446:                     if neo4j_id != record["input_id"]:
- 447:                         entity.id = UUID(neo4j_id)
- 448:                         logger.debug(f"Entity '{entity.name}' ID synced: {record['input_id']} -> {neo4j_id}")
- 449:                     results.append((entity, record["is_new"]))
- 450: 
- 451:         logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
- 452:         return results
+ 379:     async def upsert_entities_batch(
+ 380:         self,
+ 381:         namespace_id: UUID,
+ 382:         entities: list[Entity],
+ 383:         *,
+ 384:         batch_size: int = 50,
+ 385:     ) -> list[tuple[Entity, bool]]:
+ 386:         """Batch upsert entities using UNWIND + MERGE.
+ 387: 
+ 388:         Matches on (namespace_id, name, entity_type).  Creates if new,
+ 389:         updates if existing.  Returns (entity, is_new) tuples.
+ 390:         """
+ 391:         if not entities:
+ 392:             return []
+ 393: 
+ 394:         driver = self._get_driver()
+ 395:         results: list[tuple[Entity, bool]] = []
+ 396: 
+ 397:         for start in range(0, len(entities), batch_size):
+ 398:             batch = entities[start : start + batch_size]
+ 399:             rows = [
+ 400:                 {
+ 401:                     "id": str(e.id),
+ 402:                     "namespace_id": str(e.namespace_id),
+ 403:                     "name": e.name,
+ 404:                     "entity_type": (e.entity_type.value if isinstance(e.entity_type, EntityType) else e.entity_type),
+ 405:                     "description": e.description,
+ 406:                     "attributes": _serialize_dict(e.attributes),
+ 407:                     "source_document_ids": [str(d) for d in e.source_document_ids],
+ 408:                     "source_chunk_ids": [str(c) for c in e.source_chunk_ids],
+ 409:                     "mention_count": e.mention_count,
+ 410:                     "valid_from": e.valid_from.isoformat() if e.valid_from else None,
+ 411:                     "valid_until": e.valid_until.isoformat() if e.valid_until else None,
+ 412:                     "confidence": e.confidence,
+ 413:                     "metadata": _serialize_dict(e.metadata),
+ 414:                     "created_at": e.created_at.isoformat(),
+ 415:                     "updated_at": e.updated_at.isoformat(),
+ 416:                 }
+ 417:                 for e in batch
+ 418:             ]
+ 419: 
+ 420:             async def _upsert_batch(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+ 421:                 result = await tx.run(
+ 422:                     """
+ 423:                     UNWIND $rows AS row
+ 424:                     MERGE (e:Entity {namespace_id: row.namespace_id, name: row.name, entity_type: row.entity_type})
+ 425:                     ON CREATE SET
+ 426:                         e.id = row.id,
+ 427:                         e.description = row.description,
+ 428:                         e.attributes = row.attributes,
+ 429:                         e.source_document_ids = row.source_document_ids,
+ 430:                         e.source_chunk_ids = row.source_chunk_ids,
+ 431:                         e.mention_count = row.mention_count,
+ 432:                         e.valid_from = row.valid_from,
+ 433:                         e.valid_until = row.valid_until,
+ 434:                         e.confidence = row.confidence,
+ 435:                         e.metadata = row.metadata,
+ 436:                         e.created_at = row.created_at,
+ 437:                         e.updated_at = row.updated_at
+ 438:                     ON MATCH SET
+ 439:                         e.description = CASE WHEN size(row.description) > size(coalesce(e.description, ''))
+ 440:                             THEN row.description ELSE e.description END,
+ 441:                         e.attributes = row.attributes,
+ 442:                         e.source_document_ids = e.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN e.source_document_ids],
+ 443:                         e.source_chunk_ids = e.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN e.source_chunk_ids],
+ 444:                         e.mention_count = e.mention_count + row.mention_count,
+ 445:                         e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
+ 446:                         e.updated_at = row.updated_at
+ 447:                     RETURN e.id AS id, e.name AS name, row.id AS input_id,
+ 448:                            CASE WHEN e.id = row.id THEN true ELSE false END AS is_new
+ 449:                     """,
+ 450:                     rows=rows,
+ 451:                 )
+ 452:                 return await result.data()
  453: 
- 454:     async def create_relationships_batch(
- 455:         self,
- 456:         relationships: list[Relationship],
- 457:         *,
- 458:         batch_size: int = 50,
- 459:     ) -> int:
- 460:         """Batch create relationships using UNWIND."""
- 461:         if not relationships:
- 462:             return 0
- 463: 
- 464:         driver = self._get_driver()
- 465:         total_created = 0
- 466: 
- 467:         # Group by relationship type (required for dynamic rel type in Cypher)
- 468:         type_groups: dict[str, list[Relationship]] = {}
- 469:         for rel in relationships:
- 470:             rel_type = _sanitize_neo4j_label(
- 471:                 rel.relationship_type.value
- 472:                 if isinstance(rel.relationship_type, RelationshipType)
- 473:                 else rel.relationship_type
- 474:             )
- 475:             type_groups.setdefault(rel_type, []).append(rel)
- 476: 
- 477:         for rel_type, rels in type_groups.items():
- 478:             for start in range(0, len(rels), batch_size):
- 479:                 batch = rels[start : start + batch_size]
- 480:                 rows = [
- 481:                     {
- 482:                         "id": str(r.id),
- 483:                         "namespace_id": str(r.namespace_id),
- 484:                         "source_id": str(r.source_entity_id),
- 485:                         "target_id": str(r.target_entity_id),
- 486:                         "description": r.description,
- 487:                         "properties": _serialize_dict(r.properties),
- 488:                         "source_document_ids": [str(d) for d in r.source_document_ids],
- 489:                         "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
- 490:                         "valid_from": r.valid_from.isoformat() if r.valid_from else None,
- 491:                         "valid_until": r.valid_until.isoformat() if r.valid_until else None,
- 492:                         "confidence": r.confidence,
- 493:                         "weight": r.weight,
- 494:                         "metadata": _serialize_dict(r.metadata),
- 495:                         "created_at": r.created_at.isoformat(),
- 496:                         "updated_at": r.updated_at.isoformat(),
- 497:                     }
- 498:                     for r in batch
- 499:                 ]
- 500: 
- 501:                 async def _create_batch(tx: AsyncManagedTransaction) -> int:
- 502:                     query = f"""
- 503:                     UNWIND $rows AS row
- 504:                     MATCH (source:Entity {{id: row.source_id}})
- 505:                     MATCH (target:Entity {{id: row.target_id}})
- 506:                     CREATE (source)-[r:{rel_type} {{
- 507:                         id: row.id,
- 508:                         namespace_id: row.namespace_id,
- 509:                         description: row.description,
- 510:                         properties: row.properties,
- 511:                         source_document_ids: row.source_document_ids,
- 512:                         source_chunk_ids: row.source_chunk_ids,
- 513:                         valid_from: row.valid_from,
- 514:                         valid_until: row.valid_until,
- 515:                         confidence: row.confidence,
- 516:                         weight: row.weight,
- 517:                         metadata: row.metadata,
- 518:                         created_at: row.created_at,
- 519:                         updated_at: row.updated_at
- 520:                     }}]->(target)
- 521:                     RETURN count(r) AS created
- 522:                     """
- 523:                     result = await tx.run(query, rows=rows)
- 524:                     record = await result.single()
- 525:                     return record["created"] if record else 0
- 526: 
- 527:                 async with driver.session(database=self._database) as session:
- 528:                     created = await session.execute_write(_create_batch)
- 529:                     total_created += created
- 530: 
- 531:         logger.debug(f"Batch created {total_created} relationships")
- 532:         return total_created
- 533: 
- 534:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
- 535:         """Convert a Neo4j node to a domain Entity."""
- 536:         return Entity(
- 537:             id=UUID(node["id"]),
- 538:             namespace_id=UUID(node["namespace_id"]),
- 539:             name=node["name"],
- 540:             entity_type=(
- 541:                 EntityType(node["entity_type"])
- 542:                 if node["entity_type"] in EntityType.__members__
- 543:                 else node["entity_type"]
- 544:             ),
- 545:             description=node.get("description", ""),
- 546:             attributes=_deserialize_dict(node.get("attributes")),
- 547:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
- 548:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
- 549:             mention_count=node.get("mention_count", 1),
- 550:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
- 551:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
- 552:             confidence=node.get("confidence", 1.0),
- 553:             metadata=_deserialize_dict(node.get("metadata")),
- 554:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
- 555:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
- 556:         )
- 557: 
- 558:     # =========================================================================
- 559:     # Relationship operations
- 560:     # =========================================================================
- 561: 
- 562:     async def create_relationship(self, relationship: Relationship) -> Relationship:
- 563:         """Create a relationship between entities."""
- 564:         driver = self._get_driver()
- 565: 
- 566:         rel_type = _sanitize_neo4j_label(
- 567:             relationship.relationship_type.value
- 568:             if isinstance(relationship.relationship_type, RelationshipType)
- 569:             else relationship.relationship_type
- 570:         )
- 571: 
- 572:         async def _create(tx: AsyncManagedTransaction) -> None:
- 573:             # Use dynamic relationship type
- 574:             query = f"""
- 575:             MATCH (source:Entity {{id: $source_id}})
- 576:             MATCH (target:Entity {{id: $target_id}})
- 577:             CREATE (source)-[r:{rel_type} {{
- 578:                 id: $id,
- 579:                 namespace_id: $namespace_id,
- 580:                 description: $description,
- 581:                 properties: $properties,
- 582:                 source_document_ids: $source_document_ids,
- 583:                 source_chunk_ids: $source_chunk_ids,
- 584:                 valid_from: $valid_from,
- 585:                 valid_until: $valid_until,
- 586:                 confidence: $confidence,
- 587:                 weight: $weight,
- 588:                 metadata: $metadata,
- 589:                 created_at: $created_at,
- 590:                 updated_at: $updated_at
- 591:             }}]->(target)
- 592:             """
- 593:             await tx.run(
- 594:                 query,
- 595:                 source_id=str(relationship.source_entity_id),
- 596:                 target_id=str(relationship.target_entity_id),
- 597:                 id=str(relationship.id),
- 598:                 namespace_id=str(relationship.namespace_id),
- 599:                 description=relationship.description,
- 600:                 properties=_serialize_dict(relationship.properties),
- 601:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
- 602:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
- 603:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
- 604:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
- 605:                 confidence=relationship.confidence,
- 606:                 weight=relationship.weight,
- 607:                 metadata=_serialize_dict(relationship.metadata),
- 608:                 created_at=relationship.created_at.isoformat(),
- 609:                 updated_at=relationship.updated_at.isoformat(),
- 610:             )
- 611: 
- 612:         async with driver.session(database=self._database) as session:
- 613:             await session.execute_write(_create)
- 614: 
- 615:         return relationship
- 616: 
- 617:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
- 618:         """Get a relationship by ID."""
- 619:         driver = self._get_driver()
- 620: 
- 621:         async with driver.session(database=self._database) as session:
- 622:             result = await session.run(
- 623:                 """
- 624:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
- 625:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
- 626:                 """,
- 627:                 id=str(relationship_id),
+ 454:             async with driver.session(database=self._database) as session:
+ 455:                 records = await session.execute_write(_upsert_batch)
+ 456: 
+ 457:             # Build result mapping
+ 458:             input_id_to_entity = {str(e.id): e for e in batch}
+ 459:             for record in records:
+ 460:                 entity = input_id_to_entity.get(record["input_id"])
+ 461:                 if entity is not None:
+ 462:                     # Sync entity ID with what Neo4j actually has
+ 463:                     neo4j_id = record["id"]
+ 464:                     if neo4j_id != record["input_id"]:
+ 465:                         entity.id = UUID(neo4j_id)
+ 466:                         logger.debug(f"Entity '{entity.name}' ID synced: {record['input_id']} -> {neo4j_id}")
+ 467:                     results.append((entity, record["is_new"]))
+ 468: 
+ 469:         logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
+ 470:         return results
+ 471: 
+ 472:     async def create_relationships_batch(
+ 473:         self,
+ 474:         relationships: list[Relationship],
+ 475:         *,
+ 476:         batch_size: int = 50,
+ 477:     ) -> int:
+ 478:         """Batch create relationships using UNWIND."""
+ 479:         if not relationships:
+ 480:             return 0
+ 481: 
+ 482:         driver = self._get_driver()
+ 483:         total_created = 0
+ 484: 
+ 485:         # Group by relationship type (required for dynamic rel type in Cypher)
+ 486:         type_groups: dict[str, list[Relationship]] = {}
+ 487:         for rel in relationships:
+ 488:             rel_type = _sanitize_neo4j_label(
+ 489:                 rel.relationship_type.value
+ 490:                 if isinstance(rel.relationship_type, RelationshipType)
+ 491:                 else rel.relationship_type
+ 492:             )
+ 493:             type_groups.setdefault(rel_type, []).append(rel)
+ 494: 
+ 495:         for rel_type, rels in type_groups.items():
+ 496:             for start in range(0, len(rels), batch_size):
+ 497:                 batch = rels[start : start + batch_size]
+ 498:                 rows = [
+ 499:                     {
+ 500:                         "id": str(r.id),
+ 501:                         "namespace_id": str(r.namespace_id),
+ 502:                         "source_id": str(r.source_entity_id),
+ 503:                         "target_id": str(r.target_entity_id),
+ 504:                         "description": r.description,
+ 505:                         "properties": _serialize_dict(r.properties),
+ 506:                         "source_document_ids": [str(d) for d in r.source_document_ids],
+ 507:                         "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
+ 508:                         "valid_from": r.valid_from.isoformat() if r.valid_from else None,
+ 509:                         "valid_until": r.valid_until.isoformat() if r.valid_until else None,
+ 510:                         "confidence": r.confidence,
+ 511:                         "weight": r.weight,
+ 512:                         "metadata": _serialize_dict(r.metadata),
+ 513:                         "created_at": r.created_at.isoformat(),
+ 514:                         "updated_at": r.updated_at.isoformat(),
+ 515:                     }
+ 516:                     for r in batch
+ 517:                 ]
+ 518: 
+ 519:                 async def _create_batch(tx: AsyncManagedTransaction) -> int:
+ 520:                     query = f"""
+ 521:                     UNWIND $rows AS row
+ 522:                     MATCH (source:Entity {{id: row.source_id}})
+ 523:                     MATCH (target:Entity {{id: row.target_id}})
+ 524:                     CREATE (source)-[r:{rel_type} {{
+ 525:                         id: row.id,
+ 526:                         namespace_id: row.namespace_id,
+ 527:                         description: row.description,
+ 528:                         properties: row.properties,
+ 529:                         source_document_ids: row.source_document_ids,
+ 530:                         source_chunk_ids: row.source_chunk_ids,
+ 531:                         valid_from: row.valid_from,
+ 532:                         valid_until: row.valid_until,
+ 533:                         confidence: row.confidence,
+ 534:                         weight: row.weight,
+ 535:                         metadata: row.metadata,
+ 536:                         created_at: row.created_at,
+ 537:                         updated_at: row.updated_at
+ 538:                     }}]->(target)
+ 539:                     RETURN count(r) AS created
+ 540:                     """
+ 541:                     result = await tx.run(query, rows=rows)
+ 542:                     record = await result.single()
+ 543:                     return record["created"] if record else 0
+ 544: 
+ 545:                 async with driver.session(database=self._database) as session:
+ 546:                     created = await session.execute_write(_create_batch)
+ 547:                     total_created += created
+ 548: 
+ 549:         logger.debug(f"Batch created {total_created} relationships")
+ 550:         return total_created
+ 551: 
+ 552:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
+ 553:         """Convert a Neo4j node to a domain Entity."""
+ 554:         return Entity(
+ 555:             id=UUID(node["id"]),
+ 556:             namespace_id=UUID(node["namespace_id"]),
+ 557:             name=node["name"],
+ 558:             entity_type=(
+ 559:                 EntityType(node["entity_type"])
+ 560:                 if node["entity_type"] in EntityType.__members__
+ 561:                 else node["entity_type"]
+ 562:             ),
+ 563:             description=node.get("description", ""),
+ 564:             attributes=_deserialize_dict(node.get("attributes")),
+ 565:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+ 566:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+ 567:             mention_count=node.get("mention_count", 1),
+ 568:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
+ 569:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
+ 570:             confidence=node.get("confidence", 1.0),
+ 571:             metadata=_deserialize_dict(node.get("metadata")),
+ 572:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+ 573:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+ 574:         )
+ 575: 
+ 576:     # =========================================================================
+ 577:     # Relationship operations
+ 578:     # =========================================================================
+ 579: 
+ 580:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+ 581:         """Create a relationship between entities."""
+ 582:         driver = self._get_driver()
+ 583: 
+ 584:         rel_type = _sanitize_neo4j_label(
+ 585:             relationship.relationship_type.value
+ 586:             if isinstance(relationship.relationship_type, RelationshipType)
+ 587:             else relationship.relationship_type
+ 588:         )
+ 589: 
+ 590:         async def _create(tx: AsyncManagedTransaction) -> None:
+ 591:             # Use dynamic relationship type
+ 592:             query = f"""
+ 593:             MATCH (source:Entity {{id: $source_id}})
+ 594:             MATCH (target:Entity {{id: $target_id}})
+ 595:             CREATE (source)-[r:{rel_type} {{
+ 596:                 id: $id,
+ 597:                 namespace_id: $namespace_id,
+ 598:                 description: $description,
+ 599:                 properties: $properties,
+ 600:                 source_document_ids: $source_document_ids,
+ 601:                 source_chunk_ids: $source_chunk_ids,
+ 602:                 valid_from: $valid_from,
+ 603:                 valid_until: $valid_until,
+ 604:                 confidence: $confidence,
+ 605:                 weight: $weight,
+ 606:                 metadata: $metadata,
+ 607:                 created_at: $created_at,
+ 608:                 updated_at: $updated_at
+ 609:             }}]->(target)
+ 610:             """
+ 611:             await tx.run(
+ 612:                 query,
+ 613:                 source_id=str(relationship.source_entity_id),
+ 614:                 target_id=str(relationship.target_entity_id),
+ 615:                 id=str(relationship.id),
+ 616:                 namespace_id=str(relationship.namespace_id),
+ 617:                 description=relationship.description,
+ 618:                 properties=_serialize_dict(relationship.properties),
+ 619:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
+ 620:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
+ 621:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
+ 622:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
+ 623:                 confidence=relationship.confidence,
+ 624:                 weight=relationship.weight,
+ 625:                 metadata=_serialize_dict(relationship.metadata),
+ 626:                 created_at=relationship.created_at.isoformat(),
+ 627:                 updated_at=relationship.updated_at.isoformat(),
  628:             )
- 629:             record = await result.single()
- 630:             if record:
- 631:                 return self._record_to_relationship(
- 632:                     record["r"],
- 633:                     record["source_id"],
- 634:                     record["target_id"],
- 635:                     record["rel_type"],
- 636:                 )
- 637:             return None
+ 629: 
+ 630:         async with driver.session(database=self._database) as session:
+ 631:             await session.execute_write(_create)
+ 632: 
+ 633:         return relationship
+ 634: 
+ 635:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+ 636:         """Get a relationship by ID."""
+ 637:         driver = self._get_driver()
  638: 
- 639:     async def delete_relationship(self, relationship_id: UUID) -> bool:
- 640:         """Delete a relationship."""
- 641:         driver = self._get_driver()
- 642: 
- 643:         async def _delete(tx: AsyncManagedTransaction) -> int:
- 644:             result = await tx.run(
- 645:                 """
- 646:                 MATCH ()-[r {id: $id}]->()
- 647:                 DELETE r
- 648:                 RETURN count(r) as deleted
- 649:                 """,
- 650:                 id=str(relationship_id),
- 651:             )
- 652:             record = await result.single()
- 653:             return record["deleted"] if record else 0
- 654: 
- 655:         async with driver.session(database=self._database) as session:
- 656:             deleted = await session.execute_write(_delete)
- 657:             return deleted > 0
- 658: 
- 659:     async def get_entity_relationships(
- 660:         self,
- 661:         entity_id: UUID,
- 662:         *,
- 663:         direction: str = "both",
- 664:         relationship_types: list[str] | None = None,
- 665:         limit: int = 100,
- 666:     ) -> list[Relationship]:
- 667:         """Get relationships for an entity."""
- 668:         driver = self._get_driver()
- 669: 
- 670:         # Build relationship type filter
- 671:         rel_filter = ""
- 672:         if relationship_types:
- 673:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
- 674: 
- 675:         # Build direction query
- 676:         if direction == "outgoing":
- 677:             pattern = f"(e)-[r{rel_filter}]->(other)"
- 678:         elif direction == "incoming":
- 679:             pattern = f"(other)-[r{rel_filter}]->(e)"
- 680:         else:  # both
- 681:             pattern = f"(e)-[r{rel_filter}]-(other)"
- 682: 
- 683:         query = f"""
- 684:         MATCH {pattern}
- 685:         WHERE e.id = $entity_id
- 686:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
- 687:         LIMIT $limit
- 688:         """
- 689: 
- 690:         async with driver.session(database=self._database) as session:
- 691:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
- 692:             records = await result.data()
- 693:             return [
- 694:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
- 695:             ]
- 696: 
- 697:     def _record_to_relationship(
- 698:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
- 699:     ) -> Relationship:
- 700:         """Convert a Neo4j relationship to a domain Relationship."""
- 701:         return Relationship(
- 702:             id=UUID(rel["id"]),
- 703:             namespace_id=UUID(rel["namespace_id"]),
- 704:             source_entity_id=UUID(source_id),
- 705:             target_entity_id=UUID(target_id),
- 706:             relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
- 707:             description=rel.get("description", ""),
- 708:             properties=_deserialize_dict(rel.get("properties")),
- 709:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
- 710:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
- 711:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
- 712:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
- 713:             confidence=rel.get("confidence", 1.0),
- 714:             weight=rel.get("weight", 1.0),
- 715:             metadata=_deserialize_dict(rel.get("metadata")),
- 716:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
- 717:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
- 718:         )
- 719: 
- 720:     async def list_relationships(
- 721:         self,
- 722:         namespace_id: UUID,
- 723:         *,
- 724:         relationship_type: str | None = None,
- 725:         limit: int = 1000,
- 726:         offset: int = 0,
- 727:     ) -> list[Relationship]:
- 728:         """List all relationships in a namespace."""
- 729:         driver = self._get_driver()
- 730: 
- 731:         # Build relationship type filter
- 732:         rel_filter = f":{_sanitize_neo4j_label(relationship_type)}" if relationship_type else ""
- 733: 
- 734:         query = f"""
- 735:         MATCH (source)-[r{rel_filter}]->(target)
- 736:         WHERE r.namespace_id = $namespace_id
- 737:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
- 738:         ORDER BY r.created_at DESC
- 739:         SKIP $offset
- 740:         LIMIT $limit
- 741:         """
- 742: 
- 743:         async with driver.session(database=self._database) as session:
- 744:             result = await session.run(
- 745:                 query,
- 746:                 namespace_id=str(namespace_id),
- 747:                 offset=offset,
- 748:                 limit=limit,
- 749:             )
- 750:             records = await result.data()
- 751:             return [
- 752:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
- 753:                 for r in records
- 754:             ]
- 755: 
- 756:     # =========================================================================
- 757:     # Episode operations
- 758:     # =========================================================================
- 759: 
- 760:     async def create_episode(self, episode: Episode) -> Episode:
- 761:         """Create an episode node."""
- 762:         driver = self._get_driver()
- 763: 
- 764:         async def _create(tx: AsyncManagedTransaction) -> None:
- 765:             query = """
- 766:             CREATE (ep:Episode {
- 767:                 id: $id,
- 768:                 namespace_id: $namespace_id,
- 769:                 name: $name,
- 770:                 description: $description,
- 771:                 occurred_at: $occurred_at,
- 772:                 duration_seconds: $duration_seconds,
- 773:                 entity_ids: $entity_ids,
- 774:                 source_document_ids: $source_document_ids,
- 775:                 source_chunk_ids: $source_chunk_ids,
- 776:                 metadata: $metadata,
- 777:                 created_at: $created_at,
- 778:                 updated_at: $updated_at
- 779:             })
- 780:             """
- 781:             await tx.run(
- 782:                 query,
- 783:                 id=str(episode.id),
- 784:                 namespace_id=str(episode.namespace_id),
- 785:                 name=episode.name,
- 786:                 description=episode.description,
- 787:                 occurred_at=episode.occurred_at.isoformat(),
- 788:                 duration_seconds=episode.duration_seconds,
- 789:                 entity_ids=[str(e) for e in episode.entity_ids],
- 790:                 source_document_ids=[str(d) for d in episode.source_document_ids],
- 791:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
- 792:                 metadata=_serialize_dict(episode.metadata),
- 793:                 created_at=episode.created_at.isoformat(),
- 794:                 updated_at=episode.updated_at.isoformat(),
- 795:             )
- 796: 
- 797:             # Create links to entities
- 798:             if episode.entity_ids:
- 799:                 link_query = """
- 800:                 MATCH (ep:Episode {id: $episode_id})
- 801:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
- 802:                 CREATE (ep)-[:INVOLVES]->(e)
- 803:                 """
- 804:                 await tx.run(
- 805:                     link_query,
- 806:                     episode_id=str(episode.id),
- 807:                     entity_ids=[str(e) for e in episode.entity_ids],
- 808:                 )
- 809: 
- 810:         async with driver.session(database=self._database) as session:
- 811:             await session.execute_write(_create)
- 812: 
- 813:         return episode
+ 639:         async with driver.session(database=self._database) as session:
+ 640:             result = await session.run(
+ 641:                 """
+ 642:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
+ 643:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+ 644:                 """,
+ 645:                 id=str(relationship_id),
+ 646:             )
+ 647:             record = await result.single()
+ 648:             if record:
+ 649:                 return self._record_to_relationship(
+ 650:                     record["r"],
+ 651:                     record["source_id"],
+ 652:                     record["target_id"],
+ 653:                     record["rel_type"],
+ 654:                 )
+ 655:             return None
+ 656: 
+ 657:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+ 658:         """Delete a relationship."""
+ 659:         driver = self._get_driver()
+ 660: 
+ 661:         async def _delete(tx: AsyncManagedTransaction) -> int:
+ 662:             result = await tx.run(
+ 663:                 """
+ 664:                 MATCH ()-[r {id: $id}]->()
+ 665:                 DELETE r
+ 666:                 RETURN count(r) as deleted
+ 667:                 """,
+ 668:                 id=str(relationship_id),
+ 669:             )
+ 670:             record = await result.single()
+ 671:             return record["deleted"] if record else 0
+ 672: 
+ 673:         async with driver.session(database=self._database) as session:
+ 674:             deleted = await session.execute_write(_delete)
+ 675:             return deleted > 0
+ 676: 
+ 677:     async def get_entity_relationships(
+ 678:         self,
+ 679:         entity_id: UUID,
+ 680:         *,
+ 681:         direction: str = "both",
+ 682:         relationship_types: list[str] | None = None,
+ 683:         limit: int = 100,
+ 684:     ) -> list[Relationship]:
+ 685:         """Get relationships for an entity."""
+ 686:         driver = self._get_driver()
+ 687: 
+ 688:         # Build relationship type filter
+ 689:         rel_filter = ""
+ 690:         if relationship_types:
+ 691:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
+ 692: 
+ 693:         # Build direction query
+ 694:         if direction == "outgoing":
+ 695:             pattern = f"(e)-[r{rel_filter}]->(other)"
+ 696:         elif direction == "incoming":
+ 697:             pattern = f"(other)-[r{rel_filter}]->(e)"
+ 698:         else:  # both
+ 699:             pattern = f"(e)-[r{rel_filter}]-(other)"
+ 700: 
+ 701:         query = f"""
+ 702:         MATCH {pattern}
+ 703:         WHERE e.id = $entity_id
+ 704:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
+ 705:         LIMIT $limit
+ 706:         """
+ 707: 
+ 708:         async with driver.session(database=self._database) as session:
+ 709:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
+ 710:             records = await result.data()
+ 711:             return [
+ 712:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+ 713:             ]
+ 714: 
+ 715:     def _record_to_relationship(
+ 716:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
+ 717:     ) -> Relationship:
+ 718:         """Convert a Neo4j relationship to a domain Relationship."""
+ 719:         return Relationship(
+ 720:             id=UUID(rel["id"]),
+ 721:             namespace_id=UUID(rel["namespace_id"]),
+ 722:             source_entity_id=UUID(source_id),
+ 723:             target_entity_id=UUID(target_id),
+ 724:             relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
+ 725:             description=rel.get("description", ""),
+ 726:             properties=_deserialize_dict(rel.get("properties")),
+ 727:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
+ 728:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
+ 729:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
+ 730:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
+ 731:             confidence=rel.get("confidence", 1.0),
+ 732:             weight=rel.get("weight", 1.0),
+ 733:             metadata=_deserialize_dict(rel.get("metadata")),
+ 734:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
+ 735:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
+ 736:         )
+ 737: 
+ 738:     async def list_relationships(
+ 739:         self,
+ 740:         namespace_id: UUID,
+ 741:         *,
+ 742:         relationship_type: str | None = None,
+ 743:         limit: int = 1000,
+ 744:         offset: int = 0,
+ 745:     ) -> list[Relationship]:
+ 746:         """List all relationships in a namespace."""
+ 747:         driver = self._get_driver()
+ 748: 
+ 749:         # Build relationship type filter
+ 750:         rel_filter = f":{_sanitize_neo4j_label(relationship_type)}" if relationship_type else ""
+ 751: 
+ 752:         query = f"""
+ 753:         MATCH (source)-[r{rel_filter}]->(target)
+ 754:         WHERE r.namespace_id = $namespace_id
+ 755:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
+ 756:         ORDER BY r.created_at DESC
+ 757:         SKIP $offset
+ 758:         LIMIT $limit
+ 759:         """
+ 760: 
+ 761:         async with driver.session(database=self._database) as session:
+ 762:             result = await session.run(
+ 763:                 query,
+ 764:                 namespace_id=str(namespace_id),
+ 765:                 offset=offset,
+ 766:                 limit=limit,
+ 767:             )
+ 768:             records = await result.data()
+ 769:             return [
+ 770:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
+ 771:                 for r in records
+ 772:             ]
+ 773: 
+ 774:     # =========================================================================
+ 775:     # Episode operations
+ 776:     # =========================================================================
+ 777: 
+ 778:     async def create_episode(self, episode: Episode) -> Episode:
+ 779:         """Create an episode node."""
+ 780:         driver = self._get_driver()
+ 781: 
+ 782:         async def _create(tx: AsyncManagedTransaction) -> None:
+ 783:             query = """
+ 784:             CREATE (ep:Episode {
+ 785:                 id: $id,
+ 786:                 namespace_id: $namespace_id,
+ 787:                 name: $name,
+ 788:                 description: $description,
+ 789:                 occurred_at: $occurred_at,
+ 790:                 duration_seconds: $duration_seconds,
+ 791:                 entity_ids: $entity_ids,
+ 792:                 source_document_ids: $source_document_ids,
+ 793:                 source_chunk_ids: $source_chunk_ids,
+ 794:                 metadata: $metadata,
+ 795:                 created_at: $created_at,
+ 796:                 updated_at: $updated_at
+ 797:             })
+ 798:             """
+ 799:             await tx.run(
+ 800:                 query,
+ 801:                 id=str(episode.id),
+ 802:                 namespace_id=str(episode.namespace_id),
+ 803:                 name=episode.name,
+ 804:                 description=episode.description,
+ 805:                 occurred_at=episode.occurred_at.isoformat(),
+ 806:                 duration_seconds=episode.duration_seconds,
+ 807:                 entity_ids=[str(e) for e in episode.entity_ids],
+ 808:                 source_document_ids=[str(d) for d in episode.source_document_ids],
+ 809:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
+ 810:                 metadata=_serialize_dict(episode.metadata),
+ 811:                 created_at=episode.created_at.isoformat(),
+ 812:                 updated_at=episode.updated_at.isoformat(),
+ 813:             )
  814: 
- 815:     async def get_episode(self, episode_id: UUID) -> Episode | None:
- 816:         """Get an episode by ID."""
- 817:         driver = self._get_driver()
- 818: 
- 819:         async with driver.session(database=self._database) as session:
- 820:             result = await session.run(
- 821:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
- 822:                 id=str(episode_id),
- 823:             )
- 824:             record = await result.single()
- 825:             if record:
- 826:                 return self._record_to_episode(record["ep"])
- 827:             return None
- 828: 
- 829:     async def list_episodes(
- 830:         self,
- 831:         namespace_id: UUID,
- 832:         *,
- 833:         start_time: datetime | None = None,
- 834:         end_time: datetime | None = None,
- 835:         limit: int = 100,
- 836:     ) -> list[Episode]:
- 837:         """List episodes in a time range."""
- 838:         driver = self._get_driver()
- 839: 
- 840:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
- 841:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
- 842:         conditions = []
- 843: 
- 844:         if start_time:
- 845:             conditions.append("ep.occurred_at >= $start_time")
- 846:             params["start_time"] = start_time.isoformat()
- 847:         if end_time:
- 848:             conditions.append("ep.occurred_at <= $end_time")
- 849:             params["end_time"] = end_time.isoformat()
- 850: 
- 851:         if conditions:
- 852:             query += " WHERE " + " AND ".join(conditions)
- 853: 
- 854:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
- 855:         params["limit"] = limit
- 856: 
- 857:         async with driver.session(database=self._database) as session:
- 858:             result = await session.run(query, **params)
- 859:             records = await result.data()
- 860:             return [self._record_to_episode(r["ep"]) for r in records]
+ 815:             # Create links to entities
+ 816:             if episode.entity_ids:
+ 817:                 link_query = """
+ 818:                 MATCH (ep:Episode {id: $episode_id})
+ 819:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
+ 820:                 CREATE (ep)-[:INVOLVES]->(e)
+ 821:                 """
+ 822:                 await tx.run(
+ 823:                     link_query,
+ 824:                     episode_id=str(episode.id),
+ 825:                     entity_ids=[str(e) for e in episode.entity_ids],
+ 826:                 )
+ 827: 
+ 828:         async with driver.session(database=self._database) as session:
+ 829:             await session.execute_write(_create)
+ 830: 
+ 831:         return episode
+ 832: 
+ 833:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+ 834:         """Get an episode by ID."""
+ 835:         driver = self._get_driver()
+ 836: 
+ 837:         async with driver.session(database=self._database) as session:
+ 838:             result = await session.run(
+ 839:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
+ 840:                 id=str(episode_id),
+ 841:             )
+ 842:             record = await result.single()
+ 843:             if record:
+ 844:                 return self._record_to_episode(record["ep"])
+ 845:             return None
+ 846: 
+ 847:     async def list_episodes(
+ 848:         self,
+ 849:         namespace_id: UUID,
+ 850:         *,
+ 851:         start_time: datetime | None = None,
+ 852:         end_time: datetime | None = None,
+ 853:         limit: int = 100,
+ 854:     ) -> list[Episode]:
+ 855:         """List episodes in a time range."""
+ 856:         driver = self._get_driver()
+ 857: 
+ 858:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
+ 859:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+ 860:         conditions = []
  861: 
- 862:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
- 863:         """Convert a Neo4j node to a domain Episode."""
- 864:         return Episode(
- 865:             id=UUID(node["id"]),
- 866:             namespace_id=UUID(node["namespace_id"]),
- 867:             name=node["name"],
- 868:             description=node.get("description", ""),
- 869:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
- 870:             duration_seconds=node.get("duration_seconds"),
- 871:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
- 872:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
- 873:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
- 874:             metadata=_deserialize_dict(node.get("metadata")),
- 875:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
- 876:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
- 877:         )
- 878: 
- 879:     # =========================================================================
- 880:     # Graph traversal
- 881:     # =========================================================================
- 882: 
- 883:     async def find_paths(
- 884:         self,
- 885:         namespace_id: UUID,
- 886:         source_entity_id: UUID,
- 887:         target_entity_id: UUID,
- 888:         *,
- 889:         max_depth: int = 3,
- 890:         relationship_types: list[str] | None = None,
- 891:     ) -> list[list[dict[str, Any]]]:
- 892:         """Find paths between two entities."""
- 893:         driver = self._get_driver()
- 894: 
- 895:         rel_filter = ""
- 896:         if relationship_types:
- 897:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
- 898: 
- 899:         query = f"""
- 900:         MATCH path = shortestPath(
- 901:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
- 902:         )
- 903:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
- 904:         RETURN path
- 905:         LIMIT 10
- 906:         """
- 907: 
- 908:         async with driver.session(database=self._database) as session:
- 909:             result = await session.run(
- 910:                 query,
- 911:                 source_id=str(source_entity_id),
- 912:                 target_id=str(target_entity_id),
- 913:                 namespace_id=str(namespace_id),
- 914:             )
- 915:             records = await result.data()
+ 862:         if start_time:
+ 863:             conditions.append("ep.occurred_at >= $start_time")
+ 864:             params["start_time"] = start_time.isoformat()
+ 865:         if end_time:
+ 866:             conditions.append("ep.occurred_at <= $end_time")
+ 867:             params["end_time"] = end_time.isoformat()
+ 868: 
+ 869:         if conditions:
+ 870:             query += " WHERE " + " AND ".join(conditions)
+ 871: 
+ 872:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
+ 873:         params["limit"] = limit
+ 874: 
+ 875:         async with driver.session(database=self._database) as session:
+ 876:             result = await session.run(query, **params)
+ 877:             records = await result.data()
+ 878:             return [self._record_to_episode(r["ep"]) for r in records]
+ 879: 
+ 880:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
+ 881:         """Convert a Neo4j node to a domain Episode."""
+ 882:         return Episode(
+ 883:             id=UUID(node["id"]),
+ 884:             namespace_id=UUID(node["namespace_id"]),
+ 885:             name=node["name"],
+ 886:             description=node.get("description", ""),
+ 887:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
+ 888:             duration_seconds=node.get("duration_seconds"),
+ 889:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
+ 890:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+ 891:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+ 892:             metadata=_deserialize_dict(node.get("metadata")),
+ 893:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+ 894:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+ 895:         )
+ 896: 
+ 897:     # =========================================================================
+ 898:     # Graph traversal
+ 899:     # =========================================================================
+ 900: 
+ 901:     async def find_paths(
+ 902:         self,
+ 903:         namespace_id: UUID,
+ 904:         source_entity_id: UUID,
+ 905:         target_entity_id: UUID,
+ 906:         *,
+ 907:         max_depth: int = 3,
+ 908:         relationship_types: list[str] | None = None,
+ 909:     ) -> list[list[dict[str, Any]]]:
+ 910:         """Find paths between two entities."""
+ 911:         driver = self._get_driver()
+ 912: 
+ 913:         rel_filter = ""
+ 914:         if relationship_types:
+ 915:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
  916: 
- 917:             paths = []
- 918:             for record in records:
- 919:                 path = record["path"]
- 920:                 path_elements = []
- 921:                 for element in path:
- 922:                     if hasattr(element, "items"):  # Node
- 923:                         path_elements.append({"type": "node", "data": _element_to_dict(element)})
- 924:                     else:  # Relationship
- 925:                         path_elements.append({"type": "relationship", "data": _element_to_dict(element)})
- 926:                 paths.append(path_elements)
- 927: 
- 928:             return paths
- 929: 
- 930:     async def get_neighborhood(
- 931:         self,
- 932:         entity_id: UUID,
- 933:         *,
- 934:         depth: int = 1,
- 935:         relationship_types: list[str] | None = None,
- 936:         limit: int = 50,
- 937:     ) -> dict[str, Any]:
- 938:         """Get the neighborhood of an entity up to a certain depth."""
- 939:         driver = self._get_driver()
- 940: 
- 941:         rel_filter = ""
- 942:         if relationship_types:
- 943:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
- 944: 
- 945:         query = f"""
- 946:         MATCH (center:Entity {{id: $entity_id}})
- 947:         CALL apoc.path.subgraphAll(center, {{
- 948:             maxLevel: {depth},
- 949:             relationshipFilter: '{rel_filter.lstrip(":")}',
- 950:             limit: $limit
- 951:         }})
- 952:         YIELD nodes, relationships
- 953:         RETURN nodes, relationships
- 954:         """
- 955: 
- 956:         # Fallback query if APOC is not available
- 957:         fallback_query = f"""
- 958:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
- 959:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
- 960:         LIMIT $limit
- 961:         """
+ 917:         query = f"""
+ 918:         MATCH path = shortestPath(
+ 919:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+ 920:         )
+ 921:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+ 922:         RETURN path
+ 923:         LIMIT 10
+ 924:         """
+ 925: 
+ 926:         async with driver.session(database=self._database) as session:
+ 927:             result = await session.run(
+ 928:                 query,
+ 929:                 source_id=str(source_entity_id),
+ 930:                 target_id=str(target_entity_id),
+ 931:                 namespace_id=str(namespace_id),
+ 932:             )
+ 933:             records = await result.data()
+ 934: 
+ 935:             paths = []
+ 936:             for record in records:
+ 937:                 path = record["path"]
+ 938:                 path_elements = []
+ 939:                 for element in path:
+ 940:                     if hasattr(element, "items"):  # Node
+ 941:                         path_elements.append({"type": "node", "data": _element_to_dict(element)})
+ 942:                     else:  # Relationship
+ 943:                         path_elements.append({"type": "relationship", "data": _element_to_dict(element)})
+ 944:                 paths.append(path_elements)
+ 945: 
+ 946:             return paths
+ 947: 
+ 948:     async def get_neighborhood(
+ 949:         self,
+ 950:         entity_id: UUID,
+ 951:         *,
+ 952:         depth: int = 1,
+ 953:         relationship_types: list[str] | None = None,
+ 954:         limit: int = 50,
+ 955:     ) -> dict[str, Any]:
+ 956:         """Get the neighborhood of an entity up to a certain depth."""
+ 957:         driver = self._get_driver()
+ 958: 
+ 959:         rel_filter = ""
+ 960:         if relationship_types:
+ 961:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
  962: 
- 963:         async with driver.session(database=self._database) as session:
- 964:             try:
- 965:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
- 966:                 record = await result.single()
- 967:             except Exception:
- 968:                 # Fallback if APOC not available
- 969:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
- 970:                 record = await result.single()
- 971: 
- 972:             if record:
- 973:                 nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
- 974:                 relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
- 975:                 return {"entities": nodes, "relationships": relationships}
- 976: 
- 977:             return {"entities": [], "relationships": []}
- 978: 
- 979:     async def get_neighborhoods_batch(
- 980:         self,
- 981:         entity_ids: list[UUID],
- 982:         *,
- 983:         depth: int = 1,
- 984:         relationship_types: list[str] | None = None,
- 985:         limit_per_entity: int = 20,
- 986:     ) -> dict[UUID, dict[str, Any]]:
- 987:         """Get neighborhoods for multiple entities in parallel.
- 988: 
- 989:         Args:
- 990:             entity_ids: List of entity IDs
- 991:             depth: Max traversal depth
- 992:             relationship_types: Optional relationship type filter
- 993:             limit_per_entity: Max nodes per entity neighborhood
+ 963:         query = f"""
+ 964:         MATCH (center:Entity {{id: $entity_id}})
+ 965:         CALL apoc.path.subgraphAll(center, {{
+ 966:             maxLevel: {depth},
+ 967:             relationshipFilter: '{rel_filter.lstrip(":")}',
+ 968:             limit: $limit
+ 969:         }})
+ 970:         YIELD nodes, relationships
+ 971:         RETURN nodes, relationships
+ 972:         """
+ 973: 
+ 974:         # Fallback query if APOC is not available
+ 975:         fallback_query = f"""
+ 976:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+ 977:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+ 978:         LIMIT $limit
+ 979:         """
+ 980: 
+ 981:         async with driver.session(database=self._database) as session:
+ 982:             try:
+ 983:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
+ 984:                 record = await result.single()
+ 985:             except Exception:
+ 986:                 # Fallback if APOC not available
+ 987:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
+ 988:                 record = await result.single()
+ 989: 
+ 990:             if record:
+ 991:                 nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
+ 992:                 relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
+ 993:                 return {"entities": nodes, "relationships": relationships}
  994: 
- 995:         Returns:
- 996:             Dictionary mapping entity ID to neighborhood data
- 997:         """
- 998:         if not entity_ids:
- 999:             return {}
-1000: 
-1001:         driver = self._get_driver()
-1002:         id_strings = [str(eid) for eid in entity_ids]
-1003: 
-1004:         rel_filter = ""
-1005:         if relationship_types:
-1006:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
-1007: 
-1008:         # Use UNWIND to process all entities in a single query
-1009:         query = f"""
-1010:         UNWIND $entity_ids AS eid
-1011:         MATCH (center:Entity {{id: eid}})
-1012:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-1013:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
-1014:         RETURN eid, neighbors, rels
+ 995:             return {"entities": [], "relationships": []}
+ 996: 
+ 997:     async def get_neighborhoods_batch(
+ 998:         self,
+ 999:         entity_ids: list[UUID],
+1000:         *,
+1001:         depth: int = 1,
+1002:         relationship_types: list[str] | None = None,
+1003:         limit_per_entity: int = 20,
+1004:     ) -> dict[UUID, dict[str, Any]]:
+1005:         """Get neighborhoods for multiple entities in parallel.
+1006: 
+1007:         Args:
+1008:             entity_ids: List of entity IDs
+1009:             depth: Max traversal depth
+1010:             relationship_types: Optional relationship type filter
+1011:             limit_per_entity: Max nodes per entity neighborhood
+1012: 
+1013:         Returns:
+1014:             Dictionary mapping entity ID to neighborhood data
 1015:         """
-1016: 
-1017:         async with driver.session(database=self._database) as session:
-1018:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
-1019:             records = await result.data()
-1020: 
-1021:             neighborhoods = {}
-1022:             for record in records:
-1023:                 eid = UUID(record["eid"])
-1024:                 nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
-1025:                 relationships = []
-1026:                 for rel_list in record.get("rels") or []:
-1027:                     if rel_list:
-1028:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
-1029:                             if r:
-1030:                                 relationships.append(_element_to_dict(r))
-1031:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
-1032: 
-1033:             return neighborhoods
+1016:         if not entity_ids:
+1017:             return {}
+1018: 
+1019:         driver = self._get_driver()
+1020:         id_strings = [str(eid) for eid in entity_ids]
+1021: 
+1022:         rel_filter = ""
+1023:         if relationship_types:
+1024:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
+1025: 
+1026:         # Use UNWIND to process all entities in a single query
+1027:         query = f"""
+1028:         UNWIND $entity_ids AS eid
+1029:         MATCH (center:Entity {{id: eid}})
+1030:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+1031:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+1032:         RETURN eid, neighbors, rels
+1033:         """
 1034: 
-1035:     async def search_entities_by_attribute(
-1036:         self,
-1037:         namespace_id: UUID,
-1038:         attribute_name: str,
-1039:         attribute_value: Any,
-1040:         *,
-1041:         limit: int = 100,
-1042:     ) -> list[Entity]:
-1043:         """Search entities by attribute value."""
-1044:         driver = self._get_driver()
-1045: 
-1046:         query = """
-1047:         MATCH (e:Entity {namespace_id: $namespace_id})
-1048:         WHERE e.attributes[$attribute_name] = $attribute_value
-1049:         RETURN e
-1050:         LIMIT $limit
-1051:         """
+1035:         async with driver.session(database=self._database) as session:
+1036:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+1037:             records = await result.data()
+1038: 
+1039:             neighborhoods = {}
+1040:             for record in records:
+1041:                 eid = UUID(record["eid"])
+1042:                 nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
+1043:                 relationships = []
+1044:                 for rel_list in record.get("rels") or []:
+1045:                     if rel_list:
+1046:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+1047:                             if r:
+1048:                                 relationships.append(_element_to_dict(r))
+1049:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+1050: 
+1051:             return neighborhoods
 1052: 
-1053:         async with driver.session(database=self._database) as session:
-1054:             result = await session.run(
-1055:                 query,
-1056:                 namespace_id=str(namespace_id),
-1057:                 attribute_name=attribute_name,
-1058:                 attribute_value=attribute_value,
-1059:                 limit=limit,
-1060:             )
-1061:             records = await result.data()
-1062:             return [self._record_to_entity(r["e"]) for r in records]
+1053:     async def search_entities_by_attribute(
+1054:         self,
+1055:         namespace_id: UUID,
+1056:         attribute_name: str,
+1057:         attribute_value: Any,
+1058:         *,
+1059:         limit: int = 100,
+1060:     ) -> list[Entity]:
+1061:         """Search entities by attribute value."""
+1062:         driver = self._get_driver()
+1063: 
+1064:         query = """
+1065:         MATCH (e:Entity {namespace_id: $namespace_id})
+1066:         WHERE e.attributes[$attribute_name] = $attribute_value
+1067:         RETURN e
+1068:         LIMIT $limit
+1069:         """
+1070: 
+1071:         async with driver.session(database=self._database) as session:
+1072:             result = await session.run(
+1073:                 query,
+1074:                 namespace_id=str(namespace_id),
+1075:                 attribute_name=attribute_name,
+1076:                 attribute_value=attribute_value,
+1077:                 limit=limit,
+1078:             )
+1079:             records = await result.data()
+1080:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
 ## File: src/khora/storage/coordinator.py
@@ -44816,442 +44940,6 @@ README.md
 752:         await lake.disconnect()
 ````
 
-## File: src/khora/extraction/expansion/relationship_inferrer.py
-````python
-  1: """Relationship inference from existing graph patterns.
-  2: 
-  3: Infers new relationships based on configurable inference rules
-  4: defined in expertise configuration.
-  5: """
-  6: 
-  7: from __future__ import annotations
-  8: 
-  9: from collections import Counter
- 10: from dataclasses import dataclass, field
- 11: from datetime import UTC, datetime
- 12: from typing import TYPE_CHECKING
- 13: from uuid import UUID, uuid4
- 14: 
- 15: from loguru import logger
- 16: 
- 17: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
- 18: 
- 19: if TYPE_CHECKING:
- 20:     from khora.core.models import Entity, Relationship
- 21:     from khora.extraction.skills import ExpertiseConfig
- 22: 
- 23: 
- 24: @dataclass
- 25: class InferredRelationship:
- 26:     """An inferred relationship from rule evaluation."""
- 27: 
- 28:     source_entity_id: UUID
- 29:     target_entity_id: UUID
- 30:     relationship_type: str
- 31:     description: str = ""
- 32:     confidence: float = 0.5
- 33:     rule_name: str = ""  # Name of inference rule that created this
- 34:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
- 35: 
- 36: 
- 37: class RelationshipInferrer:
- 38:     """Infers new relationships based on existing graph patterns.
- 39: 
- 40:     Uses inference rules from expertise configuration to deduce
- 41:     relationships that aren't explicitly stated but can be inferred
- 42:     from existing relationships.
- 43: 
- 44:     Example inference rules:
- 45:     - If A manages B and B works on project C, A is stakeholder of C
- 46:     - If person P is mentioned in channel for project X, P is involved in X
- 47:     - If PR author and reviewer work on same PR, they collaborate
- 48:     """
- 49: 
- 50:     def __init__(
- 51:         self,
- 52:         expertise: ExpertiseConfig | None = None,
- 53:         *,
- 54:         min_confidence: float = 0.3,
- 55:         max_inferences_per_rule: int = 500,
- 56:     ) -> None:
- 57:         """Initialize the relationship inferrer.
- 58: 
- 59:         Args:
- 60:             expertise: ExpertiseConfig with inference rules
- 61:             min_confidence: Minimum confidence for inferred relationships
- 62:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
- 63:         """
- 64:         self._expertise = expertise
- 65:         self._min_confidence = min_confidence
- 66:         self._max_inferences_per_rule = max_inferences_per_rule
- 67:         self._rule_engine = RuleEngine(expertise)
- 68: 
- 69:     def infer(
- 70:         self,
- 71:         entities: list[Entity],
- 72:         relationships: list[Relationship],
- 73:         *,
- 74:         depth: int = 1,
- 75:     ) -> list[InferredRelationship]:
- 76:         """Infer new relationships from existing graph.
- 77: 
- 78:         Args:
- 79:             entities: Existing entities
- 80:             relationships: Existing relationships
- 81:             depth: Number of inference passes (for transitive inference)
- 82: 
- 83:         Returns:
- 84:             List of inferred relationships
- 85:         """
- 86:         if not self._expertise or not self._expertise.inference_rules:
- 87:             logger.debug("No expertise or inference rules configured, skipping inference")
- 88:             return []
- 89: 
- 90:         # Diagnostic logging
- 91:         entity_types = Counter(
- 92:             e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
- 93:         )
- 94:         logger.debug(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
- 95: 
- 96:         rel_types = Counter(
- 97:             r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
- 98:             for r in relationships
- 99:         )
-100:         logger.debug(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
-101: 
-102:         # Detailed pattern diagnostics (debug-only to avoid overhead)
-103:         if logger._core.min_level <= 10:  # DEBUG level
-104:             entity_type_lookup = {
-105:                 e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
-106:             }
-107:             rel_type_patterns: dict[str, Counter] = {}
-108:             for r in relationships:
-109:                 rt = r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
-110:                 source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
-111:                 target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
-112:                 if rt not in rel_type_patterns:
-113:                     rel_type_patterns[rt] = Counter()
-114:                 rel_type_patterns[rt][f"{source_type}->{target_type}"] += 1
-115: 
-116:             for rel_type, patterns in rel_type_patterns.items():
-117:                 logger.debug(f"  {rel_type} patterns: {dict(patterns.most_common(5))}")
-118: 
-119:         # Check rule compatibility (log mismatches as warnings)
-120:         expected_rels = set()
-121:         expected_entities = set()
-122:         for rule in self._expertise.inference_rules:
-123:             for cond in rule.when:
-124:                 if hasattr(cond, "relationship"):
-125:                     expected_rels.add(cond.relationship)
-126:                 if hasattr(cond, "source_type"):
-127:                     expected_entities.add(cond.source_type)
-128:                 if hasattr(cond, "target_type"):
-129:                     expected_entities.add(cond.target_type)
-130: 
-131:         if expected_rels or expected_entities:
-132:             actual_rel_types = {
-133:                 r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
-134:                 for r in relationships
-135:             }
-136:             actual_entity_types = {
-137:                 e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
-138:             }
-139:             if not (actual_rel_types & expected_rels):
-140:                 logger.debug(
-141:                     f"No relationship type overlap: rules expect {sorted(expected_rels)}, "
-142:                     f"graph has {sorted(actual_rel_types)}"
-143:                 )
-144:             if not (actual_entity_types & expected_entities):
-145:                 logger.debug(
-146:                     f"No entity type overlap: rules expect {sorted(expected_entities)}, "
-147:                     f"graph has {sorted(actual_entity_types)}"
-148:                 )
-149: 
-150:         all_inferred: list[InferredRelationship] = []
-151:         current_relationships = list(relationships)
-152: 
-153:         for pass_num in range(depth):
-154:             # Build context with current state
-155:             context = RuleEvaluationContext.from_data(entities, current_relationships)
-156: 
-157:             # Evaluate inference rules
-158:             matches = self._rule_engine.evaluate_inference_rules(context)
-159:             logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
-160: 
-161:             # Log details of first few matches (debug only, avoids list() overhead)
-162:             if logger._core.min_level <= 10:
-163:                 for i, match in enumerate(matches[:5]):
-164:                     logger.debug(
-165:                         f"  Match {i + 1}: rule={match.rule_name}, "
-166:                         f"confidence={match.confidence:.2f}, "
-167:                         f"metadata_keys={list(match.metadata.keys())}"
-168:                     )
-169: 
-170:             # Convert matches to inferred relationships
-171:             pass_inferred = self._matches_to_relationships(matches, context)
-172:             logger.debug(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
-173: 
-174:             if not pass_inferred:
-175:                 logger.debug(f"Pass {pass_num + 1}: No new inferences, stopping early")
-176:                 break
-177: 
-178:             # Filter out duplicates and already existing relationships
-179:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
-180: 
-181:             if not new_inferred:
-182:                 break
-183: 
-184:             all_inferred.extend(new_inferred)
-185: 
-186:             # Add inferred to current for next pass (as mock relationships)
-187:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
-188: 
-189:             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
-190: 
-191:         logger.debug(f"Inference complete: {len(all_inferred)} total relationships inferred")
-192:         return all_inferred
-193: 
-194:     def infer_from_pattern(
-195:         self,
-196:         entities: list[Entity],
-197:         relationships: list[Relationship],
-198:         pattern: str,
-199:     ) -> list[InferredRelationship]:
-200:         """Infer relationships matching a specific pattern.
-201: 
-202:         Args:
-203:             entities: Existing entities
-204:             relationships: Existing relationships
-205:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
-206: 
-207:         Returns:
-208:             List of inferred relationships
-209:         """
-210:         # Parse pattern and find matches
-211:         # For now, delegate to rule engine
-212:         context = RuleEvaluationContext.from_data(entities, relationships)
-213:         matches = self._rule_engine.evaluate_inference_rules(context)
-214:         return self._matches_to_relationships(matches, context)
-215: 
-216:     def _matches_to_relationships(
-217:         self,
-218:         matches: list[RuleMatch],
-219:         context: RuleEvaluationContext,
-220:     ) -> list[InferredRelationship]:
-221:         """Convert rule matches to inferred relationships."""
-222:         inferred = []
-223:         rule_counts: dict[str, int] = {}
-224: 
-225:         # Diagnostic counters
-226:         filtered_rule_limit = 0
-227:         filtered_confidence = 0
-228:         filtered_entity_resolution = 0
-229:         filtered_self_ref = 0
-230: 
-231:         for match in matches:
-232:             # Check rule limit
-233:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
-234:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
-235:                 filtered_rule_limit += 1
-236:                 continue
-237: 
-238:             # Check confidence threshold
-239:             if match.confidence < self._min_confidence:
-240:                 filtered_confidence += 1
-241:                 continue
-242: 
-243:             # Resolve source and target from metadata
-244:             source_entity, target_entity = self._resolve_inference_entities(match, context)
-245: 
-246:             if not source_entity or not target_entity:
-247:                 filtered_entity_resolution += 1
-248:                 continue
-249: 
-250:             # Skip self-referential
-251:             if source_entity.id == target_entity.id:
-252:                 filtered_self_ref += 1
-253:                 continue
-254: 
-255:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
-256: 
-257:             inferred.append(
-258:                 InferredRelationship(
-259:                     source_entity_id=source_entity.id,
-260:                     target_entity_id=target_entity.id,
-261:                     relationship_type=relationship_type,
-262:                     description=f"Inferred by rule: {match.rule_name}",
-263:                     confidence=match.confidence,
-264:                     rule_name=match.rule_name,
-265:                     evidence=[r.id for r in match.matched_relationships],
-266:                 )
-267:             )
-268: 
-269:         # Log filtering breakdown
-270:         total_filtered = filtered_rule_limit + filtered_confidence + filtered_entity_resolution + filtered_self_ref
-271:         if total_filtered > 0 or len(matches) > 0:
-272:             logger.debug(
-273:                 f"Match filtering: {len(matches)} input -> {len(inferred)} output | "
-274:                 f"rule_limit={filtered_rule_limit}, confidence={filtered_confidence}, "
-275:                 f"entity_resolution={filtered_entity_resolution}, self_ref={filtered_self_ref}"
-276:             )
-277: 
-278:         return inferred
-279: 
-280:     def _resolve_inference_entities(
-281:         self,
-282:         match: RuleMatch,
-283:         context: RuleEvaluationContext,
-284:     ) -> tuple[Entity | None, Entity | None]:
-285:         """Resolve source and target entities from match metadata.
-286: 
-287:         The then_source and then_target specify which entity to use:
-288:         - "first.source": Source entity of first matched relationship
-289:         - "first.target": Target entity of first matched relationship
-290:         - "second.source": Source entity of second matched relationship
-291:         - "second.target": Target entity of second matched relationship
-292:         """
-293:         then_source = match.metadata.get("then_source", "first.source")
-294:         then_target = match.metadata.get("then_target", "second.target")
-295: 
-296:         first = match.metadata.get("first", {})
-297:         second = match.metadata.get("second", {})
-298: 
-299:         def resolve_ref(ref: str) -> Entity | None:
-300:             parts = ref.split(".")
-301:             if len(parts) != 2:
-302:                 return None
-303: 
-304:             group, position = parts
-305:             if group == "first":
-306:                 data = first
-307:             elif group == "second":
-308:                 data = second
-309:             else:
-310:                 logger.warning(
-311:                     f"Rule '{match.rule_name}': invalid reference '{ref}' " f"(only 'first'/'second' supported)"
-312:                 )
-313:                 return None
-314: 
-315:             return data.get(position)
-316: 
-317:         source = resolve_ref(then_source)
-318:         target = resolve_ref(then_target)
-319: 
-320:         return source, target
-321: 
-322:     def _filter_duplicates(
-323:         self,
-324:         new_inferred: list[InferredRelationship],
-325:         existing_relationships: list[Relationship],
-326:         already_inferred: list[InferredRelationship],
-327:     ) -> list[InferredRelationship]:
-328:         """Filter out duplicate inferences."""
-329:         # Build set of existing relationship keys
-330:         existing_keys: set[tuple[UUID, UUID, str]] = set()
-331: 
-332:         for rel in existing_relationships:
-333:             rel_type = str(
-334:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-335:             )
-336:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
-337: 
-338:         for inf in already_inferred:
-339:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
-340: 
-341:         # Filter new inferences
-342:         filtered = []
-343:         for inf in new_inferred:
-344:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
-345:             if key not in existing_keys:
-346:                 filtered.append(inf)
-347:                 existing_keys.add(key)
-348: 
-349:         return filtered
-350: 
-351:     def _to_mock_relationships(
-352:         self,
-353:         inferred: list[InferredRelationship],
-354:         entities: list[Entity],
-355:     ) -> list[Relationship]:
-356:         """Convert inferred relationships to mock Relationship objects for next pass."""
-357:         from khora.core.models import Relationship
-358:         from khora.core.models.entity import RelationshipType
-359: 
-360:         mock_rels = []
-361:         # Get namespace from first entity if available
-362:         namespace_id = entities[0].namespace_id if entities else uuid4()
-363: 
-364:         for inf in inferred:
-365:             # Preserve original type string for domain-specific types
-366:             try:
-367:                 rel_type: RelationshipType | str = RelationshipType[inf.relationship_type]
-368:             except (KeyError, AttributeError):
-369:                 rel_type = inf.relationship_type
-370: 
-371:             mock_rels.append(
-372:                 Relationship(
-373:                     id=uuid4(),
-374:                     namespace_id=namespace_id,
-375:                     source_entity_id=inf.source_entity_id,
-376:                     target_entity_id=inf.target_entity_id,
-377:                     relationship_type=rel_type,
-378:                     description=inf.description,
-379:                     properties={},
-380:                     source_document_ids=[],
-381:                     source_chunk_ids=[],
-382:                     confidence=inf.confidence,
-383:                     metadata={"inferred": True, "rule": inf.rule_name},
-384:                     created_at=datetime.now(UTC),
-385:                     updated_at=datetime.now(UTC),
-386:                 )
-387:             )
-388: 
-389:         return mock_rels
-390: 
-391: 
-392: def to_relationship(
-393:     inferred: InferredRelationship,
-394:     namespace_id: UUID,
-395: ) -> Relationship:
-396:     """Convert an InferredRelationship to a domain Relationship model.
-397: 
-398:     Args:
-399:         inferred: The inferred relationship to convert
-400:         namespace_id: Namespace ID for the relationship
-401: 
-402:     Returns:
-403:         Domain Relationship model
-404:     """
-405:     from khora.core.models import Relationship
-406:     from khora.core.models.entity import RelationshipType
-407: 
-408:     # Preserve original type string for domain-specific types
-409:     try:
-410:         rel_type: RelationshipType | str = RelationshipType[inferred.relationship_type]
-411:     except (KeyError, AttributeError):
-412:         rel_type = inferred.relationship_type
-413: 
-414:     return Relationship(
-415:         id=uuid4(),
-416:         namespace_id=namespace_id,
-417:         source_entity_id=inferred.source_entity_id,
-418:         target_entity_id=inferred.target_entity_id,
-419:         relationship_type=rel_type,
-420:         description=inferred.description,
-421:         properties={
-422:             "inferred": True,
-423:             "rule_name": inferred.rule_name,
-424:             "evidence": [str(e) for e in inferred.evidence],
-425:         },
-426:         source_document_ids=[],
-427:         source_chunk_ids=[],
-428:         confidence=inferred.confidence,
-429:         metadata={"inferred": True},
-430:         created_at=datetime.now(UTC),
-431:         updated_at=datetime.now(UTC),
-432:     )
-````
-
 ## File: src/khora/config/schema.py
 ````python
   1: """Pydantic configuration models for Khora."""
@@ -45791,6 +45479,442 @@ README.md
 535:                 embedding_dimension=self.storage.embedding_dimension,
 536:             )
 537:         return vector
+````
+
+## File: src/khora/extraction/expansion/relationship_inferrer.py
+````python
+  1: """Relationship inference from existing graph patterns.
+  2: 
+  3: Infers new relationships based on configurable inference rules
+  4: defined in expertise configuration.
+  5: """
+  6: 
+  7: from __future__ import annotations
+  8: 
+  9: from collections import Counter
+ 10: from dataclasses import dataclass, field
+ 11: from datetime import UTC, datetime
+ 12: from typing import TYPE_CHECKING
+ 13: from uuid import UUID, uuid4
+ 14: 
+ 15: from loguru import logger
+ 16: 
+ 17: from .rule_engine import RuleEngine, RuleEvaluationContext, RuleMatch
+ 18: 
+ 19: if TYPE_CHECKING:
+ 20:     from khora.core.models import Entity, Relationship
+ 21:     from khora.extraction.skills import ExpertiseConfig
+ 22: 
+ 23: 
+ 24: @dataclass
+ 25: class InferredRelationship:
+ 26:     """An inferred relationship from rule evaluation."""
+ 27: 
+ 28:     source_entity_id: UUID
+ 29:     target_entity_id: UUID
+ 30:     relationship_type: str
+ 31:     description: str = ""
+ 32:     confidence: float = 0.5
+ 33:     rule_name: str = ""  # Name of inference rule that created this
+ 34:     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
+ 35: 
+ 36: 
+ 37: class RelationshipInferrer:
+ 38:     """Infers new relationships based on existing graph patterns.
+ 39: 
+ 40:     Uses inference rules from expertise configuration to deduce
+ 41:     relationships that aren't explicitly stated but can be inferred
+ 42:     from existing relationships.
+ 43: 
+ 44:     Example inference rules:
+ 45:     - If A manages B and B works on project C, A is stakeholder of C
+ 46:     - If person P is mentioned in channel for project X, P is involved in X
+ 47:     - If PR author and reviewer work on same PR, they collaborate
+ 48:     """
+ 49: 
+ 50:     def __init__(
+ 51:         self,
+ 52:         expertise: ExpertiseConfig | None = None,
+ 53:         *,
+ 54:         min_confidence: float = 0.3,
+ 55:         max_inferences_per_rule: int = 500,
+ 56:     ) -> None:
+ 57:         """Initialize the relationship inferrer.
+ 58: 
+ 59:         Args:
+ 60:             expertise: ExpertiseConfig with inference rules
+ 61:             min_confidence: Minimum confidence for inferred relationships
+ 62:             max_inferences_per_rule: Maximum inferences per rule to prevent explosion
+ 63:         """
+ 64:         self._expertise = expertise
+ 65:         self._min_confidence = min_confidence
+ 66:         self._max_inferences_per_rule = max_inferences_per_rule
+ 67:         self._rule_engine = RuleEngine(expertise)
+ 68: 
+ 69:     def infer(
+ 70:         self,
+ 71:         entities: list[Entity],
+ 72:         relationships: list[Relationship],
+ 73:         *,
+ 74:         depth: int = 1,
+ 75:     ) -> list[InferredRelationship]:
+ 76:         """Infer new relationships from existing graph.
+ 77: 
+ 78:         Args:
+ 79:             entities: Existing entities
+ 80:             relationships: Existing relationships
+ 81:             depth: Number of inference passes (for transitive inference)
+ 82: 
+ 83:         Returns:
+ 84:             List of inferred relationships
+ 85:         """
+ 86:         if not self._expertise or not self._expertise.inference_rules:
+ 87:             logger.debug("No expertise or inference rules configured, skipping inference")
+ 88:             return []
+ 89: 
+ 90:         # Diagnostic logging
+ 91:         entity_types = Counter(
+ 92:             e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
+ 93:         )
+ 94:         logger.debug(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
+ 95: 
+ 96:         rel_types = Counter(
+ 97:             r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+ 98:             for r in relationships
+ 99:         )
+100:         logger.debug(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
+101: 
+102:         # Detailed pattern diagnostics (debug-only to avoid overhead)
+103:         if logger._core.min_level <= 10:  # DEBUG level
+104:             entity_type_lookup = {
+105:                 e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
+106:             }
+107:             rel_type_patterns: dict[str, Counter] = {}
+108:             for r in relationships:
+109:                 rt = r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+110:                 source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
+111:                 target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
+112:                 if rt not in rel_type_patterns:
+113:                     rel_type_patterns[rt] = Counter()
+114:                 rel_type_patterns[rt][f"{source_type}->{target_type}"] += 1
+115: 
+116:             for rel_type, patterns in rel_type_patterns.items():
+117:                 logger.debug(f"  {rel_type} patterns: {dict(patterns.most_common(5))}")
+118: 
+119:         # Check rule compatibility (log mismatches as warnings)
+120:         expected_rels = set()
+121:         expected_entities = set()
+122:         for rule in self._expertise.inference_rules:
+123:             for cond in rule.when:
+124:                 if hasattr(cond, "relationship"):
+125:                     expected_rels.add(cond.relationship)
+126:                 if hasattr(cond, "source_type"):
+127:                     expected_entities.add(cond.source_type)
+128:                 if hasattr(cond, "target_type"):
+129:                     expected_entities.add(cond.target_type)
+130: 
+131:         if expected_rels or expected_entities:
+132:             actual_rel_types = {
+133:                 r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+134:                 for r in relationships
+135:             }
+136:             actual_entity_types = {
+137:                 e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
+138:             }
+139:             if not (actual_rel_types & expected_rels):
+140:                 logger.debug(
+141:                     f"No relationship type overlap: rules expect {sorted(expected_rels)}, "
+142:                     f"graph has {sorted(actual_rel_types)}"
+143:                 )
+144:             if not (actual_entity_types & expected_entities):
+145:                 logger.debug(
+146:                     f"No entity type overlap: rules expect {sorted(expected_entities)}, "
+147:                     f"graph has {sorted(actual_entity_types)}"
+148:                 )
+149: 
+150:         all_inferred: list[InferredRelationship] = []
+151:         current_relationships = list(relationships)
+152: 
+153:         for pass_num in range(depth):
+154:             # Build context with current state
+155:             context = RuleEvaluationContext.from_data(entities, current_relationships)
+156: 
+157:             # Evaluate inference rules
+158:             matches = self._rule_engine.evaluate_inference_rules(context)
+159:             logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
+160: 
+161:             # Log details of first few matches (debug only, avoids list() overhead)
+162:             if logger._core.min_level <= 10:
+163:                 for i, match in enumerate(matches[:5]):
+164:                     logger.debug(
+165:                         f"  Match {i + 1}: rule={match.rule_name}, "
+166:                         f"confidence={match.confidence:.2f}, "
+167:                         f"metadata_keys={list(match.metadata.keys())}"
+168:                     )
+169: 
+170:             # Convert matches to inferred relationships
+171:             pass_inferred = self._matches_to_relationships(matches, context)
+172:             logger.debug(f"Pass {pass_num + 1}: Converted to {len(pass_inferred)} inferred relationships")
+173: 
+174:             if not pass_inferred:
+175:                 logger.debug(f"Pass {pass_num + 1}: No new inferences, stopping early")
+176:                 break
+177: 
+178:             # Filter out duplicates and already existing relationships
+179:             new_inferred = self._filter_duplicates(pass_inferred, current_relationships, all_inferred)
+180: 
+181:             if not new_inferred:
+182:                 break
+183: 
+184:             all_inferred.extend(new_inferred)
+185: 
+186:             # Add inferred to current for next pass (as mock relationships)
+187:             current_relationships.extend(self._to_mock_relationships(new_inferred, entities))
+188: 
+189:             logger.debug(f"Inference pass {pass_num + 1}: {len(new_inferred)} new relationships")
+190: 
+191:         logger.debug(f"Inference complete: {len(all_inferred)} total relationships inferred")
+192:         return all_inferred
+193: 
+194:     def infer_from_pattern(
+195:         self,
+196:         entities: list[Entity],
+197:         relationships: list[Relationship],
+198:         pattern: str,
+199:     ) -> list[InferredRelationship]:
+200:         """Infer relationships matching a specific pattern.
+201: 
+202:         Args:
+203:             entities: Existing entities
+204:             relationships: Existing relationships
+205:             pattern: Pattern to match (e.g., "A -> WORKS_FOR -> B, B -> OWNS -> C")
+206: 
+207:         Returns:
+208:             List of inferred relationships
+209:         """
+210:         # Parse pattern and find matches
+211:         # For now, delegate to rule engine
+212:         context = RuleEvaluationContext.from_data(entities, relationships)
+213:         matches = self._rule_engine.evaluate_inference_rules(context)
+214:         return self._matches_to_relationships(matches, context)
+215: 
+216:     def _matches_to_relationships(
+217:         self,
+218:         matches: list[RuleMatch],
+219:         context: RuleEvaluationContext,
+220:     ) -> list[InferredRelationship]:
+221:         """Convert rule matches to inferred relationships."""
+222:         inferred = []
+223:         rule_counts: dict[str, int] = {}
+224: 
+225:         # Diagnostic counters
+226:         filtered_rule_limit = 0
+227:         filtered_confidence = 0
+228:         filtered_entity_resolution = 0
+229:         filtered_self_ref = 0
+230: 
+231:         for match in matches:
+232:             # Check rule limit
+233:             rule_counts[match.rule_name] = rule_counts.get(match.rule_name, 0) + 1
+234:             if rule_counts[match.rule_name] > self._max_inferences_per_rule:
+235:                 filtered_rule_limit += 1
+236:                 continue
+237: 
+238:             # Check confidence threshold
+239:             if match.confidence < self._min_confidence:
+240:                 filtered_confidence += 1
+241:                 continue
+242: 
+243:             # Resolve source and target from metadata
+244:             source_entity, target_entity = self._resolve_inference_entities(match, context)
+245: 
+246:             if not source_entity or not target_entity:
+247:                 filtered_entity_resolution += 1
+248:                 continue
+249: 
+250:             # Skip self-referential
+251:             if source_entity.id == target_entity.id:
+252:                 filtered_self_ref += 1
+253:                 continue
+254: 
+255:             relationship_type = match.metadata.get("then_relationship", "RELATES_TO")
+256: 
+257:             inferred.append(
+258:                 InferredRelationship(
+259:                     source_entity_id=source_entity.id,
+260:                     target_entity_id=target_entity.id,
+261:                     relationship_type=relationship_type,
+262:                     description=f"Inferred by rule: {match.rule_name}",
+263:                     confidence=match.confidence,
+264:                     rule_name=match.rule_name,
+265:                     evidence=[r.id for r in match.matched_relationships],
+266:                 )
+267:             )
+268: 
+269:         # Log filtering breakdown
+270:         total_filtered = filtered_rule_limit + filtered_confidence + filtered_entity_resolution + filtered_self_ref
+271:         if total_filtered > 0 or len(matches) > 0:
+272:             logger.debug(
+273:                 f"Match filtering: {len(matches)} input -> {len(inferred)} output | "
+274:                 f"rule_limit={filtered_rule_limit}, confidence={filtered_confidence}, "
+275:                 f"entity_resolution={filtered_entity_resolution}, self_ref={filtered_self_ref}"
+276:             )
+277: 
+278:         return inferred
+279: 
+280:     def _resolve_inference_entities(
+281:         self,
+282:         match: RuleMatch,
+283:         context: RuleEvaluationContext,
+284:     ) -> tuple[Entity | None, Entity | None]:
+285:         """Resolve source and target entities from match metadata.
+286: 
+287:         The then_source and then_target specify which entity to use:
+288:         - "first.source": Source entity of first matched relationship
+289:         - "first.target": Target entity of first matched relationship
+290:         - "second.source": Source entity of second matched relationship
+291:         - "second.target": Target entity of second matched relationship
+292:         """
+293:         then_source = match.metadata.get("then_source", "first.source")
+294:         then_target = match.metadata.get("then_target", "second.target")
+295: 
+296:         first = match.metadata.get("first", {})
+297:         second = match.metadata.get("second", {})
+298: 
+299:         def resolve_ref(ref: str) -> Entity | None:
+300:             parts = ref.split(".")
+301:             if len(parts) != 2:
+302:                 return None
+303: 
+304:             group, position = parts
+305:             if group == "first":
+306:                 data = first
+307:             elif group == "second":
+308:                 data = second
+309:             else:
+310:                 logger.warning(
+311:                     f"Rule '{match.rule_name}': invalid reference '{ref}' " f"(only 'first'/'second' supported)"
+312:                 )
+313:                 return None
+314: 
+315:             return data.get(position)
+316: 
+317:         source = resolve_ref(then_source)
+318:         target = resolve_ref(then_target)
+319: 
+320:         return source, target
+321: 
+322:     def _filter_duplicates(
+323:         self,
+324:         new_inferred: list[InferredRelationship],
+325:         existing_relationships: list[Relationship],
+326:         already_inferred: list[InferredRelationship],
+327:     ) -> list[InferredRelationship]:
+328:         """Filter out duplicate inferences."""
+329:         # Build set of existing relationship keys
+330:         existing_keys: set[tuple[UUID, UUID, str]] = set()
+331: 
+332:         for rel in existing_relationships:
+333:             rel_type = str(
+334:                 rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
+335:             )
+336:             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
+337: 
+338:         for inf in already_inferred:
+339:             existing_keys.add((inf.source_entity_id, inf.target_entity_id, inf.relationship_type))
+340: 
+341:         # Filter new inferences
+342:         filtered = []
+343:         for inf in new_inferred:
+344:             key = (inf.source_entity_id, inf.target_entity_id, inf.relationship_type)
+345:             if key not in existing_keys:
+346:                 filtered.append(inf)
+347:                 existing_keys.add(key)
+348: 
+349:         return filtered
+350: 
+351:     def _to_mock_relationships(
+352:         self,
+353:         inferred: list[InferredRelationship],
+354:         entities: list[Entity],
+355:     ) -> list[Relationship]:
+356:         """Convert inferred relationships to mock Relationship objects for next pass."""
+357:         from khora.core.models import Relationship
+358:         from khora.core.models.entity import RelationshipType
+359: 
+360:         mock_rels = []
+361:         # Get namespace from first entity if available
+362:         namespace_id = entities[0].namespace_id if entities else uuid4()
+363: 
+364:         for inf in inferred:
+365:             # Preserve original type string for domain-specific types
+366:             try:
+367:                 rel_type: RelationshipType | str = RelationshipType[inf.relationship_type]
+368:             except (KeyError, AttributeError):
+369:                 rel_type = inf.relationship_type
+370: 
+371:             mock_rels.append(
+372:                 Relationship(
+373:                     id=uuid4(),
+374:                     namespace_id=namespace_id,
+375:                     source_entity_id=inf.source_entity_id,
+376:                     target_entity_id=inf.target_entity_id,
+377:                     relationship_type=rel_type,
+378:                     description=inf.description,
+379:                     properties={},
+380:                     source_document_ids=[],
+381:                     source_chunk_ids=[],
+382:                     confidence=inf.confidence,
+383:                     metadata={"inferred": True, "rule": inf.rule_name},
+384:                     created_at=datetime.now(UTC),
+385:                     updated_at=datetime.now(UTC),
+386:                 )
+387:             )
+388: 
+389:         return mock_rels
+390: 
+391: 
+392: def to_relationship(
+393:     inferred: InferredRelationship,
+394:     namespace_id: UUID,
+395: ) -> Relationship:
+396:     """Convert an InferredRelationship to a domain Relationship model.
+397: 
+398:     Args:
+399:         inferred: The inferred relationship to convert
+400:         namespace_id: Namespace ID for the relationship
+401: 
+402:     Returns:
+403:         Domain Relationship model
+404:     """
+405:     from khora.core.models import Relationship
+406:     from khora.core.models.entity import RelationshipType
+407: 
+408:     # Preserve original type string for domain-specific types
+409:     try:
+410:         rel_type: RelationshipType | str = RelationshipType[inferred.relationship_type]
+411:     except (KeyError, AttributeError):
+412:         rel_type = inferred.relationship_type
+413: 
+414:     return Relationship(
+415:         id=uuid4(),
+416:         namespace_id=namespace_id,
+417:         source_entity_id=inferred.source_entity_id,
+418:         target_entity_id=inferred.target_entity_id,
+419:         relationship_type=rel_type,
+420:         description=inferred.description,
+421:         properties={
+422:             "inferred": True,
+423:             "rule_name": inferred.rule_name,
+424:             "evidence": [str(e) for e in inferred.evidence],
+425:         },
+426:         source_document_ids=[],
+427:         source_chunk_ids=[],
+428:         confidence=inferred.confidence,
+429:         metadata={"inferred": True},
+430:         created_at=datetime.now(UTC),
+431:         updated_at=datetime.now(UTC),
+432:     )
 ````
 
 ## File: src/khora/query/engine.py
@@ -48076,6 +48200,68 @@ README.md
 85: Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
 ````
 
+## File: src/khora/__init__.py
+````python
+ 1: """Khora - Deyta's memory lake and materialization of knowledge.
+ 2: 
+ 3: Khora provides a unified interface for:
+ 4: - Storing and retrieving knowledge artifacts
+ 5: - Materializing data transformations
+ 6: - Building memory graphs and relationships
+ 7: 
+ 8: Example usage:
+ 9:     # Simplest - from env vars (KHORA_DATABASE_URL)
+10:     from khora import MemoryLake
+11: 
+12:     async with MemoryLake() as lake:
+13:         await lake.remember("Important information to store")
+14:         results = await lake.recall("query about information")
+15: 
+16:     # Common - explicit database URL
+17:     async with MemoryLake("postgresql://localhost/mydb") as lake:
+18:         await lake.remember("content", title="My Document")
+19:         results = await lake.recall("query", limit=20)
+20: 
+21:     # With graph backend
+22:     async with MemoryLake(
+23:         "postgresql://localhost/mydb",
+24:         graph_url="bolt://localhost:7687",
+25:     ) as lake:
+26:         results = await lake.recall("query", mode=SearchMode.GRAPH)
+27: 
+28:     # Batch ingestion with automatic optimization
+29:     async with MemoryLake(database_url) as lake:
+30:         result = await lake.remember_batch(documents)
+31:         print(f"Processed {result.processed} docs, {result.entities} entities")
+32: 
+33:     # Raw search without LLM features (for benchmarks)
+34:     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
+35: """
+36: 
+37: from .cli import main
+38: from .config import KhoraConfig
+39: from .engines import create_engine, list_engines, register_engine
+40: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
+41: from .query import SearchMode
+42: 
+43: __version__ = "0.1.5"
+44: 
+45: __all__ = [
+46:     "main",
+47:     "MemoryLake",
+48:     "RememberResult",
+49:     "RecallResult",
+50:     "BatchResult",
+51:     "Stats",
+52:     "SearchMode",
+53:     "KhoraConfig",
+54:     # Engine functions
+55:     "create_engine",
+56:     "list_engines",
+57:     "register_engine",
+58: ]
+````
+
 ## File: src/khora/pipelines/flows/ingest.py
 ````python
    1: """Two-phase ingestion flow for Khora Memory Lake.
@@ -49085,68 +49271,6 @@ README.md
 1005:         "total_entities": len(entities),
 1006:         "entities_updated": total_updated,
 1007:     }
-````
-
-## File: src/khora/__init__.py
-````python
- 1: """Khora - Deyta's memory lake and materialization of knowledge.
- 2: 
- 3: Khora provides a unified interface for:
- 4: - Storing and retrieving knowledge artifacts
- 5: - Materializing data transformations
- 6: - Building memory graphs and relationships
- 7: 
- 8: Example usage:
- 9:     # Simplest - from env vars (KHORA_DATABASE_URL)
-10:     from khora import MemoryLake
-11: 
-12:     async with MemoryLake() as lake:
-13:         await lake.remember("Important information to store")
-14:         results = await lake.recall("query about information")
-15: 
-16:     # Common - explicit database URL
-17:     async with MemoryLake("postgresql://localhost/mydb") as lake:
-18:         await lake.remember("content", title="My Document")
-19:         results = await lake.recall("query", limit=20)
-20: 
-21:     # With graph backend
-22:     async with MemoryLake(
-23:         "postgresql://localhost/mydb",
-24:         graph_url="bolt://localhost:7687",
-25:     ) as lake:
-26:         results = await lake.recall("query", mode=SearchMode.GRAPH)
-27: 
-28:     # Batch ingestion with automatic optimization
-29:     async with MemoryLake(database_url) as lake:
-30:         result = await lake.remember_batch(documents)
-31:         print(f"Processed {result.processed} docs, {result.entities} entities")
-32: 
-33:     # Raw search without LLM features (for benchmarks)
-34:     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
-35: """
-36: 
-37: from .cli import main
-38: from .config import KhoraConfig
-39: from .engines import create_engine, list_engines, register_engine
-40: from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
-41: from .query import SearchMode
-42: 
-43: __version__ = "0.1.5"
-44: 
-45: __all__ = [
-46:     "main",
-47:     "MemoryLake",
-48:     "RememberResult",
-49:     "RecallResult",
-50:     "BatchResult",
-51:     "Stats",
-52:     "SearchMode",
-53:     "KhoraConfig",
-54:     # Engine functions
-55:     "create_engine",
-56:     "list_engines",
-57:     "register_engine",
-58: ]
 ````
 
 ## File: src/khora/extraction/extractors/llm.py
@@ -50453,6 +50577,14 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-06 08:18:45 +0100
+**Message:** fix: resolve 0 relationships in ingestion results
+
+**Files:**
+- REPOMIX.md
+- src/khora/extraction/extractors/llm.py
+- src/khora/pipelines/flows/ingest.py
+
 ## Commit: 2026-02-05 22:28:54 +0100
 **Message:** fix: replace placeholder skeleton extraction with proper LLM extraction in VectorCypher
 
@@ -50710,11 +50842,3 @@ README.md
 **Files:**
 - REPOMIX.md
 - uv.lock
-
-## Commit: 2026-02-04 12:36:41 +0100
-**Message:** feat: add adaptive token-budget-based extraction batching
-
-**Files:**
-- pyproject.toml
-- src/khora/extraction/extractors/llm.py
-- src/khora/pipelines/tasks/extract.py

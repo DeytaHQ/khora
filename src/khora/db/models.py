@@ -210,7 +210,10 @@ class DocumentModel(Base):
         "ChunkModel", back_populates="document", cascade="all, delete-orphan"
     )
 
-    __table_args__ = (Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),)
+    __table_args__ = (
+        Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),
+        Index("ix_documents_namespace_source_type", "namespace_id", "source_type"),
+    )
 
     def __repr__(self) -> str:
         return f"<Document(id={self.id!r}, title={self.title!r})>"
@@ -334,6 +337,7 @@ class EntityModel(Base):
             postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        Index("ix_entities_namespace_mentions", "namespace_id", mention_count.desc()),
     )
 
     def __repr__(self) -> str:
@@ -384,7 +388,11 @@ class RelationshipModel(Base):
     # Relationships
     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="relationships")
 
-    __table_args__ = (Index("ix_relationships_entities", "source_entity_id", "target_entity_id"),)
+    __table_args__ = (
+        Index("ix_relationships_entities", "source_entity_id", "target_entity_id"),
+        Index("ix_relationships_namespace_type", "namespace_id", "relationship_type"),
+        Index("ix_relationships_target_source", "target_entity_id", "source_entity_id"),
+    )
 
     def __repr__(self) -> str:
         return f"<Relationship(id={self.id!r}, type={self.relationship_type})>"

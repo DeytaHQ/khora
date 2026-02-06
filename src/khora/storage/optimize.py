@@ -67,6 +67,38 @@ PG_INDEXES = [
         "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_document_namespace " "ON chunks (document_id, namespace_id)"),
         "purpose": "Document-to-chunk lookups",
     },
+    # --- Synced from models.py __table_args__ for catch-up on existing databases ---
+    {
+        "name": "ix_documents_namespace_source_type",
+        "sql": (
+            "CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type " "ON documents (namespace_id, source_type)"
+        ),
+        "purpose": "Document queries filtered by source_type within namespace",
+    },
+    {
+        "name": "ix_entities_namespace_mentions",
+        "sql": (
+            "CREATE INDEX IF NOT EXISTS ix_entities_namespace_mentions "
+            "ON entities (namespace_id, mention_count DESC)"
+        ),
+        "purpose": "Entity importance ranking (top N entities in namespace)",
+    },
+    {
+        "name": "ix_relationships_namespace_type",
+        "sql": (
+            "CREATE INDEX IF NOT EXISTS ix_relationships_namespace_type "
+            "ON relationships (namespace_id, relationship_type)"
+        ),
+        "purpose": "Graph-emulated queries filtering by relationship type within namespace",
+    },
+    {
+        "name": "ix_relationships_target_source",
+        "sql": (
+            "CREATE INDEX IF NOT EXISTS ix_relationships_target_source "
+            "ON relationships (target_entity_id, source_entity_id)"
+        ),
+        "purpose": "Reverse traversal (inbound relationships)",
+    },
 ]
 
 #: Tables to run ANALYZE on after index creation.
@@ -119,6 +151,72 @@ NEO4J_INDEXES = [
             "CREATE INDEX mentioned_in_confidence IF NOT EXISTS " "FOR ()-[r:MENTIONED_IN]-() ON (r.confidence)"
         ),
         "purpose": "Confidence filtering",
+    },
+    # --- Synced from neo4j.py _create_indexes for catch-up on existing databases ---
+    {
+        "name": "entity_ns_type",
+        "cypher": ("CREATE INDEX entity_ns_type IF NOT EXISTS " "FOR (e:Entity) ON (e.namespace_id, e.entity_type)"),
+        "purpose": "Entity namespace + type composite (list queries filtering by type)",
+    },
+    {
+        "name": "entity_source_tool",
+        "cypher": "CREATE INDEX entity_source_tool IF NOT EXISTS FOR (e:Entity) ON (e.source_tool)",
+        "purpose": "Source-aware queries (e.g. what does Slack say about X?)",
+    },
+    {
+        "name": "entity_confidence",
+        "cypher": "CREATE INDEX entity_confidence IF NOT EXISTS FOR (e:Entity) ON (e.confidence)",
+        "purpose": "Entity confidence threshold filtering",
+    },
+    {
+        "name": "rel_collaborates_ns",
+        "cypher": "CREATE INDEX rel_collaborates_ns IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.namespace_id)",
+        "purpose": "Namespace filtering on COLLABORATES_WITH",
+    },
+    {
+        "name": "rel_associated_ns",
+        "cypher": "CREATE INDEX rel_associated_ns IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.namespace_id)",
+        "purpose": "Namespace filtering on ASSOCIATED_WITH",
+    },
+    {
+        "name": "rel_depends_ns",
+        "cypher": "CREATE INDEX rel_depends_ns IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.namespace_id)",
+        "purpose": "Namespace filtering on DEPENDS_ON",
+    },
+    {
+        "name": "rel_owns_ns",
+        "cypher": "CREATE INDEX rel_owns_ns IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.namespace_id)",
+        "purpose": "Namespace filtering on OWNS",
+    },
+    {
+        "name": "rel_works_for_ns",
+        "cypher": "CREATE INDEX rel_works_for_ns IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.namespace_id)",
+        "purpose": "Namespace filtering on WORKS_FOR",
+    },
+    {
+        "name": "rel_implements_ns",
+        "cypher": "CREATE INDEX rel_implements_ns IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.namespace_id)",
+        "purpose": "Namespace filtering on IMPLEMENTS",
+    },
+    {
+        "name": "rel_part_of_ns",
+        "cypher": "CREATE INDEX rel_part_of_ns IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.namespace_id)",
+        "purpose": "Namespace filtering on PART_OF",
+    },
+    {
+        "name": "rel_collaborates_conf",
+        "cypher": "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
+        "purpose": "Confidence filtering on COLLABORATES_WITH",
+    },
+    {
+        "name": "rel_associated_conf",
+        "cypher": "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",
+        "purpose": "Confidence filtering on ASSOCIATED_WITH",
+    },
+    {
+        "name": "rel_depends_conf",
+        "cypher": "CREATE INDEX rel_depends_conf IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
+        "purpose": "Confidence filtering on DEPENDS_ON",
     },
 ]
 

@@ -126,6 +126,12 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
             # Composite index for MERGE pattern (namespace_id, name, entity_type)
             "CREATE INDEX entity_ns_name_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)",
+            # Composite: namespace + type (for list queries filtering by type without name)
+            "CREATE INDEX entity_ns_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.entity_type)",
+            # Entity source_tool (for source-aware queries)
+            "CREATE INDEX entity_source_tool IF NOT EXISTS FOR (e:Entity) ON (e.source_tool)",
+            # Entity confidence (for threshold filtering: min_entity_confidence)
+            "CREATE INDEX entity_confidence IF NOT EXISTS FOR (e:Entity) ON (e.confidence)",
             # Episode indexes
             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
@@ -135,6 +141,18 @@ class Neo4jBackend(GraphBackendBase):
         # Relationship property indexes require Neo4j ≥5.7 or Enterprise Edition
         rel_indexes = [
             "CREATE INDEX rel_namespace IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.namespace_id)",
+            # namespace_id on high-volume relationship types
+            "CREATE INDEX rel_collaborates_ns IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_associated_ns IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_depends_ns IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_owns_ns IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_works_for_ns IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_implements_ns IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_part_of_ns IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.namespace_id)",
+            # confidence on highest-volume relationship types
+            "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
+            "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",
+            "CREATE INDEX rel_depends_conf IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
         ]
 
         async with self._driver.session(database=self._database) as session:
