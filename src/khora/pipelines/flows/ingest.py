@@ -570,7 +570,7 @@ async def process_document(
                     entity_id_mapping[stored_id] = stored_id
                     # If upsert changed the ID (Neo4j MERGE with existing entity),
                     # also map the original extraction ID to the stored ID
-                    if pre_upsert_ids[i] != stored_id:
+                    if i < len(pre_upsert_ids) and pre_upsert_ids[i] != stored_id:
                         entity_id_mapping[pre_upsert_ids[i]] = stored_id
                     # New entities always need embeddings; existing only if missing
                     needs_embedding = is_new or not entity.embedding

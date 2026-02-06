@@ -653,7 +653,12 @@ class StorageCoordinator:
         elif has_graph:
             results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
         elif has_vector:
-            await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+            results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+
+        # Fallback: if no backend returned results, create synthetic results
+        # to ensure callers always get one result per input entity
+        if not results:
+            results = [(entity, True) for entity in entities]
 
         from khora.telemetry import get_collector
 

@@ -3061,6 +3061,378 @@ README.md
 156:         await loop.run_in_executor(pool, _run_migrations_sync)
 ````
 
+## File: src/khora/extraction/chunkers/__init__.py
+````python
+ 1: """Text chunking strategies for Khora Memory Lake."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from .base import Chunker, ChunkResult
+ 6: from .conversation import ConversationChunker, ConversationChunkerConfig, SlackMessage
+ 7: from .fixed import FixedChunker
+ 8: from .recursive import RecursiveChunker
+ 9: from .semantic import SemanticChunker
+10: 
+11: 
+12: def create_chunker(
+13:     strategy: str = "semantic",
+14:     *,
+15:     chunk_size: int = 512,
+16:     chunk_overlap: int = 50,
+17:     **kwargs,
+18: ) -> Chunker:
+19:     """Create a chunker based on the specified strategy.
+20: 
+21:     Args:
+22:         strategy: Chunking strategy (fixed, semantic, recursive)
+23:         chunk_size: Target chunk size in tokens
+24:         chunk_overlap: Overlap between chunks in tokens
+25:         **kwargs: Additional strategy-specific arguments
+26: 
+27:     Returns:
+28:         Configured Chunker instance
+29:     """
+30:     if strategy == "fixed":
+31:         return FixedChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+32:     elif strategy == "semantic":
+33:         return SemanticChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs)
+34:     elif strategy == "recursive":
+35:         return RecursiveChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs)
+36:     elif strategy == "conversation":
+37:         config = ConversationChunkerConfig(**kwargs)
+38:         return ConversationChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, config=config)
+39:     else:
+40:         raise ValueError(f"Unknown chunking strategy: {strategy}")
+41: 
+42: 
+43: __all__ = [
+44:     "Chunker",
+45:     "ChunkResult",
+46:     "ConversationChunker",
+47:     "ConversationChunkerConfig",
+48:     "FixedChunker",
+49:     "SemanticChunker",
+50:     "SlackMessage",
+51:     "RecursiveChunker",
+52:     "create_chunker",
+53: ]
+````
+
+## File: src/khora/extraction/chunkers/conversation.py
+````python
+  1: """Conversation chunker for Slack message grouping.
+  2: 
+  3: Groups Slack messages into coherent conversation chunks using
+  4: thread-awareness, temporal proximity, and semantic similarity.
+  5: Individual messages remain retrievable via per-message metadata
+  6: with character offsets.
+  7: """
+  8: 
+  9: from __future__ import annotations
+ 10: 
+ 11: import json
+ 12: from dataclasses import dataclass, field
+ 13: from datetime import datetime
+ 14: from typing import Any
+ 15: 
+ 16: from .base import Chunker, ChunkResult
+ 17: 
+ 18: 
+ 19: @dataclass
+ 20: class SlackMessage:
+ 21:     """A single Slack message."""
+ 22: 
+ 23:     text: str
+ 24:     author: str
+ 25:     timestamp: datetime
+ 26:     message_id: str
+ 27:     thread_ts: str | None = None
+ 28:     channel: str | None = None
+ 29:     reactions: list[str] = field(default_factory=list)
+ 30: 
+ 31:     @classmethod
+ 32:     def from_dict(cls, data: dict[str, Any]) -> SlackMessage:
+ 33:         """Create from a dictionary.
+ 34: 
+ 35:         Args:
+ 36:             data: Dictionary with message fields. The ``timestamp`` value
+ 37:                   can be an ISO-format string or a :class:`datetime` instance.
+ 38: 
+ 39:         Returns:
+ 40:             SlackMessage instance
+ 41:         """
+ 42:         ts = data["timestamp"]
+ 43:         if isinstance(ts, str):
+ 44:             ts = datetime.fromisoformat(ts)
+ 45:         return cls(
+ 46:             text=data["text"],
+ 47:             author=data["author"],
+ 48:             timestamp=ts,
+ 49:             message_id=data["message_id"],
+ 50:             thread_ts=data.get("thread_ts"),
+ 51:             channel=data.get("channel"),
+ 52:             reactions=data.get("reactions", []),
+ 53:         )
+ 54: 
+ 55: 
+ 56: @dataclass
+ 57: class ConversationChunkerConfig:
+ 58:     """Configuration for the conversation chunker."""
+ 59: 
+ 60:     time_gap_minutes: int = 15
+ 61:     max_group_size: int = 50
+ 62:     min_group_size: int = 2
+ 63:     semantic_threshold: float | None = None
+ 64:     include_message_metadata: bool = True
+ 65: 
+ 66: 
+ 67: class ConversationChunker(Chunker):
+ 68:     """Chunker that groups Slack messages into conversation chunks.
+ 69: 
+ 70:     Three-layer grouping strategy:
+ 71:     1. **Thread grouping** – messages sharing a ``thread_ts`` are kept together.
+ 72:     2. **Temporal windowing** – top-level messages are split when the gap
+ 73:        between consecutive messages exceeds ``time_gap_minutes``.
+ 74:     3. **Semantic similarity** *(optional)* – further splits groups when
+ 75:        cosine similarity drops below ``semantic_threshold``.
+ 76:     """
+ 77: 
+ 78:     def __init__(
+ 79:         self,
+ 80:         *,
+ 81:         chunk_size: int = 512,
+ 82:         chunk_overlap: int = 0,
+ 83:         config: ConversationChunkerConfig | None = None,
+ 84:     ) -> None:
+ 85:         super().__init__(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+ 86:         self.config = config or ConversationChunkerConfig()
+ 87: 
+ 88:     # ------------------------------------------------------------------
+ 89:     # Public API
+ 90:     # ------------------------------------------------------------------
+ 91: 
+ 92:     def chunk(self, text: str) -> list[ChunkResult]:
+ 93:         """Parse a JSON array of message dicts and chunk them.
+ 94: 
+ 95:         Args:
+ 96:             text: JSON string containing a list of SlackMessage dicts.
+ 97: 
+ 98:         Returns:
+ 99:             List of ChunkResult objects.
+100:         """
+101:         if not text or not text.strip():
+102:             return []
+103:         raw = json.loads(text)
+104:         messages = [SlackMessage.from_dict(m) for m in raw]
+105:         return self.chunk_messages(messages)
+106: 
+107:     def chunk_messages(self, messages: list[SlackMessage]) -> list[ChunkResult]:
+108:         """Group messages into conversation chunks.
+109: 
+110:         Args:
+111:             messages: List of SlackMessage objects.
+112: 
+113:         Returns:
+114:             List of ChunkResult objects with per-message metadata.
+115:         """
+116:         if not messages:
+117:             return []
+118: 
+119:         # Sort by timestamp
+120:         messages = sorted(messages, key=lambda m: m.timestamp)
+121: 
+122:         # Step 1: separate threads from top-level
+123:         threads, top_level = self._group_by_threads(messages)
+124: 
+125:         # Step 2: split top-level messages by time gaps
+126:         top_groups = self._split_by_time_gaps(top_level, self.config.time_gap_minutes)
+127: 
+128:         # Combine all groups: threads first, then top-level groups
+129:         all_groups: list[list[SlackMessage]] = list(threads.values()) + top_groups
+130: 
+131:         # Step 3: enforce size limits
+132:         all_groups = self._enforce_size_limits(all_groups)
+133: 
+134:         # Build ChunkResults
+135:         results: list[ChunkResult] = []
+136:         for idx, group in enumerate(all_groups):
+137:             if group:
+138:                 results.append(self._build_chunk_result(group, idx))
+139: 
+140:         # Re-index sequentially
+141:         for i, r in enumerate(results):
+142:             r.index = i
+143: 
+144:         return results
+145: 
+146:     # ------------------------------------------------------------------
+147:     # Internal helpers
+148:     # ------------------------------------------------------------------
+149: 
+150:     def _group_by_threads(
+151:         self, messages: list[SlackMessage]
+152:     ) -> tuple[dict[str, list[SlackMessage]], list[SlackMessage]]:
+153:         """Separate threaded messages from top-level messages.
+154: 
+155:         Returns:
+156:             (threads_dict, top_level_messages) where threads_dict maps
+157:             thread_ts to message lists.
+158:         """
+159:         threads: dict[str, list[SlackMessage]] = {}
+160:         top_level: list[SlackMessage] = []
+161: 
+162:         for msg in messages:
+163:             if msg.thread_ts:
+164:                 threads.setdefault(msg.thread_ts, []).append(msg)
+165:             else:
+166:                 top_level.append(msg)
+167: 
+168:         # Sort each thread by timestamp
+169:         for ts in threads:
+170:             threads[ts].sort(key=lambda m: m.timestamp)
+171: 
+172:         return threads, top_level
+173: 
+174:     def _split_by_time_gaps(self, messages: list[SlackMessage], gap_minutes: int) -> list[list[SlackMessage]]:
+175:         """Split sorted messages when the time gap exceeds the threshold.
+176: 
+177:         Args:
+178:             messages: Sorted list of messages.
+179:             gap_minutes: Gap threshold in minutes.
+180: 
+181:         Returns:
+182:             List of message groups.
+183:         """
+184:         if not messages:
+185:             return []
+186: 
+187:         groups: list[list[SlackMessage]] = [[messages[0]]]
+188:         gap_seconds = gap_minutes * 60
+189: 
+190:         for msg in messages[1:]:
+191:             prev = groups[-1][-1]
+192:             delta = (msg.timestamp - prev.timestamp).total_seconds()
+193:             if delta > gap_seconds:
+194:                 groups.append([msg])
+195:             else:
+196:                 groups[-1].append(msg)
+197: 
+198:         return groups
+199: 
+200:     def _enforce_size_limits(self, groups: list[list[SlackMessage]]) -> list[list[SlackMessage]]:
+201:         """Split groups exceeding max_group_size and merge tiny groups.
+202: 
+203:         Args:
+204:             groups: List of message groups.
+205: 
+206:         Returns:
+207:             Size-adjusted groups.
+208:         """
+209:         max_size = self.config.max_group_size
+210:         min_size = self.config.min_group_size
+211: 
+212:         # Split oversized groups
+213:         split: list[list[SlackMessage]] = []
+214:         for group in groups:
+215:             if len(group) <= max_size:
+216:                 split.append(group)
+217:             else:
+218:                 for i in range(0, len(group), max_size):
+219:                     split.append(group[i : i + max_size])
+220: 
+221:         # Merge undersized groups with their nearest neighbour
+222:         if len(split) <= 1:
+223:             return split
+224: 
+225:         merged: list[list[SlackMessage]] = [split[0]]
+226:         for group in split[1:]:
+227:             if len(merged[-1]) < min_size or len(group) < min_size:
+228:                 merged[-1].extend(group)
+229:             else:
+230:                 merged.append(group)
+231: 
+232:         # Final pass: if last group is undersized, merge with previous
+233:         if len(merged) > 1 and len(merged[-1]) < min_size:
+234:             merged[-2].extend(merged[-1])
+235:             merged.pop()
+236: 
+237:         return merged
+238: 
+239:     def _format_group(self, messages: list[SlackMessage]) -> str:
+240:         """Render messages as ``[HH:MM] author: text`` lines.
+241: 
+242:         Args:
+243:             messages: Messages to format.
+244: 
+245:         Returns:
+246:             Formatted string.
+247:         """
+248:         lines: list[str] = []
+249:         for msg in messages:
+250:             time_str = msg.timestamp.strftime("%H:%M")
+251:             lines.append(f"[{time_str}] {msg.author}: {msg.text}")
+252:         return "\n".join(lines)
+253: 
+254:     def _build_chunk_result(self, messages: list[SlackMessage], index: int) -> ChunkResult:
+255:         """Build a ChunkResult with per-message metadata.
+256: 
+257:         Args:
+258:             messages: Messages in this chunk.
+259:             index: Chunk index.
+260: 
+261:         Returns:
+262:             ChunkResult with content and metadata.
+263:         """
+264:         content = self._format_group(messages)
+265: 
+266:         # Compute per-message character offsets
+267:         message_meta: list[dict[str, Any]] = []
+268:         offset = 0
+269:         for i, msg in enumerate(messages):
+270:             time_str = msg.timestamp.strftime("%H:%M")
+271:             line = f"[{time_str}] {msg.author}: {msg.text}"
+272:             start = offset
+273:             end = offset + len(line)
+274:             message_meta.append(
+275:                 {
+276:                     "id": msg.message_id,
+277:                     "author": msg.author,
+278:                     "timestamp": msg.timestamp.isoformat(),
+279:                     "start_char": start,
+280:                     "end_char": end,
+281:                 }
+282:             )
+283:             # +1 for the newline separator (except after last message)
+284:             offset = end + (1 if i < len(messages) - 1 else 0)
+285: 
+286:         # Collect metadata
+287:         authors = list(dict.fromkeys(msg.author for msg in messages))
+288:         channel = next((m.channel for m in messages if m.channel), None)
+289:         thread_ts = next((m.thread_ts for m in messages if m.thread_ts), None)
+290: 
+291:         metadata: dict[str, Any] = {
+292:             "source_type": "slack_conversation",
+293:             "channel": channel,
+294:             "thread_ts": thread_ts,
+295:             "message_count": len(messages),
+296:             "time_start": messages[0].timestamp.isoformat(),
+297:             "time_end": messages[-1].timestamp.isoformat(),
+298:             "authors": authors,
+299:         }
+300: 
+301:         if self.config.include_message_metadata:
+302:             metadata["messages"] = message_meta
+303: 
+304:         return ChunkResult(
+305:             content=content,
+306:             index=index,
+307:             start_char=0,
+308:             end_char=len(content),
+309:             token_count=self.count_tokens(content),
+310:             metadata=metadata,
+311:         )
+````
+
 ## File: src/khora/extraction/embedders/__init__.py
 ````python
  1: """Embedding generation for Khora Memory Lake."""
@@ -4267,6 +4639,76 @@ README.md
 132:     return [(items_by_id[item_id], combined_scores[item_id]) for item_id in sorted_ids]
 ````
 
+## File: src/khora/query/message_extract.py
+````python
+ 1: """Utilities for extracting individual messages from conversation chunks.
+ 2: 
+ 3: Conversation chunks produced by :class:`ConversationChunker` embed
+ 4: per-message metadata (author, timestamp, character offsets) so that
+ 5: individual messages can be retrieved from search results.
+ 6: """
+ 7: 
+ 8: from __future__ import annotations
+ 9: 
+10: from typing import Any
+11: 
+12: 
+13: def extract_messages_from_chunk(chunk_metadata: dict[str, Any]) -> list[dict[str, Any]]:
+14:     """Return the per-message metadata list from a chunk.
+15: 
+16:     Args:
+17:         chunk_metadata: The ``metadata`` dict of a chunk or search result.
+18: 
+19:     Returns:
+20:         List of message dicts (each with ``id``, ``author``, ``timestamp``,
+21:         ``start_char``, ``end_char``).  Returns an empty list when the
+22:         metadata does not contain conversation message data.
+23:     """
+24:     return chunk_metadata.get("messages", [])
+25: 
+26: 
+27: def extract_message_text(chunk_content: str, start_char: int, end_char: int) -> str:
+28:     """Slice a message's text from the chunk content using character offsets.
+29: 
+30:     Args:
+31:         chunk_content: The full chunk text.
+32:         start_char: Start character offset (inclusive).
+33:         end_char: End character offset (exclusive).
+34: 
+35:     Returns:
+36:         The substring corresponding to the message.
+37:     """
+38:     return chunk_content[start_char:end_char]
+39: 
+40: 
+41: def find_message_in_chunk(
+42:     chunk_content: str,
+43:     chunk_metadata: dict[str, Any],
+44:     message_id: str,
+45: ) -> dict[str, Any] | None:
+46:     """Find a specific message by ID within a conversation chunk.
+47: 
+48:     Args:
+49:         chunk_content: The full chunk text.
+50:         chunk_metadata: The chunk's metadata dict.
+51:         message_id: The ``message_id`` to look up.
+52: 
+53:     Returns:
+54:         A dict with ``id``, ``author``, ``timestamp``, and ``text`` keys,
+55:         or ``None`` if the message was not found.
+56:     """
+57:     for msg in extract_messages_from_chunk(chunk_metadata):
+58:         if msg.get("id") == message_id:
+59:             text = extract_message_text(chunk_content, msg["start_char"], msg["end_char"])
+60:             return {
+61:                 "id": msg["id"],
+62:                 "author": msg["author"],
+63:                 "timestamp": msg["timestamp"],
+64:                 "text": text,
+65:             }
+66:     return None
+````
+
 ## File: src/khora/query/temporal.py
 ````python
   1: """Temporal query support for Khora Memory Lake."""
@@ -5339,6 +5781,255 @@ README.md
 222: 
 223:         with pytest.raises(TypeError):
 224:             IncompleteChunker()  # type: ignore
+````
+
+## File: tests/unit/test_conversation_chunker.py
+````python
+  1: """Tests for the ConversationChunker."""
+  2: 
+  3: from __future__ import annotations
+  4: 
+  5: import json
+  6: from datetime import datetime, timedelta, timezone
+  7: 
+  8: from khora.extraction.chunkers.conversation import (
+  9:     ConversationChunker,
+ 10:     ConversationChunkerConfig,
+ 11:     SlackMessage,
+ 12: )
+ 13: 
+ 14: 
+ 15: def _ts(minutes: int = 0) -> datetime:
+ 16:     """Helper: return a UTC datetime offset by *minutes* from a fixed base."""
+ 17:     base = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+ 18:     return base + timedelta(minutes=minutes)
+ 19: 
+ 20: 
+ 21: def _msg(
+ 22:     text: str,
+ 23:     author: str = "alice",
+ 24:     minutes: int = 0,
+ 25:     msg_id: str | None = None,
+ 26:     thread_ts: str | None = None,
+ 27:     channel: str | None = "general",
+ 28: ) -> SlackMessage:
+ 29:     """Helper: build a SlackMessage."""
+ 30:     return SlackMessage(
+ 31:         text=text,
+ 32:         author=author,
+ 33:         timestamp=_ts(minutes),
+ 34:         message_id=msg_id or f"msg-{minutes}",
+ 35:         thread_ts=thread_ts,
+ 36:         channel=channel,
+ 37:     )
+ 38: 
+ 39: 
+ 40: class TestSlackMessage:
+ 41:     def test_construction(self):
+ 42:         msg = _msg("hello")
+ 43:         assert msg.text == "hello"
+ 44:         assert msg.author == "alice"
+ 45: 
+ 46:     def test_from_dict(self):
+ 47:         data = {
+ 48:             "text": "hi",
+ 49:             "author": "bob",
+ 50:             "timestamp": "2025-01-15T10:00:00+00:00",
+ 51:             "message_id": "m1",
+ 52:             "thread_ts": "123.456",
+ 53:             "channel": "random",
+ 54:             "reactions": ["+1"],
+ 55:         }
+ 56:         msg = SlackMessage.from_dict(data)
+ 57:         assert msg.author == "bob"
+ 58:         assert msg.thread_ts == "123.456"
+ 59:         assert msg.reactions == ["+1"]
+ 60: 
+ 61:     def test_sorting_by_timestamp(self):
+ 62:         msgs = [_msg("c", minutes=10), _msg("a", minutes=0), _msg("b", minutes=5)]
+ 63:         sorted_msgs = sorted(msgs, key=lambda m: m.timestamp)
+ 64:         assert [m.text for m in sorted_msgs] == ["a", "b", "c"]
+ 65: 
+ 66: 
+ 67: class TestConversationChunker:
+ 68:     def test_chunk_empty(self):
+ 69:         chunker = ConversationChunker()
+ 70:         assert chunker.chunk_messages([]) == []
+ 71: 
+ 72:     def test_single_message(self):
+ 73:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
+ 74:         results = chunker.chunk_messages([_msg("hello")])
+ 75:         assert len(results) == 1
+ 76:         assert "hello" in results[0].content
+ 77: 
+ 78:     def test_thread_grouping(self):
+ 79:         """Messages sharing a thread_ts are grouped together."""
+ 80:         msgs = [
+ 81:             _msg("thread start", author="alice", minutes=0, thread_ts="t1"),
+ 82:             _msg("unrelated top-level", author="carol", minutes=1),
+ 83:             _msg("thread reply", author="bob", minutes=2, thread_ts="t1"),
+ 84:         ]
+ 85:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
+ 86:         results = chunker.chunk_messages(msgs)
+ 87:         # Thread group + top-level group
+ 88:         assert len(results) == 2
+ 89:         # Thread group should contain both thread messages
+ 90:         thread_chunk = next(r for r in results if r.metadata.get("thread_ts") == "t1")
+ 91:         assert thread_chunk.metadata["message_count"] == 2
+ 92: 
+ 93:     def test_time_gap_splitting(self):
+ 94:         """A 30-min gap with 15-min threshold splits into two groups."""
+ 95:         msgs = [
+ 96:             _msg("morning 1", minutes=0),
+ 97:             _msg("morning 2", minutes=5),
+ 98:             _msg("afternoon 1", minutes=35),
+ 99:             _msg("afternoon 2", minutes=40),
+100:         ]
+101:         chunker = ConversationChunker(config=ConversationChunkerConfig(time_gap_minutes=15))
+102:         results = chunker.chunk_messages(msgs)
+103:         assert len(results) == 2
+104:         assert results[0].metadata["message_count"] == 2
+105:         assert results[1].metadata["message_count"] == 2
+106: 
+107:     def test_mixed_threads_and_toplevel(self):
+108:         """Threads are separated from top-level conversation."""
+109:         msgs = [
+110:             _msg("top1", minutes=0),
+111:             _msg("top2", minutes=1),
+112:             _msg("thread msg", minutes=2, thread_ts="t1"),
+113:         ]
+114:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
+115:         results = chunker.chunk_messages(msgs)
+116:         source_types = {r.metadata.get("thread_ts") for r in results}
+117:         assert "t1" in source_types
+118:         assert None in source_types
+119: 
+120:     def test_max_group_size_splits(self):
+121:         """A group of 60 messages with max=50 splits into two."""
+122:         msgs = [_msg(f"msg {i}", minutes=i, msg_id=f"m{i}") for i in range(60)]
+123:         config = ConversationChunkerConfig(max_group_size=50, min_group_size=2, time_gap_minutes=9999)
+124:         chunker = ConversationChunker(config=config)
+125:         results = chunker.chunk_messages(msgs)
+126:         assert len(results) == 2
+127:         total = sum(r.metadata["message_count"] for r in results)
+128:         assert total == 60
+129: 
+130:     def test_min_group_size_merges(self):
+131:         """A tiny trailing group merges with its neighbour."""
+132:         # 3 messages then a gap then 1 message → should merge the 1 into the 3
+133:         msgs = [
+134:             _msg("a", minutes=0),
+135:             _msg("b", minutes=1),
+136:             _msg("c", minutes=2),
+137:             _msg("d", minutes=20),  # gap triggers split, but group of 1 < min_group_size=2
+138:         ]
+139:         config = ConversationChunkerConfig(time_gap_minutes=15, min_group_size=2)
+140:         chunker = ConversationChunker(config=config)
+141:         results = chunker.chunk_messages(msgs)
+142:         assert len(results) == 1
+143:         assert results[0].metadata["message_count"] == 4
+144: 
+145:     def test_format_output(self):
+146:         """Rendered text matches [HH:MM] author: text format."""
+147:         msgs = [_msg("hello world", author="alice", minutes=0)]
+148:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
+149:         results = chunker.chunk_messages(msgs)
+150:         assert results[0].content == "[10:00] alice: hello world"
+151: 
+152:     def test_message_metadata_present(self):
+153:         """Chunk metadata contains messages list."""
+154:         msgs = [_msg("hi", minutes=0), _msg("hey", author="bob", minutes=1)]
+155:         chunker = ConversationChunker()
+156:         results = chunker.chunk_messages(msgs)
+157:         assert len(results) == 1
+158:         meta = results[0].metadata
+159:         assert "messages" in meta
+160:         assert len(meta["messages"]) == 2
+161:         assert meta["messages"][0]["author"] == "alice"
+162:         assert meta["messages"][1]["author"] == "bob"
+163: 
+164:     def test_char_offsets_correct(self):
+165:         """start_char/end_char correctly index into content."""
+166:         msgs = [
+167:             _msg("first message", author="alice", minutes=0),
+168:             _msg("second message", author="bob", minutes=1),
+169:         ]
+170:         chunker = ConversationChunker()
+171:         results = chunker.chunk_messages(msgs)
+172:         chunk = results[0]
+173:         for msg_meta in chunk.metadata["messages"]:
+174:             extracted = chunk.content[msg_meta["start_char"] : msg_meta["end_char"]]
+175:             assert msg_meta["author"] in extracted
+176:             assert "] " in extracted  # has time prefix
+177: 
+178:     def test_json_input(self):
+179:         """chunk(text) parses a JSON array correctly."""
+180:         data = [
+181:             {
+182:                 "text": "hello",
+183:                 "author": "alice",
+184:                 "timestamp": "2025-01-15T10:00:00+00:00",
+185:                 "message_id": "m1",
+186:             },
+187:             {
+188:                 "text": "world",
+189:                 "author": "bob",
+190:                 "timestamp": "2025-01-15T10:01:00+00:00",
+191:                 "message_id": "m2",
+192:             },
+193:         ]
+194:         chunker = ConversationChunker()
+195:         results = chunker.chunk(json.dumps(data))
+196:         assert len(results) == 1
+197:         assert "hello" in results[0].content
+198:         assert "world" in results[0].content
+199: 
+200:     def test_configurable_time_gap(self):
+201:         """5-min vs 60-min gap threshold produces different groupings."""
+202:         msgs = [
+203:             _msg("a", minutes=0),
+204:             _msg("b", minutes=10),
+205:             _msg("c", minutes=20),
+206:         ]
+207:         # 5-min gap → 3 groups (each gap > 5)
+208:         config_tight = ConversationChunkerConfig(time_gap_minutes=5, min_group_size=1)
+209:         results_tight = ConversationChunker(config=config_tight).chunk_messages(msgs)
+210: 
+211:         # 60-min gap → 1 group (no gap > 60)
+212:         config_wide = ConversationChunkerConfig(time_gap_minutes=60, min_group_size=1)
+213:         results_wide = ConversationChunker(config=config_wide).chunk_messages(msgs)
+214: 
+215:         assert len(results_tight) == 3
+216:         assert len(results_wide) == 1
+217: 
+218:     def test_authors_deduplicated(self):
+219:         """metadata authors list contains unique names."""
+220:         msgs = [
+221:             _msg("hi", author="alice", minutes=0),
+222:             _msg("hey", author="bob", minutes=1),
+223:             _msg("yo", author="alice", minutes=2),
+224:         ]
+225:         chunker = ConversationChunker()
+226:         results = chunker.chunk_messages(msgs)
+227:         authors = results[0].metadata["authors"]
+228:         assert authors == ["alice", "bob"]
+229: 
+230:     def test_chunk_empty_string(self):
+231:         chunker = ConversationChunker()
+232:         assert chunker.chunk("") == []
+233:         assert chunker.chunk("  ") == []
+234: 
+235:     def test_metadata_fields(self):
+236:         """Chunk metadata has all expected top-level fields."""
+237:         msgs = [_msg("hello", channel="dev", minutes=0)]
+238:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
+239:         results = chunker.chunk_messages(msgs)
+240:         meta = results[0].metadata
+241:         assert meta["source_type"] == "slack_conversation"
+242:         assert meta["channel"] == "dev"
+243:         assert meta["message_count"] == 1
+244:         assert "time_start" in meta
+245:         assert "time_end" in meta
 ````
 
 ## File: tests/unit/test_expansion.py
@@ -6590,6 +7281,94 @@ README.md
 484:         entity_names = [e.name for e in resolved.entity_types]
 485:         assert "PERSON" in entity_names  # from parent
 486:         assert "CUSTOM" in entity_names  # from child
+````
+
+## File: tests/unit/test_message_extract.py
+````python
+ 1: """Tests for message extraction utilities."""
+ 2: 
+ 3: from __future__ import annotations
+ 4: 
+ 5: from khora.query.message_extract import (
+ 6:     extract_message_text,
+ 7:     extract_messages_from_chunk,
+ 8:     find_message_in_chunk,
+ 9: )
+10: 
+11: 
+12: def _sample_chunk():
+13:     """Return a (content, metadata) pair for a conversation chunk."""
+14:     line1 = "[10:00] alice: hello world"
+15:     line2 = "[10:01] bob: hi there"
+16:     content = f"{line1}\n{line2}"
+17:     metadata = {
+18:         "source_type": "slack_conversation",
+19:         "messages": [
+20:             {
+21:                 "id": "m1",
+22:                 "author": "alice",
+23:                 "timestamp": "2025-01-15T10:00:00+00:00",
+24:                 "start_char": 0,
+25:                 "end_char": len(line1),
+26:             },
+27:             {
+28:                 "id": "m2",
+29:                 "author": "bob",
+30:                 "timestamp": "2025-01-15T10:01:00+00:00",
+31:                 "start_char": len(line1) + 1,
+32:                 "end_char": len(line1) + 1 + len(line2),
+33:             },
+34:         ],
+35:     }
+36:     return content, metadata
+37: 
+38: 
+39: class TestExtractMessages:
+40:     def test_extract_messages(self):
+41:         _, meta = _sample_chunk()
+42:         msgs = extract_messages_from_chunk(meta)
+43:         assert len(msgs) == 2
+44:         assert msgs[0]["id"] == "m1"
+45: 
+46:     def test_extract_from_empty_metadata(self):
+47:         assert extract_messages_from_chunk({}) == []
+48: 
+49:     def test_extract_from_non_conversation(self):
+50:         assert extract_messages_from_chunk({"source_type": "document"}) == []
+51: 
+52: 
+53: class TestFindMessage:
+54:     def test_find_by_id(self):
+55:         content, meta = _sample_chunk()
+56:         result = find_message_in_chunk(content, meta, "m1")
+57:         assert result is not None
+58:         assert result["author"] == "alice"
+59:         assert "hello world" in result["text"]
+60: 
+61:     def test_find_second_message(self):
+62:         content, meta = _sample_chunk()
+63:         result = find_message_in_chunk(content, meta, "m2")
+64:         assert result is not None
+65:         assert result["author"] == "bob"
+66:         assert "hi there" in result["text"]
+67: 
+68:     def test_find_missing_id(self):
+69:         content, meta = _sample_chunk()
+70:         assert find_message_in_chunk(content, meta, "nonexistent") is None
+71: 
+72: 
+73: class TestExtractText:
+74:     def test_extract_text_by_offsets(self):
+75:         content, meta = _sample_chunk()
+76:         m = meta["messages"][0]
+77:         text = extract_message_text(content, m["start_char"], m["end_char"])
+78:         assert text == "[10:00] alice: hello world"
+79: 
+80:     def test_extract_second_message(self):
+81:         content, meta = _sample_chunk()
+82:         m = meta["messages"][1]
+83:         text = extract_message_text(content, m["start_char"], m["end_char"])
+84:         assert text == "[10:01] bob: hi there"
 ````
 
 ## File: tests/unit/test_models.py
@@ -11308,63 +12087,6 @@ README.md
 321:         ...
 ````
 
-## File: src/khora/extraction/chunkers/__init__.py
-````python
- 1: """Text chunking strategies for Khora Memory Lake."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from .base import Chunker, ChunkResult
- 6: from .conversation import ConversationChunker, ConversationChunkerConfig, SlackMessage
- 7: from .fixed import FixedChunker
- 8: from .recursive import RecursiveChunker
- 9: from .semantic import SemanticChunker
-10: 
-11: 
-12: def create_chunker(
-13:     strategy: str = "semantic",
-14:     *,
-15:     chunk_size: int = 512,
-16:     chunk_overlap: int = 50,
-17:     **kwargs,
-18: ) -> Chunker:
-19:     """Create a chunker based on the specified strategy.
-20: 
-21:     Args:
-22:         strategy: Chunking strategy (fixed, semantic, recursive)
-23:         chunk_size: Target chunk size in tokens
-24:         chunk_overlap: Overlap between chunks in tokens
-25:         **kwargs: Additional strategy-specific arguments
-26: 
-27:     Returns:
-28:         Configured Chunker instance
-29:     """
-30:     if strategy == "fixed":
-31:         return FixedChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-32:     elif strategy == "semantic":
-33:         return SemanticChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs)
-34:     elif strategy == "recursive":
-35:         return RecursiveChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, **kwargs)
-36:     elif strategy == "conversation":
-37:         config = ConversationChunkerConfig(**kwargs)
-38:         return ConversationChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, config=config)
-39:     else:
-40:         raise ValueError(f"Unknown chunking strategy: {strategy}")
-41: 
-42: 
-43: __all__ = [
-44:     "Chunker",
-45:     "ChunkResult",
-46:     "ConversationChunker",
-47:     "ConversationChunkerConfig",
-48:     "FixedChunker",
-49:     "SemanticChunker",
-50:     "SlackMessage",
-51:     "RecursiveChunker",
-52:     "create_chunker",
-53: ]
-````
-
 ## File: src/khora/extraction/chunkers/base.py
 ````python
  1: """Base chunker protocol and types."""
@@ -11449,321 +12171,6 @@ README.md
 80:             return len(self._encoding.encode(text))
 81:         # Fallback: estimate ~4 chars per token
 82:         return len(text) // 4
-````
-
-## File: src/khora/extraction/chunkers/conversation.py
-````python
-  1: """Conversation chunker for Slack message grouping.
-  2: 
-  3: Groups Slack messages into coherent conversation chunks using
-  4: thread-awareness, temporal proximity, and semantic similarity.
-  5: Individual messages remain retrievable via per-message metadata
-  6: with character offsets.
-  7: """
-  8: 
-  9: from __future__ import annotations
- 10: 
- 11: import json
- 12: from dataclasses import dataclass, field
- 13: from datetime import datetime
- 14: from typing import Any
- 15: 
- 16: from .base import Chunker, ChunkResult
- 17: 
- 18: 
- 19: @dataclass
- 20: class SlackMessage:
- 21:     """A single Slack message."""
- 22: 
- 23:     text: str
- 24:     author: str
- 25:     timestamp: datetime
- 26:     message_id: str
- 27:     thread_ts: str | None = None
- 28:     channel: str | None = None
- 29:     reactions: list[str] = field(default_factory=list)
- 30: 
- 31:     @classmethod
- 32:     def from_dict(cls, data: dict[str, Any]) -> SlackMessage:
- 33:         """Create from a dictionary.
- 34: 
- 35:         Args:
- 36:             data: Dictionary with message fields. The ``timestamp`` value
- 37:                   can be an ISO-format string or a :class:`datetime` instance.
- 38: 
- 39:         Returns:
- 40:             SlackMessage instance
- 41:         """
- 42:         ts = data["timestamp"]
- 43:         if isinstance(ts, str):
- 44:             ts = datetime.fromisoformat(ts)
- 45:         return cls(
- 46:             text=data["text"],
- 47:             author=data["author"],
- 48:             timestamp=ts,
- 49:             message_id=data["message_id"],
- 50:             thread_ts=data.get("thread_ts"),
- 51:             channel=data.get("channel"),
- 52:             reactions=data.get("reactions", []),
- 53:         )
- 54: 
- 55: 
- 56: @dataclass
- 57: class ConversationChunkerConfig:
- 58:     """Configuration for the conversation chunker."""
- 59: 
- 60:     time_gap_minutes: int = 15
- 61:     max_group_size: int = 50
- 62:     min_group_size: int = 2
- 63:     semantic_threshold: float | None = None
- 64:     include_message_metadata: bool = True
- 65: 
- 66: 
- 67: class ConversationChunker(Chunker):
- 68:     """Chunker that groups Slack messages into conversation chunks.
- 69: 
- 70:     Three-layer grouping strategy:
- 71:     1. **Thread grouping** – messages sharing a ``thread_ts`` are kept together.
- 72:     2. **Temporal windowing** – top-level messages are split when the gap
- 73:        between consecutive messages exceeds ``time_gap_minutes``.
- 74:     3. **Semantic similarity** *(optional)* – further splits groups when
- 75:        cosine similarity drops below ``semantic_threshold``.
- 76:     """
- 77: 
- 78:     def __init__(
- 79:         self,
- 80:         *,
- 81:         chunk_size: int = 512,
- 82:         chunk_overlap: int = 0,
- 83:         config: ConversationChunkerConfig | None = None,
- 84:     ) -> None:
- 85:         super().__init__(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
- 86:         self.config = config or ConversationChunkerConfig()
- 87: 
- 88:     # ------------------------------------------------------------------
- 89:     # Public API
- 90:     # ------------------------------------------------------------------
- 91: 
- 92:     def chunk(self, text: str) -> list[ChunkResult]:
- 93:         """Parse a JSON array of message dicts and chunk them.
- 94: 
- 95:         Args:
- 96:             text: JSON string containing a list of SlackMessage dicts.
- 97: 
- 98:         Returns:
- 99:             List of ChunkResult objects.
-100:         """
-101:         if not text or not text.strip():
-102:             return []
-103:         raw = json.loads(text)
-104:         messages = [SlackMessage.from_dict(m) for m in raw]
-105:         return self.chunk_messages(messages)
-106: 
-107:     def chunk_messages(self, messages: list[SlackMessage]) -> list[ChunkResult]:
-108:         """Group messages into conversation chunks.
-109: 
-110:         Args:
-111:             messages: List of SlackMessage objects.
-112: 
-113:         Returns:
-114:             List of ChunkResult objects with per-message metadata.
-115:         """
-116:         if not messages:
-117:             return []
-118: 
-119:         # Sort by timestamp
-120:         messages = sorted(messages, key=lambda m: m.timestamp)
-121: 
-122:         # Step 1: separate threads from top-level
-123:         threads, top_level = self._group_by_threads(messages)
-124: 
-125:         # Step 2: split top-level messages by time gaps
-126:         top_groups = self._split_by_time_gaps(top_level, self.config.time_gap_minutes)
-127: 
-128:         # Combine all groups: threads first, then top-level groups
-129:         all_groups: list[list[SlackMessage]] = list(threads.values()) + top_groups
-130: 
-131:         # Step 3: enforce size limits
-132:         all_groups = self._enforce_size_limits(all_groups)
-133: 
-134:         # Build ChunkResults
-135:         results: list[ChunkResult] = []
-136:         for idx, group in enumerate(all_groups):
-137:             if group:
-138:                 results.append(self._build_chunk_result(group, idx))
-139: 
-140:         # Re-index sequentially
-141:         for i, r in enumerate(results):
-142:             r.index = i
-143: 
-144:         return results
-145: 
-146:     # ------------------------------------------------------------------
-147:     # Internal helpers
-148:     # ------------------------------------------------------------------
-149: 
-150:     def _group_by_threads(
-151:         self, messages: list[SlackMessage]
-152:     ) -> tuple[dict[str, list[SlackMessage]], list[SlackMessage]]:
-153:         """Separate threaded messages from top-level messages.
-154: 
-155:         Returns:
-156:             (threads_dict, top_level_messages) where threads_dict maps
-157:             thread_ts to message lists.
-158:         """
-159:         threads: dict[str, list[SlackMessage]] = {}
-160:         top_level: list[SlackMessage] = []
-161: 
-162:         for msg in messages:
-163:             if msg.thread_ts:
-164:                 threads.setdefault(msg.thread_ts, []).append(msg)
-165:             else:
-166:                 top_level.append(msg)
-167: 
-168:         # Sort each thread by timestamp
-169:         for ts in threads:
-170:             threads[ts].sort(key=lambda m: m.timestamp)
-171: 
-172:         return threads, top_level
-173: 
-174:     def _split_by_time_gaps(self, messages: list[SlackMessage], gap_minutes: int) -> list[list[SlackMessage]]:
-175:         """Split sorted messages when the time gap exceeds the threshold.
-176: 
-177:         Args:
-178:             messages: Sorted list of messages.
-179:             gap_minutes: Gap threshold in minutes.
-180: 
-181:         Returns:
-182:             List of message groups.
-183:         """
-184:         if not messages:
-185:             return []
-186: 
-187:         groups: list[list[SlackMessage]] = [[messages[0]]]
-188:         gap_seconds = gap_minutes * 60
-189: 
-190:         for msg in messages[1:]:
-191:             prev = groups[-1][-1]
-192:             delta = (msg.timestamp - prev.timestamp).total_seconds()
-193:             if delta > gap_seconds:
-194:                 groups.append([msg])
-195:             else:
-196:                 groups[-1].append(msg)
-197: 
-198:         return groups
-199: 
-200:     def _enforce_size_limits(self, groups: list[list[SlackMessage]]) -> list[list[SlackMessage]]:
-201:         """Split groups exceeding max_group_size and merge tiny groups.
-202: 
-203:         Args:
-204:             groups: List of message groups.
-205: 
-206:         Returns:
-207:             Size-adjusted groups.
-208:         """
-209:         max_size = self.config.max_group_size
-210:         min_size = self.config.min_group_size
-211: 
-212:         # Split oversized groups
-213:         split: list[list[SlackMessage]] = []
-214:         for group in groups:
-215:             if len(group) <= max_size:
-216:                 split.append(group)
-217:             else:
-218:                 for i in range(0, len(group), max_size):
-219:                     split.append(group[i : i + max_size])
-220: 
-221:         # Merge undersized groups with their nearest neighbour
-222:         if len(split) <= 1:
-223:             return split
-224: 
-225:         merged: list[list[SlackMessage]] = [split[0]]
-226:         for group in split[1:]:
-227:             if len(merged[-1]) < min_size or len(group) < min_size:
-228:                 merged[-1].extend(group)
-229:             else:
-230:                 merged.append(group)
-231: 
-232:         # Final pass: if last group is undersized, merge with previous
-233:         if len(merged) > 1 and len(merged[-1]) < min_size:
-234:             merged[-2].extend(merged[-1])
-235:             merged.pop()
-236: 
-237:         return merged
-238: 
-239:     def _format_group(self, messages: list[SlackMessage]) -> str:
-240:         """Render messages as ``[HH:MM] author: text`` lines.
-241: 
-242:         Args:
-243:             messages: Messages to format.
-244: 
-245:         Returns:
-246:             Formatted string.
-247:         """
-248:         lines: list[str] = []
-249:         for msg in messages:
-250:             time_str = msg.timestamp.strftime("%H:%M")
-251:             lines.append(f"[{time_str}] {msg.author}: {msg.text}")
-252:         return "\n".join(lines)
-253: 
-254:     def _build_chunk_result(self, messages: list[SlackMessage], index: int) -> ChunkResult:
-255:         """Build a ChunkResult with per-message metadata.
-256: 
-257:         Args:
-258:             messages: Messages in this chunk.
-259:             index: Chunk index.
-260: 
-261:         Returns:
-262:             ChunkResult with content and metadata.
-263:         """
-264:         content = self._format_group(messages)
-265: 
-266:         # Compute per-message character offsets
-267:         message_meta: list[dict[str, Any]] = []
-268:         offset = 0
-269:         for i, msg in enumerate(messages):
-270:             time_str = msg.timestamp.strftime("%H:%M")
-271:             line = f"[{time_str}] {msg.author}: {msg.text}"
-272:             start = offset
-273:             end = offset + len(line)
-274:             message_meta.append(
-275:                 {
-276:                     "id": msg.message_id,
-277:                     "author": msg.author,
-278:                     "timestamp": msg.timestamp.isoformat(),
-279:                     "start_char": start,
-280:                     "end_char": end,
-281:                 }
-282:             )
-283:             # +1 for the newline separator (except after last message)
-284:             offset = end + (1 if i < len(messages) - 1 else 0)
-285: 
-286:         # Collect metadata
-287:         authors = list(dict.fromkeys(msg.author for msg in messages))
-288:         channel = next((m.channel for m in messages if m.channel), None)
-289:         thread_ts = next((m.thread_ts for m in messages if m.thread_ts), None)
-290: 
-291:         metadata: dict[str, Any] = {
-292:             "source_type": "slack_conversation",
-293:             "channel": channel,
-294:             "thread_ts": thread_ts,
-295:             "message_count": len(messages),
-296:             "time_start": messages[0].timestamp.isoformat(),
-297:             "time_end": messages[-1].timestamp.isoformat(),
-298:             "authors": authors,
-299:         }
-300: 
-301:         if self.config.include_message_metadata:
-302:             metadata["messages"] = message_meta
-303: 
-304:         return ChunkResult(
-305:             content=content,
-306:             index=index,
-307:             start_char=0,
-308:             end_char=len(content),
-309:             token_count=self.count_tokens(content),
-310:             metadata=metadata,
-311:         )
 ````
 
 ## File: src/khora/extraction/chunkers/fixed.py
@@ -14528,76 +14935,6 @@ README.md
 450:     return min(1.0, score / max_score)
 ````
 
-## File: src/khora/query/message_extract.py
-````python
- 1: """Utilities for extracting individual messages from conversation chunks.
- 2: 
- 3: Conversation chunks produced by :class:`ConversationChunker` embed
- 4: per-message metadata (author, timestamp, character offsets) so that
- 5: individual messages can be retrieved from search results.
- 6: """
- 7: 
- 8: from __future__ import annotations
- 9: 
-10: from typing import Any
-11: 
-12: 
-13: def extract_messages_from_chunk(chunk_metadata: dict[str, Any]) -> list[dict[str, Any]]:
-14:     """Return the per-message metadata list from a chunk.
-15: 
-16:     Args:
-17:         chunk_metadata: The ``metadata`` dict of a chunk or search result.
-18: 
-19:     Returns:
-20:         List of message dicts (each with ``id``, ``author``, ``timestamp``,
-21:         ``start_char``, ``end_char``).  Returns an empty list when the
-22:         metadata does not contain conversation message data.
-23:     """
-24:     return chunk_metadata.get("messages", [])
-25: 
-26: 
-27: def extract_message_text(chunk_content: str, start_char: int, end_char: int) -> str:
-28:     """Slice a message's text from the chunk content using character offsets.
-29: 
-30:     Args:
-31:         chunk_content: The full chunk text.
-32:         start_char: Start character offset (inclusive).
-33:         end_char: End character offset (exclusive).
-34: 
-35:     Returns:
-36:         The substring corresponding to the message.
-37:     """
-38:     return chunk_content[start_char:end_char]
-39: 
-40: 
-41: def find_message_in_chunk(
-42:     chunk_content: str,
-43:     chunk_metadata: dict[str, Any],
-44:     message_id: str,
-45: ) -> dict[str, Any] | None:
-46:     """Find a specific message by ID within a conversation chunk.
-47: 
-48:     Args:
-49:         chunk_content: The full chunk text.
-50:         chunk_metadata: The chunk's metadata dict.
-51:         message_id: The ``message_id`` to look up.
-52: 
-53:     Returns:
-54:         A dict with ``id``, ``author``, ``timestamp``, and ``text`` keys,
-55:         or ``None`` if the message was not found.
-56:     """
-57:     for msg in extract_messages_from_chunk(chunk_metadata):
-58:         if msg.get("id") == message_id:
-59:             text = extract_message_text(chunk_content, msg["start_char"], msg["end_char"])
-60:             return {
-61:                 "id": msg["id"],
-62:                 "author": msg["author"],
-63:                 "timestamp": msg["timestamp"],
-64:                 "text": text,
-65:             }
-66:     return None
-````
-
 ## File: src/khora/query/metrics.py
 ````python
   1: """Search quality metrics for observability.
@@ -15730,255 +16067,6 @@ README.md
 117:         assert entity.source_tool == ""
 ````
 
-## File: tests/unit/test_conversation_chunker.py
-````python
-  1: """Tests for the ConversationChunker."""
-  2: 
-  3: from __future__ import annotations
-  4: 
-  5: import json
-  6: from datetime import datetime, timedelta, timezone
-  7: 
-  8: from khora.extraction.chunkers.conversation import (
-  9:     ConversationChunker,
- 10:     ConversationChunkerConfig,
- 11:     SlackMessage,
- 12: )
- 13: 
- 14: 
- 15: def _ts(minutes: int = 0) -> datetime:
- 16:     """Helper: return a UTC datetime offset by *minutes* from a fixed base."""
- 17:     base = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
- 18:     return base + timedelta(minutes=minutes)
- 19: 
- 20: 
- 21: def _msg(
- 22:     text: str,
- 23:     author: str = "alice",
- 24:     minutes: int = 0,
- 25:     msg_id: str | None = None,
- 26:     thread_ts: str | None = None,
- 27:     channel: str | None = "general",
- 28: ) -> SlackMessage:
- 29:     """Helper: build a SlackMessage."""
- 30:     return SlackMessage(
- 31:         text=text,
- 32:         author=author,
- 33:         timestamp=_ts(minutes),
- 34:         message_id=msg_id or f"msg-{minutes}",
- 35:         thread_ts=thread_ts,
- 36:         channel=channel,
- 37:     )
- 38: 
- 39: 
- 40: class TestSlackMessage:
- 41:     def test_construction(self):
- 42:         msg = _msg("hello")
- 43:         assert msg.text == "hello"
- 44:         assert msg.author == "alice"
- 45: 
- 46:     def test_from_dict(self):
- 47:         data = {
- 48:             "text": "hi",
- 49:             "author": "bob",
- 50:             "timestamp": "2025-01-15T10:00:00+00:00",
- 51:             "message_id": "m1",
- 52:             "thread_ts": "123.456",
- 53:             "channel": "random",
- 54:             "reactions": ["+1"],
- 55:         }
- 56:         msg = SlackMessage.from_dict(data)
- 57:         assert msg.author == "bob"
- 58:         assert msg.thread_ts == "123.456"
- 59:         assert msg.reactions == ["+1"]
- 60: 
- 61:     def test_sorting_by_timestamp(self):
- 62:         msgs = [_msg("c", minutes=10), _msg("a", minutes=0), _msg("b", minutes=5)]
- 63:         sorted_msgs = sorted(msgs, key=lambda m: m.timestamp)
- 64:         assert [m.text for m in sorted_msgs] == ["a", "b", "c"]
- 65: 
- 66: 
- 67: class TestConversationChunker:
- 68:     def test_chunk_empty(self):
- 69:         chunker = ConversationChunker()
- 70:         assert chunker.chunk_messages([]) == []
- 71: 
- 72:     def test_single_message(self):
- 73:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
- 74:         results = chunker.chunk_messages([_msg("hello")])
- 75:         assert len(results) == 1
- 76:         assert "hello" in results[0].content
- 77: 
- 78:     def test_thread_grouping(self):
- 79:         """Messages sharing a thread_ts are grouped together."""
- 80:         msgs = [
- 81:             _msg("thread start", author="alice", minutes=0, thread_ts="t1"),
- 82:             _msg("unrelated top-level", author="carol", minutes=1),
- 83:             _msg("thread reply", author="bob", minutes=2, thread_ts="t1"),
- 84:         ]
- 85:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
- 86:         results = chunker.chunk_messages(msgs)
- 87:         # Thread group + top-level group
- 88:         assert len(results) == 2
- 89:         # Thread group should contain both thread messages
- 90:         thread_chunk = next(r for r in results if r.metadata.get("thread_ts") == "t1")
- 91:         assert thread_chunk.metadata["message_count"] == 2
- 92: 
- 93:     def test_time_gap_splitting(self):
- 94:         """A 30-min gap with 15-min threshold splits into two groups."""
- 95:         msgs = [
- 96:             _msg("morning 1", minutes=0),
- 97:             _msg("morning 2", minutes=5),
- 98:             _msg("afternoon 1", minutes=35),
- 99:             _msg("afternoon 2", minutes=40),
-100:         ]
-101:         chunker = ConversationChunker(config=ConversationChunkerConfig(time_gap_minutes=15))
-102:         results = chunker.chunk_messages(msgs)
-103:         assert len(results) == 2
-104:         assert results[0].metadata["message_count"] == 2
-105:         assert results[1].metadata["message_count"] == 2
-106: 
-107:     def test_mixed_threads_and_toplevel(self):
-108:         """Threads are separated from top-level conversation."""
-109:         msgs = [
-110:             _msg("top1", minutes=0),
-111:             _msg("top2", minutes=1),
-112:             _msg("thread msg", minutes=2, thread_ts="t1"),
-113:         ]
-114:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
-115:         results = chunker.chunk_messages(msgs)
-116:         source_types = {r.metadata.get("thread_ts") for r in results}
-117:         assert "t1" in source_types
-118:         assert None in source_types
-119: 
-120:     def test_max_group_size_splits(self):
-121:         """A group of 60 messages with max=50 splits into two."""
-122:         msgs = [_msg(f"msg {i}", minutes=i, msg_id=f"m{i}") for i in range(60)]
-123:         config = ConversationChunkerConfig(max_group_size=50, min_group_size=2, time_gap_minutes=9999)
-124:         chunker = ConversationChunker(config=config)
-125:         results = chunker.chunk_messages(msgs)
-126:         assert len(results) == 2
-127:         total = sum(r.metadata["message_count"] for r in results)
-128:         assert total == 60
-129: 
-130:     def test_min_group_size_merges(self):
-131:         """A tiny trailing group merges with its neighbour."""
-132:         # 3 messages then a gap then 1 message → should merge the 1 into the 3
-133:         msgs = [
-134:             _msg("a", minutes=0),
-135:             _msg("b", minutes=1),
-136:             _msg("c", minutes=2),
-137:             _msg("d", minutes=20),  # gap triggers split, but group of 1 < min_group_size=2
-138:         ]
-139:         config = ConversationChunkerConfig(time_gap_minutes=15, min_group_size=2)
-140:         chunker = ConversationChunker(config=config)
-141:         results = chunker.chunk_messages(msgs)
-142:         assert len(results) == 1
-143:         assert results[0].metadata["message_count"] == 4
-144: 
-145:     def test_format_output(self):
-146:         """Rendered text matches [HH:MM] author: text format."""
-147:         msgs = [_msg("hello world", author="alice", minutes=0)]
-148:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
-149:         results = chunker.chunk_messages(msgs)
-150:         assert results[0].content == "[10:00] alice: hello world"
-151: 
-152:     def test_message_metadata_present(self):
-153:         """Chunk metadata contains messages list."""
-154:         msgs = [_msg("hi", minutes=0), _msg("hey", author="bob", minutes=1)]
-155:         chunker = ConversationChunker()
-156:         results = chunker.chunk_messages(msgs)
-157:         assert len(results) == 1
-158:         meta = results[0].metadata
-159:         assert "messages" in meta
-160:         assert len(meta["messages"]) == 2
-161:         assert meta["messages"][0]["author"] == "alice"
-162:         assert meta["messages"][1]["author"] == "bob"
-163: 
-164:     def test_char_offsets_correct(self):
-165:         """start_char/end_char correctly index into content."""
-166:         msgs = [
-167:             _msg("first message", author="alice", minutes=0),
-168:             _msg("second message", author="bob", minutes=1),
-169:         ]
-170:         chunker = ConversationChunker()
-171:         results = chunker.chunk_messages(msgs)
-172:         chunk = results[0]
-173:         for msg_meta in chunk.metadata["messages"]:
-174:             extracted = chunk.content[msg_meta["start_char"] : msg_meta["end_char"]]
-175:             assert msg_meta["author"] in extracted
-176:             assert "] " in extracted  # has time prefix
-177: 
-178:     def test_json_input(self):
-179:         """chunk(text) parses a JSON array correctly."""
-180:         data = [
-181:             {
-182:                 "text": "hello",
-183:                 "author": "alice",
-184:                 "timestamp": "2025-01-15T10:00:00+00:00",
-185:                 "message_id": "m1",
-186:             },
-187:             {
-188:                 "text": "world",
-189:                 "author": "bob",
-190:                 "timestamp": "2025-01-15T10:01:00+00:00",
-191:                 "message_id": "m2",
-192:             },
-193:         ]
-194:         chunker = ConversationChunker()
-195:         results = chunker.chunk(json.dumps(data))
-196:         assert len(results) == 1
-197:         assert "hello" in results[0].content
-198:         assert "world" in results[0].content
-199: 
-200:     def test_configurable_time_gap(self):
-201:         """5-min vs 60-min gap threshold produces different groupings."""
-202:         msgs = [
-203:             _msg("a", minutes=0),
-204:             _msg("b", minutes=10),
-205:             _msg("c", minutes=20),
-206:         ]
-207:         # 5-min gap → 3 groups (each gap > 5)
-208:         config_tight = ConversationChunkerConfig(time_gap_minutes=5, min_group_size=1)
-209:         results_tight = ConversationChunker(config=config_tight).chunk_messages(msgs)
-210: 
-211:         # 60-min gap → 1 group (no gap > 60)
-212:         config_wide = ConversationChunkerConfig(time_gap_minutes=60, min_group_size=1)
-213:         results_wide = ConversationChunker(config=config_wide).chunk_messages(msgs)
-214: 
-215:         assert len(results_tight) == 3
-216:         assert len(results_wide) == 1
-217: 
-218:     def test_authors_deduplicated(self):
-219:         """metadata authors list contains unique names."""
-220:         msgs = [
-221:             _msg("hi", author="alice", minutes=0),
-222:             _msg("hey", author="bob", minutes=1),
-223:             _msg("yo", author="alice", minutes=2),
-224:         ]
-225:         chunker = ConversationChunker()
-226:         results = chunker.chunk_messages(msgs)
-227:         authors = results[0].metadata["authors"]
-228:         assert authors == ["alice", "bob"]
-229: 
-230:     def test_chunk_empty_string(self):
-231:         chunker = ConversationChunker()
-232:         assert chunker.chunk("") == []
-233:         assert chunker.chunk("  ") == []
-234: 
-235:     def test_metadata_fields(self):
-236:         """Chunk metadata has all expected top-level fields."""
-237:         msgs = [_msg("hello", channel="dev", minutes=0)]
-238:         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
-239:         results = chunker.chunk_messages(msgs)
-240:         meta = results[0].metadata
-241:         assert meta["source_type"] == "slack_conversation"
-242:         assert meta["channel"] == "dev"
-243:         assert meta["message_count"] == 1
-244:         assert "time_start" in meta
-245:         assert "time_end" in meta
-````
-
 ## File: tests/unit/test_extraction_embedders.py
 ````python
   1: """Unit tests for extraction/embedders/litellm.py — LiteLLM embedder."""
@@ -16838,94 +16926,6 @@ README.md
 132:         backend = ArcadeDBBackend.from_config(config)
 133:         assert backend._url == "http://arcade:2480"
 134:         assert backend._database == "testdb"
-````
-
-## File: tests/unit/test_message_extract.py
-````python
- 1: """Tests for message extraction utilities."""
- 2: 
- 3: from __future__ import annotations
- 4: 
- 5: from khora.query.message_extract import (
- 6:     extract_message_text,
- 7:     extract_messages_from_chunk,
- 8:     find_message_in_chunk,
- 9: )
-10: 
-11: 
-12: def _sample_chunk():
-13:     """Return a (content, metadata) pair for a conversation chunk."""
-14:     line1 = "[10:00] alice: hello world"
-15:     line2 = "[10:01] bob: hi there"
-16:     content = f"{line1}\n{line2}"
-17:     metadata = {
-18:         "source_type": "slack_conversation",
-19:         "messages": [
-20:             {
-21:                 "id": "m1",
-22:                 "author": "alice",
-23:                 "timestamp": "2025-01-15T10:00:00+00:00",
-24:                 "start_char": 0,
-25:                 "end_char": len(line1),
-26:             },
-27:             {
-28:                 "id": "m2",
-29:                 "author": "bob",
-30:                 "timestamp": "2025-01-15T10:01:00+00:00",
-31:                 "start_char": len(line1) + 1,
-32:                 "end_char": len(line1) + 1 + len(line2),
-33:             },
-34:         ],
-35:     }
-36:     return content, metadata
-37: 
-38: 
-39: class TestExtractMessages:
-40:     def test_extract_messages(self):
-41:         _, meta = _sample_chunk()
-42:         msgs = extract_messages_from_chunk(meta)
-43:         assert len(msgs) == 2
-44:         assert msgs[0]["id"] == "m1"
-45: 
-46:     def test_extract_from_empty_metadata(self):
-47:         assert extract_messages_from_chunk({}) == []
-48: 
-49:     def test_extract_from_non_conversation(self):
-50:         assert extract_messages_from_chunk({"source_type": "document"}) == []
-51: 
-52: 
-53: class TestFindMessage:
-54:     def test_find_by_id(self):
-55:         content, meta = _sample_chunk()
-56:         result = find_message_in_chunk(content, meta, "m1")
-57:         assert result is not None
-58:         assert result["author"] == "alice"
-59:         assert "hello world" in result["text"]
-60: 
-61:     def test_find_second_message(self):
-62:         content, meta = _sample_chunk()
-63:         result = find_message_in_chunk(content, meta, "m2")
-64:         assert result is not None
-65:         assert result["author"] == "bob"
-66:         assert "hi there" in result["text"]
-67: 
-68:     def test_find_missing_id(self):
-69:         content, meta = _sample_chunk()
-70:         assert find_message_in_chunk(content, meta, "nonexistent") is None
-71: 
-72: 
-73: class TestExtractText:
-74:     def test_extract_text_by_offsets(self):
-75:         content, meta = _sample_chunk()
-76:         m = meta["messages"][0]
-77:         text = extract_message_text(content, m["start_char"], m["end_char"])
-78:         assert text == "[10:00] alice: hello world"
-79: 
-80:     def test_extract_second_message(self):
-81:         content, meta = _sample_chunk()
-82:         m = meta["messages"][1]
-83:         text = extract_message_text(content, m["start_char"], m["end_char"])
-84:         assert text == "[10:01] bob: hi there"
 ````
 
 ## File: tests/unit/test_query_fusion.py
@@ -46465,318 +46465,323 @@ README.md
 653:         elif has_graph:
 654:             results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
 655:         elif has_vector:
-656:             await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+656:             results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
 657: 
-658:         from khora.telemetry import get_collector
-659: 
-660:         get_collector().record_storage_op(
-661:             backend="graph+vector",
-662:             operation="upsert_entities_batch",
-663:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-664:             record_count=len(entities),
-665:             namespace_id=namespace_id,
-666:         )
-667:         return results
-668: 
-669:     async def create_relationships_batch(
-670:         self,
-671:         relationships: list[Relationship],
-672:         *,
-673:         batch_size: int = 50,
-674:     ) -> int:
-675:         """Batch create relationships in the graph backend.
-676: 
-677:         Returns the number of relationships created.
-678:         """
-679:         if not relationships:
-680:             return 0
+658:         # Fallback: if no backend returned results, create synthetic results
+659:         # to ensure callers always get one result per input entity
+660:         if not results:
+661:             results = [(entity, True) for entity in entities]
+662: 
+663:         from khora.telemetry import get_collector
+664: 
+665:         get_collector().record_storage_op(
+666:             backend="graph+vector",
+667:             operation="upsert_entities_batch",
+668:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+669:             record_count=len(entities),
+670:             namespace_id=namespace_id,
+671:         )
+672:         return results
+673: 
+674:     async def create_relationships_batch(
+675:         self,
+676:         relationships: list[Relationship],
+677:         *,
+678:         batch_size: int = 50,
+679:     ) -> int:
+680:         """Batch create relationships in the graph backend.
 681: 
-682:         import time as _time
-683: 
-684:         _t0 = _time.perf_counter()
-685: 
-686:         count = 0
-687:         if self.graph and hasattr(self.graph, "create_relationships_batch"):
-688:             count = await self.graph.create_relationships_batch(relationships, batch_size=batch_size)
-689: 
-690:         from khora.telemetry import get_collector
-691: 
-692:         get_collector().record_storage_op(
-693:             backend="graph",
-694:             operation="create_relationships_batch",
-695:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-696:             record_count=count,
-697:             namespace_id=relationships[0].namespace_id if relationships else None,
-698:         )
-699:         return count
-700: 
-701:     # =========================================================================
-702:     # Relationship operations (delegated to graph)
-703:     # =========================================================================
-704: 
-705:     async def create_relationship(self, relationship: Relationship) -> Relationship:
-706:         """Create a relationship between entities."""
-707:         if not self.graph:
-708:             raise RuntimeError("Graph backend not configured")
-709:         import time as _time
-710: 
-711:         _t0 = _time.perf_counter()
-712:         result = await self.graph.create_relationship(relationship)
-713:         from khora.telemetry import get_collector
-714: 
-715:         get_collector().record_storage_op(
-716:             backend="graph",
-717:             operation="create_relationship",
-718:             latency_ms=(_time.perf_counter() - _t0) * 1000,
-719:             record_count=1,
-720:             namespace_id=relationship.namespace_id,
-721:         )
-722:         return result
-723: 
-724:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-725:         """Get a relationship by ID."""
-726:         if self.graph:
-727:             return await self.graph.get_relationship(relationship_id)
-728:         return None
-729: 
-730:     async def delete_relationship(self, relationship_id: UUID) -> bool:
-731:         """Delete a relationship."""
-732:         if self.graph:
-733:             return await self.graph.delete_relationship(relationship_id)
-734:         return False
-735: 
-736:     async def get_entity_relationships(
-737:         self,
-738:         entity_id: UUID,
-739:         *,
-740:         direction: str = "both",
-741:         relationship_types: list[str] | None = None,
-742:         limit: int = 100,
-743:     ) -> list[Relationship]:
-744:         """Get relationships for an entity."""
-745:         if self.graph:
-746:             return await self.graph.get_entity_relationships(
-747:                 entity_id, direction=direction, relationship_types=relationship_types, limit=limit
-748:             )
-749:         return []
-750: 
-751:     async def list_relationships(
-752:         self,
-753:         namespace_id: UUID,
-754:         *,
-755:         relationship_type: str | None = None,
-756:         limit: int = 1000,
-757:         offset: int = 0,
-758:     ) -> list[Relationship]:
-759:         """List all relationships in a namespace."""
-760:         if self.graph:
-761:             return await self.graph.list_relationships(
-762:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
-763:             )
-764:         return []
-765: 
-766:     # =========================================================================
-767:     # Episode operations (delegated to graph)
-768:     # =========================================================================
-769: 
-770:     async def create_episode(self, episode: Episode) -> Episode:
-771:         """Create an episode."""
-772:         if not self.graph:
-773:             raise RuntimeError("Graph backend not configured")
-774:         return await self.graph.create_episode(episode)
-775: 
-776:     async def get_episode(self, episode_id: UUID) -> Episode | None:
-777:         """Get an episode by ID."""
-778:         if self.graph:
-779:             return await self.graph.get_episode(episode_id)
-780:         return None
-781: 
-782:     async def list_episodes(
-783:         self,
-784:         namespace_id: UUID,
-785:         *,
-786:         start_time: datetime | None = None,
-787:         end_time: datetime | None = None,
-788:         limit: int = 100,
-789:     ) -> list[Episode]:
-790:         """List episodes in a time range."""
-791:         if self.graph:
-792:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
-793:         return []
-794: 
-795:     # =========================================================================
-796:     # Graph traversal (delegated to graph)
-797:     # =========================================================================
-798: 
-799:     async def find_paths(
-800:         self,
-801:         namespace_id: UUID,
-802:         source_entity_id: UUID,
-803:         target_entity_id: UUID,
-804:         *,
-805:         max_depth: int = 3,
-806:         relationship_types: list[str] | None = None,
-807:     ) -> list[list[dict[str, Any]]]:
-808:         """Find paths between two entities."""
-809:         if self.graph:
-810:             return await self.graph.find_paths(
-811:                 namespace_id,
-812:                 source_entity_id,
-813:                 target_entity_id,
-814:                 max_depth=max_depth,
-815:                 relationship_types=relationship_types,
-816:             )
-817:         return []
-818: 
-819:     async def get_neighborhood(
-820:         self,
-821:         entity_id: UUID,
-822:         *,
-823:         depth: int = 1,
-824:         relationship_types: list[str] | None = None,
-825:         limit: int = 50,
-826:     ) -> dict[str, Any]:
-827:         """Get the neighborhood of an entity."""
-828:         if self.graph:
-829:             return await self.graph.get_neighborhood(
-830:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
-831:             )
-832:         return {"entities": [], "relationships": []}
-833: 
-834:     # =========================================================================
-835:     # Batch operations (optimized for parallel fetching)
-836:     # =========================================================================
-837: 
-838:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-839:         """Fetch multiple entities in a single query.
-840: 
-841:         Args:
-842:             entity_ids: List of entity IDs to fetch
-843: 
-844:         Returns:
-845:             Dictionary mapping entity ID to Entity object
-846:         """
-847:         if not entity_ids:
-848:             return {}
-849:         if self.graph:
-850:             return await self.graph.get_entities_batch(entity_ids)
-851:         return {}
-852: 
-853:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-854:         """Fetch multiple documents in a single query.
-855: 
-856:         Args:
-857:             document_ids: List of document IDs to fetch
-858: 
-859:         Returns:
-860:             Dictionary mapping document ID to Document object
-861:         """
-862:         if not document_ids:
-863:             return {}
-864:         if self.relational:
-865:             return await self.relational.get_documents_batch(document_ids)
-866:         return {}
-867: 
-868:     async def get_neighborhoods_batch(
-869:         self,
-870:         entity_ids: list[UUID],
-871:         *,
-872:         depth: int = 1,
-873:         relationship_types: list[str] | None = None,
-874:         limit_per_entity: int = 20,
-875:     ) -> dict[UUID, dict[str, Any]]:
-876:         """Get neighborhoods for multiple entities in a single query.
-877: 
-878:         Args:
-879:             entity_ids: List of entity IDs
-880:             depth: Max traversal depth
-881:             relationship_types: Optional relationship type filter
-882:             limit_per_entity: Max nodes per entity neighborhood
-883: 
-884:         Returns:
-885:             Dictionary mapping entity ID to neighborhood data
-886:         """
-887:         if not entity_ids:
-888:             return {}
-889:         if self.graph:
-890:             import time as _time
-891: 
-892:             _t0 = _time.perf_counter()
-893:             result = await self.graph.get_neighborhoods_batch(
-894:                 entity_ids,
-895:                 depth=depth,
-896:                 relationship_types=relationship_types,
-897:                 limit_per_entity=limit_per_entity,
-898:             )
-899:             from khora.telemetry import get_collector
-900: 
-901:             get_collector().record_storage_op(
-902:                 backend="graph",
-903:                 operation="get_neighborhoods_batch",
-904:                 latency_ms=(_time.perf_counter() - _t0) * 1000,
-905:                 record_count=len(result),
-906:                 # No namespace_id available — entity_ids don't carry namespace info
-907:             )
-908:             return result
-909:         return {}
-910: 
-911:     # =========================================================================
-912:     # Event operations (delegated to event store)
-913:     # =========================================================================
-914: 
-915:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
-916:         """Append an event to the log."""
-917:         if not self.event_store:
-918:             raise RuntimeError("Event store not configured")
-919:         return await self.event_store.append_event(event)
-920: 
-921:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
-922:         """Append multiple events in a batch."""
-923:         if not self.event_store:
-924:             raise RuntimeError("Event store not configured")
-925:         return await self.event_store.append_events_batch(events)
-926: 
-927:     async def get_events(
-928:         self,
-929:         namespace_id: UUID,
-930:         *,
-931:         event_types: list[str] | None = None,
-932:         resource_type: str | None = None,
-933:         resource_id: UUID | None = None,
-934:         after: datetime | None = None,
-935:         before: datetime | None = None,
-936:         limit: int = 100,
-937:         offset: int = 0,
-938:     ) -> list[MemoryEvent]:
-939:         """Query events from the log."""
-940:         if not self.event_store:
-941:             raise RuntimeError("Event store not configured")
-942:         return await self.event_store.get_events(
-943:             namespace_id,
-944:             event_types=event_types,
-945:             resource_type=resource_type,
-946:             resource_id=resource_id,
-947:             after=after,
-948:             before=before,
-949:             limit=limit,
-950:             offset=offset,
-951:         )
-952: 
-953:     # =========================================================================
-954:     # Sync checkpoint operations (delegated to relational)
-955:     # =========================================================================
-956: 
-957:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
-958:         """Get the last sync checkpoint for a source."""
-959:         if not self.relational:
-960:             raise RuntimeError("Relational backend not configured")
-961:         return await self.relational.get_sync_checkpoint(namespace_id, source)
-962: 
-963:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
-964:         """Set the sync checkpoint for a source."""
-965:         if not self.relational:
-966:             raise RuntimeError("Relational backend not configured")
-967:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
+682:         Returns the number of relationships created.
+683:         """
+684:         if not relationships:
+685:             return 0
+686: 
+687:         import time as _time
+688: 
+689:         _t0 = _time.perf_counter()
+690: 
+691:         count = 0
+692:         if self.graph and hasattr(self.graph, "create_relationships_batch"):
+693:             count = await self.graph.create_relationships_batch(relationships, batch_size=batch_size)
+694: 
+695:         from khora.telemetry import get_collector
+696: 
+697:         get_collector().record_storage_op(
+698:             backend="graph",
+699:             operation="create_relationships_batch",
+700:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+701:             record_count=count,
+702:             namespace_id=relationships[0].namespace_id if relationships else None,
+703:         )
+704:         return count
+705: 
+706:     # =========================================================================
+707:     # Relationship operations (delegated to graph)
+708:     # =========================================================================
+709: 
+710:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+711:         """Create a relationship between entities."""
+712:         if not self.graph:
+713:             raise RuntimeError("Graph backend not configured")
+714:         import time as _time
+715: 
+716:         _t0 = _time.perf_counter()
+717:         result = await self.graph.create_relationship(relationship)
+718:         from khora.telemetry import get_collector
+719: 
+720:         get_collector().record_storage_op(
+721:             backend="graph",
+722:             operation="create_relationship",
+723:             latency_ms=(_time.perf_counter() - _t0) * 1000,
+724:             record_count=1,
+725:             namespace_id=relationship.namespace_id,
+726:         )
+727:         return result
+728: 
+729:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+730:         """Get a relationship by ID."""
+731:         if self.graph:
+732:             return await self.graph.get_relationship(relationship_id)
+733:         return None
+734: 
+735:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+736:         """Delete a relationship."""
+737:         if self.graph:
+738:             return await self.graph.delete_relationship(relationship_id)
+739:         return False
+740: 
+741:     async def get_entity_relationships(
+742:         self,
+743:         entity_id: UUID,
+744:         *,
+745:         direction: str = "both",
+746:         relationship_types: list[str] | None = None,
+747:         limit: int = 100,
+748:     ) -> list[Relationship]:
+749:         """Get relationships for an entity."""
+750:         if self.graph:
+751:             return await self.graph.get_entity_relationships(
+752:                 entity_id, direction=direction, relationship_types=relationship_types, limit=limit
+753:             )
+754:         return []
+755: 
+756:     async def list_relationships(
+757:         self,
+758:         namespace_id: UUID,
+759:         *,
+760:         relationship_type: str | None = None,
+761:         limit: int = 1000,
+762:         offset: int = 0,
+763:     ) -> list[Relationship]:
+764:         """List all relationships in a namespace."""
+765:         if self.graph:
+766:             return await self.graph.list_relationships(
+767:                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+768:             )
+769:         return []
+770: 
+771:     # =========================================================================
+772:     # Episode operations (delegated to graph)
+773:     # =========================================================================
+774: 
+775:     async def create_episode(self, episode: Episode) -> Episode:
+776:         """Create an episode."""
+777:         if not self.graph:
+778:             raise RuntimeError("Graph backend not configured")
+779:         return await self.graph.create_episode(episode)
+780: 
+781:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+782:         """Get an episode by ID."""
+783:         if self.graph:
+784:             return await self.graph.get_episode(episode_id)
+785:         return None
+786: 
+787:     async def list_episodes(
+788:         self,
+789:         namespace_id: UUID,
+790:         *,
+791:         start_time: datetime | None = None,
+792:         end_time: datetime | None = None,
+793:         limit: int = 100,
+794:     ) -> list[Episode]:
+795:         """List episodes in a time range."""
+796:         if self.graph:
+797:             return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
+798:         return []
+799: 
+800:     # =========================================================================
+801:     # Graph traversal (delegated to graph)
+802:     # =========================================================================
+803: 
+804:     async def find_paths(
+805:         self,
+806:         namespace_id: UUID,
+807:         source_entity_id: UUID,
+808:         target_entity_id: UUID,
+809:         *,
+810:         max_depth: int = 3,
+811:         relationship_types: list[str] | None = None,
+812:     ) -> list[list[dict[str, Any]]]:
+813:         """Find paths between two entities."""
+814:         if self.graph:
+815:             return await self.graph.find_paths(
+816:                 namespace_id,
+817:                 source_entity_id,
+818:                 target_entity_id,
+819:                 max_depth=max_depth,
+820:                 relationship_types=relationship_types,
+821:             )
+822:         return []
+823: 
+824:     async def get_neighborhood(
+825:         self,
+826:         entity_id: UUID,
+827:         *,
+828:         depth: int = 1,
+829:         relationship_types: list[str] | None = None,
+830:         limit: int = 50,
+831:     ) -> dict[str, Any]:
+832:         """Get the neighborhood of an entity."""
+833:         if self.graph:
+834:             return await self.graph.get_neighborhood(
+835:                 entity_id, depth=depth, relationship_types=relationship_types, limit=limit
+836:             )
+837:         return {"entities": [], "relationships": []}
+838: 
+839:     # =========================================================================
+840:     # Batch operations (optimized for parallel fetching)
+841:     # =========================================================================
+842: 
+843:     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+844:         """Fetch multiple entities in a single query.
+845: 
+846:         Args:
+847:             entity_ids: List of entity IDs to fetch
+848: 
+849:         Returns:
+850:             Dictionary mapping entity ID to Entity object
+851:         """
+852:         if not entity_ids:
+853:             return {}
+854:         if self.graph:
+855:             return await self.graph.get_entities_batch(entity_ids)
+856:         return {}
+857: 
+858:     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+859:         """Fetch multiple documents in a single query.
+860: 
+861:         Args:
+862:             document_ids: List of document IDs to fetch
+863: 
+864:         Returns:
+865:             Dictionary mapping document ID to Document object
+866:         """
+867:         if not document_ids:
+868:             return {}
+869:         if self.relational:
+870:             return await self.relational.get_documents_batch(document_ids)
+871:         return {}
+872: 
+873:     async def get_neighborhoods_batch(
+874:         self,
+875:         entity_ids: list[UUID],
+876:         *,
+877:         depth: int = 1,
+878:         relationship_types: list[str] | None = None,
+879:         limit_per_entity: int = 20,
+880:     ) -> dict[UUID, dict[str, Any]]:
+881:         """Get neighborhoods for multiple entities in a single query.
+882: 
+883:         Args:
+884:             entity_ids: List of entity IDs
+885:             depth: Max traversal depth
+886:             relationship_types: Optional relationship type filter
+887:             limit_per_entity: Max nodes per entity neighborhood
+888: 
+889:         Returns:
+890:             Dictionary mapping entity ID to neighborhood data
+891:         """
+892:         if not entity_ids:
+893:             return {}
+894:         if self.graph:
+895:             import time as _time
+896: 
+897:             _t0 = _time.perf_counter()
+898:             result = await self.graph.get_neighborhoods_batch(
+899:                 entity_ids,
+900:                 depth=depth,
+901:                 relationship_types=relationship_types,
+902:                 limit_per_entity=limit_per_entity,
+903:             )
+904:             from khora.telemetry import get_collector
+905: 
+906:             get_collector().record_storage_op(
+907:                 backend="graph",
+908:                 operation="get_neighborhoods_batch",
+909:                 latency_ms=(_time.perf_counter() - _t0) * 1000,
+910:                 record_count=len(result),
+911:                 # No namespace_id available — entity_ids don't carry namespace info
+912:             )
+913:             return result
+914:         return {}
+915: 
+916:     # =========================================================================
+917:     # Event operations (delegated to event store)
+918:     # =========================================================================
+919: 
+920:     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
+921:         """Append an event to the log."""
+922:         if not self.event_store:
+923:             raise RuntimeError("Event store not configured")
+924:         return await self.event_store.append_event(event)
+925: 
+926:     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
+927:         """Append multiple events in a batch."""
+928:         if not self.event_store:
+929:             raise RuntimeError("Event store not configured")
+930:         return await self.event_store.append_events_batch(events)
+931: 
+932:     async def get_events(
+933:         self,
+934:         namespace_id: UUID,
+935:         *,
+936:         event_types: list[str] | None = None,
+937:         resource_type: str | None = None,
+938:         resource_id: UUID | None = None,
+939:         after: datetime | None = None,
+940:         before: datetime | None = None,
+941:         limit: int = 100,
+942:         offset: int = 0,
+943:     ) -> list[MemoryEvent]:
+944:         """Query events from the log."""
+945:         if not self.event_store:
+946:             raise RuntimeError("Event store not configured")
+947:         return await self.event_store.get_events(
+948:             namespace_id,
+949:             event_types=event_types,
+950:             resource_type=resource_type,
+951:             resource_id=resource_id,
+952:             after=after,
+953:             before=before,
+954:             limit=limit,
+955:             offset=offset,
+956:         )
+957: 
+958:     # =========================================================================
+959:     # Sync checkpoint operations (delegated to relational)
+960:     # =========================================================================
+961: 
+962:     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
+963:         """Get the last sync checkpoint for a source."""
+964:         if not self.relational:
+965:             raise RuntimeError("Relational backend not configured")
+966:         return await self.relational.get_sync_checkpoint(namespace_id, source)
+967: 
+968:     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
+969:         """Set the sync checkpoint for a source."""
+970:         if not self.relational:
+971:             raise RuntimeError("Relational backend not configured")
+972:         await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
 ````
 
 ## File: src/khora/memory_lake.py
@@ -52765,7 +52770,7 @@ README.md
  219:             try:
  220:                 # Use a timeout to allow periodic batch flushes
  221:                 entity = await asyncio.wait_for(entity_queue.get(), timeout=0.5)
- 222:             except asyncio.TimeoutError:
+ 222:             except TimeoutError:
  223:                 # Flush current batch on timeout
  224:                 await embed_batch()
  225:                 if extraction_complete.is_set() and entity_queue.empty():
@@ -53116,7 +53121,7 @@ README.md
  570:                     entity_id_mapping[stored_id] = stored_id
  571:                     # If upsert changed the ID (Neo4j MERGE with existing entity),
  572:                     # also map the original extraction ID to the stored ID
- 573:                     if pre_upsert_ids[i] != stored_id:
+ 573:                     if i < len(pre_upsert_ids) and pre_upsert_ids[i] != stored_id:
  574:                         entity_id_mapping[pre_upsert_ids[i]] = stored_id
  575:                     # New entities always need embeddings; existing only if missing
  576:                     needs_embedding = is_new or not entity.embedding
@@ -55236,6 +55241,13 @@ README.md
 
 # Git Logs
 
+## Commit: 2026-02-07 00:43:54 +0100
+**Message:** chore: bump version to 0.1.6
+
+**Files:**
+- REPOMIX.md
+- pyproject.toml
+
 ## Commit: 2026-02-07 00:40:03 +0100
 **Message:** perf: optimize GraphRAG and VectorCypher engines
 
@@ -55500,10 +55512,3 @@ README.md
 
 **Files:**
 - REPOMIX.md
-
-## Commit: 2026-02-05 16:45:14 +0100
-**Message:** fix: make graph backend optional in StorageSettings
-
-**Files:**
-- src/khora/config/schema.py
-- uv.lock
