@@ -77,42 +77,61 @@ class StorageCoordinator:
     _connected: bool = field(default=False, init=False)
 
     async def connect(self) -> None:
-        """Connect all configured backends."""
+        """Connect all configured backends in parallel.
+
+        All backend connections are initiated concurrently using asyncio.gather
+        for faster startup when multiple backends are configured.
+        """
         if self._connected:
             return
 
         logger.info("Connecting storage backends...")
 
+        # Build list of connection tasks to run in parallel
+        tasks = []
         if self.relational:
-            await self.relational.connect()
+            tasks.append(self.relational.connect())
         if self.vector:
-            await self.vector.connect()
+            tasks.append(self.vector.connect())
         if self.graph:
-            await self.graph.connect()
+            tasks.append(self.graph.connect())
         if self.event_store:
-            await self.event_store.connect()
+            tasks.append(self.event_store.connect())
+
+        # Connect all backends concurrently
+        if tasks:
+            await asyncio.gather(*tasks)
 
         self._connected = True
-        logger.info("Storage backends connected")
+        logger.info("All storage backends connected")
 
     async def disconnect(self) -> None:
-        """Disconnect all backends."""
+        """Disconnect all backends in parallel.
+
+        All backend disconnections are initiated concurrently for faster shutdown.
+        """
         if not self._connected:
             return
 
         logger.info("Disconnecting storage backends...")
 
+        # Build list of disconnection tasks to run in parallel
+        tasks = []
         if self.event_store:
-            await self.event_store.disconnect()
+            tasks.append(self.event_store.disconnect())
         if self.graph:
-            await self.graph.disconnect()
+            tasks.append(self.graph.disconnect())
         if self.vector:
-            await self.vector.disconnect()
+            tasks.append(self.vector.disconnect())
         if self.relational:
-            await self.relational.disconnect()
+            tasks.append(self.relational.disconnect())
+
+        # Disconnect all backends concurrently
+        if tasks:
+            await asyncio.gather(*tasks)
 
         self._connected = False
-        logger.info("Storage backends disconnected")
+        logger.info("All storage backends disconnected")
 
     async def health_check(self) -> StorageHealth:
         """Check health of all backends (parallel)."""
@@ -362,6 +381,21 @@ class StorageCoordinator:
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
         return await self.vector.get_chunks_by_document(document_id)
+
+    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+        """Fetch multiple chunks by ID in a single query.
+
+        Args:
+            chunk_ids: List of chunk IDs to fetch
+
+        Returns:
+            Dictionary mapping chunk ID to Chunk (only for existing chunks)
+        """
+        if not chunk_ids:
+            return {}
+        if not self.vector:
+            raise RuntimeError("Vector backend not configured")
+        return await self.vector.get_chunks_batch(chunk_ids)
 
     async def search_similar_chunks(
         self,

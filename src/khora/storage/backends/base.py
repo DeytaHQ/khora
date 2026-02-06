@@ -230,6 +230,18 @@ class VectorBackendProtocol(Protocol):
         ...
 
     @abstractmethod
+    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+        """Get multiple chunks by ID in a single query.
+
+        Args:
+            chunk_ids: List of chunk IDs to fetch
+
+        Returns:
+            Dictionary mapping chunk ID to Chunk (only for existing chunks)
+        """
+        ...
+
+    @abstractmethod
     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
         """Get all chunks for a document."""
         ...

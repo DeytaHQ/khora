@@ -34,12 +34,171 @@ class InferredRelationship:
     evidence: list[UUID] = field(default_factory=list)  # IDs of relationships used as evidence
 
 
+class RelationshipTypeIndex:
+    """Index for O(1) relationship lookups by type.
+
+    Provides efficient access to relationships organized by their type,
+    reducing iteration complexity from O(n) to O(1) for type-based queries.
+    This is critical for inference rules that match on relationship types.
+    """
+
+    def __init__(self) -> None:
+        """Initialize empty type index."""
+        # relationship_type -> list of relationships
+        self._by_type: dict[str, list[Relationship]] = {}
+        # source_entity_id -> list of relationships
+        self._by_source: dict[UUID, list[Relationship]] = {}
+        # target_entity_id -> list of relationships
+        self._by_target: dict[UUID, list[Relationship]] = {}
+        # (source_id, target_id, type) -> relationship for dedup checks
+        self._lookup: dict[tuple[UUID, UUID, str], Relationship] = {}
+
+    def build(self, relationships: list[Relationship]) -> None:
+        """Build the index from a list of relationships.
+
+        Args:
+            relationships: List of relationships to index
+        """
+        self._by_type.clear()
+        self._by_source.clear()
+        self._by_target.clear()
+        self._lookup.clear()
+
+        for rel in relationships:
+            rel_type = self._get_type_str(rel)
+
+            # Index by type
+            if rel_type not in self._by_type:
+                self._by_type[rel_type] = []
+            self._by_type[rel_type].append(rel)
+
+            # Index by source
+            if rel.source_entity_id not in self._by_source:
+                self._by_source[rel.source_entity_id] = []
+            self._by_source[rel.source_entity_id].append(rel)
+
+            # Index by target
+            if rel.target_entity_id not in self._by_target:
+                self._by_target[rel.target_entity_id] = []
+            self._by_target[rel.target_entity_id].append(rel)
+
+            # Dedup lookup
+            key = (rel.source_entity_id, rel.target_entity_id, rel_type)
+            self._lookup[key] = rel
+
+    def get_by_type(self, rel_type: str) -> list[Relationship]:
+        """Get all relationships of a given type in O(1).
+
+        Args:
+            rel_type: Relationship type string
+
+        Returns:
+            List of relationships (empty if type not found)
+        """
+        return self._by_type.get(rel_type, [])
+
+    def get_by_source(self, source_id: UUID) -> list[Relationship]:
+        """Get all relationships from a source entity in O(1).
+
+        Args:
+            source_id: Source entity UUID
+
+        Returns:
+            List of outgoing relationships
+        """
+        return self._by_source.get(source_id, [])
+
+    def get_by_target(self, target_id: UUID) -> list[Relationship]:
+        """Get all relationships to a target entity in O(1).
+
+        Args:
+            target_id: Target entity UUID
+
+        Returns:
+            List of incoming relationships
+        """
+        return self._by_target.get(target_id, [])
+
+    def get_by_source_and_type(self, source_id: UUID, rel_type: str) -> list[Relationship]:
+        """Get relationships from a source with a specific type.
+
+        Efficient for chained inference patterns like:
+        "A -[MANAGES]-> B -[WORKS_ON]-> C"
+
+        Args:
+            source_id: Source entity UUID
+            rel_type: Relationship type string
+
+        Returns:
+            Filtered list of relationships
+        """
+        source_rels = self._by_source.get(source_id, [])
+        return [r for r in source_rels if self._get_type_str(r) == rel_type]
+
+    def get_by_target_and_type(self, target_id: UUID, rel_type: str) -> list[Relationship]:
+        """Get relationships to a target with a specific type.
+
+        Args:
+            target_id: Target entity UUID
+            rel_type: Relationship type string
+
+        Returns:
+            Filtered list of relationships
+        """
+        target_rels = self._by_target.get(target_id, [])
+        return [r for r in target_rels if self._get_type_str(r) == rel_type]
+
+    def exists(self, source_id: UUID, target_id: UUID, rel_type: str) -> bool:
+        """Check if a relationship exists in O(1).
+
+        Args:
+            source_id: Source entity UUID
+            target_id: Target entity UUID
+            rel_type: Relationship type string
+
+        Returns:
+            True if relationship exists
+        """
+        return (source_id, target_id, rel_type) in self._lookup
+
+    def get_types(self) -> set[str]:
+        """Get all relationship types in the index.
+
+        Returns:
+            Set of relationship type strings
+        """
+        return set(self._by_type.keys())
+
+    def stats(self) -> dict[str, int]:
+        """Get index statistics.
+
+        Returns:
+            Dict with counts for types, sources, targets, and total relationships
+        """
+        return {
+            "type_groups": len(self._by_type),
+            "source_groups": len(self._by_source),
+            "target_groups": len(self._by_target),
+            "total_relationships": len(self._lookup),
+        }
+
+    @staticmethod
+    def _get_type_str(rel: Relationship) -> str:
+        """Extract relationship type as string."""
+        rt = rel.relationship_type
+        return rt.value if hasattr(rt, "value") else str(rt)
+
+
 class RelationshipInferrer:
     """Infers new relationships based on existing graph patterns.
 
     Uses inference rules from expertise configuration to deduce
     relationships that aren't explicitly stated but can be inferred
     from existing relationships.
+
+    Includes RelationshipTypeIndex for O(1) lookups by relationship type,
+    reducing inference complexity from O(n) per rule to O(1) type lookup
+    plus O(k) candidate iteration where k << n.
 
     Example inference rules:
     - If A manages B and B works on project C, A is stakeholder of C
@@ -65,6 +224,7 @@ class RelationshipInferrer:
         self._min_confidence = min_confidence
         self._max_inferences_per_rule = max_inferences_per_rule
         self._rule_engine = RuleEngine(expertise)
+        self._rel_index: RelationshipTypeIndex | None = None
 
     def infer(
         self,
@@ -74,6 +234,9 @@ class RelationshipInferrer:
         depth: int = 1,
     ) -> list[InferredRelationship]:
         """Infer new relationships from existing graph.
+
+        Uses RelationshipTypeIndex for O(1) lookups by relationship type,
+        significantly improving performance for graphs with many relationships.
 
         Args:
             entities: Existing entities
@@ -86,6 +249,11 @@ class RelationshipInferrer:
         if not self._expertise or not self._expertise.inference_rules:
             logger.debug("No expertise or inference rules configured, skipping inference")
             return []
+
+        # Build relationship type index for O(1) lookups
+        self._rel_index = RelationshipTypeIndex()
+        self._rel_index.build(relationships)
+        logger.debug(f"Built relationship index: {self._rel_index.stats()}")
 
         # Diagnostic logging
         entity_types = Counter(
@@ -213,6 +381,74 @@ class RelationshipInferrer:
         matches = self._rule_engine.evaluate_inference_rules(context)
         return self._matches_to_relationships(matches, context)
 
+    def find_chains_indexed(
+        self,
+        first_type: str,
+        second_type: str,
+        entities: list[Entity],
+    ) -> list[tuple[Relationship, Relationship]]:
+        """Find relationship chains A-[first_type]->B-[second_type]->C using index.
+
+        Uses RelationshipTypeIndex for O(1) type lookups followed by O(k) iteration
+        over matching relationships, where k is the number of relationships of
+        that type. This is significantly faster than O(n^2) nested iteration.
+
+        Example: Find "MANAGES -> WORKS_ON" chains to infer STAKEHOLDER_OF.
+
+        Args:
+            first_type: Relationship type for first hop (e.g., "MANAGES")
+            second_type: Relationship type for second hop (e.g., "WORKS_ON")
+            entities: List of entities (for entity lookup by ID)
+
+        Returns:
+            List of (first_rel, second_rel) tuples forming valid chains
+        """
+        if not self._rel_index:
+            logger.warning("Relationship index not built, returning empty chains")
+            return []
+
+        # Build entity lookup for validation
+        entity_lookup: dict[UUID, Entity] = {e.id: e for e in entities}
+
+        chains: list[tuple[Relationship, Relationship]] = []
+
+        # O(1) lookup for first type
+        first_rels = self._rel_index.get_by_type(first_type)
+
+        for first_rel in first_rels:
+            # The intermediate entity is the target of the first relationship
+            intermediate_id = first_rel.target_entity_id
+
+            # O(1) lookup for second type from the intermediate entity
+            second_rels = self._rel_index.get_by_source_and_type(intermediate_id, second_type)
+
+            for second_rel in second_rels:
+                # Validate that all entities exist
+                if (
+                    first_rel.source_entity_id in entity_lookup
+                    and intermediate_id in entity_lookup
+                    and second_rel.target_entity_id in entity_lookup
+                ):
+                    chains.append((first_rel, second_rel))
+
+        logger.debug(
+            f"Found {len(chains)} chains for {first_type} -> {second_type} "
+            f"(checked {len(first_rels)} first-hop relationships)"
+        )
+
+        return chains
+
+    def get_relationship_index(self) -> RelationshipTypeIndex | None:
+        """Get the current relationship type index.
+
+        Returns the index built during the last infer() call, or None if
+        inference hasn't been run yet.
+
+        Returns:
+            RelationshipTypeIndex or None
+        """
+        return self._rel_index
+
     def _matches_to_relationships(
         self,
         matches: list[RuleMatch],
@@ -307,9 +543,7 @@ class RelationshipInferrer:
             elif group == "second":
                 data = second
             else:
-                logger.warning(
-                    f"Rule '{match.rule_name}': invalid reference '{ref}' " f"(only 'first'/'second' supported)"
-                )
+                logger.warning(f"Rule '{match.rule_name}': invalid reference '{ref}' (only 'first'/'second' supported)")
                 return None
 
             return data.get(position)

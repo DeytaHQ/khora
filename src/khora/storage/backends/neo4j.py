@@ -475,12 +475,17 @@ class Neo4jBackend(GraphBackendBase):
         *,
         batch_size: int = 50,
     ) -> int:
-        """Batch create relationships using UNWIND."""
+        """Batch create relationships using UNWIND with parallel type processing.
+
+        Relationships are grouped by type and each type group is processed
+        in parallel using separate Neo4j sessions for better throughput.
+        """
         if not relationships:
             return 0
 
+        import asyncio
+
         driver = self._get_driver()
-        total_created = 0
 
         # Group by relationship type (required for dynamic rel type in Cypher)
         type_groups: dict[str, list[Relationship]] = {}
@@ -492,7 +497,9 @@ class Neo4jBackend(GraphBackendBase):
             )
             type_groups.setdefault(rel_type, []).append(rel)
 
-        for rel_type, rels in type_groups.items():
+        async def _process_type_group(rel_type: str, rels: list[Relationship]) -> int:
+            """Process all relationships of a single type in batches."""
+            type_created = 0
             for start in range(0, len(rels), batch_size):
                 batch = rels[start : start + batch_size]
                 rows = [
@@ -542,11 +549,18 @@ class Neo4jBackend(GraphBackendBase):
                     record = await result.single()
                     return record["created"] if record else 0
 
+                # Each type group uses its own session for parallel execution
                 async with driver.session(database=self._database) as session:
                     created = await session.execute_write(_create_batch)
-                    total_created += created
+                    type_created += created
 
-        logger.debug(f"Batch created {total_created} relationships")
+            return type_created
+
+        # Process all relationship type groups in parallel
+        results = await asyncio.gather(*[_process_type_group(rel_type, rels) for rel_type, rels in type_groups.items()])
+        total_created = sum(results)
+
+        logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
         return total_created
 
     def _record_to_entity(self, node: dict[str, Any]) -> Entity:

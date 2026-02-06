@@ -266,15 +266,15 @@ class AgenticSearchAgent:
             for i, follow_up in enumerate(all_follow_ups[: max_steps - 1]):
                 if isinstance(follow_up, dict):
                     fq_query = follow_up.get("query", "")
-                    fq_reasoning = follow_up.get("reasoning", f"Follow-up query {i+1}")
+                    fq_reasoning = follow_up.get("reasoning", f"Follow-up query {i + 1}")
                 else:
                     fq_query = str(follow_up)
-                    fq_reasoning = f"Pre-computed follow-up query {i+1}"
+                    fq_reasoning = f"Pre-computed follow-up query {i + 1}"
 
                 if not fq_query:
                     continue
 
-                logger.info(f"Agentic search step {i+2}: '{fq_query[:50]}...'")
+                logger.info(f"Agentic search step {i + 2}: '{fq_query[:50]}...'")
 
                 step_result = await self._engine.query(
                     fq_query,

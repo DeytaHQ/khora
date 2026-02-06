@@ -874,6 +874,19 @@ class ArcadeDBBackend(GraphBackendBase, VectorBackendBase):
             return None
         return self._row_to_chunk(rows[0])
 
+    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+        """Get multiple chunks by ID in a single query."""
+        if not chunk_ids:
+            return {}
+
+        # Build IN clause with placeholders
+        placeholders = ", ".join("?" for _ in chunk_ids)
+        rows = await self._sql(
+            f"SELECT * FROM Chunk WHERE id IN ({placeholders})",
+            params={"positionalParams": [str(cid) for cid in chunk_ids]},
+        )
+        return {UUID(row["id"]): self._row_to_chunk(row) for row in rows}
+
     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
         rows = await self._sql(
             "SELECT * FROM Chunk WHERE document_id = ? ORDER BY chunk_index",

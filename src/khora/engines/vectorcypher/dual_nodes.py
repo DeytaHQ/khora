@@ -406,6 +406,13 @@ class DualNodeManager:
     ) -> dict[str, list[dict[str, Any]]]:
         """Get neighborhood of entities via relationship traversal.
 
+        OPTIMIZATION: Uses a single Cypher query with UNWIND pattern to fetch
+        all entity neighborhoods in one database round-trip. The query:
+        1. Uses IN clause for batch entity matching (index-backed)
+        2. Expands all neighborhoods in parallel within Neo4j
+        3. Groups results by source entity
+        4. Limits per-entity results to avoid explosion
+
         Args:
             entity_ids: Starting entity IDs
             namespace_id: Namespace constraint
@@ -420,20 +427,29 @@ class DualNodeManager:
 
         depth = min(max(1, depth), 4)  # Clamp to 1-4
 
+        # OPTIMIZATION: Single query fetches all neighborhoods in batch
+        # Uses UNWIND internally via IN clause + collect() aggregation
+        # This avoids N separate queries for N entity IDs
         query = f"""
-        MATCH (e:Entity)
-        WHERE e.id IN $entity_ids AND e.namespace_id = $namespace_id
-        MATCH path = (e)-[*1..{depth}]-(related:Entity)
+        UNWIND $entity_ids AS eid
+        MATCH (e:Entity {{id: eid, namespace_id: $namespace_id}})
+        OPTIONAL MATCH path = (e)-[*1..{depth}]-(related:Entity)
         WHERE related.namespace_id = $namespace_id
-        AND related.id <> e.id
-        WITH e, related, length(path) AS distance
+          AND related.id <> e.id
+        WITH e, related,
+             CASE WHEN related IS NOT NULL THEN length(path) ELSE null END AS distance
+        ORDER BY e.id, distance
+        WITH e, collect(DISTINCT CASE
+            WHEN related IS NOT NULL THEN {{
+                id: related.id,
+                name: related.name,
+                entity_type: related.entity_type,
+                distance: distance
+            }}
+            ELSE null
+        END)[0..$limit] AS related_raw
         RETURN e.id AS source_id,
-               collect(DISTINCT {{
-                   id: related.id,
-                   name: related.name,
-                   entity_type: related.entity_type,
-                   distance: distance
-               }})[0..$limit] AS related_entities
+               [x IN related_raw WHERE x IS NOT NULL] AS related_entities
         """
 
         async with self._driver.session(database=self._database) as session:

@@ -51,6 +51,7 @@ class BatchResult:
     chunks: int
     entities: int
     relationships: int
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

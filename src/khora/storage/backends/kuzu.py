@@ -72,8 +72,7 @@ class KuzuBackend(GraphBackendBase):
     def _create_schema(self) -> None:
         """Create node/relationship tables if they don't exist."""
         conn = self._get_conn()
-        conn.execute(
-            """
+        conn.execute("""
             CREATE NODE TABLE IF NOT EXISTS Entity(
                 id STRING,
                 namespace_id STRING,
@@ -92,10 +91,8 @@ class KuzuBackend(GraphBackendBase):
                 updated_at STRING,
                 PRIMARY KEY (id)
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE NODE TABLE IF NOT EXISTS Episode(
                 id STRING,
                 namespace_id STRING,
@@ -111,10 +108,8 @@ class KuzuBackend(GraphBackendBase):
                 updated_at STRING,
                 PRIMARY KEY (id)
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE REL TABLE IF NOT EXISTS RELATES_TO(
                 FROM Entity TO Entity,
                 id STRING,
@@ -132,15 +127,12 @@ class KuzuBackend(GraphBackendBase):
                 created_at STRING,
                 updated_at STRING
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE REL TABLE IF NOT EXISTS INVOLVES(
                 FROM Episode TO Entity
             )
-            """
-        )
+            """)
 
     async def disconnect(self) -> None:
         if self._conn is not None:

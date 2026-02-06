@@ -112,58 +112,48 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
             # Create BRIN index on occurred_at
             await conn.execute(
-                text(
-                    """
+                text("""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_occurred_brin
                 ON khora_chunks USING BRIN (occurred_at)
-                """
-                )
+                """)
             )
 
             # Create HNSW index on embedding
             await conn.execute(
-                text(
-                    """
+                text("""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_embedding_hnsw
                 ON khora_chunks USING hnsw (embedding vector_cosine_ops)
                 WITH (m = 16, ef_construction = 64)
-                """
-                )
+                """)
             )
 
             # Create GIN index on content_tsv
             await conn.execute(
-                text(
-                    """
+                text("""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_content_tsv
                 ON khora_chunks USING GIN (content_tsv)
-                """
-                )
+                """)
             )
 
             # Create trigger for auto-updating content_tsv
             # Note: Each statement must be executed separately (asyncpg limitation)
             await conn.execute(
-                text(
-                    """
+                text("""
                 CREATE OR REPLACE FUNCTION khora_chunks_content_tsv_trigger() RETURNS trigger AS $$
                 BEGIN
                     NEW.content_tsv := to_tsvector('english', NEW.content);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """
-                )
+                """)
             )
             await conn.execute(text("DROP TRIGGER IF EXISTS khora_chunks_content_tsv_update ON khora_chunks"))
             await conn.execute(
-                text(
-                    """
+                text("""
                 CREATE TRIGGER khora_chunks_content_tsv_update
                 BEFORE INSERT OR UPDATE ON khora_chunks
                 FOR EACH ROW EXECUTE FUNCTION khora_chunks_content_tsv_trigger()
-                """
-                )
+                """)
             )
 
         self._connected = True
@@ -300,6 +290,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
         - Vector similarity via pgvector cosine distance
         - BM25-style scoring via ts_rank for hybrid search
         - RRF fusion to combine scores
+
+        QUALITY FIX: When vector search returns insufficient results, automatically
+        falls back to keyword search to improve recall on non-core chunks.
         """
         async with self._get_session() as session:
             # Build base conditions
@@ -331,6 +324,31 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 results = self._rrf_fusion(vector_results, bm25_results, hybrid_alpha, limit)
             else:
                 results = vector_results[:limit]
+
+                # QUALITY FIX: Keyword fallback when vector search returns
+                # insufficient results. This improves recall for non-core chunks
+                # that may not have strong vector similarity but contain
+                # relevant keywords.
+                if len(results) < limit and query_text:
+                    needed = limit - len(results)
+                    existing_ids = {str(r.chunk.id) for r in results}
+
+                    bm25_results = await self._bm25_search(
+                        session,
+                        query_text,
+                        conditions,
+                        needed + len(existing_ids),  # Fetch extra to account for overlap
+                    )
+
+                    # Add BM25 results that aren't already in vector results
+                    for bm25_result in bm25_results:
+                        if str(bm25_result.chunk.id) not in existing_ids:
+                            # Discount BM25-only results slightly to prefer vector matches
+                            bm25_result.combined_score = (bm25_result.bm25_score or 0.0) * 0.8
+                            results.append(bm25_result)
+                            existing_ids.add(str(bm25_result.chunk.id))
+                            if len(results) >= limit:
+                                break
 
         return results
 

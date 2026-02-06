@@ -180,3 +180,223 @@ class TestStageDocument:
 
         assert doc.created_at.year == 2024
         assert doc.created_at.month == 1
+
+
+class TestStreamExtractAndEmbedEntities:
+    """Tests for stream_extract_and_embed_entities."""
+
+    @pytest.mark.asyncio
+    async def test_empty_chunks_returns_empty(self) -> None:
+        """Empty chunks list returns empty entities and relationships."""
+        from khora.pipelines.flows.ingest import stream_extract_and_embed_entities
+
+        embedder = MagicMock()
+        embedder.embed_batch = AsyncMock(return_value=[])
+
+        entities, relationships = await stream_extract_and_embed_entities(
+            chunks=[],
+            embedder=embedder,
+        )
+
+        assert entities == []
+        assert relationships == []
+        embedder.embed_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_entities_get_embeddings(self) -> None:
+        """Extracted entities receive embeddings."""
+        from unittest.mock import patch
+
+        from khora.core.models import Chunk, ChunkMetadata
+        from khora.pipelines.flows.ingest import stream_extract_and_embed_entities
+
+        ns_id = uuid4()
+        doc_id = uuid4()
+
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=doc_id,
+            content="Alice works at Acme Corp.",
+            metadata=ChunkMetadata(),
+            embedding=[],
+        )
+
+        # Mock embedder
+        embedder = MagicMock()
+        embedder.embed_batch = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
+
+        # Mock extractor - we need to patch the LLMEntityExtractor
+        from khora.extraction.extractors.base import ExtractedEntity, ExtractionResult
+
+        mock_result = ExtractionResult(
+            entities=[
+                ExtractedEntity(
+                    name="Alice",
+                    entity_type="PERSON",
+                    description="A person",
+                    confidence=0.9,
+                )
+            ],
+            relationships=[],
+        )
+
+        class MockExtractor:
+            def __init__(self, **kwargs):
+                pass
+
+            async def extract_multi(self, texts, **kwargs):
+                return [mock_result] * len(texts)
+
+        with patch(
+            "khora.extraction.extractors.LLMEntityExtractor",
+            MockExtractor,
+        ):
+            entities, relationships = await stream_extract_and_embed_entities(
+                chunks=[chunk],
+                embedder=embedder,
+            )
+
+        assert len(entities) == 1
+        assert entities[0].name == "Alice"
+        assert entities[0].embedding == [0.1, 0.2, 0.3]
+        embedder.embed_batch.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_relationships_extracted(self) -> None:
+        """Relationships between entities are extracted."""
+        from unittest.mock import patch
+
+        from khora.core.models import Chunk, ChunkMetadata
+        from khora.pipelines.flows.ingest import stream_extract_and_embed_entities
+
+        ns_id = uuid4()
+        doc_id = uuid4()
+
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=doc_id,
+            content="Alice works for Bob.",
+            metadata=ChunkMetadata(),
+            embedding=[],
+        )
+
+        embedder = MagicMock()
+        embedder.embed_batch = AsyncMock(return_value=[[0.1], [0.2]])
+
+        from khora.extraction.extractors.base import (
+            ExtractedEntity,
+            ExtractedRelationship,
+            ExtractionResult,
+        )
+
+        mock_result = ExtractionResult(
+            entities=[
+                ExtractedEntity(
+                    name="Alice",
+                    entity_type="PERSON",
+                    description="Employee",
+                    confidence=0.9,
+                ),
+                ExtractedEntity(
+                    name="Bob",
+                    entity_type="PERSON",
+                    description="Manager",
+                    confidence=0.9,
+                ),
+            ],
+            relationships=[
+                ExtractedRelationship(
+                    source_entity="Alice",
+                    target_entity="Bob",
+                    relationship_type="WORKS_FOR",
+                    description="Employment relationship",
+                    confidence=0.85,
+                )
+            ],
+        )
+
+        class MockExtractor:
+            def __init__(self, **kwargs):
+                pass
+
+            async def extract_multi(self, texts, **kwargs):
+                return [mock_result] * len(texts)
+
+        with patch(
+            "khora.extraction.extractors.LLMEntityExtractor",
+            MockExtractor,
+        ):
+            entities, relationships = await stream_extract_and_embed_entities(
+                chunks=[chunk],
+                embedder=embedder,
+            )
+
+        assert len(entities) == 2
+        assert len(relationships) == 1
+        assert relationships[0].relationship_type == "WORKS_FOR"
+
+    @pytest.mark.asyncio
+    async def test_batch_embedding(self) -> None:
+        """Entities are embedded in batches."""
+        from unittest.mock import patch
+
+        from khora.core.models import Chunk, ChunkMetadata
+        from khora.pipelines.flows.ingest import stream_extract_and_embed_entities
+
+        ns_id = uuid4()
+        doc_id = uuid4()
+
+        # Create multiple chunks
+        chunks = [
+            Chunk(
+                id=uuid4(),
+                namespace_id=ns_id,
+                document_id=doc_id,
+                content=f"Entity{i} is important.",
+                metadata=ChunkMetadata(),
+                embedding=[],
+            )
+            for i in range(5)
+        ]
+
+        embedder = MagicMock()
+        # Return embeddings for each batch call
+        embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * len(texts[0]) for _ in texts])
+
+        from khora.extraction.extractors.base import ExtractedEntity, ExtractionResult
+
+        def make_result(idx):
+            return ExtractionResult(
+                entities=[
+                    ExtractedEntity(
+                        name=f"Entity{idx}",
+                        entity_type="CONCEPT",
+                        description="",
+                        confidence=0.9,
+                    )
+                ],
+                relationships=[],
+            )
+
+        class MockExtractor:
+            def __init__(self, **kwargs):
+                pass
+
+            async def extract_multi(self, texts, **kwargs):
+                return [make_result(i) for i in range(len(texts))]
+
+        with patch(
+            "khora.extraction.extractors.LLMEntityExtractor",
+            MockExtractor,
+        ):
+            entities, _ = await stream_extract_and_embed_entities(
+                chunks=chunks,
+                embedder=embedder,
+                embedding_batch_size=2,  # Small batch size for testing
+            )
+
+        assert len(entities) == 5
+        # embed_batch should have been called multiple times for batching
+        assert embedder.embed_batch.call_count >= 1

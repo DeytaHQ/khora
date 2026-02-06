@@ -676,7 +676,11 @@ class LLMEntityExtractor(EntityExtractor):
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
     ) -> list[ExtractionResult]:
-        """Extract from multiple texts concurrently.
+        """Extract from multiple texts using adaptive token-budget batching.
+
+        Uses extract_multi() to group texts into batches based on token budgets,
+        reducing API round-trips while avoiding context overflow. Falls back to
+        single-document extraction if batch extraction fails.
 
         Args:
             texts: List of texts to extract from
@@ -690,8 +694,14 @@ class LLMEntityExtractor(EntityExtractor):
         if not texts:
             return []
 
-        tasks = [self.extract(text, entity_types=entity_types, expertise=expertise, context=context) for text in texts]
-        return await asyncio.gather(*tasks)
+        # Use extract_multi for efficient token-budget-based batching
+        # This reduces API calls by grouping texts that fit within model context
+        return await self.extract_multi(
+            texts,
+            entity_types=entity_types,
+            expertise=expertise,
+            context=context,
+        )
 
     async def extract_multi(
         self,
@@ -770,7 +780,7 @@ class LLMEntityExtractor(EntityExtractor):
             all_failed = all(r.metadata.get("error") for r in results)
             if all_failed and len(batch) > 1:
                 logger.info(
-                    f"Batch extraction failed for {len(batch)} texts, " f"falling back to single-document extraction"
+                    f"Batch extraction failed for {len(batch)} texts, falling back to single-document extraction"
                 )
                 # Extract documents one at a time
                 single_results = []
@@ -976,6 +986,137 @@ Return ONLY valid JSON, no other text."""
             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
             return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
 
+    def _compute_entity_confidence(self, entity_data: dict[str, Any]) -> float:
+        """Compute confidence score for an entity based on extraction quality heuristics.
+
+        QUALITY FIX: Instead of hardcoding 0.9, compute confidence based on:
+        - Name quality (length, proper capitalization)
+        - Description presence and length
+        - Entity type specificity
+        - Attribute completeness
+
+        Returns:
+            Confidence score in [0.5, 1.0] range
+        """
+        # If LLM provided explicit confidence, use it
+        if entity_data.get("confidence") is not None:
+            return float(entity_data["confidence"])
+
+        score = 0.5  # Base score
+
+        name = entity_data.get("name") or ""
+        description = entity_data.get("description") or ""
+        entity_type = entity_data.get("entity_type") or ""
+        aliases = entity_data.get("aliases") or []
+
+        # Name quality (max +0.2)
+        if len(name) >= 2:
+            score += 0.1
+        if len(name) >= 3 and name[0].isupper():  # Proper capitalization
+            score += 0.1
+
+        # Description quality (max +0.2)
+        if len(description) >= 10:
+            score += 0.1
+        if len(description) >= 30:
+            score += 0.1
+
+        # Entity type specificity (max +0.05)
+        generic_types = {"CONCEPT", "THING", "OTHER", "UNKNOWN", "ENTITY"}
+        if entity_type and entity_type.upper() not in generic_types:
+            score += 0.05
+
+        # Aliases indicate thorough extraction (max +0.05)
+        if aliases and len(aliases) > 0:
+            score += 0.05
+
+        return min(1.0, score)
+
+    def _compute_relationship_confidence(self, rel_data: dict[str, Any], entity_names: set[str]) -> float:
+        """Compute confidence score for a relationship based on extraction quality.
+
+        QUALITY FIX: Instead of hardcoding 0.9, compute confidence based on:
+        - Source/target entity validity
+        - Relationship type specificity
+        - Description presence
+
+        Args:
+            rel_data: Relationship data from LLM
+            entity_names: Set of entity names extracted in the same batch
+
+        Returns:
+            Confidence score in [0.5, 1.0] range
+        """
+        # If LLM provided explicit confidence, use it
+        if rel_data.get("confidence") is not None:
+            return float(rel_data["confidence"])
+
+        score = 0.5  # Base score
+
+        source = rel_data.get("source_entity") or ""
+        target = rel_data.get("target_entity") or ""
+        rel_type = rel_data.get("relationship_type") or ""
+        description = rel_data.get("description") or ""
+
+        # Entity reference validity (max +0.25)
+        # Higher confidence if source/target match extracted entities
+        if source in entity_names:
+            score += 0.125
+        if target in entity_names:
+            score += 0.125
+
+        # Relationship type specificity (max +0.15)
+        generic_rels = {"RELATES_TO", "ASSOCIATED_WITH", "CONNECTED_TO", "RELATED"}
+        if rel_type and rel_type.upper() not in generic_rels:
+            score += 0.15
+
+        # Description quality (max +0.1)
+        if len(description) >= 10:
+            score += 0.05
+        if len(description) >= 25:
+            score += 0.05
+
+        return min(1.0, score)
+
+    def _compute_event_confidence(self, event_data: dict[str, Any]) -> float:
+        """Compute confidence score for an event based on extraction quality.
+
+        QUALITY FIX: Instead of hardcoding 0.9, compute confidence based on:
+        - Description quality
+        - Temporal information presence
+        - Participant count
+
+        Returns:
+            Confidence score in [0.5, 1.0] range
+        """
+        # If LLM provided explicit confidence, use it
+        if event_data.get("confidence") is not None:
+            return float(event_data["confidence"])
+
+        score = 0.5  # Base score
+
+        description = event_data.get("description") or ""
+        occurred_at = event_data.get("occurred_at")
+        participants = event_data.get("participants") or []
+
+        # Description quality (max +0.2)
+        if len(description) >= 10:
+            score += 0.1
+        if len(description) >= 30:
+            score += 0.1
+
+        # Temporal information (max +0.15)
+        if occurred_at:
+            score += 0.15
+
+        # Participants (max +0.15)
+        if len(participants) >= 1:
+            score += 0.075
+        if len(participants) >= 2:
+            score += 0.075
+
+        return min(1.0, score)
+
     def _parse_response(self, content: str | dict | None) -> ExtractionResult:
         """Parse the LLM response into an ExtractionResult.
 
@@ -995,6 +1136,12 @@ Return ONLY valid JSON, no other text."""
             if not isinstance(data, dict):
                 logger.warning(f"Response parsed but is not a dict: {type(data)}")
                 return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
+
+            # First pass: collect entity names for relationship confidence scoring
+            entity_names: set[str] = set()
+            for e in data.get("entities", []):
+                if isinstance(e, dict) and e.get("name"):
+                    entity_names.add(e["name"])
 
             entities = []
             for e in data.get("entities", []):
@@ -1019,6 +1166,9 @@ Return ONLY valid JSON, no other text."""
                 if not isinstance(attrs, dict):
                     attrs = {}
 
+                # QUALITY FIX: Use heuristic confidence instead of hardcoded 0.9
+                confidence = self._compute_entity_confidence(e)
+
                 entities.append(
                     ExtractedEntity(
                         name=e.get("name") or "",
@@ -1027,7 +1177,7 @@ Return ONLY valid JSON, no other text."""
                         attributes=attrs,
                         aliases=e.get("aliases") or [],
                         temporal=temporal,
-                        confidence=e.get("confidence") or 0.9,
+                        confidence=confidence,
                     )
                 )
 
@@ -1049,6 +1199,9 @@ Return ONLY valid JSON, no other text."""
                             valid_until=t.get("valid_until"),
                         )
 
+                # QUALITY FIX: Use heuristic confidence instead of hardcoded 0.9
+                confidence = self._compute_relationship_confidence(r, entity_names)
+
                 relationships.append(
                     ExtractedRelationship(
                         source_entity=r.get("source_entity") or "",
@@ -1057,7 +1210,7 @@ Return ONLY valid JSON, no other text."""
                         description=r.get("description") or "",
                         properties=r.get("properties") or {},
                         temporal=temporal,
-                        confidence=r.get("confidence") or 0.9,
+                        confidence=confidence,
                     )
                 )
 
@@ -1068,13 +1221,16 @@ Return ONLY valid JSON, no other text."""
                     logger.debug(f"Skipping malformed event (not a dict): {type(ev)}")
                     continue
 
+                # QUALITY FIX: Use heuristic confidence instead of hardcoded 0.9
+                confidence = self._compute_event_confidence(ev)
+
                 events.append(
                     ExtractedEvent(
                         description=ev.get("description") or "",
                         event_type=ev.get("event_type") or "EVENT",
                         occurred_at=ev.get("occurred_at"),
                         participants=ev.get("participants") or [],
-                        confidence=ev.get("confidence") or 0.9,
+                        confidence=confidence,
                     )
                 )
 

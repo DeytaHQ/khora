@@ -5,20 +5,33 @@ Implements the VectorCypher retrieval pipeline:
 2. Cypher traversal to expand relationships (Neo4j)
 3. Chunk retrieval via MENTIONED_IN relationships
 4. RRF fusion to combine vector and graph scores
+
+Performance optimizations:
+- Parallel execution of independent operations (vector chunk search + entity path)
+- Batch entity neighborhood fetching via UNWIND
+- Normalized score fusion for better ranking
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
+from neo4j.exceptions import Neo4jError
 
 from .dual_nodes import DualNodeManager
-from .fusion import FusedResult, apply_recency_boost, normalize_scores, weighted_rrf
-from .router import QueryComplexity, QueryComplexityRouter, RoutingDecision
+from .fusion import (
+    FusedResult,
+    apply_recency_boost,
+    normalize_scores,
+    weighted_rrf,
+    weighted_rrf_normalized,
+)
+from .router import QueryComplexity, QueryComplexityRouter, RouterConfig, RoutingDecision
 
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
@@ -45,6 +58,11 @@ class RetrieverConfig:
     default_depth: int = 2
     max_depth: int = 4
     max_entry_entities: int = 10
+
+    # Adaptive depth settings
+    adaptive_depth_enabled: bool = True
+    adaptive_depth_high_entity_threshold: int = 10  # Shallow depth if >= this many entities
+    adaptive_depth_low_entity_threshold: int = 2  # Deeper depth if <= this many entities
 
     # Fusion settings
     rrf_k: int = 60
@@ -80,6 +98,7 @@ class VectorCypherRetriever:
         *,
         database: str = "neo4j",
         config: RetrieverConfig | None = None,
+        router_config: RouterConfig | None = None,
     ):
         """Initialize the retriever.
 
@@ -89,6 +108,7 @@ class VectorCypherRetriever:
             embedder: Embedder for query embedding
             database: Neo4j database name
             config: Retriever configuration
+            router_config: Router configuration (optional, for LLM routing etc.)
         """
         self._vector_store = vector_store
         self._neo4j_driver = neo4j_driver
@@ -96,8 +116,15 @@ class VectorCypherRetriever:
         self._database = database
         self._config = config or RetrieverConfig()
 
-        # Initialize sub-components
-        self._router = QueryComplexityRouter()
+        # Initialize router with config, syncing adaptive depth settings
+        if router_config is None:
+            router_config = RouterConfig(
+                adaptive_depth_enabled=self._config.adaptive_depth_enabled,
+                adaptive_depth_high_entity_threshold=self._config.adaptive_depth_high_entity_threshold,
+                adaptive_depth_low_entity_threshold=self._config.adaptive_depth_low_entity_threshold,
+                complex_depth=self._config.default_depth,
+            )
+        self._router = QueryComplexityRouter(router_config)
         self._dual_nodes = DualNodeManager(neo4j_driver, database)
 
     async def retrieve(
@@ -142,11 +169,64 @@ class VectorCypherRetriever:
                 routing=routing,
             )
 
-        # Complex/moderate path: VectorCypher
-        depth = graph_depth or routing.graph_depth
+        # Complex/moderate path: VectorCypher with parallel execution
+        # Wrap in try/except for graceful fallback on graph failures
+        try:
+            return await self._vectorcypher_retrieve(
+                query=query,
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                graph_depth=graph_depth,
+                limit=limit,
+                routing=routing,
+            )
+        except Neo4jError as e:
+            logger.warning(f"Graph search failed, falling back to vector-only: {e}")
+            return await self._vector_only_fallback(
+                query=query,
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                limit=limit,
+                routing=routing,
+            )
+
+    async def _vectorcypher_retrieve(
+        self,
+        query: str,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        temporal_filter: TemporalFilter | None,
+        graph_depth: int | None,
+        limit: int,
+        routing: RoutingDecision,
+    ) -> VectorCypherResult:
+        """Internal VectorCypher retrieval with graph traversal.
+
+        This is the main VectorCypher path that combines vector and graph search.
+        Separated from retrieve() to enable clean fallback handling.
+
+        Implements adaptive depth: adjusts graph traversal depth based on the
+        number of entry entities found. More entities = shallower depth (to avoid
+        explosion), fewer entities = deeper depth (to find more context).
+        """
+        base_depth = graph_depth or routing.graph_depth
         entry_limit = routing.suggested_entry_limit
 
-        # Step 3a: Find entry entities via vector search
+        # OPTIMIZATION: Start vector chunk search immediately in parallel
+        # This operation doesn't depend on entity search results
+        vector_chunks_task = asyncio.create_task(
+            self._vector_search_chunks(
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                query_text=query,
+                limit=limit,
+            )
+        )
+
+        # Step 3a: Find entry entities via vector search (runs in parallel with vector_chunks_task)
         entry_entities = await self._vector_search_entities(
             query_embedding=query_embedding,
             namespace_id=namespace_id,
@@ -155,6 +235,12 @@ class VectorCypherRetriever:
 
         if not entry_entities:
             logger.debug("No entry entities found, falling back to simple retrieval")
+            # Cancel the parallel task since we're taking a different path
+            vector_chunks_task.cancel()
+            try:
+                await vector_chunks_task
+            except asyncio.CancelledError:
+                pass
             return await self._simple_retrieve(
                 query=query,
                 query_embedding=query_embedding,
@@ -163,6 +249,13 @@ class VectorCypherRetriever:
                 limit=limit,
                 routing=routing,
             )
+
+        # Compute adaptive depth based on entry entity count
+        # This prevents explosion when many entities are found
+        depth = self._router.compute_adaptive_depth(
+            entry_entity_count=len(entry_entities),
+            base_depth=base_depth,
+        )
 
         # Step 4: Cypher expand to find related entities
         expanded_entities = await self._cypher_expand(
@@ -174,26 +267,22 @@ class VectorCypherRetriever:
         # Step 5: Fetch chunks from all entities
         all_entity_ids = list({e[0] for e in entry_entities} | expanded_entities.keys())
 
-        chunks = await self._fetch_chunks_from_entities(
+        graph_chunks = await self._fetch_chunks_from_entities(
             entity_ids=all_entity_ids,
             namespace_id=namespace_id,
             temporal_filter=temporal_filter,
             limit=limit * 2,  # Fetch more for fusion
         )
 
-        # Step 6: Also do direct chunk vector search
-        vector_chunks = await self._vector_search_chunks(
-            query_embedding=query_embedding,
-            namespace_id=namespace_id,
-            temporal_filter=temporal_filter,
-            query_text=query,
-            limit=limit,
-        )
+        # Step 6: Wait for parallel vector chunk search to complete
+        # This was started at the beginning and may already be done
+        vector_chunks = await vector_chunks_task
 
-        # Step 7: RRF fusion
+        # Step 7: RRF fusion with score normalization for better ranking
         fused_results = self._fuse_results(
             vector_chunks=vector_chunks,
-            graph_chunks=chunks,
+            graph_chunks=graph_chunks,
+            use_normalization=True,
         )
 
         # Step 8: Apply recency boost if temporal data available
@@ -223,9 +312,44 @@ class VectorCypherRetriever:
                 "entry_entities": len(entry_entities),
                 "expanded_entities": len(expanded_entities),
                 "graph_depth": depth,
-                "total_chunks_before_fusion": len(chunks) + len(vector_chunks),
+                "base_depth": base_depth,
+                "adaptive_depth_applied": depth != base_depth,
+                "total_chunks_before_fusion": len(graph_chunks) + len(vector_chunks),
+                "routing_confidence": routing.confidence,
             },
         )
+
+    async def _vector_only_fallback(
+        self,
+        query: str,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        temporal_filter: TemporalFilter | None,
+        limit: int,
+        routing: RoutingDecision,
+    ) -> VectorCypherResult:
+        """Fallback to vector-only search when graph operations fail.
+
+        This provides graceful degradation when Neo4j is unavailable or
+        returns errors. Results are still useful, just without graph expansion.
+        """
+        logger.info("Using vector-only fallback due to graph search failure")
+
+        # Use the simple retrieval path which only needs pgvector
+        result = await self._simple_retrieve(
+            query=query,
+            query_embedding=query_embedding,
+            namespace_id=namespace_id,
+            temporal_filter=temporal_filter,
+            limit=limit,
+            routing=routing,
+        )
+
+        # Update metadata to indicate fallback was used
+        result.metadata["fallback_mode"] = "vector_only"
+        result.metadata["graph_unavailable"] = True
+
+        return result
 
     async def _simple_retrieve(
         self,
@@ -448,16 +572,28 @@ class VectorCypherRetriever:
         self,
         vector_chunks: list[tuple[UUID, float, dict[str, Any]]],
         graph_chunks: list[tuple[UUID, float, dict[str, Any]]],
+        *,
+        use_normalization: bool = False,
     ) -> list[FusedResult]:
         """Fuse vector and graph results using weighted RRF.
 
         Args:
             vector_chunks: Results from vector search
             graph_chunks: Results from graph traversal
+            use_normalization: If True, normalize scores before fusion for better ranking
 
         Returns:
             Fused and sorted results
         """
+        if use_normalization:
+            # Use normalized fusion for better score combination
+            return weighted_rrf_normalized(
+                vector_results=vector_chunks,
+                graph_results=graph_chunks,
+                k=self._config.rrf_k,
+                vector_weight=self._config.vector_weight,
+                graph_weight=self._config.graph_weight,
+            )
         return weighted_rrf(
             vector_results=vector_chunks,
             graph_results=graph_chunks,

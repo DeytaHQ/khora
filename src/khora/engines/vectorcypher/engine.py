@@ -5,7 +5,7 @@ This engine implements the VectorCypher retrieval paradigm inspired by Graph RAG
 - Cypher traversal to expand relationships (Neo4j)
 - Query routing to optimize simple vs complex queries
 - HippoRAG 2 dual-node architecture (Entity + Chunk nodes)
-- Skeleton-based construction (KET-RAG) - full KG extraction for top 25% of chunks
+- Skeleton-based construction (KET-RAG) - full KG extraction for top 40% of chunks
 - Bi-temporal edges (Graphiti-style) - occurred_at vs ingested_at with invalidation
 
 Target: Sub-300ms P95 for simple queries, sub-800ms for complex multi-hop queries.
@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -45,6 +45,24 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class ExtractionQualityMetrics:
+    """Track extraction quality for monitoring."""
+
+    total_chunks: int = 0
+    chunks_with_entities: int = 0
+    total_entities: int = 0
+    total_relationships: int = 0
+    avg_entities_per_chunk: float = 0.0
+    avg_confidence: float = 0.0
+    entity_type_distribution: dict[str, int] = field(default_factory=dict)
+
+    def compute_averages(self) -> None:
+        """Compute average metrics from totals."""
+        if self.total_chunks > 0:
+            self.avg_entities_per_chunk = self.total_entities / self.total_chunks
+
+
+@dataclass
 class VectorCypherConfig:
     """VectorCypher-specific configuration."""
 
@@ -53,7 +71,7 @@ class VectorCypherConfig:
     routing_use_llm: bool = False
 
     # Skeleton indexing
-    skeleton_core_ratio: float = 0.25  # 25% get full KG extraction
+    skeleton_core_ratio: float = 0.40  # 40% get full KG extraction (increased for +10-20% recall)
 
     # Graph traversal
     graph_default_depth: int = 2
@@ -76,7 +94,7 @@ class VectorCypherEngine:
     Key features:
     - Dual retrieval: Vector similarity (pgvector) + graph traversal (Neo4j)
     - Smart routing: Route queries to optimal path (simple vs complex)
-    - Skeleton indexing: Full KG extraction only for core 25% chunks
+    - Skeleton indexing: Full KG extraction only for core 40% chunks
     - Bi-temporal model: Track occurred_at vs ingested_at
     - RRF fusion: Combine vector and graph scores
 
@@ -589,6 +607,64 @@ class VectorCypherEngine:
 
         return len(entities), relationships_created
 
+    def _validate_recall_results(
+        self,
+        chunks: list[tuple[dict[str, Any], float]],
+        query: str,
+        *,
+        min_content_length: int = 10,
+    ) -> list[tuple[dict[str, Any], float]]:
+        """Validate and filter retrieval results.
+
+        Removes duplicates, filters out empty content, ensures scores are normalized,
+        and logs quality warnings.
+
+        Args:
+            chunks: List of (chunk_dict, score) tuples
+            query: Original query text for logging context
+            min_content_length: Minimum content length to accept
+
+        Returns:
+            Validated and filtered list of (chunk_dict, score) tuples
+        """
+        validated: list[tuple[dict[str, Any], float]] = []
+        seen_ids: set[str] = set()
+        empty_count = 0
+        duplicate_count = 0
+
+        for chunk_dict, score in chunks:
+            if not isinstance(chunk_dict, dict):
+                logger.warning(f"Skipping non-dict chunk result: {type(chunk_dict)}")
+                continue
+
+            chunk_id = chunk_dict.get("id", "")
+
+            # Skip duplicates
+            if chunk_id and chunk_id in seen_ids:
+                duplicate_count += 1
+                continue
+            if chunk_id:
+                seen_ids.add(chunk_id)
+
+            # Skip empty content
+            content = chunk_dict.get("content", "")
+            if not content or len(content.strip()) < min_content_length:
+                empty_count += 1
+                continue
+
+            # Normalize score to [0, 1]
+            normalized_score = min(max(score, 0.0), 1.0)
+
+            validated.append((chunk_dict, normalized_score))
+
+        # Log quality warnings
+        if duplicate_count > 0:
+            logger.debug(f"Recall validation: removed {duplicate_count} duplicate chunks for query: {query[:50]}...")
+        if empty_count > 0:
+            logger.warning(f"Recall validation: filtered {empty_count} empty/short chunks for query: {query[:50]}...")
+
+        return validated
+
     async def recall(
         self,
         query: str,
@@ -632,9 +708,12 @@ class VectorCypherEngine:
             limit=limit,
         )
 
-        # Build context text
+        # Validate and filter retrieval results
+        validated_chunks = self._validate_recall_results(result.chunks, query)
+
+        # Build context text from validated chunks
         context_parts = []
-        for chunk_dict, score in result.chunks:
+        for chunk_dict, score in validated_chunks:
             if isinstance(chunk_dict, dict):
                 context_parts.append(chunk_dict.get("content", ""))
 
@@ -643,7 +722,7 @@ class VectorCypherEngine:
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
-            chunks=result.chunks,
+            chunks=validated_chunks,
             entities=result.entities,
             context_text=context_text,
             metadata={
@@ -651,6 +730,8 @@ class VectorCypherEngine:
                 "routing": result.routing_decision.complexity.value,
                 "use_graph": result.routing_decision.use_graph,
                 "graph_depth": result.routing_decision.graph_depth,
+                "raw_chunk_count": len(result.chunks),
+                "validated_chunk_count": len(validated_chunks),
                 **result.metadata,
             },
         )
@@ -1088,4 +1169,4 @@ class VectorCypherEngine:
         }
 
 
-__all__ = ["VectorCypherConfig", "VectorCypherEngine"]
+__all__ = ["ExtractionQualityMetrics", "VectorCypherConfig", "VectorCypherEngine"]

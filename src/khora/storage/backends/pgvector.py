@@ -195,6 +195,23 @@ class PgVectorBackend:
             model = result.scalar_one_or_none()
             return self._chunk_model_to_domain(model) if model else None
 
+    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+        """Get multiple chunks by ID in a single query.
+
+        Args:
+            chunk_ids: List of chunk IDs to fetch
+
+        Returns:
+            Dictionary mapping chunk ID to Chunk (only for existing chunks)
+        """
+        if not chunk_ids:
+            return {}
+
+        async with self._get_session() as session:
+            result = await session.execute(select(ChunkModel).where(ChunkModel.id.in_([str(cid) for cid in chunk_ids])))
+            models = result.scalars().all()
+            return {UUID(m.id): self._chunk_model_to_domain(m) for m in models}
+
     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
         """Get all chunks for a document."""
         async with self._get_session() as session:

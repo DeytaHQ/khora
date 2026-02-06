@@ -268,6 +268,151 @@ class SkeletonIndexer:
             return self._chunks[chunk_id].is_core
         return False
 
+    def compute_adaptive_core_ratio(
+        self,
+        chunks: list[TemporalChunk] | None = None,
+        base_ratio: float = 0.10,
+    ) -> float:
+        """Compute adaptive core ratio based on content heterogeneity.
+
+        Dynamically adjusts the core chunk ratio based on how diverse the content is:
+        - Homogeneous content (similar chunks): use base_ratio (0.10)
+        - Heterogeneous content (diverse chunks): increase to 0.25-0.40
+
+        Heterogeneity is measured by keyword diversity:
+        - Unique-to-total keyword ratio across chunks
+        - Low overlap between chunks indicates diverse content needing more core chunks
+
+        This prevents under-extraction in diverse corpora where a fixed 10% might
+        miss important semantic clusters, while maintaining efficiency for
+        homogeneous content like chat logs or similar documents.
+
+        Args:
+            chunks: Optional list of chunks to analyze. If None, uses already-indexed chunks.
+            base_ratio: Minimum ratio for homogeneous content (default: 0.10)
+
+        Returns:
+            Adaptive core ratio between base_ratio and 0.40
+        """
+        # Use indexed chunks if none provided
+        if chunks is not None:
+            # Build temporary index for analysis
+            chunk_keywords: list[set[str]] = []
+            for chunk in chunks:
+                keywords = self._extract_keywords(chunk.content)
+                chunk_keywords.append(keywords)
+        else:
+            # Use already indexed chunks
+            chunk_keywords = [node.keywords for node in self._chunks.values()]
+
+        if len(chunk_keywords) < 2:
+            return base_ratio
+
+        # Collect all keywords and count occurrences
+        all_keywords: set[str] = set()
+        keyword_chunk_count: dict[str, int] = {}
+
+        for keywords in chunk_keywords:
+            all_keywords.update(keywords)
+            for kw in keywords:
+                keyword_chunk_count[kw] = keyword_chunk_count.get(kw, 0) + 1
+
+        if not all_keywords:
+            return base_ratio
+
+        n_chunks = len(chunk_keywords)
+        n_keywords = len(all_keywords)
+
+        # Calculate heterogeneity score (0 to 1)
+        # Two metrics combined:
+
+        # 1. Unique keyword ratio: keywords appearing in only 1 chunk / total keywords
+        # High ratio = diverse content, each chunk has unique concepts
+        unique_keywords = sum(1 for count in keyword_chunk_count.values() if count == 1)
+        unique_ratio = unique_keywords / n_keywords if n_keywords > 0 else 0
+
+        # 2. Average pairwise Jaccard distance
+        # High distance = low overlap between chunks = diverse content
+        # Sample for efficiency on large chunk sets
+        max_pairs = min(100, n_chunks * (n_chunks - 1) // 2)
+        pair_distances: list[float] = []
+
+        import random
+
+        indices = list(range(n_chunks))
+        pairs_checked = 0
+
+        # Use deterministic sampling for reproducibility
+        random.seed(42)
+        random.shuffle(indices)
+
+        for i in range(n_chunks):
+            if pairs_checked >= max_pairs:
+                break
+            for j in range(i + 1, n_chunks):
+                if pairs_checked >= max_pairs:
+                    break
+                kw_i = chunk_keywords[indices[i]]
+                kw_j = chunk_keywords[indices[j]]
+                if kw_i or kw_j:
+                    intersection = len(kw_i & kw_j)
+                    union = len(kw_i | kw_j)
+                    jaccard_similarity = intersection / union if union > 0 else 0
+                    jaccard_distance = 1 - jaccard_similarity
+                    pair_distances.append(jaccard_distance)
+                    pairs_checked += 1
+
+        avg_distance = sum(pair_distances) / len(pair_distances) if pair_distances else 0
+
+        # Combine metrics: weighted average
+        # unique_ratio is more stable, distance captures local diversity
+        heterogeneity = 0.6 * unique_ratio + 0.4 * avg_distance
+
+        # Map heterogeneity (0-1) to core ratio (base_ratio to 0.40)
+        # Using a sigmoid-like curve to smooth the transition
+        max_ratio = 0.40
+        ratio_range = max_ratio - base_ratio
+
+        # Smooth scaling: low heterogeneity stays near base, high approaches max
+        # Using squared scaling for smoother transition
+        adaptive_ratio = base_ratio + ratio_range * (heterogeneity**0.8)
+
+        # Clamp to valid range
+        adaptive_ratio = max(base_ratio, min(max_ratio, adaptive_ratio))
+
+        logger.debug(
+            f"Adaptive core ratio: {adaptive_ratio:.3f} "
+            f"(heterogeneity={heterogeneity:.3f}, unique_ratio={unique_ratio:.3f}, "
+            f"avg_distance={avg_distance:.3f})"
+        )
+
+        return adaptive_ratio
+
+    def build_skeleton_adaptive(self, chunks: list[TemporalChunk] | None = None) -> list[UUID]:
+        """Build skeleton with adaptive core ratio based on content heterogeneity.
+
+        Combines compute_adaptive_core_ratio with build_skeleton for a single-call
+        interface that automatically adjusts to content diversity.
+
+        Args:
+            chunks: Optional list of chunks to add before building. If provided,
+                    these will be added and analyzed for heterogeneity.
+
+        Returns:
+            List of core chunk IDs that should have full KG extraction
+        """
+        if chunks:
+            self.add_chunks_batch(chunks)
+
+        # Compute adaptive ratio and update
+        adaptive_ratio = self.compute_adaptive_core_ratio()
+        original_ratio = self._core_ratio
+        self._core_ratio = adaptive_ratio
+
+        logger.info(f"Using adaptive core ratio: {adaptive_ratio:.3f} (original: {original_ratio:.3f})")
+
+        return self.build_skeleton()
+
     # =========================================================================
     # Private methods
     # =========================================================================

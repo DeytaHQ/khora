@@ -10,7 +10,9 @@ This is the default memory engine for Khora, providing:
 from __future__ import annotations
 
 import hashlib
+import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -25,6 +27,55 @@ from khora.storage import StorageConfig, StorageCoordinator, create_storage_coor
 
 if TYPE_CHECKING:
     pass
+
+
+@dataclass
+class ExtractionQualityMetrics:
+    """Track extraction quality for monitoring.
+
+    This dataclass captures metrics about the quality of entity and
+    relationship extraction during document ingestion, enabling
+    monitoring and quality control.
+    """
+
+    total_chunks: int = 0
+    chunks_with_entities: int = 0
+    total_entities: int = 0
+    total_relationships: int = 0
+    avg_entities_per_chunk: float = 0.0
+    avg_confidence: float = 0.0
+    entity_type_distribution: dict[str, int] = field(default_factory=dict)
+    low_confidence_entities: int = 0
+    extraction_time_ms: float = 0.0
+
+    def compute_averages(self) -> None:
+        """Compute average metrics from totals."""
+        if self.total_chunks > 0:
+            self.avg_entities_per_chunk = self.total_entities / self.total_chunks
+
+    def log_quality_summary(self, document_id: UUID) -> None:
+        """Log a quality summary for monitoring."""
+        if self.total_chunks == 0:
+            logger.debug(f"Document {document_id}: no chunks processed")
+            return
+
+        entity_ratio = self.chunks_with_entities / self.total_chunks if self.total_chunks > 0 else 0
+        logger.info(
+            f"Document {document_id} extraction quality: "
+            f"{self.total_entities} entities from {self.chunks_with_entities}/{self.total_chunks} chunks "
+            f"({entity_ratio:.1%} coverage), "
+            f"{self.total_relationships} relationships, "
+            f"avg confidence: {self.avg_confidence:.2f}"
+        )
+
+        if self.low_confidence_entities > 0:
+            logger.warning(f"Document {document_id}: {self.low_confidence_entities} low-confidence entities detected")
+
+        if entity_ratio < 0.1 and self.total_chunks > 5:
+            logger.warning(
+                f"Document {document_id}: low entity extraction rate ({entity_ratio:.1%}). "
+                "Consider reviewing extraction skill or content quality."
+            )
 
 
 class GraphRAGEngine:
@@ -169,15 +220,31 @@ class GraphRAGEngine:
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
     ) -> RememberResult:
-        """Store content in the memory engine."""
+        """Store content in the memory engine.
+
+        Processes document through the ingestion pipeline with parallel
+        chunking, embedding, and entity extraction for optimal performance.
+
+        Returns:
+            RememberResult with document_id, counts, and timing metrics in metadata.
+        """
+        timings: dict[str, float] = {}
+        total_start = time.perf_counter()
+
         # Compute checksum
+        start = time.perf_counter()
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        timings["checksum_ms"] = (time.perf_counter() - start) * 1000
 
         storage = self._get_storage()
 
         # Check for duplicate - skip if any document with same checksum exists
+        start = time.perf_counter()
         existing = await storage.get_document_by_checksum(namespace_id, checksum)
+        timings["dedup_check_ms"] = (time.perf_counter() - start) * 1000
+
         if existing:
+            timings["total_ms"] = (time.perf_counter() - total_start) * 1000
             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
             return RememberResult(
                 document_id=existing.id,
@@ -185,10 +252,11 @@ class GraphRAGEngine:
                 chunks_created=existing.chunk_count,
                 entities_extracted=existing.entity_count,
                 relationships_created=0,
-                metadata={"duplicate": True, "status": str(existing.status)},
+                metadata={"duplicate": True, "status": str(existing.status), "timings": timings},
             )
 
         # Create document
+        start = time.perf_counter()
         doc_metadata = DocumentMetadata(
             title=title,
             source=source,
@@ -203,16 +271,36 @@ class GraphRAGEngine:
             metadata=doc_metadata,
         )
         document = await storage.create_document(document)
+        timings["document_create_ms"] = (time.perf_counter() - start) * 1000
 
-        # Process through pipeline
+        # Process through pipeline (handles chunking, embedding, extraction in parallel)
         from khora.pipelines.flows.ingest import process_document
 
+        start = time.perf_counter()
         result = await process_document(
             document,
             storage,
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+        )
+        timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
+        timings["total_ms"] = (time.perf_counter() - total_start) * 1000
+
+        # Track extraction quality metrics
+        quality_metrics = ExtractionQualityMetrics(
+            total_chunks=result["chunks"],
+            total_entities=result["entities"],
+            total_relationships=result["relationships"],
+            extraction_time_ms=timings.get("pipeline_ms", 0),
+        )
+        quality_metrics.compute_averages()
+        quality_metrics.log_quality_summary(document.id)
+
+        # Log performance summary
+        logger.debug(
+            f"remember() completed: {result['chunks']} chunks, {result['entities']} entities, "
+            f"{result['relationships']} relationships in {timings['total_ms']:.1f}ms"
         )
 
         return RememberResult(
@@ -221,6 +309,13 @@ class GraphRAGEngine:
             chunks_created=result["chunks"],
             entities_extracted=result["entities"],
             relationships_created=result["relationships"],
+            metadata={
+                "timings": timings,
+                "quality_metrics": {
+                    "avg_entities_per_chunk": quality_metrics.avg_entities_per_chunk,
+                    "extraction_time_ms": quality_metrics.extraction_time_ms,
+                },
+            },
         )
 
     async def recall(
@@ -288,7 +383,17 @@ class GraphRAGEngine:
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> BatchResult:
-        """Store multiple documents with automatic optimization."""
+        """Store multiple documents with automatic optimization.
+
+        Processes documents in parallel with configurable concurrency.
+        Uses shared embedder and entity index for efficiency.
+
+        Returns:
+            BatchResult with counts and timing metrics.
+        """
+        timings: dict[str, float] = {}
+        total_start = time.perf_counter()
+
         if not documents:
             return BatchResult(
                 total=0,
@@ -301,6 +406,7 @@ class GraphRAGEngine:
             )
 
         # Build doc dicts for ingest_documents
+        start = time.perf_counter()
         doc_inputs = []
         for doc_data in documents:
             doc_inputs.append(
@@ -312,6 +418,7 @@ class GraphRAGEngine:
                     "metadata": doc_data.get("metadata", {}),
                 }
             )
+        timings["prepare_inputs_ms"] = (time.perf_counter() - start) * 1000
 
         from khora.pipelines.flows.ingest import ingest_documents
 
@@ -321,6 +428,7 @@ class GraphRAGEngine:
         # Create shared EntityIndex for cross-document deduplication if enabled
         shared_entity_index = None
         if deduplicate:
+            start = time.perf_counter()
             from khora.extraction.expansion.entity_index import EntityIndex
 
             shared_entity_index = EntityIndex()
@@ -330,9 +438,11 @@ class GraphRAGEngine:
             for entity in existing_entities:
                 shared_entity_index.add(entity)
 
+            timings["entity_preload_ms"] = (time.perf_counter() - start) * 1000
             if existing_entities:
                 logger.debug(f"Preloaded {len(existing_entities)} existing entities into EntityIndex")
 
+        start = time.perf_counter()
         result = await ingest_documents(
             namespace_id,
             doc_inputs,
@@ -344,6 +454,20 @@ class GraphRAGEngine:
             shared_embedder=shared_embedder,
             shared_entity_index=shared_entity_index,
             enable_expansion=infer_relationships,
+        )
+        timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
+        timings["total_ms"] = (time.perf_counter() - total_start) * 1000
+
+        # Calculate throughput metrics
+        processed = result.get("processed_documents", 0)
+        if processed > 0 and timings["total_ms"] > 0:
+            timings["docs_per_second"] = processed / (timings["total_ms"] / 1000)
+            timings["avg_doc_ms"] = timings["ingest_pipeline_ms"] / processed
+
+        logger.info(
+            f"remember_batch() completed: {processed}/{len(documents)} docs, "
+            f"{result.get('total_chunks', 0)} chunks, {result.get('total_entities', 0)} entities "
+            f"in {timings['total_ms']:.1f}ms ({timings.get('docs_per_second', 0):.1f} docs/sec)"
         )
 
         # Call progress callback if provided
@@ -361,6 +485,7 @@ class GraphRAGEngine:
             chunks=result.get("total_chunks", 0),
             entities=result.get("total_entities", 0),
             relationships=result.get("total_relationships", 0) + result.get("total_inferred_relationships", 0),
+            metadata={"timings": timings},
         )
 
     # =========================================================================
@@ -525,7 +650,10 @@ class GraphRAGEngine:
         *,
         limit: int = 10,
     ) -> list[Entity]:
-        """Search entities by query text using embedding similarity."""
+        """Search entities by query text using embedding similarity.
+
+        Uses batch entity fetching to avoid N+1 queries for better performance.
+        """
         # Embed the query
         if self._embedder is None:
             raise RuntimeError("GraphRAG engine not connected. Call connect() first.")
@@ -533,20 +661,26 @@ class GraphRAGEngine:
         query_embedding = await self._embedder.embed(query)
 
         # Search similar entities
-        entity_ids_scores = await self._get_storage().search_similar_entities(
+        storage = self._get_storage()
+        entity_ids_scores = await storage.search_similar_entities(
             namespace_id,
             query_embedding,
             limit=limit,
             min_similarity=0.0,
         )
 
-        # Fetch full entities
-        storage = self._get_storage()
+        if not entity_ids_scores:
+            return []
+
+        # Batch fetch all entities in a single query (avoids N+1)
+        entity_ids = [entity_id for entity_id, _ in entity_ids_scores]
+        entities_map = await storage.get_entities_batch(entity_ids)
+
+        # Return entities in score order, filtering out any that weren't found
         entities = []
         for entity_id, _score in entity_ids_scores:
-            entity = await storage.get_entity(entity_id)
-            if entity:
-                entities.append(entity)
+            if entity_id in entities_map:
+                entities.append(entities_map[entity_id])
 
         return entities
 
@@ -591,13 +725,53 @@ class GraphRAGEngine:
         )
 
     async def health_check(self) -> dict[str, Any]:
-        """Check health of all components."""
+        """Check health of all components and dependencies.
+
+        Returns a dict with:
+        - status: 'healthy', 'degraded', or 'disconnected'
+        - checks: Individual component check results
+        - engine: Engine name for identification
+        """
         if not self._connected:
-            return {"status": "disconnected"}
+            return {"status": "disconnected", "engine": "graphrag"}
 
-        storage_health = await self._get_storage().health_check()
-
-        return {
-            "status": "healthy" if storage_health.is_healthy else "degraded",
-            "storage": storage_health.summary,
+        health: dict[str, Any] = {
+            "engine": "graphrag",
+            "status": "healthy",
+            "checks": {},
         }
+
+        # Check storage coordinator (PostgreSQL + backends)
+        try:
+            storage_health = await self._get_storage().health_check()
+            health["checks"]["storage"] = storage_health.summary
+            if not storage_health.is_healthy:
+                health["status"] = "degraded"
+        except Exception as e:
+            health["checks"]["storage"] = f"error: {e}"
+            health["status"] = "degraded"
+
+        # Check embedder availability
+        try:
+            if self._embedder is not None:
+                # Simple test - just verify the embedder is configured
+                health["checks"]["embedder"] = "ok"
+            else:
+                health["checks"]["embedder"] = "not configured"
+                health["status"] = "degraded"
+        except Exception as e:
+            health["checks"]["embedder"] = f"error: {e}"
+            health["status"] = "degraded"
+
+        # Check query engine
+        try:
+            if self._query_engine is not None:
+                health["checks"]["query_engine"] = "ok"
+            else:
+                health["checks"]["query_engine"] = "not configured"
+                health["status"] = "degraded"
+        except Exception as e:
+            health["checks"]["query_engine"] = f"error: {e}"
+            health["status"] = "degraded"
+
+        return health
