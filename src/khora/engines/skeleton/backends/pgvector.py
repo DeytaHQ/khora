@@ -300,6 +300,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
         - Vector similarity via pgvector cosine distance
         - BM25-style scoring via ts_rank for hybrid search
         - RRF fusion to combine scores
+
+        QUALITY FIX: When vector search returns insufficient results, automatically
+        falls back to keyword search to improve recall on non-core chunks.
         """
         async with self._get_session() as session:
             # Build base conditions
@@ -331,6 +334,31 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 results = self._rrf_fusion(vector_results, bm25_results, hybrid_alpha, limit)
             else:
                 results = vector_results[:limit]
+
+                # QUALITY FIX: Keyword fallback when vector search returns
+                # insufficient results. This improves recall for non-core chunks
+                # that may not have strong vector similarity but contain
+                # relevant keywords.
+                if len(results) < limit and query_text:
+                    needed = limit - len(results)
+                    existing_ids = {str(r.chunk.id) for r in results}
+
+                    bm25_results = await self._bm25_search(
+                        session,
+                        query_text,
+                        conditions,
+                        needed + len(existing_ids),  # Fetch extra to account for overlap
+                    )
+
+                    # Add BM25 results that aren't already in vector results
+                    for bm25_result in bm25_results:
+                        if str(bm25_result.chunk.id) not in existing_ids:
+                            # Discount BM25-only results slightly to prefer vector matches
+                            bm25_result.combined_score = (bm25_result.bm25_score or 0.0) * 0.8
+                            results.append(bm25_result)
+                            existing_ids.add(str(bm25_result.chunk.id))
+                            if len(results) >= limit:
+                                break
 
         return results
 

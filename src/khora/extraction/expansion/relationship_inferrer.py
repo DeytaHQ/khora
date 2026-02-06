@@ -307,9 +307,7 @@ class RelationshipInferrer:
             elif group == "second":
                 data = second
             else:
-                logger.warning(
-                    f"Rule '{match.rule_name}': invalid reference '{ref}' " f"(only 'first'/'second' supported)"
-                )
+                logger.warning(f"Rule '{match.rule_name}': invalid reference '{ref}' (only 'first'/'second' supported)")
                 return None
 
             return data.get(position)

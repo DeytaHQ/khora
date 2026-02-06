@@ -97,7 +97,7 @@ class CrossEncoderReranker(Reranker):
             try:
                 from sentence_transformers import CrossEncoder
             except ImportError:
-                raise RuntimeError("sentence-transformers not installed. " "Run: pip install sentence-transformers")
+                raise RuntimeError("sentence-transformers not installed. Run: pip install sentence-transformers")
             self._model = CrossEncoder(self._model_name, device=self._device)
         return self._model
 
@@ -129,22 +129,36 @@ class CrossEncoderReranker(Reranker):
             # Score in batches
             scores = model.predict(pairs, batch_size=self._batch_size)
 
-            # Combine with original scores
-            results = []
-            for candidate, rerank_score in zip(candidates, scores):
-                # Normalize rerank score to 0-1
-                normalized_score = (
-                    float(1 / (1 + (-rerank_score).exp())) if hasattr(rerank_score, "exp") else float(rerank_score)
-                )
+            # Convert all scores to floats for normalization
+            # Cross-encoders output logits (roughly -3 to 3), we need to normalize
+            float_scores = [float(1 / (1 + (-s).exp())) if hasattr(s, "exp") else float(s) for s in scores]
 
-                # Combine scores (weighted average)
-                final_score = 0.7 * normalized_score + 0.3 * candidate.original_score
+            # QUALITY FIX: Normalize cross-encoder scores to [0,1] using min-max
+            # across the batch. This ensures proper combination with original_score
+            # (which is already in [0,1] from RRF or similarity scoring).
+            if float_scores:
+                min_score = min(float_scores)
+                max_score = max(float_scores)
+                score_range = max_score - min_score
+                if score_range > 0:
+                    normalized_scores = [(s - min_score) / score_range for s in float_scores]
+                else:
+                    # All scores are the same - use 0.5 as neutral
+                    normalized_scores = [0.5] * len(float_scores)
+            else:
+                normalized_scores = []
+
+            # Combine with original scores (both now in [0,1])
+            results = []
+            for candidate, normalized_rerank in zip(candidates, normalized_scores):
+                # Weighted combination: 70% rerank score, 30% original score
+                final_score = 0.7 * normalized_rerank + 0.3 * candidate.original_score
 
                 results.append(
                     RerankResult(
                         item=candidate.item,
                         original_score=candidate.original_score,
-                        rerank_score=normalized_score,
+                        rerank_score=normalized_rerank,
                         final_score=final_score,
                         metadata=candidate.metadata,
                     )

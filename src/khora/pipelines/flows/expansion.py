@@ -307,7 +307,7 @@ async def unify_entities(
     unifier = CrossToolUnifier(expertise=resolved_expertise)
     result = unifier.unify(entities, relationships)
 
-    logger.info(f"Unification complete: {len(result.unified_entities)} entities " f"({result.entities_merged} merged)")
+    logger.info(f"Unification complete: {len(result.unified_entities)} entities ({result.entities_merged} merged)")
 
     # Store results if requested
     stored = False

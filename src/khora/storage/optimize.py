@@ -20,21 +20,20 @@ from loguru import logger
 PG_INDEXES = [
     {
         "name": "idx_chunks_namespace_created",
-        "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_namespace_created " "ON chunks (namespace_id, created_at DESC)"),
+        "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_namespace_created ON chunks (namespace_id, created_at DESC)"),
         "purpose": "Temporal filtering within namespace",
     },
     {
         "name": "idx_documents_namespace_created",
         "sql": (
-            "CREATE INDEX IF NOT EXISTS idx_documents_namespace_created " "ON documents (namespace_id, created_at DESC)"
+            "CREATE INDEX IF NOT EXISTS idx_documents_namespace_created ON documents (namespace_id, created_at DESC)"
         ),
         "purpose": "Document temporal queries",
     },
     {
         "name": "idx_entities_namespace_type_name",
         "sql": (
-            "CREATE INDEX IF NOT EXISTS idx_entities_namespace_type_name "
-            "ON entities (namespace_id, entity_type, name)"
+            "CREATE INDEX IF NOT EXISTS idx_entities_namespace_type_name ON entities (namespace_id, entity_type, name)"
         ),
         "purpose": "Entity type filtering + name lookup",
     },
@@ -49,8 +48,7 @@ PG_INDEXES = [
     {
         "name": "idx_entities_namespace_confidence",
         "sql": (
-            "CREATE INDEX IF NOT EXISTS idx_entities_namespace_confidence "
-            "ON entities (namespace_id, confidence DESC)"
+            "CREATE INDEX IF NOT EXISTS idx_entities_namespace_confidence ON entities (namespace_id, confidence DESC)"
         ),
         "purpose": "Confidence-based filtering",
     },
@@ -64,22 +62,21 @@ PG_INDEXES = [
     },
     {
         "name": "idx_chunks_document_namespace",
-        "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_document_namespace " "ON chunks (document_id, namespace_id)"),
+        "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_document_namespace ON chunks (document_id, namespace_id)"),
         "purpose": "Document-to-chunk lookups",
     },
     # --- Synced from models.py __table_args__ for catch-up on existing databases ---
     {
         "name": "ix_documents_namespace_source_type",
         "sql": (
-            "CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type " "ON documents (namespace_id, source_type)"
+            "CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type ON documents (namespace_id, source_type)"
         ),
         "purpose": "Document queries filtered by source_type within namespace",
     },
     {
         "name": "ix_entities_namespace_mentions",
         "sql": (
-            "CREATE INDEX IF NOT EXISTS ix_entities_namespace_mentions "
-            "ON entities (namespace_id, mention_count DESC)"
+            "CREATE INDEX IF NOT EXISTS ix_entities_namespace_mentions ON entities (namespace_id, mention_count DESC)"
         ),
         "purpose": "Entity importance ranking (top N entities in namespace)",
     },
@@ -128,34 +125,31 @@ NEO4J_INDEXES = [
     {
         "name": "entity_fulltext",
         "cypher": (
-            "CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS " "FOR (e:Entity) ON EACH [e.name, e.description]"
+            "CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS FOR (e:Entity) ON EACH [e.name, e.description]"
         ),
         "purpose": "Fuzzy name/description search",
     },
     {
         "name": "episode_namespace_occurred",
         "cypher": (
-            "CREATE INDEX episode_namespace_occurred IF NOT EXISTS "
-            "FOR (e:Episode) ON (e.namespace_id, e.occurred_at)"
+            "CREATE INDEX episode_namespace_occurred IF NOT EXISTS FOR (e:Episode) ON (e.namespace_id, e.occurred_at)"
         ),
         "purpose": "Temporal episode queries",
     },
     {
         "name": "relates_to_weight",
-        "cypher": ("CREATE INDEX relates_to_weight IF NOT EXISTS " "FOR ()-[r:RELATES_TO]-() ON (r.weight)"),
+        "cypher": ("CREATE INDEX relates_to_weight IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.weight)"),
         "purpose": "Weighted traversal",
     },
     {
         "name": "mentioned_in_confidence",
-        "cypher": (
-            "CREATE INDEX mentioned_in_confidence IF NOT EXISTS " "FOR ()-[r:MENTIONED_IN]-() ON (r.confidence)"
-        ),
+        "cypher": ("CREATE INDEX mentioned_in_confidence IF NOT EXISTS FOR ()-[r:MENTIONED_IN]-() ON (r.confidence)"),
         "purpose": "Confidence filtering",
     },
     # --- Synced from neo4j.py _create_indexes for catch-up on existing databases ---
     {
         "name": "entity_ns_type",
-        "cypher": ("CREATE INDEX entity_ns_type IF NOT EXISTS " "FOR (e:Entity) ON (e.namespace_id, e.entity_type)"),
+        "cypher": ("CREATE INDEX entity_ns_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.entity_type)"),
         "purpose": "Entity namespace + type composite (list queries filtering by type)",
     },
     {

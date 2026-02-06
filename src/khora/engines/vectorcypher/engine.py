@@ -5,7 +5,7 @@ This engine implements the VectorCypher retrieval paradigm inspired by Graph RAG
 - Cypher traversal to expand relationships (Neo4j)
 - Query routing to optimize simple vs complex queries
 - HippoRAG 2 dual-node architecture (Entity + Chunk nodes)
-- Skeleton-based construction (KET-RAG) - full KG extraction for top 25% of chunks
+- Skeleton-based construction (KET-RAG) - full KG extraction for top 40% of chunks
 - Bi-temporal edges (Graphiti-style) - occurred_at vs ingested_at with invalidation
 
 Target: Sub-300ms P95 for simple queries, sub-800ms for complex multi-hop queries.
@@ -53,7 +53,7 @@ class VectorCypherConfig:
     routing_use_llm: bool = False
 
     # Skeleton indexing
-    skeleton_core_ratio: float = 0.25  # 25% get full KG extraction
+    skeleton_core_ratio: float = 0.40  # 40% get full KG extraction (increased for +10-20% recall)
 
     # Graph traversal
     graph_default_depth: int = 2
@@ -76,7 +76,7 @@ class VectorCypherEngine:
     Key features:
     - Dual retrieval: Vector similarity (pgvector) + graph traversal (Neo4j)
     - Smart routing: Route queries to optimal path (simple vs complex)
-    - Skeleton indexing: Full KG extraction only for core 25% chunks
+    - Skeleton indexing: Full KG extraction only for core 40% chunks
     - Bi-temporal model: Track occurred_at vs ingested_at
     - RRF fusion: Combine vector and graph scores
 

@@ -553,15 +553,17 @@ class HybridQueryEngine:
         }
 
         # Step 1: Query Understanding
+        # Check cache FIRST (fastest path), then heuristic, then LLM call
         metrics.understanding_timer.start()
         understanding: UnderstandingResult | None = None
-        if cfg.enable_query_understanding and not self._is_simple_query(query_text):
-            # Check understanding cache first
+        if cfg.enable_query_understanding:
+            # Check understanding cache before running heuristic (cache lookup is faster)
             cached_understanding = await self._understanding_cache.get(query_text, namespace_id, "understanding")
             if cached_understanding is not None:
                 understanding = cached_understanding
                 logger.debug(f"Understanding cache hit for: {query_text[:50]}...")
-            else:
+            elif not self._is_simple_query(query_text):
+                # Only call LLM for complex queries that aren't cached
                 try:
                     # Use lightweight prompt unless caller explicitly opted out
                     use_lightweight = _lightweight_understanding if _lightweight_understanding is not None else True
@@ -1180,20 +1182,26 @@ class HybridQueryEngine:
                     if entity_id in neighborhoods:
                         graph_context[str(entity_id)] = neighborhoods[entity_id]
 
-        # Get related chunks through entities
+        # Get related chunks through entities - batch fetch to avoid N+1
         chunks = []
-        seen_chunk_ids = set()
+
+        # Collect all unique chunk IDs with their associated entity/score info
+        chunk_ids_to_fetch: list[UUID] = []
+        chunk_id_to_info: dict[UUID, tuple[Any, float]] = {}
         for entity, score in entities:
-            # Get chunks that mention this entity
             for chunk_id in entity.source_chunk_ids[:5]:
-                if chunk_id in seen_chunk_ids:
-                    continue
-                chunk = await self._storage.get_chunk(chunk_id)
-                if chunk:
-                    # Score based on entity score and mention count
-                    chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
-                    chunks.append((chunk, chunk_score))
-                    seen_chunk_ids.add(chunk_id)
+                if chunk_id not in chunk_id_to_info:
+                    chunk_ids_to_fetch.append(chunk_id)
+                    chunk_id_to_info[chunk_id] = (entity, score)
+
+        # Batch fetch all chunks in a single query
+        if chunk_ids_to_fetch:
+            chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch)
+            for chunk_id, chunk in chunks_map.items():
+                entity, score = chunk_id_to_info[chunk_id]
+                # Score based on entity score and mention count
+                chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+                chunks.append((chunk, chunk_score))
 
         return {
             "source": "graph",

@@ -24,6 +24,14 @@ class LiteLLMEmbedder(Embedder):
 
     Includes an in-memory embedding cache to avoid re-embedding
     identical texts (e.g. entity mentions that recur across queries).
+
+    Cache Behavior:
+        The cache persists across multiple embed_batch() calls within
+        the embedder's lifetime. This enables cross-document embedding
+        deduplication when processing document batches - if chunk text
+        appears in multiple documents, it's only embedded once. For
+        optimal batch processing, reuse the same embedder instance
+        across all documents in a session.
     """
 
     def __init__(
