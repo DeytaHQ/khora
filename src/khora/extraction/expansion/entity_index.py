@@ -123,6 +123,79 @@ class EntityIndex:
     # Candidate retrieval (for post-ingestion resolution)
     # ------------------------------------------------------------------
 
+    def find_candidates_fast(
+        self,
+        entity: Entity,
+        max_candidates: int = 20,
+    ) -> list[Entity]:
+        """Find merge candidates using multi-level blocking.
+
+        Uses a hierarchical blocking strategy to reduce candidate sets from
+        O(n^2) to O(n + k*log(c)) where c is the average cluster size:
+
+        1. Same entity_type (required) - Primary partition
+        2. Same first letter of normalized name (optional speedup) - Secondary partition
+        3. Token overlap (existing logic) - Tertiary filter
+
+        This approach creates smaller candidate pools by leveraging the natural
+        clustering of entities by type and name prefix, significantly reducing
+        the number of expensive similarity comparisons needed.
+
+        Args:
+            entity: Query entity to find candidates for.
+            max_candidates: Maximum number of candidates to return.
+
+        Returns:
+            List of candidate entities, prioritized by blocking level match.
+        """
+        type_str = _entity_type_str(entity)
+        normalized_name = _normalize_name(entity.name)
+
+        # Fast path: no entities of this type
+        if type_str not in self._type:
+            return []
+
+        type_entities = self._type[type_str]
+
+        # Extract first letter for secondary blocking
+        first_letter = normalized_name[0] if normalized_name else ""
+
+        # Level 1 + 2: Same type AND same first letter (highest priority)
+        first_letter_matches: list[Entity] = []
+
+        # Level 1 only: Same type but different first letter
+        type_only_matches: list[Entity] = []
+
+        for candidate in type_entities:
+            if candidate.id == entity.id:
+                continue
+            candidate_normalized = _normalize_name(candidate.name)
+            # Skip exact matches (already handled by add())
+            if candidate_normalized == normalized_name:
+                continue
+
+            if first_letter and candidate_normalized and candidate_normalized[0] == first_letter:
+                first_letter_matches.append(candidate)
+            else:
+                type_only_matches.append(candidate)
+
+        # Level 3: Apply token overlap filter to prioritize within each group
+        tokens = _tokenize(entity.name)
+
+        def token_overlap_score(candidate: Entity) -> int:
+            """Count shared tokens with the query entity."""
+            candidate_tokens = _tokenize(candidate.name)
+            return len(tokens & candidate_tokens)
+
+        # Sort each group by token overlap (higher is better)
+        first_letter_matches.sort(key=token_overlap_score, reverse=True)
+        type_only_matches.sort(key=token_overlap_score, reverse=True)
+
+        # Combine results: first letter matches first, then type-only matches
+        candidates = first_letter_matches + type_only_matches
+
+        return candidates[:max_candidates]
+
     def find_fuzzy_candidates(
         self,
         entity: Entity,

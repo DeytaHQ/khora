@@ -21,10 +21,224 @@ from ..registry import pipeline
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from khora.core.models import Document, Entity
+    from khora.core.models import Chunk, Document, Entity, Relationship
+    from khora.extraction.embedders import Embedder
     from khora.extraction.expansion.entity_index import EntityIndex
     from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
+
+
+async def stream_extract_and_embed_entities(
+    chunks: list[Chunk],
+    embedder: Embedder,
+    *,
+    skill_name: str = "general_entities",
+    expertise: ExpertiseConfig | None = None,
+    model: str = "gpt-4o-mini",
+    max_concurrent_extractions: int = 10,
+    extraction_context: dict[str, Any] | None = None,
+    extraction_timeout: int = 120,
+    extraction_max_retries: int = 3,
+    extraction_retry_wait: float = 2.0,
+    embedding_batch_size: int = 50,
+) -> tuple[list[Entity], list[Relationship]]:
+    """Extract entities from chunks and embed them in a streaming fashion.
+
+    This function overlaps extraction and embedding work by using an async queue.
+    As entities are extracted from chunks, they are immediately queued for embedding,
+    allowing the embedding process to start while extraction continues.
+
+    Args:
+        chunks: Chunks to extract entities from
+        embedder: Embedder for generating entity embeddings
+        skill_name: Extraction skill to use
+        expertise: Optional ExpertiseConfig
+        model: LLM model for extraction
+        max_concurrent_extractions: Maximum concurrent LLM extractions
+        extraction_context: Optional context for prompt templates
+        extraction_timeout: Timeout for extraction calls
+        extraction_max_retries: Max retries for extraction
+        extraction_retry_wait: Base wait time between retries
+        embedding_batch_size: Batch size for embedding operations
+
+    Returns:
+        Tuple of (entities with embeddings, relationships)
+    """
+    from khora.core.models import Entity, Relationship
+    from khora.core.models.entity import EntityType, RelationshipType
+    from khora.extraction.extractors import LLMEntityExtractor
+    from khora.extraction.skills.registry import get_default_registry
+
+    if not chunks:
+        return [], []
+
+    # Entity queue for streaming between extraction and embedding
+    entity_queue: asyncio.Queue[Entity | None] = asyncio.Queue()
+    embedded_entities: list[Entity] = []
+    all_relationships: list[Relationship] = []
+    extraction_complete = asyncio.Event()
+
+    # Resolve expertise and skill
+    registry = get_default_registry()
+    skill = registry.get_or_default(skill_name)
+
+    if expertise:
+        min_entity_confidence = expertise.confidence.min_entity
+        min_relationship_confidence = expertise.confidence.min_relationship
+    else:
+        min_entity_confidence = skill.min_entity_confidence
+        min_relationship_confidence = skill.min_relationship_confidence
+
+    async def extraction_task() -> None:
+        """Extract entities from chunks and queue them for embedding."""
+        try:
+            extractor = LLMEntityExtractor(
+                model=model,
+                max_concurrent=max_concurrent_extractions,
+                timeout=extraction_timeout,
+                max_retries=extraction_max_retries,
+                retry_wait=extraction_retry_wait,
+            )
+
+            texts = [chunk.content for chunk in chunks]
+
+            if expertise:
+                results = await extractor.extract_multi(
+                    texts,
+                    expertise=expertise,
+                    context=extraction_context,
+                    batch_size=5,
+                    max_input_tokens=None,
+                )
+            else:
+                results = await extractor.extract_multi(
+                    texts,
+                    entity_types=skill.entity_types,
+                    batch_size=5,
+                    max_input_tokens=None,
+                )
+
+            # Process results and queue entities
+            all_entities: dict[str, Entity] = {}
+
+            for chunk, result in zip(chunks, results):
+                for extracted in result.entities:
+                    if extracted.confidence < min_entity_confidence:
+                        continue
+
+                    key = f"{extracted.name}:{extracted.entity_type}"
+                    if key in all_entities:
+                        existing = all_entities[key]
+                        existing.mention_count += 1
+                        if chunk.document_id not in existing.source_document_ids:
+                            existing.source_document_ids.append(chunk.document_id)
+                        if chunk.id not in existing.source_chunk_ids:
+                            existing.source_chunk_ids.append(chunk.id)
+                        if existing.valid_from and chunk.created_at < existing.valid_from:
+                            existing.valid_from = chunk.created_at
+                    else:
+                        try:
+                            entity_type: EntityType | str = EntityType(extracted.entity_type)
+                        except ValueError:
+                            entity_type = extracted.entity_type or "CONCEPT"
+
+                        entity = Entity(
+                            namespace_id=chunk.namespace_id,
+                            name=extracted.name,
+                            entity_type=entity_type,
+                            description=extracted.description,
+                            attributes=extracted.attributes,
+                            source_document_ids=[chunk.document_id],
+                            source_chunk_ids=[chunk.id],
+                            confidence=extracted.confidence,
+                            valid_from=chunk.created_at,
+                        )
+                        all_entities[key] = entity
+                        # Queue entity for embedding as soon as it's extracted
+                        await entity_queue.put(entity)
+
+                # Process relationships
+                for extracted_rel in result.relationships:
+                    if extracted_rel.confidence < min_relationship_confidence:
+                        continue
+
+                    try:
+                        rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
+                    except ValueError:
+                        rel_type = extracted_rel.relationship_type or "RELATES_TO"
+
+                    source_key = next(
+                        (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
+                        None,
+                    )
+                    target_key = next(
+                        (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
+                        None,
+                    )
+
+                    if source_key and target_key:
+                        relationship = Relationship(
+                            namespace_id=chunk.namespace_id,
+                            source_entity_id=all_entities[source_key].id,
+                            target_entity_id=all_entities[target_key].id,
+                            relationship_type=rel_type,
+                            description=extracted_rel.description,
+                            properties=extracted_rel.properties,
+                            source_document_ids=[chunk.document_id],
+                            source_chunk_ids=[chunk.id],
+                            confidence=extracted_rel.confidence,
+                            valid_from=chunk.created_at,
+                        )
+                        all_relationships.append(relationship)
+
+        finally:
+            # Signal completion
+            await entity_queue.put(None)
+            extraction_complete.set()
+
+    async def embedding_task() -> None:
+        """Consume entities from queue and embed them in batches."""
+        batch: list[Entity] = []
+
+        async def embed_batch() -> None:
+            if not batch:
+                return
+            try:
+                texts = [f"{e.name}: {e.description}" if e.description else e.name for e in batch]
+                embeddings = await embedder.embed_batch(texts)
+                for entity, embedding in zip(batch, embeddings):
+                    entity.embedding = embedding
+                    embedded_entities.append(entity)
+            except Exception as e:
+                logger.warning(f"Batch embedding failed: {e}")
+                # Still add entities without embeddings
+                embedded_entities.extend(batch)
+            batch.clear()
+
+        while True:
+            try:
+                # Use a timeout to allow periodic batch flushes
+                entity = await asyncio.wait_for(entity_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                # Flush current batch on timeout
+                await embed_batch()
+                if extraction_complete.is_set() and entity_queue.empty():
+                    break
+                continue
+
+            if entity is None:
+                # Extraction complete, flush remaining batch
+                await embed_batch()
+                break
+
+            batch.append(entity)
+            if len(batch) >= embedding_batch_size:
+                await embed_batch()
+
+    # Run extraction and embedding concurrently
+    await asyncio.gather(extraction_task(), embedding_task())
+
+    return embedded_entities, all_relationships
 
 
 def compute_checksum(content: str) -> str:

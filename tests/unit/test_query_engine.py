@@ -99,6 +99,13 @@ class TestQueryConfig:
         settings.keyword_search_method = "bm25"
         settings.enable_hyde = True
         settings.hyde_num_hypotheticals = 2
+        # Multi-stage settings
+        settings.enable_multi_stage = True
+        settings.stage1_recall_limit = 150
+        settings.stage3_filter_limit = 40
+        settings.stage4_rerank_limit = 40
+        settings.enable_diversity = True
+        settings.diversity_lambda = 0.7
 
         config = QueryConfig.from_settings(settings)
         assert config.mode == SearchMode.ALL
@@ -107,6 +114,13 @@ class TestQueryConfig:
         assert config.enable_query_understanding is False
         assert config.reranking_method == "llm"
         assert config.enable_hyde is True
+        # Multi-stage assertions
+        assert config.enable_multi_stage is True
+        assert config.stage1_recall_limit == 150
+        assert config.stage3_filter_limit == 40
+        assert config.stage4_rerank_limit == 40
+        assert config.enable_diversity is True
+        assert config.diversity_lambda == 0.7
 
     def test_from_settings_unknown_mode_defaults_to_hybrid(self) -> None:
         """Unknown mode string defaults to HYBRID."""
@@ -136,9 +150,47 @@ class TestQueryConfig:
         settings.keyword_search_method = "fulltext"
         settings.enable_hyde = False
         settings.hyde_num_hypotheticals = 1
+        # Multi-stage settings (defaults)
+        settings.enable_multi_stage = True
+        settings.stage1_recall_limit = 200
+        settings.stage3_filter_limit = 50
+        settings.stage4_rerank_limit = 50
+        settings.enable_diversity = False
+        settings.diversity_lambda = 0.5
 
         config = QueryConfig.from_settings(settings)
         assert config.mode == SearchMode.HYBRID
+
+
+class TestMultiStageConfig:
+    """Tests for multi-stage ranking pipeline configuration."""
+
+    def test_defaults(self) -> None:
+        """Test default multi-stage configuration values."""
+        config = QueryConfig()
+        assert config.enable_multi_stage is True
+        assert config.stage1_recall_limit == 200
+        assert config.stage3_filter_limit == 50
+        assert config.stage4_rerank_limit == 50
+        assert config.enable_diversity is False
+        assert config.diversity_lambda == 0.5
+
+    def test_custom_config(self) -> None:
+        """Test custom multi-stage configuration."""
+        config = QueryConfig(
+            enable_multi_stage=False,
+            stage1_recall_limit=100,
+            stage3_filter_limit=30,
+            stage4_rerank_limit=25,
+            enable_diversity=True,
+            diversity_lambda=0.8,
+        )
+        assert config.enable_multi_stage is False
+        assert config.stage1_recall_limit == 100
+        assert config.stage3_filter_limit == 30
+        assert config.stage4_rerank_limit == 25
+        assert config.enable_diversity is True
+        assert config.diversity_lambda == 0.8
 
 
 # ---------------------------------------------------------------------------
@@ -625,3 +677,206 @@ class TestFindRelatedEntities:
 
         results = await engine.find_related_entities(uuid4(), uuid4())
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# HybridQueryEngine.warm_cache
+# ---------------------------------------------------------------------------
+
+
+class TestWarmCache:
+    """Tests for warm_cache method."""
+
+    def _make_engine(self) -> HybridQueryEngine:
+        """Create engine with mocked dependencies."""
+        storage = MagicMock()
+        storage.search_similar_chunks = AsyncMock(return_value=[])
+        storage.search_similar_entities = AsyncMock(return_value=[])
+        storage.get_entities_batch = AsyncMock(return_value={})
+        storage.get_neighborhood = AsyncMock(return_value={})
+        storage.get_neighborhoods_batch = AsyncMock(return_value={})
+        storage.list_chunks = AsyncMock(return_value=[])
+        storage.list_entities = AsyncMock(return_value=[])
+        storage.search_fulltext_chunks = AsyncMock(return_value=[])
+
+        embedder = MagicMock()
+        embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+
+        config = QueryConfig(
+            enable_query_understanding=False,
+            enable_entity_linking=False,
+            enable_reranking=False,
+            enable_keyword_search=False,
+        )
+
+        return HybridQueryEngine(storage=storage, embedder=embedder, config=config)
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_with_explicit_queries(self) -> None:
+        """warm_cache executes provided queries."""
+        engine = self._make_engine()
+        ns_id = uuid4()
+
+        with patch("khora.telemetry.get_collector") as mock_tc:
+            mock_tc.return_value = MagicMock()
+            mock_tc.return_value.record_pipeline_stage = MagicMock()
+
+            result = await engine.warm_cache(
+                ns_id,
+                queries=["query1", "query2"],
+                include_entity_based=False,
+            )
+
+        assert result["queries_warmed"] == 2
+        assert result["errors"] == 0
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_generates_entity_queries(self) -> None:
+        """warm_cache generates queries from top entities."""
+        engine = self._make_engine()
+        ns_id = uuid4()
+
+        # Mock top entities
+        mock_entity = MagicMock()
+        mock_entity.name = "Alice"
+        mock_entity.description = "A person"
+        mock_entity.mention_count = 10
+        engine._storage.list_entities = AsyncMock(return_value=[mock_entity])
+
+        with patch("khora.telemetry.get_collector") as mock_tc:
+            mock_tc.return_value = MagicMock()
+            mock_tc.return_value.record_pipeline_stage = MagicMock()
+
+            result = await engine.warm_cache(
+                ns_id,
+                queries=[],
+                include_entity_based=True,
+                max_entity_queries=5,
+            )
+
+        # Should have warmed entity-based queries
+        assert result["queries_warmed"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_handles_errors(self) -> None:
+        """warm_cache tracks errors gracefully."""
+        engine = self._make_engine()
+        ns_id = uuid4()
+
+        # Make the query method itself raise an exception (not just search)
+        async def failing_query(*args, **kwargs):
+            raise Exception("query completely failed")
+
+        original_query = engine.query
+        engine.query = failing_query
+
+        result = await engine.warm_cache(
+            ns_id,
+            queries=["failing query"],
+            include_entity_based=False,
+        )
+
+        assert result["queries_warmed"] == 0
+        assert result["errors"] == 1
+
+        # Restore original method
+        engine.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_returns_stats(self) -> None:
+        """warm_cache returns cache statistics."""
+        engine = self._make_engine()
+        ns_id = uuid4()
+
+        with patch("khora.telemetry.get_collector") as mock_tc:
+            mock_tc.return_value = MagicMock()
+            mock_tc.return_value.record_pipeline_stage = MagicMock()
+
+            result = await engine.warm_cache(
+                ns_id,
+                queries=["test"],
+                include_entity_based=False,
+            )
+
+        assert "cache_stats" in result
+        assert "namespace_id" in result
+
+
+# ---------------------------------------------------------------------------
+# HybridQueryEngine.warm_keyword_index
+# ---------------------------------------------------------------------------
+
+
+class TestWarmKeywordIndex:
+    """Tests for warm_keyword_index method."""
+
+    def _make_engine(self) -> HybridQueryEngine:
+        """Create engine with mocked dependencies."""
+        storage = MagicMock()
+        storage.list_chunks = AsyncMock(return_value=[])
+
+        config = QueryConfig(
+            enable_query_understanding=False,
+            enable_entity_linking=False,
+            enable_reranking=False,
+        )
+
+        return HybridQueryEngine(storage=storage, config=config)
+
+    @pytest.mark.asyncio
+    async def test_warm_keyword_index_builds_index(self) -> None:
+        """warm_keyword_index builds BM25 index."""
+        engine = self._make_engine()
+        ns_id = uuid4()
+
+        # Mock chunks
+        mock_chunk = MagicMock()
+        mock_chunk.id = uuid4()
+        mock_chunk.content = "test content"
+        engine._storage.list_chunks = AsyncMock(return_value=[mock_chunk])
+
+        result = await engine.warm_keyword_index(ns_id)
+
+        assert result["status"] == "indexed"
+        assert result["chunk_count"] == 1
+        assert str(ns_id) in engine._keyword_searchers
+
+    @pytest.mark.asyncio
+    async def test_warm_keyword_index_already_indexed(self) -> None:
+        """warm_keyword_index returns early if already indexed."""
+        engine = self._make_engine()
+        ns_id = uuid4()
+
+        # Pre-populate the index
+        engine._keyword_searchers[str(ns_id)] = MagicMock()
+
+        result = await engine.warm_keyword_index(ns_id)
+
+        assert result["status"] == "already_indexed"
+        engine._storage.list_chunks.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_warm_keyword_index_no_chunks(self) -> None:
+        """warm_keyword_index handles empty namespace."""
+        engine = self._make_engine()
+        ns_id = uuid4()
+
+        engine._storage.list_chunks = AsyncMock(return_value=[])
+
+        result = await engine.warm_keyword_index(ns_id)
+
+        assert result["status"] == "no_chunks"
+        assert result["chunk_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_warm_keyword_index_handles_error(self) -> None:
+        """warm_keyword_index handles errors gracefully."""
+        engine = self._make_engine()
+        ns_id = uuid4()
+
+        engine._storage.list_chunks = AsyncMock(side_effect=Exception("db error"))
+
+        result = await engine.warm_keyword_index(ns_id)
+
+        assert result["status"] == "error"
+        assert "error" in result

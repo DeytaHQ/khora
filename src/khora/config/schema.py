@@ -328,6 +328,24 @@ class QuerySettings(BaseModel):
         default=1, ge=1, le=5, description="Number of hypothetical documents to generate"
     )
 
+    # Multi-stage ranking pipeline
+    enable_multi_stage: bool = Field(
+        default=True, description="Enable multi-stage ranking pipeline for improved quality"
+    )
+    stage1_recall_limit: int = Field(
+        default=200, ge=50, le=500, description="Number of candidates to retrieve in Stage 1 (broad recall)"
+    )
+    stage3_filter_limit: int = Field(
+        default=50, ge=20, le=200, description="Number of candidates after Stage 3 filtering"
+    )
+    stage4_rerank_limit: int = Field(
+        default=50, ge=10, le=100, description="Number of candidates to send to neural reranking in Stage 4"
+    )
+    enable_diversity: bool = Field(default=False, description="Enable MMR-style diversity selection in Stage 5")
+    diversity_lambda: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="Diversity vs relevance tradeoff (0=pure diversity, 1=pure relevance)"
+    )
+
 
 class KhoraConfig(BaseSettings):
     """Main application configuration."""
