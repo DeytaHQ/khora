@@ -1012,7 +1012,7 @@ Return ONLY valid JSON, no other text."""
         # Name quality (max +0.2)
         if len(name) >= 2:
             score += 0.1
-        if len(name) >= 3 and name[0].isupper():  # Proper capitalization
+        if name and len(name) >= 3 and name[0].isupper():  # Proper capitalization
             score += 0.1
 
         # Description quality (max +0.2)
