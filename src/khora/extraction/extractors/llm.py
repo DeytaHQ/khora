@@ -120,6 +120,9 @@ class LLMEntityExtractor(EntityExtractor):
         "gpt-4o-mini-2024-07-18",
         "gpt-4-turbo",
         "gpt-4-turbo-preview",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
         "o1",
         "o1-mini",
         "o1-preview",
@@ -135,8 +138,9 @@ class LLMEntityExtractor(EntityExtractor):
         "gpt-4o-2024-05-13": 8,
         "gpt-4o-2024-08-06": 8,
         "gpt-4o-2024-11-20": 8,
-        "gpt-4.1": 8,
-        "gpt-4.1-mini": 5,  # 128K context but smaller model
+        "gpt-4.1": 8,  # 1M context
+        "gpt-4.1-mini": 5,  # 1M context
+        "gpt-4.1-nano": 5,  # 1M context
         "gpt-4o-mini": 5,
         "gpt-4o-mini-2024-07-18": 5,
         "o1": 8,
@@ -954,6 +958,11 @@ Return ONLY valid JSON, no other text."""
                         logger.warning(f"Batch response is not a dict: {type(data)}")
                         return [ExtractionResult(metadata={"error": "invalid_response_type"}) for _ in texts]
                     sections_data = data.get("sections", [])
+
+                    # Handle flat format: LLM returned {"entities": [...], "relationships": [...]}
+                    # instead of {"sections": [...]}.  Treat as single-section response.
+                    if not sections_data and (data.get("entities") or data.get("relationships")):
+                        sections_data = [data]
 
                     results: list[ExtractionResult] = []
                     for i, text in enumerate(texts):

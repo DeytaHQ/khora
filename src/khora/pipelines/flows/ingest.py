@@ -236,7 +236,7 @@ async def process_document(
         )
         chunks = embedded_chunks
         logger.debug(f"Document {document.id}: generated embeddings")
-        logger.debug(f"Document {document.id}: extracted {len(entities)} entities, {len(relationships)} relationships")
+        logger.info(f"Document {document.id}: {len(entities)} entities, {len(relationships)} relationships extracted")
 
         # Step 4 (Optional): Semantic expansion
         inferred_relationships = []
@@ -340,13 +340,20 @@ async def process_document(
             if entity_index is not None and inference_mode == "smart":
                 entity_id_mapping.update(dedup_id_mapping)
 
+            # Save pre-upsert IDs (Neo4j may sync entity.id to a different value on MERGE)
+            pre_upsert_ids = [str(e.id) for e in entities]
+
             # Batch upsert: single MERGE operation instead of N+1 individual lookups
             upsert_results = await storage.upsert_entities_batch(document.namespace_id, entities)
 
             store_results: list[tuple[Entity, bool]] = []
-            for entity, is_new in upsert_results:
-                original_id = str(entity.id)
-                entity_id_mapping[original_id] = original_id
+            for i, (entity, is_new) in enumerate(upsert_results):
+                stored_id = str(entity.id)
+                entity_id_mapping[stored_id] = stored_id
+                # If upsert changed the ID (Neo4j MERGE with existing entity),
+                # also map the original extraction ID to the stored ID
+                if pre_upsert_ids[i] != stored_id:
+                    entity_id_mapping[pre_upsert_ids[i]] = stored_id
                 # New entities always need embeddings; existing only if missing
                 needs_embedding = is_new or not entity.embedding
                 store_results.append((entity, needs_embedding))
@@ -415,7 +422,7 @@ async def process_document(
                 count = await storage.create_relationships_batch(valid_relationships)
 
             if skipped > 0:
-                logger.debug(
+                logger.warning(
                     f"Stored {count}/{len(all_relationships)} relationships "
                     f"({skipped} skipped due to missing entity mappings)"
                 )
