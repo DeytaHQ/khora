@@ -183,4 +183,5 @@ dev = [
     "ruff>=0.15.0",
     "isort>=7.0.0",
     "ty>=0.0.15",
+    "rapidfuzz>=3.0.0",  # For ty type checking of optional accel module
 ]
