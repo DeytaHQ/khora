@@ -1239,10 +1239,9 @@ async def backfill_entity_embeddings(
         # Generate embeddings
         embeddings = await embedder.embed_batch(texts)
 
-        # Update entities
-        for entity, embedding in zip(batch, embeddings):
-            await storage.update_entity_embedding(entity.id, embedding, embedding_model)
-            total_updated += 1
+        # Update entities in batch
+        updates = [(entity.id, embedding, embedding_model) for entity, embedding in zip(batch, embeddings)]
+        total_updated += await storage.update_entity_embeddings_batch(updates)
 
         logger.debug(f"Updated {total_updated}/{len(entities_needing_embeddings)} entity embeddings")
 

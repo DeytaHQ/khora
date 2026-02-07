@@ -442,12 +442,13 @@ class PgVectorBackend:
         if not entities:
             return []
 
+        import asyncio
+
         from sqlalchemy.dialects.postgresql import insert
 
-        # Process in sub-batches to avoid exceeding parameter limits
-        # (17 columns × batch_size parameters per statement)
-        for i in range(0, len(entities), batch_size):
-            batch = entities[i : i + batch_size]
+        sem = asyncio.Semaphore(4)
+
+        async def _upsert_batch(batch: list) -> None:
             values = [
                 {
                     "id": str(entity.id),
@@ -472,29 +473,34 @@ class PgVectorBackend:
                 }
                 for entity in batch
             ]
+            async with sem:
+                async with self._get_session() as session:
+                    stmt = insert(EntityModel).values(values)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["id"],
+                        set_={
+                            "name": stmt.excluded.name,
+                            "description": stmt.excluded.description,
+                            "attributes": stmt.excluded.attributes,
+                            "source_document_ids": stmt.excluded.source_document_ids,
+                            "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                            "mention_count": stmt.excluded.mention_count,
+                            "embedding": stmt.excluded.embedding,
+                            "embedding_model": stmt.excluded.embedding_model,
+                            "valid_from": stmt.excluded.valid_from,
+                            "valid_until": stmt.excluded.valid_until,
+                            "confidence": stmt.excluded.confidence,
+                            "metadata": stmt.excluded.metadata,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    await session.execute(stmt)
+                    await session.commit()
 
-            async with self._get_session() as session:
-                stmt = insert(EntityModel).values(values)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["id"],
-                    set_={
-                        "name": stmt.excluded.name,
-                        "description": stmt.excluded.description,
-                        "attributes": stmt.excluded.attributes,
-                        "source_document_ids": stmt.excluded.source_document_ids,
-                        "source_chunk_ids": stmt.excluded.source_chunk_ids,
-                        "mention_count": stmt.excluded.mention_count,
-                        "embedding": stmt.excluded.embedding,
-                        "embedding_model": stmt.excluded.embedding_model,
-                        "valid_from": stmt.excluded.valid_from,
-                        "valid_until": stmt.excluded.valid_until,
-                        "confidence": stmt.excluded.confidence,
-                        "metadata": stmt.excluded.metadata,
-                        "updated_at": stmt.excluded.updated_at,
-                    },
-                )
-                await session.execute(stmt)
-                await session.commit()
+        # Process sub-batches concurrently (parameter limits require chunking)
+        await asyncio.gather(
+            *[_upsert_batch(entities[i : i + batch_size]) for i in range(0, len(entities), batch_size)]
+        )
 
         return [(entity, True) for entity in entities]
 

@@ -579,10 +579,14 @@ class StorageCoordinator:
         """Update embeddings for multiple entities in a single transaction."""
         if self.vector and hasattr(self.vector, "update_entity_embeddings_batch"):
             return await self.vector.update_entity_embeddings_batch(updates)
-        # Fallback to individual updates
+        # Fallback to individual updates (concurrent)
         if self.vector:
-            for entity_id, embedding, model in updates:
-                await self.vector.update_entity_embedding(entity_id, embedding, model)
+            await asyncio.gather(
+                *[
+                    self.vector.update_entity_embedding(entity_id, embedding, model)
+                    for entity_id, embedding, model in updates
+                ]
+            )
             return len(updates)
         return 0
 
