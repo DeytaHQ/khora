@@ -84,6 +84,8 @@ class SkeletonConstructionEngine:
             storage_kwargs: dict[str, Any] = {
                 "postgresql_url": postgresql_url,
                 "pgvector_url": postgresql_url,
+                "postgresql_pool_size": config.storage.postgresql_pool_size,
+                "postgresql_max_overflow": config.storage.postgresql_max_overflow,
                 "pgvector_embedding_dimension": config.storage.embedding_dimension,
                 "graph_config": graph_config,
                 "vector_config": config.get_vector_config(),

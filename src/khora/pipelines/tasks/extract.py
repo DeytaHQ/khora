@@ -20,6 +20,7 @@ async def extract_entities(
     timeout: int = 120,
     max_retries: int = 3,
     retry_wait: float = 2.0,
+    extraction_batch_size: int = 10,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
 
@@ -98,14 +99,14 @@ async def extract_entities(
             texts,
             expertise=resolved_expertise,
             context=context,
-            batch_size=5,
+            batch_size=extraction_batch_size,
             max_input_tokens=None,  # Auto-calculate from model
         )
     else:
         results = await extractor.extract_multi(
             texts,
             entity_types=skill.entity_types,
-            batch_size=5,
+            batch_size=extraction_batch_size,
             max_input_tokens=None,  # Auto-calculate from model
         )
 

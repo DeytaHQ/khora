@@ -115,6 +115,8 @@ class GraphRAGEngine:
             self._storage_config = StorageConfig(
                 postgresql_url=postgresql_url,
                 pgvector_url=postgresql_url,  # pgvector uses same database as relational
+                postgresql_pool_size=config.storage.postgresql_pool_size,
+                postgresql_max_overflow=config.storage.postgresql_max_overflow,
                 neo4j_url=config.get_neo4j_url(),
                 neo4j_user=config.get_neo4j_user(),
                 neo4j_password=config.get_neo4j_password(),
