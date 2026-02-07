@@ -5556,520 +5556,6 @@ README.md
 1: """Unit tests for Khora."""
 ````
 
-## File: tests/unit/test_accel.py
-````python
-  1: """Tests for khora._accel — Rust-accelerated operations with Python fallbacks.
-  2: 
-  3: Each function is tested under two backends:
-  4:   1. Default (Rust, if available)
-  5:   2. Pure Python (via monkeypatching _HAS_RUST/_HAS_NUMPY/_HAS_RAPIDFUZZ)
-  6: """
-  7: 
-  8: from __future__ import annotations
-  9: 
- 10: import pytest
- 11: 
- 12: import khora._accel as accel
- 13: 
- 14: # ---------------------------------------------------------------------------
- 15: # Helpers
- 16: # ---------------------------------------------------------------------------
- 17: 
- 18: 
- 19: @pytest.fixture()
- 20: def force_python(monkeypatch):
- 21:     """Force the pure-Python path for all functions."""
- 22:     monkeypatch.setattr(accel, "_HAS_RUST", False)
- 23:     monkeypatch.setattr(accel, "_HAS_NUMPY", False)
- 24:     monkeypatch.setattr(accel, "_HAS_RAPIDFUZZ", False)
- 25: 
- 26: 
- 27: @pytest.fixture()
- 28: def force_numpy(monkeypatch):
- 29:     """Force numpy path (skip Rust, keep numpy)."""
- 30:     monkeypatch.setattr(accel, "_HAS_RUST", False)
- 31:     # Keep _HAS_NUMPY and _HAS_RAPIDFUZZ at their real values
- 32: 
- 33: 
- 34: # ---------------------------------------------------------------------------
- 35: # Cosine similarity
- 36: # ---------------------------------------------------------------------------
- 37: 
- 38: 
- 39: class TestCosineSimilarity:
- 40:     def test_identical_vectors(self):
- 41:         assert accel.cosine_similarity([1, 0, 0], [1, 0, 0]) == pytest.approx(1.0)
- 42: 
- 43:     def test_orthogonal_vectors(self):
- 44:         assert accel.cosine_similarity([1, 0], [0, 1]) == pytest.approx(0.0)
- 45: 
- 46:     def test_dimension_mismatch_python(self, force_python):
- 47:         assert accel.cosine_similarity([1, 0], [1, 0, 0]) == 0.0
- 48: 
- 49:     def test_zero_vector_python(self, force_python):
- 50:         assert accel.cosine_similarity([0, 0], [1, 1]) == 0.0
- 51: 
- 52:     def test_identical_python(self, force_python):
- 53:         assert accel.cosine_similarity([1, 2, 3], [1, 2, 3]) == pytest.approx(1.0)
- 54: 
- 55:     def test_similar_python(self, force_python):
- 56:         sim = accel.cosine_similarity([1, 1], [1, 0])
- 57:         assert 0.5 < sim < 1.0
- 58: 
- 59:     def test_numpy_path(self, force_numpy):
- 60:         assert accel.cosine_similarity([1, 0], [1, 0]) == pytest.approx(1.0)
- 61: 
- 62:     def test_numpy_zero_vector(self, force_numpy):
- 63:         assert accel.cosine_similarity([0, 0], [1, 1]) == 0.0
- 64: 
- 65:     def test_numpy_mismatch(self, force_numpy):
- 66:         assert accel.cosine_similarity([1, 0], [1, 0, 0]) == 0.0
- 67: 
- 68: 
- 69: class TestBatchCosineSimilarity:
- 70:     def test_empty_candidates(self):
- 71:         assert accel.batch_cosine_similarity([1, 0], []) == []
- 72: 
- 73:     def test_with_threshold(self, force_python):
- 74:         query = [1.0, 0.0]
- 75:         candidates = [[1.0, 0.0], [0.0, 1.0], [0.7, 0.7]]
- 76:         results = accel.batch_cosine_similarity(query, candidates, threshold=0.5)
- 77:         indices = [idx for idx, _ in results]
- 78:         assert 0 in indices  # identical
- 79:         assert 1 not in indices  # orthogonal
- 80:         assert 2 in indices  # similar enough
- 81: 
- 82:     def test_sorted_descending(self, force_python):
- 83:         query = [1.0, 0.0]
- 84:         candidates = [[0.5, 0.5], [1.0, 0.0], [0.1, 0.9]]
- 85:         results = accel.batch_cosine_similarity(query, candidates)
- 86:         scores = [s for _, s in results]
- 87:         assert scores == sorted(scores, reverse=True)
- 88: 
- 89:     def test_numpy_path(self, force_numpy):
- 90:         query = [1.0, 0.0]
- 91:         candidates = [[1.0, 0.0], [0.0, 1.0]]
- 92:         results = accel.batch_cosine_similarity(query, candidates, threshold=0.5)
- 93:         assert len(results) == 1
- 94:         assert results[0][0] == 0
- 95: 
- 96:     def test_numpy_zero_query(self, force_numpy):
- 97:         results = accel.batch_cosine_similarity([0.0, 0.0], [[1.0, 0.0]])
- 98:         assert results == []
- 99: 
-100: 
-101: class TestPairwiseCosineSimilarity:
-102:     def test_two_identical(self, force_python):
-103:         result = accel.pairwise_cosine_above_threshold([[1, 0], [1, 0]], 0.5)
-104:         assert len(result) == 1
-105:         i, j, sim = result[0]
-106:         assert i == 0 and j == 1
-107:         assert sim == pytest.approx(1.0)
-108: 
-109:     def test_below_threshold(self, force_python):
-110:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 1]], 0.5)
-111:         assert len(result) == 0
-112: 
-113:     def test_single_vector(self, force_python):
-114:         assert accel.pairwise_cosine_above_threshold([[1, 0]], 0.5) == []
-115: 
-116:     def test_empty(self, force_python):
-117:         assert accel.pairwise_cosine_above_threshold([], 0.5) == []
-118: 
-119:     def test_zero_vector_skipped(self, force_python):
-120:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 0], [1, 0]], 0.5)
-121:         # Only (0, 2) should appear, zero vector skipped
-122:         assert len(result) == 1
-123:         assert result[0][0] == 0 and result[0][1] == 2
-124: 
-125:     def test_numpy_path(self, force_numpy):
-126:         result = accel.pairwise_cosine_above_threshold([[1, 0], [1, 0], [0, 1]], 0.5)
-127:         # (0,1) should match, (0,2) and (1,2) should not
-128:         assert len(result) == 1
-129:         assert result[0][0] == 0 and result[0][1] == 1
-130: 
-131:     def test_numpy_zero_skipped(self, force_numpy):
-132:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 0]], 0.5)
-133:         assert len(result) == 0
-134: 
-135: 
-136: # ---------------------------------------------------------------------------
-137: # Levenshtein similarity
-138: # ---------------------------------------------------------------------------
-139: 
-140: 
-141: class TestLevenshteinSimilarity:
-142:     def test_identical(self):
-143:         assert accel.levenshtein_similarity("hello", "hello") == pytest.approx(1.0)
-144: 
-145:     def test_empty(self):
-146:         assert accel.levenshtein_similarity("", "hello") == pytest.approx(0.0)
-147: 
-148:     def test_similar_python(self, force_python):
-149:         sim = accel.levenshtein_similarity("hello", "hallo")
-150:         assert 0.5 < sim < 1.0
-151: 
-152:     def test_case_insensitive_python(self, force_python):
-153:         assert accel.levenshtein_similarity("Hello", "hello") == pytest.approx(1.0)
-154: 
-155:     def test_rapidfuzz_path(self, force_numpy):
-156:         # force_numpy disables Rust but keeps rapidfuzz
-157:         sim = accel.levenshtein_similarity("hello", "hallo")
-158:         assert 0.5 < sim < 1.0
-159: 
-160:     def test_rapidfuzz_equal(self, force_numpy):
-161:         assert accel.levenshtein_similarity("abc", "abc") == pytest.approx(1.0)
-162: 
-163: 
-164: class TestBatchLevenshtein:
-165:     def test_basic(self, force_python):
-166:         results = accel.batch_levenshtein("cat", ["cat", "car", "dog"], threshold=0.5)
-167:         indices = [idx for idx, _ in results]
-168:         assert 0 in indices  # exact match
-169:         assert 1 in indices  # close match
-170:         # "dog" should have low similarity to "cat"
-171: 
-172:     def test_sorted_descending(self, force_python):
-173:         results = accel.batch_levenshtein("hello", ["hello", "helo", "world"])
-174:         scores = [s for _, s in results]
-175:         assert scores == sorted(scores, reverse=True)
-176: 
-177: 
-178: # ---------------------------------------------------------------------------
-179: # Sequence match ratio
-180: # ---------------------------------------------------------------------------
-181: 
-182: 
-183: class TestSequenceMatchRatio:
-184:     def test_identical(self):
-185:         assert accel.sequence_match_ratio("abc", "abc") == pytest.approx(1.0)
-186: 
-187:     def test_different_python(self, force_python):
-188:         # Use difflib fallback
-189:         ratio = accel.sequence_match_ratio("abc", "xyz")
-190:         assert ratio < 0.5
-191: 
-192:     def test_rapidfuzz_path(self, force_numpy):
-193:         ratio = accel.sequence_match_ratio("abc", "abc")
-194:         assert ratio == pytest.approx(1.0)
-195: 
-196: 
-197: class TestBatchSequenceMatch:
-198:     def test_sorted(self, force_python):
-199:         results = accel.batch_sequence_match("hello", ["hello", "help", "xyz"])
-200:         scores = [s for _, s in results]
-201:         assert scores == sorted(scores, reverse=True)
-202: 
-203: 
-204: # ---------------------------------------------------------------------------
-205: # PageRank
-206: # ---------------------------------------------------------------------------
-207: 
-208: 
-209: class TestPageRank:
-210:     def test_empty_graph(self):
-211:         assert accel.pagerank(0, []) == []
-212: 
-213:     def test_cycle_graph(self):
-214:         # 3-node cycle: all nodes should have equal score ~0.333
-215:         edges = [(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)]
-216:         scores = accel.pagerank(3, edges, damping=0.85, max_iter=100, tol=1e-6)
-217:         assert len(scores) == 3
-218:         for s in scores:
-219:             assert s == pytest.approx(1.0 / 3, abs=0.01)
-220: 
-221:     def test_star_graph(self):
-222:         # Node 0 receives links from 1, 2, 3 -> highest score
-223:         edges = [(1, 0, 1.0), (2, 0, 1.0), (3, 0, 1.0)]
-224:         scores = accel.pagerank(4, edges, damping=0.85)
-225:         assert scores[0] > scores[1]
-226:         assert scores[0] > scores[2]
-227:         assert scores[0] > scores[3]
-228: 
-229:     def test_python_fallback(self, force_python):
-230:         edges = [(0, 1, 1.0), (1, 0, 1.0)]
-231:         scores = accel.pagerank(2, edges, damping=0.85, max_iter=100, tol=1e-6)
-232:         assert len(scores) == 2
-233:         assert scores[0] == pytest.approx(0.5, abs=0.01)
-234: 
-235:     def test_empty_python(self, force_python):
-236:         assert accel.pagerank(0, []) == []
-237: 
-238:     def test_star_python(self, force_python):
-239:         edges = [(1, 0, 1.0), (2, 0, 1.0), (3, 0, 1.0)]
-240:         scores = accel.pagerank(4, edges, damping=0.85)
-241:         assert scores[0] > scores[1]
-242: 
-243: 
-244: # ---------------------------------------------------------------------------
-245: # Build chunk edges
-246: # ---------------------------------------------------------------------------
-247: 
-248: 
-249: class TestBuildChunkEdges:
-250:     def test_basic(self):
-251:         # Two keywords: kw0 shared by chunks [0,1], kw1 shared by [1,2]
-252:         edges = accel.build_chunk_edges(3, [[0, 1], [1, 2]], [1.5, 2.0])
-253:         # kw0 -> (0,1,1.5) + (1,0,1.5)
-254:         # kw1 -> (1,2,2.0) + (2,1,2.0)
-255:         assert (0, 1, 1.5) in edges
-256:         assert (1, 0, 1.5) in edges
-257:         assert (1, 2, 2.0) in edges
-258:         assert (2, 1, 2.0) in edges
-259: 
-260:     def test_out_of_range(self):
-261:         # Chunk index >= n_chunks should be skipped
-262:         edges = accel.build_chunk_edges(2, [[0, 5]], [1.0])
-263:         assert len(edges) == 0
-264: 
-265:     def test_python_fallback(self, force_python):
-266:         edges = accel.build_chunk_edges(3, [[0, 1, 2]], [1.0])
-267:         # 3 chunks sharing 1 keyword -> 6 directed edges (3 pairs * 2)
-268:         assert len(edges) == 6
-269: 
-270:     def test_empty(self, force_python):
-271:         assert accel.build_chunk_edges(0, [], []) == []
-272: 
-273: 
-274: # ---------------------------------------------------------------------------
-275: # Keyword extraction
-276: # ---------------------------------------------------------------------------
-277: 
-278: 
-279: class TestExtractKeywords:
-280:     def test_basic(self):
-281:         kws = accel.extract_keywords("The quick brown fox jumps over the lazy dog")
-282:         assert "quick" in kws
-283:         assert "brown" in kws
-284:         assert "fox" in kws
-285:         # Stopwords removed
-286:         assert "the" not in kws
-287:         assert "and" not in kws
-288: 
-289:     def test_deduplication(self):
-290:         kws = accel.extract_keywords("hello hello hello world world")
-291:         assert kws.count("hello") == 1
-292:         assert kws.count("world") == 1
-293: 
-294:     def test_short_words_filtered(self):
-295:         kws = accel.extract_keywords("I am a big fan of AI")
-296:         # "am", "AI", "a", "I" are < 3 chars or stopwords
-297:         assert "fan" in kws
-298:         assert "big" in kws
-299: 
-300:     def test_python_fallback(self, force_python):
-301:         kws = accel.extract_keywords("The quick brown fox")
-302:         assert "quick" in kws
-303:         assert "the" not in kws
-304: 
-305: 
-306: class TestExtractKeywordsBatch:
-307:     def test_batch(self):
-308:         results = accel.extract_keywords_batch(["hello world", "foo bar baz"])
-309:         assert len(results) == 2
-310:         assert "hello" in results[0]
-311:         assert "foo" in results[1]
-312: 
-313:     def test_python_fallback(self, force_python):
-314:         results = accel.extract_keywords_batch(["The quick fox", "lazy dog"])
-315:         assert len(results) == 2
-316:         assert "quick" in results[0]
-317: 
-318: 
-319: # ---------------------------------------------------------------------------
-320: # RRF (Reciprocal Rank Fusion)
-321: # ---------------------------------------------------------------------------
-322: 
-323: 
-324: class TestReciprocalRankFusion:
-325:     def test_basic(self):
-326:         results = accel.reciprocal_rank_fusion([["a", "b", "c"], ["b", "c", "d"]], k=60)
-327:         ids = [r[0] for r in results]
-328:         # "b" appears in both lists, should have highest score
-329:         assert ids[0] == "b"
-330: 
-331:     def test_single_list(self):
-332:         results = accel.reciprocal_rank_fusion([["x", "y"]], k=60)
-333:         assert len(results) == 2
-334: 
-335:     def test_python_fallback(self, force_python):
-336:         results = accel.reciprocal_rank_fusion([["a", "b"], ["b", "c"]], k=60)
-337:         ids = [r[0] for r in results]
-338:         assert ids[0] == "b"
-339: 
-340: 
-341: class TestWeightedRRF:
-342:     def test_basic(self):
-343:         results = accel.weighted_rrf([(0.8, ["a", "b"]), (0.2, ["b", "c"])], k=60)
-344:         ids = [r[0] for r in results]
-345:         assert "b" in ids
-346: 
-347:     def test_python_fallback(self, force_python):
-348:         results = accel.weighted_rrf([(0.6, ["x"]), (0.4, ["x", "y"])], k=60)
-349:         ids = [r[0] for r in results]
-350:         assert ids[0] == "x"
-351: 
-352: 
-353: class TestNormalizeScores:
-354:     def test_basic(self):
-355:         result = accel.normalize_scores([1.0, 2.0, 3.0])
-356:         assert result[0] == pytest.approx(0.0)
-357:         assert result[1] == pytest.approx(0.5)
-358:         assert result[2] == pytest.approx(1.0)
-359: 
-360:     def test_identical_scores(self):
-361:         result = accel.normalize_scores([5.0, 5.0, 5.0])
-362:         assert all(s == pytest.approx(1.0) for s in result)
-363: 
-364:     def test_empty(self):
-365:         assert accel.normalize_scores([]) == []
-366: 
-367:     def test_python_fallback(self, force_python):
-368:         result = accel.normalize_scores([0.0, 10.0])
-369:         assert result[0] == pytest.approx(0.0)
-370:         assert result[1] == pytest.approx(1.0)
-371: 
-372: 
-373: # ---------------------------------------------------------------------------
-374: # Entity resolution
-375: # ---------------------------------------------------------------------------
-376: 
-377: 
-378: class TestResolveEntitiesBatch:
-379:     def test_exact_match(self):
-380:         results = accel.resolve_entities_batch(
-381:             ["Apple Inc"],
-382:             ["apple inc", "Google"],
-383:             [[], []],
-384:             threshold=0.8,
-385:         )
-386:         assert len(results) == 1
-387:         assert results[0] is not None
-388:         idx, score, match_type = results[0]
-389:         assert idx == 0
-390:         assert score == pytest.approx(1.0)
-391:         assert match_type == "exact"
-392: 
-393:     def test_alias_match(self):
-394:         results = accel.resolve_entities_batch(
-395:             ["GOOG"],
-396:             ["Google", "Apple"],
-397:             [["goog", "alphabet"], ["aapl"]],
-398:             threshold=0.8,
-399:         )
-400:         assert results[0] is not None
-401:         idx, score, match_type = results[0]
-402:         assert idx == 0
-403:         assert match_type == "alias"
-404: 
-405:     def test_fuzzy_match(self):
-406:         results = accel.resolve_entities_batch(
-407:             ["Gogle"],  # typo
-408:             ["Google", "Apple"],
-409:             [[], []],
-410:             threshold=0.5,
-411:         )
-412:         assert results[0] is not None
-413:         idx, score, match_type = results[0]
-414:         assert idx == 0
-415:         assert match_type == "fuzzy"
-416: 
-417:     def test_no_match(self):
-418:         results = accel.resolve_entities_batch(
-419:             ["XYZ Corp"],
-420:             ["Google", "Apple"],
-421:             [[], []],
-422:             threshold=0.99,
-423:         )
-424:         assert results[0] is None
-425: 
-426:     def test_python_exact(self, force_python):
-427:         results = accel.resolve_entities_batch(
-428:             ["Test"],
-429:             ["test"],
-430:             [[]],
-431:             threshold=0.8,
-432:         )
-433:         assert results[0] is not None
-434:         assert results[0][2] == "exact"
-435: 
-436:     def test_python_alias(self, force_python):
-437:         results = accel.resolve_entities_batch(
-438:             ["nyc"],
-439:             ["New York City"],
-440:             [["nyc", "ny"]],
-441:             threshold=0.8,
-442:         )
-443:         assert results[0] is not None
-444:         assert results[0][2] == "alias"
-445: 
-446:     def test_python_fuzzy(self, force_python):
-447:         results = accel.resolve_entities_batch(
-448:             ["Gogle"],
-449:             ["Google"],
-450:             [[]],
-451:             threshold=0.5,
-452:         )
-453:         assert results[0] is not None
-454:         assert results[0][2] == "fuzzy"
-455: 
-456:     def test_python_no_match(self, force_python):
-457:         results = accel.resolve_entities_batch(
-458:             ["ZZZZZ"],
-459:             ["Google"],
-460:             [[]],
-461:             threshold=0.99,
-462:         )
-463:         assert results[0] is None
-464: 
-465: 
-466: # ---------------------------------------------------------------------------
-467: # RustBM25Index
-468: # ---------------------------------------------------------------------------
-469: 
-470: 
-471: class TestRustBM25Index:
-472:     def test_available(self):
-473:         """RustBM25Index should be importable when Rust is available."""
-474:         if not accel._HAS_RUST:
-475:             pytest.skip("Rust extension not available")
-476:         assert accel.RustBM25Index is not None
-477: 
-478:     def test_add_and_search(self):
-479:         if not accel._HAS_RUST:
-480:             pytest.skip("Rust extension not available")
-481:         idx = accel.RustBM25Index()
-482:         idx.add_document("doc1", "the quick brown fox")
-483:         idx.add_document("doc2", "the lazy brown dog")
-484:         idx.add_document("doc3", "unrelated content here")
-485:         results = idx.search("brown fox", limit=5)
-486:         assert len(results) > 0
-487:         # doc1 should rank highest (exact match for "brown fox")
-488:         assert results[0][0] == "doc1"
-489: 
-490:     def test_add_documents_batch(self):
-491:         if not accel._HAS_RUST:
-492:             pytest.skip("Rust extension not available")
-493:         idx = accel.RustBM25Index()
-494:         idx.add_documents([("d1", "hello world"), ("d2", "world peace")])
-495:         results = idx.search("world", limit=5)
-496:         assert len(results) == 2
-497: 
-498:     def test_score(self):
-499:         if not accel._HAS_RUST:
-500:             pytest.skip("Rust extension not available")
-501:         idx = accel.RustBM25Index()
-502:         idx.add_document("doc1", "test document content")
-503:         score = idx.score("test", "doc1")
-504:         assert score > 0.0
-505:         # Non-existent doc returns 0
-506:         assert idx.score("test", "nonexistent") == 0.0
-507: 
-508:     def test_none_when_python_forced(self, force_python):
-509:         # When _HAS_RUST is forced False, verify the flag is off
-510:         assert not accel._HAS_RUST
-````
-
 ## File: tests/unit/test_chunkers.py
 ````python
   1: """Unit tests for text chunking functionality."""
@@ -15927,6 +15413,61 @@ README.md
 168:         return []
 ````
 
+## File: src/khora/storage/__init__.py
+````python
+ 1: """Storage layer for Khora Memory Lake.
+ 2: 
+ 3: Provides unified access to multiple storage backends:
+ 4: - PostgreSQL: Relational data (documents, events, tenancy, ACLs)
+ 5: - pgvector: Vector embeddings for semantic search
+ 6: - Neo4j: Knowledge graph (entities, relationships)
+ 7: - Kùzu: Embedded graph database (optional)
+ 8: - Memgraph: In-memory graph database (optional)
+ 9: - ArcadeDB: Multi-model graph + vector database (optional)
+10: """
+11: 
+12: from __future__ import annotations
+13: 
+14: from .backends.base import (
+15:     EventStoreProtocol,
+16:     GraphBackendProtocol,
+17:     RelationalBackendProtocol,
+18:     VectorBackendProtocol,
+19: )
+20: from .backends.neo4j import Neo4jBackend
+21: from .backends.pgvector import PgVectorBackend
+22: from .backends.postgresql import PostgreSQLBackend
+23: from .coordinator import StorageCoordinator
+24: from .event_store import PostgreSQLEventStore
+25: from .expertise_store import ExpertiseStore
+26: from .factory import StorageConfig, StorageFactory, create_storage_coordinator
+27: from .optimize import optimize_neo4j, optimize_postgresql, optimize_storage
+28: 
+29: __all__ = [
+30:     # Protocols
+31:     "RelationalBackendProtocol",
+32:     "VectorBackendProtocol",
+33:     "GraphBackendProtocol",
+34:     "EventStoreProtocol",
+35:     # Implementations
+36:     "PostgreSQLBackend",
+37:     "PgVectorBackend",
+38:     "Neo4jBackend",
+39:     "PostgreSQLEventStore",
+40:     # Coordinator
+41:     "StorageCoordinator",
+42:     "StorageConfig",
+43:     "StorageFactory",
+44:     "create_storage_coordinator",
+45:     # Optimization
+46:     "optimize_storage",
+47:     "optimize_postgresql",
+48:     "optimize_neo4j",
+49:     # Expertise
+50:     "ExpertiseStore",
+51: ]
+````
+
 ## File: src/khora/telemetry/config.py
 ````python
  1: """Telemetry configuration."""
@@ -16524,6 +16065,520 @@ README.md
 336:         from khora.engines.skeleton.engine import SkeletonConstructionEngine
 337: 
 338:         assert isinstance(engine, SkeletonConstructionEngine)
+````
+
+## File: tests/unit/test_accel.py
+````python
+  1: """Tests for khora._accel — Rust-accelerated operations with Python fallbacks.
+  2: 
+  3: Each function is tested under two backends:
+  4:   1. Default (Rust, if available)
+  5:   2. Pure Python (via monkeypatching _HAS_RUST/_HAS_NUMPY/_HAS_RAPIDFUZZ)
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: import pytest
+ 11: 
+ 12: import khora._accel as accel
+ 13: 
+ 14: # ---------------------------------------------------------------------------
+ 15: # Helpers
+ 16: # ---------------------------------------------------------------------------
+ 17: 
+ 18: 
+ 19: @pytest.fixture()
+ 20: def force_python(monkeypatch):
+ 21:     """Force the pure-Python path for all functions."""
+ 22:     monkeypatch.setattr(accel, "_HAS_RUST", False)
+ 23:     monkeypatch.setattr(accel, "_HAS_NUMPY", False)
+ 24:     monkeypatch.setattr(accel, "_HAS_RAPIDFUZZ", False)
+ 25: 
+ 26: 
+ 27: @pytest.fixture()
+ 28: def force_numpy(monkeypatch):
+ 29:     """Force numpy path (skip Rust, keep numpy)."""
+ 30:     monkeypatch.setattr(accel, "_HAS_RUST", False)
+ 31:     # Keep _HAS_NUMPY and _HAS_RAPIDFUZZ at their real values
+ 32: 
+ 33: 
+ 34: # ---------------------------------------------------------------------------
+ 35: # Cosine similarity
+ 36: # ---------------------------------------------------------------------------
+ 37: 
+ 38: 
+ 39: class TestCosineSimilarity:
+ 40:     def test_identical_vectors(self):
+ 41:         assert accel.cosine_similarity([1, 0, 0], [1, 0, 0]) == pytest.approx(1.0)
+ 42: 
+ 43:     def test_orthogonal_vectors(self):
+ 44:         assert accel.cosine_similarity([1, 0], [0, 1]) == pytest.approx(0.0)
+ 45: 
+ 46:     def test_dimension_mismatch_python(self, force_python):
+ 47:         assert accel.cosine_similarity([1, 0], [1, 0, 0]) == 0.0
+ 48: 
+ 49:     def test_zero_vector_python(self, force_python):
+ 50:         assert accel.cosine_similarity([0, 0], [1, 1]) == 0.0
+ 51: 
+ 52:     def test_identical_python(self, force_python):
+ 53:         assert accel.cosine_similarity([1, 2, 3], [1, 2, 3]) == pytest.approx(1.0)
+ 54: 
+ 55:     def test_similar_python(self, force_python):
+ 56:         sim = accel.cosine_similarity([1, 1], [1, 0])
+ 57:         assert 0.5 < sim < 1.0
+ 58: 
+ 59:     def test_numpy_path(self, force_numpy):
+ 60:         assert accel.cosine_similarity([1, 0], [1, 0]) == pytest.approx(1.0)
+ 61: 
+ 62:     def test_numpy_zero_vector(self, force_numpy):
+ 63:         assert accel.cosine_similarity([0, 0], [1, 1]) == 0.0
+ 64: 
+ 65:     def test_numpy_mismatch(self, force_numpy):
+ 66:         assert accel.cosine_similarity([1, 0], [1, 0, 0]) == 0.0
+ 67: 
+ 68: 
+ 69: class TestBatchCosineSimilarity:
+ 70:     def test_empty_candidates(self):
+ 71:         assert accel.batch_cosine_similarity([1, 0], []) == []
+ 72: 
+ 73:     def test_with_threshold(self, force_python):
+ 74:         query = [1.0, 0.0]
+ 75:         candidates = [[1.0, 0.0], [0.0, 1.0], [0.7, 0.7]]
+ 76:         results = accel.batch_cosine_similarity(query, candidates, threshold=0.5)
+ 77:         indices = [idx for idx, _ in results]
+ 78:         assert 0 in indices  # identical
+ 79:         assert 1 not in indices  # orthogonal
+ 80:         assert 2 in indices  # similar enough
+ 81: 
+ 82:     def test_sorted_descending(self, force_python):
+ 83:         query = [1.0, 0.0]
+ 84:         candidates = [[0.5, 0.5], [1.0, 0.0], [0.1, 0.9]]
+ 85:         results = accel.batch_cosine_similarity(query, candidates)
+ 86:         scores = [s for _, s in results]
+ 87:         assert scores == sorted(scores, reverse=True)
+ 88: 
+ 89:     def test_numpy_path(self, force_numpy):
+ 90:         query = [1.0, 0.0]
+ 91:         candidates = [[1.0, 0.0], [0.0, 1.0]]
+ 92:         results = accel.batch_cosine_similarity(query, candidates, threshold=0.5)
+ 93:         assert len(results) == 1
+ 94:         assert results[0][0] == 0
+ 95: 
+ 96:     def test_numpy_zero_query(self, force_numpy):
+ 97:         results = accel.batch_cosine_similarity([0.0, 0.0], [[1.0, 0.0]])
+ 98:         assert results == []
+ 99: 
+100: 
+101: class TestPairwiseCosineSimilarity:
+102:     def test_two_identical(self, force_python):
+103:         result = accel.pairwise_cosine_above_threshold([[1, 0], [1, 0]], 0.5)
+104:         assert len(result) == 1
+105:         i, j, sim = result[0]
+106:         assert i == 0 and j == 1
+107:         assert sim == pytest.approx(1.0)
+108: 
+109:     def test_below_threshold(self, force_python):
+110:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 1]], 0.5)
+111:         assert len(result) == 0
+112: 
+113:     def test_single_vector(self, force_python):
+114:         assert accel.pairwise_cosine_above_threshold([[1, 0]], 0.5) == []
+115: 
+116:     def test_empty(self, force_python):
+117:         assert accel.pairwise_cosine_above_threshold([], 0.5) == []
+118: 
+119:     def test_zero_vector_skipped(self, force_python):
+120:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 0], [1, 0]], 0.5)
+121:         # Only (0, 2) should appear, zero vector skipped
+122:         assert len(result) == 1
+123:         assert result[0][0] == 0 and result[0][1] == 2
+124: 
+125:     def test_numpy_path(self, force_numpy):
+126:         result = accel.pairwise_cosine_above_threshold([[1, 0], [1, 0], [0, 1]], 0.5)
+127:         # (0,1) should match, (0,2) and (1,2) should not
+128:         assert len(result) == 1
+129:         assert result[0][0] == 0 and result[0][1] == 1
+130: 
+131:     def test_numpy_zero_skipped(self, force_numpy):
+132:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 0]], 0.5)
+133:         assert len(result) == 0
+134: 
+135: 
+136: # ---------------------------------------------------------------------------
+137: # Levenshtein similarity
+138: # ---------------------------------------------------------------------------
+139: 
+140: 
+141: class TestLevenshteinSimilarity:
+142:     def test_identical(self):
+143:         assert accel.levenshtein_similarity("hello", "hello") == pytest.approx(1.0)
+144: 
+145:     def test_empty(self):
+146:         assert accel.levenshtein_similarity("", "hello") == pytest.approx(0.0)
+147: 
+148:     def test_similar_python(self, force_python):
+149:         sim = accel.levenshtein_similarity("hello", "hallo")
+150:         assert 0.5 < sim < 1.0
+151: 
+152:     def test_case_insensitive_python(self, force_python):
+153:         assert accel.levenshtein_similarity("Hello", "hello") == pytest.approx(1.0)
+154: 
+155:     def test_rapidfuzz_path(self, force_numpy):
+156:         # force_numpy disables Rust but keeps rapidfuzz
+157:         sim = accel.levenshtein_similarity("hello", "hallo")
+158:         assert 0.5 < sim < 1.0
+159: 
+160:     def test_rapidfuzz_equal(self, force_numpy):
+161:         assert accel.levenshtein_similarity("abc", "abc") == pytest.approx(1.0)
+162: 
+163: 
+164: class TestBatchLevenshtein:
+165:     def test_basic(self, force_python):
+166:         results = accel.batch_levenshtein("cat", ["cat", "car", "dog"], threshold=0.5)
+167:         indices = [idx for idx, _ in results]
+168:         assert 0 in indices  # exact match
+169:         assert 1 in indices  # close match
+170:         # "dog" should have low similarity to "cat"
+171: 
+172:     def test_sorted_descending(self, force_python):
+173:         results = accel.batch_levenshtein("hello", ["hello", "helo", "world"])
+174:         scores = [s for _, s in results]
+175:         assert scores == sorted(scores, reverse=True)
+176: 
+177: 
+178: # ---------------------------------------------------------------------------
+179: # Sequence match ratio
+180: # ---------------------------------------------------------------------------
+181: 
+182: 
+183: class TestSequenceMatchRatio:
+184:     def test_identical(self):
+185:         assert accel.sequence_match_ratio("abc", "abc") == pytest.approx(1.0)
+186: 
+187:     def test_different_python(self, force_python):
+188:         # Use difflib fallback
+189:         ratio = accel.sequence_match_ratio("abc", "xyz")
+190:         assert ratio < 0.5
+191: 
+192:     def test_rapidfuzz_path(self, force_numpy):
+193:         ratio = accel.sequence_match_ratio("abc", "abc")
+194:         assert ratio == pytest.approx(1.0)
+195: 
+196: 
+197: class TestBatchSequenceMatch:
+198:     def test_sorted(self, force_python):
+199:         results = accel.batch_sequence_match("hello", ["hello", "help", "xyz"])
+200:         scores = [s for _, s in results]
+201:         assert scores == sorted(scores, reverse=True)
+202: 
+203: 
+204: # ---------------------------------------------------------------------------
+205: # PageRank
+206: # ---------------------------------------------------------------------------
+207: 
+208: 
+209: class TestPageRank:
+210:     def test_empty_graph(self):
+211:         assert accel.pagerank(0, []) == []
+212: 
+213:     def test_cycle_graph(self):
+214:         # 3-node cycle: all nodes should have equal score ~0.333
+215:         edges = [(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)]
+216:         scores = accel.pagerank(3, edges, damping=0.85, max_iter=100, tol=1e-6)
+217:         assert len(scores) == 3
+218:         for s in scores:
+219:             assert s == pytest.approx(1.0 / 3, abs=0.01)
+220: 
+221:     def test_star_graph(self):
+222:         # Node 0 receives links from 1, 2, 3 -> highest score
+223:         edges = [(1, 0, 1.0), (2, 0, 1.0), (3, 0, 1.0)]
+224:         scores = accel.pagerank(4, edges, damping=0.85)
+225:         assert scores[0] > scores[1]
+226:         assert scores[0] > scores[2]
+227:         assert scores[0] > scores[3]
+228: 
+229:     def test_python_fallback(self, force_python):
+230:         edges = [(0, 1, 1.0), (1, 0, 1.0)]
+231:         scores = accel.pagerank(2, edges, damping=0.85, max_iter=100, tol=1e-6)
+232:         assert len(scores) == 2
+233:         assert scores[0] == pytest.approx(0.5, abs=0.01)
+234: 
+235:     def test_empty_python(self, force_python):
+236:         assert accel.pagerank(0, []) == []
+237: 
+238:     def test_star_python(self, force_python):
+239:         edges = [(1, 0, 1.0), (2, 0, 1.0), (3, 0, 1.0)]
+240:         scores = accel.pagerank(4, edges, damping=0.85)
+241:         assert scores[0] > scores[1]
+242: 
+243: 
+244: # ---------------------------------------------------------------------------
+245: # Build chunk edges
+246: # ---------------------------------------------------------------------------
+247: 
+248: 
+249: class TestBuildChunkEdges:
+250:     def test_basic(self):
+251:         # Two keywords: kw0 shared by chunks [0,1], kw1 shared by [1,2]
+252:         edges = accel.build_chunk_edges(3, [[0, 1], [1, 2]], [1.5, 2.0])
+253:         # kw0 -> (0,1,1.5) + (1,0,1.5)
+254:         # kw1 -> (1,2,2.0) + (2,1,2.0)
+255:         assert (0, 1, 1.5) in edges
+256:         assert (1, 0, 1.5) in edges
+257:         assert (1, 2, 2.0) in edges
+258:         assert (2, 1, 2.0) in edges
+259: 
+260:     def test_out_of_range(self):
+261:         # Chunk index >= n_chunks should be skipped
+262:         edges = accel.build_chunk_edges(2, [[0, 5]], [1.0])
+263:         assert len(edges) == 0
+264: 
+265:     def test_python_fallback(self, force_python):
+266:         edges = accel.build_chunk_edges(3, [[0, 1, 2]], [1.0])
+267:         # 3 chunks sharing 1 keyword -> 6 directed edges (3 pairs * 2)
+268:         assert len(edges) == 6
+269: 
+270:     def test_empty(self, force_python):
+271:         assert accel.build_chunk_edges(0, [], []) == []
+272: 
+273: 
+274: # ---------------------------------------------------------------------------
+275: # Keyword extraction
+276: # ---------------------------------------------------------------------------
+277: 
+278: 
+279: class TestExtractKeywords:
+280:     def test_basic(self):
+281:         kws = accel.extract_keywords("The quick brown fox jumps over the lazy dog")
+282:         assert "quick" in kws
+283:         assert "brown" in kws
+284:         assert "fox" in kws
+285:         # Stopwords removed
+286:         assert "the" not in kws
+287:         assert "and" not in kws
+288: 
+289:     def test_deduplication(self):
+290:         kws = accel.extract_keywords("hello hello hello world world")
+291:         assert kws.count("hello") == 1
+292:         assert kws.count("world") == 1
+293: 
+294:     def test_short_words_filtered(self):
+295:         kws = accel.extract_keywords("I am a big fan of AI")
+296:         # "am", "AI", "a", "I" are < 3 chars or stopwords
+297:         assert "fan" in kws
+298:         assert "big" in kws
+299: 
+300:     def test_python_fallback(self, force_python):
+301:         kws = accel.extract_keywords("The quick brown fox")
+302:         assert "quick" in kws
+303:         assert "the" not in kws
+304: 
+305: 
+306: class TestExtractKeywordsBatch:
+307:     def test_batch(self):
+308:         results = accel.extract_keywords_batch(["hello world", "foo bar baz"])
+309:         assert len(results) == 2
+310:         assert "hello" in results[0]
+311:         assert "foo" in results[1]
+312: 
+313:     def test_python_fallback(self, force_python):
+314:         results = accel.extract_keywords_batch(["The quick fox", "lazy dog"])
+315:         assert len(results) == 2
+316:         assert "quick" in results[0]
+317: 
+318: 
+319: # ---------------------------------------------------------------------------
+320: # RRF (Reciprocal Rank Fusion)
+321: # ---------------------------------------------------------------------------
+322: 
+323: 
+324: class TestReciprocalRankFusion:
+325:     def test_basic(self):
+326:         results = accel.reciprocal_rank_fusion([["a", "b", "c"], ["b", "c", "d"]], k=60)
+327:         ids = [r[0] for r in results]
+328:         # "b" appears in both lists, should have highest score
+329:         assert ids[0] == "b"
+330: 
+331:     def test_single_list(self):
+332:         results = accel.reciprocal_rank_fusion([["x", "y"]], k=60)
+333:         assert len(results) == 2
+334: 
+335:     def test_python_fallback(self, force_python):
+336:         results = accel.reciprocal_rank_fusion([["a", "b"], ["b", "c"]], k=60)
+337:         ids = [r[0] for r in results]
+338:         assert ids[0] == "b"
+339: 
+340: 
+341: class TestWeightedRRF:
+342:     def test_basic(self):
+343:         results = accel.weighted_rrf([(0.8, ["a", "b"]), (0.2, ["b", "c"])], k=60)
+344:         ids = [r[0] for r in results]
+345:         assert "b" in ids
+346: 
+347:     def test_python_fallback(self, force_python):
+348:         results = accel.weighted_rrf([(0.6, ["x"]), (0.4, ["x", "y"])], k=60)
+349:         ids = [r[0] for r in results]
+350:         assert ids[0] == "x"
+351: 
+352: 
+353: class TestNormalizeScores:
+354:     def test_basic(self):
+355:         result = accel.normalize_scores([1.0, 2.0, 3.0])
+356:         assert result[0] == pytest.approx(0.0)
+357:         assert result[1] == pytest.approx(0.5)
+358:         assert result[2] == pytest.approx(1.0)
+359: 
+360:     def test_identical_scores(self):
+361:         result = accel.normalize_scores([5.0, 5.0, 5.0])
+362:         assert all(s == pytest.approx(1.0) for s in result)
+363: 
+364:     def test_empty(self):
+365:         assert accel.normalize_scores([]) == []
+366: 
+367:     def test_python_fallback(self, force_python):
+368:         result = accel.normalize_scores([0.0, 10.0])
+369:         assert result[0] == pytest.approx(0.0)
+370:         assert result[1] == pytest.approx(1.0)
+371: 
+372: 
+373: # ---------------------------------------------------------------------------
+374: # Entity resolution
+375: # ---------------------------------------------------------------------------
+376: 
+377: 
+378: class TestResolveEntitiesBatch:
+379:     def test_exact_match(self):
+380:         results = accel.resolve_entities_batch(
+381:             ["Apple Inc"],
+382:             ["apple inc", "Google"],
+383:             [[], []],
+384:             threshold=0.8,
+385:         )
+386:         assert len(results) == 1
+387:         assert results[0] is not None
+388:         idx, score, match_type = results[0]
+389:         assert idx == 0
+390:         assert score == pytest.approx(1.0)
+391:         assert match_type == "exact"
+392: 
+393:     def test_alias_match(self):
+394:         results = accel.resolve_entities_batch(
+395:             ["GOOG"],
+396:             ["Google", "Apple"],
+397:             [["goog", "alphabet"], ["aapl"]],
+398:             threshold=0.8,
+399:         )
+400:         assert results[0] is not None
+401:         idx, score, match_type = results[0]
+402:         assert idx == 0
+403:         assert match_type == "alias"
+404: 
+405:     def test_fuzzy_match(self):
+406:         results = accel.resolve_entities_batch(
+407:             ["Gogle"],  # typo
+408:             ["Google", "Apple"],
+409:             [[], []],
+410:             threshold=0.5,
+411:         )
+412:         assert results[0] is not None
+413:         idx, score, match_type = results[0]
+414:         assert idx == 0
+415:         assert match_type == "fuzzy"
+416: 
+417:     def test_no_match(self):
+418:         results = accel.resolve_entities_batch(
+419:             ["XYZ Corp"],
+420:             ["Google", "Apple"],
+421:             [[], []],
+422:             threshold=0.99,
+423:         )
+424:         assert results[0] is None
+425: 
+426:     def test_python_exact(self, force_python):
+427:         results = accel.resolve_entities_batch(
+428:             ["Test"],
+429:             ["test"],
+430:             [[]],
+431:             threshold=0.8,
+432:         )
+433:         assert results[0] is not None
+434:         assert results[0][2] == "exact"
+435: 
+436:     def test_python_alias(self, force_python):
+437:         results = accel.resolve_entities_batch(
+438:             ["nyc"],
+439:             ["New York City"],
+440:             [["nyc", "ny"]],
+441:             threshold=0.8,
+442:         )
+443:         assert results[0] is not None
+444:         assert results[0][2] == "alias"
+445: 
+446:     def test_python_fuzzy(self, force_python):
+447:         results = accel.resolve_entities_batch(
+448:             ["Gogle"],
+449:             ["Google"],
+450:             [[]],
+451:             threshold=0.5,
+452:         )
+453:         assert results[0] is not None
+454:         assert results[0][2] == "fuzzy"
+455: 
+456:     def test_python_no_match(self, force_python):
+457:         results = accel.resolve_entities_batch(
+458:             ["ZZZZZ"],
+459:             ["Google"],
+460:             [[]],
+461:             threshold=0.99,
+462:         )
+463:         assert results[0] is None
+464: 
+465: 
+466: # ---------------------------------------------------------------------------
+467: # RustBM25Index
+468: # ---------------------------------------------------------------------------
+469: 
+470: 
+471: class TestRustBM25Index:
+472:     def test_available(self):
+473:         """RustBM25Index should be importable when Rust is available."""
+474:         if not accel._HAS_RUST:
+475:             pytest.skip("Rust extension not available")
+476:         assert accel.RustBM25Index is not None
+477: 
+478:     def test_add_and_search(self):
+479:         if not accel._HAS_RUST:
+480:             pytest.skip("Rust extension not available")
+481:         idx = accel.RustBM25Index()
+482:         idx.add_document("doc1", "the quick brown fox")
+483:         idx.add_document("doc2", "the lazy brown dog")
+484:         idx.add_document("doc3", "unrelated content here")
+485:         results = idx.search("brown fox", limit=5)
+486:         assert len(results) > 0
+487:         # doc1 should rank highest (exact match for "brown fox")
+488:         assert results[0][0] == "doc1"
+489: 
+490:     def test_add_documents_batch(self):
+491:         if not accel._HAS_RUST:
+492:             pytest.skip("Rust extension not available")
+493:         idx = accel.RustBM25Index()
+494:         idx.add_documents([("d1", "hello world"), ("d2", "world peace")])
+495:         results = idx.search("world", limit=5)
+496:         assert len(results) == 2
+497: 
+498:     def test_score(self):
+499:         if not accel._HAS_RUST:
+500:             pytest.skip("Rust extension not available")
+501:         idx = accel.RustBM25Index()
+502:         idx.add_document("doc1", "test document content")
+503:         score = idx.score("test", "doc1")
+504:         assert score > 0.0
+505:         # Non-existent doc returns 0
+506:         assert idx.score("test", "nonexistent") == 0.0
+507: 
+508:     def test_none_when_python_forced(self, force_python):
+509:         # When _HAS_RUST is forced False, verify the flag is off
+510:         assert not accel._HAS_RUST
 ````
 
 ## File: tests/unit/test_attribute_schemas.py
@@ -26017,61 +26072,6 @@ README.md
 604:             await session.commit()
 ````
 
-## File: src/khora/storage/__init__.py
-````python
- 1: """Storage layer for Khora Memory Lake.
- 2: 
- 3: Provides unified access to multiple storage backends:
- 4: - PostgreSQL: Relational data (documents, events, tenancy, ACLs)
- 5: - pgvector: Vector embeddings for semantic search
- 6: - Neo4j: Knowledge graph (entities, relationships)
- 7: - Kùzu: Embedded graph database (optional)
- 8: - Memgraph: In-memory graph database (optional)
- 9: - ArcadeDB: Multi-model graph + vector database (optional)
-10: """
-11: 
-12: from __future__ import annotations
-13: 
-14: from .backends.base import (
-15:     EventStoreProtocol,
-16:     GraphBackendProtocol,
-17:     RelationalBackendProtocol,
-18:     VectorBackendProtocol,
-19: )
-20: from .backends.neo4j import Neo4jBackend
-21: from .backends.pgvector import PgVectorBackend
-22: from .backends.postgresql import PostgreSQLBackend
-23: from .coordinator import StorageCoordinator
-24: from .event_store import PostgreSQLEventStore
-25: from .expertise_store import ExpertiseStore
-26: from .factory import StorageConfig, StorageFactory, create_storage_coordinator
-27: from .optimize import optimize_neo4j, optimize_postgresql, optimize_storage
-28: 
-29: __all__ = [
-30:     # Protocols
-31:     "RelationalBackendProtocol",
-32:     "VectorBackendProtocol",
-33:     "GraphBackendProtocol",
-34:     "EventStoreProtocol",
-35:     # Implementations
-36:     "PostgreSQLBackend",
-37:     "PgVectorBackend",
-38:     "Neo4jBackend",
-39:     "PostgreSQLEventStore",
-40:     # Coordinator
-41:     "StorageCoordinator",
-42:     "StorageConfig",
-43:     "StorageFactory",
-44:     "create_storage_coordinator",
-45:     # Optimization
-46:     "optimize_storage",
-47:     "optimize_postgresql",
-48:     "optimize_neo4j",
-49:     # Expertise
-50:     "ExpertiseStore",
-51: ]
-````
-
 ## File: src/khora/storage/factory.py
 ````python
   1: """Storage factory for creating storage backends and coordinator.
@@ -26365,6 +26365,339 @@ README.md
 289: 
 290:     factory = StorageFactory(config=storage_config)
 291:     return factory.create_coordinator()
+````
+
+## File: src/khora/storage/optimize.py
+````python
+  1: """Storage optimization for Khora Memory Lake.
+  2: 
+  3: Creates additional indexes on PostgreSQL and Neo4j that improve query
+  4: and search performance beyond the base indexes created at schema init time.
+  5: Designed to run after bulk data ingestion when tables have enough data
+  6: for PostgreSQL's planner statistics to be meaningful.
+  7: 
+  8: All index creation statements use IF NOT EXISTS for idempotency —
+  9: safe to run multiple times.
+ 10: """
+ 11: 
+ 12: from __future__ import annotations
+ 13: 
+ 14: from loguru import logger
+ 15: 
+ 16: # ---------------------------------------------------------------------------
+ 17: # PostgreSQL indexes (beyond what SQLAlchemy models already define)
+ 18: # ---------------------------------------------------------------------------
+ 19: 
+ 20: PG_INDEXES = [
+ 21:     {
+ 22:         "name": "idx_chunks_namespace_created",
+ 23:         "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_namespace_created ON chunks (namespace_id, created_at DESC)"),
+ 24:         "purpose": "Temporal filtering within namespace",
+ 25:     },
+ 26:     {
+ 27:         "name": "idx_documents_namespace_created",
+ 28:         "sql": (
+ 29:             "CREATE INDEX IF NOT EXISTS idx_documents_namespace_created ON documents (namespace_id, created_at DESC)"
+ 30:         ),
+ 31:         "purpose": "Document temporal queries",
+ 32:     },
+ 33:     {
+ 34:         "name": "idx_entities_namespace_type_name",
+ 35:         "sql": (
+ 36:             "CREATE INDEX IF NOT EXISTS idx_entities_namespace_type_name ON entities (namespace_id, entity_type, name)"
+ 37:         ),
+ 38:         "purpose": "Entity type filtering + name lookup",
+ 39:     },
+ 40:     {
+ 41:         "name": "idx_entities_description_fts",
+ 42:         "sql": (
+ 43:             "CREATE INDEX IF NOT EXISTS idx_entities_description_fts "
+ 44:             "ON entities USING gin (to_tsvector('english', description))"
+ 45:         ),
+ 46:         "purpose": "Full-text search on entity descriptions",
+ 47:     },
+ 48:     {
+ 49:         "name": "idx_entities_namespace_confidence",
+ 50:         "sql": (
+ 51:             "CREATE INDEX IF NOT EXISTS idx_entities_namespace_confidence ON entities (namespace_id, confidence DESC)"
+ 52:         ),
+ 53:         "purpose": "Confidence-based filtering",
+ 54:     },
+ 55:     {
+ 56:         "name": "idx_relationships_source_target",
+ 57:         "sql": (
+ 58:             "CREATE INDEX IF NOT EXISTS idx_relationships_source_target "
+ 59:             "ON relationships (source_entity_id, target_entity_id)"
+ 60:         ),
+ 61:         "purpose": "Relationship traversal",
+ 62:     },
+ 63:     {
+ 64:         "name": "idx_chunks_document_namespace",
+ 65:         "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_document_namespace ON chunks (document_id, namespace_id)"),
+ 66:         "purpose": "Document-to-chunk lookups",
+ 67:     },
+ 68:     # --- Synced from models.py __table_args__ for catch-up on existing databases ---
+ 69:     {
+ 70:         "name": "ix_documents_namespace_source_type",
+ 71:         "sql": (
+ 72:             "CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type ON documents (namespace_id, source_type)"
+ 73:         ),
+ 74:         "purpose": "Document queries filtered by source_type within namespace",
+ 75:     },
+ 76:     {
+ 77:         "name": "ix_entities_namespace_mentions",
+ 78:         "sql": (
+ 79:             "CREATE INDEX IF NOT EXISTS ix_entities_namespace_mentions ON entities (namespace_id, mention_count DESC)"
+ 80:         ),
+ 81:         "purpose": "Entity importance ranking (top N entities in namespace)",
+ 82:     },
+ 83:     {
+ 84:         "name": "ix_relationships_namespace_type",
+ 85:         "sql": (
+ 86:             "CREATE INDEX IF NOT EXISTS ix_relationships_namespace_type "
+ 87:             "ON relationships (namespace_id, relationship_type)"
+ 88:         ),
+ 89:         "purpose": "Graph-emulated queries filtering by relationship type within namespace",
+ 90:     },
+ 91:     {
+ 92:         "name": "ix_relationships_target_source",
+ 93:         "sql": (
+ 94:             "CREATE INDEX IF NOT EXISTS ix_relationships_target_source "
+ 95:             "ON relationships (target_entity_id, source_entity_id)"
+ 96:         ),
+ 97:         "purpose": "Reverse traversal (inbound relationships)",
+ 98:     },
+ 99: ]
+100: 
+101: #: Tables to run ANALYZE on after index creation.
+102: PG_ANALYZE_TABLES = ["chunks", "documents", "entities", "relationships"]
+103: 
+104: # ---------------------------------------------------------------------------
+105: # Neo4j indexes and constraints
+106: # ---------------------------------------------------------------------------
+107: 
+108: NEO4J_INDEXES = [
+109:     {
+110:         "name": "entity_namespace_name_type",
+111:         "cypher": (
+112:             "CREATE INDEX entity_namespace_name_type IF NOT EXISTS "
+113:             "FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)"
+114:         ),
+115:         "purpose": "Primary entity lookup (composite)",
+116:     },
+117:     {
+118:         "name": "entity_namespace_id_unique",
+119:         "cypher": (
+120:             "CREATE CONSTRAINT entity_namespace_id_unique IF NOT EXISTS "
+121:             "FOR (e:Entity) REQUIRE (e.namespace_id, e.id) IS UNIQUE"
+122:         ),
+123:         "purpose": "Prevent duplicate entities",
+124:     },
+125:     {
+126:         "name": "entity_fulltext",
+127:         "cypher": (
+128:             "CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS FOR (e:Entity) ON EACH [e.name, e.description]"
+129:         ),
+130:         "purpose": "Fuzzy name/description search",
+131:     },
+132:     {
+133:         "name": "episode_namespace_occurred",
+134:         "cypher": (
+135:             "CREATE INDEX episode_namespace_occurred IF NOT EXISTS FOR (e:Episode) ON (e.namespace_id, e.occurred_at)"
+136:         ),
+137:         "purpose": "Temporal episode queries",
+138:     },
+139:     {
+140:         "name": "relates_to_weight",
+141:         "cypher": ("CREATE INDEX relates_to_weight IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.weight)"),
+142:         "purpose": "Weighted traversal",
+143:     },
+144:     {
+145:         "name": "mentioned_in_confidence",
+146:         "cypher": ("CREATE INDEX mentioned_in_confidence IF NOT EXISTS FOR ()-[r:MENTIONED_IN]-() ON (r.confidence)"),
+147:         "purpose": "Confidence filtering",
+148:     },
+149:     # --- Synced from neo4j.py _create_indexes for catch-up on existing databases ---
+150:     {
+151:         "name": "entity_ns_type",
+152:         "cypher": ("CREATE INDEX entity_ns_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.entity_type)"),
+153:         "purpose": "Entity namespace + type composite (list queries filtering by type)",
+154:     },
+155:     {
+156:         "name": "entity_source_tool",
+157:         "cypher": "CREATE INDEX entity_source_tool IF NOT EXISTS FOR (e:Entity) ON (e.source_tool)",
+158:         "purpose": "Source-aware queries (e.g. what does Slack say about X?)",
+159:     },
+160:     {
+161:         "name": "entity_confidence",
+162:         "cypher": "CREATE INDEX entity_confidence IF NOT EXISTS FOR (e:Entity) ON (e.confidence)",
+163:         "purpose": "Entity confidence threshold filtering",
+164:     },
+165:     {
+166:         "name": "rel_collaborates_ns",
+167:         "cypher": "CREATE INDEX rel_collaborates_ns IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.namespace_id)",
+168:         "purpose": "Namespace filtering on COLLABORATES_WITH",
+169:     },
+170:     {
+171:         "name": "rel_associated_ns",
+172:         "cypher": "CREATE INDEX rel_associated_ns IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.namespace_id)",
+173:         "purpose": "Namespace filtering on ASSOCIATED_WITH",
+174:     },
+175:     {
+176:         "name": "rel_depends_ns",
+177:         "cypher": "CREATE INDEX rel_depends_ns IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.namespace_id)",
+178:         "purpose": "Namespace filtering on DEPENDS_ON",
+179:     },
+180:     {
+181:         "name": "rel_owns_ns",
+182:         "cypher": "CREATE INDEX rel_owns_ns IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.namespace_id)",
+183:         "purpose": "Namespace filtering on OWNS",
+184:     },
+185:     {
+186:         "name": "rel_works_for_ns",
+187:         "cypher": "CREATE INDEX rel_works_for_ns IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.namespace_id)",
+188:         "purpose": "Namespace filtering on WORKS_FOR",
+189:     },
+190:     {
+191:         "name": "rel_implements_ns",
+192:         "cypher": "CREATE INDEX rel_implements_ns IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.namespace_id)",
+193:         "purpose": "Namespace filtering on IMPLEMENTS",
+194:     },
+195:     {
+196:         "name": "rel_part_of_ns",
+197:         "cypher": "CREATE INDEX rel_part_of_ns IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.namespace_id)",
+198:         "purpose": "Namespace filtering on PART_OF",
+199:     },
+200:     {
+201:         "name": "rel_collaborates_conf",
+202:         "cypher": "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
+203:         "purpose": "Confidence filtering on COLLABORATES_WITH",
+204:     },
+205:     {
+206:         "name": "rel_associated_conf",
+207:         "cypher": "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",
+208:         "purpose": "Confidence filtering on ASSOCIATED_WITH",
+209:     },
+210:     {
+211:         "name": "rel_depends_conf",
+212:         "cypher": "CREATE INDEX rel_depends_conf IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
+213:         "purpose": "Confidence filtering on DEPENDS_ON",
+214:     },
+215: ]
+216: 
+217: 
+218: # ---------------------------------------------------------------------------
+219: # Public API
+220: # ---------------------------------------------------------------------------
+221: 
+222: 
+223: async def optimize_postgresql(engine) -> dict:
+224:     """Create optimal PostgreSQL indexes and run ANALYZE.
+225: 
+226:     Executes raw DDL against the provided SQLAlchemy async engine,
+227:     so that callers don't need to provide a raw connection URL.
+228: 
+229:     Args:
+230:         engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+231: 
+232:     Returns:
+233:         Dict with ``indexes_created``, ``tables_analyzed``, and ``errors``.
+234:     """
+235:     from sqlalchemy import text
+236: 
+237:     result = {
+238:         "indexes_created": 0,
+239:         "tables_analyzed": 0,
+240:         "errors": [],
+241:     }
+242: 
+243:     async with engine.begin() as conn:
+244:         for idx in PG_INDEXES:
+245:             try:
+246:                 logger.debug(f"Creating index {idx['name']} ({idx['purpose']})")
+247:                 await conn.execute(text(idx["sql"]))
+248:                 result["indexes_created"] += 1
+249:             except Exception as e:
+250:                 msg = f"Index {idx['name']}: {e}"
+251:                 result["errors"].append(msg)
+252:                 logger.warning(msg)
+253: 
+254:         for table in PG_ANALYZE_TABLES:
+255:             try:
+256:                 logger.debug(f"Analyzing table {table}")
+257:                 await conn.execute(text(f"ANALYZE {table}"))
+258:                 result["tables_analyzed"] += 1
+259:             except Exception as e:
+260:                 msg = f"ANALYZE {table}: {e}"
+261:                 result["errors"].append(msg)
+262:                 logger.warning(msg)
+263: 
+264:     return result
+265: 
+266: 
+267: async def optimize_neo4j(driver, *, database: str = "neo4j") -> dict:
+268:     """Create optimal Neo4j indexes and constraints.
+269: 
+270:     Args:
+271:         driver: An ``neo4j.AsyncDriver`` instance.
+272:         database: Neo4j database name.
+273: 
+274:     Returns:
+275:         Dict with ``indexes_created`` and ``errors``.
+276:     """
+277:     result = {
+278:         "indexes_created": 0,
+279:         "errors": [],
+280:     }
+281: 
+282:     async with driver.session(database=database) as session:
+283:         for idx in NEO4J_INDEXES:
+284:             try:
+285:                 logger.debug(f"Creating Neo4j index {idx['name']} ({idx['purpose']})")
+286:                 await session.run(idx["cypher"])
+287:                 result["indexes_created"] += 1
+288:             except Exception as e:
+289:                 msg = f"Neo4j index {idx['name']}: {e}"
+290:                 result["errors"].append(msg)
+291:                 logger.warning(msg)
+292: 
+293:     return result
+294: 
+295: 
+296: async def optimize_storage(coordinator) -> dict:
+297:     """Run all optimizations against a connected StorageCoordinator.
+298: 
+299:     This is the main entry point for callers that already have a
+300:     ``StorageCoordinator`` (e.g. via ``MemoryLake.storage``).
+301: 
+302:     Args:
+303:         coordinator: A connected ``StorageCoordinator`` instance.
+304: 
+305:     Returns:
+306:         Combined results: ``{"postgresql": {...}, "neo4j": {...}}``.
+307:     """
+308:     results: dict[str, dict | None] = {"postgresql": None, "neo4j": None}
+309: 
+310:     # Optimize PostgreSQL / pgvector (they share the same engine)
+311:     backend = coordinator.vector or coordinator.relational
+312:     if backend is not None:
+313:         engine = getattr(backend, "_engine", None)
+314:         if engine is not None:
+315:             results["postgresql"] = await optimize_postgresql(engine)
+316:         else:
+317:             logger.warning("No SQLAlchemy engine found on backend; skipping PostgreSQL optimization")
+318: 
+319:     # Optimize Neo4j
+320:     graph = coordinator.graph
+321:     if graph is not None:
+322:         driver = getattr(graph, "_driver", None)
+323:         database = getattr(graph, "_database", "neo4j")
+324:         if driver is not None:
+325:             results["neo4j"] = await optimize_neo4j(driver, database=database)
+326:         else:
+327:             logger.warning("No Neo4j driver found on backend; skipping Neo4j optimization")
+328: 
+329:     return results
 ````
 
 ## File: src/khora/telemetry/__init__.py
@@ -26809,708 +27142,6 @@ README.md
 77:     sa.Column("trace_id", sa.Uuid, nullable=True, index=True),
 78:     sa.Column("parent_event_id", sa.BigInteger, nullable=True),
 79: )
-````
-
-## File: src/khora/_accel.py
-````python
-  1: """Accelerated operations with graceful fallbacks.
-  2: 
-  3: Provides optimized implementations of CPU-intensive operations.
-  4: Three-tier acceleration: Rust (khora-accel) → NumPy/RapidFuzz → Pure Python.
-  5: 
-  6: Control the backend via the KHORA_ACCEL_BACKEND environment variable:
-  7:   - unset: auto-detect fastest available (default)
-  8:   - "rust": use Rust if available, fall through otherwise
-  9:   - "numpy": skip Rust, use NumPy/RapidFuzz
- 10:   - "python": force pure Python (useful for debugging/testing)
- 11: """
- 12: 
- 13: from __future__ import annotations
- 14: 
- 15: import math
- 16: import os
- 17: import re
- 18: from typing import TYPE_CHECKING
- 19: 
- 20: if TYPE_CHECKING:
- 21:     pass
- 22: 
- 23: # ---------------------------------------------------------------------------
- 24: # Runtime backend override
- 25: # ---------------------------------------------------------------------------
- 26: 
- 27: _FORCE_BACKEND = os.environ.get("KHORA_ACCEL_BACKEND")
- 28: 
- 29: # ---------------------------------------------------------------------------
- 30: # Tier 0: Rust native acceleration (fastest)
- 31: # ---------------------------------------------------------------------------
- 32: 
- 33: try:
- 34:     from khora_accel import (
- 35:         RustBM25Index,
- 36:     )
- 37:     from khora_accel import batch_cosine_similarity as _rust_batch_cosine
- 38:     from khora_accel import batch_levenshtein as _rust_batch_levenshtein
- 39:     from khora_accel import batch_sequence_match as _rust_batch_sequence_match
- 40:     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
- 41:     from khora_accel import cosine_similarity as _rust_cosine
- 42:     from khora_accel import extract_keywords as _rust_extract_keywords
- 43:     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
- 44:     from khora_accel import levenshtein_similarity as _rust_levenshtein
- 45:     from khora_accel import normalize_scores as _rust_normalize_scores
- 46:     from khora_accel import pagerank as _rust_pagerank
- 47:     from khora_accel import pairwise_cosine_above_threshold as _rust_pairwise_cosine
- 48:     from khora_accel import reciprocal_rank_fusion as _rust_rrf
- 49:     from khora_accel import resolve_entities_batch as _rust_resolve_entities_batch
- 50:     from khora_accel import sequence_match_ratio as _rust_sequence_match
- 51:     from khora_accel import weighted_rrf as _rust_weighted_rrf
- 52: 
- 53:     _HAS_RUST = True
- 54: except ImportError:  # pragma: no cover
- 55:     _HAS_RUST = False
- 56:     RustBM25Index = None  # type: ignore[assignment, misc]
- 57: 
- 58: # ---------------------------------------------------------------------------
- 59: # Tier 1: NumPy / RapidFuzz (existing)
- 60: # ---------------------------------------------------------------------------
- 61: 
- 62: try:
- 63:     import numpy as np
- 64: 
- 65:     _HAS_NUMPY = True
- 66: except ImportError:  # pragma: no cover
- 67:     _HAS_NUMPY = False
- 68: 
- 69: try:
- 70:     from rapidfuzz.distance import Levenshtein as _rf_lev
- 71:     from rapidfuzz.fuzz import ratio as _rf_ratio
- 72: 
- 73:     _HAS_RAPIDFUZZ = True
- 74: except ImportError:  # pragma: no cover
- 75:     _HAS_RAPIDFUZZ = False
- 76: 
- 77: # ---------------------------------------------------------------------------
- 78: # Apply runtime backend override
- 79: # ---------------------------------------------------------------------------
- 80: 
- 81: if _FORCE_BACKEND == "python":
- 82:     _HAS_RUST = False
- 83:     _HAS_NUMPY = False
- 84:     _HAS_RAPIDFUZZ = False
- 85:     RustBM25Index = None  # type: ignore[assignment, misc]
- 86: elif _FORCE_BACKEND == "numpy":
- 87:     _HAS_RUST = False
- 88:     RustBM25Index = None  # type: ignore[assignment, misc]
- 89: # "rust" or unset: use auto-detected fastest path
- 90: 
- 91: 
- 92: # ---------------------------------------------------------------------------
- 93: # Cosine similarity
- 94: # ---------------------------------------------------------------------------
- 95: 
- 96: 
- 97: def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
- 98:     """Compute cosine similarity between two vectors.
- 99: 
-100:     Uses Rust > numpy > pure Python, depending on availability.
-101:     """
-102:     if _HAS_RUST:
-103:         return _rust_cosine(vec1, vec2)
-104: 
-105:     if len(vec1) != len(vec2):
-106:         return 0.0
-107: 
-108:     if _HAS_NUMPY:
-109:         a = np.asarray(vec1, dtype=np.float32)
-110:         b = np.asarray(vec2, dtype=np.float32)
-111:         dot = float(np.dot(a, b))
-112:         na = float(np.linalg.norm(a))
-113:         nb = float(np.linalg.norm(b))
-114:         if na == 0.0 or nb == 0.0:
-115:             return 0.0
-116:         return dot / (na * nb)
-117: 
-118:     # Pure-Python fallback
-119:     dot = 0.0
-120:     norm1 = 0.0
-121:     norm2 = 0.0
-122:     for a, b in zip(vec1, vec2):
-123:         dot += a * b
-124:         norm1 += a * a
-125:         norm2 += b * b
-126: 
-127:     if norm1 == 0.0 or norm2 == 0.0:
-128:         return 0.0
-129:     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
-130: 
-131: 
-132: def batch_cosine_similarity(
-133:     query: list[float],
-134:     candidates: list[list[float]],
-135:     threshold: float = 0.0,
-136: ) -> list[tuple[int, float]]:
-137:     """Compute cosine similarity between a query vector and a matrix of candidates.
-138: 
-139:     Returns (index, similarity) pairs above threshold, sorted descending.
-140:     """
-141:     if len(candidates) == 0:
-142:         return []
-143: 
-144:     if _HAS_RUST and _HAS_NUMPY:
-145:         q = np.asarray(query, dtype=np.float32)
-146:         mat = np.asarray(candidates, dtype=np.float32)
-147:         return _rust_batch_cosine(q, mat, threshold)
-148: 
-149:     if _HAS_NUMPY:
-150:         q = np.asarray(query, dtype=np.float32)
-151:         mat = np.asarray(candidates, dtype=np.float32)
-152: 
-153:         q_norm = float(np.linalg.norm(q))
-154:         if q_norm == 0.0:
-155:             return []
-156: 
-157:         norms = np.linalg.norm(mat, axis=1)
-158:         safe_norms = np.where(norms == 0.0, 1.0, norms)
-159:         sims = (mat @ q) / (safe_norms * q_norm)
-160:         sims = np.where(norms == 0.0, 0.0, sims)
-161: 
-162:         results = []
-163:         for i in range(len(sims)):
-164:             s = float(sims[i])
-165:             if s >= threshold:
-166:                 results.append((i, s))
-167:         results.sort(key=lambda x: x[1], reverse=True)
-168:         return results
-169: 
-170:     # Pure-Python fallback
-171:     results = []
-172:     for i, cand in enumerate(candidates):
-173:         s = cosine_similarity(query, cand)
-174:         if s >= threshold:
-175:             results.append((i, s))
-176:     results.sort(key=lambda x: x[1], reverse=True)
-177:     return results
-178: 
-179: 
-180: def pairwise_cosine_above_threshold(
-181:     embeddings: list[list[float]],
-182:     threshold: float,
-183: ) -> list[tuple[int, int, float]]:
-184:     """All-pairs cosine similarity above a threshold.
-185: 
-186:     Returns (i, j, similarity) triples where i < j and similarity >= threshold.
-187:     Uses Rust (rayon parallel) > numpy > pure Python.
-188:     """
-189:     if _HAS_RUST and _HAS_NUMPY:
-190:         mat = np.asarray(embeddings, dtype=np.float32)
-191:         return _rust_pairwise_cosine(mat, threshold)
-192: 
-193:     n = len(embeddings)
-194:     if n < 2:
-195:         return []
-196: 
-197:     if _HAS_NUMPY:
-198:         mat = np.asarray(embeddings, dtype=np.float32)
-199:         norms = np.linalg.norm(mat, axis=1)
-200:         results = []
-201:         for i in range(n):
-202:             if norms[i] == 0.0:
-203:                 continue
-204:             for j in range(i + 1, n):
-205:                 if norms[j] == 0.0:
-206:                     continue
-207:                 sim = float(np.dot(mat[i], mat[j]) / (norms[i] * norms[j]))
-208:                 if sim >= threshold:
-209:                     results.append((i, j, sim))
-210:         return results
-211: 
-212:     # Pure-Python fallback
-213:     results = []
-214:     for i in range(n):
-215:         for j in range(i + 1, n):
-216:             sim = cosine_similarity(embeddings[i], embeddings[j])
-217:             if sim >= threshold:
-218:                 results.append((i, j, sim))
-219:     return results
-220: 
-221: 
-222: # ---------------------------------------------------------------------------
-223: # Levenshtein similarity
-224: # ---------------------------------------------------------------------------
-225: 
-226: 
-227: def levenshtein_similarity(s1: str, s2: str) -> float:
-228:     """Normalized Levenshtein similarity (1.0 = identical).
-229: 
-230:     Uses Rust > rapidfuzz > pure Python.
-231:     """
-232:     if _HAS_RUST:
-233:         return _rust_levenshtein(s1, s2)
-234: 
-235:     a, b = s1.lower(), s2.lower()
-236:     if a == b:
-237:         return 1.0
-238:     if not a or not b:
-239:         return 0.0
-240: 
-241:     if _HAS_RAPIDFUZZ:
-242:         return _rf_lev.normalized_similarity(a, b)
-243: 
-244:     # Pure-Python single-row DP fallback
-245:     la, lb = len(a), len(b)
-246:     prev = list(range(lb + 1))
-247:     for i in range(1, la + 1):
-248:         curr = [i] + [0] * lb
-249:         for j in range(1, lb + 1):
-250:             cost = 0 if a[i - 1] == b[j - 1] else 1
-251:             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-252:         prev = curr
-253: 
-254:     distance = prev[lb]
-255:     return 1.0 - (distance / max(la, lb))
-256: 
-257: 
-258: # ---------------------------------------------------------------------------
-259: # Sequence matching (SequenceMatcher replacement)
-260: # ---------------------------------------------------------------------------
-261: 
-262: 
-263: def sequence_match_ratio(s1: str, s2: str) -> float:
-264:     """Compute sequence match ratio between two strings.
-265: 
-266:     Uses Rust > rapidfuzz > difflib.
-267:     """
-268:     if _HAS_RUST:
-269:         return _rust_sequence_match(s1, s2)
-270: 
-271:     if _HAS_RAPIDFUZZ:
-272:         return _rf_ratio(s1, s2) / 100.0
-273: 
-274:     from difflib import SequenceMatcher
-275: 
-276:     return SequenceMatcher(None, s1, s2).ratio()
-277: 
-278: 
-279: # ---------------------------------------------------------------------------
-280: # Batch string operations
-281: # ---------------------------------------------------------------------------
-282: 
-283: 
-284: def batch_levenshtein(
-285:     query: str,
-286:     candidates: list[str],
-287:     threshold: float = 0.0,
-288: ) -> list[tuple[int, float]]:
-289:     """Score query against all candidates using Levenshtein similarity.
-290: 
-291:     Returns (index, similarity) pairs above threshold, sorted descending.
-292:     Uses Rust parallelism when available, otherwise falls back to serial loop.
-293:     """
-294:     if _HAS_RUST:
-295:         return _rust_batch_levenshtein(query, candidates, threshold)
-296: 
-297:     results = []
-298:     for i, cand in enumerate(candidates):
-299:         s = levenshtein_similarity(query, cand)
-300:         if s >= threshold:
-301:             results.append((i, s))
-302:     results.sort(key=lambda x: x[1], reverse=True)
-303:     return results
-304: 
-305: 
-306: def batch_sequence_match(
-307:     query: str,
-308:     candidates: list[str],
-309:     threshold: float = 0.0,
-310: ) -> list[tuple[int, float]]:
-311:     """Score query against all candidates using sequence match ratio.
-312: 
-313:     Returns (index, similarity) pairs above threshold, sorted descending.
-314:     Uses Rust parallelism when available, otherwise falls back to serial loop.
-315:     """
-316:     if _HAS_RUST:
-317:         return _rust_batch_sequence_match(query, candidates, threshold)
-318: 
-319:     results = []
-320:     for i, cand in enumerate(candidates):
-321:         s = sequence_match_ratio(query, cand)
-322:         if s >= threshold:
-323:             results.append((i, s))
-324:     results.sort(key=lambda x: x[1], reverse=True)
-325:     return results
-326: 
-327: 
-328: # ---------------------------------------------------------------------------
-329: # PageRank
-330: # ---------------------------------------------------------------------------
-331: 
-332: 
-333: def pagerank(
-334:     n: int,
-335:     edges: list[tuple[int, int, float]],
-336:     damping: float = 0.85,
-337:     max_iter: int = 100,
-338:     tol: float = 1e-6,
-339: ) -> list[float]:
-340:     """Compute PageRank scores on a weighted directed graph.
-341: 
-342:     Args:
-343:         n: Number of nodes (IDs are 0..n-1).
-344:         edges: (src, dst, weight) triples.
-345:         damping: Damping factor (typically 0.85).
-346:         max_iter: Maximum iterations.
-347:         tol: Convergence threshold.
-348: 
-349:     Returns:
-350:         List of length n with PageRank scores indexed by node ID.
-351:     """
-352:     if _HAS_RUST:
-353:         return _rust_pagerank(n, edges, damping, max_iter, tol)
-354: 
-355:     # Pure-Python fallback
-356:     if n == 0:
-357:         return []
-358: 
-359:     incoming: list[list[tuple[int, float]]] = [[] for _ in range(n)]
-360:     out_degree: list[float] = [0.0] * n
-361: 
-362:     for src, dst, weight in edges:
-363:         if 0 <= src < n and 0 <= dst < n:
-364:             incoming[dst].append((src, weight))
-365:             out_degree[src] += weight
-366: 
-367:     base = (1.0 - damping) / n
-368:     scores = [1.0 / n] * n
-369: 
-370:     for _ in range(max_iter):
-371:         new_scores = [0.0] * n
-372:         diff = 0.0
-373: 
-374:         for node in range(n):
-375:             contrib = 0.0
-376:             for src, weight in incoming[node]:
-377:                 if out_degree[src] > 0:
-378:                     contrib += scores[src] * weight / out_degree[src]
-379:             new_score = base + damping * contrib
-380:             diff += abs(new_score - scores[node])
-381:             new_scores[node] = new_score
-382: 
-383:         scores = new_scores
-384:         if diff < tol:
-385:             break
-386: 
-387:     return scores
-388: 
-389: 
-390: def build_chunk_edges(
-391:     n_chunks: int,
-392:     keyword_chunk_ids: list[list[int]],
-393:     idf_scores: list[float],
-394: ) -> list[tuple[int, int, float]]:
-395:     """Build chunk-to-chunk edges from keyword co-occurrence.
-396: 
-397:     For each keyword, creates bidirectional edges among all chunks sharing
-398:     that keyword, weighted by the keyword's IDF score.
-399: 
-400:     Args:
-401:         n_chunks: Total number of chunks.
-402:         keyword_chunk_ids: For each keyword, the list of chunk indices containing it.
-403:         idf_scores: IDF score per keyword (parallel to keyword_chunk_ids).
-404: 
-405:     Returns:
-406:         Flat edge list of (src, dst, weight) triples (bidirectional).
-407:     """
-408:     if _HAS_RUST:
-409:         return _rust_build_chunk_edges(n_chunks, keyword_chunk_ids, idf_scores)
-410: 
-411:     # Pure-Python fallback
-412:     edges: list[tuple[int, int, float]] = []
-413:     for keyword_idx, chunk_ids in enumerate(keyword_chunk_ids):
-414:         weight = idf_scores[keyword_idx] if keyword_idx < len(idf_scores) else 0.0
-415:         for i in range(len(chunk_ids)):
-416:             cid1 = chunk_ids[i]
-417:             if cid1 >= n_chunks:
-418:                 continue
-419:             for j in range(i + 1, len(chunk_ids)):
-420:                 cid2 = chunk_ids[j]
-421:                 if cid2 >= n_chunks:
-422:                     continue
-423:                 edges.append((cid1, cid2, weight))
-424:                 edges.append((cid2, cid1, weight))
-425:     return edges
-426: 
-427: 
-428: # ---------------------------------------------------------------------------
-429: # Keyword extraction
-430: # ---------------------------------------------------------------------------
-431: 
-432: _SKELETON_STOPWORDS = frozenset(
-433:     {
-434:         "a",
-435:         "an",
-436:         "the",
-437:         "and",
-438:         "or",
-439:         "but",
-440:         "in",
-441:         "on",
-442:         "at",
-443:         "to",
-444:         "for",
-445:         "of",
-446:         "with",
-447:         "by",
-448:         "from",
-449:         "as",
-450:         "is",
-451:         "was",
-452:         "are",
-453:         "were",
-454:         "been",
-455:         "be",
-456:         "have",
-457:         "has",
-458:         "had",
-459:         "do",
-460:         "does",
-461:         "did",
-462:         "will",
-463:         "would",
-464:         "could",
-465:         "should",
-466:         "may",
-467:         "might",
-468:         "must",
-469:         "that",
-470:         "this",
-471:         "these",
-472:         "those",
-473:         "it",
-474:         "its",
-475:         "he",
-476:         "she",
-477:         "they",
-478:         "them",
-479:         "his",
-480:         "her",
-481:         "their",
-482:         "we",
-483:         "our",
-484:         "you",
-485:         "your",
-486:         "i",
-487:         "me",
-488:         "my",
-489:         "what",
-490:         "which",
-491:         "who",
-492:         "whom",
-493:         "when",
-494:         "where",
-495:         "why",
-496:         "how",
-497:         "all",
-498:         "each",
-499:         "every",
-500:         "both",
-501:         "few",
-502:         "more",
-503:         "most",
-504:         "other",
-505:         "some",
-506:         "such",
-507:         "no",
-508:         "not",
-509:         "only",
-510:         "own",
-511:         "same",
-512:         "so",
-513:         "than",
-514:         "too",
-515:         "very",
-516:         "just",
-517:         "can",
-518:     }
-519: )
-520: 
-521: _KEYWORD_RE = re.compile(r"\b[a-zA-Z]{3,}\b")
-522: 
-523: 
-524: def extract_keywords(content: str) -> list[str]:
-525:     """Extract unique keywords from content.
-526: 
-527:     Tokenises with ``\\b[a-zA-Z]{3,}\\b``, removes stopwords, deduplicates.
-528:     Uses Rust when available, otherwise pure Python.
-529:     """
-530:     if _HAS_RUST:
-531:         return _rust_extract_keywords(content)
-532: 
-533:     lower = content.lower()
-534:     seen: set[str] = set()
-535:     keywords: list[str] = []
-536:     for m in _KEYWORD_RE.finditer(lower):
-537:         word = m.group()
-538:         if word not in _SKELETON_STOPWORDS and word not in seen:
-539:             seen.add(word)
-540:             keywords.append(word)
-541:     return keywords
-542: 
-543: 
-544: def extract_keywords_batch(contents: list[str]) -> list[list[str]]:
-545:     """Batch keyword extraction.
-546: 
-547:     Uses Rust (rayon parallel) when available, otherwise serial Python.
-548:     """
-549:     if _HAS_RUST:
-550:         return _rust_extract_keywords_batch(contents)
-551: 
-552:     return [extract_keywords(c) for c in contents]
-553: 
-554: 
-555: # ---------------------------------------------------------------------------
-556: # Reciprocal Rank Fusion (low-level, string-ID based)
-557: # ---------------------------------------------------------------------------
-558: 
-559: 
-560: def reciprocal_rank_fusion(
-561:     ranked_lists: list[list[str]],
-562:     k: int = 60,
-563: ) -> list[tuple[str, float]]:
-564:     """Basic Reciprocal Rank Fusion over string ID lists.
-565: 
-566:     For each list the score contribution is ``1 / (k + rank)`` where rank
-567:     is 1-indexed.  Returns ``(id, score)`` pairs sorted descending.
-568: 
-569:     Note: The higher-level ``engines.vectorcypher.fusion`` module wraps this
-570:     with rich FusedResult metadata tracking. Use this for raw score computation.
-571:     """
-572:     if _HAS_RUST:
-573:         return _rust_rrf(ranked_lists, k)
-574: 
-575:     scores: dict[str, float] = {}
-576:     for item_list in ranked_lists:
-577:         for rank_0, item_id in enumerate(item_list):
-578:             rank = rank_0 + 1
-579:             scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (k + rank)
-580: 
-581:     results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-582:     return results
-583: 
-584: 
-585: def weighted_rrf(
-586:     ranked_lists: list[tuple[float, list[str]]],
-587:     k: int = 60,
-588: ) -> list[tuple[str, float]]:
-589:     """Weighted Reciprocal Rank Fusion.
-590: 
-591:     Each entry is ``(weight, [id, ...])``.  Score contribution per item:
-592:     ``weight / (k + rank)`` where rank is 1-indexed.
-593:     Returns ``(id, score)`` pairs sorted descending.
-594:     """
-595:     if _HAS_RUST:
-596:         return _rust_weighted_rrf(ranked_lists, k)
-597: 
-598:     scores: dict[str, float] = {}
-599:     for weight, item_list in ranked_lists:
-600:         for rank_0, item_id in enumerate(item_list):
-601:             scores[item_id] = scores.get(item_id, 0.0) + weight / (k + rank_0 + 1)
-602: 
-603:     results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-604:     return results
-605: 
-606: 
-607: def normalize_scores(scores: list[float]) -> list[float]:
-608:     """Min-max normalise a list of scores to ``[0, 1]``.
-609: 
-610:     If all scores are identical, returns a list of ``1.0``.
-611:     """
-612:     if _HAS_RUST:
-613:         return _rust_normalize_scores(scores)
-614: 
-615:     if not scores:
-616:         return scores
-617: 
-618:     min_s = min(scores)
-619:     max_s = max(scores)
-620:     if abs(max_s - min_s) < 1e-15:
-621:         return [1.0] * len(scores)
-622:     rng = max_s - min_s
-623:     return [(s - min_s) / rng for s in scores]
-624: 
-625: 
-626: # ---------------------------------------------------------------------------
-627: # Entity resolution (batch)
-628: # ---------------------------------------------------------------------------
-629: 
-630: 
-631: def resolve_entities_batch(
-632:     new_names: list[str],
-633:     existing_names: list[str],
-634:     existing_aliases: list[list[str]],
-635:     threshold: float = 0.85,
-636: ) -> list[tuple[int, float, str] | None]:
-637:     """Resolve a batch of new entity names against existing entities.
-638: 
-639:     For each new name, attempts matching in order:
-640:     1. Exact match — case-insensitive against existing names
-641:     2. Alias match — case-insensitive against each entity's aliases
-642:     3. Fuzzy match — normalized Levenshtein above *threshold*
-643: 
-644:     Returns a list parallel to *new_names*. Each element is either
-645:     ``(existing_index, score, match_type)`` or ``None``.
-646:     """
-647:     if _HAS_RUST:
-648:         return _rust_resolve_entities_batch(new_names, existing_names, existing_aliases, threshold)
-649: 
-650:     # Pure-Python fallback
-651:     existing_lower = [n.lower() for n in existing_names]
-652:     aliases_lower = [[a.lower() for a in aliases] for aliases in existing_aliases]
-653: 
-654:     results: list[tuple[int, float, str] | None] = []
-655:     for new_name in new_names:
-656:         query = new_name.lower()
-657:         matched = False
-658: 
-659:         # Step 1: Exact name match
-660:         for idx, existing in enumerate(existing_lower):
-661:             if query == existing:
-662:                 results.append((idx, 1.0, "exact"))
-663:                 matched = True
-664:                 break
-665: 
-666:         if matched:
-667:             continue
-668: 
-669:         # Step 2: Alias match
-670:         for idx, aliases in enumerate(aliases_lower):
-671:             for alias in aliases:
-672:                 if query == alias:
-673:                     results.append((idx, 1.0, "alias"))
-674:                     matched = True
-675:                     break
-676:             if matched:
-677:                 break
-678: 
-679:         if matched:
-680:             continue
-681: 
-682:         # Step 3: Fuzzy match
-683:         best_idx = None
-684:         best_score = threshold
-685:         for idx, existing in enumerate(existing_lower):
-686:             if not query or not existing:
-687:                 continue
-688:             sim = levenshtein_similarity(query, existing)
-689:             if sim > best_score:
-690:                 best_score = sim
-691:                 best_idx = idx
-692: 
-693:         if best_idx is not None:
-694:             results.append((best_idx, best_score, "fuzzy"))
-695:         else:
-696:             results.append(None)
-697: 
-698:     return results
 ````
 
 ## File: tests/unit/engines/test_skeleton.py
@@ -34492,337 +34123,706 @@ README.md
 1038:         return [self._row_to_chunk(row) for row in rows]
 ````
 
-## File: src/khora/storage/optimize.py
+## File: src/khora/_accel.py
 ````python
-  1: """Storage optimization for Khora Memory Lake.
+  1: """Accelerated operations with graceful fallbacks.
   2: 
-  3: Creates additional indexes on PostgreSQL and Neo4j that improve query
-  4: and search performance beyond the base indexes created at schema init time.
-  5: Designed to run after bulk data ingestion when tables have enough data
-  6: for PostgreSQL's planner statistics to be meaningful.
-  7: 
-  8: All index creation statements use IF NOT EXISTS for idempotency —
-  9: safe to run multiple times.
- 10: """
- 11: 
- 12: from __future__ import annotations
- 13: 
- 14: from loguru import logger
- 15: 
- 16: # ---------------------------------------------------------------------------
- 17: # PostgreSQL indexes (beyond what SQLAlchemy models already define)
- 18: # ---------------------------------------------------------------------------
+  3: Provides optimized implementations of CPU-intensive operations.
+  4: Three-tier acceleration: Rust (khora-accel) → NumPy/RapidFuzz → Pure Python.
+  5: 
+  6: Control the backend via the KHORA_ACCEL_BACKEND environment variable:
+  7:   - unset: auto-detect fastest available (default)
+  8:   - "rust": use Rust if available, fall through otherwise
+  9:   - "numpy": skip Rust, use NumPy/RapidFuzz
+ 10:   - "python": force pure Python (useful for debugging/testing)
+ 11: """
+ 12: 
+ 13: from __future__ import annotations
+ 14: 
+ 15: import math
+ 16: import os
+ 17: import re
+ 18: from typing import TYPE_CHECKING
  19: 
- 20: PG_INDEXES = [
- 21:     {
- 22:         "name": "idx_chunks_namespace_created",
- 23:         "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_namespace_created ON chunks (namespace_id, created_at DESC)"),
- 24:         "purpose": "Temporal filtering within namespace",
- 25:     },
- 26:     {
- 27:         "name": "idx_documents_namespace_created",
- 28:         "sql": (
- 29:             "CREATE INDEX IF NOT EXISTS idx_documents_namespace_created ON documents (namespace_id, created_at DESC)"
- 30:         ),
- 31:         "purpose": "Document temporal queries",
- 32:     },
- 33:     {
- 34:         "name": "idx_entities_namespace_type_name",
- 35:         "sql": (
- 36:             "CREATE INDEX IF NOT EXISTS idx_entities_namespace_type_name ON entities (namespace_id, entity_type, name)"
- 37:         ),
- 38:         "purpose": "Entity type filtering + name lookup",
- 39:     },
- 40:     {
- 41:         "name": "idx_entities_description_fts",
- 42:         "sql": (
- 43:             "CREATE INDEX IF NOT EXISTS idx_entities_description_fts "
- 44:             "ON entities USING gin (to_tsvector('english', description))"
- 45:         ),
- 46:         "purpose": "Full-text search on entity descriptions",
- 47:     },
- 48:     {
- 49:         "name": "idx_entities_namespace_confidence",
- 50:         "sql": (
- 51:             "CREATE INDEX IF NOT EXISTS idx_entities_namespace_confidence ON entities (namespace_id, confidence DESC)"
- 52:         ),
- 53:         "purpose": "Confidence-based filtering",
- 54:     },
- 55:     {
- 56:         "name": "idx_relationships_source_target",
- 57:         "sql": (
- 58:             "CREATE INDEX IF NOT EXISTS idx_relationships_source_target "
- 59:             "ON relationships (source_entity_id, target_entity_id)"
- 60:         ),
- 61:         "purpose": "Relationship traversal",
- 62:     },
- 63:     {
- 64:         "name": "idx_chunks_document_namespace",
- 65:         "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_document_namespace ON chunks (document_id, namespace_id)"),
- 66:         "purpose": "Document-to-chunk lookups",
- 67:     },
- 68:     # --- Synced from models.py __table_args__ for catch-up on existing databases ---
- 69:     {
- 70:         "name": "ix_documents_namespace_source_type",
- 71:         "sql": (
- 72:             "CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type ON documents (namespace_id, source_type)"
- 73:         ),
- 74:         "purpose": "Document queries filtered by source_type within namespace",
- 75:     },
- 76:     {
- 77:         "name": "ix_entities_namespace_mentions",
- 78:         "sql": (
- 79:             "CREATE INDEX IF NOT EXISTS ix_entities_namespace_mentions ON entities (namespace_id, mention_count DESC)"
- 80:         ),
- 81:         "purpose": "Entity importance ranking (top N entities in namespace)",
- 82:     },
- 83:     {
- 84:         "name": "ix_relationships_namespace_type",
- 85:         "sql": (
- 86:             "CREATE INDEX IF NOT EXISTS ix_relationships_namespace_type "
- 87:             "ON relationships (namespace_id, relationship_type)"
- 88:         ),
- 89:         "purpose": "Graph-emulated queries filtering by relationship type within namespace",
- 90:     },
- 91:     {
- 92:         "name": "ix_relationships_target_source",
- 93:         "sql": (
- 94:             "CREATE INDEX IF NOT EXISTS ix_relationships_target_source "
- 95:             "ON relationships (target_entity_id, source_entity_id)"
- 96:         ),
- 97:         "purpose": "Reverse traversal (inbound relationships)",
- 98:     },
- 99: ]
-100: 
-101: #: Tables to run ANALYZE on after index creation.
-102: PG_ANALYZE_TABLES = ["chunks", "documents", "entities", "relationships"]
-103: 
-104: # ---------------------------------------------------------------------------
-105: # Neo4j indexes and constraints
-106: # ---------------------------------------------------------------------------
+ 20: if TYPE_CHECKING:
+ 21:     pass
+ 22: 
+ 23: # ---------------------------------------------------------------------------
+ 24: # Runtime backend override
+ 25: # ---------------------------------------------------------------------------
+ 26: 
+ 27: _FORCE_BACKEND = os.environ.get("KHORA_ACCEL_BACKEND")
+ 28: 
+ 29: # ---------------------------------------------------------------------------
+ 30: # Tier 0: Rust native acceleration (fastest)
+ 31: # ---------------------------------------------------------------------------
+ 32: 
+ 33: try:
+ 34:     from khora_accel import (
+ 35:         RustBM25Index,
+ 36:     )
+ 37:     from khora_accel import batch_cosine_similarity as _rust_batch_cosine
+ 38:     from khora_accel import batch_levenshtein as _rust_batch_levenshtein
+ 39:     from khora_accel import batch_sequence_match as _rust_batch_sequence_match
+ 40:     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
+ 41:     from khora_accel import cosine_similarity as _rust_cosine
+ 42:     from khora_accel import extract_keywords as _rust_extract_keywords
+ 43:     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
+ 44:     from khora_accel import levenshtein_similarity as _rust_levenshtein
+ 45:     from khora_accel import normalize_scores as _rust_normalize_scores
+ 46:     from khora_accel import pagerank as _rust_pagerank
+ 47:     from khora_accel import pairwise_cosine_above_threshold as _rust_pairwise_cosine
+ 48:     from khora_accel import reciprocal_rank_fusion as _rust_rrf
+ 49:     from khora_accel import resolve_entities_batch as _rust_resolve_entities_batch
+ 50:     from khora_accel import sequence_match_ratio as _rust_sequence_match
+ 51:     from khora_accel import weighted_rrf as _rust_weighted_rrf
+ 52: 
+ 53:     _HAS_RUST = True
+ 54: except ImportError:  # pragma: no cover
+ 55:     _HAS_RUST = False
+ 56:     RustBM25Index = None  # type: ignore[assignment, misc]
+ 57: 
+ 58: # ---------------------------------------------------------------------------
+ 59: # Tier 1: NumPy / RapidFuzz (existing)
+ 60: # ---------------------------------------------------------------------------
+ 61: 
+ 62: try:
+ 63:     import numpy as np
+ 64: 
+ 65:     _HAS_NUMPY = True
+ 66: except ImportError:  # pragma: no cover
+ 67:     _HAS_NUMPY = False
+ 68: 
+ 69: try:
+ 70:     from rapidfuzz.distance import Levenshtein as _rf_lev
+ 71:     from rapidfuzz.fuzz import ratio as _rf_ratio
+ 72: 
+ 73:     _HAS_RAPIDFUZZ = True
+ 74: except ImportError:  # pragma: no cover
+ 75:     _HAS_RAPIDFUZZ = False
+ 76: 
+ 77: # ---------------------------------------------------------------------------
+ 78: # Apply runtime backend override
+ 79: # ---------------------------------------------------------------------------
+ 80: 
+ 81: if _FORCE_BACKEND == "python":
+ 82:     _HAS_RUST = False
+ 83:     _HAS_NUMPY = False
+ 84:     _HAS_RAPIDFUZZ = False
+ 85:     RustBM25Index = None  # type: ignore[assignment, misc]
+ 86: elif _FORCE_BACKEND == "numpy":
+ 87:     _HAS_RUST = False
+ 88:     RustBM25Index = None  # type: ignore[assignment, misc]
+ 89: # "rust" or unset: use auto-detected fastest path
+ 90: 
+ 91: 
+ 92: # ---------------------------------------------------------------------------
+ 93: # Cosine similarity
+ 94: # ---------------------------------------------------------------------------
+ 95: 
+ 96: 
+ 97: def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+ 98:     """Compute cosine similarity between two vectors.
+ 99: 
+100:     Uses Rust > numpy > pure Python, depending on availability.
+101:     """
+102:     if _HAS_RUST:
+103:         return _rust_cosine(vec1, vec2)
+104: 
+105:     if len(vec1) != len(vec2):
+106:         return 0.0
 107: 
-108: NEO4J_INDEXES = [
-109:     {
-110:         "name": "entity_namespace_name_type",
-111:         "cypher": (
-112:             "CREATE INDEX entity_namespace_name_type IF NOT EXISTS "
-113:             "FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)"
-114:         ),
-115:         "purpose": "Primary entity lookup (composite)",
-116:     },
-117:     {
-118:         "name": "entity_namespace_id_unique",
-119:         "cypher": (
-120:             "CREATE CONSTRAINT entity_namespace_id_unique IF NOT EXISTS "
-121:             "FOR (e:Entity) REQUIRE (e.namespace_id, e.id) IS UNIQUE"
-122:         ),
-123:         "purpose": "Prevent duplicate entities",
-124:     },
-125:     {
-126:         "name": "entity_fulltext",
-127:         "cypher": (
-128:             "CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS FOR (e:Entity) ON EACH [e.name, e.description]"
-129:         ),
-130:         "purpose": "Fuzzy name/description search",
-131:     },
-132:     {
-133:         "name": "episode_namespace_occurred",
-134:         "cypher": (
-135:             "CREATE INDEX episode_namespace_occurred IF NOT EXISTS FOR (e:Episode) ON (e.namespace_id, e.occurred_at)"
-136:         ),
-137:         "purpose": "Temporal episode queries",
-138:     },
-139:     {
-140:         "name": "relates_to_weight",
-141:         "cypher": ("CREATE INDEX relates_to_weight IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.weight)"),
-142:         "purpose": "Weighted traversal",
-143:     },
-144:     {
-145:         "name": "mentioned_in_confidence",
-146:         "cypher": ("CREATE INDEX mentioned_in_confidence IF NOT EXISTS FOR ()-[r:MENTIONED_IN]-() ON (r.confidence)"),
-147:         "purpose": "Confidence filtering",
-148:     },
-149:     # --- Synced from neo4j.py _create_indexes for catch-up on existing databases ---
-150:     {
-151:         "name": "entity_ns_type",
-152:         "cypher": ("CREATE INDEX entity_ns_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.entity_type)"),
-153:         "purpose": "Entity namespace + type composite (list queries filtering by type)",
-154:     },
-155:     {
-156:         "name": "entity_source_tool",
-157:         "cypher": "CREATE INDEX entity_source_tool IF NOT EXISTS FOR (e:Entity) ON (e.source_tool)",
-158:         "purpose": "Source-aware queries (e.g. what does Slack say about X?)",
-159:     },
-160:     {
-161:         "name": "entity_confidence",
-162:         "cypher": "CREATE INDEX entity_confidence IF NOT EXISTS FOR (e:Entity) ON (e.confidence)",
-163:         "purpose": "Entity confidence threshold filtering",
-164:     },
-165:     {
-166:         "name": "rel_collaborates_ns",
-167:         "cypher": "CREATE INDEX rel_collaborates_ns IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.namespace_id)",
-168:         "purpose": "Namespace filtering on COLLABORATES_WITH",
-169:     },
-170:     {
-171:         "name": "rel_associated_ns",
-172:         "cypher": "CREATE INDEX rel_associated_ns IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.namespace_id)",
-173:         "purpose": "Namespace filtering on ASSOCIATED_WITH",
-174:     },
-175:     {
-176:         "name": "rel_depends_ns",
-177:         "cypher": "CREATE INDEX rel_depends_ns IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.namespace_id)",
-178:         "purpose": "Namespace filtering on DEPENDS_ON",
-179:     },
-180:     {
-181:         "name": "rel_owns_ns",
-182:         "cypher": "CREATE INDEX rel_owns_ns IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.namespace_id)",
-183:         "purpose": "Namespace filtering on OWNS",
-184:     },
-185:     {
-186:         "name": "rel_works_for_ns",
-187:         "cypher": "CREATE INDEX rel_works_for_ns IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.namespace_id)",
-188:         "purpose": "Namespace filtering on WORKS_FOR",
-189:     },
-190:     {
-191:         "name": "rel_implements_ns",
-192:         "cypher": "CREATE INDEX rel_implements_ns IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.namespace_id)",
-193:         "purpose": "Namespace filtering on IMPLEMENTS",
-194:     },
-195:     {
-196:         "name": "rel_part_of_ns",
-197:         "cypher": "CREATE INDEX rel_part_of_ns IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.namespace_id)",
-198:         "purpose": "Namespace filtering on PART_OF",
-199:     },
-200:     {
-201:         "name": "rel_collaborates_conf",
-202:         "cypher": "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
-203:         "purpose": "Confidence filtering on COLLABORATES_WITH",
-204:     },
-205:     {
-206:         "name": "rel_associated_conf",
-207:         "cypher": "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",
-208:         "purpose": "Confidence filtering on ASSOCIATED_WITH",
-209:     },
-210:     {
-211:         "name": "rel_depends_conf",
-212:         "cypher": "CREATE INDEX rel_depends_conf IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
-213:         "purpose": "Confidence filtering on DEPENDS_ON",
-214:     },
-215: ]
-216: 
-217: 
-218: # ---------------------------------------------------------------------------
-219: # Public API
-220: # ---------------------------------------------------------------------------
+108:     if _HAS_NUMPY:
+109:         a = np.asarray(vec1, dtype=np.float32)
+110:         b = np.asarray(vec2, dtype=np.float32)
+111:         dot = float(np.dot(a, b))
+112:         na = float(np.linalg.norm(a))
+113:         nb = float(np.linalg.norm(b))
+114:         if na == 0.0 or nb == 0.0:
+115:             return 0.0
+116:         return dot / (na * nb)
+117: 
+118:     # Pure-Python fallback
+119:     dot = 0.0
+120:     norm1 = 0.0
+121:     norm2 = 0.0
+122:     for a, b in zip(vec1, vec2):
+123:         dot += a * b
+124:         norm1 += a * a
+125:         norm2 += b * b
+126: 
+127:     if norm1 == 0.0 or norm2 == 0.0:
+128:         return 0.0
+129:     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
+130: 
+131: 
+132: def batch_cosine_similarity(
+133:     query: list[float],
+134:     candidates: list[list[float]],
+135:     threshold: float = 0.0,
+136: ) -> list[tuple[int, float]]:
+137:     """Compute cosine similarity between a query vector and a matrix of candidates.
+138: 
+139:     Returns (index, similarity) pairs above threshold, sorted descending.
+140:     """
+141:     if len(candidates) == 0:
+142:         return []
+143: 
+144:     if _HAS_RUST and _HAS_NUMPY:
+145:         q = np.asarray(query, dtype=np.float32)
+146:         mat = np.asarray(candidates, dtype=np.float32)
+147:         return _rust_batch_cosine(q, mat, threshold)
+148: 
+149:     if _HAS_NUMPY:
+150:         q = np.asarray(query, dtype=np.float32)
+151:         mat = np.asarray(candidates, dtype=np.float32)
+152: 
+153:         q_norm = float(np.linalg.norm(q))
+154:         if q_norm == 0.0:
+155:             return []
+156: 
+157:         norms = np.linalg.norm(mat, axis=1)
+158:         safe_norms = np.where(norms == 0.0, 1.0, norms)
+159:         sims = (mat @ q) / (safe_norms * q_norm)
+160:         sims = np.where(norms == 0.0, 0.0, sims)
+161: 
+162:         results = []
+163:         for i in range(len(sims)):
+164:             s = float(sims[i])
+165:             if s >= threshold:
+166:                 results.append((i, s))
+167:         results.sort(key=lambda x: x[1], reverse=True)
+168:         return results
+169: 
+170:     # Pure-Python fallback
+171:     results = []
+172:     for i, cand in enumerate(candidates):
+173:         s = cosine_similarity(query, cand)
+174:         if s >= threshold:
+175:             results.append((i, s))
+176:     results.sort(key=lambda x: x[1], reverse=True)
+177:     return results
+178: 
+179: 
+180: def pairwise_cosine_above_threshold(
+181:     embeddings: list[list[float]],
+182:     threshold: float,
+183: ) -> list[tuple[int, int, float]]:
+184:     """All-pairs cosine similarity above a threshold.
+185: 
+186:     Returns (i, j, similarity) triples where i < j and similarity >= threshold.
+187:     Uses Rust (rayon parallel) > numpy > pure Python.
+188:     """
+189:     if _HAS_RUST and _HAS_NUMPY:
+190:         mat = np.asarray(embeddings, dtype=np.float32)
+191:         return _rust_pairwise_cosine(mat, threshold)
+192: 
+193:     n = len(embeddings)
+194:     if n < 2:
+195:         return []
+196: 
+197:     if _HAS_NUMPY:
+198:         mat = np.asarray(embeddings, dtype=np.float32)
+199:         norms = np.linalg.norm(mat, axis=1)
+200:         results = []
+201:         for i in range(n):
+202:             if norms[i] == 0.0:
+203:                 continue
+204:             for j in range(i + 1, n):
+205:                 if norms[j] == 0.0:
+206:                     continue
+207:                 sim = float(np.dot(mat[i], mat[j]) / (norms[i] * norms[j]))
+208:                 if sim >= threshold:
+209:                     results.append((i, j, sim))
+210:         return results
+211: 
+212:     # Pure-Python fallback
+213:     results = []
+214:     for i in range(n):
+215:         for j in range(i + 1, n):
+216:             sim = cosine_similarity(embeddings[i], embeddings[j])
+217:             if sim >= threshold:
+218:                 results.append((i, j, sim))
+219:     return results
+220: 
 221: 
-222: 
-223: async def optimize_postgresql(engine) -> dict:
-224:     """Create optimal PostgreSQL indexes and run ANALYZE.
+222: # ---------------------------------------------------------------------------
+223: # Levenshtein similarity
+224: # ---------------------------------------------------------------------------
 225: 
-226:     Executes raw DDL against the provided SQLAlchemy async engine,
-227:     so that callers don't need to provide a raw connection URL.
-228: 
-229:     Args:
-230:         engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
-231: 
-232:     Returns:
-233:         Dict with ``indexes_created``, ``tables_analyzed``, and ``errors``.
-234:     """
-235:     from sqlalchemy import text
-236: 
-237:     result = {
-238:         "indexes_created": 0,
-239:         "tables_analyzed": 0,
-240:         "errors": [],
-241:     }
-242: 
-243:     async with engine.begin() as conn:
-244:         for idx in PG_INDEXES:
-245:             try:
-246:                 logger.debug(f"Creating index {idx['name']} ({idx['purpose']})")
-247:                 await conn.execute(text(idx["sql"]))
-248:                 result["indexes_created"] += 1
-249:             except Exception as e:
-250:                 msg = f"Index {idx['name']}: {e}"
-251:                 result["errors"].append(msg)
-252:                 logger.warning(msg)
+226: 
+227: def levenshtein_similarity(s1: str, s2: str) -> float:
+228:     """Normalized Levenshtein similarity (1.0 = identical).
+229: 
+230:     Uses Rust > rapidfuzz > pure Python.
+231:     """
+232:     if _HAS_RUST:
+233:         return _rust_levenshtein(s1, s2)
+234: 
+235:     a, b = s1.lower(), s2.lower()
+236:     if a == b:
+237:         return 1.0
+238:     if not a or not b:
+239:         return 0.0
+240: 
+241:     if _HAS_RAPIDFUZZ:
+242:         return _rf_lev.normalized_similarity(a, b)
+243: 
+244:     # Pure-Python single-row DP fallback
+245:     la, lb = len(a), len(b)
+246:     prev = list(range(lb + 1))
+247:     for i in range(1, la + 1):
+248:         curr = [i] + [0] * lb
+249:         for j in range(1, lb + 1):
+250:             cost = 0 if a[i - 1] == b[j - 1] else 1
+251:             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+252:         prev = curr
 253: 
-254:         for table in PG_ANALYZE_TABLES:
-255:             try:
-256:                 logger.debug(f"Analyzing table {table}")
-257:                 await conn.execute(text(f"ANALYZE {table}"))
-258:                 result["tables_analyzed"] += 1
-259:             except Exception as e:
-260:                 msg = f"ANALYZE {table}: {e}"
-261:                 result["errors"].append(msg)
-262:                 logger.warning(msg)
-263: 
-264:     return result
+254:     distance = prev[lb]
+255:     return 1.0 - (distance / max(la, lb))
+256: 
+257: 
+258: # ---------------------------------------------------------------------------
+259: # Sequence matching (SequenceMatcher replacement)
+260: # ---------------------------------------------------------------------------
+261: 
+262: 
+263: def sequence_match_ratio(s1: str, s2: str) -> float:
+264:     """Compute sequence match ratio between two strings.
 265: 
-266: 
-267: async def optimize_neo4j(driver, *, database: str = "neo4j") -> dict:
-268:     """Create optimal Neo4j indexes and constraints.
-269: 
-270:     Args:
-271:         driver: An ``neo4j.AsyncDriver`` instance.
-272:         database: Neo4j database name.
+266:     Uses Rust > rapidfuzz > difflib.
+267:     """
+268:     if _HAS_RUST:
+269:         return _rust_sequence_match(s1, s2)
+270: 
+271:     if _HAS_RAPIDFUZZ:
+272:         return _rf_ratio(s1, s2) / 100.0
 273: 
-274:     Returns:
-275:         Dict with ``indexes_created`` and ``errors``.
-276:     """
-277:     result = {
-278:         "indexes_created": 0,
-279:         "errors": [],
-280:     }
-281: 
-282:     async with driver.session(database=database) as session:
-283:         for idx in NEO4J_INDEXES:
-284:             try:
-285:                 logger.debug(f"Creating Neo4j index {idx['name']} ({idx['purpose']})")
-286:                 await session.run(idx["cypher"])
-287:                 result["indexes_created"] += 1
-288:             except Exception as e:
-289:                 msg = f"Neo4j index {idx['name']}: {e}"
-290:                 result["errors"].append(msg)
-291:                 logger.warning(msg)
-292: 
-293:     return result
-294: 
-295: 
-296: async def optimize_storage(coordinator) -> dict:
-297:     """Run all optimizations against a connected StorageCoordinator.
-298: 
-299:     This is the main entry point for callers that already have a
-300:     ``StorageCoordinator`` (e.g. via ``MemoryLake.storage``).
-301: 
-302:     Args:
-303:         coordinator: A connected ``StorageCoordinator`` instance.
+274:     from difflib import SequenceMatcher
+275: 
+276:     return SequenceMatcher(None, s1, s2).ratio()
+277: 
+278: 
+279: # ---------------------------------------------------------------------------
+280: # Batch string operations
+281: # ---------------------------------------------------------------------------
+282: 
+283: 
+284: def batch_levenshtein(
+285:     query: str,
+286:     candidates: list[str],
+287:     threshold: float = 0.0,
+288: ) -> list[tuple[int, float]]:
+289:     """Score query against all candidates using Levenshtein similarity.
+290: 
+291:     Returns (index, similarity) pairs above threshold, sorted descending.
+292:     Uses Rust parallelism when available, otherwise falls back to serial loop.
+293:     """
+294:     if _HAS_RUST:
+295:         return _rust_batch_levenshtein(query, candidates, threshold)
+296: 
+297:     results = []
+298:     for i, cand in enumerate(candidates):
+299:         s = levenshtein_similarity(query, cand)
+300:         if s >= threshold:
+301:             results.append((i, s))
+302:     results.sort(key=lambda x: x[1], reverse=True)
+303:     return results
 304: 
-305:     Returns:
-306:         Combined results: ``{"postgresql": {...}, "neo4j": {...}}``.
-307:     """
-308:     results: dict[str, dict | None] = {"postgresql": None, "neo4j": None}
-309: 
-310:     # Optimize PostgreSQL / pgvector (they share the same engine)
-311:     backend = coordinator.vector or coordinator.relational
-312:     if backend is not None:
-313:         engine = getattr(backend, "_engine", None)
-314:         if engine is not None:
-315:             results["postgresql"] = await optimize_postgresql(engine)
-316:         else:
-317:             logger.warning("No SQLAlchemy engine found on backend; skipping PostgreSQL optimization")
+305: 
+306: def batch_sequence_match(
+307:     query: str,
+308:     candidates: list[str],
+309:     threshold: float = 0.0,
+310: ) -> list[tuple[int, float]]:
+311:     """Score query against all candidates using sequence match ratio.
+312: 
+313:     Returns (index, similarity) pairs above threshold, sorted descending.
+314:     Uses Rust parallelism when available, otherwise falls back to serial loop.
+315:     """
+316:     if _HAS_RUST:
+317:         return _rust_batch_sequence_match(query, candidates, threshold)
 318: 
-319:     # Optimize Neo4j
-320:     graph = coordinator.graph
-321:     if graph is not None:
-322:         driver = getattr(graph, "_driver", None)
-323:         database = getattr(graph, "_database", "neo4j")
-324:         if driver is not None:
-325:             results["neo4j"] = await optimize_neo4j(driver, database=database)
-326:         else:
-327:             logger.warning("No Neo4j driver found on backend; skipping Neo4j optimization")
-328: 
-329:     return results
+319:     results = []
+320:     for i, cand in enumerate(candidates):
+321:         s = sequence_match_ratio(query, cand)
+322:         if s >= threshold:
+323:             results.append((i, s))
+324:     results.sort(key=lambda x: x[1], reverse=True)
+325:     return results
+326: 
+327: 
+328: # ---------------------------------------------------------------------------
+329: # PageRank
+330: # ---------------------------------------------------------------------------
+331: 
+332: 
+333: def pagerank(
+334:     n: int,
+335:     edges: list[tuple[int, int, float]],
+336:     damping: float = 0.85,
+337:     max_iter: int = 100,
+338:     tol: float = 1e-6,
+339: ) -> list[float]:
+340:     """Compute PageRank scores on a weighted directed graph.
+341: 
+342:     Args:
+343:         n: Number of nodes (IDs are 0..n-1).
+344:         edges: (src, dst, weight) triples.
+345:         damping: Damping factor (typically 0.85).
+346:         max_iter: Maximum iterations.
+347:         tol: Convergence threshold.
+348: 
+349:     Returns:
+350:         List of length n with PageRank scores indexed by node ID.
+351:     """
+352:     if _HAS_RUST:
+353:         return _rust_pagerank(n, edges, damping, max_iter, tol)
+354: 
+355:     # Pure-Python fallback
+356:     if n == 0:
+357:         return []
+358: 
+359:     incoming: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+360:     out_degree: list[float] = [0.0] * n
+361: 
+362:     for src, dst, weight in edges:
+363:         if 0 <= src < n and 0 <= dst < n:
+364:             incoming[dst].append((src, weight))
+365:             out_degree[src] += weight
+366: 
+367:     base = (1.0 - damping) / n
+368:     scores = [1.0 / n] * n
+369: 
+370:     for _ in range(max_iter):
+371:         new_scores = [0.0] * n
+372:         diff = 0.0
+373: 
+374:         for node in range(n):
+375:             contrib = 0.0
+376:             for src, weight in incoming[node]:
+377:                 if out_degree[src] > 0:
+378:                     contrib += scores[src] * weight / out_degree[src]
+379:             new_score = base + damping * contrib
+380:             diff += abs(new_score - scores[node])
+381:             new_scores[node] = new_score
+382: 
+383:         scores = new_scores
+384:         if diff < tol:
+385:             break
+386: 
+387:     return scores
+388: 
+389: 
+390: def build_chunk_edges(
+391:     n_chunks: int,
+392:     keyword_chunk_ids: list[list[int]],
+393:     idf_scores: list[float],
+394: ) -> list[tuple[int, int, float]]:
+395:     """Build chunk-to-chunk edges from keyword co-occurrence.
+396: 
+397:     For each keyword, creates bidirectional edges among all chunks sharing
+398:     that keyword, weighted by the keyword's IDF score.
+399: 
+400:     Args:
+401:         n_chunks: Total number of chunks.
+402:         keyword_chunk_ids: For each keyword, the list of chunk indices containing it.
+403:         idf_scores: IDF score per keyword (parallel to keyword_chunk_ids).
+404: 
+405:     Returns:
+406:         Flat edge list of (src, dst, weight) triples (bidirectional).
+407:     """
+408:     if _HAS_RUST:
+409:         return _rust_build_chunk_edges(n_chunks, keyword_chunk_ids, idf_scores)
+410: 
+411:     # Pure-Python fallback
+412:     edges: list[tuple[int, int, float]] = []
+413:     for keyword_idx, chunk_ids in enumerate(keyword_chunk_ids):
+414:         weight = idf_scores[keyword_idx] if keyword_idx < len(idf_scores) else 0.0
+415:         for i in range(len(chunk_ids)):
+416:             cid1 = chunk_ids[i]
+417:             if cid1 >= n_chunks:
+418:                 continue
+419:             for j in range(i + 1, len(chunk_ids)):
+420:                 cid2 = chunk_ids[j]
+421:                 if cid2 >= n_chunks:
+422:                     continue
+423:                 edges.append((cid1, cid2, weight))
+424:                 edges.append((cid2, cid1, weight))
+425:     return edges
+426: 
+427: 
+428: # ---------------------------------------------------------------------------
+429: # Keyword extraction
+430: # ---------------------------------------------------------------------------
+431: 
+432: _SKELETON_STOPWORDS = frozenset(
+433:     {
+434:         "a",
+435:         "an",
+436:         "the",
+437:         "and",
+438:         "or",
+439:         "but",
+440:         "in",
+441:         "on",
+442:         "at",
+443:         "to",
+444:         "for",
+445:         "of",
+446:         "with",
+447:         "by",
+448:         "from",
+449:         "as",
+450:         "is",
+451:         "was",
+452:         "are",
+453:         "were",
+454:         "been",
+455:         "be",
+456:         "have",
+457:         "has",
+458:         "had",
+459:         "do",
+460:         "does",
+461:         "did",
+462:         "will",
+463:         "would",
+464:         "could",
+465:         "should",
+466:         "may",
+467:         "might",
+468:         "must",
+469:         "that",
+470:         "this",
+471:         "these",
+472:         "those",
+473:         "it",
+474:         "its",
+475:         "he",
+476:         "she",
+477:         "they",
+478:         "them",
+479:         "his",
+480:         "her",
+481:         "their",
+482:         "we",
+483:         "our",
+484:         "you",
+485:         "your",
+486:         "i",
+487:         "me",
+488:         "my",
+489:         "what",
+490:         "which",
+491:         "who",
+492:         "whom",
+493:         "when",
+494:         "where",
+495:         "why",
+496:         "how",
+497:         "all",
+498:         "each",
+499:         "every",
+500:         "both",
+501:         "few",
+502:         "more",
+503:         "most",
+504:         "other",
+505:         "some",
+506:         "such",
+507:         "no",
+508:         "not",
+509:         "only",
+510:         "own",
+511:         "same",
+512:         "so",
+513:         "than",
+514:         "too",
+515:         "very",
+516:         "just",
+517:         "can",
+518:     }
+519: )
+520: 
+521: _KEYWORD_RE = re.compile(r"\b[a-zA-Z]{3,}\b")
+522: 
+523: 
+524: def extract_keywords(content: str) -> list[str]:
+525:     """Extract unique keywords from content.
+526: 
+527:     Tokenises with ``\\b[a-zA-Z]{3,}\\b``, removes stopwords, deduplicates.
+528:     Uses Rust when available, otherwise pure Python.
+529:     """
+530:     if _HAS_RUST:
+531:         return _rust_extract_keywords(content)
+532: 
+533:     lower = content.lower()
+534:     seen: set[str] = set()
+535:     keywords: list[str] = []
+536:     for m in _KEYWORD_RE.finditer(lower):
+537:         word = m.group()
+538:         if word not in _SKELETON_STOPWORDS and word not in seen:
+539:             seen.add(word)
+540:             keywords.append(word)
+541:     return keywords
+542: 
+543: 
+544: def extract_keywords_batch(contents: list[str]) -> list[list[str]]:
+545:     """Batch keyword extraction.
+546: 
+547:     Uses Rust (rayon parallel) when available, otherwise serial Python.
+548:     """
+549:     if _HAS_RUST:
+550:         return _rust_extract_keywords_batch(contents)
+551: 
+552:     return [extract_keywords(c) for c in contents]
+553: 
+554: 
+555: # ---------------------------------------------------------------------------
+556: # Reciprocal Rank Fusion (low-level, string-ID based)
+557: # ---------------------------------------------------------------------------
+558: 
+559: 
+560: def reciprocal_rank_fusion(
+561:     ranked_lists: list[list[str]],
+562:     k: int = 60,
+563: ) -> list[tuple[str, float]]:
+564:     """Basic Reciprocal Rank Fusion over string ID lists.
+565: 
+566:     For each list the score contribution is ``1 / (k + rank)`` where rank
+567:     is 1-indexed.  Returns ``(id, score)`` pairs sorted descending.
+568: 
+569:     Note: The higher-level ``engines.vectorcypher.fusion`` module wraps this
+570:     with rich FusedResult metadata tracking. Use this for raw score computation.
+571:     """
+572:     if _HAS_RUST:
+573:         return _rust_rrf(ranked_lists, k)
+574: 
+575:     scores: dict[str, float] = {}
+576:     for item_list in ranked_lists:
+577:         for rank_0, item_id in enumerate(item_list):
+578:             rank = rank_0 + 1
+579:             scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (k + rank)
+580: 
+581:     results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+582:     return results
+583: 
+584: 
+585: def weighted_rrf(
+586:     ranked_lists: list[tuple[float, list[str]]],
+587:     k: int = 60,
+588: ) -> list[tuple[str, float]]:
+589:     """Weighted Reciprocal Rank Fusion.
+590: 
+591:     Each entry is ``(weight, [id, ...])``.  Score contribution per item:
+592:     ``weight / (k + rank)`` where rank is 1-indexed.
+593:     Returns ``(id, score)`` pairs sorted descending.
+594:     """
+595:     if _HAS_RUST:
+596:         return _rust_weighted_rrf(ranked_lists, k)
+597: 
+598:     scores: dict[str, float] = {}
+599:     for weight, item_list in ranked_lists:
+600:         for rank_0, item_id in enumerate(item_list):
+601:             scores[item_id] = scores.get(item_id, 0.0) + weight / (k + rank_0 + 1)
+602: 
+603:     results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+604:     return results
+605: 
+606: 
+607: def normalize_scores(scores: list[float]) -> list[float]:
+608:     """Min-max normalise a list of scores to ``[0, 1]``.
+609: 
+610:     If all scores are identical, returns a list of ``1.0``.
+611:     """
+612:     if _HAS_RUST:
+613:         return _rust_normalize_scores(scores)
+614: 
+615:     if not scores:
+616:         return scores
+617: 
+618:     min_s = min(scores)
+619:     max_s = max(scores)
+620:     if abs(max_s - min_s) < 1e-15:
+621:         return [1.0] * len(scores)
+622:     rng = max_s - min_s
+623:     return [(s - min_s) / rng for s in scores]
+624: 
+625: 
+626: # ---------------------------------------------------------------------------
+627: # Entity resolution (batch)
+628: # ---------------------------------------------------------------------------
+629: 
+630: 
+631: def resolve_entities_batch(
+632:     new_names: list[str],
+633:     existing_names: list[str],
+634:     existing_aliases: list[list[str]],
+635:     threshold: float = 0.85,
+636: ) -> list[tuple[int, float, str] | None]:
+637:     """Resolve a batch of new entity names against existing entities.
+638: 
+639:     For each new name, attempts matching in order:
+640:     1. Exact match — case-insensitive against existing names
+641:     2. Alias match — case-insensitive against each entity's aliases
+642:     3. Fuzzy match — normalized Levenshtein above *threshold*
+643: 
+644:     Returns a list parallel to *new_names*. Each element is either
+645:     ``(existing_index, score, match_type)`` or ``None``.
+646:     """
+647:     if _HAS_RUST:
+648:         return _rust_resolve_entities_batch(new_names, existing_names, existing_aliases, threshold)
+649: 
+650:     # Pure-Python fallback
+651:     existing_lower = [n.lower() for n in existing_names]
+652:     aliases_lower = [[a.lower() for a in aliases] for aliases in existing_aliases]
+653: 
+654:     results: list[tuple[int, float, str] | None] = []
+655:     for new_name in new_names:
+656:         query = new_name.lower()
+657:         matched = False
+658: 
+659:         # Step 1: Exact name match
+660:         for idx, existing in enumerate(existing_lower):
+661:             if query == existing:
+662:                 results.append((idx, 1.0, "exact"))
+663:                 matched = True
+664:                 break
+665: 
+666:         if matched:
+667:             continue
+668: 
+669:         # Step 2: Alias match
+670:         for idx, aliases in enumerate(aliases_lower):
+671:             for alias in aliases:
+672:                 if query == alias:
+673:                     results.append((idx, 1.0, "alias"))
+674:                     matched = True
+675:                     break
+676:             if matched:
+677:                 break
+678: 
+679:         if matched:
+680:             continue
+681: 
+682:         # Step 3: Fuzzy match
+683:         best_idx = None
+684:         best_score = threshold
+685:         for idx, existing in enumerate(existing_lower):
+686:             if not query or not existing:
+687:                 continue
+688:             sim = levenshtein_similarity(query, existing)
+689:             if sim > best_score:
+690:                 best_score = sim
+691:                 best_idx = idx
+692: 
+693:         if best_idx is not None:
+694:             results.append((best_idx, best_score, "fuzzy"))
+695:         else:
+696:             results.append(None)
+697: 
+698:     return results
 ````
 
 ## File: src/khora/logging_config.py
@@ -56145,7 +56145,7 @@ README.md
 ````toml
   1: [project]
   2: name = "khora"
-  3: version = "0.1.6"
+  3: version = "0.2.0"
   4: description = "Khora is Memory Lake"
   5: readme = "README.md"
   6: authors = [
@@ -56342,6 +56342,34 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-02-07 13:13:41 +0100
+**Message:** feat: add Rust acceleration layer (khora-accel) for CPU-intensive operations
+
+**Files:**
+- Makefile
+- REPOMIX.md
+- docs/RUST_ACCELERATION_PLAN.md
+- pyproject.toml
+- rust/Cargo.lock
+- rust/Cargo.toml
+- rust/khora-accel/Cargo.toml
+- rust/khora-accel/benches/bm25_bench.rs
+- rust/khora-accel/benches/cosine_bench.rs
+- rust/khora-accel/benches/pagerank_bench.rs
+- rust/khora-accel/pyproject.toml
+- rust/khora-accel/src/bm25.rs
+- rust/khora-accel/src/cosine.rs
+- rust/khora-accel/src/entity_resolution.rs
+- rust/khora-accel/src/keyword_extract.rs
+- rust/khora-accel/src/lib.rs
+- rust/khora-accel/src/pagerank.rs
+- rust/khora-accel/src/rrf.rs
+- rust/khora-accel/src/string_sim.rs
+- rust/khora-accel/src/utils.rs
+- src/khora/_accel.py
+- tests/unit/test_accel.py
+- uv.lock
 
 ## Commit: 2026-02-07 11:30:45 +0100
 **Message:** chore: improve upsert result mismatch diagnostics
@@ -56583,16 +56611,3 @@ README.md
 - tests/unit/engines/test_temporal_edges.py
 - tests/unit/engines/test_time_hierarchy.py
 - uv.lock
-
-## Commit: 2026-02-05 19:26:05 +0100
-**Message:** feat: implement VectorCypher engine with hybrid vector+graph retrieval
-
-**Files:**
-- pyproject.toml
-- src/khora/engines/__init__.py
-- src/khora/engines/vectorcypher/__init__.py
-- src/khora/engines/vectorcypher/dual_nodes.py
-- src/khora/engines/vectorcypher/engine.py
-- src/khora/engines/vectorcypher/fusion.py
-- src/khora/engines/vectorcypher/retriever.py
-- src/khora/engines/vectorcypher/router.py
