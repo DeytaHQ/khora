@@ -48713,644 +48713,653 @@ README.md
  454:             async with driver.session(database=self._database) as session:
  455:                 records = await session.execute_write(_upsert_batch)
  456: 
- 457:             # Build result mapping
+ 457:             # Build result mapping - each input entity should get exactly one result
  458:             input_id_to_entity = {str(e.id): e for e in batch}
- 459:             for record in records:
- 460:                 entity = input_id_to_entity.get(record["input_id"])
- 461:                 if entity is not None:
- 462:                     # Sync entity ID with what Neo4j actually has
- 463:                     neo4j_id = record["id"]
- 464:                     if neo4j_id != record["input_id"]:
- 465:                         entity.id = UUID(neo4j_id)
- 466:                         logger.debug(f"Entity '{entity.name}' ID synced: {record['input_id']} -> {neo4j_id}")
- 467:                     results.append((entity, record["is_new"]))
- 468: 
- 469:         logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
- 470:         return results
- 471: 
- 472:     async def create_relationships_batch(
- 473:         self,
- 474:         relationships: list[Relationship],
- 475:         *,
- 476:         batch_size: int = 50,
- 477:     ) -> int:
- 478:         """Batch create relationships using UNWIND with parallel type processing.
- 479: 
- 480:         Relationships are grouped by type and each type group is processed
- 481:         in parallel using separate Neo4j sessions for better throughput.
- 482:         """
- 483:         if not relationships:
- 484:             return 0
- 485: 
- 486:         import asyncio
- 487: 
- 488:         driver = self._get_driver()
- 489: 
- 490:         # Group by relationship type (required for dynamic rel type in Cypher)
- 491:         type_groups: dict[str, list[Relationship]] = {}
- 492:         for rel in relationships:
- 493:             rel_type = _sanitize_neo4j_label(
- 494:                 rel.relationship_type.value
- 495:                 if isinstance(rel.relationship_type, RelationshipType)
- 496:                 else rel.relationship_type
- 497:             )
- 498:             type_groups.setdefault(rel_type, []).append(rel)
- 499: 
- 500:         async def _process_type_group(rel_type: str, rels: list[Relationship]) -> int:
- 501:             """Process all relationships of a single type in batches."""
- 502:             type_created = 0
- 503:             for start in range(0, len(rels), batch_size):
- 504:                 batch = rels[start : start + batch_size]
- 505:                 rows = [
- 506:                     {
- 507:                         "id": str(r.id),
- 508:                         "namespace_id": str(r.namespace_id),
- 509:                         "source_id": str(r.source_entity_id),
- 510:                         "target_id": str(r.target_entity_id),
- 511:                         "description": r.description,
- 512:                         "properties": _serialize_dict(r.properties),
- 513:                         "source_document_ids": [str(d) for d in r.source_document_ids],
- 514:                         "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
- 515:                         "valid_from": r.valid_from.isoformat() if r.valid_from else None,
- 516:                         "valid_until": r.valid_until.isoformat() if r.valid_until else None,
- 517:                         "confidence": r.confidence,
- 518:                         "weight": r.weight,
- 519:                         "metadata": _serialize_dict(r.metadata),
- 520:                         "created_at": r.created_at.isoformat(),
- 521:                         "updated_at": r.updated_at.isoformat(),
- 522:                     }
- 523:                     for r in batch
- 524:                 ]
- 525: 
- 526:                 async def _create_batch(tx: AsyncManagedTransaction) -> int:
- 527:                     query = f"""
- 528:                     UNWIND $rows AS row
- 529:                     MATCH (source:Entity {{id: row.source_id}})
- 530:                     MATCH (target:Entity {{id: row.target_id}})
- 531:                     CREATE (source)-[r:{rel_type} {{
- 532:                         id: row.id,
- 533:                         namespace_id: row.namespace_id,
- 534:                         description: row.description,
- 535:                         properties: row.properties,
- 536:                         source_document_ids: row.source_document_ids,
- 537:                         source_chunk_ids: row.source_chunk_ids,
- 538:                         valid_from: row.valid_from,
- 539:                         valid_until: row.valid_until,
- 540:                         confidence: row.confidence,
- 541:                         weight: row.weight,
- 542:                         metadata: row.metadata,
- 543:                         created_at: row.created_at,
- 544:                         updated_at: row.updated_at
- 545:                     }}]->(target)
- 546:                     RETURN count(r) AS created
- 547:                     """
- 548:                     result = await tx.run(query, rows=rows)
- 549:                     record = await result.single()
- 550:                     return record["created"] if record else 0
- 551: 
- 552:                 # Each type group uses its own session for parallel execution
- 553:                 async with driver.session(database=self._database) as session:
- 554:                     created = await session.execute_write(_create_batch)
- 555:                     type_created += created
- 556: 
- 557:             return type_created
- 558: 
- 559:         # Process all relationship type groups in parallel
- 560:         results = await asyncio.gather(*[_process_type_group(rel_type, rels) for rel_type, rels in type_groups.items()])
- 561:         total_created = sum(results)
- 562: 
- 563:         logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
- 564:         return total_created
+ 459:             logger.debug(f"Neo4j batch: {len(batch)} entities, {len(records)} records returned")
+ 460: 
+ 461:             for record in records:
+ 462:                 input_id = record["input_id"]
+ 463:                 entity = input_id_to_entity.get(input_id)
+ 464:                 if entity is not None:
+ 465:                     # Sync entity ID with what Neo4j actually has (may differ on MERGE match)
+ 466:                     neo4j_id = record["id"]
+ 467:                     if neo4j_id != input_id:
+ 468:                         entity.id = UUID(neo4j_id)
+ 469:                         logger.debug(f"Entity '{entity.name}' ID synced: {input_id} -> {neo4j_id}")
+ 470:                     results.append((entity, record["is_new"]))
+ 471:                 else:
+ 472:                     # This can happen if input has duplicate IDs (shouldn't normally occur)
+ 473:                     logger.warning(
+ 474:                         f"Neo4j returned input_id '{input_id}' not in batch. "
+ 475:                         f"Batch IDs: {list(input_id_to_entity.keys())[:5]}..."
+ 476:                     )
+ 477: 
+ 478:         logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
+ 479:         return results
+ 480: 
+ 481:     async def create_relationships_batch(
+ 482:         self,
+ 483:         relationships: list[Relationship],
+ 484:         *,
+ 485:         batch_size: int = 50,
+ 486:     ) -> int:
+ 487:         """Batch create relationships using UNWIND with parallel type processing.
+ 488: 
+ 489:         Relationships are grouped by type and each type group is processed
+ 490:         in parallel using separate Neo4j sessions for better throughput.
+ 491:         """
+ 492:         if not relationships:
+ 493:             return 0
+ 494: 
+ 495:         import asyncio
+ 496: 
+ 497:         driver = self._get_driver()
+ 498: 
+ 499:         # Group by relationship type (required for dynamic rel type in Cypher)
+ 500:         type_groups: dict[str, list[Relationship]] = {}
+ 501:         for rel in relationships:
+ 502:             rel_type = _sanitize_neo4j_label(
+ 503:                 rel.relationship_type.value
+ 504:                 if isinstance(rel.relationship_type, RelationshipType)
+ 505:                 else rel.relationship_type
+ 506:             )
+ 507:             type_groups.setdefault(rel_type, []).append(rel)
+ 508: 
+ 509:         async def _process_type_group(rel_type: str, rels: list[Relationship]) -> int:
+ 510:             """Process all relationships of a single type in batches."""
+ 511:             type_created = 0
+ 512:             for start in range(0, len(rels), batch_size):
+ 513:                 batch = rels[start : start + batch_size]
+ 514:                 rows = [
+ 515:                     {
+ 516:                         "id": str(r.id),
+ 517:                         "namespace_id": str(r.namespace_id),
+ 518:                         "source_id": str(r.source_entity_id),
+ 519:                         "target_id": str(r.target_entity_id),
+ 520:                         "description": r.description,
+ 521:                         "properties": _serialize_dict(r.properties),
+ 522:                         "source_document_ids": [str(d) for d in r.source_document_ids],
+ 523:                         "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
+ 524:                         "valid_from": r.valid_from.isoformat() if r.valid_from else None,
+ 525:                         "valid_until": r.valid_until.isoformat() if r.valid_until else None,
+ 526:                         "confidence": r.confidence,
+ 527:                         "weight": r.weight,
+ 528:                         "metadata": _serialize_dict(r.metadata),
+ 529:                         "created_at": r.created_at.isoformat(),
+ 530:                         "updated_at": r.updated_at.isoformat(),
+ 531:                     }
+ 532:                     for r in batch
+ 533:                 ]
+ 534: 
+ 535:                 async def _create_batch(tx: AsyncManagedTransaction) -> int:
+ 536:                     query = f"""
+ 537:                     UNWIND $rows AS row
+ 538:                     MATCH (source:Entity {{id: row.source_id}})
+ 539:                     MATCH (target:Entity {{id: row.target_id}})
+ 540:                     CREATE (source)-[r:{rel_type} {{
+ 541:                         id: row.id,
+ 542:                         namespace_id: row.namespace_id,
+ 543:                         description: row.description,
+ 544:                         properties: row.properties,
+ 545:                         source_document_ids: row.source_document_ids,
+ 546:                         source_chunk_ids: row.source_chunk_ids,
+ 547:                         valid_from: row.valid_from,
+ 548:                         valid_until: row.valid_until,
+ 549:                         confidence: row.confidence,
+ 550:                         weight: row.weight,
+ 551:                         metadata: row.metadata,
+ 552:                         created_at: row.created_at,
+ 553:                         updated_at: row.updated_at
+ 554:                     }}]->(target)
+ 555:                     RETURN count(r) AS created
+ 556:                     """
+ 557:                     result = await tx.run(query, rows=rows)
+ 558:                     record = await result.single()
+ 559:                     return record["created"] if record else 0
+ 560: 
+ 561:                 # Each type group uses its own session for parallel execution
+ 562:                 async with driver.session(database=self._database) as session:
+ 563:                     created = await session.execute_write(_create_batch)
+ 564:                     type_created += created
  565: 
- 566:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
- 567:         """Convert a Neo4j node to a domain Entity."""
- 568:         return Entity(
- 569:             id=UUID(node["id"]),
- 570:             namespace_id=UUID(node["namespace_id"]),
- 571:             name=node["name"],
- 572:             entity_type=(
- 573:                 EntityType(node["entity_type"])
- 574:                 if node["entity_type"] in EntityType.__members__
- 575:                 else node["entity_type"]
- 576:             ),
- 577:             description=node.get("description", ""),
- 578:             attributes=_deserialize_dict(node.get("attributes")),
- 579:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
- 580:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
- 581:             mention_count=node.get("mention_count", 1),
- 582:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
- 583:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
- 584:             confidence=node.get("confidence", 1.0),
- 585:             metadata=_deserialize_dict(node.get("metadata")),
- 586:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
- 587:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
- 588:         )
- 589: 
- 590:     # =========================================================================
- 591:     # Relationship operations
- 592:     # =========================================================================
- 593: 
- 594:     async def create_relationship(self, relationship: Relationship) -> Relationship:
- 595:         """Create a relationship between entities."""
- 596:         driver = self._get_driver()
- 597: 
- 598:         rel_type = _sanitize_neo4j_label(
- 599:             relationship.relationship_type.value
- 600:             if isinstance(relationship.relationship_type, RelationshipType)
- 601:             else relationship.relationship_type
- 602:         )
- 603: 
- 604:         async def _create(tx: AsyncManagedTransaction) -> None:
- 605:             # Use dynamic relationship type
- 606:             query = f"""
- 607:             MATCH (source:Entity {{id: $source_id}})
- 608:             MATCH (target:Entity {{id: $target_id}})
- 609:             CREATE (source)-[r:{rel_type} {{
- 610:                 id: $id,
- 611:                 namespace_id: $namespace_id,
- 612:                 description: $description,
- 613:                 properties: $properties,
- 614:                 source_document_ids: $source_document_ids,
- 615:                 source_chunk_ids: $source_chunk_ids,
- 616:                 valid_from: $valid_from,
- 617:                 valid_until: $valid_until,
- 618:                 confidence: $confidence,
- 619:                 weight: $weight,
- 620:                 metadata: $metadata,
- 621:                 created_at: $created_at,
- 622:                 updated_at: $updated_at
- 623:             }}]->(target)
- 624:             """
- 625:             await tx.run(
- 626:                 query,
- 627:                 source_id=str(relationship.source_entity_id),
- 628:                 target_id=str(relationship.target_entity_id),
- 629:                 id=str(relationship.id),
- 630:                 namespace_id=str(relationship.namespace_id),
- 631:                 description=relationship.description,
- 632:                 properties=_serialize_dict(relationship.properties),
- 633:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
- 634:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
- 635:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
- 636:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
- 637:                 confidence=relationship.confidence,
- 638:                 weight=relationship.weight,
- 639:                 metadata=_serialize_dict(relationship.metadata),
- 640:                 created_at=relationship.created_at.isoformat(),
- 641:                 updated_at=relationship.updated_at.isoformat(),
- 642:             )
- 643: 
- 644:         async with driver.session(database=self._database) as session:
- 645:             await session.execute_write(_create)
- 646: 
- 647:         return relationship
- 648: 
- 649:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
- 650:         """Get a relationship by ID."""
- 651:         driver = self._get_driver()
+ 566:             return type_created
+ 567: 
+ 568:         # Process all relationship type groups in parallel
+ 569:         results = await asyncio.gather(*[_process_type_group(rel_type, rels) for rel_type, rels in type_groups.items()])
+ 570:         total_created = sum(results)
+ 571: 
+ 572:         logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
+ 573:         return total_created
+ 574: 
+ 575:     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
+ 576:         """Convert a Neo4j node to a domain Entity."""
+ 577:         return Entity(
+ 578:             id=UUID(node["id"]),
+ 579:             namespace_id=UUID(node["namespace_id"]),
+ 580:             name=node["name"],
+ 581:             entity_type=(
+ 582:                 EntityType(node["entity_type"])
+ 583:                 if node["entity_type"] in EntityType.__members__
+ 584:                 else node["entity_type"]
+ 585:             ),
+ 586:             description=node.get("description", ""),
+ 587:             attributes=_deserialize_dict(node.get("attributes")),
+ 588:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+ 589:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+ 590:             mention_count=node.get("mention_count", 1),
+ 591:             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
+ 592:             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
+ 593:             confidence=node.get("confidence", 1.0),
+ 594:             metadata=_deserialize_dict(node.get("metadata")),
+ 595:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+ 596:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+ 597:         )
+ 598: 
+ 599:     # =========================================================================
+ 600:     # Relationship operations
+ 601:     # =========================================================================
+ 602: 
+ 603:     async def create_relationship(self, relationship: Relationship) -> Relationship:
+ 604:         """Create a relationship between entities."""
+ 605:         driver = self._get_driver()
+ 606: 
+ 607:         rel_type = _sanitize_neo4j_label(
+ 608:             relationship.relationship_type.value
+ 609:             if isinstance(relationship.relationship_type, RelationshipType)
+ 610:             else relationship.relationship_type
+ 611:         )
+ 612: 
+ 613:         async def _create(tx: AsyncManagedTransaction) -> None:
+ 614:             # Use dynamic relationship type
+ 615:             query = f"""
+ 616:             MATCH (source:Entity {{id: $source_id}})
+ 617:             MATCH (target:Entity {{id: $target_id}})
+ 618:             CREATE (source)-[r:{rel_type} {{
+ 619:                 id: $id,
+ 620:                 namespace_id: $namespace_id,
+ 621:                 description: $description,
+ 622:                 properties: $properties,
+ 623:                 source_document_ids: $source_document_ids,
+ 624:                 source_chunk_ids: $source_chunk_ids,
+ 625:                 valid_from: $valid_from,
+ 626:                 valid_until: $valid_until,
+ 627:                 confidence: $confidence,
+ 628:                 weight: $weight,
+ 629:                 metadata: $metadata,
+ 630:                 created_at: $created_at,
+ 631:                 updated_at: $updated_at
+ 632:             }}]->(target)
+ 633:             """
+ 634:             await tx.run(
+ 635:                 query,
+ 636:                 source_id=str(relationship.source_entity_id),
+ 637:                 target_id=str(relationship.target_entity_id),
+ 638:                 id=str(relationship.id),
+ 639:                 namespace_id=str(relationship.namespace_id),
+ 640:                 description=relationship.description,
+ 641:                 properties=_serialize_dict(relationship.properties),
+ 642:                 source_document_ids=[str(d) for d in relationship.source_document_ids],
+ 643:                 source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
+ 644:                 valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
+ 645:                 valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
+ 646:                 confidence=relationship.confidence,
+ 647:                 weight=relationship.weight,
+ 648:                 metadata=_serialize_dict(relationship.metadata),
+ 649:                 created_at=relationship.created_at.isoformat(),
+ 650:                 updated_at=relationship.updated_at.isoformat(),
+ 651:             )
  652: 
  653:         async with driver.session(database=self._database) as session:
- 654:             result = await session.run(
- 655:                 """
- 656:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
- 657:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
- 658:                 """,
- 659:                 id=str(relationship_id),
- 660:             )
- 661:             record = await result.single()
- 662:             if record:
- 663:                 return self._record_to_relationship(
- 664:                     record["r"],
- 665:                     record["source_id"],
- 666:                     record["target_id"],
- 667:                     record["rel_type"],
- 668:                 )
- 669:             return None
- 670: 
- 671:     async def delete_relationship(self, relationship_id: UUID) -> bool:
- 672:         """Delete a relationship."""
- 673:         driver = self._get_driver()
- 674: 
- 675:         async def _delete(tx: AsyncManagedTransaction) -> int:
- 676:             result = await tx.run(
- 677:                 """
- 678:                 MATCH ()-[r {id: $id}]->()
- 679:                 DELETE r
- 680:                 RETURN count(r) as deleted
- 681:                 """,
- 682:                 id=str(relationship_id),
- 683:             )
- 684:             record = await result.single()
- 685:             return record["deleted"] if record else 0
- 686: 
- 687:         async with driver.session(database=self._database) as session:
- 688:             deleted = await session.execute_write(_delete)
- 689:             return deleted > 0
- 690: 
- 691:     async def get_entity_relationships(
- 692:         self,
- 693:         entity_id: UUID,
- 694:         *,
- 695:         direction: str = "both",
- 696:         relationship_types: list[str] | None = None,
- 697:         limit: int = 100,
- 698:     ) -> list[Relationship]:
- 699:         """Get relationships for an entity."""
- 700:         driver = self._get_driver()
- 701: 
- 702:         # Build relationship type filter
- 703:         rel_filter = ""
- 704:         if relationship_types:
- 705:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
- 706: 
- 707:         # Build direction query
- 708:         if direction == "outgoing":
- 709:             pattern = f"(e)-[r{rel_filter}]->(other)"
- 710:         elif direction == "incoming":
- 711:             pattern = f"(other)-[r{rel_filter}]->(e)"
- 712:         else:  # both
- 713:             pattern = f"(e)-[r{rel_filter}]-(other)"
- 714: 
- 715:         query = f"""
- 716:         MATCH {pattern}
- 717:         WHERE e.id = $entity_id
- 718:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
- 719:         LIMIT $limit
- 720:         """
- 721: 
- 722:         async with driver.session(database=self._database) as session:
- 723:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
- 724:             records = await result.data()
- 725:             return [
- 726:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
- 727:             ]
- 728: 
- 729:     def _record_to_relationship(
- 730:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
- 731:     ) -> Relationship:
- 732:         """Convert a Neo4j relationship to a domain Relationship."""
- 733:         return Relationship(
- 734:             id=UUID(rel["id"]),
- 735:             namespace_id=UUID(rel["namespace_id"]),
- 736:             source_entity_id=UUID(source_id),
- 737:             target_entity_id=UUID(target_id),
- 738:             relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
- 739:             description=rel.get("description", ""),
- 740:             properties=_deserialize_dict(rel.get("properties")),
- 741:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
- 742:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
- 743:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
- 744:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
- 745:             confidence=rel.get("confidence", 1.0),
- 746:             weight=rel.get("weight", 1.0),
- 747:             metadata=_deserialize_dict(rel.get("metadata")),
- 748:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
- 749:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
- 750:         )
- 751: 
- 752:     async def list_relationships(
- 753:         self,
- 754:         namespace_id: UUID,
- 755:         *,
- 756:         relationship_type: str | None = None,
- 757:         limit: int = 1000,
- 758:         offset: int = 0,
- 759:     ) -> list[Relationship]:
- 760:         """List all relationships in a namespace."""
- 761:         driver = self._get_driver()
- 762: 
- 763:         # Build relationship type filter
- 764:         rel_filter = f":{_sanitize_neo4j_label(relationship_type)}" if relationship_type else ""
- 765: 
- 766:         query = f"""
- 767:         MATCH (source)-[r{rel_filter}]->(target)
- 768:         WHERE r.namespace_id = $namespace_id
- 769:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
- 770:         ORDER BY r.created_at DESC
- 771:         SKIP $offset
- 772:         LIMIT $limit
- 773:         """
+ 654:             await session.execute_write(_create)
+ 655: 
+ 656:         return relationship
+ 657: 
+ 658:     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+ 659:         """Get a relationship by ID."""
+ 660:         driver = self._get_driver()
+ 661: 
+ 662:         async with driver.session(database=self._database) as session:
+ 663:             result = await session.run(
+ 664:                 """
+ 665:                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
+ 666:                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
+ 667:                 """,
+ 668:                 id=str(relationship_id),
+ 669:             )
+ 670:             record = await result.single()
+ 671:             if record:
+ 672:                 return self._record_to_relationship(
+ 673:                     record["r"],
+ 674:                     record["source_id"],
+ 675:                     record["target_id"],
+ 676:                     record["rel_type"],
+ 677:                 )
+ 678:             return None
+ 679: 
+ 680:     async def delete_relationship(self, relationship_id: UUID) -> bool:
+ 681:         """Delete a relationship."""
+ 682:         driver = self._get_driver()
+ 683: 
+ 684:         async def _delete(tx: AsyncManagedTransaction) -> int:
+ 685:             result = await tx.run(
+ 686:                 """
+ 687:                 MATCH ()-[r {id: $id}]->()
+ 688:                 DELETE r
+ 689:                 RETURN count(r) as deleted
+ 690:                 """,
+ 691:                 id=str(relationship_id),
+ 692:             )
+ 693:             record = await result.single()
+ 694:             return record["deleted"] if record else 0
+ 695: 
+ 696:         async with driver.session(database=self._database) as session:
+ 697:             deleted = await session.execute_write(_delete)
+ 698:             return deleted > 0
+ 699: 
+ 700:     async def get_entity_relationships(
+ 701:         self,
+ 702:         entity_id: UUID,
+ 703:         *,
+ 704:         direction: str = "both",
+ 705:         relationship_types: list[str] | None = None,
+ 706:         limit: int = 100,
+ 707:     ) -> list[Relationship]:
+ 708:         """Get relationships for an entity."""
+ 709:         driver = self._get_driver()
+ 710: 
+ 711:         # Build relationship type filter
+ 712:         rel_filter = ""
+ 713:         if relationship_types:
+ 714:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
+ 715: 
+ 716:         # Build direction query
+ 717:         if direction == "outgoing":
+ 718:             pattern = f"(e)-[r{rel_filter}]->(other)"
+ 719:         elif direction == "incoming":
+ 720:             pattern = f"(other)-[r{rel_filter}]->(e)"
+ 721:         else:  # both
+ 722:             pattern = f"(e)-[r{rel_filter}]-(other)"
+ 723: 
+ 724:         query = f"""
+ 725:         MATCH {pattern}
+ 726:         WHERE e.id = $entity_id
+ 727:         RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
+ 728:         LIMIT $limit
+ 729:         """
+ 730: 
+ 731:         async with driver.session(database=self._database) as session:
+ 732:             result = await session.run(query, entity_id=str(entity_id), limit=limit)
+ 733:             records = await result.data()
+ 734:             return [
+ 735:                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+ 736:             ]
+ 737: 
+ 738:     def _record_to_relationship(
+ 739:         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
+ 740:     ) -> Relationship:
+ 741:         """Convert a Neo4j relationship to a domain Relationship."""
+ 742:         return Relationship(
+ 743:             id=UUID(rel["id"]),
+ 744:             namespace_id=UUID(rel["namespace_id"]),
+ 745:             source_entity_id=UUID(source_id),
+ 746:             target_entity_id=UUID(target_id),
+ 747:             relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
+ 748:             description=rel.get("description", ""),
+ 749:             properties=_deserialize_dict(rel.get("properties")),
+ 750:             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
+ 751:             source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
+ 752:             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
+ 753:             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
+ 754:             confidence=rel.get("confidence", 1.0),
+ 755:             weight=rel.get("weight", 1.0),
+ 756:             metadata=_deserialize_dict(rel.get("metadata")),
+ 757:             created_at=datetime.fromisoformat(rel["created_at"]) if rel.get("created_at") else datetime.now(),
+ 758:             updated_at=datetime.fromisoformat(rel["updated_at"]) if rel.get("updated_at") else datetime.now(),
+ 759:         )
+ 760: 
+ 761:     async def list_relationships(
+ 762:         self,
+ 763:         namespace_id: UUID,
+ 764:         *,
+ 765:         relationship_type: str | None = None,
+ 766:         limit: int = 1000,
+ 767:         offset: int = 0,
+ 768:     ) -> list[Relationship]:
+ 769:         """List all relationships in a namespace."""
+ 770:         driver = self._get_driver()
+ 771: 
+ 772:         # Build relationship type filter
+ 773:         rel_filter = f":{_sanitize_neo4j_label(relationship_type)}" if relationship_type else ""
  774: 
- 775:         async with driver.session(database=self._database) as session:
- 776:             result = await session.run(
- 777:                 query,
- 778:                 namespace_id=str(namespace_id),
- 779:                 offset=offset,
- 780:                 limit=limit,
- 781:             )
- 782:             records = await result.data()
- 783:             return [
- 784:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
- 785:                 for r in records
- 786:             ]
- 787: 
- 788:     # =========================================================================
- 789:     # Episode operations
- 790:     # =========================================================================
- 791: 
- 792:     async def create_episode(self, episode: Episode) -> Episode:
- 793:         """Create an episode node."""
- 794:         driver = self._get_driver()
- 795: 
- 796:         async def _create(tx: AsyncManagedTransaction) -> None:
- 797:             query = """
- 798:             CREATE (ep:Episode {
- 799:                 id: $id,
- 800:                 namespace_id: $namespace_id,
- 801:                 name: $name,
- 802:                 description: $description,
- 803:                 occurred_at: $occurred_at,
- 804:                 duration_seconds: $duration_seconds,
- 805:                 entity_ids: $entity_ids,
- 806:                 source_document_ids: $source_document_ids,
- 807:                 source_chunk_ids: $source_chunk_ids,
- 808:                 metadata: $metadata,
- 809:                 created_at: $created_at,
- 810:                 updated_at: $updated_at
- 811:             })
- 812:             """
- 813:             await tx.run(
- 814:                 query,
- 815:                 id=str(episode.id),
- 816:                 namespace_id=str(episode.namespace_id),
- 817:                 name=episode.name,
- 818:                 description=episode.description,
- 819:                 occurred_at=episode.occurred_at.isoformat(),
- 820:                 duration_seconds=episode.duration_seconds,
- 821:                 entity_ids=[str(e) for e in episode.entity_ids],
- 822:                 source_document_ids=[str(d) for d in episode.source_document_ids],
- 823:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
- 824:                 metadata=_serialize_dict(episode.metadata),
- 825:                 created_at=episode.created_at.isoformat(),
- 826:                 updated_at=episode.updated_at.isoformat(),
- 827:             )
- 828: 
- 829:             # Create links to entities
- 830:             if episode.entity_ids:
- 831:                 link_query = """
- 832:                 MATCH (ep:Episode {id: $episode_id})
- 833:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
- 834:                 CREATE (ep)-[:INVOLVES]->(e)
- 835:                 """
- 836:                 await tx.run(
- 837:                     link_query,
- 838:                     episode_id=str(episode.id),
- 839:                     entity_ids=[str(e) for e in episode.entity_ids],
- 840:                 )
- 841: 
- 842:         async with driver.session(database=self._database) as session:
- 843:             await session.execute_write(_create)
- 844: 
- 845:         return episode
- 846: 
- 847:     async def get_episode(self, episode_id: UUID) -> Episode | None:
- 848:         """Get an episode by ID."""
- 849:         driver = self._get_driver()
+ 775:         query = f"""
+ 776:         MATCH (source)-[r{rel_filter}]->(target)
+ 777:         WHERE r.namespace_id = $namespace_id
+ 778:         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
+ 779:         ORDER BY r.created_at DESC
+ 780:         SKIP $offset
+ 781:         LIMIT $limit
+ 782:         """
+ 783: 
+ 784:         async with driver.session(database=self._database) as session:
+ 785:             result = await session.run(
+ 786:                 query,
+ 787:                 namespace_id=str(namespace_id),
+ 788:                 offset=offset,
+ 789:                 limit=limit,
+ 790:             )
+ 791:             records = await result.data()
+ 792:             return [
+ 793:                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
+ 794:                 for r in records
+ 795:             ]
+ 796: 
+ 797:     # =========================================================================
+ 798:     # Episode operations
+ 799:     # =========================================================================
+ 800: 
+ 801:     async def create_episode(self, episode: Episode) -> Episode:
+ 802:         """Create an episode node."""
+ 803:         driver = self._get_driver()
+ 804: 
+ 805:         async def _create(tx: AsyncManagedTransaction) -> None:
+ 806:             query = """
+ 807:             CREATE (ep:Episode {
+ 808:                 id: $id,
+ 809:                 namespace_id: $namespace_id,
+ 810:                 name: $name,
+ 811:                 description: $description,
+ 812:                 occurred_at: $occurred_at,
+ 813:                 duration_seconds: $duration_seconds,
+ 814:                 entity_ids: $entity_ids,
+ 815:                 source_document_ids: $source_document_ids,
+ 816:                 source_chunk_ids: $source_chunk_ids,
+ 817:                 metadata: $metadata,
+ 818:                 created_at: $created_at,
+ 819:                 updated_at: $updated_at
+ 820:             })
+ 821:             """
+ 822:             await tx.run(
+ 823:                 query,
+ 824:                 id=str(episode.id),
+ 825:                 namespace_id=str(episode.namespace_id),
+ 826:                 name=episode.name,
+ 827:                 description=episode.description,
+ 828:                 occurred_at=episode.occurred_at.isoformat(),
+ 829:                 duration_seconds=episode.duration_seconds,
+ 830:                 entity_ids=[str(e) for e in episode.entity_ids],
+ 831:                 source_document_ids=[str(d) for d in episode.source_document_ids],
+ 832:                 source_chunk_ids=[str(c) for c in episode.source_chunk_ids],
+ 833:                 metadata=_serialize_dict(episode.metadata),
+ 834:                 created_at=episode.created_at.isoformat(),
+ 835:                 updated_at=episode.updated_at.isoformat(),
+ 836:             )
+ 837: 
+ 838:             # Create links to entities
+ 839:             if episode.entity_ids:
+ 840:                 link_query = """
+ 841:                 MATCH (ep:Episode {id: $episode_id})
+ 842:                 MATCH (e:Entity) WHERE e.id IN $entity_ids
+ 843:                 CREATE (ep)-[:INVOLVES]->(e)
+ 844:                 """
+ 845:                 await tx.run(
+ 846:                     link_query,
+ 847:                     episode_id=str(episode.id),
+ 848:                     entity_ids=[str(e) for e in episode.entity_ids],
+ 849:                 )
  850: 
  851:         async with driver.session(database=self._database) as session:
- 852:             result = await session.run(
- 853:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
- 854:                 id=str(episode_id),
- 855:             )
- 856:             record = await result.single()
- 857:             if record:
- 858:                 return self._record_to_episode(record["ep"])
- 859:             return None
- 860: 
- 861:     async def list_episodes(
- 862:         self,
- 863:         namespace_id: UUID,
- 864:         *,
- 865:         start_time: datetime | None = None,
- 866:         end_time: datetime | None = None,
- 867:         limit: int = 100,
- 868:     ) -> list[Episode]:
- 869:         """List episodes in a time range."""
- 870:         driver = self._get_driver()
- 871: 
- 872:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
- 873:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
- 874:         conditions = []
- 875: 
- 876:         if start_time:
- 877:             conditions.append("ep.occurred_at >= $start_time")
- 878:             params["start_time"] = start_time.isoformat()
- 879:         if end_time:
- 880:             conditions.append("ep.occurred_at <= $end_time")
- 881:             params["end_time"] = end_time.isoformat()
- 882: 
- 883:         if conditions:
- 884:             query += " WHERE " + " AND ".join(conditions)
- 885: 
- 886:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
- 887:         params["limit"] = limit
- 888: 
- 889:         async with driver.session(database=self._database) as session:
- 890:             result = await session.run(query, **params)
- 891:             records = await result.data()
- 892:             return [self._record_to_episode(r["ep"]) for r in records]
- 893: 
- 894:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
- 895:         """Convert a Neo4j node to a domain Episode."""
- 896:         return Episode(
- 897:             id=UUID(node["id"]),
- 898:             namespace_id=UUID(node["namespace_id"]),
- 899:             name=node["name"],
- 900:             description=node.get("description", ""),
- 901:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
- 902:             duration_seconds=node.get("duration_seconds"),
- 903:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
- 904:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
- 905:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
- 906:             metadata=_deserialize_dict(node.get("metadata")),
- 907:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
- 908:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
- 909:         )
- 910: 
- 911:     # =========================================================================
- 912:     # Graph traversal
- 913:     # =========================================================================
- 914: 
- 915:     async def find_paths(
- 916:         self,
- 917:         namespace_id: UUID,
- 918:         source_entity_id: UUID,
- 919:         target_entity_id: UUID,
- 920:         *,
- 921:         max_depth: int = 3,
- 922:         relationship_types: list[str] | None = None,
- 923:     ) -> list[list[dict[str, Any]]]:
- 924:         """Find paths between two entities."""
- 925:         driver = self._get_driver()
- 926: 
- 927:         rel_filter = ""
- 928:         if relationship_types:
- 929:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
- 930: 
- 931:         query = f"""
- 932:         MATCH path = shortestPath(
- 933:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
- 934:         )
- 935:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
- 936:         RETURN path
- 937:         LIMIT 10
- 938:         """
+ 852:             await session.execute_write(_create)
+ 853: 
+ 854:         return episode
+ 855: 
+ 856:     async def get_episode(self, episode_id: UUID) -> Episode | None:
+ 857:         """Get an episode by ID."""
+ 858:         driver = self._get_driver()
+ 859: 
+ 860:         async with driver.session(database=self._database) as session:
+ 861:             result = await session.run(
+ 862:                 "MATCH (ep:Episode {id: $id}) RETURN ep",
+ 863:                 id=str(episode_id),
+ 864:             )
+ 865:             record = await result.single()
+ 866:             if record:
+ 867:                 return self._record_to_episode(record["ep"])
+ 868:             return None
+ 869: 
+ 870:     async def list_episodes(
+ 871:         self,
+ 872:         namespace_id: UUID,
+ 873:         *,
+ 874:         start_time: datetime | None = None,
+ 875:         end_time: datetime | None = None,
+ 876:         limit: int = 100,
+ 877:     ) -> list[Episode]:
+ 878:         """List episodes in a time range."""
+ 879:         driver = self._get_driver()
+ 880: 
+ 881:         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
+ 882:         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+ 883:         conditions = []
+ 884: 
+ 885:         if start_time:
+ 886:             conditions.append("ep.occurred_at >= $start_time")
+ 887:             params["start_time"] = start_time.isoformat()
+ 888:         if end_time:
+ 889:             conditions.append("ep.occurred_at <= $end_time")
+ 890:             params["end_time"] = end_time.isoformat()
+ 891: 
+ 892:         if conditions:
+ 893:             query += " WHERE " + " AND ".join(conditions)
+ 894: 
+ 895:         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
+ 896:         params["limit"] = limit
+ 897: 
+ 898:         async with driver.session(database=self._database) as session:
+ 899:             result = await session.run(query, **params)
+ 900:             records = await result.data()
+ 901:             return [self._record_to_episode(r["ep"]) for r in records]
+ 902: 
+ 903:     def _record_to_episode(self, node: dict[str, Any]) -> Episode:
+ 904:         """Convert a Neo4j node to a domain Episode."""
+ 905:         return Episode(
+ 906:             id=UUID(node["id"]),
+ 907:             namespace_id=UUID(node["namespace_id"]),
+ 908:             name=node["name"],
+ 909:             description=node.get("description", ""),
+ 910:             occurred_at=datetime.fromisoformat(node["occurred_at"]),
+ 911:             duration_seconds=node.get("duration_seconds"),
+ 912:             entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
+ 913:             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
+ 914:             source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+ 915:             metadata=_deserialize_dict(node.get("metadata")),
+ 916:             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+ 917:             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
+ 918:         )
+ 919: 
+ 920:     # =========================================================================
+ 921:     # Graph traversal
+ 922:     # =========================================================================
+ 923: 
+ 924:     async def find_paths(
+ 925:         self,
+ 926:         namespace_id: UUID,
+ 927:         source_entity_id: UUID,
+ 928:         target_entity_id: UUID,
+ 929:         *,
+ 930:         max_depth: int = 3,
+ 931:         relationship_types: list[str] | None = None,
+ 932:     ) -> list[list[dict[str, Any]]]:
+ 933:         """Find paths between two entities."""
+ 934:         driver = self._get_driver()
+ 935: 
+ 936:         rel_filter = ""
+ 937:         if relationship_types:
+ 938:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
  939: 
- 940:         async with driver.session(database=self._database) as session:
- 941:             result = await session.run(
- 942:                 query,
- 943:                 source_id=str(source_entity_id),
- 944:                 target_id=str(target_entity_id),
- 945:                 namespace_id=str(namespace_id),
- 946:             )
- 947:             records = await result.data()
+ 940:         query = f"""
+ 941:         MATCH path = shortestPath(
+ 942:             (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+ 943:         )
+ 944:         WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+ 945:         RETURN path
+ 946:         LIMIT 10
+ 947:         """
  948: 
- 949:             paths = []
- 950:             for record in records:
- 951:                 path = record["path"]
- 952:                 path_elements = []
- 953:                 for element in path:
- 954:                     if hasattr(element, "items"):  # Node
- 955:                         path_elements.append({"type": "node", "data": _element_to_dict(element)})
- 956:                     else:  # Relationship
- 957:                         path_elements.append({"type": "relationship", "data": _element_to_dict(element)})
- 958:                 paths.append(path_elements)
- 959: 
- 960:             return paths
- 961: 
- 962:     async def get_neighborhood(
- 963:         self,
- 964:         entity_id: UUID,
- 965:         *,
- 966:         depth: int = 1,
- 967:         relationship_types: list[str] | None = None,
- 968:         limit: int = 50,
- 969:     ) -> dict[str, Any]:
- 970:         """Get the neighborhood of an entity up to a certain depth."""
- 971:         driver = self._get_driver()
- 972: 
- 973:         rel_filter = ""
- 974:         if relationship_types:
- 975:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
- 976: 
- 977:         query = f"""
- 978:         MATCH (center:Entity {{id: $entity_id}})
- 979:         CALL apoc.path.subgraphAll(center, {{
- 980:             maxLevel: {depth},
- 981:             relationshipFilter: '{rel_filter.lstrip(":")}',
- 982:             limit: $limit
- 983:         }})
- 984:         YIELD nodes, relationships
- 985:         RETURN nodes, relationships
- 986:         """
- 987: 
- 988:         # Fallback query if APOC is not available
- 989:         fallback_query = f"""
- 990:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
- 991:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
- 992:         LIMIT $limit
- 993:         """
- 994: 
- 995:         async with driver.session(database=self._database) as session:
- 996:             try:
- 997:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
- 998:                 record = await result.single()
- 999:             except Exception:
-1000:                 # Fallback if APOC not available
-1001:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
-1002:                 record = await result.single()
+ 949:         async with driver.session(database=self._database) as session:
+ 950:             result = await session.run(
+ 951:                 query,
+ 952:                 source_id=str(source_entity_id),
+ 953:                 target_id=str(target_entity_id),
+ 954:                 namespace_id=str(namespace_id),
+ 955:             )
+ 956:             records = await result.data()
+ 957: 
+ 958:             paths = []
+ 959:             for record in records:
+ 960:                 path = record["path"]
+ 961:                 path_elements = []
+ 962:                 for element in path:
+ 963:                     if hasattr(element, "items"):  # Node
+ 964:                         path_elements.append({"type": "node", "data": _element_to_dict(element)})
+ 965:                     else:  # Relationship
+ 966:                         path_elements.append({"type": "relationship", "data": _element_to_dict(element)})
+ 967:                 paths.append(path_elements)
+ 968: 
+ 969:             return paths
+ 970: 
+ 971:     async def get_neighborhood(
+ 972:         self,
+ 973:         entity_id: UUID,
+ 974:         *,
+ 975:         depth: int = 1,
+ 976:         relationship_types: list[str] | None = None,
+ 977:         limit: int = 50,
+ 978:     ) -> dict[str, Any]:
+ 979:         """Get the neighborhood of an entity up to a certain depth."""
+ 980:         driver = self._get_driver()
+ 981: 
+ 982:         rel_filter = ""
+ 983:         if relationship_types:
+ 984:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
+ 985: 
+ 986:         query = f"""
+ 987:         MATCH (center:Entity {{id: $entity_id}})
+ 988:         CALL apoc.path.subgraphAll(center, {{
+ 989:             maxLevel: {depth},
+ 990:             relationshipFilter: '{rel_filter.lstrip(":")}',
+ 991:             limit: $limit
+ 992:         }})
+ 993:         YIELD nodes, relationships
+ 994:         RETURN nodes, relationships
+ 995:         """
+ 996: 
+ 997:         # Fallback query if APOC is not available
+ 998:         fallback_query = f"""
+ 999:         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+1000:         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+1001:         LIMIT $limit
+1002:         """
 1003: 
-1004:             if record:
-1005:                 nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
-1006:                 relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
-1007:                 return {"entities": nodes, "relationships": relationships}
-1008: 
-1009:             return {"entities": [], "relationships": []}
-1010: 
-1011:     async def get_neighborhoods_batch(
-1012:         self,
-1013:         entity_ids: list[UUID],
-1014:         *,
-1015:         depth: int = 1,
-1016:         relationship_types: list[str] | None = None,
-1017:         limit_per_entity: int = 20,
-1018:     ) -> dict[UUID, dict[str, Any]]:
-1019:         """Get neighborhoods for multiple entities in parallel.
-1020: 
-1021:         Args:
-1022:             entity_ids: List of entity IDs
-1023:             depth: Max traversal depth
-1024:             relationship_types: Optional relationship type filter
-1025:             limit_per_entity: Max nodes per entity neighborhood
-1026: 
-1027:         Returns:
-1028:             Dictionary mapping entity ID to neighborhood data
-1029:         """
-1030:         if not entity_ids:
-1031:             return {}
-1032: 
-1033:         driver = self._get_driver()
-1034:         id_strings = [str(eid) for eid in entity_ids]
+1004:         async with driver.session(database=self._database) as session:
+1005:             try:
+1006:                 result = await session.run(query, entity_id=str(entity_id), limit=limit)
+1007:                 record = await result.single()
+1008:             except Exception:
+1009:                 # Fallback if APOC not available
+1010:                 result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
+1011:                 record = await result.single()
+1012: 
+1013:             if record:
+1014:                 nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
+1015:                 relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
+1016:                 return {"entities": nodes, "relationships": relationships}
+1017: 
+1018:             return {"entities": [], "relationships": []}
+1019: 
+1020:     async def get_neighborhoods_batch(
+1021:         self,
+1022:         entity_ids: list[UUID],
+1023:         *,
+1024:         depth: int = 1,
+1025:         relationship_types: list[str] | None = None,
+1026:         limit_per_entity: int = 20,
+1027:     ) -> dict[UUID, dict[str, Any]]:
+1028:         """Get neighborhoods for multiple entities in parallel.
+1029: 
+1030:         Args:
+1031:             entity_ids: List of entity IDs
+1032:             depth: Max traversal depth
+1033:             relationship_types: Optional relationship type filter
+1034:             limit_per_entity: Max nodes per entity neighborhood
 1035: 
-1036:         rel_filter = ""
-1037:         if relationship_types:
-1038:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
-1039: 
-1040:         # Use UNWIND to process all entities in a single query
-1041:         query = f"""
-1042:         UNWIND $entity_ids AS eid
-1043:         MATCH (center:Entity {{id: eid}})
-1044:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-1045:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
-1046:         RETURN eid, neighbors, rels
-1047:         """
+1036:         Returns:
+1037:             Dictionary mapping entity ID to neighborhood data
+1038:         """
+1039:         if not entity_ids:
+1040:             return {}
+1041: 
+1042:         driver = self._get_driver()
+1043:         id_strings = [str(eid) for eid in entity_ids]
+1044: 
+1045:         rel_filter = ""
+1046:         if relationship_types:
+1047:             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 1048: 
-1049:         async with driver.session(database=self._database) as session:
-1050:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
-1051:             records = await result.data()
-1052: 
-1053:             neighborhoods = {}
-1054:             for record in records:
-1055:                 eid = UUID(record["eid"])
-1056:                 nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
-1057:                 relationships = []
-1058:                 for rel_list in record.get("rels") or []:
-1059:                     if rel_list:
-1060:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
-1061:                             if r:
-1062:                                 relationships.append(_element_to_dict(r))
-1063:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
-1064: 
-1065:             return neighborhoods
-1066: 
-1067:     async def search_entities_by_attribute(
-1068:         self,
-1069:         namespace_id: UUID,
-1070:         attribute_name: str,
-1071:         attribute_value: Any,
-1072:         *,
-1073:         limit: int = 100,
-1074:     ) -> list[Entity]:
-1075:         """Search entities by attribute value."""
-1076:         driver = self._get_driver()
-1077: 
-1078:         query = """
-1079:         MATCH (e:Entity {namespace_id: $namespace_id})
-1080:         WHERE e.attributes[$attribute_name] = $attribute_value
-1081:         RETURN e
-1082:         LIMIT $limit
-1083:         """
-1084: 
-1085:         async with driver.session(database=self._database) as session:
-1086:             result = await session.run(
-1087:                 query,
-1088:                 namespace_id=str(namespace_id),
-1089:                 attribute_name=attribute_name,
-1090:                 attribute_value=attribute_value,
-1091:                 limit=limit,
-1092:             )
-1093:             records = await result.data()
-1094:             return [self._record_to_entity(r["e"]) for r in records]
+1049:         # Use UNWIND to process all entities in a single query
+1050:         query = f"""
+1051:         UNWIND $entity_ids AS eid
+1052:         MATCH (center:Entity {{id: eid}})
+1053:         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+1054:         WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+1055:         RETURN eid, neighbors, rels
+1056:         """
+1057: 
+1058:         async with driver.session(database=self._database) as session:
+1059:             result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+1060:             records = await result.data()
+1061: 
+1062:             neighborhoods = {}
+1063:             for record in records:
+1064:                 eid = UUID(record["eid"])
+1065:                 nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
+1066:                 relationships = []
+1067:                 for rel_list in record.get("rels") or []:
+1068:                     if rel_list:
+1069:                         for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+1070:                             if r:
+1071:                                 relationships.append(_element_to_dict(r))
+1072:                 neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+1073: 
+1074:             return neighborhoods
+1075: 
+1076:     async def search_entities_by_attribute(
+1077:         self,
+1078:         namespace_id: UUID,
+1079:         attribute_name: str,
+1080:         attribute_value: Any,
+1081:         *,
+1082:         limit: int = 100,
+1083:     ) -> list[Entity]:
+1084:         """Search entities by attribute value."""
+1085:         driver = self._get_driver()
+1086: 
+1087:         query = """
+1088:         MATCH (e:Entity {namespace_id: $namespace_id})
+1089:         WHERE e.attributes[$attribute_name] = $attribute_value
+1090:         RETURN e
+1091:         LIMIT $limit
+1092:         """
+1093: 
+1094:         async with driver.session(database=self._database) as session:
+1095:             result = await session.run(
+1096:                 query,
+1097:                 namespace_id=str(namespace_id),
+1098:                 attribute_name=attribute_name,
+1099:                 attribute_value=attribute_value,
+1100:                 limit=limit,
+1101:             )
+1102:             records = await result.data()
+1103:             return [self._record_to_entity(r["e"]) for r in records]
 ````
 
 ## File: src/khora/memory_lake.py
@@ -54411,675 +54420,680 @@ README.md
  570:                     f"(expected {len(pre_upsert_ids)})"
  571:                 )
  572:                 if len(upsert_results) != len(pre_upsert_ids):
- 573:                     logger.warning(
- 574:                         f"Document {document.id}: upsert result count mismatch - "
- 575:                         f"got {len(upsert_results)}, expected {len(pre_upsert_ids)}"
- 576:                     )
- 577: 
- 578:                 store_results: list[tuple[Entity, bool]] = []
- 579:                 for i, (entity, is_new) in enumerate(upsert_results):
- 580:                     stored_id = str(entity.id)
- 581:                     entity_id_mapping[stored_id] = stored_id
- 582:                     # If upsert changed the ID (Neo4j MERGE with existing entity),
- 583:                     # also map the original extraction ID to the stored ID
- 584:                     if i < len(pre_upsert_ids) and pre_upsert_ids[i] != stored_id:
- 585:                         entity_id_mapping[pre_upsert_ids[i]] = stored_id
- 586:                     # New entities always need embeddings; existing only if missing
- 587:                     needs_embedding = is_new or not entity.embedding
- 588:                     store_results.append((entity, needs_embedding))
- 589:                 # Collect entities that need embeddings
- 590:                 entities_needing = [e for e, needs in store_results if needs]
- 591:                 _es_ctx["output_count"] = len(store_results)
- 592:                 return store_results, entity_id_mapping, entities_needing
- 593: 
- 594:         # Run chunk and entity storage in parallel
- 595:         _, (store_results, entity_id_mapping, entities_needing_embeddings) = await asyncio.gather(
- 596:             _store_chunks(),
- 597:             _store_entities(),
- 598:         )
- 599: 
- 600:         # Step 5b + Step 6: Entity embeddings and relationship storage run in parallel
- 601:         # since relationships don't depend on entity embeddings
- 602: 
- 603:         async def _embed_entities() -> int:
- 604:             """Generate and store entity embeddings. Returns count embedded."""
- 605:             if not entities_needing_embeddings:
- 606:                 return 0
- 607:             async with pipeline_stage(
- 608:                 "ingestion",
- 609:                 "entity_embedding",
- 610:                 _run_id,
- 611:                 namespace_id=_ns_id,
- 612:                 input_count=len(entities_needing_embeddings),
- 613:             ) as _ee_ctx:
- 614:                 from khora.extraction.embedders import LiteLLMEmbedder
- 615: 
- 616:                 embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
- 617:                 entity_texts = [
- 618:                     f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings
- 619:                 ]
- 620:                 entity_embeddings = await embedder.embed_batch(entity_texts)
- 621:                 updates = [
- 622:                     (entity.id, embedding, embedding_model)
- 623:                     for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
+ 573:                     # Log details to diagnose the mismatch
+ 574:                     result_ids = [str(e.id) for e, _ in upsert_results]
+ 575:                     missing_ids = set(pre_upsert_ids) - set(result_ids)
+ 576:                     extra_ids = set(result_ids) - set(pre_upsert_ids)
+ 577:                     logger.warning(
+ 578:                         f"Document {document.id}: upsert result count mismatch - "
+ 579:                         f"sent {len(pre_upsert_ids)}, got {len(upsert_results)} "
+ 580:                         f"(missing: {len(missing_ids)}, extra: {len(extra_ids)})"
+ 581:                     )
+ 582: 
+ 583:                 store_results: list[tuple[Entity, bool]] = []
+ 584:                 for i, (entity, is_new) in enumerate(upsert_results):
+ 585:                     stored_id = str(entity.id)
+ 586:                     entity_id_mapping[stored_id] = stored_id
+ 587:                     # If upsert changed the ID (Neo4j MERGE with existing entity),
+ 588:                     # also map the original extraction ID to the stored ID
+ 589:                     if i < len(pre_upsert_ids) and pre_upsert_ids[i] != stored_id:
+ 590:                         entity_id_mapping[pre_upsert_ids[i]] = stored_id
+ 591:                     # New entities always need embeddings; existing only if missing
+ 592:                     needs_embedding = is_new or not entity.embedding
+ 593:                     store_results.append((entity, needs_embedding))
+ 594:                 # Collect entities that need embeddings
+ 595:                 entities_needing = [e for e, needs in store_results if needs]
+ 596:                 _es_ctx["output_count"] = len(store_results)
+ 597:                 return store_results, entity_id_mapping, entities_needing
+ 598: 
+ 599:         # Run chunk and entity storage in parallel
+ 600:         _, (store_results, entity_id_mapping, entities_needing_embeddings) = await asyncio.gather(
+ 601:             _store_chunks(),
+ 602:             _store_entities(),
+ 603:         )
+ 604: 
+ 605:         # Step 5b + Step 6: Entity embeddings and relationship storage run in parallel
+ 606:         # since relationships don't depend on entity embeddings
+ 607: 
+ 608:         async def _embed_entities() -> int:
+ 609:             """Generate and store entity embeddings. Returns count embedded."""
+ 610:             if not entities_needing_embeddings:
+ 611:                 return 0
+ 612:             async with pipeline_stage(
+ 613:                 "ingestion",
+ 614:                 "entity_embedding",
+ 615:                 _run_id,
+ 616:                 namespace_id=_ns_id,
+ 617:                 input_count=len(entities_needing_embeddings),
+ 618:             ) as _ee_ctx:
+ 619:                 from khora.extraction.embedders import LiteLLMEmbedder
+ 620: 
+ 621:                 embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
+ 622:                 entity_texts = [
+ 623:                     f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings
  624:                 ]
- 625:                 await storage.update_entity_embeddings_batch(updates)
- 626:                 _ee_ctx["output_count"] = len(entities_needing_embeddings)
- 627:             logger.debug(
- 628:                 f"Document {document.id}: generated embeddings for {len(entities_needing_embeddings)} entities"
- 629:             )
- 630:             return len(entities_needing_embeddings)
- 631: 
- 632:         async def _store_relationships() -> tuple[int, int]:
- 633:             """Remap and batch-store relationships. Returns (stored_count, skipped)."""
- 634:             all_relationships = relationships + inferred_relationships
- 635:             if not all_relationships:
- 636:                 return 0, 0
- 637:             from uuid import UUID
- 638: 
- 639:             valid_relationships = []
- 640:             skipped = 0
- 641:             for rel in all_relationships:
- 642:                 source_id = str(rel.source_entity_id)
- 643:                 target_id = str(rel.target_entity_id)
- 644: 
- 645:                 mapped_source = entity_id_mapping.get(source_id)
- 646:                 mapped_target = entity_id_mapping.get(target_id)
- 647: 
- 648:                 if not mapped_source or not mapped_target:
- 649:                     skipped += 1
- 650:                     continue
- 651: 
- 652:                 rel.source_entity_id = UUID(mapped_source)
- 653:                 rel.target_entity_id = UUID(mapped_target)
- 654:                 valid_relationships.append(rel)
- 655: 
- 656:             count = 0
- 657:             if valid_relationships:
- 658:                 count = await storage.create_relationships_batch(valid_relationships)
- 659: 
- 660:             if skipped > 0:
- 661:                 logger.warning(
- 662:                     f"Stored {count}/{len(all_relationships)} relationships "
- 663:                     f"({skipped} skipped due to missing entity mappings)"
- 664:                 )
- 665:             return count, skipped
- 666: 
- 667:         # Run embedding and relationship storage concurrently
- 668:         _, (stored_count, _skipped) = await asyncio.gather(
- 669:             _embed_entities(),
- 670:             _store_relationships(),
- 671:         )
- 672: 
- 673:         # Mark as completed
- 674:         document.mark_completed(len(chunks), len(entities))
- 675:         await storage.update_document(document)
- 676: 
- 677:         return {
- 678:             "document_id": str(document.id),
- 679:             "chunks": len(chunks),
- 680:             "entities": len(entities),
- 681:             "relationships": stored_count,
- 682:             "extracted_relationships": len(relationships),
- 683:             "inferred_relationships": len(inferred_relationships),
- 684:         }
- 685: 
- 686:     except Exception as e:
- 687:         document.mark_failed(str(e))
- 688:         await storage.update_document(document)
- 689:         raise
+ 625:                 entity_embeddings = await embedder.embed_batch(entity_texts)
+ 626:                 updates = [
+ 627:                     (entity.id, embedding, embedding_model)
+ 628:                     for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
+ 629:                 ]
+ 630:                 await storage.update_entity_embeddings_batch(updates)
+ 631:                 _ee_ctx["output_count"] = len(entities_needing_embeddings)
+ 632:             logger.debug(
+ 633:                 f"Document {document.id}: generated embeddings for {len(entities_needing_embeddings)} entities"
+ 634:             )
+ 635:             return len(entities_needing_embeddings)
+ 636: 
+ 637:         async def _store_relationships() -> tuple[int, int]:
+ 638:             """Remap and batch-store relationships. Returns (stored_count, skipped)."""
+ 639:             all_relationships = relationships + inferred_relationships
+ 640:             if not all_relationships:
+ 641:                 return 0, 0
+ 642:             from uuid import UUID
+ 643: 
+ 644:             valid_relationships = []
+ 645:             skipped = 0
+ 646:             for rel in all_relationships:
+ 647:                 source_id = str(rel.source_entity_id)
+ 648:                 target_id = str(rel.target_entity_id)
+ 649: 
+ 650:                 mapped_source = entity_id_mapping.get(source_id)
+ 651:                 mapped_target = entity_id_mapping.get(target_id)
+ 652: 
+ 653:                 if not mapped_source or not mapped_target:
+ 654:                     skipped += 1
+ 655:                     continue
+ 656: 
+ 657:                 rel.source_entity_id = UUID(mapped_source)
+ 658:                 rel.target_entity_id = UUID(mapped_target)
+ 659:                 valid_relationships.append(rel)
+ 660: 
+ 661:             count = 0
+ 662:             if valid_relationships:
+ 663:                 count = await storage.create_relationships_batch(valid_relationships)
+ 664: 
+ 665:             if skipped > 0:
+ 666:                 logger.warning(
+ 667:                     f"Stored {count}/{len(all_relationships)} relationships "
+ 668:                     f"({skipped} skipped due to missing entity mappings)"
+ 669:                 )
+ 670:             return count, skipped
+ 671: 
+ 672:         # Run embedding and relationship storage concurrently
+ 673:         _, (stored_count, _skipped) = await asyncio.gather(
+ 674:             _embed_entities(),
+ 675:             _store_relationships(),
+ 676:         )
+ 677: 
+ 678:         # Mark as completed
+ 679:         document.mark_completed(len(chunks), len(entities))
+ 680:         await storage.update_document(document)
+ 681: 
+ 682:         return {
+ 683:             "document_id": str(document.id),
+ 684:             "chunks": len(chunks),
+ 685:             "entities": len(entities),
+ 686:             "relationships": stored_count,
+ 687:             "extracted_relationships": len(relationships),
+ 688:             "inferred_relationships": len(inferred_relationships),
+ 689:         }
  690: 
- 691: 
- 692: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
- 693: async def ingest_documents(
- 694:     namespace_id: UUID,
- 695:     documents: list[dict[str, Any]],
- 696:     storage: StorageCoordinator | None = None,
- 697:     *,
- 698:     skill_name: str = "general_entities",
- 699:     expertise: ExpertiseConfig | str | None = None,
- 700:     chunk_strategy: str = "semantic",
- 701:     chunk_size: int = 512,
- 702:     embedding_model: str = "text-embedding-3-small",
- 703:     extraction_model: str = "gpt-4o-mini",
- 704:     max_concurrent_documents: int = 5,
- 705:     max_concurrent_extractions: int = 10,
- 706:     enable_expansion: bool = False,
- 707:     extraction_context: dict[str, Any] | None = None,
- 708:     skip_resolution: bool = False,
- 709:     shared_embedder: Any | None = None,
- 710:     shared_entity_index: Any | None = None,
- 711:     extraction_timeout: int = 120,
- 712:     extraction_max_retries: int = 3,
- 713:     extraction_retry_wait: float = 2.0,
- 714:     **kwargs,
- 715: ) -> dict[str, Any]:
- 716:     """Two-phase document ingestion flow with parallel processing.
- 717: 
- 718:     Phase 1: Stage documents (checksum-based change detection)
- 719:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
- 720:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
- 721: 
- 722:     Args:
- 723:         namespace_id: Target namespace
- 724:         documents: List of document dicts with 'content' and optional metadata
- 725:         storage: StorageCoordinator instance
- 726:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
- 727:         expertise: ExpertiseConfig, expertise name string, or file path
- 728:         chunk_strategy: Chunking strategy
- 729:         chunk_size: Target chunk size
- 730:         embedding_model: Model for embeddings
- 731:         extraction_model: Model for extraction
- 732:         max_concurrent_documents: Maximum documents to process in parallel
- 733:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
- 734:         enable_expansion: Whether to run semantic expansion
- 735:         extraction_context: Context dict for prompt template rendering
- 736:         skip_resolution: If True, skip Phase 3 (smart resolution). Useful when the
- 737:             caller runs resolution separately after all batches are processed.
- 738: 
- 739:     Returns:
- 740:         Summary of ingestion results
- 741:     """
- 742:     if storage is None:
- 743:         raise ValueError("storage is required")
- 744: 
- 745:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
- 746: 
- 747:     # Resolve expertise early to determine inference mode
- 748:     resolved_expertise: ExpertiseConfig | None = None
- 749:     if expertise is not None:
- 750:         from khora.extraction.skills import ExpertiseConfig as EC
- 751:         from khora.extraction.skills import load_expertise
- 752: 
- 753:         if isinstance(expertise, EC):
- 754:             resolved_expertise = expertise
- 755:         elif isinstance(expertise, str):
- 756:             try:
- 757:                 resolved_expertise = load_expertise(expertise)
- 758:             except Exception:
- 759:                 pass
- 760: 
- 761:     inference_mode = resolved_expertise.expansion.inference_mode if resolved_expertise else "none"
- 762:     is_smart = inference_mode == "smart"
- 763: 
- 764:     # Smart mode: create shared EntityIndex, optionally pre-load existing entities
- 765:     if shared_entity_index is not None:
- 766:         pass  # Caller provided a pre-populated index; use it as-is
- 767:     elif is_smart and resolved_expertise:
- 768:         from khora.extraction.expansion.entity_index import EntityIndex as EI
- 769: 
- 770:         shared_entity_index = EI()
- 771:         if resolved_expertise.expansion.preload_existing:
- 772:             existing_entities = await storage.list_entities(namespace_id, limit=50000)
- 773:             for e in existing_entities:
- 774:                 shared_entity_index.add(e)
- 775:             if existing_entities:
- 776:                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
- 777: 
- 778:     # Phase 1: Stage documents (can run in parallel too)
- 779:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
- 780: 
- 781:     async def stage_with_limit(doc_input):
- 782:         async with staging_semaphore:
- 783:             return await stage_document(doc_input, namespace_id, storage)
- 784: 
- 785:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
- 786:     staged_docs = [doc for doc in staged_results if doc is not None]
- 787: 
- 788:     # Build mapping from staged doc ID to original dict for per-doc overrides
- 789:     # (e.g. _skill_name, _extraction_context set by callers like Genesis)
- 790:     doc_originals: dict[UUID, dict[str, Any]] = {}
- 791:     for orig, staged in zip(documents, staged_results):
- 792:         if staged is not None:
- 793:             doc_originals[staged.id] = orig
- 794: 
- 795:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
- 796: 
- 797:     if not staged_docs:
- 798:         return {
- 799:             "total_documents": len(documents),
- 800:             "processed_documents": 0,
- 801:             "skipped_documents": len(documents),
- 802:             "total_chunks": 0,
- 803:             "total_entities": 0,
- 804:             "total_relationships": 0,
- 805:         }
- 806: 
- 807:     # Phase 2: Process staged documents in parallel with controlled concurrency
- 808:     # Share a single embedder across all documents to preserve the embedding cache
- 809:     if shared_embedder is None:
- 810:         from khora.extraction.embedders import LiteLLMEmbedder
+ 691:     except Exception as e:
+ 692:         document.mark_failed(str(e))
+ 693:         await storage.update_document(document)
+ 694:         raise
+ 695: 
+ 696: 
+ 697: @pipeline("ingest", description="Two-phase document ingestion with optional expansion", tags=["ingestion"])
+ 698: async def ingest_documents(
+ 699:     namespace_id: UUID,
+ 700:     documents: list[dict[str, Any]],
+ 701:     storage: StorageCoordinator | None = None,
+ 702:     *,
+ 703:     skill_name: str = "general_entities",
+ 704:     expertise: ExpertiseConfig | str | None = None,
+ 705:     chunk_strategy: str = "semantic",
+ 706:     chunk_size: int = 512,
+ 707:     embedding_model: str = "text-embedding-3-small",
+ 708:     extraction_model: str = "gpt-4o-mini",
+ 709:     max_concurrent_documents: int = 5,
+ 710:     max_concurrent_extractions: int = 10,
+ 711:     enable_expansion: bool = False,
+ 712:     extraction_context: dict[str, Any] | None = None,
+ 713:     skip_resolution: bool = False,
+ 714:     shared_embedder: Any | None = None,
+ 715:     shared_entity_index: Any | None = None,
+ 716:     extraction_timeout: int = 120,
+ 717:     extraction_max_retries: int = 3,
+ 718:     extraction_retry_wait: float = 2.0,
+ 719:     **kwargs,
+ 720: ) -> dict[str, Any]:
+ 721:     """Two-phase document ingestion flow with parallel processing.
+ 722: 
+ 723:     Phase 1: Stage documents (checksum-based change detection)
+ 724:     Phase 2: Process changed documents in parallel (chunk, embed, extract)
+ 725:     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
+ 726: 
+ 727:     Args:
+ 728:         namespace_id: Target namespace
+ 729:         documents: List of document dicts with 'content' and optional metadata
+ 730:         storage: StorageCoordinator instance
+ 731:         skill_name: Legacy extraction skill to use (ignored if expertise provided)
+ 732:         expertise: ExpertiseConfig, expertise name string, or file path
+ 733:         chunk_strategy: Chunking strategy
+ 734:         chunk_size: Target chunk size
+ 735:         embedding_model: Model for embeddings
+ 736:         extraction_model: Model for extraction
+ 737:         max_concurrent_documents: Maximum documents to process in parallel
+ 738:         max_concurrent_extractions: Maximum concurrent LLM extractions per document
+ 739:         enable_expansion: Whether to run semantic expansion
+ 740:         extraction_context: Context dict for prompt template rendering
+ 741:         skip_resolution: If True, skip Phase 3 (smart resolution). Useful when the
+ 742:             caller runs resolution separately after all batches are processed.
+ 743: 
+ 744:     Returns:
+ 745:         Summary of ingestion results
+ 746:     """
+ 747:     if storage is None:
+ 748:         raise ValueError("storage is required")
+ 749: 
+ 750:     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
+ 751: 
+ 752:     # Resolve expertise early to determine inference mode
+ 753:     resolved_expertise: ExpertiseConfig | None = None
+ 754:     if expertise is not None:
+ 755:         from khora.extraction.skills import ExpertiseConfig as EC
+ 756:         from khora.extraction.skills import load_expertise
+ 757: 
+ 758:         if isinstance(expertise, EC):
+ 759:             resolved_expertise = expertise
+ 760:         elif isinstance(expertise, str):
+ 761:             try:
+ 762:                 resolved_expertise = load_expertise(expertise)
+ 763:             except Exception:
+ 764:                 pass
+ 765: 
+ 766:     inference_mode = resolved_expertise.expansion.inference_mode if resolved_expertise else "none"
+ 767:     is_smart = inference_mode == "smart"
+ 768: 
+ 769:     # Smart mode: create shared EntityIndex, optionally pre-load existing entities
+ 770:     if shared_entity_index is not None:
+ 771:         pass  # Caller provided a pre-populated index; use it as-is
+ 772:     elif is_smart and resolved_expertise:
+ 773:         from khora.extraction.expansion.entity_index import EntityIndex as EI
+ 774: 
+ 775:         shared_entity_index = EI()
+ 776:         if resolved_expertise.expansion.preload_existing:
+ 777:             existing_entities = await storage.list_entities(namespace_id, limit=50000)
+ 778:             for e in existing_entities:
+ 779:                 shared_entity_index.add(e)
+ 780:             if existing_entities:
+ 781:                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
+ 782: 
+ 783:     # Phase 1: Stage documents (can run in parallel too)
+ 784:     staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
+ 785: 
+ 786:     async def stage_with_limit(doc_input):
+ 787:         async with staging_semaphore:
+ 788:             return await stage_document(doc_input, namespace_id, storage)
+ 789: 
+ 790:     staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+ 791:     staged_docs = [doc for doc in staged_results if doc is not None]
+ 792: 
+ 793:     # Build mapping from staged doc ID to original dict for per-doc overrides
+ 794:     # (e.g. _skill_name, _extraction_context set by callers like Genesis)
+ 795:     doc_originals: dict[UUID, dict[str, Any]] = {}
+ 796:     for orig, staged in zip(documents, staged_results):
+ 797:         if staged is not None:
+ 798:             doc_originals[staged.id] = orig
+ 799: 
+ 800:     logger.info(f"Phase 1 complete: {len(staged_docs)} documents to process")
+ 801: 
+ 802:     if not staged_docs:
+ 803:         return {
+ 804:             "total_documents": len(documents),
+ 805:             "processed_documents": 0,
+ 806:             "skipped_documents": len(documents),
+ 807:             "total_chunks": 0,
+ 808:             "total_entities": 0,
+ 809:             "total_relationships": 0,
+ 810:         }
  811: 
- 812:         shared_embedder = LiteLLMEmbedder(model=embedding_model)
- 813: 
- 814:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
- 815: 
- 816:     async def process_with_limit(doc):
- 817:         async with doc_semaphore:
- 818:             # Check for per-doc overrides from the original document dict
- 819:             orig = doc_originals.get(doc.id, {})
- 820:             doc_skill = orig.get("_skill_name", skill_name)
- 821:             doc_context = orig.get("_extraction_context", extraction_context)
- 822:             doc_model = orig.get("_extraction_model", extraction_model)
- 823:             return await process_document(
- 824:                 doc,
- 825:                 storage,
- 826:                 chunk_strategy=chunk_strategy,
- 827:                 chunk_size=chunk_size,
- 828:                 embedding_model=embedding_model,
- 829:                 extraction_model=doc_model,
- 830:                 skill_name=doc_skill,
- 831:                 expertise=expertise,
- 832:                 max_concurrent_extractions=max_concurrent_extractions,
- 833:                 enable_expansion=enable_expansion,
- 834:                 extraction_context=doc_context,
- 835:                 entity_index=shared_entity_index,
- 836:                 shared_embedder=shared_embedder,
- 837:                 extraction_timeout=extraction_timeout,
- 838:                 extraction_max_retries=extraction_max_retries,
- 839:                 extraction_retry_wait=extraction_retry_wait,
- 840:             )
- 841: 
- 842:     results = await asyncio.gather(
- 843:         *[process_with_limit(doc) for doc in staged_docs],
- 844:         return_exceptions=True,
- 845:     )
+ 812:     # Phase 2: Process staged documents in parallel with controlled concurrency
+ 813:     # Share a single embedder across all documents to preserve the embedding cache
+ 814:     if shared_embedder is None:
+ 815:         from khora.extraction.embedders import LiteLLMEmbedder
+ 816: 
+ 817:         shared_embedder = LiteLLMEmbedder(model=embedding_model)
+ 818: 
+ 819:     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+ 820: 
+ 821:     async def process_with_limit(doc):
+ 822:         async with doc_semaphore:
+ 823:             # Check for per-doc overrides from the original document dict
+ 824:             orig = doc_originals.get(doc.id, {})
+ 825:             doc_skill = orig.get("_skill_name", skill_name)
+ 826:             doc_context = orig.get("_extraction_context", extraction_context)
+ 827:             doc_model = orig.get("_extraction_model", extraction_model)
+ 828:             return await process_document(
+ 829:                 doc,
+ 830:                 storage,
+ 831:                 chunk_strategy=chunk_strategy,
+ 832:                 chunk_size=chunk_size,
+ 833:                 embedding_model=embedding_model,
+ 834:                 extraction_model=doc_model,
+ 835:                 skill_name=doc_skill,
+ 836:                 expertise=expertise,
+ 837:                 max_concurrent_extractions=max_concurrent_extractions,
+ 838:                 enable_expansion=enable_expansion,
+ 839:                 extraction_context=doc_context,
+ 840:                 entity_index=shared_entity_index,
+ 841:                 shared_embedder=shared_embedder,
+ 842:                 extraction_timeout=extraction_timeout,
+ 843:                 extraction_max_retries=extraction_max_retries,
+ 844:                 extraction_retry_wait=extraction_retry_wait,
+ 845:             )
  846: 
- 847:     if shared_entity_index is not None:
- 848:         logger.info(f"Entity index size after processing: {len(shared_entity_index)} entities")
- 849: 
- 850:     # Filter out exceptions and count errors
- 851:     successful_results = []
- 852:     error_count = 0
- 853:     for result in results:
- 854:         if isinstance(result, Exception):
- 855:             logger.error(f"Document processing failed: {result}")
- 856:             error_count += 1
- 857:         else:
- 858:             successful_results.append(result)
- 859: 
- 860:     # Aggregate results
- 861:     total_chunks = sum(r["chunks"] for r in successful_results)
- 862:     total_entities = sum(r["entities"] for r in successful_results)
- 863:     total_relationships = sum(r["relationships"] for r in successful_results)
- 864:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
- 865: 
- 866:     # Phase 3 (Smart mode): Post-ingestion cross-document resolution + inference
- 867:     smart_resolution_result: dict[str, Any] = {}
- 868:     if is_smart and shared_entity_index and resolved_expertise and successful_results and not skip_resolution:
- 869:         logger.info("Starting smart post-ingestion resolution...")
- 870:         smart_resolution_result = await run_smart_resolution(
- 871:             namespace_id,
- 872:             storage,
- 873:             shared_entity_index,
- 874:             resolved_expertise,
- 875:             embedding_model=embedding_model,
- 876:             shared_embedder=shared_embedder,
- 877:         )
- 878:         total_entities = smart_resolution_result.get("entities_resolved", total_entities)
- 879:         total_inferred = smart_resolution_result.get("inferred_relationships", total_inferred)
- 880: 
- 881:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
- 882: 
- 883:     return {
- 884:         "total_documents": len(documents),
- 885:         "processed_documents": len(successful_results),
- 886:         "skipped_documents": len(documents) - len(staged_docs),
- 887:         "failed_documents": error_count,
- 888:         "total_chunks": total_chunks,
- 889:         "total_entities": total_entities,
- 890:         "total_relationships": total_relationships,
- 891:         "total_inferred_relationships": total_inferred,
- 892:         "per_document_results": successful_results,
- 893:         **({"smart_resolution": smart_resolution_result} if smart_resolution_result else {}),
- 894:     }
- 895: 
- 896: 
- 897: async def run_smart_resolution(
- 898:     namespace_id: UUID,
- 899:     storage: StorageCoordinator,
- 900:     entity_index: EntityIndex,
- 901:     expertise: ExpertiseConfig,
- 902:     *,
- 903:     embedding_model: str = "text-embedding-3-small",
- 904:     shared_embedder: Any | None = None,
- 905: ) -> dict[str, Any]:
- 906:     """Post-ingestion cross-document entity resolution and relationship inference.
- 907: 
- 908:     Called once after all documents have been processed in smart mode.
- 909:     Uses the shared EntityIndex for blocked (O(n*k)) matching instead
- 910:     of O(n^2) pairwise comparisons.
- 911: 
- 912:     Steps:
- 913:         1. Run CrossToolUnifier with token blocking via EntityIndex
- 914:         2. Apply merge results to storage (batch upsert)
- 915:         3. Load all relationships once
- 916:         4. Run RelationshipInferrer on the full resolved graph
- 917:         5. Store inferred relationships (batch)
- 918: 
- 919:     Args:
- 920:         namespace_id: Namespace to resolve
- 921:         storage: Storage coordinator
- 922:         entity_index: Populated EntityIndex from ingestion
- 923:         expertise: ExpertiseConfig with rules
- 924:         embedding_model: Model name for entity embeddings
- 925: 
- 926:     Returns:
- 927:         Summary of resolution results
- 928:     """
- 929:     from khora.extraction.expansion import SemanticExpander
- 930:     from khora.extraction.expansion.relationship_inferrer import to_relationship
- 931:     from khora.telemetry.instrument import pipeline_stage
- 932: 
- 933:     all_entities = entity_index.get_all_entities()
- 934:     logger.info(f"Smart resolution: {len(all_entities)} entities in index ({entity_index.stats()})")
- 935: 
- 936:     if not all_entities:
- 937:         return {"entities_resolved": 0, "entities_merged": 0, "inferred_relationships": 0}
- 938: 
- 939:     # Phase 1: Cross-document entity unification with blocking
- 940:     async with pipeline_stage(
- 941:         "ingestion",
- 942:         "smart_resolution",
- 943:         namespace_id=namespace_id,
- 944:         input_count=len(all_entities),
- 945:     ) as _sr_ctx:
- 946:         expander = SemanticExpander(
- 947:             expertise=expertise,
- 948:             enable_unification=True,
- 949:             enable_inference=False,  # Inference done separately below
- 950:         )
- 951:         expansion_result = await expander.expand(
- 952:             entities=all_entities,
- 953:             relationships=[],  # No relationships needed for unification
- 954:             namespace_id=namespace_id,
- 955:             entity_index=entity_index,
- 956:         )
- 957:         _sr_ctx["output_count"] = len(expansion_result.entities)
- 958: 
- 959:     resolved_entities = expansion_result.entities
- 960:     entity_mapping = expansion_result.entity_mapping
- 961:     entities_merged = expansion_result.merged_entity_count
- 962: 
- 963:     logger.info(f"Smart resolution: unified {len(all_entities)} -> {len(resolved_entities)} ({entities_merged} merged)")
- 964: 
- 965:     # Phase 2: Batch upsert resolved entities to storage
- 966:     batch_size = expertise.expansion.batch_storage_size
- 967:     await storage.upsert_entities_batch(namespace_id, resolved_entities, batch_size=batch_size)
- 968: 
- 969:     # Generate embeddings for entities missing them
- 970:     entities_needing_embeddings = [e for e in resolved_entities if not e.embedding]
- 971:     if entities_needing_embeddings:
- 972:         from khora.extraction.embedders import LiteLLMEmbedder
+ 847:     results = await asyncio.gather(
+ 848:         *[process_with_limit(doc) for doc in staged_docs],
+ 849:         return_exceptions=True,
+ 850:     )
+ 851: 
+ 852:     if shared_entity_index is not None:
+ 853:         logger.info(f"Entity index size after processing: {len(shared_entity_index)} entities")
+ 854: 
+ 855:     # Filter out exceptions and count errors
+ 856:     successful_results = []
+ 857:     error_count = 0
+ 858:     for result in results:
+ 859:         if isinstance(result, Exception):
+ 860:             logger.error(f"Document processing failed: {result}")
+ 861:             error_count += 1
+ 862:         else:
+ 863:             successful_results.append(result)
+ 864: 
+ 865:     # Aggregate results
+ 866:     total_chunks = sum(r["chunks"] for r in successful_results)
+ 867:     total_entities = sum(r["entities"] for r in successful_results)
+ 868:     total_relationships = sum(r["relationships"] for r in successful_results)
+ 869:     total_inferred = sum(r.get("inferred_relationships", 0) for r in successful_results)
+ 870: 
+ 871:     # Phase 3 (Smart mode): Post-ingestion cross-document resolution + inference
+ 872:     smart_resolution_result: dict[str, Any] = {}
+ 873:     if is_smart and shared_entity_index and resolved_expertise and successful_results and not skip_resolution:
+ 874:         logger.info("Starting smart post-ingestion resolution...")
+ 875:         smart_resolution_result = await run_smart_resolution(
+ 876:             namespace_id,
+ 877:             storage,
+ 878:             shared_entity_index,
+ 879:             resolved_expertise,
+ 880:             embedding_model=embedding_model,
+ 881:             shared_embedder=shared_embedder,
+ 882:         )
+ 883:         total_entities = smart_resolution_result.get("entities_resolved", total_entities)
+ 884:         total_inferred = smart_resolution_result.get("inferred_relationships", total_inferred)
+ 885: 
+ 886:     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
+ 887: 
+ 888:     return {
+ 889:         "total_documents": len(documents),
+ 890:         "processed_documents": len(successful_results),
+ 891:         "skipped_documents": len(documents) - len(staged_docs),
+ 892:         "failed_documents": error_count,
+ 893:         "total_chunks": total_chunks,
+ 894:         "total_entities": total_entities,
+ 895:         "total_relationships": total_relationships,
+ 896:         "total_inferred_relationships": total_inferred,
+ 897:         "per_document_results": successful_results,
+ 898:         **({"smart_resolution": smart_resolution_result} if smart_resolution_result else {}),
+ 899:     }
+ 900: 
+ 901: 
+ 902: async def run_smart_resolution(
+ 903:     namespace_id: UUID,
+ 904:     storage: StorageCoordinator,
+ 905:     entity_index: EntityIndex,
+ 906:     expertise: ExpertiseConfig,
+ 907:     *,
+ 908:     embedding_model: str = "text-embedding-3-small",
+ 909:     shared_embedder: Any | None = None,
+ 910: ) -> dict[str, Any]:
+ 911:     """Post-ingestion cross-document entity resolution and relationship inference.
+ 912: 
+ 913:     Called once after all documents have been processed in smart mode.
+ 914:     Uses the shared EntityIndex for blocked (O(n*k)) matching instead
+ 915:     of O(n^2) pairwise comparisons.
+ 916: 
+ 917:     Steps:
+ 918:         1. Run CrossToolUnifier with token blocking via EntityIndex
+ 919:         2. Apply merge results to storage (batch upsert)
+ 920:         3. Load all relationships once
+ 921:         4. Run RelationshipInferrer on the full resolved graph
+ 922:         5. Store inferred relationships (batch)
+ 923: 
+ 924:     Args:
+ 925:         namespace_id: Namespace to resolve
+ 926:         storage: Storage coordinator
+ 927:         entity_index: Populated EntityIndex from ingestion
+ 928:         expertise: ExpertiseConfig with rules
+ 929:         embedding_model: Model name for entity embeddings
+ 930: 
+ 931:     Returns:
+ 932:         Summary of resolution results
+ 933:     """
+ 934:     from khora.extraction.expansion import SemanticExpander
+ 935:     from khora.extraction.expansion.relationship_inferrer import to_relationship
+ 936:     from khora.telemetry.instrument import pipeline_stage
+ 937: 
+ 938:     all_entities = entity_index.get_all_entities()
+ 939:     logger.info(f"Smart resolution: {len(all_entities)} entities in index ({entity_index.stats()})")
+ 940: 
+ 941:     if not all_entities:
+ 942:         return {"entities_resolved": 0, "entities_merged": 0, "inferred_relationships": 0}
+ 943: 
+ 944:     # Phase 1: Cross-document entity unification with blocking
+ 945:     async with pipeline_stage(
+ 946:         "ingestion",
+ 947:         "smart_resolution",
+ 948:         namespace_id=namespace_id,
+ 949:         input_count=len(all_entities),
+ 950:     ) as _sr_ctx:
+ 951:         expander = SemanticExpander(
+ 952:             expertise=expertise,
+ 953:             enable_unification=True,
+ 954:             enable_inference=False,  # Inference done separately below
+ 955:         )
+ 956:         expansion_result = await expander.expand(
+ 957:             entities=all_entities,
+ 958:             relationships=[],  # No relationships needed for unification
+ 959:             namespace_id=namespace_id,
+ 960:             entity_index=entity_index,
+ 961:         )
+ 962:         _sr_ctx["output_count"] = len(expansion_result.entities)
+ 963: 
+ 964:     resolved_entities = expansion_result.entities
+ 965:     entity_mapping = expansion_result.entity_mapping
+ 966:     entities_merged = expansion_result.merged_entity_count
+ 967: 
+ 968:     logger.info(f"Smart resolution: unified {len(all_entities)} -> {len(resolved_entities)} ({entities_merged} merged)")
+ 969: 
+ 970:     # Phase 2: Batch upsert resolved entities to storage
+ 971:     batch_size = expertise.expansion.batch_storage_size
+ 972:     await storage.upsert_entities_batch(namespace_id, resolved_entities, batch_size=batch_size)
  973: 
- 974:         embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
- 975:         entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings]
- 976:         entity_embeddings = await embedder.embed_batch(entity_texts)
- 977:         updates = [
- 978:             (entity.id, embedding, embedding_model)
- 979:             for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
- 980:         ]
- 981:         await storage.update_entity_embeddings_batch(updates)
- 982:         logger.debug(f"Smart resolution: generated embeddings for {len(entities_needing_embeddings)} entities")
- 983: 
- 984:     # Phase 3: Load all relationships and remap merged entity IDs
- 985:     relationships = await storage.list_relationships(namespace_id, limit=50000)
- 986:     if entity_mapping:
- 987:         for rel in relationships:
- 988:             new_source = entity_mapping.get(rel.source_entity_id, rel.source_entity_id)
- 989:             new_target = entity_mapping.get(rel.target_entity_id, rel.target_entity_id)
- 990:             rel.source_entity_id = new_source
- 991:             rel.target_entity_id = new_target
- 992: 
- 993:     # --- Inference diagnostics ---
- 994:     from collections import Counter
- 995: 
- 996:     logger.info(f"Smart resolution: loaded {len(relationships)} relationships from storage")
+ 974:     # Generate embeddings for entities missing them
+ 975:     entities_needing_embeddings = [e for e in resolved_entities if not e.embedding]
+ 976:     if entities_needing_embeddings:
+ 977:         from khora.extraction.embedders import LiteLLMEmbedder
+ 978: 
+ 979:         embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
+ 980:         entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings]
+ 981:         entity_embeddings = await embedder.embed_batch(entity_texts)
+ 982:         updates = [
+ 983:             (entity.id, embedding, embedding_model)
+ 984:             for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
+ 985:         ]
+ 986:         await storage.update_entity_embeddings_batch(updates)
+ 987:         logger.debug(f"Smart resolution: generated embeddings for {len(entities_needing_embeddings)} entities")
+ 988: 
+ 989:     # Phase 3: Load all relationships and remap merged entity IDs
+ 990:     relationships = await storage.list_relationships(namespace_id, limit=50000)
+ 991:     if entity_mapping:
+ 992:         for rel in relationships:
+ 993:             new_source = entity_mapping.get(rel.source_entity_id, rel.source_entity_id)
+ 994:             new_target = entity_mapping.get(rel.target_entity_id, rel.target_entity_id)
+ 995:             rel.source_entity_id = new_source
+ 996:             rel.target_entity_id = new_target
  997: 
- 998:     if relationships:
- 999:         rel_type_dist = Counter(
-1000:             str(r.relationship_type.value if hasattr(r.relationship_type, "value") else r.relationship_type)
-1001:             for r in relationships
-1002:         )
-1003:         logger.info(f"Smart resolution: relationship types: {dict(rel_type_dist.most_common(15))}")
-1004: 
-1005:     if resolved_entities:
-1006:         ent_type_dist = Counter(
-1007:             str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) for e in resolved_entities
-1008:         )
-1009:         logger.info(f"Smart resolution: entity types: {dict(ent_type_dist.most_common(15))}")
-1010: 
-1011:     # Check entity ID overlap between relationships and resolved_entities
-1012:     rel_entity_ids = set()
-1013:     for rel in relationships:
-1014:         rel_entity_ids.add(str(rel.source_entity_id))
-1015:         rel_entity_ids.add(str(rel.target_entity_id))
-1016:     resolved_ids = {str(e.id) for e in resolved_entities}
-1017:     matched = len(rel_entity_ids & resolved_ids)
-1018:     unmatched = len(rel_entity_ids - resolved_ids)
-1019:     logger.info(
-1020:         f"Smart resolution: entity ID overlap: {matched}/{len(rel_entity_ids)} "
-1021:         f"({unmatched} relationship entity IDs NOT in resolved entities)"
-1022:     )
-1023: 
-1024:     # Debug: show sample IDs if overlap is suspiciously low
-1025:     if len(rel_entity_ids) > 0 and matched / len(rel_entity_ids) < 0.5:
-1026:         sample_rel_ids = list(rel_entity_ids)[:5]
-1027:         sample_resolved_ids = list(resolved_ids)[:5]
-1028:         logger.warning(
-1029:             f"Low entity ID overlap! Sample rel IDs: {sample_rel_ids}, Sample resolved IDs: {sample_resolved_ids}"
-1030:         )
-1031: 
-1032:     # Phase 4: Relationship inference on full resolved graph (single pass)
-1033:     from khora.extraction.expansion.relationship_inferrer import RelationshipInferrer
-1034:     from khora.extraction.expansion.rule_engine import RuleEvaluationContext
-1035: 
-1036:     inferrer = RelationshipInferrer(
-1037:         expertise=expertise,
-1038:         min_confidence=expertise.confidence.min_inferred,
-1039:     )
+ 998:     # --- Inference diagnostics ---
+ 999:     from collections import Counter
+1000: 
+1001:     logger.info(f"Smart resolution: loaded {len(relationships)} relationships from storage")
+1002: 
+1003:     if relationships:
+1004:         rel_type_dist = Counter(
+1005:             str(r.relationship_type.value if hasattr(r.relationship_type, "value") else r.relationship_type)
+1006:             for r in relationships
+1007:         )
+1008:         logger.info(f"Smart resolution: relationship types: {dict(rel_type_dist.most_common(15))}")
+1009: 
+1010:     if resolved_entities:
+1011:         ent_type_dist = Counter(
+1012:             str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) for e in resolved_entities
+1013:         )
+1014:         logger.info(f"Smart resolution: entity types: {dict(ent_type_dist.most_common(15))}")
+1015: 
+1016:     # Check entity ID overlap between relationships and resolved_entities
+1017:     rel_entity_ids = set()
+1018:     for rel in relationships:
+1019:         rel_entity_ids.add(str(rel.source_entity_id))
+1020:         rel_entity_ids.add(str(rel.target_entity_id))
+1021:     resolved_ids = {str(e.id) for e in resolved_entities}
+1022:     matched = len(rel_entity_ids & resolved_ids)
+1023:     unmatched = len(rel_entity_ids - resolved_ids)
+1024:     logger.info(
+1025:         f"Smart resolution: entity ID overlap: {matched}/{len(rel_entity_ids)} "
+1026:         f"({unmatched} relationship entity IDs NOT in resolved entities)"
+1027:     )
+1028: 
+1029:     # Debug: show sample IDs if overlap is suspiciously low
+1030:     if len(rel_entity_ids) > 0 and matched / len(rel_entity_ids) < 0.5:
+1031:         sample_rel_ids = list(rel_entity_ids)[:5]
+1032:         sample_resolved_ids = list(resolved_ids)[:5]
+1033:         logger.warning(
+1034:             f"Low entity ID overlap! Sample rel IDs: {sample_rel_ids}, Sample resolved IDs: {sample_resolved_ids}"
+1035:         )
+1036: 
+1037:     # Phase 4: Relationship inference on full resolved graph (single pass)
+1038:     from khora.extraction.expansion.relationship_inferrer import RelationshipInferrer
+1039:     from khora.extraction.expansion.rule_engine import RuleEvaluationContext
 1040: 
-1041:     # Pre-check: count rule engine matches (for diagnostics)
-1042:     rule_engine_matches = 0
-1043:     if expertise.inference_rules:
-1044:         context = RuleEvaluationContext.from_data(resolved_entities, relationships)
-1045:         matches = inferrer._rule_engine.evaluate_inference_rules(context)
-1046:         rule_engine_matches = len(matches)
-1047:         logger.info(f"Smart resolution: rule engine produced {rule_engine_matches} raw matches")
-1048: 
-1049:     inferred = inferrer.infer(
-1050:         resolved_entities,
-1051:         relationships,
-1052:         depth=expertise.expansion.depth,
-1053:     )
-1054: 
-1055:     # Phase 5: Store inferred relationships (batch)
-1056:     inferred_count = 0
-1057:     if inferred:
-1058:         inferred_rels = [to_relationship(inf, namespace_id) for inf in inferred]
-1059:         inferred_count = await storage.create_relationships_batch(inferred_rels, batch_size=batch_size)
-1060: 
-1061:     logger.info(
-1062:         f"Smart resolution complete: {len(resolved_entities)} entities, "
-1063:         f"{entities_merged} merged, {inferred_count} inferred relationships"
-1064:     )
+1041:     inferrer = RelationshipInferrer(
+1042:         expertise=expertise,
+1043:         min_confidence=expertise.confidence.min_inferred,
+1044:     )
+1045: 
+1046:     # Pre-check: count rule engine matches (for diagnostics)
+1047:     rule_engine_matches = 0
+1048:     if expertise.inference_rules:
+1049:         context = RuleEvaluationContext.from_data(resolved_entities, relationships)
+1050:         matches = inferrer._rule_engine.evaluate_inference_rules(context)
+1051:         rule_engine_matches = len(matches)
+1052:         logger.info(f"Smart resolution: rule engine produced {rule_engine_matches} raw matches")
+1053: 
+1054:     inferred = inferrer.infer(
+1055:         resolved_entities,
+1056:         relationships,
+1057:         depth=expertise.expansion.depth,
+1058:     )
+1059: 
+1060:     # Phase 5: Store inferred relationships (batch)
+1061:     inferred_count = 0
+1062:     if inferred:
+1063:         inferred_rels = [to_relationship(inf, namespace_id) for inf in inferred]
+1064:         inferred_count = await storage.create_relationships_batch(inferred_rels, batch_size=batch_size)
 1065: 
-1066:     # Build diagnostics for caller
-1067:     diagnostics = {
-1068:         "relationships_loaded": len(relationships),
-1069:         "entities_resolved": len(resolved_entities),
-1070:         "relationship_types": dict(rel_type_dist) if relationships else {},
-1071:         "entity_types": dict(ent_type_dist) if resolved_entities else {},
-1072:         "entity_id_overlap": {
-1073:             "matched": matched,
-1074:             "total": len(rel_entity_ids),
-1075:             "unmatched": unmatched,
-1076:         },
-1077:         "rule_engine_matches": rule_engine_matches,
-1078:     }
-1079: 
-1080:     return {
-1081:         "entities_resolved": len(resolved_entities),
-1082:         "entities_merged": entities_merged,
-1083:         "inferred_relationships": inferred_count,
-1084:         "diagnostics": diagnostics,
-1085:     }
-1086: 
-1087: 
-1088: async def run_batch_inference(
-1089:     namespace_id: UUID,
-1090:     storage: StorageCoordinator,
-1091:     expertise: ExpertiseConfig,
-1092:     *,
-1093:     max_entities: int = 10000,
-1094:     max_relationships: int = 50000,
-1095: ) -> dict[str, Any]:
-1096:     """Run batch inference on the entire namespace.
-1097: 
-1098:     This should be called after all documents are ingested when using
-1099:     inference_mode="batch". It queries all entities and relationships
-1100:     from the namespace and runs inference rules to create new relationships.
-1101: 
-1102:     Args:
-1103:         namespace_id: Namespace to run inference on
-1104:         storage: Storage coordinator
-1105:         expertise: ExpertiseConfig with inference rules
-1106:         max_entities: Maximum entities to load
-1107:         max_relationships: Maximum relationships to load
-1108: 
-1109:     Returns:
-1110:         Summary of inference results
-1111:     """
-1112:     from khora.extraction.expansion import SemanticExpander
+1066:     logger.info(
+1067:         f"Smart resolution complete: {len(resolved_entities)} entities, "
+1068:         f"{entities_merged} merged, {inferred_count} inferred relationships"
+1069:     )
+1070: 
+1071:     # Build diagnostics for caller
+1072:     diagnostics = {
+1073:         "relationships_loaded": len(relationships),
+1074:         "entities_resolved": len(resolved_entities),
+1075:         "relationship_types": dict(rel_type_dist) if relationships else {},
+1076:         "entity_types": dict(ent_type_dist) if resolved_entities else {},
+1077:         "entity_id_overlap": {
+1078:             "matched": matched,
+1079:             "total": len(rel_entity_ids),
+1080:             "unmatched": unmatched,
+1081:         },
+1082:         "rule_engine_matches": rule_engine_matches,
+1083:     }
+1084: 
+1085:     return {
+1086:         "entities_resolved": len(resolved_entities),
+1087:         "entities_merged": entities_merged,
+1088:         "inferred_relationships": inferred_count,
+1089:         "diagnostics": diagnostics,
+1090:     }
+1091: 
+1092: 
+1093: async def run_batch_inference(
+1094:     namespace_id: UUID,
+1095:     storage: StorageCoordinator,
+1096:     expertise: ExpertiseConfig,
+1097:     *,
+1098:     max_entities: int = 10000,
+1099:     max_relationships: int = 50000,
+1100: ) -> dict[str, Any]:
+1101:     """Run batch inference on the entire namespace.
+1102: 
+1103:     This should be called after all documents are ingested when using
+1104:     inference_mode="batch". It queries all entities and relationships
+1105:     from the namespace and runs inference rules to create new relationships.
+1106: 
+1107:     Args:
+1108:         namespace_id: Namespace to run inference on
+1109:         storage: Storage coordinator
+1110:         expertise: ExpertiseConfig with inference rules
+1111:         max_entities: Maximum entities to load
+1112:         max_relationships: Maximum relationships to load
 1113: 
-1114:     logger.info(f"Starting batch inference for namespace {namespace_id}")
-1115: 
-1116:     # Load all entities and relationships from storage
-1117:     entities = await storage.list_entities(namespace_id, limit=max_entities)
-1118:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
-1119: 
-1120:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
-1121: 
-1122:     if not entities:
-1123:         return {
-1124:             "entities": 0,
-1125:             "relationships": 0,
-1126:             "inferred_relationships": 0,
-1127:         }
-1128: 
-1129:     # Create expander with inference enabled
-1130:     logger.info("Creating SemanticExpander...")
-1131:     expander = SemanticExpander(
-1132:         expertise=expertise,
-1133:         enable_unification=False,  # Entities already unified during ingestion
-1134:         enable_inference=True,
-1135:     )
-1136:     logger.info("SemanticExpander created, starting expansion...")
-1137: 
-1138:     # Run expansion (inference only)
-1139:     expansion_result = await expander.expand(
-1140:         entities=entities,
-1141:         relationships=relationships,
-1142:         namespace_id=namespace_id,
-1143:     )
-1144:     logger.info(f"Expansion complete: {expansion_result.inferred_relationship_count} inferred")
-1145: 
-1146:     # Store inferred relationships (batch)
-1147:     inferred_count = 0
-1148:     if expansion_result.inferred_relationships:
-1149:         try:
-1150:             inferred_count = await storage.create_relationships_batch(expansion_result.inferred_relationships)
-1151:         except Exception as e:
-1152:             logger.warning(f"Failed to store inferred relationships in batch: {e}")
-1153: 
-1154:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
-1155: 
-1156:     return {
-1157:         "entities": len(entities),
-1158:         "relationships": len(relationships),
-1159:         "inferred_relationships": inferred_count,
-1160:     }
-1161: 
-1162: 
-1163: async def backfill_entity_embeddings(
-1164:     namespace_id: UUID,
-1165:     storage: StorageCoordinator,
-1166:     *,
-1167:     embedding_model: str = "text-embedding-3-small",
-1168:     batch_size: int = 100,
-1169:     max_entities: int = 50000,
-1170: ) -> dict[str, Any]:
-1171:     """Backfill embeddings for entities that don't have them.
-1172: 
-1173:     This is useful for fixing entities created before entity embedding
-1174:     generation was implemented. It queries entities from Neo4j via the
-1175:     graph backend and generates embeddings for storage in PostgreSQL.
-1176: 
-1177:     Args:
-1178:         namespace_id: Namespace to process
-1179:         storage: Storage coordinator
-1180:         embedding_model: Model to use for embeddings
-1181:         batch_size: Batch size for embedding generation
-1182:         max_entities: Maximum entities to process
-1183: 
-1184:     Returns:
-1185:         Summary of backfill results
-1186:     """
-1187:     from khora.extraction.embedders import LiteLLMEmbedder
+1114:     Returns:
+1115:         Summary of inference results
+1116:     """
+1117:     from khora.extraction.expansion import SemanticExpander
+1118: 
+1119:     logger.info(f"Starting batch inference for namespace {namespace_id}")
+1120: 
+1121:     # Load all entities and relationships from storage
+1122:     entities = await storage.list_entities(namespace_id, limit=max_entities)
+1123:     relationships = await storage.list_relationships(namespace_id, limit=max_relationships)
+1124: 
+1125:     logger.info(f"Loaded {len(entities)} entities and {len(relationships)} relationships")
+1126: 
+1127:     if not entities:
+1128:         return {
+1129:             "entities": 0,
+1130:             "relationships": 0,
+1131:             "inferred_relationships": 0,
+1132:         }
+1133: 
+1134:     # Create expander with inference enabled
+1135:     logger.info("Creating SemanticExpander...")
+1136:     expander = SemanticExpander(
+1137:         expertise=expertise,
+1138:         enable_unification=False,  # Entities already unified during ingestion
+1139:         enable_inference=True,
+1140:     )
+1141:     logger.info("SemanticExpander created, starting expansion...")
+1142: 
+1143:     # Run expansion (inference only)
+1144:     expansion_result = await expander.expand(
+1145:         entities=entities,
+1146:         relationships=relationships,
+1147:         namespace_id=namespace_id,
+1148:     )
+1149:     logger.info(f"Expansion complete: {expansion_result.inferred_relationship_count} inferred")
+1150: 
+1151:     # Store inferred relationships (batch)
+1152:     inferred_count = 0
+1153:     if expansion_result.inferred_relationships:
+1154:         try:
+1155:             inferred_count = await storage.create_relationships_batch(expansion_result.inferred_relationships)
+1156:         except Exception as e:
+1157:             logger.warning(f"Failed to store inferred relationships in batch: {e}")
+1158: 
+1159:     logger.info(f"Batch inference complete: inferred {inferred_count} new relationships")
+1160: 
+1161:     return {
+1162:         "entities": len(entities),
+1163:         "relationships": len(relationships),
+1164:         "inferred_relationships": inferred_count,
+1165:     }
+1166: 
+1167: 
+1168: async def backfill_entity_embeddings(
+1169:     namespace_id: UUID,
+1170:     storage: StorageCoordinator,
+1171:     *,
+1172:     embedding_model: str = "text-embedding-3-small",
+1173:     batch_size: int = 100,
+1174:     max_entities: int = 50000,
+1175: ) -> dict[str, Any]:
+1176:     """Backfill embeddings for entities that don't have them.
+1177: 
+1178:     This is useful for fixing entities created before entity embedding
+1179:     generation was implemented. It queries entities from Neo4j via the
+1180:     graph backend and generates embeddings for storage in PostgreSQL.
+1181: 
+1182:     Args:
+1183:         namespace_id: Namespace to process
+1184:         storage: Storage coordinator
+1185:         embedding_model: Model to use for embeddings
+1186:         batch_size: Batch size for embedding generation
+1187:         max_entities: Maximum entities to process
 1188: 
-1189:     logger.info(f"Starting entity embedding backfill for namespace {namespace_id}")
-1190: 
-1191:     # Get all entities from the namespace
-1192:     entities = await storage.list_entities(namespace_id, limit=max_entities)
-1193:     logger.info(f"Found {len(entities)} entities")
-1194: 
-1195:     if not entities:
-1196:         return {"total_entities": 0, "entities_updated": 0}
-1197: 
-1198:     # Filter to entities without embeddings
-1199:     # Note: We check the vector backend directly since graph doesn't store embeddings
-1200:     entities_needing_embeddings = []
-1201:     for entity in entities:
-1202:         if not entity.embedding:
-1203:             # Also ensure entity exists in PostgreSQL, create if not
-1204:             if storage.vector:
-1205:                 exists = await storage.vector.entity_exists(entity.id)
-1206:                 if not exists:
-1207:                     await storage.vector.create_entity(entity)
-1208:             entities_needing_embeddings.append(entity)
-1209: 
-1210:     logger.info(f"Found {len(entities_needing_embeddings)} entities needing embeddings")
-1211: 
-1212:     if not entities_needing_embeddings:
-1213:         return {"total_entities": len(entities), "entities_updated": 0}
+1189:     Returns:
+1190:         Summary of backfill results
+1191:     """
+1192:     from khora.extraction.embedders import LiteLLMEmbedder
+1193: 
+1194:     logger.info(f"Starting entity embedding backfill for namespace {namespace_id}")
+1195: 
+1196:     # Get all entities from the namespace
+1197:     entities = await storage.list_entities(namespace_id, limit=max_entities)
+1198:     logger.info(f"Found {len(entities)} entities")
+1199: 
+1200:     if not entities:
+1201:         return {"total_entities": 0, "entities_updated": 0}
+1202: 
+1203:     # Filter to entities without embeddings
+1204:     # Note: We check the vector backend directly since graph doesn't store embeddings
+1205:     entities_needing_embeddings = []
+1206:     for entity in entities:
+1207:         if not entity.embedding:
+1208:             # Also ensure entity exists in PostgreSQL, create if not
+1209:             if storage.vector:
+1210:                 exists = await storage.vector.entity_exists(entity.id)
+1211:                 if not exists:
+1212:                     await storage.vector.create_entity(entity)
+1213:             entities_needing_embeddings.append(entity)
 1214: 
-1215:     # Create embedder
-1216:     embedder = LiteLLMEmbedder(model=embedding_model, batch_size=batch_size)
-1217: 
-1218:     # Process in batches
-1219:     total_updated = 0
-1220:     for i in range(0, len(entities_needing_embeddings), batch_size):
-1221:         batch = entities_needing_embeddings[i : i + batch_size]
+1215:     logger.info(f"Found {len(entities_needing_embeddings)} entities needing embeddings")
+1216: 
+1217:     if not entities_needing_embeddings:
+1218:         return {"total_entities": len(entities), "entities_updated": 0}
+1219: 
+1220:     # Create embedder
+1221:     embedder = LiteLLMEmbedder(model=embedding_model, batch_size=batch_size)
 1222: 
-1223:         # Create text representations
-1224:         texts = [f"{e.name}: {e.description}" if e.description else e.name for e in batch]
-1225: 
-1226:         # Generate embeddings
-1227:         embeddings = await embedder.embed_batch(texts)
-1228: 
-1229:         # Update entities
-1230:         for entity, embedding in zip(batch, embeddings):
-1231:             await storage.update_entity_embedding(entity.id, embedding, embedding_model)
-1232:             total_updated += 1
+1223:     # Process in batches
+1224:     total_updated = 0
+1225:     for i in range(0, len(entities_needing_embeddings), batch_size):
+1226:         batch = entities_needing_embeddings[i : i + batch_size]
+1227: 
+1228:         # Create text representations
+1229:         texts = [f"{e.name}: {e.description}" if e.description else e.name for e in batch]
+1230: 
+1231:         # Generate embeddings
+1232:         embeddings = await embedder.embed_batch(texts)
 1233: 
-1234:         logger.debug(f"Updated {total_updated}/{len(entities_needing_embeddings)} entity embeddings")
-1235: 
-1236:     logger.info(f"Entity embedding backfill complete: updated {total_updated} entities")
-1237: 
-1238:     return {
-1239:         "total_entities": len(entities),
-1240:         "entities_updated": total_updated,
-1241:     }
+1234:         # Update entities
+1235:         for entity, embedding in zip(batch, embeddings):
+1236:             await storage.update_entity_embedding(entity.id, embedding, embedding_model)
+1237:             total_updated += 1
+1238: 
+1239:         logger.debug(f"Updated {total_updated}/{len(entities_needing_embeddings)} entity embeddings")
+1240: 
+1241:     logger.info(f"Entity embedding backfill complete: updated {total_updated} entities")
+1242: 
+1243:     return {
+1244:         "total_entities": len(entities),
+1245:         "entities_updated": total_updated,
+1246:     }
 ````
 
 ## File: pyproject.toml
@@ -55276,6 +55290,13 @@ README.md
 
 
 # Git Logs
+
+## Commit: 2026-02-07 11:24:30 +0100
+**Message:** chore: downgrade extraction log to debug level
+
+**Files:**
+- REPOMIX.md
+- src/khora/pipelines/flows/ingest.py
 
 ## Commit: 2026-02-07 01:03:58 +0100
 **Message:** Merge pull request #2 from DeytaHQ/khora-optimization
@@ -55528,11 +55549,3 @@ README.md
 - src/khora/extraction/chunkers/semantic.py
 - src/khora/storage/backends/postgresql.py
 - src/khora/storage/coordinator.py
-
-## Commit: 2026-02-05 18:09:50 +0100
-**Message:** chore: bump version to 0.1.2
-
-**Files:**
-- REPOMIX.md
-- pyproject.toml
-- uv.lock

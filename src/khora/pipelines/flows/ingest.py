@@ -570,9 +570,14 @@ async def process_document(
                     f"(expected {len(pre_upsert_ids)})"
                 )
                 if len(upsert_results) != len(pre_upsert_ids):
+                    # Log details to diagnose the mismatch
+                    result_ids = [str(e.id) for e, _ in upsert_results]
+                    missing_ids = set(pre_upsert_ids) - set(result_ids)
+                    extra_ids = set(result_ids) - set(pre_upsert_ids)
                     logger.warning(
                         f"Document {document.id}: upsert result count mismatch - "
-                        f"got {len(upsert_results)}, expected {len(pre_upsert_ids)}"
+                        f"sent {len(pre_upsert_ids)}, got {len(upsert_results)} "
+                        f"(missing: {len(missing_ids)}, extra: {len(extra_ids)})"
                     )
 
                 store_results: list[tuple[Entity, bool]] = []

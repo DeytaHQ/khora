@@ -454,17 +454,26 @@ class Neo4jBackend(GraphBackendBase):
             async with driver.session(database=self._database) as session:
                 records = await session.execute_write(_upsert_batch)
 
-            # Build result mapping
+            # Build result mapping - each input entity should get exactly one result
             input_id_to_entity = {str(e.id): e for e in batch}
+            logger.debug(f"Neo4j batch: {len(batch)} entities, {len(records)} records returned")
+
             for record in records:
-                entity = input_id_to_entity.get(record["input_id"])
+                input_id = record["input_id"]
+                entity = input_id_to_entity.get(input_id)
                 if entity is not None:
-                    # Sync entity ID with what Neo4j actually has
+                    # Sync entity ID with what Neo4j actually has (may differ on MERGE match)
                     neo4j_id = record["id"]
-                    if neo4j_id != record["input_id"]:
+                    if neo4j_id != input_id:
                         entity.id = UUID(neo4j_id)
-                        logger.debug(f"Entity '{entity.name}' ID synced: {record['input_id']} -> {neo4j_id}")
+                        logger.debug(f"Entity '{entity.name}' ID synced: {input_id} -> {neo4j_id}")
                     results.append((entity, record["is_new"]))
+                else:
+                    # This can happen if input has duplicate IDs (shouldn't normally occur)
+                    logger.warning(
+                        f"Neo4j returned input_id '{input_id}' not in batch. "
+                        f"Batch IDs: {list(input_id_to_entity.keys())[:5]}..."
+                    )
 
         logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
         return results
