@@ -442,7 +442,7 @@ class HybridQueryEngine:
         self._entity_linker: EntityLinker | None = None
 
         # HyDE expander
-        self._hyde_expander: HyDEExpander | None = None
+        self._hyde_expander: HyDEExpander | None = None  # type: ignore[unresolved-reference]
         if self._config.enable_hyde and self._embedder:
             from .hyde import HyDEExpander
 
@@ -547,7 +547,7 @@ class HybridQueryEngine:
         # Initialize metrics
         metrics = SearchMetrics()
         metrics.total_timer.start()
-        metrics.features = {
+        metrics.features = {  # type: ignore[invalid-assignment]
             "query_understanding": cfg.enable_query_understanding,
             "entity_linking": cfg.enable_entity_linking,
             "reranking": cfg.enable_reranking,

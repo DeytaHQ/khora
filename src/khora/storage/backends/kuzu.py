@@ -64,7 +64,7 @@ class KuzuBackend(GraphBackendBase):
         logger.info("Kùzu database opened")
 
     def _open_database(self) -> None:
-        import kuzu
+        import kuzu  # type: ignore[unresolved-import]
 
         self._db = kuzu.Database(self._database_path)
         self._conn = kuzu.Connection(self._db)

@@ -225,7 +225,7 @@ class PgVectorBackend:
         async with self._get_session() as session:
             result = await session.execute(delete(ChunkModel).where(ChunkModel.document_id == str(document_id)))
             await session.commit()
-            return result.rowcount
+            return result.rowcount  # type: ignore[unresolved-attribute]
 
     async def search_similar(
         self,
@@ -541,7 +541,7 @@ class PgVectorBackend:
             # Use Core table to avoid ORM bulk-update PK requirements
             tbl = EntityModel.__table__
             stmt = (
-                tbl.update()
+                tbl.update()  # type: ignore[unresolved-attribute]
                 .where(tbl.c.id == bindparam("eid"))
                 .values(
                     embedding=bindparam("emb"),

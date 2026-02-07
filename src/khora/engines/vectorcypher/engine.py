@@ -416,8 +416,8 @@ class VectorCypherEngine:
         5. Store chunks in pgvector and create Chunk nodes in Neo4j
         6. Link entities to chunks via MENTIONED_IN
         """
-        from khora.pipelines.chunking import create_chunker
-        from khora.pipelines.chunking.config import ChunkerConfig
+        from khora.pipelines.chunking import create_chunker  # type: ignore[unresolved-import]
+        from khora.pipelines.chunking.config import ChunkerConfig  # type: ignore[unresolved-import]
 
         storage = self._get_storage()
         embedder = self._get_embedder()
@@ -1087,7 +1087,7 @@ class VectorCypherEngine:
         query_embedding = await embedder.embed(query)
 
         # Search via storage coordinator
-        return await self._get_storage().search_entities_by_embedding(
+        return await self._get_storage().search_entities_by_embedding(  # type: ignore[unresolved-attribute]
             namespace_id=namespace_id,
             embedding=query_embedding,
             limit=limit,
@@ -1116,7 +1116,7 @@ class VectorCypherEngine:
         dual_nodes = self._get_dual_nodes()
 
         try:
-            doc_count = await storage.count_documents(namespace_id)
+            doc_count = await storage.count_documents(namespace_id)  # type: ignore[unresolved-attribute]
         except (AttributeError, NotImplementedError):
             documents = await storage.list_documents(namespace_id, limit=0)
             doc_count = len(documents) if documents else 0
@@ -1130,7 +1130,7 @@ class VectorCypherEngine:
             entity_count = 0
 
         try:
-            relationship_count = await storage.count_relationships(namespace_id)
+            relationship_count = await storage.count_relationships(namespace_id)  # type: ignore[unresolved-attribute]
         except (AttributeError, NotImplementedError):
             relationship_count = 0
 

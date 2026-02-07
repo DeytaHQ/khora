@@ -55,8 +55,8 @@ class WeaviateTemporalStore(TemporalVectorStore):
             return
 
         try:
-            import weaviate
-            from weaviate.classes.config import Configure, DataType, Property
+            import weaviate  # type: ignore[unresolved-import]
+            from weaviate.classes.config import Configure, DataType, Property  # type: ignore[unresolved-import]
         except ImportError:
             raise ImportError(
                 "weaviate-client is required for the Weaviate backend. "
@@ -113,7 +113,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         # Ensure tenant exists
         tenant_name = str(namespace_id)
         try:
-            from weaviate.classes.tenants import Tenant
+            from weaviate.classes.tenants import Tenant  # type: ignore[unresolved-import]
 
             collection.tenants.create([Tenant(name=tenant_name)])
         except Exception:
@@ -215,7 +215,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
 
     async def delete_chunks_by_document(self, document_id: UUID, namespace_id: UUID) -> int:
         """Delete all chunks for a document."""
-        from weaviate.classes.query import Filter
+        from weaviate.classes.query import Filter  # type: ignore[unresolved-import]
 
         collection = self._get_collection(namespace_id)
 
@@ -250,7 +250,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         - alpha=0: Pure BM25 search
         - 0 < alpha < 1: Blend of both
         """
-        from weaviate.classes.query import HybridFusion, MetadataQuery
+        from weaviate.classes.query import HybridFusion, MetadataQuery  # type: ignore[unresolved-import]
 
         collection = self._get_collection(namespace_id)
 
@@ -303,7 +303,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
 
     def _build_weaviate_filter(self, f: TemporalFilter):
         """Build Weaviate filter from TemporalFilter."""
-        from weaviate.classes.query import Filter
+        from weaviate.classes.query import Filter  # type: ignore[unresolved-import]
 
         filters = []
 

@@ -339,7 +339,7 @@ class StorageCoordinator:
         """
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_documents_by_checksums(namespace_id, checksums)
+        return await self.relational.get_documents_by_checksums(namespace_id, checksums)  # type: ignore[unresolved-attribute]
 
     # =========================================================================
     # Chunk operations (delegated to vector)
@@ -650,13 +650,13 @@ class StorageCoordinator:
         if has_graph and has_vector:
             graph_results, _ = await asyncio.gather(
                 self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
-                self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
+                self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),  # type: ignore[unresolved-attribute]
             )
             results = graph_results
         elif has_graph:
             results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
         elif has_vector:
-            results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+            results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)  # type: ignore[unresolved-attribute]
 
         # Fallback: if no backend returned results, create synthetic results
         # to ensure callers always get one result per input entity

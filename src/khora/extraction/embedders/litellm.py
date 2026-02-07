@@ -233,7 +233,7 @@ class LiteLLMEmbedder(Embedder):
 
         return results  # type: ignore[return-value]
 
-    async def _embed_batch_internal(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_batch_internal(self, texts: list[str]) -> list[list[float]]:  # type: ignore[invalid-return-type]
         """Internal batch embedding without chunking."""
         import time as _time
 

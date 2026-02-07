@@ -102,7 +102,7 @@ class GraphBackendBase:
     Backends that support native batch queries should override these methods.
     """
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:  # noqa: F821
+    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:  # type: ignore[unresolved-reference]  # noqa: F821
         """Default N+1 implementation — subclasses should override for efficiency."""
         if not entity_ids:
             return {}

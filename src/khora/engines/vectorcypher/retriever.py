@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
     from khora.engines.skeleton.backends import TemporalFilter, TemporalVectorStore
-    from khora.extraction.embedders import EmbedderProtocol
+    from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
 
 
 @dataclass

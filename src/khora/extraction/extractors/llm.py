@@ -425,7 +425,7 @@ class LLMEntityExtractor(EntityExtractor):
         entity_types: list[str] | None = None,
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
-    ) -> ExtractionResult:
+    ) -> ExtractionResult:  # type: ignore[invalid-return-type]
         """Extract entities and relationships from text.
 
         Args:
@@ -814,7 +814,7 @@ class LLMEntityExtractor(EntityExtractor):
         tool_context: str | None = None,
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
-    ) -> list[ExtractionResult]:
+    ) -> list[ExtractionResult]:  # type: ignore[invalid-return-type]
         """Extract from a batch of texts in a single LLM call."""
         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
 

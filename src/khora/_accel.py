@@ -55,7 +55,7 @@ try:
     _HAS_RUST = True
 except ImportError:  # pragma: no cover
     _HAS_RUST = False
-    RustBM25Index = None  # type: ignore[assignment, misc]
+    RustBM25Index = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Tier 1: NumPy / RapidFuzz (existing)
@@ -84,10 +84,10 @@ if _FORCE_BACKEND == "python":
     _HAS_RUST = False
     _HAS_NUMPY = False
     _HAS_RAPIDFUZZ = False
-    RustBM25Index = None  # type: ignore[assignment, misc]
+    RustBM25Index = None  # type: ignore[assignment]
 elif _FORCE_BACKEND == "numpy":
     _HAS_RUST = False
-    RustBM25Index = None  # type: ignore[assignment, misc]
+    RustBM25Index = None  # type: ignore[assignment]
 # "rust" or unset: use auto-detected fastest path
 
 # ---------------------------------------------------------------------------
