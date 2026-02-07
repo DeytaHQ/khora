@@ -450,7 +450,7 @@ async def process_document(
         )
         chunks = embedded_chunks
         logger.debug(f"Document {document.id}: generated embeddings")
-        logger.info(f"Document {document.id}: {len(entities)} entities, {len(relationships)} relationships extracted")
+        logger.debug(f"Document {document.id}: {len(entities)} entities, {len(relationships)} relationships extracted")
 
         # Step 4 (Optional): Semantic expansion
         inferred_relationships = []
