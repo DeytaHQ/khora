@@ -219,7 +219,7 @@ async def stream_extract_and_embed_entities(
             try:
                 # Use a timeout to allow periodic batch flushes
                 entity = await asyncio.wait_for(entity_queue.get(), timeout=0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Flush current batch on timeout
                 await embed_batch()
                 if extraction_complete.is_set() and entity_queue.empty():
@@ -560,9 +560,20 @@ async def process_document(
 
                 # Save pre-upsert IDs (Neo4j may sync entity.id to a different value on MERGE)
                 pre_upsert_ids = [str(e.id) for e in entities]
+                logger.debug(f"Document {document.id}: upserting {len(entities)} entities")
 
                 # Batch upsert: single MERGE operation instead of N+1 individual lookups
                 upsert_results = await storage.upsert_entities_batch(document.namespace_id, entities)
+
+                logger.debug(
+                    f"Document {document.id}: upsert returned {len(upsert_results)} results "
+                    f"(expected {len(pre_upsert_ids)})"
+                )
+                if len(upsert_results) != len(pre_upsert_ids):
+                    logger.warning(
+                        f"Document {document.id}: upsert result count mismatch - "
+                        f"got {len(upsert_results)}, expected {len(pre_upsert_ids)}"
+                    )
 
                 store_results: list[tuple[Entity, bool]] = []
                 for i, (entity, is_new) in enumerate(upsert_results):
@@ -570,7 +581,7 @@ async def process_document(
                     entity_id_mapping[stored_id] = stored_id
                     # If upsert changed the ID (Neo4j MERGE with existing entity),
                     # also map the original extraction ID to the stored ID
-                    if pre_upsert_ids[i] != stored_id:
+                    if i < len(pre_upsert_ids) and pre_upsert_ids[i] != stored_id:
                         entity_id_mapping[pre_upsert_ids[i]] = stored_id
                     # New entities always need embeddings; existing only if missing
                     needs_embedding = is_new or not entity.embedding

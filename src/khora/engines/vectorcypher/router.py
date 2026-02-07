@@ -51,7 +51,7 @@ class RouterConfig:
 
     enabled: bool = True
     use_llm: bool = False  # Use heuristics by default (faster)
-    llm_config: "LiteLLMConfig | None" = None  # LLM config for LLM-based routing
+    llm_config: LiteLLMConfig | None = None  # LLM config for LLM-based routing
     llm_model: str = "gpt-4o-mini"  # Fallback model if llm_config not provided
 
     # Confidence threshold for LLM fallback
@@ -188,7 +188,7 @@ COMPLEX|Multi-hop query requiring graph traversal"""
         config: RouterConfig | None = None,
         *,
         use_llm: bool | None = None,
-        llm_config: "LiteLLMConfig | None" = None,
+        llm_config: LiteLLMConfig | None = None,
     ):
         """Initialize the router.
 

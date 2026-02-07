@@ -643,6 +643,9 @@ class StorageCoordinator:
         # Upsert in graph and vector backends in parallel
         has_graph = self.graph and hasattr(self.graph, "upsert_entities_batch")
         has_vector = self.vector and hasattr(self.vector, "upsert_entities_batch")
+        logger.debug(
+            f"upsert_entities_batch: {len(entities)} entities, " f"has_graph={has_graph}, has_vector={has_vector}"
+        )
 
         if has_graph and has_vector:
             graph_results, _ = await asyncio.gather(
@@ -653,7 +656,15 @@ class StorageCoordinator:
         elif has_graph:
             results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
         elif has_vector:
-            await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+            results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+
+        # Fallback: if no backend returned results, create synthetic results
+        # to ensure callers always get one result per input entity
+        if not results:
+            logger.debug(f"upsert_entities_batch: using fallback synthetic results for {len(entities)} entities")
+            results = [(entity, True) for entity in entities]
+
+        logger.debug(f"upsert_entities_batch: returning {len(results)} results for {len(entities)} input entities")
 
         from khora.telemetry import get_collector
 
