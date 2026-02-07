@@ -774,7 +774,7 @@ class VectorCypherEngine:
         skill_name: str = "general_entities",
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
-        max_concurrent: int = 10,
+        max_concurrent: int = 20,
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,

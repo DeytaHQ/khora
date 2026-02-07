@@ -83,8 +83,8 @@ Batching is important - 100 individual API calls is much slower than 1 call with
 Large lists are automatically split:
 
 ```python
-# 500 texts with batch_size=100
-# → 5 API calls instead of 500
+# 500 texts with batch_size=200
+# → 3 API calls instead of 500
 embeddings = await embedder.embed_batch(large_list)
 ```
 
@@ -242,8 +242,8 @@ If all retries fail, the exception propagates. Failed documents are marked as FA
 ### Batch Size
 
 ```python
-# Default: 100 texts per batch
-embedder = LiteLLMEmbedder(batch_size=100)
+# Default: 200 texts per batch
+embedder = LiteLLMEmbedder(batch_size=200)
 
 # Larger = fewer API calls, more memory
 embedder = LiteLLMEmbedder(batch_size=500)
@@ -266,12 +266,12 @@ results = await asyncio.gather(*[
 # Sub-batch level: when a document has many chunks,
 # sub-batches run concurrently instead of sequentially
 embedder = LiteLLMEmbedder(
-    batch_size=100,
-    embed_concurrency=3,  # Up to 3 API calls in flight
+    batch_size=200,
+    embed_concurrency=20,  # Up to 20 API calls in flight
 )
 ```
 
-When there are more texts than the batch size, the embedder splits them into sub-batches and runs up to `embed_concurrency` (default 3) API calls concurrently. For a document with 500 chunks and batch_size=100, that's 5 sub-batches with 3 running at a time instead of 5 sequential calls.
+When there are more texts than the batch size, the embedder splits them into sub-batches and runs up to `embed_concurrency` (default 20) API calls concurrently. For a document with 1000 chunks and batch_size=200, that's 5 sub-batches with up to 20 running at a time instead of 5 sequential calls.
 
 ### Caching
 

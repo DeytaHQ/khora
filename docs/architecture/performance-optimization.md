@@ -340,7 +340,7 @@ This is the single highest-impact change — 3-5x faster extraction for multi-ch
 
 ### Concurrent Embedding Sub-Batches
 
-When there are more texts than the batch size (e.g., 500 chunks at batch_size=100), the embedder now runs sub-batches concurrently (up to `embed_concurrency`, default 3) instead of sequentially.
+When there are more texts than the batch size (e.g., 1000 chunks at batch_size=200), the embedder now runs sub-batches concurrently (up to `embed_concurrency`, default 20) instead of sequentially.
 
 ### Batch Relationship Storage
 
@@ -368,6 +368,23 @@ The PostgreSQL entity upsert changed from N individual INSERT statements in a si
 |----------|--------|-------|---------|
 | Single doc (15 chunks, 10 entities) | ~25-35s | ~5-10s | 3-5x |
 | Batch of 50 docs | ~5-7 min | ~1-2 min | 4-6x |
+
+## Phase 7: Rust-Accelerated Operations
+
+After optimizing database patterns and pipeline parallelism, the remaining bottlenecks were CPU-bound: cosine similarity, Levenshtein distance, PageRank, keyword extraction, and entity resolution. These operations are now accelerated via an optional Rust extension (`khora-accel`) that provides native implementations with automatic fallback to NumPy or pure Python. See [Rust Acceleration](rust-acceleration.md) for full details.
+
+### Concurrency Headroom (v0.2.1)
+
+With Rust handling CPU-intensive work, Python's event loop has more headroom for I/O concurrency. The default concurrency limits were doubled:
+
+| Setting | Before | After | Where |
+|---------|--------|-------|-------|
+| `embed_concurrency` | 10 | 20 | `LiteLLMEmbedder` |
+| `batch_size` | 100 | 200 | `LiteLLMEmbedder` |
+| `max_concurrent_documents` | 5 | 10 | `ingest_documents` |
+| `max_concurrent_extractions` | 10 | 20 | `ingest_documents` |
+
+These higher limits are safe because Rust acceleration reduces per-operation CPU time, leaving the GIL free for asyncio tasks.
 
 ## What's Next
 

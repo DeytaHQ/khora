@@ -17,7 +17,7 @@ class TestLiteLLMEmbedder:
         embedder = LiteLLMEmbedder()
         assert embedder.model_name == "text-embedding-3-small"
         assert embedder.dimension == 1536
-        assert embedder._batch_size == 100
+        assert embedder._batch_size == 200
         assert embedder._cache_max_size == 10000
 
     def test_init_custom(self) -> None:

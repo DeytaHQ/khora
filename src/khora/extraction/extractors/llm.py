@@ -167,7 +167,7 @@ class LLMEntityExtractor(EntityExtractor):
         max_tokens: int = 4000,
         timeout: int = 60,
         max_retries: int = 3,
-        max_concurrent: int = 5,
+        max_concurrent: int = 10,
         retry_wait: float = 1.0,
     ) -> None:
         """Initialize the LLM entity extractor.

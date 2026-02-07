@@ -3,13 +3,10 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^REPOMIX\.md$
       - id: end-of-file-fixer
-        exclude: ^REPOMIX\.md$
       - id: check-yaml
       - id: check-added-large-files
         args: ['--maxkb=1000']
-        exclude: ^REPOMIX\.md$
 
   - repo: https://github.com/asottile/pyupgrade
     rev: v3.19.1
@@ -43,16 +40,3 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
-
-  # Generate REPOMIX.md for AI-assisted development
-  # This hook runs at the end to include all formatted/linted code
-  - repo: local
-    hooks:
-      - id: update-repomix
-        name: Update REPOMIX.md
-        entry: bash -c 'uv run python scripts/update_repomix.py'
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-commit]
-        verbose: true
