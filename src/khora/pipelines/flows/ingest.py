@@ -219,7 +219,7 @@ async def stream_extract_and_embed_entities(
             try:
                 # Use a timeout to allow periodic batch flushes
                 entity = await asyncio.wait_for(entity_queue.get(), timeout=0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Flush current batch on timeout
                 await embed_batch()
                 if extraction_complete.is_set() and entity_queue.empty():

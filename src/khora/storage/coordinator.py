@@ -644,8 +644,7 @@ class StorageCoordinator:
         has_graph = self.graph and hasattr(self.graph, "upsert_entities_batch")
         has_vector = self.vector and hasattr(self.vector, "upsert_entities_batch")
         logger.debug(
-            f"upsert_entities_batch: {len(entities)} entities, "
-            f"has_graph={has_graph}, has_vector={has_vector}"
+            f"upsert_entities_batch: {len(entities)} entities, " f"has_graph={has_graph}, has_vector={has_vector}"
         )
 
         if has_graph and has_vector:
