@@ -39,9 +39,9 @@ async def load_entities(
     """
     # Use graph backend if available, otherwise relational
     if storage.graph:
-        return await storage.graph.get_entities_by_namespace(namespace_id, limit=limit)
+        return await storage.graph.get_entities_by_namespace(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
     elif storage.relational:
-        return await storage.relational.get_entities_by_namespace(namespace_id, limit=limit)
+        return await storage.relational.get_entities_by_namespace(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
     return []
 
 
@@ -62,9 +62,9 @@ async def load_relationships(
         List of relationships
     """
     if storage.graph:
-        return await storage.graph.get_relationships_by_namespace(namespace_id, limit=limit)
+        return await storage.graph.get_relationships_by_namespace(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
     elif storage.relational:
-        return await storage.relational.get_relationships_by_namespace(namespace_id, limit=limit)
+        return await storage.relational.get_relationships_by_namespace(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
     return []
 
 

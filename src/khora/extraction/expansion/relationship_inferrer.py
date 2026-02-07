@@ -186,7 +186,7 @@ class RelationshipTypeIndex:
     def _get_type_str(rel: Relationship) -> str:
         """Extract relationship type as string."""
         rt = rel.relationship_type
-        return rt.value if hasattr(rt, "value") else str(rt)
+        return str(rt.value) if hasattr(rt, "value") else str(rt)
 
 
 class RelationshipInferrer:
@@ -268,13 +268,17 @@ class RelationshipInferrer:
         logger.debug(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
 
         # Detailed pattern diagnostics (debug-only to avoid overhead)
-        if logger._core.min_level <= 10:  # DEBUG level
+        if logger._core.min_level <= 10:  # type: ignore[unresolved-attribute]  # DEBUG level
             entity_type_lookup = {
                 e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
             }
             rel_type_patterns: dict[str, Counter] = {}
             for r in relationships:
-                rt = r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
+                rt = (
+                    str(r.relationship_type.value)
+                    if hasattr(r.relationship_type, "value")
+                    else str(r.relationship_type)
+                )
                 source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
                 target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
                 if rt not in rel_type_patterns:
@@ -327,7 +331,7 @@ class RelationshipInferrer:
             logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
 
             # Log details of first few matches (debug only, avoids list() overhead)
-            if logger._core.min_level <= 10:
+            if logger._core.min_level <= 10:  # type: ignore[unresolved-attribute]
                 for i, match in enumerate(matches[:5]):
                     logger.debug(
                         f"  Match {i + 1}: rule={match.rule_name}, "

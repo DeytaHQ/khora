@@ -415,7 +415,7 @@ class AgenticSearchAgent:
                 if isinstance(r, Exception):
                     logger.warning(f"Speculative follow-up failed: {r}")
                     continue
-                i, step_result, reasoning = r
+                i, step_result, reasoning = r  # type: ignore[not-iterable]
                 fq_query = follow_ups_to_run[i]
                 fq_query_text = fq_query.get("query", "") if isinstance(fq_query, dict) else str(fq_query)
 

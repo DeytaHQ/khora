@@ -695,7 +695,7 @@ class GraphRAGEngine:
         # For more accurate counts, query directly
         # These may vary by backend implementation
         try:
-            doc_count = await storage.count_documents(namespace_id)
+            doc_count = await storage.count_documents(namespace_id)  # type: ignore[unresolved-attribute]
         except (AttributeError, NotImplementedError):
             pass
 
@@ -712,7 +712,7 @@ class GraphRAGEngine:
             entity_count = len(entities) if entities else 0
 
         try:
-            relationship_count = await storage.count_relationships(namespace_id)
+            relationship_count = await storage.count_relationships(namespace_id)  # type: ignore[unresolved-attribute]
         except (AttributeError, NotImplementedError):
             rels = await storage.list_relationships(namespace_id, limit=0)
             relationship_count = len(rels) if rels else 0

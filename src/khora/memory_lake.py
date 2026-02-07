@@ -239,7 +239,7 @@ class MemoryLake:
         )
         engine = self._get_engine()
         if hasattr(engine, "_storage") and engine._storage:
-            return engine._storage
+            return engine._storage  # type: ignore[invalid-return-type]
         raise AttributeError("Current engine does not expose storage")
 
     @property
@@ -258,7 +258,7 @@ class MemoryLake:
         )
         engine = self._get_engine()
         if hasattr(engine, "_query_engine") and engine._query_engine:
-            return engine._query_engine
+            return engine._query_engine  # type: ignore[invalid-return-type]
         raise AttributeError("Current engine does not expose query_engine")
 
     # =========================================================================
@@ -717,9 +717,9 @@ class MemoryLake:
 
         storage = engine._storage
         default_ns_id = await self.get_or_create_default_namespace()
-        default_ns = await storage.get_namespace(default_ns_id)
+        default_ns = await storage.get_namespace(default_ns_id)  # type: ignore[unresolved-attribute]
         if default_ns:
-            ns = await storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
+            ns = await storage.get_namespace_by_slug(default_ns.workspace_id, namespace)  # type: ignore[unresolved-attribute]
             if ns:
                 return ns.id
 

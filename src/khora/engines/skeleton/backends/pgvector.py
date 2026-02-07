@@ -269,7 +269,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
             result = await session.execute(stmt)
             await session.commit()
 
-        return result.rowcount > 0
+        return result.rowcount > 0  # type: ignore[unresolved-attribute]
 
     async def delete_chunks_by_document(self, document_id: UUID, namespace_id: UUID) -> int:
         """Delete all chunks for a document."""
@@ -281,7 +281,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
             result = await session.execute(stmt)
             await session.commit()
 
-        return result.rowcount
+        return result.rowcount  # type: ignore[unresolved-attribute]
 
     async def search(
         self,

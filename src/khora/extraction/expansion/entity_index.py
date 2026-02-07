@@ -26,7 +26,7 @@ def _normalize_name(name: str) -> str:
 def _entity_type_str(entity: Entity) -> str:
     """Get entity type as a plain string."""
     et = entity.entity_type
-    return et.value if hasattr(et, "value") else str(et)
+    return str(et.value) if hasattr(et, "value") else str(et)
 
 
 def _tokenize(name: str) -> set[str]:

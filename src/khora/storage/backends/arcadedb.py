@@ -848,13 +848,13 @@ class ArcadeDBBackend(GraphBackendBase, VectorBackendBase):
                     str(chunk.document_id),
                     str(chunk.namespace_id),
                     chunk.content,
-                    chunk.chunk_index,
-                    chunk.token_count,
+                    chunk.chunk_index,  # type: ignore[unresolved-attribute]
+                    chunk.token_count,  # type: ignore[unresolved-attribute]
                     chunk.embedding,
                     chunk.embedding_model or "",
                     serialize_dict(chunk.metadata.model_dump() if hasattr(chunk.metadata, "model_dump") else {}),
                     chunk.created_at.isoformat(),
-                    chunk.updated_at.isoformat(),
+                    chunk.updated_at.isoformat(),  # type: ignore[unresolved-attribute]
                 ]
             },
         )

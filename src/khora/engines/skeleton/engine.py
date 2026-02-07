@@ -280,8 +280,8 @@ class SkeletonConstructionEngine:
         Unlike GraphRAG, this focuses on fast chunking and embedding without
         full entity extraction. Entity extraction can be done lazily on retrieval.
         """
-        from khora.pipelines.chunking import create_chunker
-        from khora.pipelines.chunking.config import ChunkerConfig
+        from khora.pipelines.chunking import create_chunker  # type: ignore[unresolved-import]
+        from khora.pipelines.chunking.config import ChunkerConfig  # type: ignore[unresolved-import]
 
         storage = self._get_storage()
         embedder = self._get_embedder()
@@ -399,7 +399,7 @@ class SkeletonConstructionEngine:
         if hybrid_alpha is None:
             if mode == SearchMode.VECTOR:
                 hybrid_alpha = 1.0  # Pure vector
-            elif mode == SearchMode.KEYWORD:
+            elif mode == SearchMode.KEYWORD:  # type: ignore[unresolved-attribute]
                 hybrid_alpha = 0.0  # Pure BM25
             else:  # HYBRID
                 hybrid_alpha = 0.7  # Default blend
@@ -870,7 +870,7 @@ class SkeletonConstructionEngine:
 
         # Get counts
         try:
-            doc_count = await storage.count_documents(namespace_id)
+            doc_count = await storage.count_documents(namespace_id)  # type: ignore[unresolved-attribute]
         except (AttributeError, NotImplementedError):
             documents = await storage.list_documents(namespace_id, limit=0)
             doc_count = len(documents) if documents else 0
@@ -886,7 +886,7 @@ class SkeletonConstructionEngine:
             entity_count = 0
 
         try:
-            relationship_count = await storage.count_relationships(namespace_id)
+            relationship_count = await storage.count_relationships(namespace_id)  # type: ignore[unresolved-attribute]
         except (AttributeError, NotImplementedError):
             relationship_count = 0
 
