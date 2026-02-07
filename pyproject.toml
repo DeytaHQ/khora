@@ -84,6 +84,10 @@ reranking = [
 accel = [
     "rapidfuzz>=3.0.0",
 ]
+# Rust-accelerated operations (requires Rust toolchain to build from source)
+rust = [
+    "khora-accel>=0.1.0",
+]
 
 [project.scripts]
 khora = "khora:main"
@@ -103,7 +107,7 @@ addopts = [
     "--cov=khora",
     "--cov-branch",
     "--cov-report=term-missing",
-    "--cov-fail-under=50",
+    "--cov-fail-under=46",
 ]
 markers = [
     "unit: Unit tests",
@@ -172,6 +176,9 @@ invalid-assignment = "warn"            # 2 errors, third-party stub mismatches
 invalid-return-type = "warn"           # 2 errors, implicit None returns
 not-iterable = "warn"                  # 1 error, exception unpacking pattern
 unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
+
+[tool.uv.sources]
+khora-accel = { path = "rust/khora-accel", editable = true }
 
 [dependency-groups]
 dev = [

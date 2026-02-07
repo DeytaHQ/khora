@@ -1,0 +1,147 @@
+//! Cosine similarity operations with PyO3 bindings.
+//!
+//! Provides single-pair, batch (1-to-N), and pairwise (all-pairs) cosine
+//! similarity with numpy zero-copy access and GIL release for batch ops.
+
+use numpy::{PyReadonlyArray1, PyReadonlyArray2};
+use pyo3::prelude::*;
+use rayon::prelude::*;
+
+/// Cosine similarity between two vectors using a fused dot+norm single pass.
+///
+/// Returns 0.0 on dimension mismatch or zero norms.
+#[pyfunction]
+pub fn cosine_similarity(vec1: Vec<f32>, vec2: Vec<f32>) -> f32 {
+    if vec1.len() != vec2.len() {
+        return 0.0;
+    }
+
+    let (mut dot, mut norm1, mut norm2) = (0.0f64, 0.0f64, 0.0f64);
+    for (a, b) in vec1.iter().zip(vec2.iter()) {
+        let a = *a as f64;
+        let b = *b as f64;
+        dot += a * b;
+        norm1 += a * a;
+        norm2 += b * b;
+    }
+
+    if norm1 == 0.0 || norm2 == 0.0 {
+        return 0.0;
+    }
+    (dot / (norm1.sqrt() * norm2.sqrt())) as f32
+}
+
+/// Batch cosine similarity: one query against N candidate vectors.
+///
+/// Accepts numpy arrays via zero-copy. Releases GIL during computation.
+/// Returns `(index, similarity)` pairs above `threshold`, sorted descending.
+#[pyfunction]
+pub fn batch_cosine_similarity(
+    py: Python<'_>,
+    query: PyReadonlyArray1<'_, f32>,
+    candidates: PyReadonlyArray2<'_, f32>,
+    threshold: f32,
+) -> Vec<(usize, f32)> {
+    let q_array = query.as_array();
+    let c_array = candidates.as_array();
+
+    // Copy to owned arrays so we can release the GIL
+    let q_owned = q_array.to_owned();
+    let c_owned = c_array.to_owned();
+
+    py.allow_threads(|| {
+        let q = q_owned.as_slice().unwrap();
+        let n_candidates = c_owned.nrows();
+
+        // Pre-compute query norm
+        let q_norm: f64 = q.iter().map(|&v| (v as f64) * (v as f64)).sum();
+        if q_norm == 0.0 {
+            return Vec::new();
+        }
+        let q_norm = q_norm.sqrt();
+
+        let mut results: Vec<(usize, f32)> = (0..n_candidates)
+            .into_par_iter()
+            .filter_map(|i| {
+                let row = c_owned.row(i);
+                let (mut dot, mut c_norm) = (0.0f64, 0.0f64);
+                for (a, b) in q.iter().zip(row.iter()) {
+                    let a = *a as f64;
+                    let b = *b as f64;
+                    dot += a * b;
+                    c_norm += b * b;
+                }
+                if c_norm == 0.0 {
+                    return None;
+                }
+                let sim = (dot / (q_norm * c_norm.sqrt())) as f32;
+                if sim >= threshold {
+                    Some((i, sim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    })
+}
+
+/// All-pairs cosine similarity above a threshold.
+///
+/// Uses rayon for parallelism. Returns `(i, j, similarity)` triples where
+/// `i < j` and `similarity >= threshold`.
+#[pyfunction]
+pub fn pairwise_cosine_above_threshold(
+    py: Python<'_>,
+    embeddings: PyReadonlyArray2<'_, f32>,
+    threshold: f32,
+) -> Vec<(usize, usize, f32)> {
+    let e_array = embeddings.as_array();
+    let e_owned = e_array.to_owned();
+
+    py.allow_threads(|| {
+        let n = e_owned.nrows();
+        if n < 2 {
+            return Vec::new();
+        }
+
+        // Pre-compute norms
+        let norms: Vec<f64> = (0..n)
+            .map(|i| {
+                let row = e_owned.row(i);
+                let sq_sum: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
+                sq_sum.sqrt()
+            })
+            .collect();
+
+        // Parallel over rows, collect pairs where i < j
+        (0..n)
+            .into_par_iter()
+            .flat_map(|i| {
+                let mut local_results = Vec::new();
+                if norms[i] == 0.0 {
+                    return local_results;
+                }
+                let row_i = e_owned.row(i);
+                for j in (i + 1)..n {
+                    if norms[j] == 0.0 {
+                        continue;
+                    }
+                    let row_j = e_owned.row(j);
+                    let dot: f64 = row_i
+                        .iter()
+                        .zip(row_j.iter())
+                        .map(|(&a, &b)| (a as f64) * (b as f64))
+                        .sum();
+                    let sim = (dot / (norms[i] * norms[j])) as f32;
+                    if sim >= threshold {
+                        local_results.push((i, j, sim));
+                    }
+                }
+                local_results
+            })
+            .collect()
+    })
+}

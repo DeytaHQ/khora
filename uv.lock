@@ -1009,6 +1009,9 @@ postgres = [
 reranking = [
     { name = "sentence-transformers" },
 ]
+rust = [
+    { name = "khora-accel" },
+]
 weaviate = [
     { name = "weaviate-client" },
 ]
@@ -1042,6 +1045,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'graph-all'", specifier = ">=0.28.0" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "khora-accel", marker = "extra == 'rust'", editable = "rust/khora-accel" },
     { name = "kuzu", marker = "extra == 'all-backends'", specifier = ">=0.8.0" },
     { name = "kuzu", marker = "extra == 'graph-all'", specifier = ">=0.8.0" },
     { name = "kuzu", marker = "extra == 'kuzu'", specifier = ">=0.8.0" },
@@ -1075,7 +1079,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'all-backends'", specifier = ">=4.10.0" },
     { name = "weaviate-client", marker = "extra == 'weaviate'", specifier = ">=4.10.0" },
 ]
-provides-extras = ["dev", "postgres", "neo4j", "kuzu", "memgraph", "arcadedb", "graph-all", "weaviate", "all-backends", "reranking", "accel"]
+provides-extras = ["dev", "postgres", "neo4j", "kuzu", "memgraph", "arcadedb", "graph-all", "weaviate", "all-backends", "reranking", "accel", "rust"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1089,6 +1093,11 @@ dev = [
     { name = "ruff", specifier = ">=0.15.0" },
     { name = "ty", specifier = ">=0.0.15" },
 ]
+
+[[package]]
+name = "khora-accel"
+version = "0.1.0"
+source = { editable = "rust/khora-accel" }
 
 [[package]]
 name = "kuzu"

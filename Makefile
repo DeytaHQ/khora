@@ -8,6 +8,7 @@
 #   make test              # Run tests with coverage
 
 .PHONY: help dev dev-down serve test lint format typecheck prek clean \
+        rust-build rust-dev rust-test rust-bench rust-clean \
         docker-build docker-run docker-down docker-clean
 
 # Default target
@@ -25,6 +26,13 @@ help:
 	@echo "  make format           Format code (black, isort, ruff)"
 	@echo "  make prek             Run pre-commit hooks"
 	@echo "  make clean            Clean build artifacts"
+	@echo ""
+	@echo "Rust Acceleration:"
+	@echo "  make rust-build       Build Rust extension in release mode"
+	@echo "  make rust-dev         Build and install Rust extension for development"
+	@echo "  make rust-test        Run Rust tests"
+	@echo "  make rust-bench       Run Rust benchmarks"
+	@echo "  make rust-clean       Clean Rust build artifacts"
 	@echo ""
 	@echo "Docker:"
 	@echo "  make docker-build     Build production Docker image"
@@ -94,6 +102,30 @@ clean:
 	rm -rf .pytest_cache .coverage htmlcov .ruff_cache
 	rm -rf src/*.egg-info build dist
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# ==============================================================================
+# Rust Acceleration Commands
+# ==============================================================================
+
+# Build Rust extension in release mode
+rust-build:
+	cd rust/khora-accel && maturin build --release
+
+# Build and install Rust extension for development
+rust-dev:
+	cd rust/khora-accel && maturin develop --release
+
+# Run Rust tests
+rust-test:
+	cd rust/khora-accel && cargo test
+
+# Run Rust benchmarks
+rust-bench:
+	cd rust/khora-accel && cargo bench
+
+# Clean Rust build artifacts
+rust-clean:
+	cd rust/khora-accel && cargo clean
 
 # ==============================================================================
 # Docker Commands
