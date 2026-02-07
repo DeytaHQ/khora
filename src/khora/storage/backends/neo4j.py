@@ -395,7 +395,6 @@ class Neo4jBackend(GraphBackendBase):
             return []
 
         driver = self._get_driver()
-        sem = asyncio.Semaphore(4)
 
         _UPSERT_CYPHER = """
             UNWIND $rows AS row
@@ -426,7 +425,10 @@ class Neo4jBackend(GraphBackendBase):
                    CASE WHEN e.id = row.id THEN true ELSE false END AS is_new
         """
 
-        async def _process_batch(batch: list[Entity]) -> list[tuple[Entity, bool]]:
+        results: list[tuple[Entity, bool]] = []
+
+        for start in range(0, len(entities), batch_size):
+            batch = entities[start : start + batch_size]
             rows = [
                 {
                     "id": str(e.id),
@@ -452,9 +454,8 @@ class Neo4jBackend(GraphBackendBase):
                 result = await tx.run(_UPSERT_CYPHER, rows=rows)
                 return await result.data()
 
-            async with sem:
-                async with driver.session(database=self._database) as session:
-                    records = await session.execute_write(_upsert_tx)
+            async with driver.session(database=self._database) as session:
+                records = await session.execute_write(_upsert_tx)
 
             # Build result mapping - each input entity should get exactly one result
             input_id_to_entity = {str(e.id): e for e in batch}
@@ -463,7 +464,6 @@ class Neo4jBackend(GraphBackendBase):
             # De-duplicate: MERGE can match multiple nodes if duplicates exist
             # in the DB (no unique constraint on the MERGE key). Keep only the
             # first result per input entity.
-            batch_results: list[tuple[Entity, bool]] = []
             seen_input_ids: set[str] = set()
             for record in records:
                 input_id = record["input_id"]
@@ -476,18 +476,12 @@ class Neo4jBackend(GraphBackendBase):
                     if neo4j_id != input_id:
                         entity.id = UUID(neo4j_id)
                         logger.debug(f"Entity '{entity.name}' ID synced: {input_id} -> {neo4j_id}")
-                    batch_results.append((entity, record["is_new"]))
+                    results.append((entity, record["is_new"]))
                 else:
                     logger.warning(
                         f"Neo4j returned input_id '{input_id}' not in batch. "
                         f"Batch IDs: {list(input_id_to_entity.keys())[:5]}..."
                     )
-            return batch_results
-
-        all_results = await asyncio.gather(
-            *[_process_batch(entities[start : start + batch_size]) for start in range(0, len(entities), batch_size)]
-        )
-        results = [r for batch_results in all_results for r in batch_results]
 
         logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
         return results
@@ -507,7 +501,6 @@ class Neo4jBackend(GraphBackendBase):
             return 0
 
         driver = self._get_driver()
-        sem = asyncio.Semaphore(4)
 
         # Group by relationship type (required for dynamic rel type in Cypher)
         type_groups: dict[str, list[Relationship]] = {}
@@ -519,66 +512,64 @@ class Neo4jBackend(GraphBackendBase):
             )
             type_groups.setdefault(rel_type, []).append(rel)
 
-        async def _create_single_batch(rel_type: str, batch: list[Relationship]) -> int:
-            """Create one sub-batch of relationships of a single type."""
-            rows = [
-                {
-                    "id": str(r.id),
-                    "namespace_id": str(r.namespace_id),
-                    "source_id": str(r.source_entity_id),
-                    "target_id": str(r.target_entity_id),
-                    "description": r.description,
-                    "properties": _serialize_dict(r.properties),
-                    "source_document_ids": [str(d) for d in r.source_document_ids],
-                    "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
-                    "valid_from": r.valid_from.isoformat() if r.valid_from else None,
-                    "valid_until": r.valid_until.isoformat() if r.valid_until else None,
-                    "confidence": r.confidence,
-                    "weight": r.weight,
-                    "metadata": _serialize_dict(r.metadata),
-                    "created_at": r.created_at.isoformat(),
-                    "updated_at": r.updated_at.isoformat(),
-                }
-                for r in batch
-            ]
-            query = f"""
-            UNWIND $rows AS row
-            MATCH (source:Entity {{id: row.source_id}})
-            MATCH (target:Entity {{id: row.target_id}})
-            CREATE (source)-[r:{rel_type} {{
-                id: row.id,
-                namespace_id: row.namespace_id,
-                description: row.description,
-                properties: row.properties,
-                source_document_ids: row.source_document_ids,
-                source_chunk_ids: row.source_chunk_ids,
-                valid_from: row.valid_from,
-                valid_until: row.valid_until,
-                confidence: row.confidence,
-                weight: row.weight,
-                metadata: row.metadata,
-                created_at: row.created_at,
-                updated_at: row.updated_at
-            }}]->(target)
-            RETURN count(r) AS created
-            """
+        async def _create_type_group(rel_type: str, rels: list[Relationship]) -> int:
+            """Create all batches for a single relationship type sequentially."""
+            type_total = 0
+            for start in range(0, len(rels), batch_size):
+                batch = rels[start : start + batch_size]
+                rows = [
+                    {
+                        "id": str(r.id),
+                        "namespace_id": str(r.namespace_id),
+                        "source_id": str(r.source_entity_id),
+                        "target_id": str(r.target_entity_id),
+                        "description": r.description,
+                        "properties": _serialize_dict(r.properties),
+                        "source_document_ids": [str(d) for d in r.source_document_ids],
+                        "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
+                        "valid_from": r.valid_from.isoformat() if r.valid_from else None,
+                        "valid_until": r.valid_until.isoformat() if r.valid_until else None,
+                        "confidence": r.confidence,
+                        "weight": r.weight,
+                        "metadata": _serialize_dict(r.metadata),
+                        "created_at": r.created_at.isoformat(),
+                        "updated_at": r.updated_at.isoformat(),
+                    }
+                    for r in batch
+                ]
+                query = f"""
+                UNWIND $rows AS row
+                MATCH (source:Entity {{id: row.source_id}})
+                MATCH (target:Entity {{id: row.target_id}})
+                CREATE (source)-[r:{rel_type} {{
+                    id: row.id,
+                    namespace_id: row.namespace_id,
+                    description: row.description,
+                    properties: row.properties,
+                    source_document_ids: row.source_document_ids,
+                    source_chunk_ids: row.source_chunk_ids,
+                    valid_from: row.valid_from,
+                    valid_until: row.valid_until,
+                    confidence: row.confidence,
+                    weight: row.weight,
+                    metadata: row.metadata,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at
+                }}]->(target)
+                RETURN count(r) AS created
+                """
 
-            async def _tx(tx: AsyncManagedTransaction) -> int:
-                result = await tx.run(query, rows=rows)
-                record = await result.single()
-                return record["created"] if record else 0
+                async def _tx(tx: AsyncManagedTransaction) -> int:
+                    result = await tx.run(query, rows=rows)
+                    record = await result.single()
+                    return record["created"] if record else 0
 
-            async with sem:
                 async with driver.session(database=self._database) as session:
-                    return await session.execute_write(_tx)
+                    type_total += await session.execute_write(_tx)
+            return type_total
 
-        # Flatten all (type, batch) pairs and process in parallel
-        tasks = [
-            _create_single_batch(rel_type, rels[start : start + batch_size])
-            for rel_type, rels in type_groups.items()
-            for start in range(0, len(rels), batch_size)
-        ]
-        results = await asyncio.gather(*tasks)
+        # Type groups in parallel (different Cypher queries), batches sequential within each
+        results = await asyncio.gather(*[_create_type_group(rel_type, rels) for rel_type, rels in type_groups.items()])
         total_created = sum(results)
 
         logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
