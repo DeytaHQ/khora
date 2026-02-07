@@ -144,7 +144,7 @@ chunks = await embed_chunks(
 
 These vectors capture semantic meaning. Similar concepts get similar vectors, enabling "find content like this" queries.
 
-Embedding is batched internally - instead of 100 API calls for 100 chunks, we make a few concurrent calls with batches of 100. When there are more texts than the batch size, sub-batches run concurrently (up to `embed_concurrency`, default 3) rather than sequentially.
+Embedding is batched internally - instead of 100 API calls for 100 chunks, we make a few concurrent calls with batches of up to 200. When there are more texts than the batch size, sub-batches run concurrently (up to `embed_concurrency`, default 20) rather than sequentially.
 
 **Extraction** has an LLM read each chunk and extract structured knowledge:
 
@@ -153,7 +153,7 @@ entities, relationships = await extract_entities(
     chunks,
     model="gpt-4o-mini",
     skill="general_entities",  # or domain-specific
-    max_concurrent=10          # parallel LLM calls
+    max_concurrent=20          # parallel LLM calls
 )
 ```
 
@@ -345,14 +345,14 @@ See [Semantic Expansion](semantic-expansion.md) for full details on each mode an
 The pipeline uses semaphores to prevent overwhelming your system or hitting API limits:
 
 ```python
-# Document-level: 5 docs processing at once
-doc_semaphore = asyncio.Semaphore(5)
+# Document-level: 10 docs processing at once
+doc_semaphore = asyncio.Semaphore(10)
 
-# Extraction-level: 10 LLM calls at once
-extraction_semaphore = asyncio.Semaphore(10)
+# Extraction-level: 20 LLM calls at once
+extraction_semaphore = asyncio.Semaphore(20)
 
-# Staging-level: 10 docs staging at once (it's fast)
-staging_semaphore = asyncio.Semaphore(10)
+# Staging-level: 20 docs staging at once (it's fast)
+staging_semaphore = asyncio.Semaphore(20)
 ```
 
 These are configurable:
@@ -360,8 +360,8 @@ These are configurable:
 ```python
 result = await lake.remember_batch(
     documents,
-    max_concurrent_documents=5,
-    max_concurrent_extractions=10
+    max_concurrent_documents=10,
+    max_concurrent_extractions=20
 )
 ```
 
@@ -452,8 +452,8 @@ result = await ingest_documents(
     embedding_model="text-embedding-3-small",
     extraction_model="gpt-4o-mini",
     expertise="saas_expert",
-    max_concurrent_documents=5,
-    max_concurrent_extractions=10,
+    max_concurrent_documents=10,
+    max_concurrent_extractions=20,
     enable_expansion=True,
     inference_mode="smart"   # default; also "incremental", "batch", "none"
 )
@@ -470,7 +470,7 @@ result = await backfill_entity_embeddings(
     namespace_id=namespace_id,
     storage=storage,
     embedding_model="text-embedding-3-small",
-    batch_size=100
+    batch_size=200
 )
 
 print(f"Updated {result['entities_updated']} entities")

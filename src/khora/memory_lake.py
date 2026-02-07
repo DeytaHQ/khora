@@ -354,7 +354,7 @@ class MemoryLake:
         *,
         namespace: str | UUID | None = None,
         skill_name: str = "general_entities",
-        max_concurrent: int = 5,
+        max_concurrent: int = 10,
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
@@ -410,7 +410,7 @@ class MemoryLake:
         *,
         namespace: str | UUID | None = None,
         skill_name: str = "general_entities",
-        max_concurrent: int = 5,
+        max_concurrent: int = 10,
     ) -> list[RememberResult]:
         """Store multiple documents - legacy version returning list of RememberResult.
 

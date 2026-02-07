@@ -64,7 +64,7 @@ class LiteLLMConfig(BaseModel):
 
     # Concurrency
     max_concurrent_llm_calls: int = Field(
-        default=10,
+        default=20,
         gt=0,
         description="Maximum concurrent LLM API calls",
     )
@@ -94,7 +94,7 @@ class LiteLLMConfig(BaseModel):
         description="Embedding vector dimension",
     )
     embed_concurrency: int = Field(
-        default=25,
+        default=50,
         gt=0,
         description="Maximum concurrent embedding API calls",
     )

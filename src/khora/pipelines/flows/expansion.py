@@ -119,7 +119,7 @@ async def store_expansion_results(
     stored_relationships = 0
 
     # Update merged entities
-    entity_semaphore = asyncio.Semaphore(20)
+    entity_semaphore = asyncio.Semaphore(40)
 
     async def update_entity(entity):
         nonlocal stored_entities
@@ -314,7 +314,7 @@ async def unify_entities(
     if store_results and result.entities_merged > 0:
         import asyncio
 
-        entity_semaphore = asyncio.Semaphore(20)
+        entity_semaphore = asyncio.Semaphore(40)
 
         async def update_entity(entity):
             async with entity_semaphore:

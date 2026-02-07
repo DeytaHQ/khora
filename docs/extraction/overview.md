@@ -268,8 +268,8 @@ For large ingestions:
 ```python
 results = await lake.remember_batch(
     documents,
-    max_concurrent_documents=5,      # Process 5 docs at once
-    max_concurrent_extractions=10,   # Max 10 LLM calls in flight
+    max_concurrent_documents=10,     # Process 10 docs at once
+    max_concurrent_extractions=20,   # Max 20 LLM calls in flight
     enable_expansion=True
 )
 ```
