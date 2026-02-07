@@ -41,6 +41,7 @@ async def stream_extract_and_embed_entities(
     extraction_max_retries: int = 3,
     extraction_retry_wait: float = 2.0,
     embedding_batch_size: int = 100,
+    extraction_batch_size: int = 10,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities from chunks and embed them in a streaming fashion.
 
@@ -60,6 +61,7 @@ async def stream_extract_and_embed_entities(
         extraction_max_retries: Max retries for extraction
         extraction_retry_wait: Base wait time between retries
         embedding_batch_size: Batch size for embedding operations
+        extraction_batch_size: Max texts per LLM extraction call
 
     Returns:
         Tuple of (entities with embeddings, relationships)
@@ -107,14 +109,14 @@ async def stream_extract_and_embed_entities(
                     texts,
                     expertise=expertise,
                     context=extraction_context,
-                    batch_size=5,
+                    batch_size=extraction_batch_size,
                     max_input_tokens=None,
                 )
             else:
                 results = await extractor.extract_multi(
                     texts,
                     entity_types=skill.entity_types,
-                    batch_size=5,
+                    batch_size=extraction_batch_size,
                     max_input_tokens=None,
                 )
 
@@ -352,6 +354,7 @@ async def process_document(
     extraction_timeout: int = 120,
     extraction_max_retries: int = 3,
     extraction_retry_wait: float = 2.0,
+    extraction_batch_size: int = 10,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -380,6 +383,7 @@ async def process_document(
         enable_expansion: Whether to run semantic expansion
         extraction_context: Context dict for prompt template rendering
         entity_index: Shared EntityIndex for smart mode (skip per-doc DB loads)
+        extraction_batch_size: Max texts per LLM extraction call
     """
     from ..tasks import chunk_document, embed_chunks, extract_entities
 
@@ -443,6 +447,7 @@ async def process_document(
                     timeout=extraction_timeout,
                     max_retries=extraction_max_retries,
                     retry_wait=extraction_retry_wait,
+                    extraction_batch_size=extraction_batch_size,
                 )
 
         embedded_chunks, (entities, relationships) = await asyncio.gather(
@@ -716,6 +721,7 @@ async def ingest_documents(
     extraction_timeout: int = 120,
     extraction_max_retries: int = 3,
     extraction_retry_wait: float = 2.0,
+    extraction_batch_size: int = 10,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -740,6 +746,7 @@ async def ingest_documents(
         extraction_context: Context dict for prompt template rendering
         skip_resolution: If True, skip Phase 3 (smart resolution). Useful when the
             caller runs resolution separately after all batches are processed.
+        extraction_batch_size: Max texts per LLM extraction call (default 10)
 
     Returns:
         Summary of ingestion results
@@ -842,6 +849,7 @@ async def ingest_documents(
                 extraction_timeout=extraction_timeout,
                 extraction_max_retries=extraction_max_retries,
                 extraction_retry_wait=extraction_retry_wait,
+                extraction_batch_size=extraction_batch_size,
             )
 
     results = await asyncio.gather(
