@@ -17,6 +17,8 @@ import os
 import re
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 if TYPE_CHECKING:
     pass
 
@@ -87,6 +89,17 @@ elif _FORCE_BACKEND == "numpy":
     _HAS_RUST = False
     RustBM25Index = None  # type: ignore[assignment, misc]
 # "rust" or unset: use auto-detected fastest path
+
+# ---------------------------------------------------------------------------
+# Log active backend
+# ---------------------------------------------------------------------------
+
+if _HAS_RUST:
+    logger.info("Khora acceleration backend: rust (khora-accel)")
+elif _HAS_NUMPY:
+    logger.info("Khora acceleration backend: numpy/rapidfuzz")
+else:
+    logger.info("Khora acceleration backend: pure python")
 
 
 # ---------------------------------------------------------------------------
