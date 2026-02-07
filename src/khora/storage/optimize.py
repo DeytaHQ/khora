@@ -11,6 +11,8 @@ safe to run multiple times.
 
 from __future__ import annotations
 
+from typing import Any
+
 from loguru import logger
 
 # ---------------------------------------------------------------------------
@@ -107,12 +109,12 @@ PG_ANALYZE_TABLES = ["chunks", "documents", "entities", "relationships"]
 
 NEO4J_INDEXES = [
     {
-        "name": "entity_namespace_name_type",
+        "name": "entity_ns_name_type_unique",
         "cypher": (
-            "CREATE INDEX entity_namespace_name_type IF NOT EXISTS "
-            "FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)"
+            "CREATE CONSTRAINT entity_ns_name_type_unique IF NOT EXISTS "
+            "FOR (e:Entity) REQUIRE (e.namespace_id, e.name, e.entity_type) IS UNIQUE"
         ),
-        "purpose": "Primary entity lookup (composite)",
+        "purpose": "Uniqueness on MERGE key — prevents duplicate entities",
     },
     {
         "name": "entity_namespace_id_unique",
@@ -272,12 +274,43 @@ async def optimize_neo4j(driver, *, database: str = "neo4j") -> dict:
         database: Neo4j database name.
 
     Returns:
-        Dict with ``indexes_created`` and ``errors``.
+        Dict with ``indexes_created``, ``duplicates_removed``, and ``errors``.
     """
-    result = {
+    result: dict[str, Any] = {
         "indexes_created": 0,
+        "duplicates_removed": 0,
         "errors": [],
     }
+
+    # De-duplicate existing Entity nodes before creating unique constraint.
+    # Merges metadata from duplicates into the kept node, then deletes dupes.
+    dedup_cypher = """
+    MATCH (e:Entity)
+    WITH e.namespace_id AS ns, e.name AS name, e.entity_type AS type,
+         collect(e) AS nodes
+    WHERE size(nodes) > 1
+    WITH nodes[0] AS keep, tail(nodes) AS dupes
+    UNWIND dupes AS dup
+    SET keep.source_document_ids = keep.source_document_ids +
+            [x IN dup.source_document_ids WHERE NOT x IN keep.source_document_ids],
+        keep.source_chunk_ids = keep.source_chunk_ids +
+            [x IN dup.source_chunk_ids WHERE NOT x IN keep.source_chunk_ids],
+        keep.mention_count = keep.mention_count + dup.mention_count
+    DETACH DELETE dup
+    RETURN count(dup) AS duplicates_removed
+    """
+    async with driver.session(database=database) as session:
+        try:
+            dedup_result = await session.run(dedup_cypher)
+            record = await dedup_result.single()
+            removed = record["duplicates_removed"] if record else 0
+            result["duplicates_removed"] = removed
+            if removed:
+                logger.info(f"De-duplicated {removed} Entity nodes in Neo4j")
+        except Exception as e:
+            msg = f"Neo4j entity de-duplication: {e}"
+            result["errors"].append(msg)
+            logger.warning(msg)
 
     async with driver.session(database=database) as session:
         for idx in NEO4J_INDEXES:

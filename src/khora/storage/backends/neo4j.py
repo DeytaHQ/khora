@@ -124,8 +124,10 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX entity_namespace IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id)",
             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
             "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
-            # Composite index for MERGE pattern (namespace_id, name, entity_type)
-            "CREATE INDEX entity_ns_name_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.name, e.entity_type)",
+            # Unique constraint on MERGE key (namespace_id, name, entity_type) —
+            # prevents duplicate entities and implicitly creates the composite index.
+            "CREATE CONSTRAINT entity_ns_name_type_unique IF NOT EXISTS "
+            "FOR (e:Entity) REQUIRE (e.namespace_id, e.name, e.entity_type) IS UNIQUE",
             # Composite: namespace + type (for list queries filtering by type without name)
             "CREATE INDEX entity_ns_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.entity_type)",
             # Entity source_tool (for source-aware queries)
@@ -458,8 +460,15 @@ class Neo4jBackend(GraphBackendBase):
             input_id_to_entity = {str(e.id): e for e in batch}
             logger.debug(f"Neo4j batch: {len(batch)} entities, {len(records)} records returned")
 
+            # De-duplicate: MERGE can match multiple nodes if duplicates exist
+            # in the DB (no unique constraint on the MERGE key). Keep only the
+            # first result per input entity.
+            seen_input_ids: set[str] = set()
             for record in records:
                 input_id = record["input_id"]
+                if input_id in seen_input_ids:
+                    continue
+                seen_input_ids.add(input_id)
                 entity = input_id_to_entity.get(input_id)
                 if entity is not None:
                     # Sync entity ID with what Neo4j actually has (may differ on MERGE match)
