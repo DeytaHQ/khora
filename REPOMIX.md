@@ -237,6 +237,7 @@ tests/
       test_temporal_edges.py
       test_time_hierarchy.py
     __init__.py
+    test_accel.py
     test_api.py
     test_attribute_schemas.py
     test_chunkers.py
@@ -5553,6 +5554,520 @@ README.md
 ## File: tests/unit/__init__.py
 ````python
 1: """Unit tests for Khora."""
+````
+
+## File: tests/unit/test_accel.py
+````python
+  1: """Tests for khora._accel — Rust-accelerated operations with Python fallbacks.
+  2: 
+  3: Each function is tested under two backends:
+  4:   1. Default (Rust, if available)
+  5:   2. Pure Python (via monkeypatching _HAS_RUST/_HAS_NUMPY/_HAS_RAPIDFUZZ)
+  6: """
+  7: 
+  8: from __future__ import annotations
+  9: 
+ 10: import pytest
+ 11: 
+ 12: import khora._accel as accel
+ 13: 
+ 14: # ---------------------------------------------------------------------------
+ 15: # Helpers
+ 16: # ---------------------------------------------------------------------------
+ 17: 
+ 18: 
+ 19: @pytest.fixture()
+ 20: def force_python(monkeypatch):
+ 21:     """Force the pure-Python path for all functions."""
+ 22:     monkeypatch.setattr(accel, "_HAS_RUST", False)
+ 23:     monkeypatch.setattr(accel, "_HAS_NUMPY", False)
+ 24:     monkeypatch.setattr(accel, "_HAS_RAPIDFUZZ", False)
+ 25: 
+ 26: 
+ 27: @pytest.fixture()
+ 28: def force_numpy(monkeypatch):
+ 29:     """Force numpy path (skip Rust, keep numpy)."""
+ 30:     monkeypatch.setattr(accel, "_HAS_RUST", False)
+ 31:     # Keep _HAS_NUMPY and _HAS_RAPIDFUZZ at their real values
+ 32: 
+ 33: 
+ 34: # ---------------------------------------------------------------------------
+ 35: # Cosine similarity
+ 36: # ---------------------------------------------------------------------------
+ 37: 
+ 38: 
+ 39: class TestCosineSimilarity:
+ 40:     def test_identical_vectors(self):
+ 41:         assert accel.cosine_similarity([1, 0, 0], [1, 0, 0]) == pytest.approx(1.0)
+ 42: 
+ 43:     def test_orthogonal_vectors(self):
+ 44:         assert accel.cosine_similarity([1, 0], [0, 1]) == pytest.approx(0.0)
+ 45: 
+ 46:     def test_dimension_mismatch_python(self, force_python):
+ 47:         assert accel.cosine_similarity([1, 0], [1, 0, 0]) == 0.0
+ 48: 
+ 49:     def test_zero_vector_python(self, force_python):
+ 50:         assert accel.cosine_similarity([0, 0], [1, 1]) == 0.0
+ 51: 
+ 52:     def test_identical_python(self, force_python):
+ 53:         assert accel.cosine_similarity([1, 2, 3], [1, 2, 3]) == pytest.approx(1.0)
+ 54: 
+ 55:     def test_similar_python(self, force_python):
+ 56:         sim = accel.cosine_similarity([1, 1], [1, 0])
+ 57:         assert 0.5 < sim < 1.0
+ 58: 
+ 59:     def test_numpy_path(self, force_numpy):
+ 60:         assert accel.cosine_similarity([1, 0], [1, 0]) == pytest.approx(1.0)
+ 61: 
+ 62:     def test_numpy_zero_vector(self, force_numpy):
+ 63:         assert accel.cosine_similarity([0, 0], [1, 1]) == 0.0
+ 64: 
+ 65:     def test_numpy_mismatch(self, force_numpy):
+ 66:         assert accel.cosine_similarity([1, 0], [1, 0, 0]) == 0.0
+ 67: 
+ 68: 
+ 69: class TestBatchCosineSimilarity:
+ 70:     def test_empty_candidates(self):
+ 71:         assert accel.batch_cosine_similarity([1, 0], []) == []
+ 72: 
+ 73:     def test_with_threshold(self, force_python):
+ 74:         query = [1.0, 0.0]
+ 75:         candidates = [[1.0, 0.0], [0.0, 1.0], [0.7, 0.7]]
+ 76:         results = accel.batch_cosine_similarity(query, candidates, threshold=0.5)
+ 77:         indices = [idx for idx, _ in results]
+ 78:         assert 0 in indices  # identical
+ 79:         assert 1 not in indices  # orthogonal
+ 80:         assert 2 in indices  # similar enough
+ 81: 
+ 82:     def test_sorted_descending(self, force_python):
+ 83:         query = [1.0, 0.0]
+ 84:         candidates = [[0.5, 0.5], [1.0, 0.0], [0.1, 0.9]]
+ 85:         results = accel.batch_cosine_similarity(query, candidates)
+ 86:         scores = [s for _, s in results]
+ 87:         assert scores == sorted(scores, reverse=True)
+ 88: 
+ 89:     def test_numpy_path(self, force_numpy):
+ 90:         query = [1.0, 0.0]
+ 91:         candidates = [[1.0, 0.0], [0.0, 1.0]]
+ 92:         results = accel.batch_cosine_similarity(query, candidates, threshold=0.5)
+ 93:         assert len(results) == 1
+ 94:         assert results[0][0] == 0
+ 95: 
+ 96:     def test_numpy_zero_query(self, force_numpy):
+ 97:         results = accel.batch_cosine_similarity([0.0, 0.0], [[1.0, 0.0]])
+ 98:         assert results == []
+ 99: 
+100: 
+101: class TestPairwiseCosineSimilarity:
+102:     def test_two_identical(self, force_python):
+103:         result = accel.pairwise_cosine_above_threshold([[1, 0], [1, 0]], 0.5)
+104:         assert len(result) == 1
+105:         i, j, sim = result[0]
+106:         assert i == 0 and j == 1
+107:         assert sim == pytest.approx(1.0)
+108: 
+109:     def test_below_threshold(self, force_python):
+110:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 1]], 0.5)
+111:         assert len(result) == 0
+112: 
+113:     def test_single_vector(self, force_python):
+114:         assert accel.pairwise_cosine_above_threshold([[1, 0]], 0.5) == []
+115: 
+116:     def test_empty(self, force_python):
+117:         assert accel.pairwise_cosine_above_threshold([], 0.5) == []
+118: 
+119:     def test_zero_vector_skipped(self, force_python):
+120:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 0], [1, 0]], 0.5)
+121:         # Only (0, 2) should appear, zero vector skipped
+122:         assert len(result) == 1
+123:         assert result[0][0] == 0 and result[0][1] == 2
+124: 
+125:     def test_numpy_path(self, force_numpy):
+126:         result = accel.pairwise_cosine_above_threshold([[1, 0], [1, 0], [0, 1]], 0.5)
+127:         # (0,1) should match, (0,2) and (1,2) should not
+128:         assert len(result) == 1
+129:         assert result[0][0] == 0 and result[0][1] == 1
+130: 
+131:     def test_numpy_zero_skipped(self, force_numpy):
+132:         result = accel.pairwise_cosine_above_threshold([[1, 0], [0, 0]], 0.5)
+133:         assert len(result) == 0
+134: 
+135: 
+136: # ---------------------------------------------------------------------------
+137: # Levenshtein similarity
+138: # ---------------------------------------------------------------------------
+139: 
+140: 
+141: class TestLevenshteinSimilarity:
+142:     def test_identical(self):
+143:         assert accel.levenshtein_similarity("hello", "hello") == pytest.approx(1.0)
+144: 
+145:     def test_empty(self):
+146:         assert accel.levenshtein_similarity("", "hello") == pytest.approx(0.0)
+147: 
+148:     def test_similar_python(self, force_python):
+149:         sim = accel.levenshtein_similarity("hello", "hallo")
+150:         assert 0.5 < sim < 1.0
+151: 
+152:     def test_case_insensitive_python(self, force_python):
+153:         assert accel.levenshtein_similarity("Hello", "hello") == pytest.approx(1.0)
+154: 
+155:     def test_rapidfuzz_path(self, force_numpy):
+156:         # force_numpy disables Rust but keeps rapidfuzz
+157:         sim = accel.levenshtein_similarity("hello", "hallo")
+158:         assert 0.5 < sim < 1.0
+159: 
+160:     def test_rapidfuzz_equal(self, force_numpy):
+161:         assert accel.levenshtein_similarity("abc", "abc") == pytest.approx(1.0)
+162: 
+163: 
+164: class TestBatchLevenshtein:
+165:     def test_basic(self, force_python):
+166:         results = accel.batch_levenshtein("cat", ["cat", "car", "dog"], threshold=0.5)
+167:         indices = [idx for idx, _ in results]
+168:         assert 0 in indices  # exact match
+169:         assert 1 in indices  # close match
+170:         # "dog" should have low similarity to "cat"
+171: 
+172:     def test_sorted_descending(self, force_python):
+173:         results = accel.batch_levenshtein("hello", ["hello", "helo", "world"])
+174:         scores = [s for _, s in results]
+175:         assert scores == sorted(scores, reverse=True)
+176: 
+177: 
+178: # ---------------------------------------------------------------------------
+179: # Sequence match ratio
+180: # ---------------------------------------------------------------------------
+181: 
+182: 
+183: class TestSequenceMatchRatio:
+184:     def test_identical(self):
+185:         assert accel.sequence_match_ratio("abc", "abc") == pytest.approx(1.0)
+186: 
+187:     def test_different_python(self, force_python):
+188:         # Use difflib fallback
+189:         ratio = accel.sequence_match_ratio("abc", "xyz")
+190:         assert ratio < 0.5
+191: 
+192:     def test_rapidfuzz_path(self, force_numpy):
+193:         ratio = accel.sequence_match_ratio("abc", "abc")
+194:         assert ratio == pytest.approx(1.0)
+195: 
+196: 
+197: class TestBatchSequenceMatch:
+198:     def test_sorted(self, force_python):
+199:         results = accel.batch_sequence_match("hello", ["hello", "help", "xyz"])
+200:         scores = [s for _, s in results]
+201:         assert scores == sorted(scores, reverse=True)
+202: 
+203: 
+204: # ---------------------------------------------------------------------------
+205: # PageRank
+206: # ---------------------------------------------------------------------------
+207: 
+208: 
+209: class TestPageRank:
+210:     def test_empty_graph(self):
+211:         assert accel.pagerank(0, []) == []
+212: 
+213:     def test_cycle_graph(self):
+214:         # 3-node cycle: all nodes should have equal score ~0.333
+215:         edges = [(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)]
+216:         scores = accel.pagerank(3, edges, damping=0.85, max_iter=100, tol=1e-6)
+217:         assert len(scores) == 3
+218:         for s in scores:
+219:             assert s == pytest.approx(1.0 / 3, abs=0.01)
+220: 
+221:     def test_star_graph(self):
+222:         # Node 0 receives links from 1, 2, 3 -> highest score
+223:         edges = [(1, 0, 1.0), (2, 0, 1.0), (3, 0, 1.0)]
+224:         scores = accel.pagerank(4, edges, damping=0.85)
+225:         assert scores[0] > scores[1]
+226:         assert scores[0] > scores[2]
+227:         assert scores[0] > scores[3]
+228: 
+229:     def test_python_fallback(self, force_python):
+230:         edges = [(0, 1, 1.0), (1, 0, 1.0)]
+231:         scores = accel.pagerank(2, edges, damping=0.85, max_iter=100, tol=1e-6)
+232:         assert len(scores) == 2
+233:         assert scores[0] == pytest.approx(0.5, abs=0.01)
+234: 
+235:     def test_empty_python(self, force_python):
+236:         assert accel.pagerank(0, []) == []
+237: 
+238:     def test_star_python(self, force_python):
+239:         edges = [(1, 0, 1.0), (2, 0, 1.0), (3, 0, 1.0)]
+240:         scores = accel.pagerank(4, edges, damping=0.85)
+241:         assert scores[0] > scores[1]
+242: 
+243: 
+244: # ---------------------------------------------------------------------------
+245: # Build chunk edges
+246: # ---------------------------------------------------------------------------
+247: 
+248: 
+249: class TestBuildChunkEdges:
+250:     def test_basic(self):
+251:         # Two keywords: kw0 shared by chunks [0,1], kw1 shared by [1,2]
+252:         edges = accel.build_chunk_edges(3, [[0, 1], [1, 2]], [1.5, 2.0])
+253:         # kw0 -> (0,1,1.5) + (1,0,1.5)
+254:         # kw1 -> (1,2,2.0) + (2,1,2.0)
+255:         assert (0, 1, 1.5) in edges
+256:         assert (1, 0, 1.5) in edges
+257:         assert (1, 2, 2.0) in edges
+258:         assert (2, 1, 2.0) in edges
+259: 
+260:     def test_out_of_range(self):
+261:         # Chunk index >= n_chunks should be skipped
+262:         edges = accel.build_chunk_edges(2, [[0, 5]], [1.0])
+263:         assert len(edges) == 0
+264: 
+265:     def test_python_fallback(self, force_python):
+266:         edges = accel.build_chunk_edges(3, [[0, 1, 2]], [1.0])
+267:         # 3 chunks sharing 1 keyword -> 6 directed edges (3 pairs * 2)
+268:         assert len(edges) == 6
+269: 
+270:     def test_empty(self, force_python):
+271:         assert accel.build_chunk_edges(0, [], []) == []
+272: 
+273: 
+274: # ---------------------------------------------------------------------------
+275: # Keyword extraction
+276: # ---------------------------------------------------------------------------
+277: 
+278: 
+279: class TestExtractKeywords:
+280:     def test_basic(self):
+281:         kws = accel.extract_keywords("The quick brown fox jumps over the lazy dog")
+282:         assert "quick" in kws
+283:         assert "brown" in kws
+284:         assert "fox" in kws
+285:         # Stopwords removed
+286:         assert "the" not in kws
+287:         assert "and" not in kws
+288: 
+289:     def test_deduplication(self):
+290:         kws = accel.extract_keywords("hello hello hello world world")
+291:         assert kws.count("hello") == 1
+292:         assert kws.count("world") == 1
+293: 
+294:     def test_short_words_filtered(self):
+295:         kws = accel.extract_keywords("I am a big fan of AI")
+296:         # "am", "AI", "a", "I" are < 3 chars or stopwords
+297:         assert "fan" in kws
+298:         assert "big" in kws
+299: 
+300:     def test_python_fallback(self, force_python):
+301:         kws = accel.extract_keywords("The quick brown fox")
+302:         assert "quick" in kws
+303:         assert "the" not in kws
+304: 
+305: 
+306: class TestExtractKeywordsBatch:
+307:     def test_batch(self):
+308:         results = accel.extract_keywords_batch(["hello world", "foo bar baz"])
+309:         assert len(results) == 2
+310:         assert "hello" in results[0]
+311:         assert "foo" in results[1]
+312: 
+313:     def test_python_fallback(self, force_python):
+314:         results = accel.extract_keywords_batch(["The quick fox", "lazy dog"])
+315:         assert len(results) == 2
+316:         assert "quick" in results[0]
+317: 
+318: 
+319: # ---------------------------------------------------------------------------
+320: # RRF (Reciprocal Rank Fusion)
+321: # ---------------------------------------------------------------------------
+322: 
+323: 
+324: class TestReciprocalRankFusion:
+325:     def test_basic(self):
+326:         results = accel.reciprocal_rank_fusion([["a", "b", "c"], ["b", "c", "d"]], k=60)
+327:         ids = [r[0] for r in results]
+328:         # "b" appears in both lists, should have highest score
+329:         assert ids[0] == "b"
+330: 
+331:     def test_single_list(self):
+332:         results = accel.reciprocal_rank_fusion([["x", "y"]], k=60)
+333:         assert len(results) == 2
+334: 
+335:     def test_python_fallback(self, force_python):
+336:         results = accel.reciprocal_rank_fusion([["a", "b"], ["b", "c"]], k=60)
+337:         ids = [r[0] for r in results]
+338:         assert ids[0] == "b"
+339: 
+340: 
+341: class TestWeightedRRF:
+342:     def test_basic(self):
+343:         results = accel.weighted_rrf([(0.8, ["a", "b"]), (0.2, ["b", "c"])], k=60)
+344:         ids = [r[0] for r in results]
+345:         assert "b" in ids
+346: 
+347:     def test_python_fallback(self, force_python):
+348:         results = accel.weighted_rrf([(0.6, ["x"]), (0.4, ["x", "y"])], k=60)
+349:         ids = [r[0] for r in results]
+350:         assert ids[0] == "x"
+351: 
+352: 
+353: class TestNormalizeScores:
+354:     def test_basic(self):
+355:         result = accel.normalize_scores([1.0, 2.0, 3.0])
+356:         assert result[0] == pytest.approx(0.0)
+357:         assert result[1] == pytest.approx(0.5)
+358:         assert result[2] == pytest.approx(1.0)
+359: 
+360:     def test_identical_scores(self):
+361:         result = accel.normalize_scores([5.0, 5.0, 5.0])
+362:         assert all(s == pytest.approx(1.0) for s in result)
+363: 
+364:     def test_empty(self):
+365:         assert accel.normalize_scores([]) == []
+366: 
+367:     def test_python_fallback(self, force_python):
+368:         result = accel.normalize_scores([0.0, 10.0])
+369:         assert result[0] == pytest.approx(0.0)
+370:         assert result[1] == pytest.approx(1.0)
+371: 
+372: 
+373: # ---------------------------------------------------------------------------
+374: # Entity resolution
+375: # ---------------------------------------------------------------------------
+376: 
+377: 
+378: class TestResolveEntitiesBatch:
+379:     def test_exact_match(self):
+380:         results = accel.resolve_entities_batch(
+381:             ["Apple Inc"],
+382:             ["apple inc", "Google"],
+383:             [[], []],
+384:             threshold=0.8,
+385:         )
+386:         assert len(results) == 1
+387:         assert results[0] is not None
+388:         idx, score, match_type = results[0]
+389:         assert idx == 0
+390:         assert score == pytest.approx(1.0)
+391:         assert match_type == "exact"
+392: 
+393:     def test_alias_match(self):
+394:         results = accel.resolve_entities_batch(
+395:             ["GOOG"],
+396:             ["Google", "Apple"],
+397:             [["goog", "alphabet"], ["aapl"]],
+398:             threshold=0.8,
+399:         )
+400:         assert results[0] is not None
+401:         idx, score, match_type = results[0]
+402:         assert idx == 0
+403:         assert match_type == "alias"
+404: 
+405:     def test_fuzzy_match(self):
+406:         results = accel.resolve_entities_batch(
+407:             ["Gogle"],  # typo
+408:             ["Google", "Apple"],
+409:             [[], []],
+410:             threshold=0.5,
+411:         )
+412:         assert results[0] is not None
+413:         idx, score, match_type = results[0]
+414:         assert idx == 0
+415:         assert match_type == "fuzzy"
+416: 
+417:     def test_no_match(self):
+418:         results = accel.resolve_entities_batch(
+419:             ["XYZ Corp"],
+420:             ["Google", "Apple"],
+421:             [[], []],
+422:             threshold=0.99,
+423:         )
+424:         assert results[0] is None
+425: 
+426:     def test_python_exact(self, force_python):
+427:         results = accel.resolve_entities_batch(
+428:             ["Test"],
+429:             ["test"],
+430:             [[]],
+431:             threshold=0.8,
+432:         )
+433:         assert results[0] is not None
+434:         assert results[0][2] == "exact"
+435: 
+436:     def test_python_alias(self, force_python):
+437:         results = accel.resolve_entities_batch(
+438:             ["nyc"],
+439:             ["New York City"],
+440:             [["nyc", "ny"]],
+441:             threshold=0.8,
+442:         )
+443:         assert results[0] is not None
+444:         assert results[0][2] == "alias"
+445: 
+446:     def test_python_fuzzy(self, force_python):
+447:         results = accel.resolve_entities_batch(
+448:             ["Gogle"],
+449:             ["Google"],
+450:             [[]],
+451:             threshold=0.5,
+452:         )
+453:         assert results[0] is not None
+454:         assert results[0][2] == "fuzzy"
+455: 
+456:     def test_python_no_match(self, force_python):
+457:         results = accel.resolve_entities_batch(
+458:             ["ZZZZZ"],
+459:             ["Google"],
+460:             [[]],
+461:             threshold=0.99,
+462:         )
+463:         assert results[0] is None
+464: 
+465: 
+466: # ---------------------------------------------------------------------------
+467: # RustBM25Index
+468: # ---------------------------------------------------------------------------
+469: 
+470: 
+471: class TestRustBM25Index:
+472:     def test_available(self):
+473:         """RustBM25Index should be importable when Rust is available."""
+474:         if not accel._HAS_RUST:
+475:             pytest.skip("Rust extension not available")
+476:         assert accel.RustBM25Index is not None
+477: 
+478:     def test_add_and_search(self):
+479:         if not accel._HAS_RUST:
+480:             pytest.skip("Rust extension not available")
+481:         idx = accel.RustBM25Index()
+482:         idx.add_document("doc1", "the quick brown fox")
+483:         idx.add_document("doc2", "the lazy brown dog")
+484:         idx.add_document("doc3", "unrelated content here")
+485:         results = idx.search("brown fox", limit=5)
+486:         assert len(results) > 0
+487:         # doc1 should rank highest (exact match for "brown fox")
+488:         assert results[0][0] == "doc1"
+489: 
+490:     def test_add_documents_batch(self):
+491:         if not accel._HAS_RUST:
+492:             pytest.skip("Rust extension not available")
+493:         idx = accel.RustBM25Index()
+494:         idx.add_documents([("d1", "hello world"), ("d2", "world peace")])
+495:         results = idx.search("world", limit=5)
+496:         assert len(results) == 2
+497: 
+498:     def test_score(self):
+499:         if not accel._HAS_RUST:
+500:             pytest.skip("Rust extension not available")
+501:         idx = accel.RustBM25Index()
+502:         idx.add_document("doc1", "test document content")
+503:         score = idx.score("test", "doc1")
+504:         assert score > 0.0
+505:         # Non-existent doc returns 0
+506:         assert idx.score("test", "nonexistent") == 0.0
+507: 
+508:     def test_none_when_python_forced(self, force_python):
+509:         # When _HAS_RUST is forced False, verify the flag is off
+510:         assert not accel._HAS_RUST
 ````
 
 ## File: tests/unit/test_chunkers.py
@@ -26300,172 +26815,702 @@ README.md
 ````python
   1: """Accelerated operations with graceful fallbacks.
   2: 
-  3: Provides optimized implementations of CPU-intensive operations using
-  4: numpy (cosine similarity) and rapidfuzz (string similarity). Falls back
-  5: to pure-Python implementations when those libraries are not available.
-  6: """
-  7: 
-  8: from __future__ import annotations
-  9: 
- 10: import math
- 11: from typing import TYPE_CHECKING
+  3: Provides optimized implementations of CPU-intensive operations.
+  4: Three-tier acceleration: Rust (khora-accel) → NumPy/RapidFuzz → Pure Python.
+  5: 
+  6: Control the backend via the KHORA_ACCEL_BACKEND environment variable:
+  7:   - unset: auto-detect fastest available (default)
+  8:   - "rust": use Rust if available, fall through otherwise
+  9:   - "numpy": skip Rust, use NumPy/RapidFuzz
+ 10:   - "python": force pure Python (useful for debugging/testing)
+ 11: """
  12: 
- 13: if TYPE_CHECKING:
- 14:     pass
- 15: 
- 16: # ---------------------------------------------------------------------------
- 17: # Optional dependency detection
- 18: # ---------------------------------------------------------------------------
+ 13: from __future__ import annotations
+ 14: 
+ 15: import math
+ 16: import os
+ 17: import re
+ 18: from typing import TYPE_CHECKING
  19: 
- 20: try:
- 21:     import numpy as np
+ 20: if TYPE_CHECKING:
+ 21:     pass
  22: 
- 23:     _HAS_NUMPY = True
- 24: except ImportError:  # pragma: no cover
- 25:     _HAS_NUMPY = False
+ 23: # ---------------------------------------------------------------------------
+ 24: # Runtime backend override
+ 25: # ---------------------------------------------------------------------------
  26: 
- 27: try:
- 28:     from rapidfuzz.distance import Levenshtein as _rf_lev
- 29:     from rapidfuzz.fuzz import ratio as _rf_ratio
- 30: 
- 31:     _HAS_RAPIDFUZZ = True
- 32: except ImportError:  # pragma: no cover
- 33:     _HAS_RAPIDFUZZ = False
- 34: 
- 35: 
- 36: # ---------------------------------------------------------------------------
- 37: # Cosine similarity
- 38: # ---------------------------------------------------------------------------
- 39: 
- 40: 
- 41: def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
- 42:     """Compute cosine similarity between two vectors.
- 43: 
- 44:     Uses numpy when available (~50-200x faster for 1536-dim vectors).
- 45:     """
- 46:     if len(vec1) != len(vec2):
- 47:         return 0.0
- 48: 
- 49:     if _HAS_NUMPY:
- 50:         a = np.asarray(vec1, dtype=np.float32)
- 51:         b = np.asarray(vec2, dtype=np.float32)
- 52:         dot = float(np.dot(a, b))
- 53:         na = float(np.linalg.norm(a))
- 54:         nb = float(np.linalg.norm(b))
- 55:         if na == 0.0 or nb == 0.0:
- 56:             return 0.0
- 57:         return dot / (na * nb)
- 58: 
- 59:     # Pure-Python fallback
- 60:     dot = 0.0
- 61:     norm1 = 0.0
- 62:     norm2 = 0.0
- 63:     for a, b in zip(vec1, vec2):
- 64:         dot += a * b
- 65:         norm1 += a * a
- 66:         norm2 += b * b
- 67: 
- 68:     if norm1 == 0.0 or norm2 == 0.0:
- 69:         return 0.0
- 70:     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
- 71: 
+ 27: _FORCE_BACKEND = os.environ.get("KHORA_ACCEL_BACKEND")
+ 28: 
+ 29: # ---------------------------------------------------------------------------
+ 30: # Tier 0: Rust native acceleration (fastest)
+ 31: # ---------------------------------------------------------------------------
+ 32: 
+ 33: try:
+ 34:     from khora_accel import (
+ 35:         RustBM25Index,
+ 36:     )
+ 37:     from khora_accel import batch_cosine_similarity as _rust_batch_cosine
+ 38:     from khora_accel import batch_levenshtein as _rust_batch_levenshtein
+ 39:     from khora_accel import batch_sequence_match as _rust_batch_sequence_match
+ 40:     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
+ 41:     from khora_accel import cosine_similarity as _rust_cosine
+ 42:     from khora_accel import extract_keywords as _rust_extract_keywords
+ 43:     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
+ 44:     from khora_accel import levenshtein_similarity as _rust_levenshtein
+ 45:     from khora_accel import normalize_scores as _rust_normalize_scores
+ 46:     from khora_accel import pagerank as _rust_pagerank
+ 47:     from khora_accel import pairwise_cosine_above_threshold as _rust_pairwise_cosine
+ 48:     from khora_accel import reciprocal_rank_fusion as _rust_rrf
+ 49:     from khora_accel import resolve_entities_batch as _rust_resolve_entities_batch
+ 50:     from khora_accel import sequence_match_ratio as _rust_sequence_match
+ 51:     from khora_accel import weighted_rrf as _rust_weighted_rrf
+ 52: 
+ 53:     _HAS_RUST = True
+ 54: except ImportError:  # pragma: no cover
+ 55:     _HAS_RUST = False
+ 56:     RustBM25Index = None  # type: ignore[assignment, misc]
+ 57: 
+ 58: # ---------------------------------------------------------------------------
+ 59: # Tier 1: NumPy / RapidFuzz (existing)
+ 60: # ---------------------------------------------------------------------------
+ 61: 
+ 62: try:
+ 63:     import numpy as np
+ 64: 
+ 65:     _HAS_NUMPY = True
+ 66: except ImportError:  # pragma: no cover
+ 67:     _HAS_NUMPY = False
+ 68: 
+ 69: try:
+ 70:     from rapidfuzz.distance import Levenshtein as _rf_lev
+ 71:     from rapidfuzz.fuzz import ratio as _rf_ratio
  72: 
- 73: def batch_cosine_similarity(
- 74:     query: list[float],
- 75:     candidates: list[list[float]],
- 76:     threshold: float = 0.0,
- 77: ) -> list[tuple[int, float]]:
- 78:     """Compute cosine similarity between a query vector and a matrix of candidates.
- 79: 
- 80:     Returns (index, similarity) pairs above threshold, sorted descending.
- 81:     Uses numpy batch matmul when available.
- 82:     """
- 83:     if not candidates:
- 84:         return []
- 85: 
- 86:     if _HAS_NUMPY:
- 87:         q = np.asarray(query, dtype=np.float32)
- 88:         mat = np.asarray(candidates, dtype=np.float32)
- 89: 
- 90:         q_norm = float(np.linalg.norm(q))
- 91:         if q_norm == 0.0:
- 92:             return []
- 93: 
- 94:         norms = np.linalg.norm(mat, axis=1)
- 95:         # Avoid division by zero
- 96:         safe_norms = np.where(norms == 0.0, 1.0, norms)
- 97:         sims = (mat @ q) / (safe_norms * q_norm)
- 98:         # Zero out entries where candidate norm was zero
- 99:         sims = np.where(norms == 0.0, 0.0, sims)
-100: 
-101:         results = []
-102:         for i in range(len(sims)):
-103:             s = float(sims[i])
-104:             if s >= threshold:
-105:                 results.append((i, s))
-106:         results.sort(key=lambda x: x[1], reverse=True)
-107:         return results
-108: 
-109:     # Pure-Python fallback
-110:     results = []
-111:     for i, cand in enumerate(candidates):
-112:         s = cosine_similarity(query, cand)
-113:         if s >= threshold:
-114:             results.append((i, s))
-115:     results.sort(key=lambda x: x[1], reverse=True)
-116:     return results
+ 73:     _HAS_RAPIDFUZZ = True
+ 74: except ImportError:  # pragma: no cover
+ 75:     _HAS_RAPIDFUZZ = False
+ 76: 
+ 77: # ---------------------------------------------------------------------------
+ 78: # Apply runtime backend override
+ 79: # ---------------------------------------------------------------------------
+ 80: 
+ 81: if _FORCE_BACKEND == "python":
+ 82:     _HAS_RUST = False
+ 83:     _HAS_NUMPY = False
+ 84:     _HAS_RAPIDFUZZ = False
+ 85:     RustBM25Index = None  # type: ignore[assignment, misc]
+ 86: elif _FORCE_BACKEND == "numpy":
+ 87:     _HAS_RUST = False
+ 88:     RustBM25Index = None  # type: ignore[assignment, misc]
+ 89: # "rust" or unset: use auto-detected fastest path
+ 90: 
+ 91: 
+ 92: # ---------------------------------------------------------------------------
+ 93: # Cosine similarity
+ 94: # ---------------------------------------------------------------------------
+ 95: 
+ 96: 
+ 97: def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+ 98:     """Compute cosine similarity between two vectors.
+ 99: 
+100:     Uses Rust > numpy > pure Python, depending on availability.
+101:     """
+102:     if _HAS_RUST:
+103:         return _rust_cosine(vec1, vec2)
+104: 
+105:     if len(vec1) != len(vec2):
+106:         return 0.0
+107: 
+108:     if _HAS_NUMPY:
+109:         a = np.asarray(vec1, dtype=np.float32)
+110:         b = np.asarray(vec2, dtype=np.float32)
+111:         dot = float(np.dot(a, b))
+112:         na = float(np.linalg.norm(a))
+113:         nb = float(np.linalg.norm(b))
+114:         if na == 0.0 or nb == 0.0:
+115:             return 0.0
+116:         return dot / (na * nb)
 117: 
-118: 
-119: # ---------------------------------------------------------------------------
-120: # Levenshtein similarity
-121: # ---------------------------------------------------------------------------
-122: 
-123: 
-124: def levenshtein_similarity(s1: str, s2: str) -> float:
-125:     """Normalized Levenshtein similarity (1.0 = identical).
+118:     # Pure-Python fallback
+119:     dot = 0.0
+120:     norm1 = 0.0
+121:     norm2 = 0.0
+122:     for a, b in zip(vec1, vec2):
+123:         dot += a * b
+124:         norm1 += a * a
+125:         norm2 += b * b
 126: 
-127:     Uses rapidfuzz when available (~5-10x faster).
-128:     """
-129:     a, b = s1.lower(), s2.lower()
-130:     if a == b:
-131:         return 1.0
-132:     if not a or not b:
-133:         return 0.0
-134: 
-135:     if _HAS_RAPIDFUZZ:
-136:         return _rf_lev.normalized_similarity(a, b)
-137: 
-138:     # Pure-Python single-row DP fallback
-139:     la, lb = len(a), len(b)
-140:     prev = list(range(lb + 1))
-141:     for i in range(1, la + 1):
-142:         curr = [i] + [0] * lb
-143:         for j in range(1, lb + 1):
-144:             cost = 0 if a[i - 1] == b[j - 1] else 1
-145:             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-146:         prev = curr
-147: 
-148:     distance = prev[lb]
-149:     return 1.0 - (distance / max(la, lb))
-150: 
-151: 
-152: # ---------------------------------------------------------------------------
-153: # Sequence matching (SequenceMatcher replacement)
-154: # ---------------------------------------------------------------------------
-155: 
+127:     if norm1 == 0.0 or norm2 == 0.0:
+128:         return 0.0
+129:     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
+130: 
+131: 
+132: def batch_cosine_similarity(
+133:     query: list[float],
+134:     candidates: list[list[float]],
+135:     threshold: float = 0.0,
+136: ) -> list[tuple[int, float]]:
+137:     """Compute cosine similarity between a query vector and a matrix of candidates.
+138: 
+139:     Returns (index, similarity) pairs above threshold, sorted descending.
+140:     """
+141:     if len(candidates) == 0:
+142:         return []
+143: 
+144:     if _HAS_RUST and _HAS_NUMPY:
+145:         q = np.asarray(query, dtype=np.float32)
+146:         mat = np.asarray(candidates, dtype=np.float32)
+147:         return _rust_batch_cosine(q, mat, threshold)
+148: 
+149:     if _HAS_NUMPY:
+150:         q = np.asarray(query, dtype=np.float32)
+151:         mat = np.asarray(candidates, dtype=np.float32)
+152: 
+153:         q_norm = float(np.linalg.norm(q))
+154:         if q_norm == 0.0:
+155:             return []
 156: 
-157: def sequence_match_ratio(s1: str, s2: str) -> float:
-158:     """Compute sequence match ratio between two strings.
-159: 
-160:     Uses rapidfuzz.fuzz.ratio when available (~3-10x faster than
-161:     difflib.SequenceMatcher). Returns a float in [0.0, 1.0].
-162:     """
-163:     if _HAS_RAPIDFUZZ:
-164:         return _rf_ratio(s1, s2) / 100.0
-165: 
-166:     from difflib import SequenceMatcher
-167: 
-168:     return SequenceMatcher(None, s1, s2).ratio()
+157:         norms = np.linalg.norm(mat, axis=1)
+158:         safe_norms = np.where(norms == 0.0, 1.0, norms)
+159:         sims = (mat @ q) / (safe_norms * q_norm)
+160:         sims = np.where(norms == 0.0, 0.0, sims)
+161: 
+162:         results = []
+163:         for i in range(len(sims)):
+164:             s = float(sims[i])
+165:             if s >= threshold:
+166:                 results.append((i, s))
+167:         results.sort(key=lambda x: x[1], reverse=True)
+168:         return results
+169: 
+170:     # Pure-Python fallback
+171:     results = []
+172:     for i, cand in enumerate(candidates):
+173:         s = cosine_similarity(query, cand)
+174:         if s >= threshold:
+175:             results.append((i, s))
+176:     results.sort(key=lambda x: x[1], reverse=True)
+177:     return results
+178: 
+179: 
+180: def pairwise_cosine_above_threshold(
+181:     embeddings: list[list[float]],
+182:     threshold: float,
+183: ) -> list[tuple[int, int, float]]:
+184:     """All-pairs cosine similarity above a threshold.
+185: 
+186:     Returns (i, j, similarity) triples where i < j and similarity >= threshold.
+187:     Uses Rust (rayon parallel) > numpy > pure Python.
+188:     """
+189:     if _HAS_RUST and _HAS_NUMPY:
+190:         mat = np.asarray(embeddings, dtype=np.float32)
+191:         return _rust_pairwise_cosine(mat, threshold)
+192: 
+193:     n = len(embeddings)
+194:     if n < 2:
+195:         return []
+196: 
+197:     if _HAS_NUMPY:
+198:         mat = np.asarray(embeddings, dtype=np.float32)
+199:         norms = np.linalg.norm(mat, axis=1)
+200:         results = []
+201:         for i in range(n):
+202:             if norms[i] == 0.0:
+203:                 continue
+204:             for j in range(i + 1, n):
+205:                 if norms[j] == 0.0:
+206:                     continue
+207:                 sim = float(np.dot(mat[i], mat[j]) / (norms[i] * norms[j]))
+208:                 if sim >= threshold:
+209:                     results.append((i, j, sim))
+210:         return results
+211: 
+212:     # Pure-Python fallback
+213:     results = []
+214:     for i in range(n):
+215:         for j in range(i + 1, n):
+216:             sim = cosine_similarity(embeddings[i], embeddings[j])
+217:             if sim >= threshold:
+218:                 results.append((i, j, sim))
+219:     return results
+220: 
+221: 
+222: # ---------------------------------------------------------------------------
+223: # Levenshtein similarity
+224: # ---------------------------------------------------------------------------
+225: 
+226: 
+227: def levenshtein_similarity(s1: str, s2: str) -> float:
+228:     """Normalized Levenshtein similarity (1.0 = identical).
+229: 
+230:     Uses Rust > rapidfuzz > pure Python.
+231:     """
+232:     if _HAS_RUST:
+233:         return _rust_levenshtein(s1, s2)
+234: 
+235:     a, b = s1.lower(), s2.lower()
+236:     if a == b:
+237:         return 1.0
+238:     if not a or not b:
+239:         return 0.0
+240: 
+241:     if _HAS_RAPIDFUZZ:
+242:         return _rf_lev.normalized_similarity(a, b)
+243: 
+244:     # Pure-Python single-row DP fallback
+245:     la, lb = len(a), len(b)
+246:     prev = list(range(lb + 1))
+247:     for i in range(1, la + 1):
+248:         curr = [i] + [0] * lb
+249:         for j in range(1, lb + 1):
+250:             cost = 0 if a[i - 1] == b[j - 1] else 1
+251:             curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+252:         prev = curr
+253: 
+254:     distance = prev[lb]
+255:     return 1.0 - (distance / max(la, lb))
+256: 
+257: 
+258: # ---------------------------------------------------------------------------
+259: # Sequence matching (SequenceMatcher replacement)
+260: # ---------------------------------------------------------------------------
+261: 
+262: 
+263: def sequence_match_ratio(s1: str, s2: str) -> float:
+264:     """Compute sequence match ratio between two strings.
+265: 
+266:     Uses Rust > rapidfuzz > difflib.
+267:     """
+268:     if _HAS_RUST:
+269:         return _rust_sequence_match(s1, s2)
+270: 
+271:     if _HAS_RAPIDFUZZ:
+272:         return _rf_ratio(s1, s2) / 100.0
+273: 
+274:     from difflib import SequenceMatcher
+275: 
+276:     return SequenceMatcher(None, s1, s2).ratio()
+277: 
+278: 
+279: # ---------------------------------------------------------------------------
+280: # Batch string operations
+281: # ---------------------------------------------------------------------------
+282: 
+283: 
+284: def batch_levenshtein(
+285:     query: str,
+286:     candidates: list[str],
+287:     threshold: float = 0.0,
+288: ) -> list[tuple[int, float]]:
+289:     """Score query against all candidates using Levenshtein similarity.
+290: 
+291:     Returns (index, similarity) pairs above threshold, sorted descending.
+292:     Uses Rust parallelism when available, otherwise falls back to serial loop.
+293:     """
+294:     if _HAS_RUST:
+295:         return _rust_batch_levenshtein(query, candidates, threshold)
+296: 
+297:     results = []
+298:     for i, cand in enumerate(candidates):
+299:         s = levenshtein_similarity(query, cand)
+300:         if s >= threshold:
+301:             results.append((i, s))
+302:     results.sort(key=lambda x: x[1], reverse=True)
+303:     return results
+304: 
+305: 
+306: def batch_sequence_match(
+307:     query: str,
+308:     candidates: list[str],
+309:     threshold: float = 0.0,
+310: ) -> list[tuple[int, float]]:
+311:     """Score query against all candidates using sequence match ratio.
+312: 
+313:     Returns (index, similarity) pairs above threshold, sorted descending.
+314:     Uses Rust parallelism when available, otherwise falls back to serial loop.
+315:     """
+316:     if _HAS_RUST:
+317:         return _rust_batch_sequence_match(query, candidates, threshold)
+318: 
+319:     results = []
+320:     for i, cand in enumerate(candidates):
+321:         s = sequence_match_ratio(query, cand)
+322:         if s >= threshold:
+323:             results.append((i, s))
+324:     results.sort(key=lambda x: x[1], reverse=True)
+325:     return results
+326: 
+327: 
+328: # ---------------------------------------------------------------------------
+329: # PageRank
+330: # ---------------------------------------------------------------------------
+331: 
+332: 
+333: def pagerank(
+334:     n: int,
+335:     edges: list[tuple[int, int, float]],
+336:     damping: float = 0.85,
+337:     max_iter: int = 100,
+338:     tol: float = 1e-6,
+339: ) -> list[float]:
+340:     """Compute PageRank scores on a weighted directed graph.
+341: 
+342:     Args:
+343:         n: Number of nodes (IDs are 0..n-1).
+344:         edges: (src, dst, weight) triples.
+345:         damping: Damping factor (typically 0.85).
+346:         max_iter: Maximum iterations.
+347:         tol: Convergence threshold.
+348: 
+349:     Returns:
+350:         List of length n with PageRank scores indexed by node ID.
+351:     """
+352:     if _HAS_RUST:
+353:         return _rust_pagerank(n, edges, damping, max_iter, tol)
+354: 
+355:     # Pure-Python fallback
+356:     if n == 0:
+357:         return []
+358: 
+359:     incoming: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+360:     out_degree: list[float] = [0.0] * n
+361: 
+362:     for src, dst, weight in edges:
+363:         if 0 <= src < n and 0 <= dst < n:
+364:             incoming[dst].append((src, weight))
+365:             out_degree[src] += weight
+366: 
+367:     base = (1.0 - damping) / n
+368:     scores = [1.0 / n] * n
+369: 
+370:     for _ in range(max_iter):
+371:         new_scores = [0.0] * n
+372:         diff = 0.0
+373: 
+374:         for node in range(n):
+375:             contrib = 0.0
+376:             for src, weight in incoming[node]:
+377:                 if out_degree[src] > 0:
+378:                     contrib += scores[src] * weight / out_degree[src]
+379:             new_score = base + damping * contrib
+380:             diff += abs(new_score - scores[node])
+381:             new_scores[node] = new_score
+382: 
+383:         scores = new_scores
+384:         if diff < tol:
+385:             break
+386: 
+387:     return scores
+388: 
+389: 
+390: def build_chunk_edges(
+391:     n_chunks: int,
+392:     keyword_chunk_ids: list[list[int]],
+393:     idf_scores: list[float],
+394: ) -> list[tuple[int, int, float]]:
+395:     """Build chunk-to-chunk edges from keyword co-occurrence.
+396: 
+397:     For each keyword, creates bidirectional edges among all chunks sharing
+398:     that keyword, weighted by the keyword's IDF score.
+399: 
+400:     Args:
+401:         n_chunks: Total number of chunks.
+402:         keyword_chunk_ids: For each keyword, the list of chunk indices containing it.
+403:         idf_scores: IDF score per keyword (parallel to keyword_chunk_ids).
+404: 
+405:     Returns:
+406:         Flat edge list of (src, dst, weight) triples (bidirectional).
+407:     """
+408:     if _HAS_RUST:
+409:         return _rust_build_chunk_edges(n_chunks, keyword_chunk_ids, idf_scores)
+410: 
+411:     # Pure-Python fallback
+412:     edges: list[tuple[int, int, float]] = []
+413:     for keyword_idx, chunk_ids in enumerate(keyword_chunk_ids):
+414:         weight = idf_scores[keyword_idx] if keyword_idx < len(idf_scores) else 0.0
+415:         for i in range(len(chunk_ids)):
+416:             cid1 = chunk_ids[i]
+417:             if cid1 >= n_chunks:
+418:                 continue
+419:             for j in range(i + 1, len(chunk_ids)):
+420:                 cid2 = chunk_ids[j]
+421:                 if cid2 >= n_chunks:
+422:                     continue
+423:                 edges.append((cid1, cid2, weight))
+424:                 edges.append((cid2, cid1, weight))
+425:     return edges
+426: 
+427: 
+428: # ---------------------------------------------------------------------------
+429: # Keyword extraction
+430: # ---------------------------------------------------------------------------
+431: 
+432: _SKELETON_STOPWORDS = frozenset(
+433:     {
+434:         "a",
+435:         "an",
+436:         "the",
+437:         "and",
+438:         "or",
+439:         "but",
+440:         "in",
+441:         "on",
+442:         "at",
+443:         "to",
+444:         "for",
+445:         "of",
+446:         "with",
+447:         "by",
+448:         "from",
+449:         "as",
+450:         "is",
+451:         "was",
+452:         "are",
+453:         "were",
+454:         "been",
+455:         "be",
+456:         "have",
+457:         "has",
+458:         "had",
+459:         "do",
+460:         "does",
+461:         "did",
+462:         "will",
+463:         "would",
+464:         "could",
+465:         "should",
+466:         "may",
+467:         "might",
+468:         "must",
+469:         "that",
+470:         "this",
+471:         "these",
+472:         "those",
+473:         "it",
+474:         "its",
+475:         "he",
+476:         "she",
+477:         "they",
+478:         "them",
+479:         "his",
+480:         "her",
+481:         "their",
+482:         "we",
+483:         "our",
+484:         "you",
+485:         "your",
+486:         "i",
+487:         "me",
+488:         "my",
+489:         "what",
+490:         "which",
+491:         "who",
+492:         "whom",
+493:         "when",
+494:         "where",
+495:         "why",
+496:         "how",
+497:         "all",
+498:         "each",
+499:         "every",
+500:         "both",
+501:         "few",
+502:         "more",
+503:         "most",
+504:         "other",
+505:         "some",
+506:         "such",
+507:         "no",
+508:         "not",
+509:         "only",
+510:         "own",
+511:         "same",
+512:         "so",
+513:         "than",
+514:         "too",
+515:         "very",
+516:         "just",
+517:         "can",
+518:     }
+519: )
+520: 
+521: _KEYWORD_RE = re.compile(r"\b[a-zA-Z]{3,}\b")
+522: 
+523: 
+524: def extract_keywords(content: str) -> list[str]:
+525:     """Extract unique keywords from content.
+526: 
+527:     Tokenises with ``\\b[a-zA-Z]{3,}\\b``, removes stopwords, deduplicates.
+528:     Uses Rust when available, otherwise pure Python.
+529:     """
+530:     if _HAS_RUST:
+531:         return _rust_extract_keywords(content)
+532: 
+533:     lower = content.lower()
+534:     seen: set[str] = set()
+535:     keywords: list[str] = []
+536:     for m in _KEYWORD_RE.finditer(lower):
+537:         word = m.group()
+538:         if word not in _SKELETON_STOPWORDS and word not in seen:
+539:             seen.add(word)
+540:             keywords.append(word)
+541:     return keywords
+542: 
+543: 
+544: def extract_keywords_batch(contents: list[str]) -> list[list[str]]:
+545:     """Batch keyword extraction.
+546: 
+547:     Uses Rust (rayon parallel) when available, otherwise serial Python.
+548:     """
+549:     if _HAS_RUST:
+550:         return _rust_extract_keywords_batch(contents)
+551: 
+552:     return [extract_keywords(c) for c in contents]
+553: 
+554: 
+555: # ---------------------------------------------------------------------------
+556: # Reciprocal Rank Fusion (low-level, string-ID based)
+557: # ---------------------------------------------------------------------------
+558: 
+559: 
+560: def reciprocal_rank_fusion(
+561:     ranked_lists: list[list[str]],
+562:     k: int = 60,
+563: ) -> list[tuple[str, float]]:
+564:     """Basic Reciprocal Rank Fusion over string ID lists.
+565: 
+566:     For each list the score contribution is ``1 / (k + rank)`` where rank
+567:     is 1-indexed.  Returns ``(id, score)`` pairs sorted descending.
+568: 
+569:     Note: The higher-level ``engines.vectorcypher.fusion`` module wraps this
+570:     with rich FusedResult metadata tracking. Use this for raw score computation.
+571:     """
+572:     if _HAS_RUST:
+573:         return _rust_rrf(ranked_lists, k)
+574: 
+575:     scores: dict[str, float] = {}
+576:     for item_list in ranked_lists:
+577:         for rank_0, item_id in enumerate(item_list):
+578:             rank = rank_0 + 1
+579:             scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (k + rank)
+580: 
+581:     results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+582:     return results
+583: 
+584: 
+585: def weighted_rrf(
+586:     ranked_lists: list[tuple[float, list[str]]],
+587:     k: int = 60,
+588: ) -> list[tuple[str, float]]:
+589:     """Weighted Reciprocal Rank Fusion.
+590: 
+591:     Each entry is ``(weight, [id, ...])``.  Score contribution per item:
+592:     ``weight / (k + rank)`` where rank is 1-indexed.
+593:     Returns ``(id, score)`` pairs sorted descending.
+594:     """
+595:     if _HAS_RUST:
+596:         return _rust_weighted_rrf(ranked_lists, k)
+597: 
+598:     scores: dict[str, float] = {}
+599:     for weight, item_list in ranked_lists:
+600:         for rank_0, item_id in enumerate(item_list):
+601:             scores[item_id] = scores.get(item_id, 0.0) + weight / (k + rank_0 + 1)
+602: 
+603:     results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+604:     return results
+605: 
+606: 
+607: def normalize_scores(scores: list[float]) -> list[float]:
+608:     """Min-max normalise a list of scores to ``[0, 1]``.
+609: 
+610:     If all scores are identical, returns a list of ``1.0``.
+611:     """
+612:     if _HAS_RUST:
+613:         return _rust_normalize_scores(scores)
+614: 
+615:     if not scores:
+616:         return scores
+617: 
+618:     min_s = min(scores)
+619:     max_s = max(scores)
+620:     if abs(max_s - min_s) < 1e-15:
+621:         return [1.0] * len(scores)
+622:     rng = max_s - min_s
+623:     return [(s - min_s) / rng for s in scores]
+624: 
+625: 
+626: # ---------------------------------------------------------------------------
+627: # Entity resolution (batch)
+628: # ---------------------------------------------------------------------------
+629: 
+630: 
+631: def resolve_entities_batch(
+632:     new_names: list[str],
+633:     existing_names: list[str],
+634:     existing_aliases: list[list[str]],
+635:     threshold: float = 0.85,
+636: ) -> list[tuple[int, float, str] | None]:
+637:     """Resolve a batch of new entity names against existing entities.
+638: 
+639:     For each new name, attempts matching in order:
+640:     1. Exact match — case-insensitive against existing names
+641:     2. Alias match — case-insensitive against each entity's aliases
+642:     3. Fuzzy match — normalized Levenshtein above *threshold*
+643: 
+644:     Returns a list parallel to *new_names*. Each element is either
+645:     ``(existing_index, score, match_type)`` or ``None``.
+646:     """
+647:     if _HAS_RUST:
+648:         return _rust_resolve_entities_batch(new_names, existing_names, existing_aliases, threshold)
+649: 
+650:     # Pure-Python fallback
+651:     existing_lower = [n.lower() for n in existing_names]
+652:     aliases_lower = [[a.lower() for a in aliases] for aliases in existing_aliases]
+653: 
+654:     results: list[tuple[int, float, str] | None] = []
+655:     for new_name in new_names:
+656:         query = new_name.lower()
+657:         matched = False
+658: 
+659:         # Step 1: Exact name match
+660:         for idx, existing in enumerate(existing_lower):
+661:             if query == existing:
+662:                 results.append((idx, 1.0, "exact"))
+663:                 matched = True
+664:                 break
+665: 
+666:         if matched:
+667:             continue
+668: 
+669:         # Step 2: Alias match
+670:         for idx, aliases in enumerate(aliases_lower):
+671:             for alias in aliases:
+672:                 if query == alias:
+673:                     results.append((idx, 1.0, "alias"))
+674:                     matched = True
+675:                     break
+676:             if matched:
+677:                 break
+678: 
+679:         if matched:
+680:             continue
+681: 
+682:         # Step 3: Fuzzy match
+683:         best_idx = None
+684:         best_score = threshold
+685:         for idx, existing in enumerate(existing_lower):
+686:             if not query or not existing:
+687:                 continue
+688:             sim = levenshtein_similarity(query, existing)
+689:             if sim > best_score:
+690:                 best_score = sim
+691:                 best_idx = idx
+692: 
+693:         if best_idx is not None:
+694:             results.append((best_idx, best_score, "fuzzy"))
+695:         else:
+696:             results.append(None)
+697: 
+698:     return results
 ````
 
 ## File: tests/unit/engines/test_skeleton.py
@@ -48255,6 +49300,763 @@ README.md
 2425:             }
 ````
 
+## File: src/khora/memory_lake.py
+````python
+  1: """MemoryLake - Primary API for Khora Memory Lake.
+  2: 
+  3: This is the main entry point for using Khora as a library.
+  4: Provides a simple, unified interface for memory storage and retrieval.
+  5: 
+  6: The MemoryLake class is a thin facade that delegates to pluggable engines.
+  7: The default engine is "graphrag" which uses knowledge graphs, vectors, and LLM extraction.
+  8: """
+  9: 
+ 10: from __future__ import annotations
+ 11: 
+ 12: import warnings
+ 13: from collections.abc import AsyncGenerator, Callable
+ 14: from contextlib import asynccontextmanager
+ 15: from dataclasses import dataclass, field
+ 16: from typing import TYPE_CHECKING, Any
+ 17: from uuid import UUID
+ 18: 
+ 19: from loguru import logger
+ 20: 
+ 21: from khora.config import KhoraConfig, load_config
+ 22: from khora.core.models import Document, Entity, MemoryNamespace
+ 23: from khora.query import SearchMode
+ 24: 
+ 25: if TYPE_CHECKING:
+ 26:     from khora.engines.protocol import MemoryEngineProtocol
+ 27:     from khora.query import HybridQueryEngine
+ 28:     from khora.storage import StorageConfig, StorageCoordinator
+ 29: 
+ 30: 
+ 31: @dataclass
+ 32: class RememberResult:
+ 33:     """Result of a remember operation."""
+ 34: 
+ 35:     document_id: UUID
+ 36:     namespace_id: UUID
+ 37:     chunks_created: int
+ 38:     entities_extracted: int
+ 39:     relationships_created: int
+ 40:     metadata: dict[str, Any] = field(default_factory=dict)
+ 41: 
+ 42: 
+ 43: @dataclass
+ 44: class BatchResult:
+ 45:     """Result of remember_batch() operation."""
+ 46: 
+ 47:     total: int
+ 48:     processed: int
+ 49:     skipped: int
+ 50:     failed: int
+ 51:     chunks: int
+ 52:     entities: int
+ 53:     relationships: int
+ 54:     metadata: dict[str, Any] = field(default_factory=dict)
+ 55: 
+ 56: 
+ 57: @dataclass
+ 58: class Stats:
+ 59:     """Namespace statistics."""
+ 60: 
+ 61:     documents: int
+ 62:     chunks: int
+ 63:     entities: int
+ 64:     relationships: int
+ 65: 
+ 66: 
+ 67: @dataclass
+ 68: class RecallResult:
+ 69:     """Result of a recall operation."""
+ 70: 
+ 71:     query: str
+ 72:     namespace_id: UUID
+ 73:     chunks: list[tuple[Any, float]]
+ 74:     entities: list[tuple[Any, float]]
+ 75:     context_text: str
+ 76:     metadata: dict[str, Any] = field(default_factory=dict)
+ 77: 
+ 78: 
+ 79: class MemoryLake:
+ 80:     """Primary interface for Khora Memory Lake.
+ 81: 
+ 82:     Provides a simple API for storing and retrieving memories:
+ 83:     - remember(): Store content in the memory lake
+ 84:     - recall(): Retrieve relevant memories for a query
+ 85:     - forget(): Remove memories
+ 86: 
+ 87:     Can be used as a context manager for automatic connection handling.
+ 88: 
+ 89:     The MemoryLake is a facade that delegates to pluggable engines.
+ 90:     The default engine is "graphrag" which uses knowledge graphs and vector embeddings.
+ 91: 
+ 92:     Usage:
+ 93:         # Simplest - from env vars (KHORA_DATABASE_URL)
+ 94:         async with MemoryLake() as lake:
+ 95:             await lake.remember("Important fact...", namespace="my-ns")
+ 96: 
+ 97:         # Common - explicit database URL
+ 98:         async with MemoryLake("postgresql://localhost/mydb") as lake:
+ 99:             results = await lake.recall("What do I know about...", namespace="my-ns")
+100: 
+101:         # With graph backend
+102:         async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
+103:             ...
+104: 
+105:         # Explicit engine selection (same as default)
+106:         async with MemoryLake("postgresql://...", engine="graphrag") as lake:
+107:             ...
+108: 
+109:         # Full config
+110:         async with MemoryLake(KhoraConfig(...)) as lake:
+111:             ...
+112:     """
+113: 
+114:     def __init__(
+115:         self,
+116:         database_url: str | KhoraConfig | None = None,
+117:         *,
+118:         engine: str = "graphrag",
+119:         graph_url: str | None = None,
+120:         embedding_model: str = "text-embedding-3-small",
+121:         storage_config: StorageConfig | None = None,
+122:     ) -> None:
+123:         """Initialize the Memory Lake.
+124: 
+125:         Args:
+126:             database_url: PostgreSQL URL, or full KhoraConfig, or None (reads KHORA_DATABASE_URL from env)
+127:             engine: Engine to use (default: "graphrag")
+128:             graph_url: Optional Neo4j/graph database URL (bolt://user:pass@host:port)
+129:             embedding_model: Embedding model to use (default: text-embedding-3-small)
+130:             storage_config: Storage configuration (derived from config if None) - deprecated
+131: 
+132:         Examples:
+133:             # Simplest - from env vars
+134:             lake = MemoryLake()
+135: 
+136:             # Common - explicit database
+137:             lake = MemoryLake("postgresql://localhost/mydb")
+138: 
+139:             # With graph
+140:             lake = MemoryLake("postgresql://...", graph_url="bolt://...")
+141: 
+142:             # Explicit engine selection
+143:             lake = MemoryLake("postgresql://...", engine="graphrag")
+144: 
+145:             # Full config
+146:             lake = MemoryLake(KhoraConfig(...))
+147:         """
+148:         # Handle overloaded first argument
+149:         if isinstance(database_url, KhoraConfig):
+150:             self._config = database_url
+151:         elif isinstance(database_url, str):
+152:             # Build config from URL parameters
+153:             self._config = KhoraConfig(
+154:                 database_url=database_url,
+155:                 neo4j_url=graph_url,
+156:             )
+157:             # Override embedding model if non-default
+158:             if embedding_model != "text-embedding-3-small":
+159:                 self._config.llm.embedding_model = embedding_model
+160:         else:
+161:             # None - load from env/file
+162:             self._config = load_config()
+163:             # Apply overrides if provided
+164:             if graph_url:
+165:                 self._config.neo4j_url = graph_url
+166:             if embedding_model != "text-embedding-3-small":
+167:                 self._config.llm.embedding_model = embedding_model
+168: 
+169:         # Store for deferred engine creation
+170:         self._engine_name = engine
+171:         self._storage_config = storage_config  # for backwards compat
+172:         self._engine: MemoryEngineProtocol | None = None
+173:         self._connected = False
+174: 
+175:     async def connect(self) -> None:
+176:         """Connect to all storage backends."""
+177:         if self._connected:
+178:             return
+179: 
+180:         logger.info("Connecting Memory Lake...")
+181: 
+182:         from khora.engines import create_engine
+183: 
+184:         self._engine = create_engine(
+185:             self._engine_name,
+186:             self._config,
+187:             storage_config=self._storage_config,
+188:         )
+189:         await self._engine.connect()
+190: 
+191:         self._connected = True
+192:         logger.info("Memory Lake connected")
+193: 
+194:     async def disconnect(self) -> None:
+195:         """Disconnect from all storage backends."""
+196:         if not self._connected:
+197:             return
+198: 
+199:         logger.info("Disconnecting Memory Lake...")
+200: 
+201:         if self._engine:
+202:             await self._engine.disconnect()
+203:             self._engine = None
+204: 
+205:         self._connected = False
+206:         logger.info("Memory Lake disconnected")
+207: 
+208:     async def __aenter__(self) -> MemoryLake:
+209:         """Async context manager entry."""
+210:         await self.connect()
+211:         return self
+212: 
+213:     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+214:         """Async context manager exit."""
+215:         await self.disconnect()
+216: 
+217:     def _get_engine(self) -> MemoryEngineProtocol:
+218:         """Get the engine (internal use)."""
+219:         if self._engine is None:
+220:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
+221:         return self._engine
+222: 
+223:     @property
+224:     def storage(self) -> StorageCoordinator:
+225:         """Get the storage coordinator.
+226: 
+227:         .. deprecated::
+228:             Direct access to storage is deprecated. Use MemoryLake methods instead:
+229:             - lake.get_document() instead of lake.storage.get_document()
+230:             - lake.list_documents() instead of lake.storage.list_documents()
+231:             - lake.search_entities() instead of lake.storage.search_entities()
+232:             - lake.stats() instead of querying storage directly
+233:         """
+234:         warnings.warn(
+235:             "lake.storage is deprecated. Use lake.get_document(), lake.list_documents(), "
+236:             "lake.search_entities(), lake.stats() instead.",
+237:             DeprecationWarning,
+238:             stacklevel=2,
+239:         )
+240:         engine = self._get_engine()
+241:         if hasattr(engine, "_storage") and engine._storage:
+242:             return engine._storage
+243:         raise AttributeError("Current engine does not expose storage")
+244: 
+245:     @property
+246:     def query_engine(self) -> HybridQueryEngine:
+247:         """Get the query engine.
+248: 
+249:         .. deprecated::
+250:             Direct access to query_engine is deprecated. Use lake.recall() instead.
+251:             For unprocessed search without LLM features, use lake.recall(query, raw=True).
+252:         """
+253:         warnings.warn(
+254:             "lake.query_engine is deprecated. Use lake.recall() instead. "
+255:             "For raw search without LLM features, use lake.recall(query, raw=True).",
+256:             DeprecationWarning,
+257:             stacklevel=2,
+258:         )
+259:         engine = self._get_engine()
+260:         if hasattr(engine, "_query_engine") and engine._query_engine:
+261:             return engine._query_engine
+262:         raise AttributeError("Current engine does not expose query_engine")
+263: 
+264:     # =========================================================================
+265:     # Namespace Management
+266:     # =========================================================================
+267: 
+268:     async def create_namespace(
+269:         self,
+270:         name: str,
+271:         workspace_id: UUID,
+272:         *,
+273:         description: str = "",
+274:         config_overrides: dict[str, Any] | None = None,
+275:     ) -> MemoryNamespace:
+276:         """Create a new memory namespace.
+277: 
+278:         Args:
+279:             name: Namespace name
+280:             workspace_id: Parent workspace ID
+281:             description: Optional description
+282:             config_overrides: Optional configuration overrides
+283: 
+284:         Returns:
+285:             Created MemoryNamespace
+286:         """
+287:         return await self._get_engine().create_namespace(
+288:             name,
+289:             workspace_id,
+290:             description=description,
+291:             config_overrides=config_overrides,
+292:         )
+293: 
+294:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+295:         """Get a namespace by ID."""
+296:         return await self._get_engine().get_namespace(namespace_id)
+297: 
+298:     async def get_or_create_default_namespace(self) -> UUID:
+299:         """Get or create a default namespace for simple usage."""
+300:         return await self._get_engine().get_or_create_default_namespace()
+301: 
+302:     # =========================================================================
+303:     # Core API: remember, recall, forget
+304:     # =========================================================================
+305: 
+306:     async def remember(
+307:         self,
+308:         content: str,
+309:         *,
+310:         namespace: str | UUID | None = None,
+311:         title: str = "",
+312:         source: str = "",
+313:         metadata: dict[str, Any] | None = None,
+314:         skill_name: str = "general_entities",
+315:     ) -> RememberResult:
+316:         """Store content in the memory lake.
+317: 
+318:         This is the primary method for adding memories. It:
+319:         1. Creates a document
+320:         2. Chunks the content
+321:         3. Generates embeddings
+322:         4. Extracts entities and relationships
+323: 
+324:         Args:
+325:             content: Content to remember
+326:             namespace: Namespace name, ID, or None for default
+327:             title: Optional title for the content
+328:             source: Optional source identifier
+329:             metadata: Optional metadata
+330:             skill_name: Extraction skill to use
+331: 
+332:         Returns:
+333:             RememberResult with details
+334:         """
+335:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+336: 
+337:         ensure_trace_id()
+338:         try:
+339:             namespace_id = await self._resolve_namespace(namespace)
+340:             return await self._get_engine().remember(
+341:                 content,
+342:                 namespace_id,
+343:                 title=title,
+344:                 source=source,
+345:                 metadata=metadata,
+346:                 skill_name=skill_name,
+347:             )
+348:         finally:
+349:             clear_trace_id()
+350: 
+351:     async def remember_batch(
+352:         self,
+353:         documents: list[dict[str, Any]],
+354:         *,
+355:         namespace: str | UUID | None = None,
+356:         skill_name: str = "general_entities",
+357:         max_concurrent: int = 5,
+358:         deduplicate: bool = True,
+359:         infer_relationships: bool = True,
+360:         on_progress: Callable[[int, int], None] | None = None,
+361:     ) -> BatchResult:
+362:         """Store multiple documents with automatic optimization.
+363: 
+364:         Handles internally:
+365:         - Shared embedder with LRU cache (reused across batches)
+366:         - Entity deduplication via EntityIndex
+367:         - Multi-phase resolution (smart mode)
+368:         - Relationship inference
+369: 
+370:         This is more efficient than calling remember() for each document
+371:         as it processes documents in parallel with controlled concurrency
+372:         and shares resources across documents.
+373: 
+374:         Args:
+375:             documents: List of document dicts with keys:
+376:                 - content: str (required)
+377:                 - title: str (optional)
+378:                 - source: str (optional)
+379:                 - metadata: dict (optional)
+380:             namespace: Namespace name, ID, or None for default
+381:             skill_name: Extraction skill to use
+382:             max_concurrent: Maximum concurrent document processing
+383:             deduplicate: Deduplicate entities across documents (default: True)
+384:             infer_relationships: Infer relationships after ingestion (default: True)
+385:             on_progress: Callback(processed_count, total_count) for progress updates
+386: 
+387:         Returns:
+388:             BatchResult with aggregated statistics
+389:         """
+390:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+391: 
+392:         ensure_trace_id()
+393:         try:
+394:             namespace_id = await self._resolve_namespace(namespace)
+395:             return await self._get_engine().remember_batch(
+396:                 documents,
+397:                 namespace_id,
+398:                 skill_name=skill_name,
+399:                 max_concurrent=max_concurrent,
+400:                 deduplicate=deduplicate,
+401:                 infer_relationships=infer_relationships,
+402:                 on_progress=on_progress,
+403:             )
+404:         finally:
+405:             clear_trace_id()
+406: 
+407:     async def remember_batch_legacy(
+408:         self,
+409:         documents: list[dict[str, Any]],
+410:         *,
+411:         namespace: str | UUID | None = None,
+412:         skill_name: str = "general_entities",
+413:         max_concurrent: int = 5,
+414:     ) -> list[RememberResult]:
+415:         """Store multiple documents - legacy version returning list of RememberResult.
+416: 
+417:         .. deprecated::
+418:             Use remember_batch() which returns BatchResult with aggregated stats.
+419:             This method is kept for backwards compatibility.
+420:         """
+421:         warnings.warn(
+422:             "remember_batch_legacy() is deprecated. Use remember_batch() which returns BatchResult.",
+423:             DeprecationWarning,
+424:             stacklevel=2,
+425:         )
+426:         if not documents:
+427:             return []
+428: 
+429:         namespace_id = await self._resolve_namespace(namespace)
+430: 
+431:         doc_inputs = []
+432:         for doc_data in documents:
+433:             doc_inputs.append(
+434:                 {
+435:                     "content": doc_data.get("content", ""),
+436:                     "title": doc_data.get("title", ""),
+437:                     "source": doc_data.get("source", ""),
+438:                     "source_type": "api",
+439:                     "metadata": doc_data.get("metadata", {}),
+440:                 }
+441:             )
+442: 
+443:         from khora.pipelines.flows.ingest import ingest_documents
+444: 
+445:         # Access storage through engine for backwards compat
+446:         engine = self._get_engine()
+447:         if not hasattr(engine, "_storage") or engine._storage is None:
+448:             raise RuntimeError("Engine does not support legacy batch operations")
+449: 
+450:         storage = engine._storage
+451: 
+452:         result = await ingest_documents(
+453:             namespace_id,
+454:             doc_inputs,
+455:             storage,
+456:             skill_name=skill_name,
+457:             embedding_model=self._config.llm.embedding_model,
+458:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+459:             max_concurrent_documents=max_concurrent,
+460:         )
+461: 
+462:         per_doc = result.get("per_document_results", [])
+463:         final_results: list[RememberResult] = []
+464:         for doc_result in per_doc:
+465:             final_results.append(
+466:                 RememberResult(
+467:                     document_id=UUID(doc_result["document_id"]),
+468:                     namespace_id=namespace_id,
+469:                     chunks_created=doc_result.get("chunks", 0),
+470:                     entities_extracted=doc_result.get("entities", 0),
+471:                     relationships_created=doc_result.get("relationships", 0),
+472:                 )
+473:             )
+474: 
+475:         failed_count = result.get("failed_documents", 0)
+476:         for _ in range(failed_count):
+477:             final_results.append(
+478:                 RememberResult(
+479:                     document_id=UUID("00000000-0000-0000-0000-000000000000"),
+480:                     namespace_id=namespace_id,
+481:                     chunks_created=0,
+482:                     entities_extracted=0,
+483:                     relationships_created=0,
+484:                     metadata={"failed": True},
+485:                 )
+486:             )
+487: 
+488:         return final_results
+489: 
+490:     async def recall(
+491:         self,
+492:         query: str,
+493:         *,
+494:         namespace: str | UUID | None = None,
+495:         limit: int = 10,
+496:         mode: SearchMode = SearchMode.HYBRID,
+497:         min_similarity: float = 0.0,
+498:         agentic: bool = False,
+499:         raw: bool = False,
+500:     ) -> RecallResult:
+501:         """Recall memories relevant to a query.
+502: 
+503:         This is the primary method for retrieving memories. It:
+504:         1. Uses LLM to understand query (entities, temporal refs, etc.)
+505:         2. Searches across vector, graph, and keyword indexes
+506:         3. Fuses results using Reciprocal Rank Fusion
+507:         4. Returns ranked results
+508: 
+509:         When agentic=True, uses multi-step exploration:
+510:         1. Initial comprehensive search with query understanding
+511:         2. Executes pre-computed follow-up queries for deeper exploration
+512:         3. Explores under-represented sources
+513:         4. Returns combined results with full trace
+514: 
+515:         When raw=True, skips all LLM features:
+516:         - Query understanding
+517:         - Entity linking
+518:         - Reranking
+519:         - HyDE expansion
+520:         This is useful for benchmarks and simple searches.
+521: 
+522:         Args:
+523:             query: Query text
+524:             namespace: Namespace name, ID, or None for default
+525:             limit: Maximum results to return
+526:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
+527:             min_similarity: Minimum similarity threshold
+528:             agentic: If True, use multi-step agentic search (default: False)
+529:             raw: If True, skip all LLM features (default: False)
+530: 
+531:         Returns:
+532:             RecallResult with matched memories
+533:         """
+534:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
+535: 
+536:         ensure_trace_id()
+537:         try:
+538:             namespace_id = await self._resolve_namespace(namespace)
+539:             return await self._get_engine().recall(
+540:                 query,
+541:                 namespace_id,
+542:                 limit=limit,
+543:                 mode=mode,
+544:                 min_similarity=min_similarity,
+545:                 agentic=agentic,
+546:                 raw=raw,
+547:             )
+548:         finally:
+549:             clear_trace_id()
+550: 
+551:     async def forget(
+552:         self,
+553:         document_id: UUID,
+554:         *,
+555:         namespace: str | UUID | None = None,
+556:     ) -> bool:
+557:         """Remove a memory from the lake.
+558: 
+559:         Args:
+560:             document_id: ID of the document to remove
+561:             namespace: Namespace for verification (optional)
+562: 
+563:         Returns:
+564:             True if deleted, False if not found
+565:         """
+566:         namespace_id = None
+567:         if namespace:
+568:             namespace_id = await self._resolve_namespace(namespace)
+569: 
+570:         return await self._get_engine().forget(document_id, namespace_id)
+571: 
+572:     # =========================================================================
+573:     # Entity Operations
+574:     # =========================================================================
+575: 
+576:     async def get_entity(self, entity_id: UUID) -> Entity | None:
+577:         """Get an entity by ID."""
+578:         return await self._get_engine().get_entity(entity_id)
+579: 
+580:     async def list_entities(
+581:         self,
+582:         *,
+583:         namespace: str | UUID | None = None,
+584:         entity_type: str | None = None,
+585:         limit: int = 100,
+586:     ) -> list[Entity]:
+587:         """List entities in a namespace."""
+588:         namespace_id = await self._resolve_namespace(namespace)
+589:         return await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+590: 
+591:     async def find_related_entities(
+592:         self,
+593:         entity_id: UUID,
+594:         *,
+595:         namespace: str | UUID | None = None,
+596:         max_depth: int = 2,
+597:         limit: int = 20,
+598:     ) -> list[tuple[Entity, float]]:
+599:         """Find entities related to a given entity."""
+600:         namespace_id = await self._resolve_namespace(namespace)
+601:         return await self._get_engine().find_related_entities(
+602:             entity_id,
+603:             namespace_id,
+604:             max_depth=max_depth,
+605:             limit=limit,
+606:         )
+607: 
+608:     # =========================================================================
+609:     # Document Operations (Convenience Methods)
+610:     # =========================================================================
+611: 
+612:     async def get_document(self, document_id: UUID) -> Document | None:
+613:         """Get a document by ID.
+614: 
+615:         Args:
+616:             document_id: Document UUID
+617: 
+618:         Returns:
+619:             Document or None if not found
+620:         """
+621:         return await self._get_engine().get_document(document_id)
+622: 
+623:     async def list_documents(
+624:         self,
+625:         *,
+626:         namespace: str | UUID | None = None,
+627:         limit: int = 100,
+628:     ) -> list[Document]:
+629:         """List documents in a namespace.
+630: 
+631:         Args:
+632:             namespace: Namespace name, ID, or None for default
+633:             limit: Maximum documents to return
+634: 
+635:         Returns:
+636:             List of Documents
+637:         """
+638:         namespace_id = await self._resolve_namespace(namespace)
+639:         return await self._get_engine().list_documents(namespace_id, limit=limit)
+640: 
+641:     async def search_entities(
+642:         self,
+643:         query: str,
+644:         *,
+645:         namespace: str | UUID | None = None,
+646:         limit: int = 10,
+647:     ) -> list[Entity]:
+648:         """Search entities by query text using embedding similarity.
+649: 
+650:         Args:
+651:             query: Search query text
+652:             namespace: Namespace name, ID, or None for default
+653:             limit: Maximum entities to return
+654: 
+655:         Returns:
+656:             List of matching Entities (most similar first)
+657:         """
+658:         namespace_id = await self._resolve_namespace(namespace)
+659:         return await self._get_engine().search_entities(query, namespace_id, limit=limit)
+660: 
+661:     async def stats(self, *, namespace: str | UUID | None = None) -> Stats:
+662:         """Get document/chunk/entity/relationship counts for a namespace.
+663: 
+664:         Args:
+665:             namespace: Namespace name, ID, or None for default
+666: 
+667:         Returns:
+668:             Stats with document/chunk/entity/relationship counts
+669:         """
+670:         namespace_id = await self._resolve_namespace(namespace)
+671:         return await self._get_engine().stats(namespace_id)
+672: 
+673:     async def ensure_namespace(
+674:         self,
+675:         name: str,
+676:         *,
+677:         description: str = "",
+678:     ) -> UUID:
+679:         """Get or create a namespace by name.
+680: 
+681:         Creates the default organization and workspace if they don't exist.
+682:         This is a convenience method for simple usage where you just want
+683:         a namespace by name without managing the full hierarchy.
+684: 
+685:         Args:
+686:             name: Namespace name (will be slugified)
+687:             description: Optional description
+688: 
+689:         Returns:
+690:             Namespace UUID
+691:         """
+692:         return await self._get_engine().ensure_namespace(name, description=description)
+693: 
+694:     # =========================================================================
+695:     # Helpers
+696:     # =========================================================================
+697: 
+698:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
+699:         """Resolve a namespace reference to a UUID."""
+700:         if namespace is None:
+701:             return await self.get_or_create_default_namespace()
+702: 
+703:         if isinstance(namespace, UUID):
+704:             return namespace
+705: 
+706:         # Try to parse as UUID
+707:         try:
+708:             return UUID(namespace)
+709:         except ValueError:
+710:             pass
+711: 
+712:         # Look up by slug in default workspace
+713:         # Access storage through engine for namespace lookup
+714:         engine = self._get_engine()
+715:         if not hasattr(engine, "_storage") or engine._storage is None:
+716:             raise RuntimeError("Engine does not support namespace lookup by slug")
+717: 
+718:         storage = engine._storage
+719:         default_ns_id = await self.get_or_create_default_namespace()
+720:         default_ns = await storage.get_namespace(default_ns_id)
+721:         if default_ns:
+722:             ns = await storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
+723:             if ns:
+724:                 return ns.id
+725: 
+726:         raise ValueError(f"Namespace not found: {namespace}")
+727: 
+728:     async def health_check(self) -> dict[str, Any]:
+729:         """Check health of all components."""
+730:         if not self._connected or self._engine is None:
+731:             return {"status": "disconnected"}
+732: 
+733:         return await self._engine.health_check()
+734: 
+735: 
+736: # Convenience function for one-off usage
+737: @asynccontextmanager
+738: async def memory_lake(
+739:     config: KhoraConfig | None = None,
+740: ) -> AsyncGenerator[MemoryLake]:
+741:     """Context manager for one-off Memory Lake usage.
+742: 
+743:     Usage:
+744:         async with memory_lake() as lake:
+745:             await lake.remember("Hello, world!")
+746:             result = await lake.recall("greeting")
+747:     """
+748:     lake = MemoryLake(config)
+749:     try:
+750:         await lake.connect()
+751:         yield lake
+752:     finally:
+753:         await lake.disconnect()
+````
+
 ## File: src/khora/storage/backends/neo4j.py
 ````python
    1: """Neo4j backend for knowledge graph storage.
@@ -49360,763 +51162,6 @@ README.md
 1101:             )
 1102:             records = await result.data()
 1103:             return [self._record_to_entity(r["e"]) for r in records]
-````
-
-## File: src/khora/memory_lake.py
-````python
-  1: """MemoryLake - Primary API for Khora Memory Lake.
-  2: 
-  3: This is the main entry point for using Khora as a library.
-  4: Provides a simple, unified interface for memory storage and retrieval.
-  5: 
-  6: The MemoryLake class is a thin facade that delegates to pluggable engines.
-  7: The default engine is "graphrag" which uses knowledge graphs, vectors, and LLM extraction.
-  8: """
-  9: 
- 10: from __future__ import annotations
- 11: 
- 12: import warnings
- 13: from collections.abc import AsyncGenerator, Callable
- 14: from contextlib import asynccontextmanager
- 15: from dataclasses import dataclass, field
- 16: from typing import TYPE_CHECKING, Any
- 17: from uuid import UUID
- 18: 
- 19: from loguru import logger
- 20: 
- 21: from khora.config import KhoraConfig, load_config
- 22: from khora.core.models import Document, Entity, MemoryNamespace
- 23: from khora.query import SearchMode
- 24: 
- 25: if TYPE_CHECKING:
- 26:     from khora.engines.protocol import MemoryEngineProtocol
- 27:     from khora.query import HybridQueryEngine
- 28:     from khora.storage import StorageConfig, StorageCoordinator
- 29: 
- 30: 
- 31: @dataclass
- 32: class RememberResult:
- 33:     """Result of a remember operation."""
- 34: 
- 35:     document_id: UUID
- 36:     namespace_id: UUID
- 37:     chunks_created: int
- 38:     entities_extracted: int
- 39:     relationships_created: int
- 40:     metadata: dict[str, Any] = field(default_factory=dict)
- 41: 
- 42: 
- 43: @dataclass
- 44: class BatchResult:
- 45:     """Result of remember_batch() operation."""
- 46: 
- 47:     total: int
- 48:     processed: int
- 49:     skipped: int
- 50:     failed: int
- 51:     chunks: int
- 52:     entities: int
- 53:     relationships: int
- 54:     metadata: dict[str, Any] = field(default_factory=dict)
- 55: 
- 56: 
- 57: @dataclass
- 58: class Stats:
- 59:     """Namespace statistics."""
- 60: 
- 61:     documents: int
- 62:     chunks: int
- 63:     entities: int
- 64:     relationships: int
- 65: 
- 66: 
- 67: @dataclass
- 68: class RecallResult:
- 69:     """Result of a recall operation."""
- 70: 
- 71:     query: str
- 72:     namespace_id: UUID
- 73:     chunks: list[tuple[Any, float]]
- 74:     entities: list[tuple[Any, float]]
- 75:     context_text: str
- 76:     metadata: dict[str, Any] = field(default_factory=dict)
- 77: 
- 78: 
- 79: class MemoryLake:
- 80:     """Primary interface for Khora Memory Lake.
- 81: 
- 82:     Provides a simple API for storing and retrieving memories:
- 83:     - remember(): Store content in the memory lake
- 84:     - recall(): Retrieve relevant memories for a query
- 85:     - forget(): Remove memories
- 86: 
- 87:     Can be used as a context manager for automatic connection handling.
- 88: 
- 89:     The MemoryLake is a facade that delegates to pluggable engines.
- 90:     The default engine is "graphrag" which uses knowledge graphs and vector embeddings.
- 91: 
- 92:     Usage:
- 93:         # Simplest - from env vars (KHORA_DATABASE_URL)
- 94:         async with MemoryLake() as lake:
- 95:             await lake.remember("Important fact...", namespace="my-ns")
- 96: 
- 97:         # Common - explicit database URL
- 98:         async with MemoryLake("postgresql://localhost/mydb") as lake:
- 99:             results = await lake.recall("What do I know about...", namespace="my-ns")
-100: 
-101:         # With graph backend
-102:         async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
-103:             ...
-104: 
-105:         # Explicit engine selection (same as default)
-106:         async with MemoryLake("postgresql://...", engine="graphrag") as lake:
-107:             ...
-108: 
-109:         # Full config
-110:         async with MemoryLake(KhoraConfig(...)) as lake:
-111:             ...
-112:     """
-113: 
-114:     def __init__(
-115:         self,
-116:         database_url: str | KhoraConfig | None = None,
-117:         *,
-118:         engine: str = "graphrag",
-119:         graph_url: str | None = None,
-120:         embedding_model: str = "text-embedding-3-small",
-121:         storage_config: StorageConfig | None = None,
-122:     ) -> None:
-123:         """Initialize the Memory Lake.
-124: 
-125:         Args:
-126:             database_url: PostgreSQL URL, or full KhoraConfig, or None (reads KHORA_DATABASE_URL from env)
-127:             engine: Engine to use (default: "graphrag")
-128:             graph_url: Optional Neo4j/graph database URL (bolt://user:pass@host:port)
-129:             embedding_model: Embedding model to use (default: text-embedding-3-small)
-130:             storage_config: Storage configuration (derived from config if None) - deprecated
-131: 
-132:         Examples:
-133:             # Simplest - from env vars
-134:             lake = MemoryLake()
-135: 
-136:             # Common - explicit database
-137:             lake = MemoryLake("postgresql://localhost/mydb")
-138: 
-139:             # With graph
-140:             lake = MemoryLake("postgresql://...", graph_url="bolt://...")
-141: 
-142:             # Explicit engine selection
-143:             lake = MemoryLake("postgresql://...", engine="graphrag")
-144: 
-145:             # Full config
-146:             lake = MemoryLake(KhoraConfig(...))
-147:         """
-148:         # Handle overloaded first argument
-149:         if isinstance(database_url, KhoraConfig):
-150:             self._config = database_url
-151:         elif isinstance(database_url, str):
-152:             # Build config from URL parameters
-153:             self._config = KhoraConfig(
-154:                 database_url=database_url,
-155:                 neo4j_url=graph_url,
-156:             )
-157:             # Override embedding model if non-default
-158:             if embedding_model != "text-embedding-3-small":
-159:                 self._config.llm.embedding_model = embedding_model
-160:         else:
-161:             # None - load from env/file
-162:             self._config = load_config()
-163:             # Apply overrides if provided
-164:             if graph_url:
-165:                 self._config.neo4j_url = graph_url
-166:             if embedding_model != "text-embedding-3-small":
-167:                 self._config.llm.embedding_model = embedding_model
-168: 
-169:         # Store for deferred engine creation
-170:         self._engine_name = engine
-171:         self._storage_config = storage_config  # for backwards compat
-172:         self._engine: MemoryEngineProtocol | None = None
-173:         self._connected = False
-174: 
-175:     async def connect(self) -> None:
-176:         """Connect to all storage backends."""
-177:         if self._connected:
-178:             return
-179: 
-180:         logger.info("Connecting Memory Lake...")
-181: 
-182:         from khora.engines import create_engine
-183: 
-184:         self._engine = create_engine(
-185:             self._engine_name,
-186:             self._config,
-187:             storage_config=self._storage_config,
-188:         )
-189:         await self._engine.connect()
-190: 
-191:         self._connected = True
-192:         logger.info("Memory Lake connected")
-193: 
-194:     async def disconnect(self) -> None:
-195:         """Disconnect from all storage backends."""
-196:         if not self._connected:
-197:             return
-198: 
-199:         logger.info("Disconnecting Memory Lake...")
-200: 
-201:         if self._engine:
-202:             await self._engine.disconnect()
-203:             self._engine = None
-204: 
-205:         self._connected = False
-206:         logger.info("Memory Lake disconnected")
-207: 
-208:     async def __aenter__(self) -> MemoryLake:
-209:         """Async context manager entry."""
-210:         await self.connect()
-211:         return self
-212: 
-213:     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-214:         """Async context manager exit."""
-215:         await self.disconnect()
-216: 
-217:     def _get_engine(self) -> MemoryEngineProtocol:
-218:         """Get the engine (internal use)."""
-219:         if self._engine is None:
-220:             raise RuntimeError("Memory Lake not connected. Call connect() first.")
-221:         return self._engine
-222: 
-223:     @property
-224:     def storage(self) -> StorageCoordinator:
-225:         """Get the storage coordinator.
-226: 
-227:         .. deprecated::
-228:             Direct access to storage is deprecated. Use MemoryLake methods instead:
-229:             - lake.get_document() instead of lake.storage.get_document()
-230:             - lake.list_documents() instead of lake.storage.list_documents()
-231:             - lake.search_entities() instead of lake.storage.search_entities()
-232:             - lake.stats() instead of querying storage directly
-233:         """
-234:         warnings.warn(
-235:             "lake.storage is deprecated. Use lake.get_document(), lake.list_documents(), "
-236:             "lake.search_entities(), lake.stats() instead.",
-237:             DeprecationWarning,
-238:             stacklevel=2,
-239:         )
-240:         engine = self._get_engine()
-241:         if hasattr(engine, "_storage") and engine._storage:
-242:             return engine._storage
-243:         raise AttributeError("Current engine does not expose storage")
-244: 
-245:     @property
-246:     def query_engine(self) -> HybridQueryEngine:
-247:         """Get the query engine.
-248: 
-249:         .. deprecated::
-250:             Direct access to query_engine is deprecated. Use lake.recall() instead.
-251:             For unprocessed search without LLM features, use lake.recall(query, raw=True).
-252:         """
-253:         warnings.warn(
-254:             "lake.query_engine is deprecated. Use lake.recall() instead. "
-255:             "For raw search without LLM features, use lake.recall(query, raw=True).",
-256:             DeprecationWarning,
-257:             stacklevel=2,
-258:         )
-259:         engine = self._get_engine()
-260:         if hasattr(engine, "_query_engine") and engine._query_engine:
-261:             return engine._query_engine
-262:         raise AttributeError("Current engine does not expose query_engine")
-263: 
-264:     # =========================================================================
-265:     # Namespace Management
-266:     # =========================================================================
-267: 
-268:     async def create_namespace(
-269:         self,
-270:         name: str,
-271:         workspace_id: UUID,
-272:         *,
-273:         description: str = "",
-274:         config_overrides: dict[str, Any] | None = None,
-275:     ) -> MemoryNamespace:
-276:         """Create a new memory namespace.
-277: 
-278:         Args:
-279:             name: Namespace name
-280:             workspace_id: Parent workspace ID
-281:             description: Optional description
-282:             config_overrides: Optional configuration overrides
-283: 
-284:         Returns:
-285:             Created MemoryNamespace
-286:         """
-287:         return await self._get_engine().create_namespace(
-288:             name,
-289:             workspace_id,
-290:             description=description,
-291:             config_overrides=config_overrides,
-292:         )
-293: 
-294:     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
-295:         """Get a namespace by ID."""
-296:         return await self._get_engine().get_namespace(namespace_id)
-297: 
-298:     async def get_or_create_default_namespace(self) -> UUID:
-299:         """Get or create a default namespace for simple usage."""
-300:         return await self._get_engine().get_or_create_default_namespace()
-301: 
-302:     # =========================================================================
-303:     # Core API: remember, recall, forget
-304:     # =========================================================================
-305: 
-306:     async def remember(
-307:         self,
-308:         content: str,
-309:         *,
-310:         namespace: str | UUID | None = None,
-311:         title: str = "",
-312:         source: str = "",
-313:         metadata: dict[str, Any] | None = None,
-314:         skill_name: str = "general_entities",
-315:     ) -> RememberResult:
-316:         """Store content in the memory lake.
-317: 
-318:         This is the primary method for adding memories. It:
-319:         1. Creates a document
-320:         2. Chunks the content
-321:         3. Generates embeddings
-322:         4. Extracts entities and relationships
-323: 
-324:         Args:
-325:             content: Content to remember
-326:             namespace: Namespace name, ID, or None for default
-327:             title: Optional title for the content
-328:             source: Optional source identifier
-329:             metadata: Optional metadata
-330:             skill_name: Extraction skill to use
-331: 
-332:         Returns:
-333:             RememberResult with details
-334:         """
-335:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-336: 
-337:         ensure_trace_id()
-338:         try:
-339:             namespace_id = await self._resolve_namespace(namespace)
-340:             return await self._get_engine().remember(
-341:                 content,
-342:                 namespace_id,
-343:                 title=title,
-344:                 source=source,
-345:                 metadata=metadata,
-346:                 skill_name=skill_name,
-347:             )
-348:         finally:
-349:             clear_trace_id()
-350: 
-351:     async def remember_batch(
-352:         self,
-353:         documents: list[dict[str, Any]],
-354:         *,
-355:         namespace: str | UUID | None = None,
-356:         skill_name: str = "general_entities",
-357:         max_concurrent: int = 5,
-358:         deduplicate: bool = True,
-359:         infer_relationships: bool = True,
-360:         on_progress: Callable[[int, int], None] | None = None,
-361:     ) -> BatchResult:
-362:         """Store multiple documents with automatic optimization.
-363: 
-364:         Handles internally:
-365:         - Shared embedder with LRU cache (reused across batches)
-366:         - Entity deduplication via EntityIndex
-367:         - Multi-phase resolution (smart mode)
-368:         - Relationship inference
-369: 
-370:         This is more efficient than calling remember() for each document
-371:         as it processes documents in parallel with controlled concurrency
-372:         and shares resources across documents.
-373: 
-374:         Args:
-375:             documents: List of document dicts with keys:
-376:                 - content: str (required)
-377:                 - title: str (optional)
-378:                 - source: str (optional)
-379:                 - metadata: dict (optional)
-380:             namespace: Namespace name, ID, or None for default
-381:             skill_name: Extraction skill to use
-382:             max_concurrent: Maximum concurrent document processing
-383:             deduplicate: Deduplicate entities across documents (default: True)
-384:             infer_relationships: Infer relationships after ingestion (default: True)
-385:             on_progress: Callback(processed_count, total_count) for progress updates
-386: 
-387:         Returns:
-388:             BatchResult with aggregated statistics
-389:         """
-390:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-391: 
-392:         ensure_trace_id()
-393:         try:
-394:             namespace_id = await self._resolve_namespace(namespace)
-395:             return await self._get_engine().remember_batch(
-396:                 documents,
-397:                 namespace_id,
-398:                 skill_name=skill_name,
-399:                 max_concurrent=max_concurrent,
-400:                 deduplicate=deduplicate,
-401:                 infer_relationships=infer_relationships,
-402:                 on_progress=on_progress,
-403:             )
-404:         finally:
-405:             clear_trace_id()
-406: 
-407:     async def remember_batch_legacy(
-408:         self,
-409:         documents: list[dict[str, Any]],
-410:         *,
-411:         namespace: str | UUID | None = None,
-412:         skill_name: str = "general_entities",
-413:         max_concurrent: int = 5,
-414:     ) -> list[RememberResult]:
-415:         """Store multiple documents - legacy version returning list of RememberResult.
-416: 
-417:         .. deprecated::
-418:             Use remember_batch() which returns BatchResult with aggregated stats.
-419:             This method is kept for backwards compatibility.
-420:         """
-421:         warnings.warn(
-422:             "remember_batch_legacy() is deprecated. Use remember_batch() which returns BatchResult.",
-423:             DeprecationWarning,
-424:             stacklevel=2,
-425:         )
-426:         if not documents:
-427:             return []
-428: 
-429:         namespace_id = await self._resolve_namespace(namespace)
-430: 
-431:         doc_inputs = []
-432:         for doc_data in documents:
-433:             doc_inputs.append(
-434:                 {
-435:                     "content": doc_data.get("content", ""),
-436:                     "title": doc_data.get("title", ""),
-437:                     "source": doc_data.get("source", ""),
-438:                     "source_type": "api",
-439:                     "metadata": doc_data.get("metadata", {}),
-440:                 }
-441:             )
-442: 
-443:         from khora.pipelines.flows.ingest import ingest_documents
-444: 
-445:         # Access storage through engine for backwards compat
-446:         engine = self._get_engine()
-447:         if not hasattr(engine, "_storage") or engine._storage is None:
-448:             raise RuntimeError("Engine does not support legacy batch operations")
-449: 
-450:         storage = engine._storage
-451: 
-452:         result = await ingest_documents(
-453:             namespace_id,
-454:             doc_inputs,
-455:             storage,
-456:             skill_name=skill_name,
-457:             embedding_model=self._config.llm.embedding_model,
-458:             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
-459:             max_concurrent_documents=max_concurrent,
-460:         )
-461: 
-462:         per_doc = result.get("per_document_results", [])
-463:         final_results: list[RememberResult] = []
-464:         for doc_result in per_doc:
-465:             final_results.append(
-466:                 RememberResult(
-467:                     document_id=UUID(doc_result["document_id"]),
-468:                     namespace_id=namespace_id,
-469:                     chunks_created=doc_result.get("chunks", 0),
-470:                     entities_extracted=doc_result.get("entities", 0),
-471:                     relationships_created=doc_result.get("relationships", 0),
-472:                 )
-473:             )
-474: 
-475:         failed_count = result.get("failed_documents", 0)
-476:         for _ in range(failed_count):
-477:             final_results.append(
-478:                 RememberResult(
-479:                     document_id=UUID("00000000-0000-0000-0000-000000000000"),
-480:                     namespace_id=namespace_id,
-481:                     chunks_created=0,
-482:                     entities_extracted=0,
-483:                     relationships_created=0,
-484:                     metadata={"failed": True},
-485:                 )
-486:             )
-487: 
-488:         return final_results
-489: 
-490:     async def recall(
-491:         self,
-492:         query: str,
-493:         *,
-494:         namespace: str | UUID | None = None,
-495:         limit: int = 10,
-496:         mode: SearchMode = SearchMode.HYBRID,
-497:         min_similarity: float = 0.0,
-498:         agentic: bool = False,
-499:         raw: bool = False,
-500:     ) -> RecallResult:
-501:         """Recall memories relevant to a query.
-502: 
-503:         This is the primary method for retrieving memories. It:
-504:         1. Uses LLM to understand query (entities, temporal refs, etc.)
-505:         2. Searches across vector, graph, and keyword indexes
-506:         3. Fuses results using Reciprocal Rank Fusion
-507:         4. Returns ranked results
-508: 
-509:         When agentic=True, uses multi-step exploration:
-510:         1. Initial comprehensive search with query understanding
-511:         2. Executes pre-computed follow-up queries for deeper exploration
-512:         3. Explores under-represented sources
-513:         4. Returns combined results with full trace
-514: 
-515:         When raw=True, skips all LLM features:
-516:         - Query understanding
-517:         - Entity linking
-518:         - Reranking
-519:         - HyDE expansion
-520:         This is useful for benchmarks and simple searches.
-521: 
-522:         Args:
-523:             query: Query text
-524:             namespace: Namespace name, ID, or None for default
-525:             limit: Maximum results to return
-526:             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
-527:             min_similarity: Minimum similarity threshold
-528:             agentic: If True, use multi-step agentic search (default: False)
-529:             raw: If True, skip all LLM features (default: False)
-530: 
-531:         Returns:
-532:             RecallResult with matched memories
-533:         """
-534:         from khora.telemetry.context import clear_trace_id, ensure_trace_id
-535: 
-536:         ensure_trace_id()
-537:         try:
-538:             namespace_id = await self._resolve_namespace(namespace)
-539:             return await self._get_engine().recall(
-540:                 query,
-541:                 namespace_id,
-542:                 limit=limit,
-543:                 mode=mode,
-544:                 min_similarity=min_similarity,
-545:                 agentic=agentic,
-546:                 raw=raw,
-547:             )
-548:         finally:
-549:             clear_trace_id()
-550: 
-551:     async def forget(
-552:         self,
-553:         document_id: UUID,
-554:         *,
-555:         namespace: str | UUID | None = None,
-556:     ) -> bool:
-557:         """Remove a memory from the lake.
-558: 
-559:         Args:
-560:             document_id: ID of the document to remove
-561:             namespace: Namespace for verification (optional)
-562: 
-563:         Returns:
-564:             True if deleted, False if not found
-565:         """
-566:         namespace_id = None
-567:         if namespace:
-568:             namespace_id = await self._resolve_namespace(namespace)
-569: 
-570:         return await self._get_engine().forget(document_id, namespace_id)
-571: 
-572:     # =========================================================================
-573:     # Entity Operations
-574:     # =========================================================================
-575: 
-576:     async def get_entity(self, entity_id: UUID) -> Entity | None:
-577:         """Get an entity by ID."""
-578:         return await self._get_engine().get_entity(entity_id)
-579: 
-580:     async def list_entities(
-581:         self,
-582:         *,
-583:         namespace: str | UUID | None = None,
-584:         entity_type: str | None = None,
-585:         limit: int = 100,
-586:     ) -> list[Entity]:
-587:         """List entities in a namespace."""
-588:         namespace_id = await self._resolve_namespace(namespace)
-589:         return await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
-590: 
-591:     async def find_related_entities(
-592:         self,
-593:         entity_id: UUID,
-594:         *,
-595:         namespace: str | UUID | None = None,
-596:         max_depth: int = 2,
-597:         limit: int = 20,
-598:     ) -> list[tuple[Entity, float]]:
-599:         """Find entities related to a given entity."""
-600:         namespace_id = await self._resolve_namespace(namespace)
-601:         return await self._get_engine().find_related_entities(
-602:             entity_id,
-603:             namespace_id,
-604:             max_depth=max_depth,
-605:             limit=limit,
-606:         )
-607: 
-608:     # =========================================================================
-609:     # Document Operations (Convenience Methods)
-610:     # =========================================================================
-611: 
-612:     async def get_document(self, document_id: UUID) -> Document | None:
-613:         """Get a document by ID.
-614: 
-615:         Args:
-616:             document_id: Document UUID
-617: 
-618:         Returns:
-619:             Document or None if not found
-620:         """
-621:         return await self._get_engine().get_document(document_id)
-622: 
-623:     async def list_documents(
-624:         self,
-625:         *,
-626:         namespace: str | UUID | None = None,
-627:         limit: int = 100,
-628:     ) -> list[Document]:
-629:         """List documents in a namespace.
-630: 
-631:         Args:
-632:             namespace: Namespace name, ID, or None for default
-633:             limit: Maximum documents to return
-634: 
-635:         Returns:
-636:             List of Documents
-637:         """
-638:         namespace_id = await self._resolve_namespace(namespace)
-639:         return await self._get_engine().list_documents(namespace_id, limit=limit)
-640: 
-641:     async def search_entities(
-642:         self,
-643:         query: str,
-644:         *,
-645:         namespace: str | UUID | None = None,
-646:         limit: int = 10,
-647:     ) -> list[Entity]:
-648:         """Search entities by query text using embedding similarity.
-649: 
-650:         Args:
-651:             query: Search query text
-652:             namespace: Namespace name, ID, or None for default
-653:             limit: Maximum entities to return
-654: 
-655:         Returns:
-656:             List of matching Entities (most similar first)
-657:         """
-658:         namespace_id = await self._resolve_namespace(namespace)
-659:         return await self._get_engine().search_entities(query, namespace_id, limit=limit)
-660: 
-661:     async def stats(self, *, namespace: str | UUID | None = None) -> Stats:
-662:         """Get document/chunk/entity/relationship counts for a namespace.
-663: 
-664:         Args:
-665:             namespace: Namespace name, ID, or None for default
-666: 
-667:         Returns:
-668:             Stats with document/chunk/entity/relationship counts
-669:         """
-670:         namespace_id = await self._resolve_namespace(namespace)
-671:         return await self._get_engine().stats(namespace_id)
-672: 
-673:     async def ensure_namespace(
-674:         self,
-675:         name: str,
-676:         *,
-677:         description: str = "",
-678:     ) -> UUID:
-679:         """Get or create a namespace by name.
-680: 
-681:         Creates the default organization and workspace if they don't exist.
-682:         This is a convenience method for simple usage where you just want
-683:         a namespace by name without managing the full hierarchy.
-684: 
-685:         Args:
-686:             name: Namespace name (will be slugified)
-687:             description: Optional description
-688: 
-689:         Returns:
-690:             Namespace UUID
-691:         """
-692:         return await self._get_engine().ensure_namespace(name, description=description)
-693: 
-694:     # =========================================================================
-695:     # Helpers
-696:     # =========================================================================
-697: 
-698:     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
-699:         """Resolve a namespace reference to a UUID."""
-700:         if namespace is None:
-701:             return await self.get_or_create_default_namespace()
-702: 
-703:         if isinstance(namespace, UUID):
-704:             return namespace
-705: 
-706:         # Try to parse as UUID
-707:         try:
-708:             return UUID(namespace)
-709:         except ValueError:
-710:             pass
-711: 
-712:         # Look up by slug in default workspace
-713:         # Access storage through engine for namespace lookup
-714:         engine = self._get_engine()
-715:         if not hasattr(engine, "_storage") or engine._storage is None:
-716:             raise RuntimeError("Engine does not support namespace lookup by slug")
-717: 
-718:         storage = engine._storage
-719:         default_ns_id = await self.get_or_create_default_namespace()
-720:         default_ns = await storage.get_namespace(default_ns_id)
-721:         if default_ns:
-722:             ns = await storage.get_namespace_by_slug(default_ns.workspace_id, namespace)
-723:             if ns:
-724:                 return ns.id
-725: 
-726:         raise ValueError(f"Namespace not found: {namespace}")
-727: 
-728:     async def health_check(self) -> dict[str, Any]:
-729:         """Check health of all components."""
-730:         if not self._connected or self._engine is None:
-731:             return {"status": "disconnected"}
-732: 
-733:         return await self._engine.health_check()
-734: 
-735: 
-736: # Convenience function for one-off usage
-737: @asynccontextmanager
-738: async def memory_lake(
-739:     config: KhoraConfig | None = None,
-740: ) -> AsyncGenerator[MemoryLake]:
-741:     """Context manager for one-off Memory Lake usage.
-742: 
-743:     Usage:
-744:         async with memory_lake() as lake:
-745:             await lake.remember("Hello, world!")
-746:             result = await lake.recall("greeting")
-747:     """
-748:     lake = MemoryLake(config)
-749:     try:
-750:         await lake.connect()
-751:         yield lake
-752:     finally:
-753:         await lake.disconnect()
 ````
 
 ## File: src/khora/extraction/expansion/relationship_inferrer.py
@@ -55184,112 +56229,127 @@ README.md
  84: accel = [
  85:     "rapidfuzz>=3.0.0",
  86: ]
- 87: 
- 88: [project.scripts]
- 89: khora = "khora:main"
- 90: 
- 91: [build-system]
- 92: requires = ["uv_build>=0.8.17,<0.9.0"]
- 93: build-backend = "uv_build"
+ 87: # Rust-accelerated operations (requires Rust toolchain to build from source)
+ 88: rust = [
+ 89:     "khora-accel>=0.1.0",
+ 90: ]
+ 91: 
+ 92: [project.scripts]
+ 93: khora = "khora:main"
  94: 
- 95: [tool.pytest.ini_options]
- 96: testpaths = ["tests"]
- 97: python_files = ["test_*.py"]
- 98: python_classes = ["Test*"]
- 99: python_functions = ["test_*"]
-100: addopts = [
-101:     "--strict-markers",
-102:     "--strict-config",
-103:     "--cov=khora",
-104:     "--cov-branch",
-105:     "--cov-report=term-missing",
-106:     "--cov-fail-under=50",
-107: ]
-108: markers = [
-109:     "unit: Unit tests",
-110:     "integration: Integration tests",
-111:     "e2e: End-to-end tests",
-112: ]
-113: asyncio_mode = "auto"
-114: 
-115: [tool.coverage.run]
-116: source = ["src"]
-117: omit = [
-118:     "tests/*",
-119:     "*/test_*.py",
-120:     "*/__pycache__/*",
-121:     # Khora engine backends require database connections for testing
-122:     "*/engines/khora/backends/pgvector.py",
-123:     "*/engines/khora/backends/weaviate.py",
-124: ]
-125: 
-126: [tool.coverage.report]
-127: exclude_lines = [
-128:     "pragma: no cover",
-129:     "def __repr__",
-130:     "raise AssertionError",
-131:     "raise NotImplementedError",
-132:     "if __name__ == .__main__.:",
-133:     "if TYPE_CHECKING:",
-134: ]
-135: 
-136: [tool.black]
-137: target-version = ["py313"]
-138: line-length = 120
+ 95: [build-system]
+ 96: requires = ["uv_build>=0.8.17,<0.9.0"]
+ 97: build-backend = "uv_build"
+ 98: 
+ 99: [tool.pytest.ini_options]
+100: testpaths = ["tests"]
+101: python_files = ["test_*.py"]
+102: python_classes = ["Test*"]
+103: python_functions = ["test_*"]
+104: addopts = [
+105:     "--strict-markers",
+106:     "--strict-config",
+107:     "--cov=khora",
+108:     "--cov-branch",
+109:     "--cov-report=term-missing",
+110:     "--cov-fail-under=46",
+111: ]
+112: markers = [
+113:     "unit: Unit tests",
+114:     "integration: Integration tests",
+115:     "e2e: End-to-end tests",
+116: ]
+117: asyncio_mode = "auto"
+118: 
+119: [tool.coverage.run]
+120: source = ["src"]
+121: omit = [
+122:     "tests/*",
+123:     "*/test_*.py",
+124:     "*/__pycache__/*",
+125:     # Khora engine backends require database connections for testing
+126:     "*/engines/khora/backends/pgvector.py",
+127:     "*/engines/khora/backends/weaviate.py",
+128: ]
+129: 
+130: [tool.coverage.report]
+131: exclude_lines = [
+132:     "pragma: no cover",
+133:     "def __repr__",
+134:     "raise AssertionError",
+135:     "raise NotImplementedError",
+136:     "if __name__ == .__main__.:",
+137:     "if TYPE_CHECKING:",
+138: ]
 139: 
-140: [tool.isort]
-141: profile = "black"
-142: line_length = 120
-143: known_first_party = ["khora"]
-144: skip_gitignore = true
-145: 
-146: [tool.ruff]
-147: target-version = "py313"
-148: line-length = 120
+140: [tool.black]
+141: target-version = ["py313"]
+142: line-length = 120
+143: 
+144: [tool.isort]
+145: profile = "black"
+146: line_length = 120
+147: known_first_party = ["khora"]
+148: skip_gitignore = true
 149: 
-150: [tool.ruff.lint]
-151: select = ["E", "F", "W"]
-152: ignore = ["E501"]  # Line too long - handled by black
+150: [tool.ruff]
+151: target-version = "py313"
+152: line-length = 120
 153: 
-154: [tool.ty.environment]
-155: python-version = "3.13"
-156: extra-paths = ["src"]
+154: [tool.ruff.lint]
+155: select = ["E", "F", "W"]
+156: ignore = ["E501"]  # Line too long - handled by black
 157: 
-158: [tool.ty.rules]
-159: # Suppress noisy rules to start green; tighten incrementally
-160: invalid-argument-type = "ignore"       # 58 errors, mostly third-party stubs (FastAPI/Starlette/SQLAlchemy)
-161: invalid-method-override = "ignore"     # 4 errors, str(Enum) LSP violations in Permission
-162: possibly-missing-attribute = "ignore"  # 10 warnings, protocol/union narrowing gaps
-163: unsupported-operator = "ignore"        # 7 errors, dict typed as dict[str, Any] += int
-164: call-non-callable = "ignore"           # 2 errors, dynamic factory patterns
-165: invalid-type-form = "ignore"           # 3 errors, advanced generics
-166: unknown-argument = "ignore"            # 3 errors, third-party keyword args
-167: deprecated = "ignore"                  # 6 warnings, third-party deprecations
-168: unresolved-attribute = "warn"          # 6 errors, protocol/model attribute gaps
-169: unresolved-reference = "warn"          # 2 errors, forward references
-170: unresolved-import = "warn"             # 1 error, optional dependency (kuzu)
-171: invalid-assignment = "warn"            # 2 errors, third-party stub mismatches
-172: invalid-return-type = "warn"           # 2 errors, implicit None returns
-173: not-iterable = "warn"                  # 1 error, exception unpacking pattern
-174: unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
-175: 
-176: [dependency-groups]
-177: dev = [
-178:     "prek>=0.3.1",
-179:     "pytest>=9.0.2",
-180:     "pytest-asyncio>=1.3.0",
-181:     "pytest-cov>=7.0.0",
-182:     "black>=26.0.0",
-183:     "ruff>=0.15.0",
-184:     "isort>=7.0.0",
-185:     "ty>=0.0.15",
-186:     "rapidfuzz>=3.0.0",  # For ty type checking of optional accel module
-187: ]
+158: [tool.ty.environment]
+159: python-version = "3.13"
+160: extra-paths = ["src"]
+161: 
+162: [tool.ty.rules]
+163: # Suppress noisy rules to start green; tighten incrementally
+164: invalid-argument-type = "ignore"       # 58 errors, mostly third-party stubs (FastAPI/Starlette/SQLAlchemy)
+165: invalid-method-override = "ignore"     # 4 errors, str(Enum) LSP violations in Permission
+166: possibly-missing-attribute = "ignore"  # 10 warnings, protocol/union narrowing gaps
+167: unsupported-operator = "ignore"        # 7 errors, dict typed as dict[str, Any] += int
+168: call-non-callable = "ignore"           # 2 errors, dynamic factory patterns
+169: invalid-type-form = "ignore"           # 3 errors, advanced generics
+170: unknown-argument = "ignore"            # 3 errors, third-party keyword args
+171: deprecated = "ignore"                  # 6 warnings, third-party deprecations
+172: unresolved-attribute = "warn"          # 6 errors, protocol/model attribute gaps
+173: unresolved-reference = "warn"          # 2 errors, forward references
+174: unresolved-import = "warn"             # 1 error, optional dependency (kuzu)
+175: invalid-assignment = "warn"            # 2 errors, third-party stub mismatches
+176: invalid-return-type = "warn"           # 2 errors, implicit None returns
+177: not-iterable = "warn"                  # 1 error, exception unpacking pattern
+178: unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
+179: 
+180: [tool.uv.sources]
+181: khora-accel = { path = "rust/khora-accel", editable = true }
+182: 
+183: [dependency-groups]
+184: dev = [
+185:     "prek>=0.3.1",
+186:     "pytest>=9.0.2",
+187:     "pytest-asyncio>=1.3.0",
+188:     "pytest-cov>=7.0.0",
+189:     "black>=26.0.0",
+190:     "ruff>=0.15.0",
+191:     "isort>=7.0.0",
+192:     "ty>=0.0.15",
+193:     "rapidfuzz>=3.0.0",  # For ty type checking of optional accel module
+194: ]
 ````
 
 
 
 # Git Logs
+
+## Commit: 2026-02-07 11:30:45 +0100
+**Message:** chore: improve upsert result mismatch diagnostics
+
+**Files:**
+- REPOMIX.md
+- src/khora/pipelines/flows/ingest.py
+- src/khora/storage/backends/neo4j.py
 
 ## Commit: 2026-02-07 11:24:30 +0100
 **Message:** chore: downgrade extraction log to debug level
@@ -55536,16 +56596,3 @@ README.md
 - src/khora/engines/vectorcypher/fusion.py
 - src/khora/engines/vectorcypher/retriever.py
 - src/khora/engines/vectorcypher/router.py
-
-## Commit: 2026-02-05 18:55:28 +0100
-**Message:** perf: optimize batch operations and parallelize health checks
-
-**Files:**
-- REPOMIX.md
-- src/khora/engines/khora/engine.py
-- src/khora/extraction/chunkers/base.py
-- src/khora/extraction/chunkers/fixed.py
-- src/khora/extraction/chunkers/recursive.py
-- src/khora/extraction/chunkers/semantic.py
-- src/khora/storage/backends/postgresql.py
-- src/khora/storage/coordinator.py

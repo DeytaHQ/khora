@@ -1,0 +1,40 @@
+[package]
+name = "khora-accel"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rust-accelerated operations for Khora memory lake"
+license = "MIT"
+
+[lib]
+name = "khora_accel"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+numpy = "0.23"
+ndarray = "0.16"
+rayon = "1.10"
+strsim = "0.11"
+regex = "1.10"
+hashbrown = "0.15"
+ordered-float = "4.0"
+
+[features]
+default = ["parallel"]
+parallel = []
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "cosine_bench"
+harness = false
+
+[[bench]]
+name = "bm25_bench"
+harness = false
+
+[[bench]]
+name = "pagerank_bench"
+harness = false
