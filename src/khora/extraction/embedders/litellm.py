@@ -41,9 +41,9 @@ class LiteLLMEmbedder(Embedder):
         *,
         timeout: int = 30,
         max_retries: int = 3,
-        batch_size: int = 100,
+        batch_size: int = 200,
         cache_max_size: int = 10000,
-        embed_concurrency: int = 10,
+        embed_concurrency: int = 20,
         retry_wait: float = 1.0,
     ) -> None:
         """Initialize the LiteLLM embedder.

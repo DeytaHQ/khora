@@ -559,7 +559,7 @@ class SkeletonConstructionEngine:
         namespace_id: UUID,
         *,
         skill_name: str = "general_entities",
-        max_concurrent: int = 10,
+        max_concurrent: int = 20,
         deduplicate: bool = True,
         infer_relationships: bool = False,  # Not used in Skeleton Construction engine
         on_progress: Callable[[int, int], None] | None = None,

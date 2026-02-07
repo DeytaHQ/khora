@@ -378,7 +378,7 @@ class GraphRAGEngine:
         namespace_id: UUID,
         *,
         skill_name: str = "general_entities",
-        max_concurrent: int = 5,
+        max_concurrent: int = 10,
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
