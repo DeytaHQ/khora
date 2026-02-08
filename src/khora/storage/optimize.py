@@ -312,6 +312,20 @@ async def optimize_neo4j(driver, *, database: str = "neo4j") -> dict:
             result["errors"].append(msg)
             logger.warning(msg)
 
+    # Migration: drop legacy plain indexes that conflict with uniqueness constraints.
+    # Neo4j refuses to create a CONSTRAINT when a plain INDEX on the same properties
+    # already exists.  This handles databases created before the code switched to
+    # constraints.  Safe to run repeatedly — DROP IF EXISTS is a no-op once gone.
+    legacy_indexes_to_drop = [
+        "entity_ns_name_type_unique",  # was a plain index, now a constraint
+    ]
+    async with driver.session(database=database) as session:
+        for idx_name in legacy_indexes_to_drop:
+            try:
+                await session.run(f"DROP INDEX {idx_name} IF EXISTS")
+            except Exception:
+                pass  # index doesn't exist or already dropped
+
     async with driver.session(database=database) as session:
         for idx in NEO4J_INDEXES:
             try:
