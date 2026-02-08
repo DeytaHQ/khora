@@ -788,7 +788,9 @@ async def ingest_documents(
                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
 
     # Phase 1: Stage documents (can run in parallel too)
-    staging_semaphore = asyncio.Semaphore(max_concurrent_documents * 2)
+    # Staging ops are fast (~5ms each), so matching doc concurrency is sufficient.
+    # Higher values just queue in the SA pool without throughput benefit.
+    staging_semaphore = asyncio.Semaphore(max_concurrent_documents)
 
     async def stage_with_limit(doc_input):
         async with staging_semaphore:
