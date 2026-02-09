@@ -71,7 +71,7 @@ class VectorCypherConfig:
     routing_use_llm: bool = False
 
     # Skeleton indexing
-    skeleton_core_ratio: float = 0.40  # 40% get full KG extraction (increased for +10-20% recall)
+    skeleton_core_ratio: float = 0.55  # 55% get full KG extraction (increased for denser graphs)
 
     # Graph traversal
     graph_default_depth: int = 2

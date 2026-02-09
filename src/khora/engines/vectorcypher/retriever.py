@@ -262,7 +262,7 @@ class VectorCypherRetriever:
         )
 
         # Step 4: Cypher expand to find related entities
-        expanded_entities = await self._cypher_expand(
+        expanded_entities, entity_info_map = await self._cypher_expand(
             entry_entity_ids=[e[0] for e in entry_entities],
             namespace_id=namespace_id,
             depth=depth,
@@ -282,11 +282,12 @@ class VectorCypherRetriever:
         # This was started at the beginning and may already be done
         vector_chunks = await vector_chunks_task
 
-        # Step 7: RRF fusion with score normalization for better ranking
+        # Step 7: RRF fusion with score normalization and dynamic weights
         fused_results = self._fuse_results(
             vector_chunks=vector_chunks,
             graph_chunks=graph_chunks,
             use_normalization=True,
+            routing=routing,
         )
 
         # Step 8: Apply recency boost if temporal data available
@@ -304,9 +305,21 @@ class VectorCypherRetriever:
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
 
-        entity_results = [
-            ({"id": str(eid), "score": score}, score) for eid, score in entry_entities[: self._config.max_entities]
-        ]
+        # Build entity results with name/type from graph neighborhoods
+        entity_results = []
+        for eid, score in entry_entities[: self._config.max_entities]:
+            info = entity_info_map.get(str(eid), {})
+            entity_results.append(
+                (
+                    {
+                        "id": str(eid),
+                        "name": info.get("name", ""),
+                        "entity_type": info.get("entity_type", ""),
+                        "score": score,
+                    },
+                    score,
+                )
+            )
 
         return VectorCypherResult(
             chunks=chunk_results,
@@ -419,7 +432,7 @@ class VectorCypherRetriever:
         entry_entity_ids: list[UUID],
         namespace_id: UUID,
         depth: int,
-    ) -> dict[UUID, float]:
+    ) -> tuple[dict[UUID, float], dict[str, dict[str, str]]]:
         """Expand entry entities to find related entities via graph traversal.
 
         Args:
@@ -428,10 +441,12 @@ class VectorCypherRetriever:
             depth: Maximum traversal depth
 
         Returns:
-            Dict mapping entity_id -> relevance score
+            Tuple of:
+            - Dict mapping entity_id -> relevance score
+            - Dict mapping entity_id_str -> {name, entity_type} for all discovered entities
         """
         if not entry_entity_ids:
-            return {}
+            return {}, {}
 
         depth = min(max(1, depth), self._config.max_depth)
 
@@ -443,8 +458,9 @@ class VectorCypherRetriever:
             limit_per_entity=20,
         )
 
-        # Score entities by distance from entry points
+        # Score entities by distance from entry points and collect entity info
         entity_scores: dict[UUID, float] = {}
+        entity_info_map: dict[str, dict[str, str]] = {}
 
         for source_id, related in neighborhoods.items():
             for entity_info in related:
@@ -459,7 +475,14 @@ class VectorCypherRetriever:
                 else:
                     entity_scores[entity_id] = score
 
-        return entity_scores
+                # Capture name and type (zero-cost, data already fetched)
+                if entity_info["id"] not in entity_info_map:
+                    entity_info_map[entity_info["id"]] = {
+                        "name": entity_info.get("name", ""),
+                        "entity_type": entity_info.get("entity_type", ""),
+                    }
+
+        return entity_scores, entity_info_map
 
     async def _fetch_chunks_from_entities(
         self,
@@ -556,6 +579,7 @@ class VectorCypherRetriever:
         graph_chunks: list[tuple[UUID, float, dict[str, Any]]],
         *,
         use_normalization: bool = False,
+        routing: RoutingDecision | None = None,
     ) -> list[FusedResult]:
         """Fuse vector and graph results using weighted RRF.
 
@@ -563,25 +587,34 @@ class VectorCypherRetriever:
             vector_chunks: Results from vector search
             graph_chunks: Results from graph traversal
             use_normalization: If True, normalize scores before fusion for better ranking
+            routing: If provided, adjust weights based on query complexity
 
         Returns:
             Fused and sorted results
         """
+        # Dynamic fusion weights based on query complexity
+        vector_weight = self._config.vector_weight
+        graph_weight = self._config.graph_weight
+        if routing is not None:
+            if routing.complexity == QueryComplexity.SIMPLE:
+                vector_weight, graph_weight = 0.8, 0.2
+            elif routing.complexity == QueryComplexity.COMPLEX:
+                vector_weight, graph_weight = 0.4, 0.6
+
         if use_normalization:
-            # Use normalized fusion for better score combination
             return weighted_rrf_normalized(
                 vector_results=vector_chunks,
                 graph_results=graph_chunks,
                 k=self._config.rrf_k,
-                vector_weight=self._config.vector_weight,
-                graph_weight=self._config.graph_weight,
+                vector_weight=vector_weight,
+                graph_weight=graph_weight,
             )
         return weighted_rrf(
             vector_results=vector_chunks,
             graph_results=graph_chunks,
             k=self._config.rrf_k,
-            vector_weight=self._config.vector_weight,
-            graph_weight=self._config.graph_weight,
+            vector_weight=vector_weight,
+            graph_weight=graph_weight,
         )
 
     def _calculate_recency_scores(
