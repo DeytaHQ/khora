@@ -28,7 +28,7 @@ services:
       KHORA_LOG_LEVEL: "${KHORA_LOG_LEVEL:-INFO}"
       KHORA_ENVIRONMENT: "${KHORA_ENVIRONMENT:-development}"
       KHORA_DATABASE_URL: "postgresql://khora:khora@postgres:5432/khora"
-      KHORA_NEO4J_URL: "bolt://neo4j:khora@neo4j:7687"
+      KHORA_NEO4J_URL: "bolt://neo4j:pleaseletmein@neo4j:7687"
       KHORA_AUTH_ENABLED: "${KHORA_AUTH_ENABLED:-false}"
     depends_on:
       postgres:
@@ -76,10 +76,11 @@ services:
     image: neo4j:2025.12.1
     container_name: khora-neo4j
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-khora}
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-pleaseletmein}
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_allowlist: "apoc.*"
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_auth__max__failed__attempts: "0"
     ports:
       - "${NEO4J_HTTP_PORT:-7475}:7474"
       - "${NEO4J_BOLT_PORT:-7688}:7687"
