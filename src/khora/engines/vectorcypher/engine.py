@@ -245,6 +245,7 @@ class VectorCypherEngine:
             embedder=self._embedder,
             database=neo4j_database,
             config=retriever_config,
+            storage=self._storage,
         )
 
         # Initialize telemetry
@@ -575,6 +576,14 @@ class VectorCypherEngine:
 
         if not entities:
             return 0, 0
+
+        # Compute entity embeddings (matching ingest pipeline format)
+        embedder = self._get_embedder()
+        entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities]
+        entity_embeddings = await embedder.embed_batch(entity_texts)
+        for entity, embedding in zip(entities, entity_embeddings):
+            entity.embedding = embedding
+            entity.embedding_model = embedder.model_name
 
         storage = self._get_storage()
         dual_nodes = self._get_dual_nodes()

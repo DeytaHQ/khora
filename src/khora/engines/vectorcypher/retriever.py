@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
     from khora.engines.skeleton.backends import TemporalFilter, TemporalVectorStore
     from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
+    from khora.storage import StorageCoordinator
 
 
 @dataclass
@@ -99,6 +100,7 @@ class VectorCypherRetriever:
         database: str = "neo4j",
         config: RetrieverConfig | None = None,
         router_config: RouterConfig | None = None,
+        storage: StorageCoordinator | None = None,
     ):
         """Initialize the retriever.
 
@@ -109,12 +111,14 @@ class VectorCypherRetriever:
             database: Neo4j database name
             config: Retriever configuration
             router_config: Router configuration (optional, for LLM routing etc.)
+            storage: Storage coordinator for entity vector search via pgvector
         """
         self._vector_store = vector_store
         self._neo4j_driver = neo4j_driver
         self._embedder = embedder
         self._database = database
         self._config = config or RetrieverConfig()
+        self._storage = storage
 
         # Initialize router with config, syncing adaptive depth settings
         if router_config is None:
@@ -394,42 +398,20 @@ class VectorCypherRetriever:
         namespace_id: UUID,
         limit: int,
     ) -> list[tuple[UUID, float]]:
-        """Search for entry entities using vector similarity on entity embeddings.
-
-        Args:
-            query_embedding: Query embedding vector
-            namespace_id: Namespace to search
-            limit: Maximum entities to return
-
-        Returns:
-            List of (entity_id, similarity_score) tuples
-        """
-        # Search entities in Neo4j using vector similarity
-        # Note: This requires Neo4j vector index or we search via pgvector entities table
-        query = """
-        MATCH (e:Entity {namespace_id: $namespace_id})
-        WHERE e.embedding IS NOT NULL
-        WITH e, gds.similarity.cosine(e.embedding, $query_embedding) AS similarity
-        WHERE similarity > 0.3
-        RETURN e.id AS id, similarity
-        ORDER BY similarity DESC
-        LIMIT $limit
-        """
+        """Search for entry entities using vector similarity via pgvector HNSW."""
+        if not self._storage:
+            logger.warning("Storage coordinator not available for entity vector search")
+            return []
 
         try:
-            async with self._neo4j_driver.session(database=self._database) as session:
-                result = await session.run(
-                    query,
-                    namespace_id=str(namespace_id),
-                    query_embedding=query_embedding,
-                    limit=limit,
-                )
-                records = [record.data() async for record in result]
-
-            return [(UUID(r["id"]), r["similarity"]) for r in records]
+            return await self._storage.search_similar_entities(
+                namespace_id,
+                query_embedding,
+                limit=limit,
+                min_similarity=0.3,
+            )
         except Exception as e:
-            logger.warning(f"Entity vector search failed (Neo4j GDS may not be available): {e}")
-            # Fallback: return empty, will use simple retrieval
+            logger.warning(f"Entity vector search failed: {e}")
             return []
 
     async def _cypher_expand(
