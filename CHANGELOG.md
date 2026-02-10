@@ -2,6 +2,91 @@
 
 All notable changes to Khora are documented here.
 
+## [0.2.2] — VectorCypher Optimization
+
+### Why: making hybrid retrieval competitive on benchmarks
+
+VectorCypher launched in 0.2.0 with sensible defaults, but benchmark runs
+against GraphRAG-Bench showed that retrieval quality dropped on complex
+multi-hop queries and that the configuration wasn't surfaced cleanly
+through the public API. This release is the result of a benchmarking-
+driven optimization cycle: tune retrieval, wire the knobs, add the
+indexes to support it, and clean up the code that was left behind.
+
+### Retrieval quality
+
+**Per-complexity fusion weights.** The original retriever used a single
+pair of vector/graph weights (0.6/0.4) for every query. Simple factual
+queries don't benefit from graph expansion, while complex multi-hop
+queries need more graph signal. The retriever now applies different
+weights per complexity level: SIMPLE gets 0.8/0.2 (vector-heavy),
+MODERATE keeps the 0.6/0.4 default, and COMPLEX flips to 0.4/0.6
+(graph-heavy). These are configurable via `VectorCypherConfig`.
+
+**Adaptive graph traversal depth.** Previously, graph depth was fixed
+at 2 regardless of how many entry entities the vector search returned.
+When many entities match (≥10), deep traversal explodes the candidate
+set without adding signal — so the retriever now drops to depth 1.
+Conversely, when very few entities match (≤2), it increases depth to
+compensate. The thresholds are configurable via `RetrieverConfig`.
+
+**Score normalization.** The fusion function (`weighted_rrf_normalized`)
+now min-max normalizes vector and graph scores to [0, 1] before
+computing RRF, producing more balanced fusion when score distributions
+differ between the two sources.
+
+**Entity resolution and graph density.** Improved entity similarity
+thresholds (`min_entity_similarity=0.3`) and skeleton core ratio
+(now 0.70 by default) increase the number of entities that get full
+LLM extraction, producing a denser graph for traversal.
+
+### Configuration wiring
+
+**`VectorCypherConfig` dataclass.** All VectorCypher-specific knobs —
+routing, skeleton indexing, graph traversal, fusion weights, temporal
+settings, and search thresholds — live in a single dataclass that can
+be passed through the `MemoryLake` constructor:
+
+```python
+from khora import MemoryLake
+from khora.engines.vectorcypher import VectorCypherConfig
+
+async with MemoryLake(
+    db_url,
+    engine="vectorcypher",
+    engine_kwargs={"vectorcypher_config": VectorCypherConfig(
+        skeleton_core_ratio=0.50,
+        fusion_complex_vector_weight=0.3,
+        fusion_complex_graph_weight=0.7,
+    )},
+) as lake:
+    ...
+```
+
+**`engine_kwargs` passthrough.** The `MemoryLake` constructor now
+accepts an `engine_kwargs` dict that is forwarded to the engine
+constructor. This is the mechanism for passing `VectorCypherConfig`
+(or any future engine-specific config) without changing the public API.
+
+### Search indexes (migration 005)
+
+Three new PostgreSQL indexes improve query-time performance:
+
+- **GIN index** on `khora_chunks.tags` for array-containment queries
+- **Composite index** on `(namespace_id, occurred_at)` for temporal
+  filtering within a namespace
+- **HNSW index** rebuilt with `ef_construction=128` (up from 64) for
+  better vector recall at the same latency
+
+### Housekeeping
+
+- Skeleton engine code cleanup: removed 122 lines of dead formatting
+  and redundant logic.
+- Removed hardcoded fusion weights from the retriever in favor of
+  config-driven values.
+
+---
+
 ## [0.2.1] — Concurrency & Throughput
 
 ### Why: filling the gap Rust opened

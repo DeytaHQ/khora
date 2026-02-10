@@ -40,7 +40,7 @@ from .engines import create_engine, list_engines, register_engine
 from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
 from .query import SearchMode
 
-__version__ = "0.1.5"
+__version__ = "0.2.2"
 
 __all__ = [
     "main",

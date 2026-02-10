@@ -120,14 +120,33 @@ class RetrieverConfig:
     max_depth: int = 4
     max_entry_entities: int = 10
 
+    # Adaptive depth settings
+    adaptive_depth_enabled: bool = True
+    adaptive_depth_high_entity_threshold: int = 10  # Shallow if >= 10 entities
+    adaptive_depth_low_entity_threshold: int = 2    # Deeper if <= 2 entities
+
     # Fusion settings
     rrf_k: int = 60
     vector_weight: float = 0.6
     graph_weight: float = 0.4
 
+    # Per-complexity fusion overrides
+    simple_vector_weight: float = 0.8
+    simple_graph_weight: float = 0.2
+    complex_vector_weight: float = 0.4
+    complex_graph_weight: float = 0.6
+
     # Temporal settings
     recency_weight: float = 0.2
     recency_decay_days: int = 30
+
+    # Search thresholds
+    min_entity_similarity: float = 0.3
+    hybrid_alpha: float = 0.7
+
+    # Limits
+    max_chunks: int = 50
+    max_entities: int = 30
 ```
 
 **Retrieval Pipeline:**
@@ -306,16 +325,50 @@ config = VectorCypherConfig(
     graph_max_depth=4,
     graph_max_entry_entities=10,
 
-    # Fusion
+    # Fusion (default weights for MODERATE queries)
     fusion_rrf_k=60,
     fusion_vector_weight=0.6,
     fusion_graph_weight=0.4,
 
+    # Per-complexity fusion overrides
+    fusion_simple_vector_weight=0.8,   # SIMPLE: vector-heavy
+    fusion_simple_graph_weight=0.2,
+    fusion_complex_vector_weight=0.4,  # COMPLEX: graph-heavy
+    fusion_complex_graph_weight=0.6,
+
     # Temporal
     temporal_recency_weight=0.2,
     temporal_recency_decay_days=30,
+
+    # Search thresholds
+    fusion_hybrid_alpha=0.7,
+    retriever_min_entity_similarity=0.3,
 )
 ```
+
+### Via `engine_kwargs` (MemoryLake Constructor)
+
+The recommended way to pass `VectorCypherConfig` is through the `engine_kwargs` parameter on `MemoryLake`:
+
+```python
+from khora import MemoryLake
+from khora.engines.vectorcypher import VectorCypherConfig
+
+async with MemoryLake(
+    "postgresql://localhost/khora",
+    engine="vectorcypher",
+    engine_kwargs={"vectorcypher_config": VectorCypherConfig(
+        skeleton_core_ratio=0.50,
+        fusion_complex_vector_weight=0.3,
+        fusion_complex_graph_weight=0.7,
+        retriever_min_entity_similarity=0.25,
+    )},
+) as lake:
+    result = await lake.remember("content")
+    results = await lake.recall("query")
+```
+
+The `engine_kwargs` dict is forwarded directly to the `VectorCypherEngine` constructor, which accepts `vectorcypher_config` as a keyword argument.
 
 ### Via Environment Variables
 
@@ -387,7 +440,7 @@ KHORA_NEO4J_PASSWORD=password
 
 | Metric | VectorCypher | Skeleton | GraphRAG |
 |--------|--------------|----------|----------|
-| LLM calls per 1000 docs | ~250 | ~100 | ~1000 |
+| LLM calls per 1000 docs | ~700 | ~100 | ~1000 |
 | Core chunk ratio | 70% (default) | 10% | 100% |
 | Multi-hop queries | Native | Limited | Full |
 | Graph database | Required | Not required | Required |
@@ -402,9 +455,10 @@ Controls what percentage of chunks get full knowledge graph extraction:
 
 | Value | LLM Calls | Graph Density | Use When |
 |-------|-----------|---------------|----------|
-| 0.35 | More | Dense graph | Multi-hop queries critical |
-| 0.25 | Default | Good density | Most cases |
-| 0.15 | Fewer | Sparse graph | Cost-sensitive |
+| 0.90 | Most | Very dense graph | Maximum recall, cost not a concern |
+| 0.70 | Default | Dense graph | Most cases (good quality/cost balance) |
+| 0.50 | Moderate | Moderate graph | Cost-conscious with decent coverage |
+| 0.25 | Fewer | Sparse graph | Cost-sensitive, simple queries |
 
 ### graph_depth
 
@@ -427,6 +481,58 @@ Controls blending of vector and graph results:
 | 0.6 | 0.4 | Balanced (default) |
 | 0.4 | 0.6 | Graph-heavy (relationship queries) |
 | 0.2 | 0.8 | Mostly graph traversal |
+
+## Adaptive Depth
+
+When `adaptive_depth_enabled=True` (the default), the retriever dynamically adjusts graph traversal depth based on how many entry entities the vector search returns:
+
+| Entry Entities | Depth Adjustment | Reason |
+|----------------|------------------|--------|
+| ≥ 10 (high threshold) | Reduce to depth 1 | Many entities → deep traversal explodes candidates without adding signal |
+| 3–9 | Use configured depth | Normal range, default behavior |
+| ≤ 2 (low threshold) | Increase depth by 1 | Few entities → deeper traversal compensates for sparse entry points |
+
+The thresholds are configurable:
+
+```python
+VectorCypherConfig(
+    # ... or via RetrieverConfig directly
+)
+
+# RetrieverConfig fields:
+#   adaptive_depth_enabled: bool = True
+#   adaptive_depth_high_entity_threshold: int = 10
+#   adaptive_depth_low_entity_threshold: int = 2
+```
+
+This prevents two failure modes: (1) candidate explosion when many entities each fan out at depth 2+, and (2) under-retrieval when very few entities match and a shallow traversal misses relevant connections.
+
+## Score Normalization
+
+The fusion function `weighted_rrf_normalized` normalizes vector and graph scores to [0, 1] via min-max normalization before computing Reciprocal Rank Fusion. This matters when the two sources produce scores on very different scales — for example, cosine similarity scores in [0.3, 0.9] vs graph proximity scores in [0.01, 0.5]. Without normalization, the source with larger absolute scores dominates the fusion.
+
+```
+RRF score = vector_weight / (k + vector_rank) + graph_weight / (k + graph_rank)
+Tiebreaker = normalized_score from the dominant source
+```
+
+## Search Index Improvements
+
+Migration 005 adds three PostgreSQL indexes that improve query-time performance:
+
+| Index | Type | Target | Purpose |
+|-------|------|--------|---------|
+| `ix_khora_chunks_tags_gin` | GIN | `khora_chunks.tags` | Fast array-containment queries (`tags @> ARRAY['topic']`) |
+| `ix_khora_chunks_ns_occurred` | B-tree (composite) | `(namespace_id, occurred_at)` | Temporal filtering within a namespace |
+| `ix_khora_chunks_embedding_hnsw` | HNSW | `khora_chunks.embedding` | Vector similarity with `ef_construction=128` (up from 64) |
+
+The HNSW index rebuild with higher `ef_construction` improves recall at index-build time — more candidates are considered during graph construction, producing a higher-quality approximate nearest neighbor index. Query-time `ef_search` can be tuned separately via PostgreSQL's `SET hnsw.ef_search = N`.
+
+Run the migration with:
+
+```bash
+uv run alembic upgrade head
+```
 
 ## Related Documentation
 

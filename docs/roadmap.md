@@ -10,8 +10,8 @@ These improvements are focused on making Khora faster and more reliable for prod
 
 | Item | Why It Matters |
 |------|----------------|
-| **HNSW Index Support** | Replace IVFFlat with HNSW for better recall at the same latency. HNSW is the gold standard for approximate nearest neighbor search. |
-| **Query Result Caching** | Many queries are repeated. Caching embeddings and results for frequent patterns can dramatically reduce latency and cost. |
+| **HNSW Index Support** | Done. Migration 005 rebuilds the vector index as HNSW with `ef_construction=128`. See [Performance Optimization](architecture/performance-optimization.md). |
+| **Query Result Caching** | Done. LRU cache with TTL (`max_size=1000`, `ttl_seconds=300`) keyed on `sha256(query + namespace_id + mode)`. See [Performance Optimization](architecture/performance-optimization.md). |
 | **Incremental Index Updates** | Currently, adding new vectors requires rebuilding indexes. Incremental updates would make real-time ingestion practical. |
 
 ### Ingestion Performance

@@ -1,16 +1,16 @@
-# Engine Comparison: GraphRAG vs Skeleton Construction
+# Engine Comparison
 
-Khora supports two pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
+Khora supports three pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
 
 ## Quick Comparison
 
 | Aspect | GraphRAG | Skeleton Construction | VectorCypher |
 |--------|----------|----------------------|--------------|
 | **Primary Focus** | Knowledge graphs | Temporal events | Hybrid retrieval |
-| **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) | Skeleton (25%) |
+| **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) | Skeleton (70%) |
 | **Core Data Model** | Entities & relationships | Chunks with temporal metadata | Dual nodes (Entity + Chunk) |
 | **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Bi-temporal |
-| **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~250 calls/1000 docs) |
+| **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) |
 | **Graph Backend** | Required (Neo4j/Kuzu/Memgraph) | Not required | Required (Neo4j) |
 | **Search Modes** | Vector + Graph + Keyword | Vector + BM25 Hybrid | Vector + Cypher + RRF |
 | **Best For** | Knowledge bases | Chat history, logs, events | Complex multi-hop queries |
@@ -105,6 +105,21 @@ results = await lake.recall(
 )
 ```
 
+### Entity Extraction (VectorCypher)
+
+**VectorCypher:**
+- Uses skeleton indexing with a higher core ratio (default 70%)
+- Core chunks get full LLM entity extraction; non-core use keywords
+- Entities and chunks stored as dual nodes in Neo4j (`MENTIONED_IN` links)
+- Per-complexity fusion weights tune how much graph signal to blend in
+
+```python
+# VectorCypher: Skeleton-based extraction with graph storage
+result = await lake.remember(content)
+# 70% of chunks get full entity extraction (configurable)
+# Entities stored in Neo4j for Cypher traversal
+```
+
 ### Infrastructure Requirements
 
 **GraphRAG:**
@@ -145,18 +160,36 @@ Neo4j (required)
 └── Graph traversal
 ```
 
+### Search Capabilities (VectorCypher)
+
+**VectorCypher:**
+
+| Mode | Description |
+|------|-------------|
+| `SIMPLE` | Vector-only search (fastest, no graph traversal) |
+| `MODERATE` | Shallow graph expansion (depth=1) + vector fusion |
+| `COMPLEX` | Deep graph traversal (depth=2-3) + weighted RRF fusion |
+
+```python
+# VectorCypher: Query routing determines the search path automatically
+results = await lake.recall(
+    "How are Alice and Bob connected through projects?",
+    graph_depth=2,  # Or let the router decide
+)
+```
+
 ### Cost Analysis
 
 For 10,000 documents:
 
-| Operation | GraphRAG | Skeleton Construction | Savings |
-|-----------|----------|----------------------|---------|
-| Entity extraction calls | ~10,000 | ~1,000 | 90% |
-| Relationship extraction calls | ~10,000 | ~0 | 100% |
-| Embedding calls | ~10,000 | ~10,000 | 0% |
-| **Total LLM calls** | **~30,000** | **~11,000** | **63%** |
+| Operation | GraphRAG | Skeleton Construction | VectorCypher |
+|-----------|----------|----------------------|--------------|
+| Entity extraction calls | ~10,000 | ~1,000 | ~7,000 |
+| Relationship extraction calls | ~10,000 | ~0 | ~7,000 |
+| Embedding calls | ~10,000 | ~10,000 | ~10,000 |
+| **Total LLM calls** | **~30,000** | **~11,000** | **~24,000** |
 
-*Note: Actual costs depend on document length, extraction complexity, and LLM pricing.*
+*Note: VectorCypher extraction counts assume the default 70% core ratio. Actual costs depend on document length, extraction complexity, and LLM pricing.*
 
 ## Use Case Guide
 
@@ -191,6 +224,21 @@ For 10,000 documents:
 - Application logs and events
 - News and social media monitoring
 - Customer interaction history
+
+### Choose VectorCypher When...
+
+- **Multi-hop queries are common**: "How are X and Y connected through Z?"
+- **Graph traversal is essential**: Organizational hierarchies, deal chains, team structures
+- **Relationship discovery matters**: Finding implicit connections across data sources
+- **Neo4j is available**: VectorCypher requires Neo4j (not optional)
+- **Balanced cost/quality**: Willing to pay more than Skeleton but less than GraphRAG
+
+**Example Use Cases:**
+- CRM relationship mapping (deals → contacts → companies)
+- Organizational knowledge graphs with multi-hop exploration
+- Research collaboration networks
+- Supply chain relationship tracking
+- Any domain where "connections between things" is the primary query pattern
 
 ## Migration Considerations
 

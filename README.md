@@ -92,6 +92,39 @@ async with MemoryLake("postgresql://...", engine="skeleton") as lake:
 
 **Requirements:** PostgreSQL + pgvector only (Neo4j optional)
 
+### VectorCypher Engine (Hybrid Retrieval)
+
+Combines vector similarity search with Cypher graph traversal for complex multi-hop queries:
+
+```python
+from khora import MemoryLake
+from khora.engines.vectorcypher import VectorCypherConfig
+
+async with MemoryLake(
+    "postgresql://...",
+    engine="vectorcypher",
+    engine_kwargs={"vectorcypher_config": VectorCypherConfig(
+        skeleton_core_ratio=0.70,        # 70% get full KG extraction
+        fusion_simple_vector_weight=0.8, # Vector-heavy for simple queries
+        fusion_complex_graph_weight=0.7, # Graph-heavy for complex queries
+    )},
+) as lake:
+    # Store with temporal context
+    result = await lake.remember(
+        "Meeting notes from Q1 planning with John and Sarah",
+        title="Q1 Planning",
+        metadata={"author": "alice@company.com"},
+    )
+
+    # Multi-hop retrieval: automatically routes to graph traversal
+    results = await lake.recall(
+        "How are John and Sarah connected through projects?",
+        graph_depth=2,
+    )
+```
+
+**Requirements:** PostgreSQL + pgvector + Neo4j
+
 See [Engine Comparison](docs/engines/engine-comparison.md) for detailed guidance.
 
 ---
@@ -134,6 +167,9 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 | [Fusion](docs/query-engine/fusion.md) | Reciprocal Rank Fusion (RRF) |
 | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
 | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
+| **Performance** | |
+| [Rust Acceleration](docs/architecture/performance-optimization.md) | Native Rust extensions for CPU-bound operations |
+| [Performance Optimization](docs/architecture/performance-optimization.md) | Query caching, batch operations, entity resolution |
 | **Planning** | |
 | [Roadmap](docs/roadmap.md) | Future improvements and features |
 | **References** | |
@@ -429,8 +465,8 @@ curl http://localhost:8100/health/live   # Liveness probe
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐ │
-│  │    Query     │   │  Pipelines   │   │     ACL      │   │   Config     │ │
-│  │   Engine     │   │  (Prefect)   │   │   Enforcer   │   │   Resolver   │ │
+│  │    Query     │   │  Pipelines   │   │  VectorCypher│   │   Config     │ │
+│  │   Engine     │   │  (Prefect)   │   │   Router     │   │   Resolver   │ │
 │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘ │
 │         │                  │                  │                  │          │
 ├─────────┴──────────────────┴──────────────────┴──────────────────┴──────────┤
@@ -878,4 +914,4 @@ The following properties emit `DeprecationWarning` and will be removed in a futu
 
 ## License
 
-Copyright (c) 2024-2025 Deyta. All rights reserved.
+Copyright (c) 2024-2026 Deyta. All rights reserved.

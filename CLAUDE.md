@@ -15,7 +15,7 @@ uv run alembic upgrade head  # Run migrations
 ## Architecture
 
 ```
-MemoryLake (facade) → Engine (graphrag | skeleton) → StorageCoordinator
+MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageCoordinator
                                                   ├── PostgreSQL (documents, tenancy)
                                                   ├── pgvector (embeddings)
                                                   └── Graph backend (entities, relationships)
@@ -23,6 +23,7 @@ MemoryLake (facade) → Engine (graphrag | skeleton) → StorageCoordinator
 
 **Pluggable Engines:**
 - **GraphRAG** (`engine="graphrag"`) - Full knowledge graph extraction, requires Neo4j/Kuzu
+- **VectorCypher** (`engine="vectorcypher"`) - Hybrid vector+Cypher retrieval, requires Neo4j
 - **Skeleton Construction** (`engine="skeleton"`) - Temporal-first, cost-optimized, Neo4j optional
 
 **Key entry points:**
@@ -34,6 +35,11 @@ MemoryLake (facade) → Engine (graphrag | skeleton) → StorageCoordinator
 - `src/khora/engines/skeleton/skeleton.py` - PageRank-based skeleton indexing
 - `src/khora/engines/skeleton/backends/pgvector.py` - PostgreSQL+pgvector backend
 - `src/khora/engines/skeleton/backends/weaviate.py` - Weaviate backend
+- `src/khora/engines/vectorcypher/engine.py` - VectorCypher hybrid engine, `VectorCypherConfig`
+- `src/khora/engines/vectorcypher/retriever.py` - Hybrid retrieval pipeline, `RetrieverConfig`
+- `src/khora/engines/vectorcypher/router.py` - Query complexity routing (SIMPLE/MODERATE/COMPLEX)
+- `src/khora/engines/vectorcypher/dual_nodes.py` - HippoRAG 2 dual-node manager (Entity+Chunk in Neo4j)
+- `src/khora/engines/vectorcypher/fusion.py` - Weighted RRF, score normalization
 - `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
 - `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
 
@@ -66,6 +72,15 @@ async with MemoryLake("postgresql://...") as lake:
 | Event streams/logs | `skeleton` | Skeleton Construction: Bi-temporal model |
 | Cost-sensitive apps | `skeleton` | Skeleton Construction: 5-10x fewer LLM calls |
 | Simple infrastructure | `skeleton` | Skeleton Construction: No Neo4j required |
+
+**VectorCypher engine features:**
+- Query routing: SIMPLE (vector-only), MODERATE (shallow graph), COMPLEX (deep graph)
+- Per-complexity fusion weights: different vector:graph ratios per query type
+- Adaptive graph depth: adjusts traversal depth based on entry entity count
+- Skeleton extraction: 70% core ratio by default (configurable via `VectorCypherConfig`)
+- Dual-node architecture: Entity + Chunk nodes in Neo4j linked via `MENTIONED_IN`
+- Score normalization: `weighted_rrf_normalized` balances score distributions before fusion
+- Config via `engine_kwargs={"vectorcypher_config": VectorCypherConfig(...)}`
 
 **Skeleton Construction engine features:**
 - Bi-temporal: `occurred_at` (event time) vs `ingested_at` (system time)
