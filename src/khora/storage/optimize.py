@@ -55,14 +55,6 @@ PG_INDEXES = [
         "purpose": "Confidence-based filtering",
     },
     {
-        "name": "idx_relationships_source_target",
-        "sql": (
-            "CREATE INDEX IF NOT EXISTS idx_relationships_source_target "
-            "ON relationships (source_entity_id, target_entity_id)"
-        ),
-        "purpose": "Relationship traversal",
-    },
-    {
         "name": "idx_chunks_document_namespace",
         "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_document_namespace ON chunks (document_id, namespace_id)"),
         "purpose": "Document-to-chunk lookups",

@@ -76,7 +76,7 @@ class DualNodeManager:
         self._database = database
 
     async def ensure_indexes(self) -> None:
-        """Create indexes for Chunk nodes."""
+        """Create indexes for Chunk and TimeNode nodes."""
         indexes = [
             "CREATE INDEX chunk_id IF NOT EXISTS FOR (c:Chunk) ON (c.id)",
             "CREATE INDEX chunk_namespace IF NOT EXISTS FOR (c:Chunk) ON (c.namespace_id)",
@@ -84,6 +84,13 @@ class DualNodeManager:
             "CREATE INDEX chunk_occurred_at IF NOT EXISTS FOR (c:Chunk) ON (c.occurred_at)",
             # Composite for efficient namespace + time queries
             "CREATE INDEX chunk_ns_time IF NOT EXISTS FOR (c:Chunk) ON (c.namespace_id, c.occurred_at)",
+            # Chunk filter indexes for structured queries
+            "CREATE INDEX chunk_source_system IF NOT EXISTS FOR (c:Chunk) ON (c.source_system)",
+            "CREATE INDEX chunk_author IF NOT EXISTS FOR (c:Chunk) ON (c.author)",
+            "CREATE INDEX chunk_channel IF NOT EXISTS FOR (c:Chunk) ON (c.channel)",
+            # TimeNode indexes for time hierarchy traversal
+            "CREATE INDEX timenode_id IF NOT EXISTS FOR (t:TimeNode) ON (t.id)",
+            "CREATE INDEX timenode_namespace IF NOT EXISTS FOR (t:TimeNode) ON (t.namespace_id)",
         ]
 
         async with self._driver.session(database=self._database) as session:

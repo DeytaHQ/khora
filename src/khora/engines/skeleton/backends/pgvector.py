@@ -371,6 +371,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
         min_similarity: float,
     ) -> list[TemporalSearchResult]:
         """Perform vector similarity search."""
+        # Increase HNSW search accuracy for this transaction
+        await session.execute(text("SET LOCAL hnsw.ef_search = 200"))
+
         # Calculate cosine similarity: 1 - cosine_distance
         similarity = (1 - khora_chunks_table.c.embedding.cosine_distance(query_embedding)).label("similarity")
 

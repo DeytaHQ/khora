@@ -91,6 +91,10 @@ class VectorCypherConfig:
     temporal_recency_weight: float = 0.2
     temporal_recency_decay_days: int = 30
 
+    # Search thresholds
+    fusion_hybrid_alpha: float = 0.7
+    retriever_min_entity_similarity: float = 0.3
+
 
 class VectorCypherEngine:
     """VectorCypher engine - hybrid vector+graph retrieval with temporal support.
@@ -246,6 +250,8 @@ class VectorCypherEngine:
             complex_graph_weight=self._vc_config.fusion_complex_graph_weight,
             recency_weight=self._vc_config.temporal_recency_weight,
             recency_decay_days=self._vc_config.temporal_recency_decay_days,
+            min_entity_similarity=self._vc_config.retriever_min_entity_similarity,
+            hybrid_alpha=self._vc_config.fusion_hybrid_alpha,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,

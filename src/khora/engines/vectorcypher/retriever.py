@@ -80,6 +80,10 @@ class RetrieverConfig:
     recency_weight: float = 0.2
     recency_decay_days: int = 30
 
+    # Search thresholds
+    min_entity_similarity: float = 0.3
+    hybrid_alpha: float = 0.7
+
     # Limits
     max_chunks: int = 50
     max_entities: int = 30
@@ -389,7 +393,7 @@ class VectorCypherRetriever:
             query_embedding=query_embedding,
             limit=limit,
             temporal_filter=temporal_filter,
-            hybrid_alpha=0.7,  # Default hybrid
+            hybrid_alpha=self._config.hybrid_alpha,
             query_text=query,
         )
 
@@ -427,7 +431,7 @@ class VectorCypherRetriever:
                 namespace_id,
                 query_embedding,
                 limit=limit,
-                min_similarity=0.3,
+                min_similarity=self._config.min_entity_similarity,
             )
         except Exception as e:
             logger.warning(f"Entity vector search failed: {e}")
@@ -560,7 +564,7 @@ class VectorCypherRetriever:
             query_embedding=query_embedding,
             limit=limit,
             temporal_filter=temporal_filter,
-            hybrid_alpha=0.7,
+            hybrid_alpha=self._config.hybrid_alpha,
             query_text=query_text,
         )
 

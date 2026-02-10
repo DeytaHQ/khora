@@ -569,6 +569,9 @@ class PgVectorBackend:
         Returns list of (entity_id, similarity_score) tuples.
         """
         async with self._get_session() as session:
+            # Increase HNSW search accuracy for this transaction
+            await session.execute(text("SET LOCAL hnsw.ef_search = 200"))
+
             similarity = 1 - EntityModel.embedding.cosine_distance(query_embedding)
 
             query = (
