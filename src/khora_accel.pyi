@@ -68,6 +68,16 @@ def resolve_entities_batch(
     existing_aliases: list[list[str]],
     threshold: float = 0.85,
 ) -> list[tuple[int, float, str] | None]: ...
+def resolve_entities_enhanced(
+    new_names: list[str],
+    new_types: list[str],
+    existing_names: list[str],
+    existing_aliases: list[list[str]],
+    existing_types: list[str],
+    type_thresholds_keys: list[str],
+    type_thresholds_vals: list[float],
+    default_threshold: float = 0.85,
+) -> list[tuple[int, float, str] | None]: ...
 
 # -- Keyword extraction --------------------------------------------------------
 

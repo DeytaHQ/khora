@@ -48,6 +48,10 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         entity_resolution::resolve_entities_batch,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        entity_resolution::resolve_entities_enhanced,
+        m
+    )?)?;
 
     // Keyword extraction
     m.add_function(wrap_pyfunction!(keyword_extract::extract_keywords, m)?)?;

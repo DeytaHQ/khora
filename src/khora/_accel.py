@@ -49,6 +49,7 @@ try:
     from khora_accel import pairwise_cosine_above_threshold as _rust_pairwise_cosine
     from khora_accel import reciprocal_rank_fusion as _rust_rrf
     from khora_accel import resolve_entities_batch as _rust_resolve_entities_batch
+    from khora_accel import resolve_entities_enhanced as _rust_resolve_entities_enhanced
     from khora_accel import sequence_match_ratio as _rust_sequence_match
     from khora_accel import weighted_rrf as _rust_weighted_rrf
 
@@ -701,6 +702,118 @@ def resolve_entities_batch(
             sim = levenshtein_similarity(query, existing)
             if sim > best_score:
                 best_score = sim
+                best_idx = idx
+
+        if best_idx is not None:
+            results.append((best_idx, best_score, "fuzzy"))
+        else:
+            results.append(None)
+
+    return results
+
+
+def resolve_entities_enhanced(
+    new_names: list[str],
+    new_types: list[str],
+    existing_names: list[str],
+    existing_aliases: list[list[str]],
+    existing_types: list[str],
+    type_thresholds: dict[str, float] | None = None,
+    default_threshold: float = 0.85,
+) -> list[tuple[int, float, str] | None]:
+    """Enhanced entity resolution using Jaro-Winkler + token overlap + per-type thresholds.
+
+    For each new entity (name + type), attempts matching against same-type existing entities:
+    1. Exact match — case-insensitive name equality (score 1.0)
+    2. Alias match — case-insensitive alias equality (score 1.0)
+    3. Enhanced fuzzy — combined Jaro-Winkler (0.6) + token overlap (0.4),
+       checked against the per-type threshold.
+
+    Args:
+        new_names: Names of new entities to resolve.
+        new_types: Entity types parallel to *new_names* (e.g. "PERSON").
+        existing_names: Names of existing entities.
+        existing_aliases: Aliases for each existing entity.
+        existing_types: Types of existing entities (parallel to *existing_names*).
+        type_thresholds: Per-type merge thresholds (e.g. {"PERSON": 0.92}).
+        default_threshold: Fallback threshold for types not in *type_thresholds*.
+
+    Returns:
+        List parallel to *new_names*. Each element is either
+        ``(existing_index, score, match_type)`` or ``None``.
+    """
+    type_thresholds = type_thresholds or {}
+
+    if _HAS_RUST:
+        keys = list(type_thresholds.keys())
+        vals = [type_thresholds[k] for k in keys]
+        return _rust_resolve_entities_enhanced(
+            new_names,
+            new_types,
+            existing_names,
+            existing_aliases,
+            existing_types,
+            keys,
+            vals,
+            default_threshold,
+        )
+
+    # Pure-Python fallback
+    existing_lower = [n.lower() for n in existing_names]
+    aliases_lower = [[a.lower() for a in aliases] for aliases in existing_aliases]
+    existing_types_upper = [t.upper() for t in existing_types]
+
+    results: list[tuple[int, float, str] | None] = []
+    for new_name, new_type in zip(new_names, new_types):
+        query = new_name.lower()
+        query_type = new_type.upper()
+        threshold = type_thresholds.get(query_type, default_threshold)
+        matched = False
+
+        # Step 1: Exact name match (same type)
+        for idx, existing in enumerate(existing_lower):
+            if existing_types_upper[idx] == query_type and query == existing:
+                results.append((idx, 1.0, "exact"))
+                matched = True
+                break
+
+        if matched:
+            continue
+
+        # Step 2: Alias match (same type)
+        for idx, aliases in enumerate(aliases_lower):
+            if existing_types_upper[idx] != query_type:
+                continue
+            for alias in aliases:
+                if query == alias:
+                    results.append((idx, 1.0, "alias"))
+                    matched = True
+                    break
+            if matched:
+                break
+
+        if matched:
+            continue
+
+        # Step 3: Enhanced fuzzy — Jaro-Winkler + token overlap
+        best_idx = None
+        best_score = threshold
+        for idx, existing in enumerate(existing_lower):
+            if existing_types_upper[idx] != query_type:
+                continue
+            if not query or not existing:
+                continue
+            jw = sequence_match_ratio(query, existing)  # Jaro-Winkler via _accel
+            # Token overlap
+            q_tokens = set(query.split())
+            e_tokens = set(existing.split())
+            if q_tokens and e_tokens:
+                tok = len(q_tokens & e_tokens) / max(len(q_tokens), len(e_tokens))
+            else:
+                tok = 0.0
+            combined = 0.6 * jw + 0.4 * tok
+            if combined > best_score:
+                best_score = combined
                 best_idx = idx
 
         if best_idx is not None:

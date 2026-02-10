@@ -18,7 +18,10 @@ from uuid import UUID
 
 from loguru import logger
 
-from khora._accel import levenshtein_similarity, sequence_match_ratio
+from khora._accel import (
+    levenshtein_similarity,
+    sequence_match_ratio,
+)
 from khora.core.models.entity import entity_type_str
 
 if TYPE_CHECKING:
@@ -35,7 +38,7 @@ DEFAULT_MERGE_THRESHOLDS: dict[str, float] = {
     "PERSON": 0.92,  # High - avoid merging different people
     "ORGANIZATION": 0.88,  # Medium-high - companies have unique names
     "LOCATION": 0.85,  # Medium - locations can have aliases
-    "CONCEPT": 0.75,  # Lower - concepts are fuzzy
+    "CONCEPT": 0.82,  # Raised to reduce over-merging of distinct concepts
     "EVENT": 0.80,  # Medium - events have specific names
     "TECHNOLOGY": 0.85,  # Medium - tech names are specific
     "PRODUCT": 0.85,  # Medium - product names are specific
