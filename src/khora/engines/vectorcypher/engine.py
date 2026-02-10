@@ -5,7 +5,7 @@ This engine implements the VectorCypher retrieval paradigm inspired by Graph RAG
 - Cypher traversal to expand relationships (Neo4j)
 - Query routing to optimize simple vs complex queries
 - HippoRAG 2 dual-node architecture (Entity + Chunk nodes)
-- Skeleton-based construction (KET-RAG) - full KG extraction for top 40% of chunks
+- Skeleton-based construction (KET-RAG) - full KG extraction for top chunks (default 70%)
 - Bi-temporal edges (Graphiti-style) - occurred_at vs ingested_at with invalidation
 
 Target: Sub-300ms P95 for simple queries, sub-800ms for complex multi-hop queries.
@@ -82,6 +82,10 @@ class VectorCypherConfig:
     fusion_rrf_k: int = 60
     fusion_vector_weight: float = 0.6
     fusion_graph_weight: float = 0.4
+    fusion_simple_vector_weight: float = 0.8
+    fusion_simple_graph_weight: float = 0.2
+    fusion_complex_vector_weight: float = 0.4
+    fusion_complex_graph_weight: float = 0.6
 
     # Temporal
     temporal_recency_weight: float = 0.2
@@ -94,7 +98,7 @@ class VectorCypherEngine:
     Key features:
     - Dual retrieval: Vector similarity (pgvector) + graph traversal (Neo4j)
     - Smart routing: Route queries to optimal path (simple vs complex)
-    - Skeleton indexing: Full KG extraction only for core 40% chunks
+    - Skeleton indexing: Full KG extraction only for core chunks (configurable ratio)
     - Bi-temporal model: Track occurred_at vs ingested_at
     - RRF fusion: Combine vector and graph scores
 
@@ -236,6 +240,10 @@ class VectorCypherEngine:
             rrf_k=self._vc_config.fusion_rrf_k,
             vector_weight=self._vc_config.fusion_vector_weight,
             graph_weight=self._vc_config.fusion_graph_weight,
+            simple_vector_weight=self._vc_config.fusion_simple_vector_weight,
+            simple_graph_weight=self._vc_config.fusion_simple_graph_weight,
+            complex_vector_weight=self._vc_config.fusion_complex_vector_weight,
+            complex_graph_weight=self._vc_config.fusion_complex_graph_weight,
             recency_weight=self._vc_config.temporal_recency_weight,
             recency_decay_days=self._vc_config.temporal_recency_decay_days,
         )
@@ -414,7 +422,7 @@ class VectorCypherEngine:
         The VectorCypher pipeline:
         1. Chunk the document
         2. Embed all chunks
-        3. Run skeleton indexing to identify core chunks (25%)
+        3. Run skeleton indexing to identify core chunks (configurable, default 70%)
         4. Extract entities only from core chunks
         5. Store chunks in pgvector and create Chunk nodes in Neo4j
         6. Link entities to chunks via MENTIONED_IN

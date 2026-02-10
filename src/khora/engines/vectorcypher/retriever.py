@@ -70,6 +70,12 @@ class RetrieverConfig:
     vector_weight: float = 0.6
     graph_weight: float = 0.4
 
+    # Per-complexity fusion overrides (used when routing is enabled)
+    simple_vector_weight: float = 0.8
+    simple_graph_weight: float = 0.2
+    complex_vector_weight: float = 0.4
+    complex_graph_weight: float = 0.6
+
     # Temporal settings
     recency_weight: float = 0.2
     recency_decay_days: int = 30
@@ -597,9 +603,11 @@ class VectorCypherRetriever:
         graph_weight = self._config.graph_weight
         if routing is not None:
             if routing.complexity == QueryComplexity.SIMPLE:
-                vector_weight, graph_weight = 0.8, 0.2
+                vector_weight = self._config.simple_vector_weight
+                graph_weight = self._config.simple_graph_weight
             elif routing.complexity == QueryComplexity.COMPLEX:
-                vector_weight, graph_weight = 0.4, 0.6
+                vector_weight = self._config.complex_vector_weight
+                graph_weight = self._config.complex_graph_weight
 
         if use_normalization:
             return weighted_rrf_normalized(

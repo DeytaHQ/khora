@@ -63,7 +63,7 @@ Choose GraphRAG instead when:
 
 2. **Query Routing**: Intelligent classification routes queries to optimal search paths (vector-only for simple queries, full VectorCypher for complex)
 
-3. **Skeleton-Based Extraction**: Only 25% of chunks (identified via PageRank) get full LLM entity extraction, balancing cost and quality
+3. **Skeleton-Based Extraction**: Only core chunks (identified via PageRank, default 70%) get full LLM entity extraction, balancing cost and quality
 
 4. **RRF Fusion**: Reciprocal Rank Fusion combines vector and graph results with configurable weights
 
@@ -299,7 +299,7 @@ config = VectorCypherConfig(
     routing_use_llm=False,  # Heuristic routing (faster)
 
     # Skeleton indexing
-    skeleton_core_ratio=0.25,  # 25% get full KG extraction
+    skeleton_core_ratio=0.70,  # 70% get full KG extraction
 
     # Graph traversal
     graph_default_depth=2,
@@ -342,7 +342,7 @@ vectorcypher:
     enabled: true
     use_llm: false
   skeleton:
-    core_ratio: 0.25
+    core_ratio: 0.70
   graph:
     default_depth: 2
     max_depth: 4
@@ -388,7 +388,7 @@ KHORA_NEO4J_PASSWORD=password
 | Metric | VectorCypher | Skeleton | GraphRAG |
 |--------|--------------|----------|----------|
 | LLM calls per 1000 docs | ~250 | ~100 | ~1000 |
-| Core chunk ratio | 25% | 10% | 100% |
+| Core chunk ratio | 70% (default) | 10% | 100% |
 | Multi-hop queries | Native | Limited | Full |
 | Graph database | Required | Not required | Required |
 | Query routing | Yes | No | No |

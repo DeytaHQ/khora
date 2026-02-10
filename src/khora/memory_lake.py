@@ -119,6 +119,7 @@ class MemoryLake:
         graph_url: str | None = None,
         embedding_model: str = "text-embedding-3-small",
         storage_config: StorageConfig | None = None,
+        engine_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the Memory Lake.
 
@@ -128,6 +129,8 @@ class MemoryLake:
             graph_url: Optional Neo4j/graph database URL (bolt://user:pass@host:port)
             embedding_model: Embedding model to use (default: text-embedding-3-small)
             storage_config: Storage configuration (derived from config if None) - deprecated
+            engine_kwargs: Additional keyword arguments forwarded to the engine constructor
+                (e.g., vectorcypher_config=VectorCypherConfig(...))
 
         Examples:
             # Simplest - from env vars
@@ -169,6 +172,7 @@ class MemoryLake:
         # Store for deferred engine creation
         self._engine_name = engine
         self._storage_config = storage_config  # for backwards compat
+        self._engine_kwargs = engine_kwargs or {}
         self._engine: MemoryEngineProtocol | None = None
         self._connected = False
 
@@ -185,6 +189,7 @@ class MemoryLake:
             self._engine_name,
             self._config,
             storage_config=self._storage_config,
+            **self._engine_kwargs,
         )
         await self._engine.connect()
 

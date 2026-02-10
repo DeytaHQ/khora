@@ -38,7 +38,7 @@ DEFAULT_MERGE_THRESHOLDS: dict[str, float] = {
     "PERSON": 0.92,  # High - avoid merging different people
     "ORGANIZATION": 0.88,  # Medium-high - companies have unique names
     "LOCATION": 0.85,  # Medium - locations can have aliases
-    "CONCEPT": 0.82,  # Raised to reduce over-merging of distinct concepts
+    "CONCEPT": 0.82,  # Moderate — prevents over-merging distinct concepts while allowing fuzzy matches
     "EVENT": 0.80,  # Medium - events have specific names
     "TECHNOLOGY": 0.85,  # Medium - tech names are specific
     "PRODUCT": 0.85,  # Medium - product names are specific
