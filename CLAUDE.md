@@ -12,6 +12,13 @@ uv run khora serve --reload  # Dev server
 uv run alembic upgrade head  # Run migrations
 ```
 
+**Version bumps:** When bumping the khora version, always bump `khora-accel` to the same version. Files to update:
+- `pyproject.toml` (khora version)
+- `src/khora/__init__.py` (`__version__`)
+- `rust/khora-accel/Cargo.toml` (khora-accel version)
+- `rust/khora-accel/pyproject.toml` (khora-accel version)
+- Run `uv lock` to update `uv.lock`, and `cargo generate-lockfile` in `rust/khora-accel/` to update `Cargo.lock`
+
 ## Architecture
 
 ```
