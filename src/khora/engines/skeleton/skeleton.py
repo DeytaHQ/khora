@@ -118,14 +118,32 @@ class SkeletonIndexer:
         if not self._chunks:
             return []
 
+        from khora._accel import build_chunk_edges, pagerank
+
         # Calculate IDF scores for keywords
         self._calculate_idf_scores()
 
-        # Build chunk-to-chunk edges via shared keywords
-        edges = self._build_chunk_edges()
+        # Map UUIDs to integer indices for accelerated computation
+        chunk_ids = list(self._chunks.keys())
+        n = len(chunk_ids)
+        chunk_idx = {cid: i for i, cid in enumerate(chunk_ids)}
 
-        # Run PageRank
-        self._calculate_pagerank(edges)
+        # Build keyword data for accelerated edge construction
+        keyword_list = list(self._keywords.values())
+        keyword_chunk_ids = [
+            [chunk_idx[cid] for cid in kw_node.chunk_ids if cid in chunk_idx] for kw_node in keyword_list
+        ]
+        idf_scores = [kw_node.idf_score for kw_node in keyword_list]
+
+        # Build edges via _accel (Rust or Python fallback)
+        edges = build_chunk_edges(n, keyword_chunk_ids, idf_scores)
+
+        # Run PageRank via _accel (Rust or Python fallback)
+        scores = pagerank(n, edges, self._damping_factor, self._max_iterations, self._convergence_threshold)
+
+        # Store scores back to chunk nodes
+        for i, cid in enumerate(chunk_ids):
+            self._chunks[cid].pagerank_score = scores[i]
 
         # Select core chunks
         core_ids = self._select_core_chunks()
@@ -418,105 +436,14 @@ class SkeletonIndexer:
     # =========================================================================
 
     def _extract_keywords(self, content: str) -> set[str]:
-        """Extract keywords from content using simple TF approach.
+        """Extract keywords from content using accelerated extraction.
 
-        Uses stopword filtering and basic normalization.
+        Delegates to ``khora._accel.extract_keywords`` which uses
+        Rust (if available) > pure Python with stopword filtering.
         """
-        # Simple stopword list (expand as needed)
-        stopwords = {
-            "a",
-            "an",
-            "the",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "of",
-            "with",
-            "by",
-            "from",
-            "as",
-            "is",
-            "was",
-            "are",
-            "were",
-            "been",
-            "be",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "could",
-            "should",
-            "may",
-            "might",
-            "must",
-            "that",
-            "this",
-            "these",
-            "those",
-            "it",
-            "its",
-            "he",
-            "she",
-            "they",
-            "them",
-            "his",
-            "her",
-            "their",
-            "we",
-            "our",
-            "you",
-            "your",
-            "i",
-            "me",
-            "my",
-            "what",
-            "which",
-            "who",
-            "whom",
-            "when",
-            "where",
-            "why",
-            "how",
-            "all",
-            "each",
-            "every",
-            "both",
-            "few",
-            "more",
-            "most",
-            "other",
-            "some",
-            "such",
-            "no",
-            "not",
-            "only",
-            "own",
-            "same",
-            "so",
-            "than",
-            "too",
-            "very",
-            "just",
-            "can",
-        }
+        from khora._accel import extract_keywords
 
-        # Tokenize and normalize
-        import re
-
-        words = re.findall(r"\b[a-zA-Z]{3,}\b", content.lower())
-        keywords = {w for w in words if w not in stopwords}
-
-        return keywords
+        return set(extract_keywords(content))
 
     def _calculate_idf_scores(self) -> None:
         """Calculate IDF scores for all keywords."""

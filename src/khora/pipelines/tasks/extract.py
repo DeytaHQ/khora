@@ -153,6 +153,12 @@ async def extract_entities(
                 )
                 all_entities[key] = entity
 
+        # Build name→key lookup for O(1) relationship resolution
+        entity_name_to_key: dict[str, str] = {}
+        for key in all_entities:
+            name_part = key.split(":")[0]
+            entity_name_to_key[name_part] = key
+
         # Process relationships
         for extracted_rel in result.relationships:
             if extracted_rel.confidence < min_relationship_confidence:
@@ -165,14 +171,8 @@ async def extract_entities(
                 rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
             # Find source and target entities
-            source_key = next(
-                (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
-                None,
-            )
-            target_key = next(
-                (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
-                None,
-            )
+            source_key = entity_name_to_key.get(extracted_rel.source_entity)
+            target_key = entity_name_to_key.get(extracted_rel.target_entity)
 
             if source_key and target_key:
                 relationship = Relationship(
