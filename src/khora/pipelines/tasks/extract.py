@@ -21,6 +21,7 @@ async def extract_entities(
     max_retries: int = 3,
     retry_wait: float = 2.0,
     extraction_batch_size: int = 10,
+    max_tokens: int | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
 
@@ -79,13 +80,16 @@ async def extract_entities(
         min_relationship_confidence = skill.min_relationship_confidence
 
     # Create extractor with concurrency limit and timeout settings
-    extractor = LLMEntityExtractor(
+    extractor_kwargs = dict(
         model=model,
         max_concurrent=max_concurrent,
         timeout=timeout,
         max_retries=max_retries,
         retry_wait=retry_wait,
     )
+    if max_tokens is not None:
+        extractor_kwargs["max_tokens"] = max_tokens
+    extractor = LLMEntityExtractor(**extractor_kwargs)
 
     # Extract from all chunks using adaptive token-budget-based batching
     # Groups chunks into batches that fit within the model's input token budget,

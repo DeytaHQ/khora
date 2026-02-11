@@ -118,6 +118,8 @@ class Entity:
         """Sanitize fields that must not be None (LLM sometimes returns null)."""
         if self.name is None:
             self.name = ""
+        if len(self.name) > 512:
+            self.name = self.name[:509] + "..."
         if self.description is None:
             self.description = ""
         if self.source_tool is None:

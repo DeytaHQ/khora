@@ -42,6 +42,7 @@ async def stream_extract_and_embed_entities(
     extraction_retry_wait: float = 2.0,
     embedding_batch_size: int = 100,
     extraction_batch_size: int = 10,
+    extraction_max_tokens: int | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities from chunks and embed them in a streaming fashion.
 
@@ -94,13 +95,16 @@ async def stream_extract_and_embed_entities(
     async def extraction_task() -> None:
         """Extract entities from chunks and queue them for embedding."""
         try:
-            extractor = LLMEntityExtractor(
+            extractor_kwargs = dict(
                 model=model,
                 max_concurrent=max_concurrent_extractions,
                 timeout=extraction_timeout,
                 max_retries=extraction_max_retries,
                 retry_wait=extraction_retry_wait,
             )
+            if extraction_max_tokens is not None:
+                extractor_kwargs["max_tokens"] = extraction_max_tokens
+            extractor = LLMEntityExtractor(**extractor_kwargs)
 
             texts = [chunk.content for chunk in chunks]
 
@@ -355,6 +359,7 @@ async def process_document(
     extraction_max_retries: int = 3,
     extraction_retry_wait: float = 2.0,
     extraction_batch_size: int = 10,
+    extraction_max_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -448,6 +453,7 @@ async def process_document(
                     max_retries=extraction_max_retries,
                     retry_wait=extraction_retry_wait,
                     extraction_batch_size=extraction_batch_size,
+                    max_tokens=extraction_max_tokens,
                 )
 
         embedded_chunks, (entities, relationships) = await asyncio.gather(
@@ -722,6 +728,7 @@ async def ingest_documents(
     extraction_max_retries: int = 3,
     extraction_retry_wait: float = 2.0,
     extraction_batch_size: int = 10,
+    extraction_max_tokens: int | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -747,6 +754,7 @@ async def ingest_documents(
         skip_resolution: If True, skip Phase 3 (smart resolution). Useful when the
             caller runs resolution separately after all batches are processed.
         extraction_batch_size: Max texts per LLM extraction call (default 10)
+        extraction_max_tokens: Max tokens for LLM extraction response. If None, uses extractor default.
 
     Returns:
         Summary of ingestion results
@@ -852,6 +860,7 @@ async def ingest_documents(
                 extraction_max_retries=extraction_max_retries,
                 extraction_retry_wait=extraction_retry_wait,
                 extraction_batch_size=extraction_batch_size,
+                extraction_max_tokens=extraction_max_tokens,
             )
 
     results = await asyncio.gather(

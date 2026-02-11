@@ -164,7 +164,7 @@ class LLMEntityExtractor(EntityExtractor):
         model: str = "gpt-4o-mini",
         *,
         temperature: float = 0.3,  # Lower for more consistent extraction
-        max_tokens: int = 4000,
+        max_tokens: int = 16384,
         timeout: int = 60,
         max_retries: int = 3,
         max_concurrent: int = 10,
