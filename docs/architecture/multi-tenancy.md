@@ -1,5 +1,7 @@
 # Multi-Tenancy
 
+> **Status (v0.2.3):** The `TenancyMode` enum and ACL enforcement code described below exist in the codebase but are **not wired at runtime**. Currently only namespace-level row filtering is active. See `docs/design/namespace-optimization-plan.md` for the implementation roadmap.
+
 Different teams need different data. Different projects shouldn't mix. Sometimes you need complete isolation for compliance. Khora's multi-tenancy model handles all of this through a simple hierarchy: Organizations contain Workspaces contain Namespaces.
 
 ## The Hierarchy

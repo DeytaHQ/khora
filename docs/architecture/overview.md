@@ -179,7 +179,7 @@ Built on Prefect, it manages the ingestion workflow - chunking documents, genera
 
 ## Multi-Tenancy: Who Owns What
 
-Khora supports multiple isolated data spaces through a hierarchy:
+Khora supports multiple isolated data spaces through a hierarchy (ACL enforcement is designed but not yet wired at runtime — see `docs/design/namespace-optimization-plan.md`):
 
 ```
 Organization

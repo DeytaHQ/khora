@@ -24,7 +24,7 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
 - **Pluggable Engines**: Choose GraphRAG (knowledge graphs) or Skeleton (temporal-first)
 - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
-- **Multi-Tenancy**: Shared mode with ACLs or complete tenant isolation
+- **Multi-Tenancy**: Namespace-level isolation (shared mode with ACLs designed but not yet active — see `docs/design/namespace-optimization-plan.md`)
 - **Event Sourcing**: Immutable event log for temporal queries and audit trails
 - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
 - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection

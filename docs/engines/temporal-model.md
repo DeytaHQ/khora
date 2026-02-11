@@ -1,5 +1,7 @@
 # Temporal Model
 
+> **Status (v0.2.3):** The bi-temporal edge storage (`TemporalEdgeStorage`) and time hierarchy (`TimeHierarchyBuilder`) described here exist as code but are **never called** by any engine's ingest or recall paths. The `occurred_at` column on chunks is populated and filterable via the pgvector backend, but the full bi-temporal edge model is not yet active.
+
 The Skeleton Construction engine implements a bi-temporal model inspired by [Graphiti](https://github.com/getzep/graphiti), with a hierarchical time graph inspired by [TG-RAG](https://arxiv.org/abs/2410.15149). This document explains the theory and implementation.
 
 ## Bi-Temporal Theory
