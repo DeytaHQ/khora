@@ -2,6 +2,66 @@
 
 All notable changes to Khora are documented here.
 
+## [0.2.3] — Namespace Optimization Design
+
+### Why: surfacing what's real vs. what's aspirational
+
+A team of five specialist agents audited Khora's namespace isolation,
+multi-tenancy enforcement, and temporal extraction paths. The audit
+found that several documented features — `TenancyMode` routing, ACL
+enforcement, bi-temporal edge storage, and the time hierarchy builder —
+exist as code but are never exercised at runtime. Meanwhile, the
+namespace-level row filtering that *is* active lacks an orphan-entity
+cleanup path when documents are deleted. This release ships the
+comprehensive design for fixing all of it, marks the stale
+documentation, and inventories the dead code so the next releases can
+act on it.
+
+### Namespace optimization design
+
+New `docs/design/namespace-optimization-plan.md` lays out a six-phase
+implementation roadmap:
+
+1. **Orphan fix** — delete graph entities left behind after `forget()`.
+2. **Data-model hardening** — add `namespace_id` to Neo4j entity/chunk
+   nodes and enforce it in Cypher queries.
+3. **Isolated-mode core** — per-org connection routing driven by
+   `TenancyMode.ISOLATED`.
+4. **Shared-mode ACL** — wire `ACLEnforcer` into the API dependency
+   chain for `TenancyMode.SHARED`.
+5. **ACL enforcement** — row-level security policies and graph-side
+   namespace filtering.
+6. **Rust acceleration** — move hot-path namespace filtering into
+   `khora-accel`.
+
+### Dead-code inventory
+
+- `TenancyMode` enum (`core/models/tenancy.py`) is defined but never
+  checked at runtime — all orgs use implicit shared mode.
+- `ACLEnforcer` and `ACLContext` (`acl/`) are importable but the API
+  dependency in `api/deps.py` is disabled.
+- `TemporalEdgeStorage` and `TimeHierarchyBuilder` (`engines/skeleton/`)
+  exist as modules but are never called by any engine's ingest or recall
+  paths. The `occurred_at` column on chunks works through the pgvector
+  backend directly.
+
+### Stale documentation fixes
+
+Added status notices to five documentation files flagging features that
+are designed but not yet wired:
+
+- `docs/architecture/multi-tenancy.md` — TenancyMode and ACL sections.
+- `docs/engines/temporal-model.md` — bi-temporal edge model.
+- `docs/engines/skeleton-engine.md` — architecture diagram components.
+- `README.md` — multi-tenancy feature bullet.
+- `docs/architecture/overview.md` — ACL enforcer mention.
+
+### Housekeeping
+
+- Bumped version from 0.2.2 to 0.2.3.
+
+---
+
 ## [0.2.2] — VectorCypher Optimization
 
 ### Why: making hybrid retrieval competitive on benchmarks

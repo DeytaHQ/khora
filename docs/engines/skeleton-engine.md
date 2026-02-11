@@ -45,6 +45,8 @@ Choose GraphRAG instead when:
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
+> **Note (v0.2.3):** `TemporalEdge Storage` and `TimeHierarchy Builder` shown above exist as code modules but are not yet wired into the engine's ingest/recall pipeline. Temporal filtering via `occurred_at` on chunks works through the pgvector backend directly.
+
 ### Core Design Principles
 
 1. **Bi-Temporal Model**: Every piece of data has two timestamps:
