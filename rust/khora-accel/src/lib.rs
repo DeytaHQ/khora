@@ -30,6 +30,11 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(string_sim::sequence_match_ratio, m)?)?;
     m.add_function(wrap_pyfunction!(string_sim::batch_levenshtein, m)?)?;
     m.add_function(wrap_pyfunction!(string_sim::batch_sequence_match, m)?)?;
+    m.add_function(wrap_pyfunction!(string_sim::normalize_entity_name, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        string_sim::normalize_entity_names_batch,
+        m
+    )?)?;
 
     // BM25
     m.add_class::<bm25::RustBM25Index>()?;
@@ -42,6 +47,7 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rrf::reciprocal_rank_fusion, m)?)?;
     m.add_function(wrap_pyfunction!(rrf::weighted_rrf, m)?)?;
     m.add_function(wrap_pyfunction!(rrf::normalize_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(rrf::weighted_rrf_normalized, m)?)?;
 
     // Entity resolution
     m.add_function(wrap_pyfunction!(

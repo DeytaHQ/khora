@@ -44,6 +44,8 @@ try:
     from khora_accel import extract_keywords as _rust_extract_keywords
     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
     from khora_accel import levenshtein_similarity as _rust_levenshtein
+    from khora_accel import normalize_entity_name as _rust_normalize_entity_name
+    from khora_accel import normalize_entity_names_batch as _rust_normalize_entity_names_batch
     from khora_accel import normalize_scores as _rust_normalize_scores
     from khora_accel import pagerank as _rust_pagerank
     from khora_accel import pairwise_cosine_above_threshold as _rust_pairwise_cosine
@@ -52,6 +54,7 @@ try:
     from khora_accel import resolve_entities_enhanced as _rust_resolve_entities_enhanced
     from khora_accel import sequence_match_ratio as _rust_sequence_match
     from khora_accel import weighted_rrf as _rust_weighted_rrf
+    from khora_accel import weighted_rrf_normalized as _rust_weighted_rrf_normalized
 
     _HAS_RUST = True
 except ImportError:  # pragma: no cover
@@ -635,6 +638,68 @@ def normalize_scores(scores: list[float]) -> list[float]:
         return [1.0] * len(scores)
     rng = max_s - min_s
     return [(s - min_s) / rng for s in scores]
+
+
+def weighted_rrf_normalized(
+    vector_results: list[tuple[str, float]],
+    graph_results: list[tuple[str, float]],
+    k: int = 60,
+    vector_weight: float = 0.6,
+    graph_weight: float = 0.4,
+) -> list[tuple[str, float]]:
+    """Weighted RRF with score normalization. Rust > Python fallback."""
+    if _HAS_RUST:
+        return _rust_weighted_rrf_normalized(vector_results, graph_results, k, vector_weight, graph_weight)
+
+    # Python fallback - same logic as Rust
+    scores: dict[str, float] = {}
+    contributions: dict[str, float] = {}
+
+    if vector_results:
+        raw = [s for _, s in vector_results]
+        normalized = normalize_scores(raw)
+        for rank_0, ((item_id, _), norm) in enumerate(zip(vector_results, normalized)):
+            scores[item_id] = scores.get(item_id, 0.0) + vector_weight / (k + rank_0 + 1)
+            contributions[item_id] = contributions.get(item_id, 0.0) + vector_weight * norm * 0.01
+
+    if graph_results:
+        raw = [s for _, s in graph_results]
+        normalized = normalize_scores(raw)
+        for rank_0, ((item_id, _), norm) in enumerate(zip(graph_results, normalized)):
+            scores[item_id] = scores.get(item_id, 0.0) + graph_weight / (k + rank_0 + 1)
+            contributions[item_id] = contributions.get(item_id, 0.0) + graph_weight * norm * 0.01
+
+    results = [(id, scores[id] + contributions.get(id, 0.0)) for id in scores]
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Entity name normalization
+# ---------------------------------------------------------------------------
+
+_HONORIFICS = ("mr.", "mrs.", "ms.", "dr.", "prof.", "sir ", "lord ", "lady ")
+
+
+def normalize_entity_name(name: str) -> str:
+    """Normalize entity name for dedup. Rust > Python."""
+    if _HAS_RUST:
+        return _rust_normalize_entity_name(name)
+    result = name.lower()
+    for h in _HONORIFICS:
+        if result.startswith(h):
+            result = result[len(h) :]
+            break
+    result = " ".join(result.split())
+    result = result.strip().strip(".,;:!?\"'()-[]{}").strip()
+    return result
+
+
+def normalize_entity_names_batch(names: list[str]) -> list[str]:
+    """Batch normalize entity names. Rust > Python."""
+    if _HAS_RUST:
+        return _rust_normalize_entity_names_batch(names)
+    return [normalize_entity_name(n) for n in names]
 
 
 # ---------------------------------------------------------------------------

@@ -59,6 +59,87 @@ pub fn weighted_rrf(
     results
 }
 
+/// Weighted RRF with score normalization before fusion.
+///
+/// 1. Min-max normalizes vector and graph scores independently
+/// 2. Computes weighted RRF: weight / (k + rank)
+/// 3. Adds small normalized score contribution for tiebreaking (0.01 * weight * norm_score)
+/// 4. Returns sorted (id, combined_score) pairs
+///
+/// Releases the GIL for computation.
+#[pyfunction]
+#[pyo3(signature = (vector_results, graph_results, k = 60, vector_weight = 0.6, graph_weight = 0.4))]
+pub fn weighted_rrf_normalized(
+    py: Python<'_>,
+    vector_results: Vec<(String, f64)>,
+    graph_results: Vec<(String, f64)>,
+    k: usize,
+    vector_weight: f64,
+    graph_weight: f64,
+) -> Vec<(String, f64)> {
+    py.allow_threads(|| {
+        let mut scores: HashMap<String, f64> = HashMap::new();
+        let mut score_contributions: HashMap<String, f64> = HashMap::new();
+
+        // Normalize and process vector results
+        if !vector_results.is_empty() {
+            let raw_scores: Vec<f64> = vector_results.iter().map(|(_, s)| *s).collect();
+            let normalized = min_max_normalize(&raw_scores);
+
+            for (rank_0, ((item_id, _), norm_score)) in
+                vector_results.iter().zip(normalized.iter()).enumerate()
+            {
+                let rank = rank_0 + 1;
+                *scores.entry(item_id.clone()).or_insert(0.0) +=
+                    vector_weight / (k as f64 + rank as f64);
+                *score_contributions.entry(item_id.clone()).or_insert(0.0) +=
+                    vector_weight * norm_score * 0.01;
+            }
+        }
+
+        // Normalize and process graph results
+        if !graph_results.is_empty() {
+            let raw_scores: Vec<f64> = graph_results.iter().map(|(_, s)| *s).collect();
+            let normalized = min_max_normalize(&raw_scores);
+
+            for (rank_0, ((item_id, _), norm_score)) in
+                graph_results.iter().zip(normalized.iter()).enumerate()
+            {
+                let rank = rank_0 + 1;
+                *scores.entry(item_id.clone()).or_insert(0.0) +=
+                    graph_weight / (k as f64 + rank as f64);
+                *score_contributions.entry(item_id.clone()).or_insert(0.0) +=
+                    graph_weight * norm_score * 0.01;
+            }
+        }
+
+        // Combine
+        let mut results: Vec<(String, f64)> = scores
+            .into_iter()
+            .map(|(id, rrf)| {
+                let contrib = score_contributions.get(&id).copied().unwrap_or(0.0);
+                (id, rrf + contrib)
+            })
+            .collect();
+
+        results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
+        results
+    })
+}
+
+fn min_max_normalize(scores: &[f64]) -> Vec<f64> {
+    if scores.is_empty() {
+        return vec![];
+    }
+    let min = scores.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if (max - min).abs() < f64::EPSILON {
+        return vec![1.0; scores.len()];
+    }
+    let range = max - min;
+    scores.iter().map(|&s| (s - min) / range).collect()
+}
+
 /// Min-max normalise a list of scores to `[0, 1]`.
 ///
 /// If all scores are identical, returns a vector of `1.0`.

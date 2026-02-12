@@ -25,7 +25,16 @@ from loguru import logger
 from neo4j import AsyncGraphDatabase
 
 from khora.config import KhoraConfig, LiteLLMConfig
-from khora.core.models import Chunk, Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+from khora.core.models import (
+    Chunk,
+    Document,
+    DocumentMetadata,
+    Entity,
+    MemoryNamespace,
+    Organization,
+    Relationship,
+    Workspace,
+)
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.extraction.embedders import LiteLLMEmbedder
@@ -90,6 +99,18 @@ class VectorCypherConfig:
     # Temporal
     temporal_recency_weight: float = 0.2
     temporal_recency_decay_days: int = 30
+    recency_decay_type: str = "exponential"  # "linear" or "exponential"
+
+    # Query caching
+    query_cache_ttl_seconds: int = 0  # 0 = disabled
+    query_cache_max_size: int = 100
+
+    # Streaming pipeline (A-1: batch entity storage across documents)
+    streaming_pipeline: bool = True
+    enable_smart_resolution: bool = True
+
+    # Lazy entity expansion
+    lazy_entity_expansion: bool = False
 
     # Search thresholds
     fusion_hybrid_alpha: float = 0.7
@@ -190,15 +211,7 @@ class VectorCypherEngine:
 
         logger.info("Connecting VectorCypher engine...")
 
-        # Create and connect relational storage
-        self._storage = create_storage_coordinator(self._storage_config)
-        await self._storage.connect()
-
-        # Create and connect temporal vector store (pgvector)
-        self._temporal_store = create_temporal_store("pgvector", self._config)
-        await self._temporal_store.connect()
-
-        # Connect to Neo4j (required for VectorCypher)
+        # Connect to Neo4j (required for VectorCypher) — single shared driver
         neo4j_url = self._config.get_neo4j_url()
         if not neo4j_url:
             raise ValueError(
@@ -212,6 +225,22 @@ class VectorCypherEngine:
         )
         await self._neo4j_driver.verify_connectivity()
 
+        # Create and connect relational storage, sharing the Neo4j driver
+        # so only one connection pool is used for the entire engine.
+        self._storage = create_storage_coordinator(self._storage_config)
+
+        from khora.storage.backends.neo4j import Neo4jBackend
+
+        neo4j_database = self._config.get_neo4j_database() or "neo4j"
+        if self._storage.graph is not None:
+            self._storage.graph = Neo4jBackend.from_driver(self._neo4j_driver, database=neo4j_database)
+
+        await self._storage.connect()
+
+        # Create and connect temporal vector store (pgvector)
+        self._temporal_store = create_temporal_store("pgvector", self._config)
+        await self._temporal_store.connect()
+
         # Create embedder
         llm_config = LiteLLMConfig(
             model=self._config.llm.model,
@@ -223,7 +252,6 @@ class VectorCypherEngine:
         self._embedder = LiteLLMEmbedder.from_config(llm_config)
 
         # Initialize dual node manager
-        neo4j_database = self._config.get_neo4j_database() or "neo4j"
         self._dual_nodes = DualNodeManager(self._neo4j_driver, neo4j_database)
         await self._dual_nodes.ensure_indexes()
 
@@ -250,8 +278,12 @@ class VectorCypherEngine:
             complex_graph_weight=self._vc_config.fusion_complex_graph_weight,
             recency_weight=self._vc_config.temporal_recency_weight,
             recency_decay_days=self._vc_config.temporal_recency_decay_days,
+            recency_decay_type=self._vc_config.recency_decay_type,
             min_entity_similarity=self._vc_config.retriever_min_entity_similarity,
             hybrid_alpha=self._vc_config.fusion_hybrid_alpha,
+            query_cache_ttl_seconds=self._vc_config.query_cache_ttl_seconds,
+            query_cache_max_size=self._vc_config.query_cache_max_size,
+            lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
@@ -632,6 +664,166 @@ class VectorCypherEngine:
 
         return len(entities), relationships_created
 
+    async def _run_skeleton_extraction_deferred(
+        self,
+        chunks: list[TemporalChunk],
+        namespace_id: UUID,
+        *,
+        skill_name: str = "general_entities",
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_model: str | None = None,
+    ) -> tuple[list[Entity], list[Relationship], list[EntityChunkLink]]:
+        """Run skeleton extraction but return results instead of storing.
+
+        Same as _run_skeleton_extraction but defers storage so the caller
+        can accumulate entities across multiple documents for batch storage.
+
+        Returns:
+            Tuple of (entities_with_embeddings, relationships, entity_chunk_links)
+        """
+        from khora.pipelines.tasks.extract import extract_entities
+
+        if not chunks:
+            return [], [], []
+
+        skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+        skeleton.add_chunks_batch(chunks)
+        core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+
+        logger.debug(f"Skeleton indexing (deferred): {len(core_ids)}/{len(chunks)} core chunks")
+
+        if not core_ids:
+            return [], [], []
+
+        core_temporal_chunks = [c for c in chunks if c.id in core_ids]
+        chunk_objects = [
+            Chunk(
+                id=tc.id,
+                namespace_id=tc.namespace_id,
+                document_id=tc.document_id,
+                content=tc.content,
+                created_at=tc.created_at or tc.occurred_at,
+            )
+            for tc in core_temporal_chunks
+        ]
+
+        model = extraction_model or self._config.llm.model
+        entities, relationships = await extract_entities(
+            chunk_objects,
+            skill_name=skill_name,
+            expertise=expertise,
+            model=model,
+            max_concurrent=self._config.llm.max_concurrent_llm_calls,
+        )
+
+        if not entities:
+            return [], [], []
+
+        # Compute entity embeddings
+        embedder = self._get_embedder()
+        entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities]
+        entity_embeddings = await embedder.embed_batch(entity_texts)
+        for entity, embedding in zip(entities, entity_embeddings):
+            entity.embedding = embedding
+            entity.embedding_model = embedder.model_name
+
+        # Build entity-chunk links
+        entity_chunk_links: list[EntityChunkLink] = []
+        for entity in entities:
+            for chunk_id in entity.source_chunk_ids:
+                entity_chunk_links.append(EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id))
+
+        return entities, relationships, entity_chunk_links
+
+    async def _process_document_streaming(
+        self,
+        document: Document,
+        *,
+        skill_name: str,
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_model: str | None = None,
+        occurred_at: datetime,
+    ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
+        """Process a document, returning entities for deferred batch storage.
+
+        Same as _process_document but returns entities/rels/links instead of
+        storing them, allowing the caller to batch across documents.
+
+        Returns:
+            Tuple of (chunks_created, entities, relationships, entity_chunk_links)
+        """
+        from khora.pipelines.chunking import create_chunker  # type: ignore[unresolved-import]
+        from khora.pipelines.chunking.config import ChunkerConfig  # type: ignore[unresolved-import]
+
+        storage = self._get_storage()
+        embedder = self._get_embedder()
+        temporal_store = self._get_temporal_store()
+        dual_nodes = self._get_dual_nodes()
+
+        chunker_config = ChunkerConfig(
+            strategy=self._config.pipeline.chunking_strategy,
+            chunk_size=self._config.pipeline.chunk_size,
+            chunk_overlap=self._config.pipeline.chunk_overlap,
+        )
+        chunker = create_chunker(chunker_config)
+        raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
+
+        if not raw_chunks:
+            document.mark_completed(0, 0)
+            await storage.update_document(document)
+            return 0, [], [], []
+
+        chunk_texts = [c.content for c in raw_chunks]
+        embeddings = await embedder.embed_batch(chunk_texts)
+        doc_metadata = document.metadata.custom if document.metadata else {}
+
+        temporal_chunks = []
+        for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+            temporal_chunk = TemporalChunk(
+                id=None,
+                namespace_id=document.namespace_id,
+                document_id=document.id,
+                content=raw_chunk.content,
+                embedding=embedding,
+                occurred_at=occurred_at,
+                created_at=datetime.now(UTC),
+                source_system=doc_metadata.get("source_system"),
+                author=doc_metadata.get("author"),
+                channel=doc_metadata.get("channel"),
+                tags=doc_metadata.get("tags", []),
+                confidence=1.0,
+                metadata={
+                    "chunk_index": i,
+                    "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+                    "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                },
+            )
+            temporal_chunks.append(temporal_chunk)
+
+        # Store chunks in pgvector
+        stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+        for i, stored in enumerate(stored_chunks):
+            temporal_chunks[i].id = stored.id
+
+        # Create Chunk nodes in Neo4j
+        await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+
+        # Deferred skeleton extraction — returns entities instead of storing
+        entities: list[Entity] = []
+        relationships: list[Relationship] = []
+        entity_chunk_links: list[EntityChunkLink] = []
+
+        if self._config.pipeline.extract_entities:
+            entities, relationships, entity_chunk_links = await self._run_skeleton_extraction_deferred(
+                temporal_chunks,
+                document.namespace_id,
+                skill_name=skill_name,
+                expertise=expertise,
+                extraction_model=extraction_model,
+            )
+
+        return len(stored_chunks), entities, relationships, entity_chunk_links
+
     def _validate_recall_results(
         self,
         chunks: list[tuple[dict[str, Any], float]],
@@ -863,6 +1055,14 @@ class VectorCypherEngine:
 
         semaphore = asyncio.Semaphore(max_concurrent)
 
+        use_streaming = self._vc_config.streaming_pipeline
+
+        # Streaming pipeline: accumulate entities across documents for batch storage
+        all_entities: list[Entity] = []
+        all_relationships: list[Relationship] = []
+        all_entity_chunk_links: list[EntityChunkLink] = []
+        entity_lock = asyncio.Lock()
+
         async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
             nonlocal progress_count
 
@@ -891,26 +1091,64 @@ class VectorCypherEngine:
                     if "occurred_at" in doc_metadata:
                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
 
-                    result = await self.remember(
-                        doc_data.get("content", ""),
-                        namespace_id,
-                        title=doc_data.get("title", ""),
-                        source=doc_data.get("source", ""),
-                        metadata=doc_metadata,
-                        skill_name=skill_name,
-                        expertise=expertise,
-                        extraction_model=extraction_model,
-                        occurred_at=occurred_at,
-                    )
+                    if use_streaming:
+                        # Streaming path: create document + process, defer entity storage
+                        document = Document(
+                            namespace_id=namespace_id,
+                            content=doc_data.get("content", ""),
+                            title=doc_data.get("title", ""),
+                            source=doc_data.get("source", ""),
+                            content_hash=checksum,
+                            metadata=DocumentMetadata(custom=doc_metadata),
+                        )
+                        document = await storage.create_document(document)
 
-                    async with results_lock:
-                        if result.metadata.get("duplicate"):
-                            results["skipped"] += 1
-                        else:
+                        chunks_created, entities, rels, links = await self._process_document_streaming(
+                            document,
+                            skill_name=skill_name,
+                            expertise=expertise,
+                            extraction_model=extraction_model,
+                            occurred_at=occurred_at or datetime.now(UTC),
+                        )
+
+                        # Accumulate entities for batch storage
+                        if entities or rels or links:
+                            async with entity_lock:
+                                all_entities.extend(entities)
+                                all_relationships.extend(rels)
+                                all_entity_chunk_links.extend(links)
+
+                        # Update document status
+                        document.mark_completed(chunks_created, len(entities))
+                        await storage.update_document(document)
+
+                        async with results_lock:
                             results["processed"] += 1
-                            results["chunks"] += result.chunks_created
-                            results["entities"] += result.entities_extracted
-                            results["relationships"] += result.relationships_created
+                            results["chunks"] += chunks_created
+                            results["entities"] += len(entities)
+                            results["relationships"] += len(rels)
+                    else:
+                        # Legacy path: per-document storage
+                        result = await self.remember(
+                            doc_data.get("content", ""),
+                            namespace_id,
+                            title=doc_data.get("title", ""),
+                            source=doc_data.get("source", ""),
+                            metadata=doc_metadata,
+                            skill_name=skill_name,
+                            expertise=expertise,
+                            extraction_model=extraction_model,
+                            occurred_at=occurred_at,
+                        )
+
+                        async with results_lock:
+                            if result.metadata.get("duplicate"):
+                                results["skipped"] += 1
+                            else:
+                                results["processed"] += 1
+                                results["chunks"] += result.chunks_created
+                                results["entities"] += result.entities_extracted
+                                results["relationships"] += result.relationships_created
 
                 except Exception as e:
                     logger.error(f"Failed to process document: {e}")
@@ -922,7 +1160,47 @@ class VectorCypherEngine:
                     progress_count += 1
                     on_progress(progress_count, total)
 
+        # Phase 2: Process all documents in parallel
         await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
+
+        # Phase 3: Batch entity storage (streaming pipeline only)
+        if use_streaming and all_entities:
+            dual_nodes = self._get_dual_nodes()
+
+            # Cross-document entity dedup by normalized name:type
+            if self._vc_config.enable_smart_resolution:
+                from khora._accel import normalize_entity_name
+
+                deduped: dict[str, Entity] = {}
+                for entity in all_entities:
+                    key = f"{normalize_entity_name(entity.name)}:{entity.entity_type}"
+                    if key in deduped:
+                        existing = deduped[key]
+                        existing.mention_count += entity.mention_count
+                        for doc_id in entity.source_document_ids:
+                            if doc_id not in existing.source_document_ids:
+                                existing.source_document_ids.append(doc_id)
+                        for chunk_id in entity.source_chunk_ids:
+                            if chunk_id not in existing.source_chunk_ids:
+                                existing.source_chunk_ids.append(chunk_id)
+                    else:
+                        deduped[key] = entity
+                all_entities = list(deduped.values())
+                logger.debug(f"Cross-document dedup: {len(deduped)} unique entities")
+
+            # Single batch upsert to Neo4j + pgvector
+            await storage.upsert_entities_batch(namespace_id, all_entities)
+
+            if all_relationships:
+                await storage.create_relationships_batch(all_relationships)
+
+            if all_entity_chunk_links:
+                await dual_nodes.link_entities_to_chunks_batch(all_entity_chunk_links)
+
+            logger.info(
+                f"Streaming pipeline batch store: {len(all_entities)} entities, "
+                f"{len(all_relationships)} relationships, {len(all_entity_chunk_links)} links"
+            )
 
         return BatchResult(
             total=total,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -17,6 +18,15 @@ from .base import (
     ExtractionResult,
     TemporalInfo,
 )
+
+# ---------------------------------------------------------------------------
+# Regex patterns for tiered extraction (A-4)
+# ---------------------------------------------------------------------------
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_DATE_RE = re.compile(r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b")
+_PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b")
+_SINGLE_CAPITALIZED_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
 
 if TYPE_CHECKING:
     from khora.config import LiteLLMConfig
@@ -197,6 +207,36 @@ class LLMEntityExtractor(EntityExtractor):
         """
         return len(text) // 3
 
+    @staticmethod
+    def _regex_extract(text: str) -> ExtractionResult:
+        """Extract entities from short text using regex patterns.
+
+        Used for texts under the tiered extraction threshold (default 200 chars)
+        to avoid LLM API calls for content that's too short for rich extraction.
+        """
+        entities: list[ExtractedEntity] = []
+        seen_names: set[str] = set()
+
+        def _add(name: str, etype: str, conf: float = 0.6) -> None:
+            lower = name.lower().strip()
+            if lower and lower not in seen_names and len(lower) > 1:
+                seen_names.add(lower)
+                entities.append(ExtractedEntity(name=name.strip(), entity_type=etype, confidence=conf))
+
+        for m in _EMAIL_RE.finditer(text):
+            _add(m.group(), "EMAIL", 0.9)
+        for m in _URL_RE.finditer(text):
+            _add(m.group(), "URL", 0.9)
+        for m in _DATE_RE.finditer(text):
+            _add(m.group(), "DATE", 0.8)
+        for m in _PROPER_NOUN_RE.finditer(text):
+            _add(m.group(), "PERSON", 0.5)
+
+        return ExtractionResult(
+            entities=entities,
+            metadata={"extraction_method": "regex"},
+        )
+
     def _get_input_multiplier(self) -> int:
         """Get input token multiplier based on model.
 
@@ -236,21 +276,37 @@ class LLMEntityExtractor(EntityExtractor):
         batches: list[list[str]] = []
         current_batch: list[str] = []
         current_tokens = prompt_overhead
+        current_density_limit = max_batch_size  # Track most restrictive limit in batch
 
         for text in texts:
             # Match truncation in _extract_multi_batch (4000 chars)
             text_tokens = self._estimate_tokens(text[:4000])
 
-            # Check if adding this text would exceed budget or max batch size
+            # Density-based limit: shorter texts can be batched more aggressively
+            text_len = len(text)
+            if text_len < 500:
+                density_limit = 15
+            elif text_len < 2000:
+                density_limit = 8
+            else:
+                density_limit = 3
+
+            effective_limit = min(max_batch_size, density_limit)
+
+            # Check if adding this text would exceed budget or effective batch size
             if current_batch and (
-                current_tokens + text_tokens > max_input_tokens or len(current_batch) >= max_batch_size
+                current_tokens + text_tokens > max_input_tokens
+                or len(current_batch) >= min(current_density_limit, effective_limit)
             ):
                 batches.append(current_batch)
                 current_batch = []
                 current_tokens = prompt_overhead
+                current_density_limit = max_batch_size
 
             current_batch.append(text)
             current_tokens += text_tokens
+            # Track the most restrictive density limit seen in this batch
+            current_density_limit = min(current_density_limit, effective_limit)
 
         if current_batch:
             batches.append(current_batch)
@@ -712,11 +768,16 @@ class LLMEntityExtractor(EntityExtractor):
         context: dict[str, Any] | None = None,
         batch_size: int = 5,
         max_input_tokens: int | None = None,
+        tiered_extraction: bool = False,
+        tier1_max_chars: int = 200,
     ) -> list[ExtractionResult]:
         """Extract entities from multiple texts in grouped LLM calls.
 
         Groups texts into batches using adaptive token-budget-based batching,
         reducing API round-trips while avoiding context overflow.
+
+        When tiered_extraction=True, texts shorter than tier1_max_chars are
+        processed via fast regex extraction instead of LLM (A-4 optimization).
 
         Args:
             texts: List of texts to extract from
@@ -726,12 +787,54 @@ class LLMEntityExtractor(EntityExtractor):
             batch_size: Maximum number of texts per LLM call (fallback/cap)
             max_input_tokens: Token budget for input. If None, auto-calculated
                 from max_tokens using model-aware multipliers.
+            tiered_extraction: If True, use regex for short texts (<tier1_max_chars)
+            tier1_max_chars: Character threshold for regex-only extraction
 
         Returns:
             List of ExtractionResult objects (one per input text)
         """
         if not texts:
             return []
+
+        # Tiered extraction: separate short texts for regex-only processing
+        if tiered_extraction:
+            regex_results: dict[int, ExtractionResult] = {}
+            llm_indices: list[int] = []
+            llm_texts: list[str] = []
+            for i, text in enumerate(texts):
+                if len(text) < tier1_max_chars:
+                    regex_results[i] = self._regex_extract(text)
+                else:
+                    llm_indices.append(i)
+                    llm_texts.append(text)
+
+            if regex_results:
+                logger.debug(f"Tiered extraction: {len(regex_results)} texts via regex, " f"{len(llm_texts)} via LLM")
+
+            if not llm_texts:
+                return [regex_results[i] for i in range(len(texts))]
+
+            # Process LLM texts through the normal pipeline
+            llm_results = await self.extract_multi(
+                llm_texts,
+                entity_types=entity_types,
+                expertise=expertise,
+                context=context,
+                batch_size=batch_size,
+                max_input_tokens=max_input_tokens,
+                tiered_extraction=False,  # Don't recurse
+            )
+
+            # Reassemble in original order
+            combined: list[ExtractionResult] = []
+            llm_idx = 0
+            for i in range(len(texts)):
+                if i in regex_results:
+                    combined.append(regex_results[i])
+                else:
+                    combined.append(llm_results[llm_idx])
+                    llm_idx += 1
+            return combined
 
         if expertise:
             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES

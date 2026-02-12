@@ -66,6 +66,7 @@ class Neo4jBackend(GraphBackendBase):
         self._database = database
         self._max_connection_pool_size = max_connection_pool_size
         self._driver: AsyncDriver | None = None
+        self._owns_driver: bool = True
 
     @classmethod
     def from_config(cls, config: Any) -> Neo4jBackend:
@@ -77,9 +78,35 @@ class Neo4jBackend(GraphBackendBase):
             database=config.database,
         )
 
+    @classmethod
+    def from_driver(cls, driver: AsyncDriver, *, database: str = "neo4j") -> Neo4jBackend:
+        """Create a Neo4jBackend from an existing AsyncDriver.
+
+        The backend will NOT close the driver on disconnect, since
+        it does not own it.
+
+        Args:
+            driver: An existing Neo4j async driver
+            database: Database name
+
+        Returns:
+            Neo4jBackend wrapping the shared driver
+        """
+        instance = cls.__new__(cls)
+        instance._url = ""
+        instance._user = ""
+        instance._password = ""
+        instance._database = database
+        instance._max_connection_pool_size = 0
+        instance._driver = driver
+        instance._owns_driver = False
+        return instance
+
     async def connect(self) -> None:
         """Establish connection to Neo4j."""
         if self._driver is not None:
+            # Already connected (either by connect() or from_driver())
+            await self._create_indexes()
             return
 
         logger.info(f"Connecting to Neo4j at {self._url}...")
@@ -98,10 +125,11 @@ class Neo4jBackend(GraphBackendBase):
     async def disconnect(self) -> None:
         """Close Neo4j connections."""
         if self._driver is not None:
-            logger.info("Disconnecting from Neo4j...")
-            await self._driver.close()
+            if self._owns_driver:
+                logger.info("Disconnecting from Neo4j...")
+                await self._driver.close()
+                logger.info("Disconnected from Neo4j")
             self._driver = None
-            logger.info("Disconnected from Neo4j")
 
     async def is_healthy(self) -> bool:
         """Check if the backend is healthy and connected."""
@@ -490,7 +518,7 @@ class Neo4jBackend(GraphBackendBase):
         self,
         relationships: list[Relationship],
         *,
-        batch_size: int = 50,
+        batch_size: int = 200,
     ) -> int:
         """Batch create relationships using UNWIND with parallel type processing.
 

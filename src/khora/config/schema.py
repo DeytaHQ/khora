@@ -172,6 +172,11 @@ class StorageSettings(BaseModel):
     neo4j_password: str = Field(default="", description="[deprecated] Neo4j password")
     neo4j_database: str = Field(default="neo4j", description="[deprecated] Neo4j database name")
 
+    # HNSW index tuning
+    hnsw_m: int = Field(default=16, description="HNSW index M parameter (max connections per layer)")
+    hnsw_ef_construction: int = Field(default=64, description="HNSW index ef_construction (build-time search width)")
+    hnsw_ef_search: int = Field(default=200, description="HNSW ef_search for query-time accuracy")
+
     @model_validator(mode="before")
     @classmethod
     def _migrate_legacy_fields(cls, data: Any) -> Any:

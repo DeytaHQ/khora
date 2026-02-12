@@ -341,3 +341,69 @@ class TestExtractMulti:
         assert len(results) == 2
         assert results[0].entities[0].name == "A"
         assert results[1].entities[0].name == "B"
+
+
+# ---------------------------------------------------------------------------
+# Regex extraction (A-4 tiered extraction)
+# ---------------------------------------------------------------------------
+
+
+class TestRegexExtraction:
+    """Tests for LLMEntityExtractor._regex_extract."""
+
+    def test_email_extraction(self) -> None:
+        result = LLMEntityExtractor._regex_extract("Contact alice@example.com for details")
+        names = [e.name for e in result.entities]
+        assert "alice@example.com" in names
+        email_entity = next(e for e in result.entities if e.entity_type == "EMAIL")
+        assert email_entity.confidence == 0.9
+
+    def test_url_extraction(self) -> None:
+        result = LLMEntityExtractor._regex_extract("Visit https://example.com/page")
+        names = [e.name for e in result.entities]
+        assert "https://example.com/page" in names
+
+    def test_date_extraction(self) -> None:
+        result = LLMEntityExtractor._regex_extract("Meeting on 2024-01-15")
+        types = [e.entity_type for e in result.entities]
+        assert "DATE" in types
+
+    def test_proper_noun_extraction(self) -> None:
+        result = LLMEntityExtractor._regex_extract("John Smith attended")
+        names = [e.name for e in result.entities]
+        assert "John Smith" in names
+
+    def test_empty_text(self) -> None:
+        result = LLMEntityExtractor._regex_extract("")
+        assert result.entities == []
+
+    def test_short_text_no_entities(self) -> None:
+        result = LLMEntityExtractor._regex_extract("ok")
+        assert result.entities == []
+
+    def test_metadata_has_extraction_method(self) -> None:
+        result = LLMEntityExtractor._regex_extract("test@email.com")
+        assert result.metadata["extraction_method"] == "regex"
+
+    def test_dedup_within_result(self) -> None:
+        result = LLMEntityExtractor._regex_extract("Email alice@test.com and alice@test.com again")
+        emails = [e for e in result.entities if e.entity_type == "EMAIL"]
+        assert len(emails) == 1
+
+
+class TestTieredExtraction:
+    """Tests for tiered extraction in extract_multi."""
+
+    @pytest.mark.asyncio
+    async def test_short_texts_use_regex(self) -> None:
+        extractor = LLMEntityExtractor(model="test-model")
+        # Very short text should use regex, not LLM
+        results = await extractor.extract_multi(
+            ["Hi alice@test.com"],
+            tiered_extraction=True,
+            tier1_max_chars=200,
+        )
+        assert len(results) == 1
+        assert results[0].metadata.get("extraction_method") == "regex"
+        emails = [e for e in results[0].entities if e.entity_type == "EMAIL"]
+        assert len(emails) == 1

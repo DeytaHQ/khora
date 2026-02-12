@@ -128,21 +128,26 @@ class DualNodeManager:
         RETURN c.id AS id
         """
 
+        params = dict(
+            id=str(chunk_id),
+            namespace_id=str(chunk.namespace_id),
+            document_id=str(chunk.document_id),
+            content=chunk.content,
+            occurred_at=chunk.occurred_at.isoformat() if chunk.occurred_at else None,
+            created_at=chunk.created_at.isoformat() if chunk.created_at else datetime.now(UTC).isoformat(),
+            source_system=chunk.source_system,
+            author=chunk.author,
+            channel=chunk.channel,
+            confidence=chunk.confidence,
+            metadata=chunk.metadata or {},
+        )
+
         async with self._driver.session(database=self._database) as session:
-            await session.run(
-                query,
-                id=str(chunk_id),
-                namespace_id=str(chunk.namespace_id),
-                document_id=str(chunk.document_id),
-                content=chunk.content,
-                occurred_at=chunk.occurred_at.isoformat() if chunk.occurred_at else None,
-                created_at=chunk.created_at.isoformat() if chunk.created_at else datetime.now(UTC).isoformat(),
-                source_system=chunk.source_system,
-                author=chunk.author,
-                channel=chunk.channel,
-                confidence=chunk.confidence,
-                metadata=chunk.metadata or {},
-            )
+
+            async def _work(tx):
+                await tx.run(query, **params)
+
+            await session.execute_write(_work)
 
         logger.debug(f"Created Chunk node: {chunk_id}")
         return chunk_id
@@ -206,7 +211,11 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            await session.run(query, chunks=chunk_data)
+
+            async def _work(tx):
+                await tx.run(query, chunks=chunk_data)
+
+            await session.execute_write(_work)
 
         logger.debug(f"Created {len(chunk_ids)} Chunk nodes in batch")
         return chunk_ids
@@ -236,13 +245,17 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            await session.run(
-                query,
-                entity_id=str(entity_id),
-                chunk_id=str(chunk_id),
-                mention_count=mention_count,
-                context=context,
-            )
+
+            async def _work(tx):
+                await tx.run(
+                    query,
+                    entity_id=str(entity_id),
+                    chunk_id=str(chunk_id),
+                    mention_count=mention_count,
+                    context=context,
+                )
+
+            await session.execute_write(_work)
 
     async def link_entities_to_chunks_batch(
         self,
@@ -276,7 +289,11 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            await session.run(query, links=link_data)
+
+            async def _work(tx):
+                await tx.run(query, links=link_data)
+
+            await session.execute_write(_work)
 
         logger.debug(f"Created {len(links)} MENTIONED_IN relationships")
 
@@ -298,11 +315,15 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            await session.run(
-                query,
-                chunk_id=str(chunk_id),
-                time_node_id=str(time_node_id),
-            )
+
+            async def _work(tx):
+                await tx.run(
+                    query,
+                    chunk_id=str(chunk_id),
+                    time_node_id=str(time_node_id),
+                )
+
+            await session.execute_write(_work)
 
     async def link_chunks_to_time_batch(
         self,
@@ -328,7 +349,11 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            await session.run(query, links=link_data)
+
+            async def _work(tx):
+                await tx.run(query, links=link_data)
+
+            await session.execute_write(_work)
 
     async def get_chunks_by_entities(
         self,
@@ -398,8 +423,12 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            result = await session.run(query, **params)
-            records = [record.data() async for record in result]
+
+            async def _work(tx):
+                result = await tx.run(query, **params)
+                return [record.data() async for record in result]
+
+            records = await session.execute_read(_work)
 
         return records
 
@@ -460,13 +489,17 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            result = await session.run(
-                query,
-                entity_ids=[str(eid) for eid in entity_ids],
-                namespace_id=str(namespace_id),
-                limit=limit_per_entity,
-            )
-            records = [record.data() async for record in result]
+
+            async def _work(tx):
+                result = await tx.run(
+                    query,
+                    entity_ids=[str(eid) for eid in entity_ids],
+                    namespace_id=str(namespace_id),
+                    limit=limit_per_entity,
+                )
+                return [record.data() async for record in result]
+
+            records = await session.execute_read(_work)
 
         return {record["source_id"]: record["related_entities"] for record in records}
 
@@ -493,14 +526,17 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            result = await session.run(
-                query,
-                document_id=str(document_id),
-                namespace_id=str(namespace_id),
-            )
-            record = await result.single()
 
-        deleted = record["deleted"] if record else 0
+            async def _work(tx):
+                result = await tx.run(
+                    query,
+                    document_id=str(document_id),
+                    namespace_id=str(namespace_id),
+                )
+                record = await result.single()
+                return record["deleted"] if record else 0
+
+            deleted = await session.execute_write(_work)
         logger.debug(f"Deleted {deleted} Chunk nodes for document {document_id}")
         return deleted
 
@@ -519,10 +555,13 @@ class DualNodeManager:
         """
 
         async with self._driver.session(database=self._database) as session:
-            result = await session.run(query, namespace_id=str(namespace_id))
-            record = await result.single()
 
-        return record["count"] if record else 0
+            async def _work(tx):
+                result = await tx.run(query, namespace_id=str(namespace_id))
+                record = await result.single()
+                return record["count"] if record else 0
+
+            return await session.execute_read(_work)
 
 
 __all__ = [

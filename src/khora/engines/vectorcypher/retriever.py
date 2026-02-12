@@ -15,6 +15,9 @@ Performance optimizations:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import math
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -79,10 +82,18 @@ class RetrieverConfig:
     # Temporal settings
     recency_weight: float = 0.2
     recency_decay_days: int = 30
+    recency_decay_type: str = "exponential"  # "linear" or "exponential"
 
     # Search thresholds
     min_entity_similarity: float = 0.3
     hybrid_alpha: float = 0.7
+
+    # Query caching
+    query_cache_ttl_seconds: int = 0  # 0 = disabled
+    query_cache_max_size: int = 100
+
+    # Lazy entity expansion
+    lazy_entity_expansion: bool = False
 
     # Limits
     max_chunks: int = 50
@@ -141,6 +152,14 @@ class VectorCypherRetriever:
         self._router = QueryComplexityRouter(router_config)
         self._dual_nodes = DualNodeManager(neo4j_driver, database)
 
+        # Query result cache (LRU + TTL)
+        self._cache: dict[str, tuple[float, VectorCypherResult]] = {}
+        self._cache_ttl = self._config.query_cache_ttl_seconds
+        self._cache_max_size = self._config.query_cache_max_size
+
+        # Lazy entity expansion cache: chunk_id -> expansion_score (0 = no match)
+        self._expansion_cache: dict[UUID, float] = {}
+
     async def retrieve(
         self,
         query: str,
@@ -164,6 +183,21 @@ class VectorCypherRetriever:
         """
         limit = limit or self._config.max_chunks
 
+        # Cache check
+        cache_key = ""
+        if self._cache_ttl > 0:
+            cache_key = hashlib.md5(
+                f"{query}:{namespace_id}:{temporal_filter}:{graph_depth}:{limit}".encode()
+            ).hexdigest()
+
+            if cache_key in self._cache:
+                cached_time, cached_result = self._cache[cache_key]
+                if time.monotonic() - cached_time < self._cache_ttl:
+                    cached_result.metadata["cache_hit"] = True
+                    return cached_result
+                else:
+                    del self._cache[cache_key]
+
         # Step 1: Route query to determine strategy
         routing = await self._router.route(query)
         logger.debug(f"Query routing: {routing.complexity.value} (use_graph={routing.use_graph})")
@@ -174,7 +208,7 @@ class VectorCypherRetriever:
         # Step 3: Vector search for entry points
         if routing.complexity == QueryComplexity.SIMPLE:
             # Simple path: direct chunk retrieval
-            return await self._simple_retrieve(
+            result = await self._simple_retrieve(
                 query=query,
                 query_embedding=query_embedding,
                 namespace_id=namespace_id,
@@ -182,29 +216,38 @@ class VectorCypherRetriever:
                 limit=limit,
                 routing=routing,
             )
+        else:
+            # Complex/moderate path: VectorCypher with parallel execution
+            # Wrap in try/except for graceful fallback on graph failures
+            try:
+                result = await self._vectorcypher_retrieve(
+                    query=query,
+                    query_embedding=query_embedding,
+                    namespace_id=namespace_id,
+                    temporal_filter=temporal_filter,
+                    graph_depth=graph_depth,
+                    limit=limit,
+                    routing=routing,
+                )
+            except Neo4jError as e:
+                logger.warning(f"Graph search failed, falling back to vector-only: {e}")
+                result = await self._vector_only_fallback(
+                    query=query,
+                    query_embedding=query_embedding,
+                    namespace_id=namespace_id,
+                    temporal_filter=temporal_filter,
+                    limit=limit,
+                    routing=routing,
+                )
 
-        # Complex/moderate path: VectorCypher with parallel execution
-        # Wrap in try/except for graceful fallback on graph failures
-        try:
-            return await self._vectorcypher_retrieve(
-                query=query,
-                query_embedding=query_embedding,
-                namespace_id=namespace_id,
-                temporal_filter=temporal_filter,
-                graph_depth=graph_depth,
-                limit=limit,
-                routing=routing,
-            )
-        except Neo4jError as e:
-            logger.warning(f"Graph search failed, falling back to vector-only: {e}")
-            return await self._vector_only_fallback(
-                query=query,
-                query_embedding=query_embedding,
-                namespace_id=namespace_id,
-                temporal_filter=temporal_filter,
-                limit=limit,
-                routing=routing,
-            )
+        # Store in cache
+        if self._cache_ttl > 0 and cache_key:
+            if len(self._cache) >= self._cache_max_size:
+                oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
+                del self._cache[oldest_key]
+            self._cache[cache_key] = (time.monotonic(), result)
+
+        return result
 
     async def _vectorcypher_retrieve(
         self,
@@ -291,6 +334,18 @@ class VectorCypherRetriever:
         # Step 6: Wait for parallel vector chunk search to complete
         # This was started at the beginning and may already be done
         vector_chunks = await vector_chunks_task
+
+        # Step 6b: Lazy entity expansion for vector-only chunks
+        # Recovers graph coverage lost from low skeleton_core_ratio by doing
+        # lightweight keyword matching (no LLM) on chunks without MENTIONED_IN edges
+        if self._config.lazy_entity_expansion and vector_chunks:
+            graph_chunk_ids = {c[0] for c in graph_chunks}
+            vector_only = [c for c in vector_chunks if c[0] not in graph_chunk_ids]
+            if vector_only:
+                expanded = self._lazy_expand_chunks(vector_only, entry_entities, entity_info_map)
+                if expanded:
+                    graph_chunks = graph_chunks + expanded
+                    logger.debug(f"Lazy expansion added {len(expanded)} chunks to graph results")
 
         # Step 7: RRF fusion with score normalization and dynamic weights
         fused_results = self._fuse_results(
@@ -583,6 +638,59 @@ class VectorCypherRetriever:
             for r in results
         ]
 
+    def _lazy_expand_chunks(
+        self,
+        vector_only_chunks: list[tuple[UUID, float, dict[str, Any]]],
+        entry_entities: list[tuple[UUID, float]],
+        entity_info_map: dict[str, dict[str, str]],
+    ) -> list[tuple[UUID, float, dict[str, Any]]]:
+        """Expand vector-only chunks by keyword matching against known entities.
+
+        For chunks retrieved via vector search that have no MENTIONED_IN edges,
+        extract keywords and match them against entity names. This recovers
+        graph signal for chunks that weren't covered by skeleton extraction.
+
+        Results are cached per chunk_id so repeated retrievals are fast.
+        """
+        from khora._accel import extract_keywords
+
+        # Build lowercased entity name set
+        entity_names: set[str] = set()
+        for eid, _ in entry_entities:
+            info = entity_info_map.get(str(eid), {})
+            name = info.get("name", "").lower().strip()
+            if name:
+                entity_names.add(name)
+
+        if not entity_names:
+            return []
+
+        results = []
+        for chunk_id, _vec_score, chunk_data in vector_only_chunks:
+            # Check cache first
+            if chunk_id in self._expansion_cache:
+                cached_score = self._expansion_cache[chunk_id]
+                if cached_score > 0:
+                    results.append((chunk_id, cached_score, chunk_data))
+                continue
+
+            content = chunk_data.get("content", "")
+            if not content:
+                self._expansion_cache[chunk_id] = 0.0
+                continue
+
+            keywords = {kw.lower() for kw in extract_keywords(content)}
+            matches = keywords & entity_names
+            if matches:
+                # Weak signal: 0.5 per matched entity name
+                expansion_score = len(matches) * 0.5
+                results.append((chunk_id, expansion_score, chunk_data))
+                self._expansion_cache[chunk_id] = expansion_score
+            else:
+                self._expansion_cache[chunk_id] = 0.0
+
+        return results
+
     def _fuse_results(
         self,
         vector_chunks: list[tuple[UUID, float, dict[str, Any]]],
@@ -655,8 +763,13 @@ class VectorCypherRetriever:
                         if occurred_at.tzinfo is None:
                             occurred_at = occurred_at.replace(tzinfo=UTC)
                         days_old = (now - occurred_at).days
-                        # Exponential decay
-                        recency = max(0.0, 1.0 - (days_old / decay_days))
+                        if self._config.recency_decay_type == "exponential":
+                            # Half-life semantics: score = 0.5 at decay_days
+                            half_life_lambda = math.log(2) / decay_days
+                            recency = math.exp(-half_life_lambda * days_old)
+                        else:
+                            # Linear decay with cliff at decay_days
+                            recency = max(0.0, 1.0 - (days_old / decay_days))
                         scores[r.item_id] = recency
                     except (ValueError, TypeError):
                         scores[r.item_id] = 0.5  # Default for unparseable dates

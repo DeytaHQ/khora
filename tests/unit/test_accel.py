@@ -508,3 +508,81 @@ class TestRustBM25Index:
     def test_none_when_python_forced(self, force_python):
         # When _HAS_RUST is forced False, verify the flag is off
         assert not accel._HAS_RUST
+
+
+# ---------------------------------------------------------------------------
+# Weighted RRF Normalized
+# ---------------------------------------------------------------------------
+
+
+class TestWeightedRRFNormalized:
+    def test_basic(self):
+        vec = [("a", 0.9), ("b", 0.7)]
+        graph = [("b", 5.0), ("c", 3.0)]
+        results = accel.weighted_rrf_normalized(vec, graph, k=60, vector_weight=0.6, graph_weight=0.4)
+        ids = [r[0] for r in results]
+        # "b" appears in both, should rank highly
+        assert "b" in ids
+        assert len(results) == 3  # a, b, c
+
+    def test_empty_inputs(self):
+        results = accel.weighted_rrf_normalized([], [], k=60)
+        assert results == []
+
+    def test_vector_only(self):
+        results = accel.weighted_rrf_normalized([("x", 1.0), ("y", 0.5)], [])
+        assert len(results) == 2
+        assert results[0][0] == "x"
+
+    def test_graph_only(self):
+        results = accel.weighted_rrf_normalized([], [("a", 3.0), ("b", 1.0)])
+        assert len(results) == 2
+        assert results[0][0] == "a"
+
+    def test_python_fallback(self, force_python):
+        vec = [("a", 0.9), ("b", 0.7)]
+        graph = [("b", 5.0), ("c", 3.0)]
+        results = accel.weighted_rrf_normalized(vec, graph)
+        ids = [r[0] for r in results]
+        assert "b" in ids
+        assert len(results) == 3
+
+
+# ---------------------------------------------------------------------------
+# Entity name normalization
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeEntityName:
+    def test_lowercase(self):
+        assert accel.normalize_entity_name("Alice") == "alice"
+
+    def test_strip_honorific(self):
+        assert accel.normalize_entity_name("Dr. John Smith") == "john smith"
+        assert accel.normalize_entity_name("Mr. Bob") == "bob"
+
+    def test_collapse_whitespace(self):
+        assert accel.normalize_entity_name("John   Smith") == "john smith"
+
+    def test_strip_punctuation(self):
+        assert accel.normalize_entity_name('"Hello World"') == "hello world"
+
+    def test_empty(self):
+        assert accel.normalize_entity_name("") == ""
+
+    def test_python_fallback(self, force_python):
+        assert accel.normalize_entity_name("Dr. Alice") == "alice"
+        assert accel.normalize_entity_name("  John  Smith  ") == "john smith"
+
+
+class TestNormalizeEntityNamesBatch:
+    def test_batch(self):
+        result = accel.normalize_entity_names_batch(["Alice", "Mr. Bob", "Dr. Charlie"])
+        assert result == ["alice", "bob", "charlie"]
+
+    def test_empty(self):
+        assert accel.normalize_entity_names_batch([]) == []
+
+    def test_python_fallback(self, force_python):
+        result = accel.normalize_entity_names_batch(["Alice", "BOB"])
+        assert result == ["alice", "bob"]

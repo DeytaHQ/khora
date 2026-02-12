@@ -53,6 +53,7 @@ class PgVectorBackend:
         echo: bool = False,
         pool_size: int = 10,
         max_overflow: int = 20,
+        hnsw_ef_search: int = 200,
     ) -> None:
         """Initialize the pgvector backend.
 
@@ -62,6 +63,7 @@ class PgVectorBackend:
             echo: Enable SQL echo logging
             pool_size: Connection pool size
             max_overflow: Maximum overflow connections
+            hnsw_ef_search: HNSW ef_search for query-time accuracy
         """
         # Convert to async URL if needed
         if database_url.startswith("postgresql://"):
@@ -74,6 +76,7 @@ class PgVectorBackend:
         self._echo = echo
         self._pool_size = pool_size
         self._max_overflow = max_overflow
+        self._hnsw_ef_search = hnsw_ef_search
         self._engine: AsyncEngine | None = None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
 
@@ -570,7 +573,7 @@ class PgVectorBackend:
         """
         async with self._get_session() as session:
             # Increase HNSW search accuracy for this transaction
-            await session.execute(text("SET LOCAL hnsw.ef_search = 200"))
+            await session.execute(text(f"SET LOCAL hnsw.ef_search = {self._hnsw_ef_search}"))
 
             similarity = 1 - EntityModel.embedding.cosine_distance(query_embedding)
 

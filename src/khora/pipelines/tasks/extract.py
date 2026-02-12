@@ -114,6 +114,8 @@ async def extract_entities(
             max_input_tokens=None,  # Auto-calculate from model
         )
 
+    from khora._accel import normalize_entity_name
+
     # Process results
     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
     all_relationships: list[Relationship] = []
@@ -124,8 +126,8 @@ async def extract_entities(
             if extracted.confidence < min_entity_confidence:
                 continue
 
-            # Deduplicate by name
-            key = f"{extracted.name}:{extracted.entity_type}"
+            # Deduplicate by normalized name
+            key = f"{normalize_entity_name(extracted.name)}:{extracted.entity_type}"
             if key in all_entities:
                 # Merge into existing
                 existing = all_entities[key]
@@ -146,7 +148,7 @@ async def extract_entities(
 
                 entity = Entity(
                     namespace_id=chunk.namespace_id,
-                    name=extracted.name,
+                    name=normalize_entity_name(extracted.name),
                     entity_type=entity_type,
                     description=extracted.description,
                     attributes=extracted.attributes,
@@ -174,9 +176,9 @@ async def extract_entities(
             except ValueError:
                 rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
-            # Find source and target entities
-            source_key = entity_name_to_key.get(extracted_rel.source_entity)
-            target_key = entity_name_to_key.get(extracted_rel.target_entity)
+            # Find source and target entities (normalize names to match dedup keys)
+            source_key = entity_name_to_key.get(normalize_entity_name(extracted_rel.source_entity))
+            target_key = entity_name_to_key.get(normalize_entity_name(extracted_rel.target_entity))
 
             if source_key and target_key:
                 relationship = Relationship(

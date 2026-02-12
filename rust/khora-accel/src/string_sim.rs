@@ -86,6 +86,64 @@ pub fn batch_levenshtein(
     })
 }
 
+/// Normalize an entity name for deduplication.
+///
+/// - Lowercase
+/// - Strip honorifics (Mr., Mrs., Ms., Dr., Prof., etc.)
+/// - Collapse multiple whitespace to single space
+/// - Strip leading/trailing whitespace and punctuation
+#[pyfunction]
+pub fn normalize_entity_name(name: &str) -> String {
+    let mut result = name.to_lowercase();
+
+    // Strip common honorifics
+    let honorifics = [
+        "mr.", "mrs.", "ms.", "dr.", "prof.", "sir ", "lord ", "lady ",
+    ];
+    for h in &honorifics {
+        if result.starts_with(h) {
+            result = result[h.len()..].to_string();
+        }
+    }
+
+    // Collapse whitespace
+    let parts: Vec<&str> = result.split_whitespace().collect();
+    result = parts.join(" ");
+
+    // Strip leading/trailing punctuation
+    result = result
+        .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .to_string();
+
+    result
+}
+
+/// Batch normalize entity names (rayon parallel).
+#[pyfunction]
+pub fn normalize_entity_names_batch(py: Python<'_>, names: Vec<String>) -> Vec<String> {
+    py.allow_threads(|| {
+        names
+            .par_iter()
+            .map(|n| {
+                let mut result = n.to_lowercase();
+                let honorifics = [
+                    "mr.", "mrs.", "ms.", "dr.", "prof.", "sir ", "lord ", "lady ",
+                ];
+                for h in &honorifics {
+                    if result.starts_with(h) {
+                        result = result[h.len()..].to_string();
+                    }
+                }
+                let parts: Vec<&str> = result.split_whitespace().collect();
+                result = parts.join(" ");
+                result
+                    .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+                    .to_string()
+            })
+            .collect()
+    })
+}
+
 /// Batch sequence match ratio: one query against N candidates.
 ///
 /// Uses rayon for parallelism and releases the GIL during computation.

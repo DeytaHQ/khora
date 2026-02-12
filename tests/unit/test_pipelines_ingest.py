@@ -258,7 +258,7 @@ class TestStreamExtractAndEmbedEntities:
             )
 
         assert len(entities) == 1
-        assert entities[0].name == "Alice"
+        assert entities[0].name == "alice"  # M-5: entity names are normalized (lowercased)
         assert entities[0].embedding == [0.1, 0.2, 0.3]
         embedder.embed_batch.assert_called()
 

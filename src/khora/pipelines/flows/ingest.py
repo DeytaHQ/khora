@@ -16,6 +16,8 @@ from uuid import UUID
 
 from loguru import logger
 
+from khora._accel import normalize_entity_name
+
 from ..registry import pipeline
 
 if TYPE_CHECKING:
@@ -132,7 +134,7 @@ async def stream_extract_and_embed_entities(
                     if extracted.confidence < min_entity_confidence:
                         continue
 
-                    key = f"{extracted.name}:{extracted.entity_type}"
+                    key = f"{normalize_entity_name(extracted.name)}:{extracted.entity_type}"
                     if key in all_entities:
                         existing = all_entities[key]
                         existing.mention_count += 1
@@ -150,7 +152,7 @@ async def stream_extract_and_embed_entities(
 
                         entity = Entity(
                             namespace_id=chunk.namespace_id,
-                            name=extracted.name,
+                            name=normalize_entity_name(extracted.name),
                             entity_type=entity_type,
                             description=extracted.description,
                             attributes=extracted.attributes,
@@ -173,12 +175,14 @@ async def stream_extract_and_embed_entities(
                     except ValueError:
                         rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
+                    norm_source = normalize_entity_name(extracted_rel.source_entity)
+                    norm_target = normalize_entity_name(extracted_rel.target_entity)
                     source_key = next(
-                        (k for k in all_entities if k.startswith(f"{extracted_rel.source_entity}:")),
+                        (k for k in all_entities if k.startswith(f"{norm_source}:")),
                         None,
                     )
                     target_key = next(
-                        (k for k in all_entities if k.startswith(f"{extracted_rel.target_entity}:")),
+                        (k for k in all_entities if k.startswith(f"{norm_target}:")),
                         None,
                     )
 

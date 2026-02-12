@@ -90,6 +90,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
         self._engine = None
         self._connected = False
         self._embedding_dimension = config.llm.embedding_dimension or 1536
+        self._hnsw_m: int = config.storage.hnsw_m
+        self._hnsw_ef_construction: int = config.storage.hnsw_ef_construction
 
     async def connect(self) -> None:
         """Connect to PostgreSQL and ensure schema exists."""
@@ -123,10 +125,10 @@ class PgVectorTemporalStore(TemporalVectorStore):
             # Create HNSW index on embedding
             await conn.execute(
                 text(
-                    """
+                    f"""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_embedding_hnsw
                 ON khora_chunks USING hnsw (embedding vector_cosine_ops)
-                WITH (m = 16, ef_construction = 64)
+                WITH (m = {self._hnsw_m}, ef_construction = {self._hnsw_ef_construction})
                 """
                 )
             )
