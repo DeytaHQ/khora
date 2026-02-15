@@ -16,9 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from khora.core.models import MemoryEvent
 from khora.core.models.event import EventType
 from khora.db.models import Base, MemoryEventModel
+from khora.storage.backends.mixins import AsyncSessionMixin
 
 
-class PostgreSQLEventStore:
+class PostgreSQLEventStore(AsyncSessionMixin):
     """PostgreSQL-based event store.
 
     Stores all memory events in an append-only log for event sourcing.
@@ -85,12 +86,6 @@ class PostgreSQLEventStore:
         except Exception as e:
             logger.error(f"Event store health check failed: {e}")
             return False
-
-    def _get_session(self) -> AsyncSession:
-        """Get a new database session."""
-        if self._session_factory is None:
-            raise RuntimeError("Event store not connected. Call connect() first.")
-        return self._session_factory()
 
     async def create_tables(self) -> None:
         """Create database tables (for testing/development)."""

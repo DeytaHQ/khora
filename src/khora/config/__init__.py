@@ -26,13 +26,9 @@ def load_config(path: str | None = None) -> KhoraConfig:
     import os
     from pathlib import Path
 
-    if path:
-        return KhoraConfig.from_yaml(Path(path))
-
-    # Try default paths
-    config_path = os.getenv("KHORA_CONFIG_PATH", DEFAULT_CONFIG_PATH)
-    if Path(config_path).exists():
-        return KhoraConfig.from_yaml(Path(config_path))
+    config_path = Path(path) if path else Path(os.getenv("KHORA_CONFIG_PATH", DEFAULT_CONFIG_PATH))
+    if config_path.exists():
+        return KhoraConfig.from_yaml(config_path)
 
     # Fall back to environment variables only
     return KhoraConfig()

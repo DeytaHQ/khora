@@ -401,18 +401,15 @@ class EntityResolver:
         """
         entity_type_upper = entity_type.upper()
 
-        if entity_type_upper == "PERSON":
-            return self._compute_person_attribute_similarity(entity1_attrs, entity2_attrs)
-        elif entity_type_upper == "ORGANIZATION":
-            return self._compute_organization_attribute_similarity(entity1_attrs, entity2_attrs)
-        elif entity_type_upper == "LOCATION":
-            return self._compute_location_attribute_similarity(entity1_attrs, entity2_attrs)
-        elif entity_type_upper == "TECHNOLOGY":
-            return self._compute_technology_attribute_similarity(entity1_attrs, entity2_attrs)
-        elif entity_type_upper == "PRODUCT":
-            return self._compute_product_attribute_similarity(entity1_attrs, entity2_attrs)
-
-        return None
+        _attr_similarity_funcs = {
+            "PERSON": self._compute_person_attribute_similarity,
+            "ORGANIZATION": self._compute_organization_attribute_similarity,
+            "LOCATION": self._compute_location_attribute_similarity,
+            "TECHNOLOGY": self._compute_technology_attribute_similarity,
+            "PRODUCT": self._compute_product_attribute_similarity,
+        }
+        func = _attr_similarity_funcs.get(entity_type_upper)
+        return func(entity1_attrs, entity2_attrs) if func else None
 
     def _compute_person_attribute_similarity(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time as _time_mod
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -249,3 +250,151 @@ class TestEmbedBatchInternal:
         ):
             with pytest.raises(Exception, match="persistent"):
                 await embedder._embed_batch_internal(["test"])
+
+
+class TestDimensionValidation:
+    """Tests for embedding dimension validation (M-2)."""
+
+    @pytest.mark.asyncio
+    async def test_matching_dimension_no_warning(self) -> None:
+        """No warning when actual dimension matches configured."""
+        embedder = LiteLLMEmbedder(model="test-model", dimension=3, max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.data = [{"embedding": [0.1, 0.2, 0.3]}]
+        mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
+
+        with (
+            patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+            patch("khora.extraction.embedders.litellm.logger") as mock_logger,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            result = await embedder._embed_batch_internal(["hello"])
+
+        assert result == [[0.1, 0.2, 0.3]]
+        assert embedder.dimension == 3
+        assert embedder._dimension_validated is True
+        mock_logger.warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mismatched_dimension_warns_and_updates(self) -> None:
+        """Warning logged and dimension updated when mismatch detected."""
+        embedder = LiteLLMEmbedder(model="test-model", dimension=1536, max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.data = [{"embedding": [0.1, 0.2, 0.3]}]  # dim=3, not 1536
+        mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
+
+        with (
+            patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+            patch("khora.extraction.embedders.litellm.logger") as mock_logger,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            result = await embedder._embed_batch_internal(["hello"])
+
+        assert result == [[0.1, 0.2, 0.3]]
+        assert embedder.dimension == 3  # Updated to actual
+        assert embedder._dimension_validated is True
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        assert "dimension mismatch" in warning_msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_dimension_validated_only_once(self) -> None:
+        """Dimension validation only runs on first call."""
+        embedder = LiteLLMEmbedder(model="test-model", dimension=3, max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.data = [{"embedding": [0.1, 0.2, 0.3]}]
+        mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
+
+        with (
+            patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            await embedder._embed_batch_internal(["hello"])
+            assert embedder._dimension_validated is True
+
+            # Second call: change response dimension — should NOT trigger re-validation
+            mock_response2 = MagicMock()
+            mock_response2.data = [{"embedding": [0.1, 0.2]}]  # dim=2
+            mock_response2.usage = MagicMock(prompt_tokens=10, total_tokens=10)
+
+            with patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response2):
+                await embedder._embed_batch_internal(["world"])
+
+            # Dimension should still be 3 (not updated to 2)
+            assert embedder.dimension == 3
+
+
+class TestCacheTTL:
+    """Tests for cache TTL support (M-3)."""
+
+    def test_no_ttl_entries_never_expire(self) -> None:
+        """With TTL=None, entries never expire."""
+        embedder = LiteLLMEmbedder(cache_ttl_hours=None)
+        embedder._cache_put("test", [1.0, 2.0])
+
+        # Even with time advancing, entry should still be valid
+        result = embedder._cache_get("test")
+        assert result == [1.0, 2.0]
+
+    def test_ttl_entry_valid_before_expiry(self) -> None:
+        """Entry is returned when within TTL."""
+        embedder = LiteLLMEmbedder(cache_ttl_hours=1)
+        embedder._cache_put("test", [1.0, 2.0])
+
+        # Immediately after put, should be available
+        result = embedder._cache_get("test")
+        assert result == [1.0, 2.0]
+
+    def test_ttl_entry_expires(self) -> None:
+        """Entry expires after TTL elapses."""
+        embedder = LiteLLMEmbedder(cache_ttl_hours=1)  # 1 hour = 3600 seconds
+        embedder._cache_put("test", [1.0, 2.0])
+
+        # Patch monotonic to simulate time passing beyond TTL
+        current_time = _time_mod.monotonic()
+        with patch.object(
+            _time_mod,
+            "monotonic",
+            return_value=current_time + 3601,
+        ):
+            result = embedder._cache_get("test")
+
+        assert result is None
+        assert embedder._cache_misses == 1
+
+    def test_ttl_entry_valid_just_before_expiry(self) -> None:
+        """Entry is still valid just before TTL expires."""
+        embedder = LiteLLMEmbedder(cache_ttl_hours=1)
+        embedder._cache_put("test", [1.0, 2.0])
+
+        current_time = _time_mod.monotonic()
+        with patch.object(
+            _time_mod,
+            "monotonic",
+            return_value=current_time + 3599,
+        ):
+            result = embedder._cache_get("test")
+
+        assert result == [1.0, 2.0]
+
+    def test_ttl_expired_entry_evicted_from_cache(self) -> None:
+        """Expired entry is removed from cache on access."""
+        embedder = LiteLLMEmbedder(cache_ttl_hours=1)
+        embedder._cache_put("test", [1.0, 2.0])
+        assert embedder.cache_stats["size"] == 1
+
+        current_time = _time_mod.monotonic()
+        with patch.object(
+            _time_mod,
+            "monotonic",
+            return_value=current_time + 3601,
+        ):
+            embedder._cache_get("test")
+
+        assert embedder.cache_stats["size"] == 0

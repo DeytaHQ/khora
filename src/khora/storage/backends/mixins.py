@@ -11,6 +11,47 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+# ---------------------------------------------------------------------------
+# Async session mixin (shared across SQL-based backends)
+# ---------------------------------------------------------------------------
+
+AsyncSessionFactory = async_sessionmaker[AsyncSession]
+
+
+class AsyncSessionMixin:
+    """Mixin providing shared async session management."""
+
+    _session_factory: AsyncSessionFactory | None
+
+    def _get_session(self) -> AsyncSession:
+        """Get a new database session."""
+        if self._session_factory is None:
+            raise RuntimeError("Backend not connected. Call connect() first.")
+        return self._session_factory()
+
+
+# ---------------------------------------------------------------------------
+# Deadlock retry decorator (shared across SQL-based backends)
+# ---------------------------------------------------------------------------
+
+
+def _is_deadlock_error(exc: BaseException) -> bool:
+    """Check if exception is a database deadlock."""
+    error_str = str(exc).lower()
+    return "deadlock" in error_str or "serialization" in error_str
+
+
+retry_on_deadlock = retry(
+    retry=retry_if_exception(_is_deadlock_error),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.1, max=2),
+    reraise=True,
+)
+
+
 # ---------------------------------------------------------------------------
 # Serialization helpers (shared across graph backends)
 # ---------------------------------------------------------------------------

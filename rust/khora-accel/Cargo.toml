@@ -2,7 +2,7 @@
 name = "khora-accel"
 version = "0.2.3"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.80"
 description = "Rust-accelerated operations for Khora memory lake"
 license = "MIT"
 
@@ -11,7 +11,7 @@ name = "khora_accel"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
 numpy = "0.23"
 ndarray = "0.16"
 rayon = "1.10"

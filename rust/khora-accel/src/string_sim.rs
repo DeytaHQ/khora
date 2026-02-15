@@ -3,9 +3,36 @@
 //! Provides Levenshtein similarity, sequence match ratio, and batch variants
 //! with GIL release and rayon parallelism.
 
+use ordered_float::OrderedFloat;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use strsim::{jaro_winkler, normalized_levenshtein};
+
+/// Normalize a single entity name: lowercase, strip honorifics, collapse
+/// whitespace, trim punctuation.
+fn normalize_single(name: &str) -> String {
+    let mut result = name.to_lowercase();
+
+    // Strip common honorifics (first match only)
+    let honorifics = [
+        "mr.", "mrs.", "ms.", "dr.", "prof.", "sir ", "lord ", "lady ",
+    ];
+    for h in &honorifics {
+        if result.starts_with(h) {
+            result = result[h.len()..].to_string();
+            break;
+        }
+    }
+
+    // Collapse whitespace
+    let parts: Vec<&str> = result.split_whitespace().collect();
+    result = parts.join(" ");
+
+    // Strip leading/trailing punctuation
+    result
+        .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .to_string()
+}
 
 /// Levenshtein similarity between two strings (case-insensitive).
 ///
@@ -50,6 +77,7 @@ pub fn sequence_match_ratio(s1: &str, s2: &str) -> f64 {
 /// Uses rayon for parallelism and releases the GIL during computation.
 /// Returns `(index, similarity)` pairs above `threshold`, sorted descending.
 #[pyfunction]
+#[pyo3(signature = (query, candidates, threshold))]
 pub fn batch_levenshtein(
     py: Python<'_>,
     query: String,
@@ -81,7 +109,7 @@ pub fn batch_levenshtein(
             })
             .collect();
 
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
         results
     })
 }
@@ -93,55 +121,16 @@ pub fn batch_levenshtein(
 /// - Collapse multiple whitespace to single space
 /// - Strip leading/trailing whitespace and punctuation
 #[pyfunction]
+#[pyo3(signature = (name))]
 pub fn normalize_entity_name(name: &str) -> String {
-    let mut result = name.to_lowercase();
-
-    // Strip common honorifics
-    let honorifics = [
-        "mr.", "mrs.", "ms.", "dr.", "prof.", "sir ", "lord ", "lady ",
-    ];
-    for h in &honorifics {
-        if result.starts_with(h) {
-            result = result[h.len()..].to_string();
-        }
-    }
-
-    // Collapse whitespace
-    let parts: Vec<&str> = result.split_whitespace().collect();
-    result = parts.join(" ");
-
-    // Strip leading/trailing punctuation
-    result = result
-        .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
-        .to_string();
-
-    result
+    normalize_single(name)
 }
 
 /// Batch normalize entity names (rayon parallel).
 #[pyfunction]
+#[pyo3(signature = (names))]
 pub fn normalize_entity_names_batch(py: Python<'_>, names: Vec<String>) -> Vec<String> {
-    py.allow_threads(|| {
-        names
-            .par_iter()
-            .map(|n| {
-                let mut result = n.to_lowercase();
-                let honorifics = [
-                    "mr.", "mrs.", "ms.", "dr.", "prof.", "sir ", "lord ", "lady ",
-                ];
-                for h in &honorifics {
-                    if result.starts_with(h) {
-                        result = result[h.len()..].to_string();
-                    }
-                }
-                let parts: Vec<&str> = result.split_whitespace().collect();
-                result = parts.join(" ");
-                result
-                    .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
-                    .to_string()
-            })
-            .collect()
-    })
+    py.allow_threads(|| names.par_iter().map(|n| normalize_single(n)).collect())
 }
 
 /// Batch sequence match ratio: one query against N candidates.
@@ -149,6 +138,7 @@ pub fn normalize_entity_names_batch(py: Python<'_>, names: Vec<String>) -> Vec<S
 /// Uses rayon for parallelism and releases the GIL during computation.
 /// Returns `(index, similarity)` pairs above `threshold`, sorted descending.
 #[pyfunction]
+#[pyo3(signature = (query, candidates, threshold))]
 pub fn batch_sequence_match(
     py: Python<'_>,
     query: String,
@@ -180,7 +170,53 @@ pub fn batch_sequence_match(
             })
             .collect();
 
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
         results
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_honorific() {
+        assert_eq!(normalize_single("Dr. Smith"), "smith");
+        assert_eq!(normalize_single("Mr. Jones"), "jones");
+        assert_eq!(normalize_single("Prof. Einstein"), "einstein");
+    }
+
+    #[test]
+    fn test_normalize_punctuation() {
+        assert_eq!(normalize_single("...hello..."), "hello");
+        assert_eq!(normalize_single("  spaces  between  "), "spaces between");
+    }
+
+    #[test]
+    fn test_normalize_whitespace() {
+        assert_eq!(normalize_single("  multiple   spaces  "), "multiple spaces");
+    }
+
+    #[test]
+    fn test_normalize_only_first_honorific() {
+        // "Mr. Dr. Smith" — should strip "Mr." but NOT also strip "Dr."
+        // since we break after the first match
+        assert_eq!(normalize_single("Mr. Dr. Smith"), "dr. smith");
+    }
+
+    #[test]
+    fn test_levenshtein_identical() {
+        assert_eq!(levenshtein_similarity("hello", "hello"), 1.0);
+    }
+
+    #[test]
+    fn test_levenshtein_case_insensitive() {
+        assert_eq!(levenshtein_similarity("Hello", "hello"), 1.0);
+    }
+
+    #[test]
+    fn test_levenshtein_empty() {
+        assert_eq!(levenshtein_similarity("hello", ""), 0.0);
+        assert_eq!(levenshtein_similarity("", "hello"), 0.0);
+    }
 }

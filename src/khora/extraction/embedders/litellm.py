@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time as _time_mod
 from collections import OrderedDict
 from hashlib import sha256
 from typing import TYPE_CHECKING
@@ -45,6 +46,7 @@ class LiteLLMEmbedder(Embedder):
         cache_max_size: int = 10000,
         embed_concurrency: int = 20,
         retry_wait: float = 1.0,
+        cache_ttl_hours: int | None = None,
     ) -> None:
         """Initialize the LiteLLM embedder.
 
@@ -57,6 +59,7 @@ class LiteLLMEmbedder(Embedder):
             cache_max_size: Maximum cached embeddings (0 to disable)
             embed_concurrency: Maximum concurrent embedding sub-batch API calls
             retry_wait: Base wait time (seconds) for exponential backoff between retries
+            cache_ttl_hours: Cache entry TTL in hours (None = no expiry)
         """
         self._model = model
         self._dimension = dimension
@@ -65,33 +68,42 @@ class LiteLLMEmbedder(Embedder):
         self._batch_size = batch_size
         self._embed_concurrency = embed_concurrency
         self._retry_wait = retry_wait
-        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[list[float], float]] = OrderedDict()
         self._cache_max_size = cache_max_size
+        self._cache_ttl_seconds: float | None = cache_ttl_hours * 3600.0 if cache_ttl_hours is not None else None
         self._cache_hits = 0
         self._cache_misses = 0
+        self._dimension_validated = False
 
     def _cache_key(self, text: str) -> str:
         """Generate a cache key for a text."""
         return sha256(f"{self._model}:{text}".encode()).hexdigest()
 
     def _cache_get(self, text: str, *, key: str | None = None) -> list[float] | None:
-        """Look up a cached embedding."""
+        """Look up a cached embedding, respecting TTL if configured."""
         if not self._cache_max_size:
             return None
         key = key or self._cache_key(text)
         if key in self._cache:
+            embedding, stored_at = self._cache[key]
+            # Check TTL expiry
+            if self._cache_ttl_seconds is not None:
+                if (_time_mod.monotonic() - stored_at) > self._cache_ttl_seconds:
+                    del self._cache[key]
+                    self._cache_misses += 1
+                    return None
             self._cache.move_to_end(key)
             self._cache_hits += 1
-            return self._cache[key]
+            return embedding
         self._cache_misses += 1
         return None
 
     def _cache_put(self, text: str, embedding: list[float], *, key: str | None = None) -> None:
-        """Store an embedding in the cache."""
+        """Store an embedding in the cache with a timestamp."""
         if not self._cache_max_size:
             return
         key = key or self._cache_key(text)
-        self._cache[key] = embedding
+        self._cache[key] = (embedding, _time_mod.monotonic())
         self._cache.move_to_end(key)
         while len(self._cache) > self._cache_max_size:
             self._cache.popitem(last=False)
@@ -272,4 +284,18 @@ class LiteLLMEmbedder(Embedder):
                     cache_hit=False,
                 )
 
-                return [item["embedding"] for item in response.data]
+                result = [item["embedding"] for item in response.data]
+
+                # Validate embedding dimension on first successful call
+                if not self._dimension_validated and result:
+                    actual_dim = len(result[0])
+                    if actual_dim != self._dimension:
+                        logger.warning(
+                            "Embedding dimension mismatch: configured=%d, actual=%d. Using actual dimension.",
+                            self._dimension,
+                            actual_dim,
+                        )
+                        self._dimension = actual_dim
+                    self._dimension_validated = True
+
+                return result

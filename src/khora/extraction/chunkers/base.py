@@ -48,6 +48,10 @@ class Chunker(ABC):
             chunk_size: Target chunk size in tokens
             chunk_overlap: Overlap between chunks in tokens
         """
+        if chunk_overlap < 0:
+            raise ValueError(f"chunk_overlap must be non-negative, got {chunk_overlap}")
+        if chunk_overlap >= chunk_size:
+            raise ValueError(f"chunk_overlap ({chunk_overlap}) must be less than chunk_size ({chunk_size})")
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         # Cache encoding reference for this instance (avoids repeated global lookups)

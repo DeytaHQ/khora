@@ -12,21 +12,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from khora._accel import batch_cosine_similarity, levenshtein_similarity
+from khora._accel import batch_cosine_similarity, levenshtein_similarity, normalize_entity_name
+from khora.core.models.entity import entity_type_str
 
 if TYPE_CHECKING:
     from khora.core.models import Entity
-
-
-def _normalize_name(name: str) -> str:
-    """Normalize an entity name for exact matching."""
-    return name.lower().strip()
-
-
-def _entity_type_str(entity: Entity) -> str:
-    """Get entity type as a plain string."""
-    et = entity.entity_type
-    return str(et.value) if hasattr(et, "value") else str(et)
 
 
 def _tokenize(name: str) -> set[str]:
@@ -34,7 +24,7 @@ def _tokenize(name: str) -> set[str]:
 
     Produces lowercase alphanumeric tokens of length >= 2.
     """
-    normalized = _normalize_name(name)
+    normalized = normalize_entity_name(name)
     tokens: set[str] = set()
     for token in normalized.split():
         cleaned = "".join(ch for ch in token if ch.isalnum())
@@ -87,7 +77,7 @@ class EntityIndex:
 
         Complexity: O(1) amortized.
         """
-        key = (_normalize_name(entity.name), _entity_type_str(entity))
+        key = (normalize_entity_name(entity.name), entity_type_str(entity.entity_type))
 
         existing = self._exact.get(key)
         if existing is not None:
@@ -97,7 +87,7 @@ class EntityIndex:
         self._exact[key] = entity
         self._by_id[entity.id] = entity
 
-        type_str = _entity_type_str(entity)
+        type_str = entity_type_str(entity.entity_type)
         self._type.setdefault(type_str, []).append(entity)
 
         for token in _tokenize(entity.name):
@@ -111,7 +101,7 @@ class EntityIndex:
 
     def get_by_name(self, name: str, entity_type: str) -> Entity | None:
         """Look up an entity by (name, type) — exact match."""
-        return self._exact.get((_normalize_name(name), entity_type))
+        return self._exact.get((normalize_entity_name(name), entity_type))
 
     def __len__(self) -> int:
         return len(self._by_id)
@@ -148,8 +138,8 @@ class EntityIndex:
         Returns:
             List of candidate entities, prioritized by blocking level match.
         """
-        type_str = _entity_type_str(entity)
-        normalized_name = _normalize_name(entity.name)
+        type_str = entity_type_str(entity.entity_type)
+        normalized_name = normalize_entity_name(entity.name)
 
         # Fast path: no entities of this type
         if type_str not in self._type:
@@ -169,7 +159,7 @@ class EntityIndex:
         for candidate in type_entities:
             if candidate.id == entity.id:
                 continue
-            candidate_normalized = _normalize_name(candidate.name)
+            candidate_normalized = normalize_entity_name(candidate.name)
             # Skip exact matches (already handled by add())
             if candidate_normalized == normalized_name:
                 continue
@@ -213,7 +203,7 @@ class EntityIndex:
         Returns:
             List of (candidate, similarity) pairs, highest first.
         """
-        type_str = _entity_type_str(entity)
+        type_str = entity_type_str(entity.entity_type)
         tokens = _tokenize(entity.name)
         if not tokens:
             return []
@@ -227,16 +217,16 @@ class EntityIndex:
         candidate_ids.discard(entity.id)
 
         results: list[tuple[Entity, float]] = []
-        normalized = _normalize_name(entity.name)
+        normalized = normalize_entity_name(entity.name)
 
         for cid in candidate_ids:
             candidate = self._by_id.get(cid)
             if candidate is None:
                 continue
-            if _entity_type_str(candidate) != type_str:
+            if entity_type_str(candidate.entity_type) != type_str:
                 continue
             # Skip exact matches (already handled by add())
-            if _normalize_name(candidate.name) == normalized:
+            if normalize_entity_name(candidate.name) == normalized:
                 continue
             sim = levenshtein_similarity(entity.name, candidate.name)
             if sim >= threshold:
@@ -265,7 +255,7 @@ class EntityIndex:
         if not entity.embedding:
             return []
 
-        type_str = _entity_type_str(entity)
+        type_str = entity_type_str(entity.entity_type)
         tokens = _tokenize(entity.name)
 
         # Gather candidate IDs via token blocking
@@ -282,7 +272,7 @@ class EntityIndex:
             candidate = self._by_id.get(cid)
             if candidate is None or not candidate.embedding:
                 continue
-            if _entity_type_str(candidate) != type_str:
+            if entity_type_str(candidate.entity_type) != type_str:
                 continue
             valid_candidates.append(candidate)
             candidate_embeddings.append(candidate.embedding)

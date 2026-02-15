@@ -24,6 +24,7 @@ use strsim::{jaro_winkler, normalized_levenshtein};
 ///   `"exact"`, `"alias"`, or `"fuzzy"`
 /// - `None` if no match was found
 #[pyfunction]
+#[pyo3(signature = (new_names, existing_names, existing_aliases, threshold))]
 pub fn resolve_entities_batch(
     py: Python<'_>,
     new_names: Vec<String>,
@@ -89,6 +90,7 @@ pub fn resolve_entities_batch(
 ///
 /// Tokenises on whitespace, computes |intersection| / max(|A|, |B|).
 /// Returns 0.0 if either side has no tokens.
+#[inline]
 fn token_overlap(a: &str, b: &str) -> f64 {
     let tokens_a: Vec<&str> = a.split_whitespace().collect();
     let tokens_b: Vec<&str> = b.split_whitespace().collect();
@@ -126,6 +128,7 @@ fn token_overlap(a: &str, b: &str) -> f64 {
 /// Returns a `Vec` parallel to `new_names`. Each element is either
 /// `Some((existing_index, score, match_type))` or `None`.
 #[pyfunction]
+#[pyo3(signature = (new_names, new_types, existing_names, existing_aliases, existing_types, type_thresholds_keys, type_thresholds_vals, default_threshold))]
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_entities_enhanced(
     py: Python<'_>,

@@ -222,3 +222,18 @@ class TestChunkerBase:
 
         with pytest.raises(TypeError):
             IncompleteChunker()  # type: ignore
+
+    def test_overlap_ge_chunk_size_raises(self) -> None:
+        """Test that overlap >= chunk_size raises ValueError."""
+        with pytest.raises(ValueError, match="chunk_overlap.*must be less than chunk_size"):
+            FixedChunker(chunk_size=100, chunk_overlap=100)
+
+    def test_overlap_greater_than_chunk_size_raises(self) -> None:
+        """Test that overlap > chunk_size raises ValueError."""
+        with pytest.raises(ValueError, match="chunk_overlap.*must be less than chunk_size"):
+            FixedChunker(chunk_size=50, chunk_overlap=100)
+
+    def test_negative_overlap_raises(self) -> None:
+        """Test that negative overlap raises ValueError."""
+        with pytest.raises(ValueError, match="chunk_overlap must be non-negative"):
+            FixedChunker(chunk_size=100, chunk_overlap=-1)

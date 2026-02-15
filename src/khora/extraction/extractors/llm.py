@@ -809,7 +809,7 @@ class LLMEntityExtractor(EntityExtractor):
                     llm_texts.append(text)
 
             if regex_results:
-                logger.debug(f"Tiered extraction: {len(regex_results)} texts via regex, " f"{len(llm_texts)} via LLM")
+                logger.debug(f"Tiered extraction: {len(regex_results)} texts via regex, {len(llm_texts)} via LLM")
 
             if not llm_texts:
                 return [regex_results[i] for i in range(len(texts))]

@@ -8,6 +8,8 @@ transaction coordination and consistency.
 from __future__ import annotations
 
 import asyncio
+import functools
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -26,6 +28,7 @@ from khora.core.models import (
     Relationship,
     Workspace,
 )
+from khora.telemetry import get_collector
 
 if TYPE_CHECKING:
     from .backends.base import (
@@ -34,6 +37,45 @@ if TYPE_CHECKING:
         RelationalBackendProtocol,
         VectorBackendProtocol,
     )
+
+
+def _record_storage_op(operation: str, backend: str = "postgresql"):
+    """Decorator to record telemetry for async storage operations.
+
+    Measures wall-clock time and records success/error via the global
+    telemetry collector.  Additional keyword arguments for
+    ``record_storage_op`` (e.g. ``record_count``, ``namespace_id``)
+    can be supplied by the decorated function by returning them as a
+    dict from a ``_telemetry_kwargs`` attribute — but typically callers
+    just let the decorator handle timing.
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            t0 = _time.perf_counter()
+            try:
+                result = await func(*args, **kwargs)
+                elapsed = _time.perf_counter() - t0
+                get_collector().record_storage_op(
+                    operation=operation,
+                    backend=backend,
+                    latency_ms=elapsed * 1000,
+                )
+                return result
+            except Exception:
+                elapsed = _time.perf_counter() - t0
+                get_collector().record_storage_op(
+                    operation=operation,
+                    backend=backend,
+                    latency_ms=elapsed * 1000,
+                    status="error",
+                )
+                raise
+
+        return wrapper
+
+    return decorator
 
 
 @dataclass
@@ -264,24 +306,12 @@ class StorageCoordinator:
     # Document operations (delegated to relational)
     # =========================================================================
 
+    @_record_storage_op("create_document", "postgresql")
     async def create_document(self, document: Document) -> Document:
         """Create a new document."""
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
-        import time as _time
-
-        _t0 = _time.perf_counter()
-        result = await self.relational.create_document(document)
-        from khora.telemetry import get_collector
-
-        get_collector().record_storage_op(
-            backend="postgresql",
-            operation="create_document",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=1,
-            namespace_id=document.namespace_id,
-        )
-        return result
+        return await self.relational.create_document(document)
 
     async def get_document(self, document_id: UUID) -> Document | None:
         """Get a document by ID."""
@@ -351,24 +381,12 @@ class StorageCoordinator:
             raise RuntimeError("Vector backend not configured")
         return await self.vector.create_chunk(chunk)
 
+    @_record_storage_op("create_chunks_batch", "pgvector")
     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
         """Create multiple chunks in a batch."""
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
-        import time as _time
-
-        _t0 = _time.perf_counter()
-        result = await self.vector.create_chunks_batch(chunks)
-        from khora.telemetry import get_collector
-
-        get_collector().record_storage_op(
-            backend="pgvector",
-            operation="create_chunks_batch",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=len(chunks),
-            namespace_id=chunks[0].namespace_id if chunks else None,
-        )
-        return result
+        return await self.vector.create_chunks_batch(chunks)
 
     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
         """Get a chunk by ID."""
@@ -397,6 +415,7 @@ class StorageCoordinator:
             raise RuntimeError("Vector backend not configured")
         return await self.vector.get_chunks_batch(chunk_ids)
 
+    @_record_storage_op("search_similar_chunks", "pgvector")
     async def search_similar_chunks(
         self,
         namespace_id: UUID,
@@ -409,27 +428,15 @@ class StorageCoordinator:
         """Search for similar chunks."""
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
-        import time as _time
-
-        _t0 = _time.perf_counter()
-        result = await self.vector.search_similar(
+        return await self.vector.search_similar(
             namespace_id,
             query_embedding,
             limit=limit,
             min_similarity=min_similarity,
             filter_document_ids=filter_document_ids,
         )
-        from khora.telemetry import get_collector
 
-        get_collector().record_storage_op(
-            backend="pgvector",
-            operation="search_similar_chunks",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=len(result),
-            namespace_id=namespace_id,
-        )
-        return result
-
+    @_record_storage_op("search_fulltext_chunks", "pgvector")
     async def search_fulltext_chunks(
         self,
         namespace_id: UUID,
@@ -441,25 +448,12 @@ class StorageCoordinator:
         """Search chunks using PostgreSQL full-text search."""
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
-        import time as _time
-
-        _t0 = _time.perf_counter()
-        result = await self.vector.search_fulltext(
+        return await self.vector.search_fulltext(
             namespace_id,
             query_text,
             limit=limit,
             language=language,
         )
-        from khora.telemetry import get_collector
-
-        get_collector().record_storage_op(
-            backend="pgvector",
-            operation="search_fulltext_chunks",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=len(result),
-            namespace_id=namespace_id,
-        )
-        return result
 
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Count chunks in a namespace."""
@@ -498,11 +492,9 @@ class StorageCoordinator:
     # Entity operations (cross-backend)
     # =========================================================================
 
+    @_record_storage_op("create_entity", "graph+vector")
     async def create_entity(self, entity: Entity) -> Entity:
         """Create an entity in both graph and vector stores (parallel)."""
-        import time as _time
-
-        _t0 = _time.perf_counter()
         # Parallel writes to graph + vector, matching update_entity pattern
         if self.graph and self.vector:
             graph_result, _ = await asyncio.gather(
@@ -514,15 +506,6 @@ class StorageCoordinator:
             entity = await self.graph.create_entity(entity)
         elif self.vector:
             await self.vector.create_entity(entity)
-        from khora.telemetry import get_collector
-
-        get_collector().record_storage_op(
-            backend="graph+vector",
-            operation="create_entity",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=1,
-            namespace_id=entity.namespace_id,
-        )
         return entity
 
     async def get_entity(self, entity_id: UUID) -> Entity | None:
@@ -586,6 +569,7 @@ class StorageCoordinator:
             return len(updates)
         return 0
 
+    @_record_storage_op("search_similar_entities", "pgvector")
     async def search_similar_entities(
         self,
         namespace_id: UUID,
@@ -597,26 +581,14 @@ class StorageCoordinator:
         """Search for similar entities."""
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
-        import time as _time
-
-        _t0 = _time.perf_counter()
-        result = await self.vector.search_similar_entities(
+        return await self.vector.search_similar_entities(
             namespace_id,
             query_embedding,
             limit=limit,
             min_similarity=min_similarity,
         )
-        from khora.telemetry import get_collector
 
-        get_collector().record_storage_op(
-            backend="pgvector",
-            operation="search_similar_entities",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=len(result),
-            namespace_id=namespace_id,
-        )
-        return result
-
+    @_record_storage_op("upsert_entities_batch", "graph+vector")
     async def upsert_entities_batch(
         self,
         namespace_id: UUID,
@@ -634,18 +606,12 @@ class StorageCoordinator:
         if not entities:
             return []
 
-        import time as _time
-
-        _t0 = _time.perf_counter()
-
         results: list[tuple[Entity, bool]] = []
 
         # Upsert in graph and vector backends in parallel
         has_graph = self.graph and hasattr(self.graph, "upsert_entities_batch")
         has_vector = self.vector and hasattr(self.vector, "upsert_entities_batch")
-        logger.debug(
-            f"upsert_entities_batch: {len(entities)} entities, " f"has_graph={has_graph}, has_vector={has_vector}"
-        )
+        logger.debug(f"upsert_entities_batch: {len(entities)} entities, has_graph={has_graph}, has_vector={has_vector}")
 
         if has_graph and has_vector:
             graph_results, _ = await asyncio.gather(
@@ -666,17 +632,9 @@ class StorageCoordinator:
 
         logger.debug(f"upsert_entities_batch: returning {len(results)} results for {len(entities)} input entities")
 
-        from khora.telemetry import get_collector
-
-        get_collector().record_storage_op(
-            backend="graph+vector",
-            operation="upsert_entities_batch",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=len(entities),
-            namespace_id=namespace_id,
-        )
         return results
 
+    @_record_storage_op("create_relationships_batch", "graph")
     async def create_relationships_batch(
         self,
         relationships: list[Relationship],
@@ -690,47 +648,22 @@ class StorageCoordinator:
         if not relationships:
             return 0
 
-        import time as _time
-
-        _t0 = _time.perf_counter()
-
         count = 0
         if self.graph and hasattr(self.graph, "create_relationships_batch"):
             count = await self.graph.create_relationships_batch(relationships, batch_size=batch_size)
 
-        from khora.telemetry import get_collector
-
-        get_collector().record_storage_op(
-            backend="graph",
-            operation="create_relationships_batch",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=count,
-            namespace_id=relationships[0].namespace_id if relationships else None,
-        )
         return count
 
     # =========================================================================
     # Relationship operations (delegated to graph)
     # =========================================================================
 
+    @_record_storage_op("create_relationship", "graph")
     async def create_relationship(self, relationship: Relationship) -> Relationship:
         """Create a relationship between entities."""
         if not self.graph:
             raise RuntimeError("Graph backend not configured")
-        import time as _time
-
-        _t0 = _time.perf_counter()
-        result = await self.graph.create_relationship(relationship)
-        from khora.telemetry import get_collector
-
-        get_collector().record_storage_op(
-            backend="graph",
-            operation="create_relationship",
-            latency_ms=(_time.perf_counter() - _t0) * 1000,
-            record_count=1,
-            namespace_id=relationship.namespace_id,
-        )
-        return result
+        return await self.graph.create_relationship(relationship)
 
     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
         """Get a relationship by ID."""
@@ -876,6 +809,7 @@ class StorageCoordinator:
             return await self.relational.get_documents_batch(document_ids)
         return {}
 
+    @_record_storage_op("get_neighborhoods_batch", "graph")
     async def get_neighborhoods_batch(
         self,
         entity_ids: list[UUID],
@@ -898,25 +832,12 @@ class StorageCoordinator:
         if not entity_ids:
             return {}
         if self.graph:
-            import time as _time
-
-            _t0 = _time.perf_counter()
-            result = await self.graph.get_neighborhoods_batch(
+            return await self.graph.get_neighborhoods_batch(
                 entity_ids,
                 depth=depth,
                 relationship_types=relationship_types,
                 limit_per_entity=limit_per_entity,
             )
-            from khora.telemetry import get_collector
-
-            get_collector().record_storage_op(
-                backend="graph",
-                operation="get_neighborhoods_batch",
-                latency_ms=(_time.perf_counter() - _t0) * 1000,
-                record_count=len(result),
-                # No namespace_id available — entity_ids don't carry namespace info
-            )
-            return result
         return {}
 
     # =========================================================================

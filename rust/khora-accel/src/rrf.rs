@@ -7,6 +7,8 @@ use hashbrown::HashMap;
 use ordered_float::OrderedFloat;
 use pyo3::prelude::*;
 
+use crate::utils::min_max_normalize;
+
 /// Basic Reciprocal Rank Fusion.
 ///
 /// `ranked_lists` is a list of ranked ID lists. For each list the score
@@ -127,19 +129,6 @@ pub fn weighted_rrf_normalized(
     })
 }
 
-fn min_max_normalize(scores: &[f64]) -> Vec<f64> {
-    if scores.is_empty() {
-        return vec![];
-    }
-    let min = scores.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if (max - min).abs() < f64::EPSILON {
-        return vec![1.0; scores.len()];
-    }
-    let range = max - min;
-    scores.iter().map(|&s| (s - min) / range).collect()
-}
-
 /// Min-max normalise a list of scores to `[0, 1]`.
 ///
 /// If all scores are identical, returns a vector of `1.0`.
@@ -158,4 +147,69 @@ pub fn normalize_scores(scores: Vec<f64>) -> Vec<f64> {
 
     let range = max - min;
     scores.iter().map(|&s| (s - min) / range).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_rrf() {
+        let lists = vec![
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            vec!["b".to_string(), "a".to_string(), "d".to_string()],
+        ];
+        let results = reciprocal_rank_fusion(lists, 60);
+        assert_eq!(results.len(), 4); // a, b, c, d
+
+        // "a" and "b" appear in both lists at symmetric positions → tied
+        let a_score = results.iter().find(|(id, _)| id == "a").unwrap().1;
+        let b_score = results.iter().find(|(id, _)| id == "b").unwrap().1;
+        assert!((a_score - b_score).abs() < 1e-10);
+
+        // "c" and "d" appear once each at rank 3 → tied
+        let c_score = results.iter().find(|(id, _)| id == "c").unwrap().1;
+        let d_score = results.iter().find(|(id, _)| id == "d").unwrap().1;
+        assert!((c_score - d_score).abs() < 1e-10);
+
+        // Items in two lists should score higher than items in one
+        assert!(a_score > c_score);
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let results = reciprocal_rank_fusion(vec![], 60);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_single_list() {
+        let lists = vec![vec!["x".to_string(), "y".to_string()]];
+        let results = reciprocal_rank_fusion(lists, 60);
+        assert_eq!(results.len(), 2);
+        // First item (rank 1) should have higher score than second (rank 2)
+        assert!(results[0].1 > results[1].1);
+        assert_eq!(results[0].0, "x");
+    }
+
+    #[test]
+    fn test_normalize_scores() {
+        let scores = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let normalized = normalize_scores(scores);
+        assert!((normalized[0] - 0.0).abs() < 1e-10);
+        assert!((normalized[4] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_normalize_scores_identical() {
+        let scores = vec![3.0, 3.0, 3.0];
+        let normalized = normalize_scores(scores);
+        assert!(normalized.iter().all(|&s| (s - 1.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn test_normalize_scores_empty() {
+        let normalized = normalize_scores(vec![]);
+        assert!(normalized.is_empty());
+    }
 }

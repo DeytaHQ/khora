@@ -1,5 +1,4 @@
 //! Shared utility functions used by other modules.
-#![allow(dead_code)]
 
 /// Min-max normalize a slice of f64 values to [0, 1] range.
 ///
