@@ -1096,10 +1096,13 @@ class VectorCypherEngine:
                         document = Document(
                             namespace_id=namespace_id,
                             content=doc_data.get("content", ""),
-                            title=doc_data.get("title", ""),
-                            source=doc_data.get("source", ""),
-                            content_hash=checksum,
-                            metadata=DocumentMetadata(custom=doc_metadata),
+                            metadata=DocumentMetadata(
+                                title=doc_data.get("title", ""),
+                                source=doc_data.get("source", ""),
+                                checksum=checksum,
+                                source_type="api",
+                                custom=doc_metadata,
+                            ),
                         )
                         document = await storage.create_document(document)
 
