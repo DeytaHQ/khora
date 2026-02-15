@@ -947,7 +947,7 @@ wheels = [
 
 [[package]]
 name = "khora"
-version = "0.2.3"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -1011,6 +1011,9 @@ memgraph = [
 neo4j = [
     { name = "neo4j" },
 ]
+nlp = [
+    { name = "nltk" },
+]
 postgres = [
     { name = "asyncpg" },
     { name = "pgvector" },
@@ -1029,6 +1032,7 @@ weaviate = [
 dev = [
     { name = "black" },
     { name = "isort" },
+    { name = "nltk" },
     { name = "prek" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1065,6 +1069,7 @@ requires-dist = [
     { name = "neo4j", marker = "extra == 'graph-all'", specifier = ">=6.1.0" },
     { name = "neo4j", marker = "extra == 'memgraph'", specifier = ">=6.1.0" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=6.1.0" },
+    { name = "nltk", marker = "extra == 'nlp'", specifier = ">=3.9.0" },
     { name = "pgvector", specifier = ">=0.4.2" },
     { name = "pgvector", marker = "extra == 'all-backends'", specifier = ">=0.4.2" },
     { name = "pgvector", marker = "extra == 'postgres'", specifier = ">=0.4.2" },
@@ -1088,12 +1093,13 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'all-backends'", specifier = ">=4.10.0" },
     { name = "weaviate-client", marker = "extra == 'weaviate'", specifier = ">=4.10.0" },
 ]
-provides-extras = ["dev", "postgres", "neo4j", "kuzu", "memgraph", "arcadedb", "graph-all", "weaviate", "all-backends", "reranking", "accel", "rust"]
+provides-extras = ["dev", "postgres", "neo4j", "kuzu", "memgraph", "arcadedb", "graph-all", "weaviate", "all-backends", "reranking", "accel", "nlp", "rust"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "black", specifier = ">=26.0.0" },
     { name = "isort", specifier = ">=7.0.0" },
+    { name = "nltk", specifier = ">=3.9.0" },
     { name = "prek", specifier = ">=0.3.1" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
@@ -1105,7 +1111,7 @@ dev = [
 
 [[package]]
 name = "khora-accel"
-version = "0.2.3"
+version = "0.3.0"
 source = { editable = "rust/khora-accel" }
 
 [[package]]
@@ -1366,6 +1372,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762", size = 2068504, upload-time = "2025-12-08T17:02:38.159Z" },
+]
+
+[[package]]
+name = "nltk"
+version = "3.9.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "joblib" },
+    { name = "regex" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f9/76/3a5e4312c19a028770f86fd7c058cf9f4ec4321c6cf7526bab998a5b683c/nltk-3.9.2.tar.gz", hash = "sha256:0f409e9b069ca4177c1903c3e843eef90c7e92992fa4931ae607da6de49e1419", size = 2887629, upload-time = "2025-10-01T07:19:23.764Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/90/81ac364ef94209c100e12579629dc92bf7a709a84af32f8c551b02c07e94/nltk-3.9.2-py3-none-any.whl", hash = "sha256:1e209d2b3009110635ed9709a67a1a3e33a10f799490fa71cf4bec218c11c88a", size = 1513404, upload-time = "2025-10-01T07:19:21.648Z" },
 ]
 
 [[package]]

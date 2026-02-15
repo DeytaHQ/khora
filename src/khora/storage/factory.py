@@ -9,8 +9,10 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .backends.pgvector import PgVectorBackend
 from .backends.postgresql import PostgreSQLBackend
@@ -121,11 +123,66 @@ class StorageConfig:
 _arcadedb_instances: dict[str, Any] = {}
 
 
+def _normalize_url(url: str) -> str:
+    """Normalize a database URL for cache-key comparison.
+
+    Strips trailing slashes and lowercases the scheme+host so that
+    ``postgresql://HOST/db`` and ``postgresql://host/db/`` share a pool.
+    """
+    parsed = urlparse(url)
+    # Rebuild with lowercased scheme+host, stripped trailing slash on path
+    normalized = parsed._replace(
+        scheme=parsed.scheme.lower(),
+        netloc=parsed.netloc.lower(),
+        path=parsed.path.rstrip("/") or "/",
+    )
+    return normalized.geturl()
+
+
 @dataclass
 class StorageFactory:
     """Factory for creating storage backends."""
 
     config: StorageConfig = field(default_factory=StorageConfig)
+    _engine_cache: dict[str, AsyncEngine] = field(default_factory=dict, repr=False)
+
+    def get_or_create_engine(
+        self,
+        url: str,
+        *,
+        echo: bool = False,
+        pool_size: int = 10,
+        max_overflow: int = 20,
+    ) -> AsyncEngine:
+        """Get a cached engine or create a new one for the given URL.
+
+        Engines are cached by normalized URL so that backends sharing the
+        same database (e.g. PostgreSQLBackend and PgVectorBackend) reuse
+        a single connection pool.
+        """
+        # Convert to async URL if needed
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+
+        key = _normalize_url(url)
+        if key not in self._engine_cache:
+            self._engine_cache[key] = create_async_engine(
+                url,
+                echo=echo,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+            )
+            logger.debug(f"Created shared engine for {key}")
+        return self._engine_cache[key]
+
+    async def dispose_engines(self) -> None:
+        """Dispose all cached engines."""
+        for key, engine in self._engine_cache.items():
+            await engine.dispose()
+            logger.debug(f"Disposed shared engine for {key}")
+        self._engine_cache.clear()
 
     def create_relational_backend(self) -> PostgreSQLBackend | None:
         """Create the PostgreSQL relational backend."""
@@ -133,11 +190,18 @@ class StorageFactory:
             logger.warning("PostgreSQL URL not configured, relational backend disabled")
             return None
 
+        engine = self.get_or_create_engine(
+            self.config.postgresql_url,
+            echo=self.config.postgresql_echo,
+            pool_size=self.config.postgresql_pool_size,
+            max_overflow=self.config.postgresql_max_overflow,
+        )
         return PostgreSQLBackend(
             self.config.postgresql_url,
             echo=self.config.postgresql_echo,
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
+            engine=engine,
         )
 
     def create_vector_backend(self) -> VectorBackendProtocol | None:
@@ -154,12 +218,19 @@ class StorageFactory:
                     logger.warning("pgvector URL not configured, vector backend disabled")
                     return None
                 dim = getattr(vector_config, "embedding_dimension", 1536)
+                engine = self.get_or_create_engine(
+                    url,
+                    echo=self.config.postgresql_echo,
+                    pool_size=self.config.postgresql_pool_size,
+                    max_overflow=self.config.postgresql_max_overflow,
+                )
                 return PgVectorBackend(
                     url,
                     embedding_dimension=dim,
                     echo=self.config.postgresql_echo,
                     pool_size=self.config.postgresql_pool_size,
                     max_overflow=self.config.postgresql_max_overflow,
+                    engine=engine,
                 )
             elif backend_name and backend_name in _VECTOR_REGISTRY:
                 return self._create_from_registry(_VECTOR_REGISTRY, backend_name, vector_config, "vector")
@@ -169,12 +240,19 @@ class StorageFactory:
             logger.warning("pgvector URL not configured, vector backend disabled")
             return None
 
+        engine = self.get_or_create_engine(
+            self.config.pgvector_url,
+            echo=self.config.postgresql_echo,
+            pool_size=self.config.postgresql_pool_size,
+            max_overflow=self.config.postgresql_max_overflow,
+        )
         return PgVectorBackend(
             self.config.pgvector_url,
             embedding_dimension=self.config.pgvector_embedding_dimension,
             echo=self.config.postgresql_echo,
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
+            engine=engine,
         )
 
     def create_graph_backend(self) -> GraphBackendProtocol | None:
@@ -251,11 +329,18 @@ class StorageFactory:
         try:
             from .event_store import PostgreSQLEventStore
 
+            engine = self.get_or_create_engine(
+                self.config.event_store_url,
+                echo=self.config.postgresql_echo,
+                pool_size=self.config.postgresql_pool_size,
+                max_overflow=self.config.postgresql_max_overflow,
+            )
             return PostgreSQLEventStore(
                 self.config.event_store_url,
                 echo=self.config.postgresql_echo,
                 pool_size=self.config.postgresql_pool_size,
                 max_overflow=self.config.postgresql_max_overflow,
+                engine=engine,
             )
         except ImportError:
             logger.warning("Event store not available")

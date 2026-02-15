@@ -49,9 +49,9 @@ metadata = MetaData()
 khora_chunks_table = Table(
     "khora_chunks",
     metadata,
-    Column("id", PG_UUID(as_uuid=False), primary_key=True),
-    Column("namespace_id", PG_UUID(as_uuid=False), nullable=False, index=True),
-    Column("document_id", PG_UUID(as_uuid=False), nullable=False, index=True),
+    Column("id", PG_UUID(as_uuid=True), primary_key=True),
+    Column("namespace_id", PG_UUID(as_uuid=True), nullable=False, index=True),
+    Column("document_id", PG_UUID(as_uuid=True), nullable=False, index=True),
     Column("content", Text, nullable=False),
     Column("embedding", Vector(1536), nullable=True),
     # Temporal fields
@@ -193,9 +193,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
         async with self._get_session() as session:
             stmt = khora_chunks_table.insert().values(
-                id=str(chunk_id),
-                namespace_id=str(chunk.namespace_id),
-                document_id=str(chunk.document_id),
+                id=chunk_id,
+                namespace_id=chunk.namespace_id,
+                document_id=chunk.document_id,
                 content=chunk.content,
                 embedding=chunk.embedding,
                 occurred_at=chunk.occurred_at,
@@ -224,9 +224,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
             chunk.id = chunk_id
             values.append(
                 {
-                    "id": str(chunk_id),
-                    "namespace_id": str(chunk.namespace_id),
-                    "document_id": str(chunk.document_id),
+                    "id": chunk_id,
+                    "namespace_id": chunk.namespace_id,
+                    "document_id": chunk.document_id,
                     "content": chunk.content,
                     "embedding": chunk.embedding,
                     "occurred_at": chunk.occurred_at,
@@ -250,8 +250,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
         """Get a chunk by ID."""
         async with self._get_session() as session:
             stmt = select(khora_chunks_table).where(
-                khora_chunks_table.c.id == str(chunk_id),
-                khora_chunks_table.c.namespace_id == str(namespace_id),
+                khora_chunks_table.c.id == chunk_id,
+                khora_chunks_table.c.namespace_id == namespace_id,
             )
             result = await session.execute(stmt)
             row = result.fetchone()
@@ -265,8 +265,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
         """Delete a chunk by ID."""
         async with self._get_session() as session:
             stmt = khora_chunks_table.delete().where(
-                khora_chunks_table.c.id == str(chunk_id),
-                khora_chunks_table.c.namespace_id == str(namespace_id),
+                khora_chunks_table.c.id == chunk_id,
+                khora_chunks_table.c.namespace_id == namespace_id,
             )
             result = await session.execute(stmt)
             await session.commit()
@@ -277,8 +277,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
         """Delete all chunks for a document."""
         async with self._get_session() as session:
             stmt = khora_chunks_table.delete().where(
-                khora_chunks_table.c.document_id == str(document_id),
-                khora_chunks_table.c.namespace_id == str(namespace_id),
+                khora_chunks_table.c.document_id == document_id,
+                khora_chunks_table.c.namespace_id == namespace_id,
             )
             result = await session.execute(stmt)
             await session.commit()
@@ -308,7 +308,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         """
         async with self._get_session() as session:
             # Build base conditions
-            conditions = [khora_chunks_table.c.namespace_id == str(namespace_id)]
+            conditions = [khora_chunks_table.c.namespace_id == namespace_id]
 
             # Add temporal filters
             if temporal_filter:
@@ -551,9 +551,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
     def _row_to_chunk(self, row) -> TemporalChunk:
         """Convert a database row to a TemporalChunk."""
         return TemporalChunk(
-            id=UUID(row.id),
-            namespace_id=UUID(row.namespace_id),
-            document_id=UUID(row.document_id),
+            id=row.id,
+            namespace_id=row.namespace_id,
+            document_id=row.document_id,
             content=row.content,
             embedding=list(row.embedding) if row.embedding else None,
             occurred_at=row.occurred_at,

@@ -96,10 +96,10 @@ class TemporalEdgeStorage:
         # Create the edge
         edge_id = edge.id or uuid4()
         model = TemporalEdgeModel(
-            id=str(edge_id),
-            namespace_id=str(edge.namespace_id),
-            source_entity_id=str(edge.source_entity_id),
-            target_entity_id=str(edge.target_entity_id),
+            id=edge_id,
+            namespace_id=edge.namespace_id,
+            source_entity_id=edge.source_entity_id,
+            target_entity_id=edge.target_entity_id,
             relationship_type=edge.relationship_type,
             description=edge.description,
             occurred_at=edge.occurred_at,
@@ -109,8 +109,8 @@ class TemporalEdgeStorage:
             is_valid=edge.is_valid,
             confidence=edge.confidence,
             properties=edge.properties,
-            source_document_ids=[str(id) for id in edge.source_document_ids],
-            source_chunk_ids=[str(id) for id in edge.source_chunk_ids],
+            source_document_ids=edge.source_document_ids,
+            source_chunk_ids=edge.source_chunk_ids,
         )
 
         self._session.add(model)
@@ -159,7 +159,7 @@ class TemporalEdgeStorage:
         Returns:
             Edge or None if not found
         """
-        stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+        stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == edge_id)
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
 
@@ -182,7 +182,7 @@ class TemporalEdgeStorage:
         Returns:
             True if edge was invalidated
         """
-        stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+        stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == edge_id)
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
 
@@ -190,7 +190,7 @@ class TemporalEdgeStorage:
             return False
 
         row.is_valid = False
-        row.invalidated_by_id = str(invalidated_by) if invalidated_by else None
+        row.invalidated_by_id = invalidated_by
         row.invalidation_reason = reason
 
         await self._session.flush()
@@ -222,7 +222,7 @@ class TemporalEdgeStorage:
             List of edges in chronological order
         """
         conditions = [
-            TemporalEdgeModel.namespace_id == str(namespace_id),
+            TemporalEdgeModel.namespace_id == namespace_id,
             TemporalEdgeModel.occurred_at >= start,
             TemporalEdgeModel.occurred_at < end,
         ]
@@ -265,19 +265,17 @@ class TemporalEdgeStorage:
         Returns:
             List of edges in chronological order
         """
-        entity_id_str = str(entity_id)
-
         if direction == "outgoing":
-            entity_condition = TemporalEdgeModel.source_entity_id == entity_id_str
+            entity_condition = TemporalEdgeModel.source_entity_id == entity_id
         elif direction == "incoming":
-            entity_condition = TemporalEdgeModel.target_entity_id == entity_id_str
+            entity_condition = TemporalEdgeModel.target_entity_id == entity_id
         else:  # both
-            entity_condition = (TemporalEdgeModel.source_entity_id == entity_id_str) | (
-                TemporalEdgeModel.target_entity_id == entity_id_str
+            entity_condition = (TemporalEdgeModel.source_entity_id == entity_id) | (
+                TemporalEdgeModel.target_entity_id == entity_id
             )
 
         conditions = [
-            TemporalEdgeModel.namespace_id == str(namespace_id),
+            TemporalEdgeModel.namespace_id == namespace_id,
             entity_condition,
         ]
 
@@ -319,9 +317,9 @@ class TemporalEdgeStorage:
             List of edges in chronological order
         """
         conditions = [
-            TemporalEdgeModel.namespace_id == str(namespace_id),
-            TemporalEdgeModel.source_entity_id == str(source_entity_id),
-            TemporalEdgeModel.target_entity_id == str(target_entity_id),
+            TemporalEdgeModel.namespace_id == namespace_id,
+            TemporalEdgeModel.source_entity_id == source_entity_id,
+            TemporalEdgeModel.target_entity_id == target_entity_id,
         ]
 
         if relationship_type:
@@ -360,7 +358,7 @@ class TemporalEdgeStorage:
             List of edges valid at that time
         """
         conditions = [
-            TemporalEdgeModel.namespace_id == str(namespace_id),
+            TemporalEdgeModel.namespace_id == namespace_id,
             TemporalEdgeModel.is_valid == True,  # noqa: E712
             # valid_from <= point_in_time < valid_until
             (TemporalEdgeModel.valid_from.is_(None)) | (TemporalEdgeModel.valid_from <= point_in_time),
@@ -369,8 +367,7 @@ class TemporalEdgeStorage:
 
         if entity_id:
             conditions.append(
-                (TemporalEdgeModel.source_entity_id == str(entity_id))
-                | (TemporalEdgeModel.target_entity_id == str(entity_id))
+                (TemporalEdgeModel.source_entity_id == entity_id) | (TemporalEdgeModel.target_entity_id == entity_id)
             )
 
         if relationship_type:
@@ -392,7 +389,7 @@ class TemporalEdgeStorage:
         Returns:
             True if deleted
         """
-        stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == str(edge_id))
+        stmt = select(TemporalEdgeModel).where(TemporalEdgeModel.id == edge_id)
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
 
@@ -415,9 +412,8 @@ class TemporalEdgeStorage:
             Number of edges deleted
         """
         stmt = select(TemporalEdgeModel).where(
-            TemporalEdgeModel.namespace_id == str(namespace_id),
-            (TemporalEdgeModel.source_entity_id == str(entity_id))
-            | (TemporalEdgeModel.target_entity_id == str(entity_id)),
+            TemporalEdgeModel.namespace_id == namespace_id,
+            (TemporalEdgeModel.source_entity_id == entity_id) | (TemporalEdgeModel.target_entity_id == entity_id),
         )
 
         result = await self._session.execute(stmt)
@@ -445,8 +441,8 @@ class TemporalEdgeStorage:
 
         # Create the link
         link = TimeEdgeLinkModel(
-            time_node_id=str(day_node.id),
-            edge_id=str(edge_id),
+            time_node_id=day_node.id,
+            edge_id=edge_id,
         )
         self._session.add(link)
 
@@ -498,10 +494,10 @@ class TemporalEdgeStorage:
     def _model_to_edge(self, model: TemporalEdgeModel) -> TemporalEdge:
         """Convert a database model to a TemporalEdge dataclass."""
         return TemporalEdge(
-            id=UUID(model.id),
-            namespace_id=UUID(model.namespace_id),
-            source_entity_id=UUID(model.source_entity_id),
-            target_entity_id=UUID(model.target_entity_id),
+            id=model.id,
+            namespace_id=model.namespace_id,
+            source_entity_id=model.source_entity_id,
+            target_entity_id=model.target_entity_id,
             relationship_type=model.relationship_type,
             description=model.description,
             occurred_at=model.occurred_at,
@@ -509,12 +505,12 @@ class TemporalEdgeStorage:
             valid_from=model.valid_from,
             valid_until=model.valid_until,
             is_valid=model.is_valid,
-            invalidated_by_id=UUID(model.invalidated_by_id) if model.invalidated_by_id else None,
+            invalidated_by_id=model.invalidated_by_id,
             invalidation_reason=model.invalidation_reason,
             confidence=model.confidence,
             properties=model.properties or {},
-            source_document_ids=[UUID(id) for id in (model.source_document_ids or [])],
-            source_chunk_ids=[UUID(id) for id in (model.source_chunk_ids or [])],
+            source_document_ids=model.source_document_ids or [],
+            source_chunk_ids=model.source_chunk_ids or [],
         )
 
 

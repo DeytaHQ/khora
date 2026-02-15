@@ -135,7 +135,7 @@ class TimeHierarchyBuilder:
         stmt = (
             select(TimeNodeModel)
             .where(
-                TimeNodeModel.namespace_id == str(namespace_id),
+                TimeNodeModel.namespace_id == namespace_id,
                 TimeNodeModel.granularity == granularity,
                 TimeNodeModel.start_time >= start,
                 TimeNodeModel.start_time < end,
@@ -157,7 +157,7 @@ class TimeHierarchyBuilder:
         Returns:
             List of child TimeNodes in chronological order
         """
-        stmt = select(TimeNodeModel).where(TimeNodeModel.parent_id == str(node.id)).order_by(TimeNodeModel.start_time)
+        stmt = select(TimeNodeModel).where(TimeNodeModel.parent_id == node.id).order_by(TimeNodeModel.start_time)
 
         result = await self._session.execute(stmt)
         rows = result.scalars().all()
@@ -176,7 +176,7 @@ class TimeHierarchyBuilder:
         if node.parent_id is None:
             return None
 
-        stmt = select(TimeNodeModel).where(TimeNodeModel.id == str(node.parent_id))
+        stmt = select(TimeNodeModel).where(TimeNodeModel.id == node.parent_id)
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
 
@@ -211,7 +211,7 @@ class TimeHierarchyBuilder:
             stmt = (
                 select(TimeNodeModel)
                 .where(
-                    TimeNodeModel.namespace_id == str(namespace_id),
+                    TimeNodeModel.namespace_id == namespace_id,
                     TimeNodeModel.granularity == granularity,
                     TimeNodeModel.start_time <= start,
                     TimeNodeModel.end_time >= end,
@@ -234,7 +234,7 @@ class TimeHierarchyBuilder:
             node_id: Time node ID
             delta: Amount to increment by
         """
-        stmt = select(TimeNodeModel).where(TimeNodeModel.id == str(node_id))
+        stmt = select(TimeNodeModel).where(TimeNodeModel.id == node_id)
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
 
@@ -249,7 +249,7 @@ class TimeHierarchyBuilder:
             node_id: Time node ID
             delta: Amount to increment by
         """
-        stmt = select(TimeNodeModel).where(TimeNodeModel.id == str(node_id))
+        stmt = select(TimeNodeModel).where(TimeNodeModel.id == node_id)
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
 
@@ -269,7 +269,7 @@ class TimeHierarchyBuilder:
     ) -> TimeNode | None:
         """Get a node by namespace, granularity, and start time."""
         stmt = select(TimeNodeModel).where(
-            TimeNodeModel.namespace_id == str(namespace_id),
+            TimeNodeModel.namespace_id == namespace_id,
             TimeNodeModel.granularity == granularity,
             TimeNodeModel.start_time == start_time,
         )
@@ -291,12 +291,12 @@ class TimeHierarchyBuilder:
         """Create a new time node."""
         node_id = uuid4()
         model = TimeNodeModel(
-            id=str(node_id),
-            namespace_id=str(namespace_id),
+            id=node_id,
+            namespace_id=namespace_id,
             granularity=granularity,
             start_time=start_time,
             end_time=end_time,
-            parent_id=str(parent_id) if parent_id else None,
+            parent_id=parent_id,
             name=name,
             edge_count=0,
             entity_count=0,
@@ -412,12 +412,12 @@ class TimeHierarchyBuilder:
     def _model_to_node(self, model: TimeNodeModel) -> TimeNode:
         """Convert a database model to a TimeNode dataclass."""
         return TimeNode(
-            id=UUID(model.id),
-            namespace_id=UUID(model.namespace_id),
+            id=model.id,
+            namespace_id=model.namespace_id,
             granularity=model.granularity,
             start_time=model.start_time,
             end_time=model.end_time,
-            parent_id=UUID(model.parent_id) if model.parent_id else None,
+            parent_id=model.parent_id,
             name=model.name,
             edge_count=model.edge_count or 0,
             entity_count=model.entity_count or 0,

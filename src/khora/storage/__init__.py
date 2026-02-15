@@ -20,7 +20,7 @@ from .backends.base import (
 from .backends.neo4j import Neo4jBackend
 from .backends.pgvector import PgVectorBackend
 from .backends.postgresql import PostgreSQLBackend
-from .coordinator import StorageCoordinator
+from .coordinator import StorageCoordinator, TransactionContext
 from .event_store import PostgreSQLEventStore
 from .expertise_store import ExpertiseStore
 from .factory import StorageConfig, StorageFactory, create_storage_coordinator
@@ -39,6 +39,7 @@ __all__ = [
     "PostgreSQLEventStore",
     # Coordinator
     "StorageCoordinator",
+    "TransactionContext",
     "StorageConfig",
     "StorageFactory",
     "create_storage_coordinator",

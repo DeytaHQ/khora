@@ -1,6 +1,6 @@
 [project]
 name = "khora"
-version = "0.2.3"
+version = "0.3.0"
 description = "Khora is Memory Lake"
 readme = "README.md"
 authors = [
@@ -84,6 +84,8 @@ reranking = [
 accel = [
     "rapidfuzz>=3.0.0",
 ]
+# NLP tools
+nlp = ["nltk>=3.9.0"]
 # Rust-accelerated operations (requires Rust toolchain to build from source)
 rust = [
     "khora-accel>=0.1.0",
@@ -191,4 +193,5 @@ dev = [
     "isort>=7.0.0",
     "ty>=0.0.15",
     "rapidfuzz>=3.0.0",  # For ty type checking of optional accel module
+    "nltk>=3.9.0",
 ]
