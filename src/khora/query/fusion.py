@@ -1,9 +1,15 @@
-"""Reciprocal Rank Fusion for combining search results."""
+"""Reciprocal Rank Fusion for combining search results.
+
+This module delegates to :mod:`khora.engines.vectorcypher.fusion` for the
+core RRF implementation while preserving a simplified public API that
+accepts generic ``(item, score)`` tuples keyed by source name.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, TypeVar
+from uuid import uuid4
 
 T = TypeVar("T")
 
@@ -27,8 +33,8 @@ def reciprocal_rank_fusion(
 ) -> list[tuple[Any, float]]:
     """Combine multiple ranked lists using Reciprocal Rank Fusion.
 
-    RRF is a simple but effective method for combining results from
-    multiple search systems without requiring score calibration.
+    Delegates to :func:`khora.engines.vectorcypher.fusion.weighted_rrf_normalized`
+    for the core RRF computation with score normalization.
 
     RRF score = sum(weight[source] / (k + rank[source]))
 
@@ -56,35 +62,75 @@ def reciprocal_rank_fusion(
     # Normalize weights
     total_weight = sum(weights.get(s, 1.0) for s in ranked_lists)
     if total_weight == 0:
-        # If all weights are zero, use equal weights
         total_weight = len(ranked_lists)
         normalized_weights = {s: 1.0 / total_weight for s in ranked_lists}
     else:
         normalized_weights = {s: weights.get(s, 1.0) / total_weight for s in ranked_lists}
 
-    # Calculate RRF scores
-    rrf_scores: dict[Any, float] = {}
-    items_by_id: dict[Any, Any] = {}
+    from khora.engines.vectorcypher.fusion import weighted_rrf_normalized as _weighted_rrf_normalized
 
-    for source, ranked_list in ranked_lists.items():
-        weight = normalized_weights.get(source, 1.0)
+    # Assign stable synthetic UUIDs per item for deduplication and map
+    # the generic (item, score) tuples into the vectorcypher format
+    # (UUID, score, item).
+    id_to_uuid: dict[Any, Any] = {}  # id_extractor(item) -> UUID
+    items_by_uuid: dict[Any, Any] = {}  # UUID -> original item
 
-        for rank, (item, _score) in enumerate(ranked_list, start=1):
+    source_names = list(ranked_lists.keys())
+
+    # Build two canonical lists: first two sources map to vector/graph slots,
+    # additional sources are folded in via sequential calls.
+    all_converted: list[list[tuple[Any, float, Any]]] = []
+    for source in source_names:
+        converted: list[tuple[Any, float, Any]] = []
+        for item, score in ranked_lists[source]:
             item_id = id_extractor(item)
+            if item_id not in id_to_uuid:
+                id_to_uuid[item_id] = uuid4()
+            uid = id_to_uuid[item_id]
+            items_by_uuid[uid] = item
+            converted.append((uid, score, item))
+        all_converted.append(converted)
 
-            # RRF formula: weight / (k + rank)
-            rrf_contribution = weight / (k + rank)
+    # Fuse pairwise: start with first source, merge subsequent sources
+    if len(all_converted) == 1:
+        source = source_names[0]
+        w = normalized_weights.get(source, 1.0)
+        fused = _weighted_rrf_normalized(
+            all_converted[0],
+            [],
+            k=k,
+            vector_weight=w,
+            graph_weight=0.0,
+        )
+    else:
+        # First pair
+        s0, s1 = source_names[0], source_names[1]
+        w0 = normalized_weights.get(s0, 1.0)
+        w1 = normalized_weights.get(s1, 1.0)
+        fused = _weighted_rrf_normalized(
+            all_converted[0],
+            all_converted[1],
+            k=k,
+            vector_weight=w0,
+            graph_weight=w1,
+        )
 
-            if item_id in rrf_scores:
-                rrf_scores[item_id] += rrf_contribution
-            else:
-                rrf_scores[item_id] = rrf_contribution
-                items_by_id[item_id] = item
+        # Fold in additional sources (rare: most callers use 2 sources)
+        for i in range(2, len(all_converted)):
+            si = source_names[i]
+            wi = normalized_weights.get(si, 1.0)
+            # Convert current fused results back to list format
+            current = [(r.item_id, r.rrf_score, r.item) for r in fused]
+            fused = _weighted_rrf_normalized(
+                current,
+                all_converted[i],
+                k=k,
+                vector_weight=1.0,
+                graph_weight=wi,
+            )
 
-    # Sort by RRF score
-    sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
-
-    return [(items_by_id[item_id], rrf_scores[item_id]) for item_id in sorted_ids]
+    # Map back to (original_item, score) tuples
+    return [(items_by_uuid[r.item_id], r.rrf_score) for r in fused]
 
 
 def combine_with_weights(

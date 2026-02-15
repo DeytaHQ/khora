@@ -35,6 +35,48 @@ def _sanitize_neo4j_label(label: str) -> str:
     return sanitized.upper() if sanitized else "RELATES_TO"
 
 
+def _entity_to_cypher_params(entity: Entity) -> dict[str, Any]:
+    """Convert Entity to Cypher-compatible parameter dict."""
+    return {
+        "id": str(entity.id),
+        "namespace_id": str(entity.namespace_id),
+        "name": entity.name,
+        "entity_type": (entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type),
+        "description": entity.description,
+        "attributes": _serialize_dict(entity.attributes),
+        "source_document_ids": [str(d) for d in entity.source_document_ids],
+        "source_chunk_ids": [str(c) for c in entity.source_chunk_ids],
+        "mention_count": entity.mention_count,
+        "valid_from": entity.valid_from.isoformat() if entity.valid_from else None,
+        "valid_until": entity.valid_until.isoformat() if entity.valid_until else None,
+        "confidence": entity.confidence,
+        "metadata": _serialize_dict(entity.metadata),
+        "created_at": entity.created_at.isoformat(),
+        "updated_at": entity.updated_at.isoformat(),
+    }
+
+
+def _relationship_to_cypher_params(rel: Relationship) -> dict[str, Any]:
+    """Convert Relationship to Cypher-compatible parameter dict."""
+    return {
+        "id": str(rel.id),
+        "namespace_id": str(rel.namespace_id),
+        "source_id": str(rel.source_entity_id),
+        "target_id": str(rel.target_entity_id),
+        "description": rel.description,
+        "properties": _serialize_dict(rel.properties),
+        "source_document_ids": [str(d) for d in rel.source_document_ids],
+        "source_chunk_ids": [str(c) for c in rel.source_chunk_ids],
+        "valid_from": rel.valid_from.isoformat() if rel.valid_from else None,
+        "valid_until": rel.valid_until.isoformat() if rel.valid_until else None,
+        "confidence": rel.confidence,
+        "weight": rel.weight,
+        "metadata": _serialize_dict(rel.metadata),
+        "created_at": rel.created_at.isoformat(),
+        "updated_at": rel.updated_at.isoformat(),
+    }
+
+
 class Neo4jBackend(GraphBackendBase):
     """Neo4j backend for knowledge graph operations.
 
@@ -212,6 +254,7 @@ class Neo4jBackend(GraphBackendBase):
     async def create_entity(self, entity: Entity) -> Entity:
         """Create an entity node in the graph."""
         driver = self._get_driver()
+        params = _entity_to_cypher_params(entity)
 
         async def _create(tx: AsyncManagedTransaction) -> None:
             query = """
@@ -233,26 +276,7 @@ class Neo4jBackend(GraphBackendBase):
                 updated_at: $updated_at
             })
             """
-            await tx.run(
-                query,
-                id=str(entity.id),
-                namespace_id=str(entity.namespace_id),
-                name=entity.name,
-                entity_type=(
-                    entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
-                ),
-                description=entity.description,
-                attributes=_serialize_dict(entity.attributes),
-                source_document_ids=[str(d) for d in entity.source_document_ids],
-                source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-                mention_count=entity.mention_count,
-                valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
-                valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
-                confidence=entity.confidence,
-                metadata=_serialize_dict(entity.metadata),
-                created_at=entity.created_at.isoformat(),
-                updated_at=entity.updated_at.isoformat(),
-            )
+            await tx.run(query, **params)
 
         async with driver.session(database=self._database) as session:
             await session.execute_write(_create)
@@ -323,6 +347,7 @@ class Neo4jBackend(GraphBackendBase):
     async def update_entity(self, entity: Entity) -> Entity:
         """Update an entity."""
         driver = self._get_driver()
+        params = _entity_to_cypher_params(entity)
 
         async def _update(tx: AsyncManagedTransaction) -> None:
             query = """
@@ -339,21 +364,7 @@ class Neo4jBackend(GraphBackendBase):
                 e.metadata = $metadata,
                 e.updated_at = $updated_at
             """
-            await tx.run(
-                query,
-                id=str(entity.id),
-                name=entity.name,
-                description=entity.description,
-                attributes=_serialize_dict(entity.attributes),
-                source_document_ids=[str(d) for d in entity.source_document_ids],
-                source_chunk_ids=[str(c) for c in entity.source_chunk_ids],
-                mention_count=entity.mention_count,
-                valid_from=entity.valid_from.isoformat() if entity.valid_from else None,
-                valid_until=entity.valid_until.isoformat() if entity.valid_until else None,
-                confidence=entity.confidence,
-                metadata=_serialize_dict(entity.metadata),
-                updated_at=entity.updated_at.isoformat(),
-            )
+            await tx.run(query, **params)
 
         async with driver.session(database=self._database) as session:
             await session.execute_write(_update)
@@ -457,26 +468,7 @@ class Neo4jBackend(GraphBackendBase):
 
         for start in range(0, len(entities), batch_size):
             batch = entities[start : start + batch_size]
-            rows = [
-                {
-                    "id": str(e.id),
-                    "namespace_id": str(e.namespace_id),
-                    "name": e.name,
-                    "entity_type": (e.entity_type.value if isinstance(e.entity_type, EntityType) else e.entity_type),
-                    "description": e.description,
-                    "attributes": _serialize_dict(e.attributes),
-                    "source_document_ids": [str(d) for d in e.source_document_ids],
-                    "source_chunk_ids": [str(c) for c in e.source_chunk_ids],
-                    "mention_count": e.mention_count,
-                    "valid_from": e.valid_from.isoformat() if e.valid_from else None,
-                    "valid_until": e.valid_until.isoformat() if e.valid_until else None,
-                    "confidence": e.confidence,
-                    "metadata": _serialize_dict(e.metadata),
-                    "created_at": e.created_at.isoformat(),
-                    "updated_at": e.updated_at.isoformat(),
-                }
-                for e in batch
-            ]
+            rows = [_entity_to_cypher_params(e) for e in batch]
 
             async def _upsert_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
                 result = await tx.run(_UPSERT_CYPHER, rows=rows)
@@ -545,26 +537,7 @@ class Neo4jBackend(GraphBackendBase):
             type_total = 0
             for start in range(0, len(rels), batch_size):
                 batch = rels[start : start + batch_size]
-                rows = [
-                    {
-                        "id": str(r.id),
-                        "namespace_id": str(r.namespace_id),
-                        "source_id": str(r.source_entity_id),
-                        "target_id": str(r.target_entity_id),
-                        "description": r.description,
-                        "properties": _serialize_dict(r.properties),
-                        "source_document_ids": [str(d) for d in r.source_document_ids],
-                        "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
-                        "valid_from": r.valid_from.isoformat() if r.valid_from else None,
-                        "valid_until": r.valid_until.isoformat() if r.valid_until else None,
-                        "confidence": r.confidence,
-                        "weight": r.weight,
-                        "metadata": _serialize_dict(r.metadata),
-                        "created_at": r.created_at.isoformat(),
-                        "updated_at": r.updated_at.isoformat(),
-                    }
-                    for r in batch
-                ]
+                rows = [_relationship_to_cypher_params(r) for r in batch]
                 query = f"""
                 UNWIND $rows AS row
                 MATCH (source:Entity {{id: row.source_id}})
@@ -634,6 +607,7 @@ class Neo4jBackend(GraphBackendBase):
     async def create_relationship(self, relationship: Relationship) -> Relationship:
         """Create a relationship between entities."""
         driver = self._get_driver()
+        params = _relationship_to_cypher_params(relationship)
 
         rel_type = _sanitize_neo4j_label(
             relationship.relationship_type.value
@@ -662,24 +636,7 @@ class Neo4jBackend(GraphBackendBase):
                 updated_at: $updated_at
             }}]->(target)
             """
-            await tx.run(
-                query,
-                source_id=str(relationship.source_entity_id),
-                target_id=str(relationship.target_entity_id),
-                id=str(relationship.id),
-                namespace_id=str(relationship.namespace_id),
-                description=relationship.description,
-                properties=_serialize_dict(relationship.properties),
-                source_document_ids=[str(d) for d in relationship.source_document_ids],
-                source_chunk_ids=[str(c) for c in relationship.source_chunk_ids],
-                valid_from=relationship.valid_from.isoformat() if relationship.valid_from else None,
-                valid_until=relationship.valid_until.isoformat() if relationship.valid_until else None,
-                confidence=relationship.confidence,
-                weight=relationship.weight,
-                metadata=_serialize_dict(relationship.metadata),
-                created_at=relationship.created_at.isoformat(),
-                updated_at=relationship.updated_at.isoformat(),
-            )
+            await tx.run(query, **params)
 
         async with driver.session(database=self._database) as session:
             await session.execute_write(_create)

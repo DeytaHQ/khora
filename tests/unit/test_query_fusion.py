@@ -121,12 +121,17 @@ class TestReciprocalRankFusion:
         assert scores == sorted(scores, reverse=True)
 
     def test_rrf_formula_correctness(self) -> None:
-        """Verify RRF formula: score = weight / (k + rank)."""
+        """Verify RRF score includes rank-based + normalized score contribution."""
         ranked = {"v": [("a", 0.9)]}
         k = 60
         result = reciprocal_rank_fusion(ranked, k=k)
         # Single source, weight=1.0 (normalized), rank=1
-        expected_score = 1.0 / (k + 1)
+        # weighted_rrf_normalized adds a small normalized score contribution
+        # for tiebreaking: weight * norm_score * 0.01
+        # Single item normalizes to 1.0, so contribution = 1.0 * 1.0 * 0.01
+        rrf_component = 1.0 / (k + 1)
+        norm_contribution = 1.0 * 1.0 * 0.01
+        expected_score = rrf_component + norm_contribution
         assert abs(result[0][1] - expected_score) < 1e-10
 
 

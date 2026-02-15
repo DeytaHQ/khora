@@ -23,7 +23,7 @@ class DocumentStatus(str, Enum):
     ARCHIVED = "archived"  # Archived, not actively used
 
 
-@dataclass
+@dataclass(slots=True)
 class DocumentMetadata:
     """Metadata associated with a document."""
 
@@ -90,7 +90,7 @@ class Document:
         self.updated_at = datetime.now(UTC)
 
 
-@dataclass
+@dataclass(slots=True)
 class ChunkMetadata:
     """Metadata associated with a chunk."""
 
@@ -102,7 +102,7 @@ class ChunkMetadata:
     custom: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class Chunk:
     """A chunk of text from a document with its embedding.
 

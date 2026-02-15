@@ -40,6 +40,7 @@ static SUFFIXES: &[&str] = &[
 // Tokenisation helpers (pure Rust, no Python interaction)
 // ---------------------------------------------------------------------------
 
+#[inline]
 fn basic_stem(word: &str) -> &str {
     for suffix in SUFFIXES {
         if word.len() > suffix.len() + 2 && word.ends_with(suffix) {
@@ -176,29 +177,7 @@ impl RustBM25Index {
     /// Add a single document to the index.
     fn add_document(&mut self, doc_id: String, text: &str) {
         let tokens = tokenize_indexed(text, self.use_stemming, self.remove_stopwords, &mut self.token_to_idx);
-        let doc_idx = self.doc_ids.len() as u32;
-
-        self.doc_id_to_idx.insert(doc_id.clone(), doc_idx);
-        self.doc_ids.push(doc_id);
-
-        let token_len = tokens.len() as u32;
-        self.doc_lengths.push(token_len);
-
-        // Build per-doc term frequency map
-        let mut freq: HashMap<u32, u32> = HashMap::new();
-        for &tok in &tokens {
-            *freq.entry(tok).or_insert(0) += 1;
-        }
-
-        // Update global term-doc frequencies and inverted index (unique terms only)
-        for &tok in freq.keys() {
-            *self.term_doc_freqs.entry(tok).or_insert(0) += 1;
-            self.inverted_index.entry(tok).or_default().push(doc_idx);
-        }
-
-        self.doc_freqs.push(freq);
-        self.total_docs += 1;
-        self.total_length += token_len as u64;
+        self.add_document_tokens(doc_id, tokens);
         self.update_avg_length();
     }
 
@@ -206,27 +185,7 @@ impl RustBM25Index {
     fn add_documents(&mut self, documents: Vec<(String, String)>) {
         for (doc_id, text) in documents {
             let tokens = tokenize_indexed(&text, self.use_stemming, self.remove_stopwords, &mut self.token_to_idx);
-            let doc_idx = self.doc_ids.len() as u32;
-
-            self.doc_id_to_idx.insert(doc_id.clone(), doc_idx);
-            self.doc_ids.push(doc_id);
-
-            let token_len = tokens.len() as u32;
-            self.doc_lengths.push(token_len);
-
-            let mut freq: HashMap<u32, u32> = HashMap::new();
-            for &tok in &tokens {
-                *freq.entry(tok).or_insert(0) += 1;
-            }
-
-            for &tok in freq.keys() {
-                *self.term_doc_freqs.entry(tok).or_insert(0) += 1;
-                self.inverted_index.entry(tok).or_default().push(doc_idx);
-            }
-
-            self.doc_freqs.push(freq);
-            self.total_docs += 1;
-            self.total_length += token_len as u64;
+            self.add_document_tokens(doc_id, tokens);
         }
         self.update_avg_length();
     }
@@ -338,10 +297,12 @@ impl RustBM25Index {
             results
         });
 
-        // Map back to doc_id strings
+        // Map back to doc_id strings (bounds-safe)
         results
             .drain(..)
-            .map(|(idx, score)| (self.doc_ids[idx as usize].clone(), score))
+            .filter_map(|(idx, score)| {
+                self.doc_ids.get(idx as usize).map(|id| (id.clone(), score))
+            })
             .collect()
     }
 }
@@ -354,6 +315,7 @@ impl RustBM25Index {
         }
     }
 
+    #[inline]
     fn idf(&self, tok_idx: u32) -> f32 {
         let n = self.total_docs as f32;
         let df = self.term_doc_freqs.get(&tok_idx).copied().unwrap_or(0) as f32;
@@ -361,5 +323,87 @@ impl RustBM25Index {
             return 0.0;
         }
         ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
+    }
+
+    /// Insert pre-tokenized document into the index (shared by add_document / add_documents).
+    fn add_document_tokens(&mut self, doc_id: String, tokens: Vec<u32>) {
+        let doc_idx = self.doc_ids.len() as u32;
+
+        self.doc_id_to_idx.insert(doc_id.clone(), doc_idx);
+        self.doc_ids.push(doc_id);
+
+        let token_len = tokens.len() as u32;
+        self.doc_lengths.push(token_len);
+
+        // Build per-doc term frequency map
+        let mut freq: HashMap<u32, u32> = HashMap::new();
+        for &tok in &tokens {
+            *freq.entry(tok).or_insert(0) += 1;
+        }
+
+        // Update global term-doc frequencies and inverted index (unique terms only)
+        for &tok in freq.keys() {
+            *self.term_doc_freqs.entry(tok).or_insert(0) += 1;
+            self.inverted_index.entry(tok).or_default().push(doc_idx);
+        }
+
+        self.doc_freqs.push(freq);
+        self.total_docs += 1;
+        self.total_length += token_len as u64;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_and_score() {
+        let mut index = RustBM25Index::new(1.5, 0.75, true, true);
+        index.add_document("doc1".to_string(), "the quick brown fox jumps over the lazy dog");
+        index.add_document("doc2".to_string(), "a brown dog runs through the field");
+
+        let score = index.score("brown fox", "doc1");
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_empty_index_score() {
+        let index = RustBM25Index::new(1.5, 0.75, true, true);
+        let score = index.score("anything", "nonexistent");
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_multiple_documents() {
+        let mut index = RustBM25Index::new(1.5, 0.75, true, true);
+        index.add_documents(vec![
+            ("doc1".to_string(), "machine learning algorithms".to_string()),
+            ("doc2".to_string(), "deep learning neural networks".to_string()),
+            ("doc3".to_string(), "cooking recipes for pasta".to_string()),
+        ]);
+
+        // "learning" stems to "learn" — appears in doc1 and doc2, not doc3
+        let score1 = index.score("learning", "doc1");
+        let score2 = index.score("learning", "doc2");
+        let score3 = index.score("learning", "doc3");
+        assert!(score1 > 0.0);
+        assert!(score2 > 0.0);
+        assert_eq!(score3, 0.0);
+    }
+
+    #[test]
+    fn test_basic_stem() {
+        assert_eq!(basic_stem("running"), "runn");
+        assert_eq!(basic_stem("played"), "play");
+        assert_eq!(basic_stem("go"), "go"); // too short to stem
+    }
+
+    #[test]
+    fn test_tokenize() {
+        let tokens = tokenize("The quick brown fox", true, true);
+        // "the" is a stopword, should be removed
+        assert!(!tokens.contains(&"the".to_string()));
+        assert!(tokens.contains(&"quick".to_string()) || tokens.contains(&"quic".to_string()));
     }
 }

@@ -124,3 +124,68 @@ pub fn build_chunk_edges(
         edges
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_graph_convergence() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            // Simple 3-node cycle: 0 → 1, 1 → 2, 2 → 0
+            let edges = vec![
+                (0, 1, 1.0),
+                (1, 2, 1.0),
+                (2, 0, 1.0),
+            ];
+            let scores = pagerank(py, 3, edges, 0.85, 100, 1e-6);
+            assert_eq!(scores.len(), 3);
+            // All nodes should have equal scores in a symmetric cycle
+            assert!((scores[0] - scores[1]).abs() < 1e-4);
+            assert!((scores[1] - scores[2]).abs() < 1e-4);
+        });
+    }
+
+    #[test]
+    fn test_isolated_nodes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            // 3 nodes, no edges → all get base score (1-d)/n
+            let scores = pagerank(py, 3, vec![], 0.85, 100, 1e-6);
+            assert_eq!(scores.len(), 3);
+            let expected = 0.15 / 3.0;
+            for s in &scores {
+                assert!((*s - expected).abs() < 1e-4);
+            }
+        });
+    }
+
+    #[test]
+    fn test_empty_graph() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let scores = pagerank(py, 0, vec![], 0.85, 100, 1e-6);
+            assert!(scores.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_star_graph() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            // All nodes point to node 0
+            let edges = vec![
+                (1, 0, 1.0),
+                (2, 0, 1.0),
+                (3, 0, 1.0),
+            ];
+            let scores = pagerank(py, 4, edges, 0.85, 100, 1e-6);
+            assert_eq!(scores.len(), 4);
+            // Node 0 should have the highest score
+            assert!(scores[0] > scores[1]);
+            assert!(scores[0] > scores[2]);
+            assert!(scores[0] > scores[3]);
+        });
+    }
+}

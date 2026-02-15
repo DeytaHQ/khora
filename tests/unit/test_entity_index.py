@@ -6,11 +6,10 @@ from uuid import uuid4
 
 import pytest
 
-from khora._accel import cosine_similarity, levenshtein_similarity
+from khora._accel import cosine_similarity, levenshtein_similarity, normalize_entity_name
 from khora.core.models.entity import Entity, EntityType
 from khora.extraction.expansion.entity_index import (
     EntityIndex,
-    _normalize_name,
     _tokenize,
 )
 
@@ -44,10 +43,10 @@ def _make_entity(
 
 class TestNormalizeName:
     def test_lowercase_strip(self):
-        assert _normalize_name("  Hello World  ") == "hello world"
+        assert normalize_entity_name("  Hello World  ") == "hello world"
 
     def test_empty(self):
-        assert _normalize_name("") == ""
+        assert normalize_entity_name("") == ""
 
 
 class TestTokenize:

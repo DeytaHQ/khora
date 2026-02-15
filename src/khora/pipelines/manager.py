@@ -111,7 +111,7 @@ class PipelineManager:
 
         except Exception as e:
             run.status = "failed"
-            run.error = str(e)
+            run.error = f"{type(e).__name__}: {e}"
             run.completed_at = datetime.now()
             logger.error(f"Pipeline {pipeline_name} failed (run_id={run_id}): {e}")
             raise

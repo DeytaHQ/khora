@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from khora.storage import StorageConfig, StorageCoordinator
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class RememberResult:
     """Result of a remember operation."""
 
@@ -40,7 +40,7 @@ class RememberResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class BatchResult:
     """Result of remember_batch() operation."""
 
@@ -54,7 +54,7 @@ class BatchResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class Stats:
     """Namespace statistics."""
 
@@ -64,7 +64,7 @@ class Stats:
     relationships: int
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class RecallResult:
     """Result of a recall operation."""
 

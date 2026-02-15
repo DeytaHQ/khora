@@ -24,12 +24,13 @@ from khora.db.models import (
     SyncCheckpointModel,
     WorkspaceModel,
 )
+from khora.storage.backends.mixins import AsyncSessionMixin, retry_on_deadlock
 
 if TYPE_CHECKING:
     pass
 
 
-class PostgreSQLBackend:
+class PostgreSQLBackend(AsyncSessionMixin):
     """PostgreSQL backend for relational data.
 
     Handles all relational data operations including multi-tenancy
@@ -97,12 +98,6 @@ class PostgreSQLBackend:
         except Exception as e:
             logger.error(f"PostgreSQL health check failed: {e}")
             return False
-
-    def _get_session(self) -> AsyncSession:
-        """Get a new database session."""
-        if self._session_factory is None:
-            raise RuntimeError("Backend not connected. Call connect() first.")
-        return self._session_factory()
 
     async def create_tables(self) -> None:
         """Create all database tables (for testing/development)."""
@@ -391,6 +386,7 @@ class PostgreSQLBackend:
     # Document operations
     # =========================================================================
 
+    @retry_on_deadlock
     async def create_document(self, document: Document) -> Document:
         """Create a new document."""
         async with self._get_session() as session:
@@ -444,6 +440,7 @@ class PostgreSQLBackend:
             result = await session.execute(query)
             return [self._document_model_to_domain(m) for m in result.scalars().all()]
 
+    @retry_on_deadlock
     async def update_document(self, document: Document) -> Document:
         """Update a document."""
         async with self._get_session() as session:
@@ -472,6 +469,7 @@ class PostgreSQLBackend:
             await session.commit()
             return document
 
+    @retry_on_deadlock
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete a document."""
         async with self._get_session() as session:

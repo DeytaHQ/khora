@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from khora.storage import StorageCoordinator
 
 
-@dataclass
+@dataclass(slots=True)
 class ExtractionQualityMetrics:
     """Track extraction quality for monitoring."""
 
@@ -71,7 +71,7 @@ class ExtractionQualityMetrics:
             self.avg_entities_per_chunk = self.total_entities / self.total_chunks
 
 
-@dataclass
+@dataclass(slots=True)
 class VectorCypherConfig:
     """VectorCypher-specific configuration."""
 

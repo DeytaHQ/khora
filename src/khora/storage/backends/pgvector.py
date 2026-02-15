@@ -17,6 +17,7 @@ from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_a
 
 from khora.core.models import Chunk, ChunkMetadata
 from khora.db.models import Base, ChunkModel, EntityModel
+from khora.storage.backends.mixins import AsyncSessionMixin
 
 if TYPE_CHECKING:
     pass
@@ -38,7 +39,7 @@ async def _retry_on_deadlock(coro_fn, *args, **kwargs):
             return await coro_fn(*args, **kwargs)
 
 
-class PgVectorBackend:
+class PgVectorBackend(AsyncSessionMixin):
     """pgvector backend for vector embeddings.
 
     Handles all vector operations including chunk storage,
@@ -124,12 +125,6 @@ class PgVectorBackend:
         except Exception as e:
             logger.error(f"pgvector health check failed: {e}")
             return False
-
-    def _get_session(self) -> AsyncSession:
-        """Get a new database session."""
-        if self._session_factory is None:
-            raise RuntimeError("Backend not connected. Call connect() first.")
-        return self._session_factory()
 
     async def create_tables(self) -> None:
         """Create all database tables (for testing/development)."""

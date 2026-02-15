@@ -73,7 +73,7 @@ def relationship_type_str(rt: RelationshipType | str) -> str:
     return rt.value if isinstance(rt, RelationshipType) else str(rt)
 
 
-@dataclass
+@dataclass(slots=True)
 class Entity:
     """An extracted entity from a document.
 
@@ -161,7 +161,7 @@ class Entity:
         self.updated_at = datetime.now(UTC)
 
 
-@dataclass
+@dataclass(slots=True)
 class Relationship:
     """A relationship between two entities.
 
@@ -196,7 +196,7 @@ class Relationship:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
-@dataclass
+@dataclass(slots=True)
 class Episode:
     """An episodic memory representing a temporal event or experience.
 
