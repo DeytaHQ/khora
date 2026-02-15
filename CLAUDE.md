@@ -1,107 +1,76 @@
 # Khora
 
-Memory Lake combining knowledge graphs (Neo4j/Kuzu/Memgraph), vector database (pgvector), and PostgreSQL for unified knowledge storage and retrieval.
+Memory Lake library combining knowledge graphs, vector database (pgvector), and PostgreSQL for unified knowledge storage and retrieval. **This is a library, not a deployable application.**
 
 ## Commands
 
 ```bash
-make test              # Run tests (pytest, coverage ≥50%)
+make test              # Run tests (pytest, coverage ≥30%)
 make format            # Format code (black, isort, ruff)
-make lint              # Lint + typecheck
+make lint              # Lint + typecheck (ruff, ty)
+make dev               # Start local databases (postgres + neo4j)
 uv run khora serve --reload  # Dev server
 uv run alembic upgrade head  # Run migrations
 ```
-
-**Version bumps:** When bumping the khora version, always bump `khora-accel` to the same version. Files to update:
-- `pyproject.toml` (khora version)
-- `src/khora/__init__.py` (`__version__`)
-- `rust/khora-accel/Cargo.toml` (khora-accel version)
-- `rust/khora-accel/pyproject.toml` (khora-accel version)
-- Run `uv lock` to update `uv.lock`, and `cargo generate-lockfile` in `rust/khora-accel/` to update `Cargo.lock`
 
 ## Architecture
 
 ```
 MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageCoordinator
-                                                  ├── PostgreSQL (documents, tenancy)
-                                                  ├── pgvector (embeddings)
-                                                  └── Graph backend (entities, relationships)
+                                                    ├── PostgreSQL (documents, tenancy)
+                                                    ├── pgvector (embeddings)
+                                                    └── Graph backend (entities, relationships)
 ```
 
-**Pluggable Engines:**
-- **GraphRAG** (`engine="graphrag"`) - Full knowledge graph extraction, requires Neo4j/Kuzu
-- **VectorCypher** (`engine="vectorcypher"`) - Hybrid vector+Cypher retrieval, requires Neo4j
-- **Skeleton Construction** (`engine="skeleton"`) - Temporal-first, cost-optimized, Neo4j optional
+- **Engines are pluggable** — implement `MemoryEngineProtocol` in `engines/protocol.py`
+- **Graph backends are interchangeable** — all implement `GraphBackend` in `storage/backends/base.py`
+- **Extraction skills are YAML-defined** — see `extraction/skills/definitions/`
+- **Multi-tenancy:** Organization → Workspace → MemoryNamespace
+- **Config via env vars** — prefix `KHORA_`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
 
-**Key entry points:**
-- `src/khora/memory_lake.py` - Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
-- `src/khora/engines/graphrag/engine.py` - GraphRAG engine (default)
-- `src/khora/engines/skeleton/engine.py` - Skeleton Construction temporal-first engine
-- `src/khora/engines/skeleton/temporal_edges.py` - Bi-temporal edge storage
-- `src/khora/engines/skeleton/time_hierarchy.py` - Hierarchical time graph (Year→Quarter→Month→Week→Day)
-- `src/khora/engines/skeleton/skeleton.py` - PageRank-based skeleton indexing
-- `src/khora/engines/skeleton/backends/pgvector.py` - PostgreSQL+pgvector backend
-- `src/khora/engines/skeleton/backends/weaviate.py` - Weaviate backend
-- `src/khora/engines/vectorcypher/engine.py` - VectorCypher hybrid engine, `VectorCypherConfig`
-- `src/khora/engines/vectorcypher/retriever.py` - Hybrid retrieval pipeline, `RetrieverConfig`
-- `src/khora/engines/vectorcypher/router.py` - Query complexity routing (SIMPLE/MODERATE/COMPLEX)
-- `src/khora/engines/vectorcypher/dual_nodes.py` - HippoRAG 2 dual-node manager (Entity+Chunk in Neo4j)
-- `src/khora/engines/vectorcypher/fusion.py` - Weighted RRF, score normalization
-- `src/khora/query/engine.py` - HybridQueryEngine (search pipeline)
-- `src/khora/pipelines/flows/ingest.py` - Document ingestion flow
+## Key Entry Points
 
-**Multi-tenancy:** Organization → Workspace → MemoryNamespace
+- `memory_lake.py` — Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
+- `storage/coordinator.py` — Backend orchestration, `TransactionContext`, `transaction()`
+- `storage/factory.py` — Backend creation with shared engine pools
+- `db/session.py` — `DatabaseManager` class for session/engine lifecycle
+- `db/models.py` — SQLAlchemy ORM (all UUID columns use `as_uuid=True`)
+- `engines/` — GraphRAG (default), Skeleton Construction, VectorCypher
+- `query/engine.py` — `HybridQueryEngine` search pipeline
 
-## Usage
+## Engine Selection
 
-```python
-async with MemoryLake("postgresql://...") as lake:
-    await lake.remember("content", title="Doc")
-    results = await lake.recall("query")
-```
-
-## Key Patterns
-
-- **Engines are pluggable** - See `khora.engines.protocol.MemoryEngineProtocol`
-- **Graph backends are interchangeable** - All implement `GraphBackend` in `storage/backends/base.py`
-- **Extraction skills are YAML-defined** - See `src/khora/extraction/skills/definitions/`
-- **Config via env vars** - `KHORA_DATABASE_URL`, `KHORA_NEO4J_URL`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
-
-## Engine Selection Guide
-
-| Use Case | Engine | Reason |
-|----------|--------|--------|
-| Knowledge bases | `graphrag` | Rich entity/relationship extraction |
-| Entity exploration | `graphrag` | Graph traversal support |
-| Multi-hop queries | `vectorcypher` | Vector + Cypher graph traversal |
-| Complex relationships | `vectorcypher` | RRF fusion, query routing |
-| Chat/message history | `skeleton` | Skeleton Construction: Temporal-first, structured filters |
-| Event streams/logs | `skeleton` | Skeleton Construction: Bi-temporal model |
-| Cost-sensitive apps | `skeleton` | Skeleton Construction: 5-10x fewer LLM calls |
-| Simple infrastructure | `skeleton` | Skeleton Construction: No Neo4j required |
-
-**VectorCypher engine features:**
-- Query routing: SIMPLE (vector-only), MODERATE (shallow graph), COMPLEX (deep graph)
-- Per-complexity fusion weights: different vector:graph ratios per query type
-- Adaptive graph depth: adjusts traversal depth based on entry entity count
-- Skeleton extraction: 70% core ratio by default (configurable via `VectorCypherConfig`)
-- Dual-node architecture: Entity + Chunk nodes in Neo4j linked via `MENTIONED_IN`
-- Score normalization: `weighted_rrf_normalized` balances score distributions before fusion
-- Config via `engine_kwargs={"vectorcypher_config": VectorCypherConfig(...)}`
-
-**Skeleton Construction engine features:**
-- Bi-temporal: `occurred_at` (event time) vs `ingested_at` (system time)
-- Skeleton indexing: PageRank identifies ~10% core chunks for LLM extraction
-- Time hierarchy: Year → Quarter → Month → Week → Day for range queries
-- Hybrid search: Vector + BM25 with configurable `hybrid_alpha`
-- Temporal filters: `author`, `channel`, `tags`, time ranges
+| Use Case | Engine | Key Trait |
+|----------|--------|-----------|
+| Knowledge bases, entity exploration | `graphrag` | Full graph extraction, requires Neo4j/Kuzu |
+| Multi-hop queries, complex relationships | `vectorcypher` | Vector + Cypher hybrid, requires Neo4j |
+| Chat history, event streams, cost-sensitive | `skeleton` | Temporal-first, 5-10x fewer LLM calls, Neo4j optional |
 
 ## Testing
 
 ```bash
-make test                           # Full suite
-uv run pytest tests/unit/test_memory_lake.py -v  # Single file
-uv run pytest -k "test_remember" -v              # By name
+uv run pytest tests/unit/ -v               # Unit tests only
+uv run pytest -k "test_remember" -v         # By name
+uv run pytest tests/unit/test_memory_lake.py  # Single file
 ```
 
-Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
+Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`. Async tests use `asyncio_mode = "auto"`.
+
+## Version Bumps
+
+IMPORTANT: When bumping the version, always update **all four files** and regenerate lockfiles:
+1. `pyproject.toml` — khora version
+2. `src/khora/__init__.py` — `__version__`
+3. `rust/khora-accel/Cargo.toml` — khora-accel version
+4. `rust/khora-accel/pyproject.toml` — khora-accel version
+5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
+
+## Gotchas
+
+- **No Docker in CI** — khora is a library; CI only runs tests, linting, and type checking
+- **UUID columns use `as_uuid=True`** — all 52 UUID columns in `db/models.py` map to native Python `uuid.UUID` objects. Never use `str()` wrapping when building ORM models
+- **Graph backends need `str()` at boundary** — Neo4j/Kuzu/Memgraph don't support native UUIDs, so convert at the graph DB boundary only
+- **Shared engine pools** — `StorageFactory` caches engines by normalized URL. Backends sharing the same URL reuse one `AsyncEngine`. Shared-engine backends must skip `dispose()` on disconnect
+- **Transactions** — use `async with coordinator.transaction() as txn:` for atomic multi-backend operations. Backend write methods accept optional `session` parameter to join an existing transaction
+- **NLTK is optional** — `_HAS_NLTK` flag controls sentence splitting. Code must handle `LookupError` when punkt_tab data is missing (falls back to regex)
+- **Downstream consumers** — `genesis` and `khora-benchmarks` depend on khora. Check compatibility when changing public APIs. `lake.storage` is a stable public API used by both
