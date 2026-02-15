@@ -62,13 +62,14 @@ to join the active transaction.
 `chat/history.py`, `chat/persona.py`, `chat/prompt.py`). The module
 itself is unchanged — these tests document and lock existing behavior.
 
-### NLTK sentence splitting
+### spaCy sentence splitting
 
-The semantic chunker now uses `nltk.tokenize.sent_tokenize` when
-available, improving sentence boundary detection for abbreviations,
-decimal numbers, and URLs. Install with `pip install khora[nlp]`.
-When NLTK is not installed or the `punkt_tab` data is missing, the
-chunker falls back to its existing regex-based splitter transparently.
+The semantic chunker now uses spaCy's `sentencizer` component when
+available, improving sentence boundary detection. Install with
+`pip install khora[nlp]`. The sentencizer is a rule-based component
+that ships with spaCy core — no model download needed. When spaCy is
+not installed, the chunker falls back to its existing regex-based
+splitter transparently.
 
 ### Docker removal
 

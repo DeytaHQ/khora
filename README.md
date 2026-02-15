@@ -912,7 +912,7 @@ class Stats:
 | `lake.query_engine` | **Removed** — use `lake.recall(raw=True)` for unprocessed search |
 | `remember_batch_legacy()` | **Removed** — use `remember_batch()` |
 | `TransactionContext` | New — atomic multi-backend operations via `coordinator.transaction()` |
-| `khora[nlp]` extra | New — install for NLTK-enhanced sentence splitting |
+| `khora[nlp]` extra | New — install for spaCy-powered sentence splitting |
 | Shared connection pools | New — backends sharing the same database URL reuse one engine pool |
 
 ---
