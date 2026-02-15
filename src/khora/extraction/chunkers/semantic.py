@@ -10,6 +10,13 @@ from .base import Chunker, ChunkResult
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 _SENTENCE_ENDINGS = re.compile(r"(?<=[.!?])\s+")
 
+try:
+    from nltk.tokenize import sent_tokenize as _nltk_sent_tokenize
+
+    _HAS_NLTK = True
+except ImportError:
+    _HAS_NLTK = False
+
 
 class SemanticChunker(Chunker):
     """Semantic chunker that respects document structure.
@@ -144,10 +151,21 @@ class SemanticChunker(Chunker):
         return chunks
 
     def _split_sentences(self, text: str) -> list[str]:
-        """Split text into sentences."""
-        # Simple sentence splitting - handles common cases
-        # Could be improved with nltk or spacy for better accuracy
+        """Split text into sentences.
+
+        Uses nltk.tokenize.sent_tokenize when available for better handling
+        of abbreviations (Dr., U.S.), decimal numbers (3.14), URLs, etc.
+        Falls back to regex splitting when nltk is not installed.
+        """
+        if _HAS_NLTK:
+            return self._split_sentences_nltk(text)
+        # Regex fallback
         sentences = _SENTENCE_ENDINGS.split(text)
+        return [s.strip() for s in sentences if s.strip()]
+
+    def _split_sentences_nltk(self, text: str) -> list[str]:
+        """Split text into sentences using nltk's Punkt tokenizer."""
+        sentences = _nltk_sent_tokenize(text)
         return [s.strip() for s in sentences if s.strip()]
 
     def _fixed_split(self, text: str) -> list[str]:

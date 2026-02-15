@@ -9,7 +9,6 @@ The default engine is "graphrag" which uses knowledge graphs, vectors, and LLM e
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -24,7 +23,6 @@ from khora.query import SearchMode
 
 if TYPE_CHECKING:
     from khora.engines.protocol import MemoryEngineProtocol
-    from khora.query import HybridQueryEngine
     from khora.storage import StorageConfig, StorageCoordinator
 
 
@@ -227,44 +225,22 @@ class MemoryLake:
 
     @property
     def storage(self) -> StorageCoordinator:
-        """Get the storage coordinator.
+        """Get the storage coordinator for admin/management operations.
 
-        .. deprecated::
-            Direct access to storage is deprecated. Use MemoryLake methods instead:
-            - lake.get_document() instead of lake.storage.get_document()
-            - lake.list_documents() instead of lake.storage.list_documents()
-            - lake.search_entities() instead of lake.storage.search_entities()
-            - lake.stats() instead of querying storage directly
+        Provides direct access to the underlying storage coordinator for
+        organizational operations like creating workspaces, managing namespaces,
+        and other administrative tasks not covered by the high-level API.
+
+        For common operations, prefer the MemoryLake convenience methods:
+        - lake.get_document() for document retrieval
+        - lake.list_documents() for document listing
+        - lake.search_entities() for entity search
+        - lake.stats() for namespace statistics
         """
-        warnings.warn(
-            "lake.storage is deprecated. Use lake.get_document(), lake.list_documents(), "
-            "lake.search_entities(), lake.stats() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         engine = self._get_engine()
         if hasattr(engine, "_storage") and engine._storage:
             return engine._storage  # type: ignore[invalid-return-type]
         raise AttributeError("Current engine does not expose storage")
-
-    @property
-    def query_engine(self) -> HybridQueryEngine:
-        """Get the query engine.
-
-        .. deprecated::
-            Direct access to query_engine is deprecated. Use lake.recall() instead.
-            For unprocessed search without LLM features, use lake.recall(query, raw=True).
-        """
-        warnings.warn(
-            "lake.query_engine is deprecated. Use lake.recall() instead. "
-            "For raw search without LLM features, use lake.recall(query, raw=True).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        engine = self._get_engine()
-        if hasattr(engine, "_query_engine") and engine._query_engine:
-            return engine._query_engine  # type: ignore[invalid-return-type]
-        raise AttributeError("Current engine does not expose query_engine")
 
     # =========================================================================
     # Namespace Management
@@ -408,89 +384,6 @@ class MemoryLake:
             )
         finally:
             clear_trace_id()
-
-    async def remember_batch_legacy(
-        self,
-        documents: list[dict[str, Any]],
-        *,
-        namespace: str | UUID | None = None,
-        skill_name: str = "general_entities",
-        max_concurrent: int = 10,
-    ) -> list[RememberResult]:
-        """Store multiple documents - legacy version returning list of RememberResult.
-
-        .. deprecated::
-            Use remember_batch() which returns BatchResult with aggregated stats.
-            This method is kept for backwards compatibility.
-        """
-        warnings.warn(
-            "remember_batch_legacy() is deprecated. Use remember_batch() which returns BatchResult.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if not documents:
-            return []
-
-        namespace_id = await self._resolve_namespace(namespace)
-
-        doc_inputs = []
-        for doc_data in documents:
-            doc_inputs.append(
-                {
-                    "content": doc_data.get("content", ""),
-                    "title": doc_data.get("title", ""),
-                    "source": doc_data.get("source", ""),
-                    "source_type": "api",
-                    "metadata": doc_data.get("metadata", {}),
-                }
-            )
-
-        from khora.pipelines.flows.ingest import ingest_documents
-
-        # Access storage through engine for backwards compat
-        engine = self._get_engine()
-        if not hasattr(engine, "_storage") or engine._storage is None:
-            raise RuntimeError("Engine does not support legacy batch operations")
-
-        storage = engine._storage
-
-        result = await ingest_documents(
-            namespace_id,
-            doc_inputs,
-            storage,
-            skill_name=skill_name,
-            embedding_model=self._config.llm.embedding_model,
-            extraction_model=self._config.llm.extraction_model or self._config.llm.model,
-            max_concurrent_documents=max_concurrent,
-        )
-
-        per_doc = result.get("per_document_results", [])
-        final_results: list[RememberResult] = []
-        for doc_result in per_doc:
-            final_results.append(
-                RememberResult(
-                    document_id=UUID(doc_result["document_id"]),
-                    namespace_id=namespace_id,
-                    chunks_created=doc_result.get("chunks", 0),
-                    entities_extracted=doc_result.get("entities", 0),
-                    relationships_created=doc_result.get("relationships", 0),
-                )
-            )
-
-        failed_count = result.get("failed_documents", 0)
-        for _ in range(failed_count):
-            final_results.append(
-                RememberResult(
-                    document_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    namespace_id=namespace_id,
-                    chunks_created=0,
-                    entities_extracted=0,
-                    relationships_created=0,
-                    metadata={"failed": True},
-                )
-            )
-
-        return final_results
 
     async def recall(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -41,9 +41,8 @@ def _mock_engine() -> MagicMock:
     """Create a mock engine with all required methods."""
     mock_eng = MagicMock()
 
-    # Storage and query engine for deprecated property tests
+    # Storage and embedder
     mock_eng._storage = MagicMock()
-    mock_eng._query_engine = MagicMock()
     mock_eng._embedder = MagicMock()
 
     # Default namespace ID
@@ -193,23 +192,16 @@ class TestMemoryLakeInit:
         assert lake._storage_config is storage_cfg
 
     def test_not_connected_properties_raise(self) -> None:
-        """Accessing storage/query_engine before connect raises."""
+        """Accessing storage before connect raises."""
         lake = _make_lake()
 
         with pytest.raises(RuntimeError, match="not connected"):
             _ = lake.storage
 
-        with pytest.raises(RuntimeError, match="not connected"):
-            _ = lake.query_engine
-
     def test_connected_properties_return(self) -> None:
-        """Accessing storage/query_engine after connect succeeds."""
+        """Accessing storage after connect succeeds."""
         lake = _make_lake(connected=True)
-        # The deprecated properties access _storage and _query_engine from the engine
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            assert lake.storage is lake._engine._storage
-            assert lake.query_engine is lake._engine._query_engine
+        assert lake.storage is lake._engine._storage
 
 
 # ---------------------------------------------------------------------------
@@ -382,94 +374,6 @@ class TestRemember:
 # ---------------------------------------------------------------------------
 # remember_batch
 # ---------------------------------------------------------------------------
-
-
-class TestRememberBatchLegacy:
-    """Tests for remember_batch_legacy() which returns list[RememberResult]."""
-
-    @pytest.mark.asyncio
-    async def test_empty_batch(self) -> None:
-        """Empty batch returns empty list."""
-        lake = _make_lake(connected=True)
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=uuid4())
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            result = await lake.remember_batch_legacy([])
-
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_batch_returns_results(self) -> None:
-        """remember_batch_legacy() returns one RememberResult per document."""
-        lake = _make_lake(connected=True)
-        ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
-        lake._config = _mock_config()
-
-        doc_id_1 = str(uuid4())
-        doc_id_2 = str(uuid4())
-        ingest_result = {
-            "per_document_results": [
-                {"document_id": doc_id_1, "chunks": 3, "entities": 1, "relationships": 0},
-                {"document_id": doc_id_2, "chunks": 2, "entities": 0, "relationships": 0},
-            ],
-            "failed_documents": 0,
-        }
-
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
-            warnings.catch_warnings(),
-        ):
-            warnings.simplefilter("ignore", DeprecationWarning)
-            results = await lake.remember_batch_legacy(
-                [
-                    {"content": "Doc 1", "title": "First"},
-                    {"content": "Doc 2", "title": "Second"},
-                ]
-            )
-
-        assert len(results) == 2
-        assert results[0].document_id == UUID(doc_id_1)
-        assert results[0].chunks_created == 3
-        assert results[1].document_id == UUID(doc_id_2)
-        assert results[1].chunks_created == 2
-
-    @pytest.mark.asyncio
-    async def test_batch_with_failures(self) -> None:
-        """Failed documents get padded with error results."""
-        lake = _make_lake(connected=True)
-        ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
-        lake._config = _mock_config()
-
-        doc_id = str(uuid4())
-        ingest_result = {
-            "per_document_results": [
-                {"document_id": doc_id, "chunks": 1, "entities": 0, "relationships": 0},
-            ],
-            "failed_documents": 1,
-        }
-
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.pipelines.flows.ingest.ingest_documents", new_callable=AsyncMock, return_value=ingest_result),
-            warnings.catch_warnings(),
-        ):
-            warnings.simplefilter("ignore", DeprecationWarning)
-            results = await lake.remember_batch_legacy(
-                [
-                    {"content": "Good doc"},
-                    {"content": "Bad doc"},
-                ]
-            )
-
-        assert len(results) == 2
-        assert results[1].metadata.get("failed") is True
-        assert results[1].chunks_created == 0
 
 
 # ---------------------------------------------------------------------------
@@ -812,36 +716,26 @@ class TestStats:
 
 
 # ---------------------------------------------------------------------------
-# New API: Deprecation Warnings
+# New API: Storage Property (stable API)
 # ---------------------------------------------------------------------------
 
 
-class TestDeprecationWarnings:
-    """Tests for deprecation warnings on storage and query_engine properties."""
+class TestStorageProperty:
+    """Tests for the storage property (promoted to stable API)."""
 
-    def test_storage_property_warns(self) -> None:
-        """Accessing storage property emits DeprecationWarning."""
+    def test_storage_no_deprecation_warning(self) -> None:
+        """Accessing storage property does NOT emit DeprecationWarning."""
         lake = _make_lake(connected=True)
-
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             _ = lake.storage
+        deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(deprecation_warnings) == 0
 
-        assert len(w) == 1
-        assert issubclass(w[0].category, DeprecationWarning)
-        assert "lake.storage is deprecated" in str(w[0].message)
-
-    def test_query_engine_property_warns(self) -> None:
-        """Accessing query_engine property emits DeprecationWarning."""
+    def test_storage_returns_coordinator(self) -> None:
+        """storage property returns the engine's storage coordinator."""
         lake = _make_lake(connected=True)
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            _ = lake.query_engine
-
-        assert len(w) == 1
-        assert issubclass(w[0].category, DeprecationWarning)
-        assert "lake.query_engine is deprecated" in str(w[0].message)
+        assert lake.storage is lake._engine._storage
 
 
 # ---------------------------------------------------------------------------

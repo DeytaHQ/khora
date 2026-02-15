@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID as UUIDType
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
@@ -55,7 +56,7 @@ class OrganizationModel(Base):
 
     __tablename__ = "organizations"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     tenancy_mode: Mapped[str] = mapped_column(
@@ -80,9 +81,9 @@ class WorkspaceModel(Base):
 
     __tablename__ = "workspaces"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    organization_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -114,9 +115,9 @@ class MemoryNamespaceModel(Base):
 
     __tablename__ = "memory_namespaces"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    workspace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -125,8 +126,8 @@ class MemoryNamespaceModel(Base):
     # Versioning fields
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    previous_version_id: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="SET NULL"), nullable=True
+    previous_version_id: Mapped[UUIDType | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="SET NULL"), nullable=True
     )
 
     config_overrides: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
@@ -170,9 +171,9 @@ class DocumentModel(Base):
 
     __tablename__ = "documents"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
@@ -224,12 +225,12 @@ class ChunkModel(Base):
 
     __tablename__ = "chunks"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    document_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    document_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -290,9 +291,9 @@ class EntityModel(Base):
 
     __tablename__ = "entities"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
     entity_type: Mapped[str] = mapped_column(
@@ -304,8 +305,8 @@ class EntityModel(Base):
 
     # Attributes and sources
     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-    source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+    source_document_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
+    source_chunk_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
     mention_count: Mapped[int] = mapped_column(Integer, default=1)
 
     # Embedding for entity similarity
@@ -349,15 +350,15 @@ class RelationshipModel(Base):
 
     __tablename__ = "relationships"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    source_entity_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    source_entity_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    target_entity_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    target_entity_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
     )
     relationship_type: Mapped[str] = mapped_column(
         String(64),
@@ -368,8 +369,8 @@ class RelationshipModel(Base):
 
     # Properties and sources
     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-    source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+    source_document_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
+    source_chunk_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
 
     # Temporal validity
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -403,9 +404,9 @@ class EpisodeModel(Base):
 
     __tablename__ = "episodes"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(512), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
@@ -417,11 +418,11 @@ class EpisodeModel(Base):
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Associated entities
-    entity_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+    entity_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
 
     # Sources
-    source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-    source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+    source_document_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
+    source_chunk_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
 
     # Embedding
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
@@ -450,9 +451,9 @@ class MemoryEventModel(Base):
 
     __tablename__ = "memory_events"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     event_type: Mapped[str] = mapped_column(
         Enum(EventType, name="event_type", create_constraint=True),
@@ -463,7 +464,7 @@ class MemoryEventModel(Base):
 
     # Resource reference
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
+    resource_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
 
     # Event data
     data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
@@ -474,7 +475,7 @@ class MemoryEventModel(Base):
     actor_type: Mapped[str] = mapped_column(String(64), default="system")
 
     # Correlation
-    correlation_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
+    correlation_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
 
     # Version
     version: Mapped[int] = mapped_column(Integer, default=1)
@@ -503,7 +504,7 @@ class PermissionModel(Base):
 
     __tablename__ = "permissions"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
 
     # The principal (who has the permission)
     principal_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # user, role, api_key
@@ -513,14 +514,14 @@ class PermissionModel(Base):
     resource_type: Mapped[str] = mapped_column(
         String(64), nullable=False, index=True
     )  # organization, workspace, namespace
-    resource_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
+    resource_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
 
     # The permission level
     permission: Mapped[str] = mapped_column(String(64), nullable=False)  # read, write, admin, owner
 
     # Inheritance
     inherited_from_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    inherited_from_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+    inherited_from_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -550,9 +551,9 @@ class SyncCheckpointModel(Base):
 
     __tablename__ = "sync_checkpoints"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     source: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # e.g., "github", "notion", "slack"
     checkpoint: Mapped[str] = mapped_column(Text, nullable=False)  # Source-specific checkpoint value
@@ -582,9 +583,9 @@ class ExpertiseDefinitionModel(Base):
 
     __tablename__ = "expertise_definitions"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
@@ -644,17 +645,17 @@ class TimeNodeModel(Base):
 
     __tablename__ = "time_nodes"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
     # Time hierarchy
     granularity: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # year, quarter, month, week, day
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    parent_id: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("time_nodes.id", ondelete="CASCADE"), nullable=True, index=True
+    parent_id: Mapped[UUIDType | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("time_nodes.id", ondelete="CASCADE"), nullable=True, index=True
     )
 
     # Display name (e.g., "2024", "Q1 2024", "January 2024", "Week 1 2024", "2024-01-15")
@@ -698,15 +699,15 @@ class TemporalEdgeModel(Base):
 
     __tablename__ = "temporal_edges"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4()))
-    namespace_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    source_entity_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    source_entity_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    target_entity_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    target_entity_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
     )
     relationship_type: Mapped[str] = mapped_column(String(64), default="RELATES_TO", index=True)
     description: Mapped[str] = mapped_column(Text, default="")
@@ -721,16 +722,16 @@ class TemporalEdgeModel(Base):
 
     # Edge invalidation tracking
     is_valid: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    invalidated_by_id: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("temporal_edges.id", ondelete="SET NULL"), nullable=True
+    invalidated_by_id: Mapped[UUIDType | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("temporal_edges.id", ondelete="SET NULL"), nullable=True
     )
     invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Confidence and source tracking
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    source_document_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
-    source_chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(UUID(as_uuid=False)), default=list)
+    source_document_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
+    source_chunk_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
 
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -768,11 +769,11 @@ class TimeEdgeLinkModel(Base):
 
     __tablename__ = "time_edge_links"
 
-    time_node_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("time_nodes.id", ondelete="CASCADE"), primary_key=True
+    time_node_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("time_nodes.id", ondelete="CASCADE"), primary_key=True
     )
-    edge_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("temporal_edges.id", ondelete="CASCADE"), primary_key=True
+    edge_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("temporal_edges.id", ondelete="CASCADE"), primary_key=True
     )
 
     # Relationships

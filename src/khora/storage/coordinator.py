@@ -10,12 +10,15 @@ from __future__ import annotations
 import asyncio
 import functools
 import time as _time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from khora.core.models import (
     Chunk,
@@ -76,6 +79,32 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
         return wrapper
 
     return decorator
+
+
+@dataclass
+class TransactionContext:
+    """Shared session for multi-backend atomic operations.
+
+    Obtained via ``StorageCoordinator.transaction()``.  The coordinator
+    commits on successful exit and rolls back on exception.
+    """
+
+    session: AsyncSession
+
+    @asynccontextmanager
+    async def savepoint(self) -> AsyncGenerator[TransactionContext]:
+        """Create a savepoint (nested transaction).
+
+        Usage::
+
+            async with coordinator.transaction() as txn:
+                # ... work ...
+                async with txn.savepoint() as sp:
+                    # rolled back independently on error
+                    ...
+        """
+        async with self.session.begin_nested():
+            yield self
 
 
 @dataclass
@@ -197,6 +226,45 @@ class StorageCoordinator:
                 setattr(health, name, result is True)
 
         return health
+
+    # =========================================================================
+    # Transaction support
+    # =========================================================================
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncGenerator[TransactionContext]:
+        """Create a transaction context for multi-step atomic operations.
+
+        All SQL-backend writes performed with ``txn.session`` share a
+        single database transaction.  The session is committed on
+        successful exit and rolled back on exception.
+
+        Usage::
+
+            async with coordinator.transaction() as txn:
+                await coordinator.create_document(doc, session=txn.session)
+                await coordinator.create_chunks_batch(chunks, session=txn.session)
+        """
+        # Resolve a session factory from the first available SQL backend
+        factory = None
+        for backend in (self.relational, self.vector, self.event_store):
+            sf = getattr(backend, "_session_factory", None)
+            if sf is not None:
+                factory = sf
+                break
+
+        if factory is None:
+            raise RuntimeError("No SQL backend connected; cannot create transaction")
+
+        session = factory()
+        try:
+            yield TransactionContext(session=session)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
 
     # =========================================================================
     # Tenancy operations (delegated to relational)

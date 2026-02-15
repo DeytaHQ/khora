@@ -37,7 +37,15 @@ class PostgreSQLBackend(AsyncSessionMixin):
     hierarchy, documents, and sync checkpoints.
     """
 
-    def __init__(self, database_url: str, *, echo: bool = False, pool_size: int = 10, max_overflow: int = 20) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        echo: bool = False,
+        pool_size: int = 10,
+        max_overflow: int = 20,
+        engine: AsyncEngine | None = None,
+    ) -> None:
         """Initialize the PostgreSQL backend.
 
         Args:
@@ -45,6 +53,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             echo: Enable SQL echo logging
             pool_size: Connection pool size
             max_overflow: Maximum overflow connections
+            engine: Optional shared engine (skip dispose on disconnect)
         """
         # Convert to async URL if needed
         if database_url.startswith("postgresql://"):
@@ -56,21 +65,23 @@ class PostgreSQLBackend(AsyncSessionMixin):
         self._echo = echo
         self._pool_size = pool_size
         self._max_overflow = max_overflow
-        self._engine: AsyncEngine | None = None
+        self._engine: AsyncEngine | None = engine
+        self._engine_shared: bool = engine is not None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
 
     async def connect(self) -> None:
         """Establish connection to the database."""
-        if self._engine is not None:
+        if self._session_factory is not None:
             return
 
         logger.info("Connecting to PostgreSQL...")
-        self._engine = create_async_engine(
-            self._database_url,
-            echo=self._echo,
-            pool_size=self._pool_size,
-            max_overflow=self._max_overflow,
-        )
+        if self._engine is None:
+            self._engine = create_async_engine(
+                self._database_url,
+                echo=self._echo,
+                pool_size=self._pool_size,
+                max_overflow=self._max_overflow,
+            )
         self._session_factory = async_sessionmaker(
             self._engine,
             class_=AsyncSession,
@@ -82,7 +93,8 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Close database connections."""
         if self._engine is not None:
             logger.info("Disconnecting from PostgreSQL...")
-            await self._engine.dispose()
+            if not self._engine_shared:
+                await self._engine.dispose()
             self._engine = None
             self._session_factory = None
             logger.info("Disconnected from PostgreSQL")
@@ -114,7 +126,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Create a new organization."""
         async with self._get_session() as session:
             model = OrganizationModel(
-                id=str(org.id),
+                id=org.id,
                 name=org.name,
                 slug=org.slug,
                 tenancy_mode=org.tenancy_mode,
@@ -130,7 +142,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
     async def get_organization(self, org_id: UUID) -> Organization | None:
         """Get an organization by ID."""
         async with self._get_session() as session:
-            result = await session.execute(select(OrganizationModel).where(OrganizationModel.id == str(org_id)))
+            result = await session.execute(select(OrganizationModel).where(OrganizationModel.id == org_id))
             model = result.scalar_one_or_none()
             return self._org_model_to_domain(model) if model else None
 
@@ -144,7 +156,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
     def _org_model_to_domain(self, model: OrganizationModel) -> Organization:
         """Convert OrganizationModel to domain Organization."""
         return Organization(
-            id=UUID(model.id),
+            id=model.id,
             name=model.name,
             slug=model.slug,
             tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
@@ -161,8 +173,8 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Create a new workspace."""
         async with self._get_session() as session:
             model = WorkspaceModel(
-                id=str(workspace.id),
-                organization_id=str(workspace.organization_id),
+                id=workspace.id,
+                organization_id=workspace.organization_id,
                 name=workspace.name,
                 slug=workspace.slug,
                 description=workspace.description,
@@ -178,7 +190,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
         """Get a workspace by ID."""
         async with self._get_session() as session:
-            result = await session.execute(select(WorkspaceModel).where(WorkspaceModel.id == str(workspace_id)))
+            result = await session.execute(select(WorkspaceModel).where(WorkspaceModel.id == workspace_id))
             model = result.scalar_one_or_none()
             return self._workspace_model_to_domain(model) if model else None
 
@@ -186,15 +198,15 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """List all workspaces in an organization."""
         async with self._get_session() as session:
             result = await session.execute(
-                select(WorkspaceModel).where(WorkspaceModel.organization_id == str(organization_id))
+                select(WorkspaceModel).where(WorkspaceModel.organization_id == organization_id)
             )
             return [self._workspace_model_to_domain(m) for m in result.scalars().all()]
 
     def _workspace_model_to_domain(self, model: WorkspaceModel) -> Workspace:
         """Convert WorkspaceModel to domain Workspace."""
         return Workspace(
-            id=UUID(model.id),
-            organization_id=UUID(model.organization_id),
+            id=model.id,
+            organization_id=model.organization_id,
             name=model.name,
             slug=model.slug,
             description=model.description,
@@ -211,14 +223,14 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Create a new memory namespace."""
         async with self._get_session() as session:
             model = MemoryNamespaceModel(
-                id=str(namespace.id),
-                workspace_id=str(namespace.workspace_id),
+                id=namespace.id,
+                workspace_id=namespace.workspace_id,
                 name=namespace.name,
                 slug=namespace.slug,
                 description=namespace.description,
                 version=namespace.version,
                 is_active=namespace.is_active,
-                previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
+                previous_version_id=namespace.previous_version_id,
                 config_overrides=namespace.config_overrides,
                 sync_checkpoints=namespace.sync_checkpoints,
                 metadata_=namespace.metadata,
@@ -233,9 +245,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
         """Get a namespace by ID."""
         async with self._get_session() as session:
-            result = await session.execute(
-                select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == str(namespace_id))
-            )
+            result = await session.execute(select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == namespace_id))
             model = result.scalar_one_or_none()
             return self._namespace_model_to_domain(model) if model else None
 
@@ -254,7 +264,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """
         async with self._get_session() as session:
             query = select(MemoryNamespaceModel).where(
-                MemoryNamespaceModel.workspace_id == str(workspace_id),
+                MemoryNamespaceModel.workspace_id == workspace_id,
                 MemoryNamespaceModel.slug == slug,
             )
             if active_only:
@@ -274,7 +284,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             List of MemoryNamespace objects
         """
         async with self._get_session() as session:
-            query = select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == str(workspace_id))
+            query = select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == workspace_id)
             if active_only:
                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
             result = await session.execute(query)
@@ -285,14 +295,14 @@ class PostgreSQLBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             await session.execute(
                 update(MemoryNamespaceModel)
-                .where(MemoryNamespaceModel.id == str(namespace.id))
+                .where(MemoryNamespaceModel.id == namespace.id)
                 .values(
                     name=namespace.name,
                     slug=namespace.slug,
                     description=namespace.description,
                     version=namespace.version,
                     is_active=namespace.is_active,
-                    previous_version_id=str(namespace.previous_version_id) if namespace.previous_version_id else None,
+                    previous_version_id=namespace.previous_version_id,
                     config_overrides=namespace.config_overrides,
                     sync_checkpoints=namespace.sync_checkpoints,
                     metadata_=namespace.metadata,
@@ -305,14 +315,14 @@ class PostgreSQLBackend(AsyncSessionMixin):
     def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
         return MemoryNamespace(
-            id=UUID(model.id),
-            workspace_id=UUID(model.workspace_id),
+            id=model.id,
+            workspace_id=model.workspace_id,
             name=model.name,
             slug=model.slug,
             description=model.description,
             version=model.version,
             is_active=model.is_active,
-            previous_version_id=UUID(model.previous_version_id) if model.previous_version_id else None,
+            previous_version_id=model.previous_version_id,
             config_overrides=model.config_overrides,
             sync_checkpoints=model.sync_checkpoints,
             metadata=model.metadata_,
@@ -376,7 +386,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             await session.execute(
                 update(MemoryNamespaceModel)
-                .where(MemoryNamespaceModel.id == str(namespace_id))
+                .where(MemoryNamespaceModel.id == namespace_id)
                 .values(is_active=False, updated_at=datetime.now(UTC))
             )
             await session.commit()
@@ -387,12 +397,84 @@ class PostgreSQLBackend(AsyncSessionMixin):
     # =========================================================================
 
     @retry_on_deadlock
-    async def create_document(self, document: Document) -> Document:
+    async def create_document(self, document: Document, *, session: AsyncSession | None = None) -> Document:
         """Create a new document."""
+        if session is not None:
+            return await self._create_document_with(session, document)
+        async with self._get_session() as own_session:
+            return await self._create_document_with(own_session, document, commit=True)
+
+    async def _create_document_with(
+        self, session: AsyncSession, document: Document, *, commit: bool = False
+    ) -> Document:
+        model = DocumentModel(
+            id=document.id,
+            namespace_id=document.namespace_id,
+            content=document.content,
+            status=document.status,
+            source=document.metadata.source,
+            source_type=document.metadata.source_type,
+            content_type=document.metadata.content_type,
+            title=document.metadata.title,
+            author=document.metadata.author,
+            language=document.metadata.language,
+            checksum=document.metadata.checksum,
+            size_bytes=document.metadata.size_bytes,
+            metadata_=document.metadata.custom,
+            chunk_count=document.chunk_count,
+            entity_count=document.entity_count,
+            error_message=document.error_message,
+            created_at=document.created_at,
+            updated_at=document.updated_at,
+            processed_at=document.processed_at,
+        )
+        session.add(model)
+        if commit:
+            await session.commit()
+        else:
+            await session.flush()
+        await session.refresh(model)
+        return self._document_model_to_domain(model)
+
+    async def get_document(self, document_id: UUID) -> Document | None:
+        """Get a document by ID."""
         async with self._get_session() as session:
-            model = DocumentModel(
-                id=str(document.id),
-                namespace_id=str(document.namespace_id),
+            result = await session.execute(select(DocumentModel).where(DocumentModel.id == document_id))
+            model = result.scalar_one_or_none()
+            return self._document_model_to_domain(model) if model else None
+
+    async def list_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Document]:
+        """List documents in a namespace."""
+        async with self._get_session() as session:
+            query = select(DocumentModel).where(DocumentModel.namespace_id == namespace_id)
+            if status:
+                query = query.where(DocumentModel.status == status)
+            query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
+            result = await session.execute(query)
+            return [self._document_model_to_domain(m) for m in result.scalars().all()]
+
+    @retry_on_deadlock
+    async def update_document(self, document: Document, *, session: AsyncSession | None = None) -> Document:
+        """Update a document."""
+        if session is not None:
+            return await self._update_document_with(session, document)
+        async with self._get_session() as own_session:
+            return await self._update_document_with(own_session, document, commit=True)
+
+    async def _update_document_with(
+        self, session: AsyncSession, document: Document, *, commit: bool = False
+    ) -> Document:
+        await session.execute(
+            update(DocumentModel)
+            .where(DocumentModel.id == document.id)
+            .values(
                 content=document.content,
                 status=document.status,
                 source=document.metadata.source,
@@ -407,73 +489,19 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 chunk_count=document.chunk_count,
                 entity_count=document.entity_count,
                 error_message=document.error_message,
-                created_at=document.created_at,
-                updated_at=document.updated_at,
+                updated_at=datetime.now(UTC),
                 processed_at=document.processed_at,
             )
-            session.add(model)
+        )
+        if commit:
             await session.commit()
-            await session.refresh(model)
-            return self._document_model_to_domain(model)
-
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID."""
-        async with self._get_session() as session:
-            result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
-            model = result.scalar_one_or_none()
-            return self._document_model_to_domain(model) if model else None
-
-    async def list_documents(
-        self,
-        namespace_id: UUID,
-        *,
-        status: str | None = None,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[Document]:
-        """List documents in a namespace."""
-        async with self._get_session() as session:
-            query = select(DocumentModel).where(DocumentModel.namespace_id == str(namespace_id))
-            if status:
-                query = query.where(DocumentModel.status == status)
-            query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
-            result = await session.execute(query)
-            return [self._document_model_to_domain(m) for m in result.scalars().all()]
-
-    @retry_on_deadlock
-    async def update_document(self, document: Document) -> Document:
-        """Update a document."""
-        async with self._get_session() as session:
-            await session.execute(
-                update(DocumentModel)
-                .where(DocumentModel.id == str(document.id))
-                .values(
-                    content=document.content,
-                    status=document.status,
-                    source=document.metadata.source,
-                    source_type=document.metadata.source_type,
-                    content_type=document.metadata.content_type,
-                    title=document.metadata.title,
-                    author=document.metadata.author,
-                    language=document.metadata.language,
-                    checksum=document.metadata.checksum,
-                    size_bytes=document.metadata.size_bytes,
-                    metadata_=document.metadata.custom,
-                    chunk_count=document.chunk_count,
-                    entity_count=document.entity_count,
-                    error_message=document.error_message,
-                    updated_at=datetime.now(UTC),
-                    processed_at=document.processed_at,
-                )
-            )
-            await session.commit()
-            return document
+        return document
 
     @retry_on_deadlock
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete a document."""
         async with self._get_session() as session:
-            result = await session.execute(select(DocumentModel).where(DocumentModel.id == str(document_id)))
+            result = await session.execute(select(DocumentModel).where(DocumentModel.id == document_id))
             model = result.scalar_one_or_none()
             if model:
                 await session.delete(model)
@@ -489,7 +517,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             result = await session.execute(
                 select(DocumentModel).where(
-                    DocumentModel.namespace_id == str(namespace_id), DocumentModel.checksum == checksum
+                    DocumentModel.namespace_id == namespace_id, DocumentModel.checksum == checksum
                 )
             )
             model = result.scalars().first()
@@ -508,11 +536,9 @@ class PostgreSQLBackend(AsyncSessionMixin):
             return {}
 
         async with self._get_session() as session:
-            result = await session.execute(
-                select(DocumentModel).where(DocumentModel.id.in_([str(did) for did in document_ids]))
-            )
+            result = await session.execute(select(DocumentModel).where(DocumentModel.id.in_(document_ids)))
             models = result.scalars().all()
-            return {UUID(m.id): self._document_model_to_domain(m) for m in models}
+            return {m.id: self._document_model_to_domain(m) for m in models}
 
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
@@ -532,7 +558,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             result = await session.execute(
                 select(DocumentModel).where(
-                    DocumentModel.namespace_id == str(namespace_id),
+                    DocumentModel.namespace_id == namespace_id,
                     DocumentModel.checksum.in_(checksums),
                 )
             )
@@ -542,8 +568,8 @@ class PostgreSQLBackend(AsyncSessionMixin):
     def _document_model_to_domain(self, model: DocumentModel) -> Document:
         """Convert DocumentModel to domain Document."""
         return Document(
-            id=UUID(model.id),
-            namespace_id=UUID(model.namespace_id),
+            id=model.id,
+            namespace_id=model.namespace_id,
             content=model.content,
             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
             metadata=DocumentMetadata(
@@ -574,7 +600,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             result = await session.execute(
                 select(SyncCheckpointModel).where(
-                    SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+                    SyncCheckpointModel.namespace_id == namespace_id, SyncCheckpointModel.source == source
                 )
             )
             model = result.scalar_one_or_none()
@@ -585,7 +611,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             result = await session.execute(
                 select(SyncCheckpointModel).where(
-                    SyncCheckpointModel.namespace_id == str(namespace_id), SyncCheckpointModel.source == source
+                    SyncCheckpointModel.namespace_id == namespace_id, SyncCheckpointModel.source == source
                 )
             )
             model = result.scalar_one_or_none()
@@ -594,7 +620,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 model.updated_at = datetime.now(UTC)
             else:
                 model = SyncCheckpointModel(
-                    namespace_id=str(namespace_id),
+                    namespace_id=namespace_id,
                     source=source,
                     checkpoint=checkpoint,
                 )

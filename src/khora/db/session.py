@@ -32,33 +32,94 @@ def get_database_url() -> str:
     return url
 
 
-_engine: AsyncEngine | None = None
-_session_factory: async_sessionmaker[AsyncSession] | None = None
+class DatabaseManager:
+    """Manages database engine and session factory lifecycle.
+
+    Encapsulates what was previously module-level global state,
+    enabling proper isolation in tests and multi-database scenarios.
+    """
+
+    def __init__(self) -> None:
+        self._engine: AsyncEngine | None = None
+        self._session_factory: async_sessionmaker[AsyncSession] | None = None
+
+    def get_engine(self) -> AsyncEngine:
+        """Get or create the database engine."""
+        if self._engine is None:
+            self._engine = create_async_engine(
+                get_database_url(),
+                echo=os.getenv("KHORA_DEBUG", "").lower() == "true",
+                pool_size=20,
+                max_overflow=30,
+            )
+        return self._engine
+
+    def get_session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """Get or create the session factory."""
+        if self._session_factory is None:
+            self._session_factory = async_sessionmaker(
+                self.get_engine(),
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
+        return self._session_factory
+
+    @asynccontextmanager
+    async def get_db(self) -> AsyncGenerator[AsyncSession]:
+        """Get a database session."""
+        session = self.get_session_factory()()
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+    async def init_db(self) -> None:
+        """Initialize database tables."""
+        from .models import Base
+
+        engine = self.get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def close_db(self) -> None:
+        """Close database connections."""
+        if self._engine:
+            await self._engine.dispose()
+            self._engine = None
+            self._session_factory = None
+
+    def reset(self) -> None:
+        """Reset state without async disposal. For test cleanup."""
+        self._engine = None
+        self._session_factory = None
+
+
+_default_manager: DatabaseManager | None = None
+
+
+def get_default_manager() -> DatabaseManager:
+    """Get the default DatabaseManager instance (lazy singleton)."""
+    global _default_manager
+    if _default_manager is None:
+        _default_manager = DatabaseManager()
+    return _default_manager
+
+
+# Backward-compatible module-level functions
 
 
 def get_engine() -> AsyncEngine:
     """Get or create the database engine."""
-    global _engine
-    if _engine is None:
-        _engine = create_async_engine(
-            get_database_url(),
-            echo=os.getenv("KHORA_DEBUG", "").lower() == "true",
-            pool_size=20,
-            max_overflow=30,
-        )
-    return _engine
+    return get_default_manager().get_engine()
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
     """Get or create the session factory."""
-    global _session_factory
-    if _session_factory is None:
-        _session_factory = async_sessionmaker(
-            get_engine(),
-            class_=AsyncSession,
-            expire_on_commit=False,
-        )
-    return _session_factory
+    return get_default_manager().get_session_factory()
 
 
 @asynccontextmanager
@@ -69,15 +130,8 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
         async with get_db() as db:
             result = await db.execute(...)
     """
-    session = get_session_factory()()
-    try:
+    async with get_default_manager().get_db() as session:
         yield session
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        raise
-    finally:
-        await session.close()
 
 
 async def init_db() -> None:
@@ -85,20 +139,12 @@ async def init_db() -> None:
 
     For development/testing only. Use Alembic migrations in production.
     """
-    from .models import Base
-
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await get_default_manager().init_db()
 
 
 async def close_db() -> None:
     """Close database connections."""
-    global _engine, _session_factory
-    if _engine:
-        await _engine.dispose()
-        _engine = None
-        _session_factory = None
+    await get_default_manager().close_db()
 
 
 def _run_migrations_sync() -> None:
