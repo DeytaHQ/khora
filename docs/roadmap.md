@@ -39,7 +39,7 @@ These additions would significantly expand what you can do with Khora.
 
 | Item | Why It Matters |
 |------|----------------|
-| **Conversational Context** | Multi-turn conversations where follow-up questions understand context. "Tell me about Einstein" then "What did he work on?" |
+| **Conversational Context** | Done. Chat module at `src/khora/chat/` provides multi-turn conversations where follow-up questions understand context. |
 | **Result Explanations** | Explain *why* a result matched - which entities linked, which keywords hit, how the graph was traversed. |
 | **Faceted Search** | Filter results by entity type, source document, date range, confidence score. Essential for exploratory search. |
 

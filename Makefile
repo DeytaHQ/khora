@@ -9,7 +9,7 @@
 
 .PHONY: help dev dev-down serve test lint format typecheck prek clean \
         rust-build rust-dev rust-test rust-bench rust-clean \
-        docker-build docker-run docker-down docker-clean
+        docker-run docker-down docker-clean
 
 # Default target
 help:
@@ -35,7 +35,6 @@ help:
 	@echo "  make rust-clean       Clean Rust build artifacts"
 	@echo ""
 	@echo "Docker:"
-	@echo "  make docker-build     Build production Docker image"
 	@echo "  make docker-run       Run full stack (api + databases)"
 	@echo "  make docker-down      Stop full stack"
 	@echo "  make docker-clean     Remove images and volumes"
@@ -130,13 +129,6 @@ rust-clean:
 # ==============================================================================
 # Docker Commands
 # ==============================================================================
-
-# Build production Docker image
-docker-build:
-	docker build \
-		-t khora:latest \
-		-t ghcr.io/$(shell git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\.git/\1/' | tr '[:upper:]' '[:lower:]'):latest \
-		.
 
 # Run full stack with docker-compose (production-like)
 docker-run:

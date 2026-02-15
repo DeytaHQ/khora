@@ -174,6 +174,7 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 | [Roadmap](docs/roadmap.md) | Future improvements and features |
 | **References** | |
 | [References](docs/REFERENCES.md) | Research papers and inspirations |
+| [Changelog](CHANGELOG.md) | Release history and migration notes |
 
 ---
 
@@ -371,9 +372,6 @@ async with MemoryLake() as lake:
 ```bash
 # Start the API server
 uv run khora serve --reload
-
-# Or with Docker
-docker compose up
 ```
 
 #### API Endpoints
@@ -606,6 +604,11 @@ khora/
 │   ├── acl/                     # Access control
 │   │   ├── checker.py           # Permission checking
 │   │   └── enforcer.py          # Cross-layer enforcement
+│   ├── chat/                    # Conversational context
+│   │   ├── engine.py            # Chat engine
+│   │   ├── history.py           # Conversation history
+│   │   ├── persona.py           # Persona management
+│   │   └── prompt.py            # Prompt construction
 │   ├── cli/                     # Command-line interface
 │   ├── config/                  # Configuration
 │   │   ├── schema.py            # Pydantic settings
@@ -618,7 +621,7 @@ khora/
 │   │   └── tenancy.py           # Org, Workspace, Namespace
 │   ├── db/                      # Database layer
 │   │   ├── models.py            # SQLAlchemy ORM
-│   │   └── session.py           # Async session management
+│   │   └── session.py           # DatabaseManager + async sessions
 │   ├── extraction/              # Content processing
 │   │   ├── chunkers/            # Text chunking strategies
 │   │   ├── embedders/           # Embedding generation
@@ -635,13 +638,13 @@ khora/
 │   │   └── temporal.py          # Time-based queries
 │   └── storage/                 # Storage backends
 │       ├── backends/            # PostgreSQL, pgvector, Neo4j
-│       ├── coordinator.py       # Backend orchestration
+│       ├── coordinator.py       # Backend orchestration + TransactionContext
 │       ├── event_store.py       # Event sourcing
-│       └── factory.py           # Storage initialization
+│       └── factory.py           # Storage initialization + shared pools
 ├── tests/                       # Test suite
 ├── alembic/                     # Database migrations
 ├── examples/config/             # Example configurations
-├── docker-compose.yml           # Development services
+├── compose.yaml                 # Development databases
 └── pyproject.toml               # Project configuration
 ```
 
@@ -901,14 +904,16 @@ class Stats:
 | `DOCUMENT` | Referenced documents |
 | `OTHER` | Uncategorized entities |
 
-### Deprecation Notices
+### Changes in v0.3.0
 
-The following properties emit `DeprecationWarning` and will be removed in a future version:
-
-| Deprecated | Replacement |
-|------------|-------------|
-| `lake.storage` | Use `lake.get_document()`, `lake.list_documents()`, `lake.stats()` |
-| `lake.query_engine` | Use `lake.recall()` with `raw=True` for unprocessed search |
+| API | Status |
+|-----|--------|
+| `lake.storage` | Stable public API (no longer deprecated) |
+| `lake.query_engine` | **Removed** — use `lake.recall(raw=True)` for unprocessed search |
+| `remember_batch_legacy()` | **Removed** — use `remember_batch()` |
+| `TransactionContext` | New — atomic multi-backend operations via `coordinator.transaction()` |
+| `khora[nlp]` extra | New — install for NLTK-enhanced sentence splitting |
+| Shared connection pools | New — backends sharing the same database URL reuse one engine pool |
 
 ---
 

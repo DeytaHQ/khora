@@ -163,7 +163,7 @@ MemoryLake handles all the complexity of coordinating three databases, running e
 
 The traffic controller. Lives at `src/khora/storage/coordinator.py`.
 
-When MemoryLake needs to store an entity, StorageCoordinator knows that it should go to Neo4j for graph queries *and* pgvector for similarity search. When you delete a document, it ensures cleanup happens everywhere.
+When MemoryLake needs to store an entity, StorageCoordinator knows that it should go to Neo4j for graph queries *and* pgvector for similarity search. When you delete a document, it ensures cleanup happens everywhere. It also provides `transaction()` for atomic multi-backend writes with savepoint support.
 
 ### HybridQueryEngine
 

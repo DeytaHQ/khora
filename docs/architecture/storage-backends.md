@@ -328,6 +328,55 @@ print(f"Neo4j: {'OK' if health.graph else 'DOWN'}")
 print(f"Overall: {'healthy' if health.is_healthy else 'degraded'}")
 ```
 
+## Shared Connection Pools
+
+When multiple backends point at the same database — the common case where PostgreSQL, pgvector, and the event store all share one URL — `StorageFactory` avoids creating redundant connection pools.
+
+`StorageFactory.get_or_create_engine()` normalizes the database URL (stripping query parameters and trailing slashes) and caches `AsyncEngine` instances by the normalized key. The first backend to request an engine for a given URL creates it; subsequent backends receive the same engine instance.
+
+```python
+# Three backends, one pool
+factory = StorageFactory(config)
+
+# All three calls return the same AsyncEngine:
+pg_engine = factory.get_or_create_engine(config.postgresql_url)
+vec_engine = factory.get_or_create_engine(config.postgresql_url)
+event_engine = factory.get_or_create_engine(config.postgresql_url)
+
+assert pg_engine is vec_engine is event_engine  # True
+```
+
+This reduces the total number of database connections from 3× pool size to 1× pool size. Backends that share an engine skip `dispose()` on disconnect to avoid pulling the pool out from under siblings — only the last backend to disconnect disposes the engine.
+
+## Transactions
+
+`StorageCoordinator.transaction()` provides atomic multi-backend writes through a single database transaction:
+
+```python
+async with coordinator.transaction() as txn:
+    # All writes share one database session
+    await coordinator.create_document(document, session=txn.session)
+    await coordinator.upsert_entities_batch(
+        namespace_id, entities, session=txn.session
+    )
+
+    # Savepoints for partial rollback
+    async with txn.savepoint():
+        await coordinator.create_relationships_batch(
+            relationships, session=txn.session
+        )
+        # If this block raises, only the savepoint rolls back
+
+    # Commit happens automatically when the outer context exits
+    # Rollback happens automatically on exception
+```
+
+The `TransactionContext` returned by `transaction()` exposes:
+- `txn.session` — the active `AsyncSession` to pass to backend write methods
+- `txn.savepoint()` — create a nested savepoint for partial rollback
+
+Backend write methods accept an optional `session` parameter. When provided, they join the existing transaction instead of creating their own.
+
 ## Batch Operations
 
 For bulk ingestion, batch methods significantly reduce database round-trips. These are used by smart mode's post-ingestion resolution but are available for any bulk workflow.

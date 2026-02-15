@@ -126,6 +126,20 @@ Chunk 1: "Sentence three. Sentence four. Sentence five."
 - Articles, reports, documentation
 - Content you might show to users
 
+#### NLTK-Enhanced Sentence Splitting
+
+The semantic chunker can optionally use `nltk.tokenize.sent_tokenize` for more accurate sentence boundary detection. This handles abbreviations (e.g., "Dr. Smith"), decimal numbers (e.g., "3.14"), and URLs better than the default regex splitter.
+
+```bash
+# Install the optional NLP extra
+pip install khora[nlp]
+
+# Download the required tokenizer data
+python -m nltk.downloader punkt_tab
+```
+
+When NLTK is installed and the `punkt_tab` data is available, the semantic chunker uses it automatically — no code changes needed. If NLTK is not installed or the data is missing, the chunker falls back to its regex-based splitter transparently. The `_HAS_NLTK` flag in the chunker module controls this behavior.
+
 ### Recursive Chunker
 
 Tries increasingly fine-grained splits until chunks fit.

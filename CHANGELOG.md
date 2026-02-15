@@ -2,6 +2,89 @@
 
 All notable changes to Khora are documented here.
 
+## [0.3.0] — Engineering Improvements
+
+### Why: removing accidental complexity
+
+Global state in database session management, UUID string wrapping across
+52 ORM columns, redundant connection pools for backends sharing the same
+database URL, and stale deprecated APIs that no longer matched the
+codebase — none of these served users, and all of them created friction
+for contributors. This release removes the accidental complexity so the
+next round of features lands on cleaner ground.
+
+### UUID migration
+
+All 52 UUID columns in `db/models.py` now declare `as_uuid=True`,
+mapping to native Python `uuid.UUID` objects. This is a Python-side-only
+change — the PostgreSQL column type remains `UUID`. The practical effect
+is that code no longer needs `str()` wrapping when building ORM models
+or `UUID()` parsing when reading them. Graph backends (Neo4j, Kuzu,
+Memgraph) still convert at the boundary because they don't support
+native UUIDs.
+
+### DatabaseManager
+
+`db/session.py` previously used module-level globals for the async
+engine and session factory. These are now encapsulated in a
+`DatabaseManager` class that owns engine creation, session lifecycle,
+and disposal. Backward-compatible module-level wrappers are preserved
+so existing callers continue to work without changes.
+
+### Shared connection pools
+
+`StorageFactory` now caches async engines by normalized URL. When
+PostgreSQL, pgvector, and the event store all point at the same
+database (the common case), they share a single connection pool instead
+of creating three independent ones. Backends using a shared engine skip
+`dispose()` on disconnect to avoid pulling the pool out from under
+siblings.
+
+### TransactionContext
+
+`StorageCoordinator.transaction()` returns an async context manager
+that wraps multiple backend writes in a single database transaction.
+`TransactionContext.savepoint()` creates nested savepoints for partial
+rollback. Backend write methods accept an optional `session` parameter
+to join the active transaction.
+
+### Deprecated API cleanup
+
+- `lake.storage` — promoted to stable public API (used by `genesis` and
+  `khora-benchmarks`). The deprecation warning has been removed.
+- `lake.query_engine` — removed. Use `lake.recall(raw=True)` for
+  unprocessed search results.
+- `remember_batch_legacy()` — removed. Use `remember_batch()`.
+
+### Chat module tests
+
+71 new tests across 4 files covering the chat module (`chat/engine.py`,
+`chat/history.py`, `chat/persona.py`, `chat/prompt.py`). The module
+itself is unchanged — these tests document and lock existing behavior.
+
+### NLTK sentence splitting
+
+The semantic chunker now uses `nltk.tokenize.sent_tokenize` when
+available, improving sentence boundary detection for abbreviations,
+decimal numbers, and URLs. Install with `pip install khora[nlp]`.
+When NLTK is not installed or the `punkt_tab` data is missing, the
+chunker falls back to its existing regex-based splitter transparently.
+
+### Docker removal
+
+The `Dockerfile` and CI `docker-build` job have been removed. Khora is
+a library, not a deployable application — the Dockerfile was never used
+in production and added maintenance burden. Development databases
+continue to use `compose.yaml` via `make dev`.
+
+### Housekeeping
+
+- Version bumped from 0.2.3 to 0.3.0 in `pyproject.toml`,
+  `src/khora/__init__.py`, `rust/khora-accel/Cargo.toml`, and
+  `rust/khora-accel/pyproject.toml`.
+
+---
+
 ## [0.2.3] — Namespace Optimization Design
 
 ### Why: surfacing what's real vs. what's aspirational

@@ -203,6 +203,8 @@ Database connection pools are sized to match concurrent operation patterns:
 | PostgreSQL max overflow | 30 |
 | Neo4j max connection pool | 50 |
 
+As of v0.3.0, `StorageFactory` caches engines by normalized URL. When PostgreSQL, pgvector, and the event store share the same database URL (the common case), they reuse a single connection pool instead of creating three independent ones. This reduces total database connections to one-third of the previous default without any configuration changes.
+
 ## Search Pipeline Timing
 
 Every query now includes per-phase timing in its metadata, exposed via `SearchMetrics`:
