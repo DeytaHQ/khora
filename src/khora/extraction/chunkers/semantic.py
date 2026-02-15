@@ -155,10 +155,14 @@ class SemanticChunker(Chunker):
 
         Uses nltk.tokenize.sent_tokenize when available for better handling
         of abbreviations (Dr., U.S.), decimal numbers (3.14), URLs, etc.
-        Falls back to regex splitting when nltk is not installed.
+        Falls back to regex splitting when nltk is not installed or punkt
+        tokenizer data is missing.
         """
         if _HAS_NLTK:
-            return self._split_sentences_nltk(text)
+            try:
+                return self._split_sentences_nltk(text)
+            except LookupError:
+                pass  # punkt_tab data not downloaded, fall back to regex
         # Regex fallback
         sentences = _SENTENCE_ENDINGS.split(text)
         return [s.strip() for s in sentences if s.strip()]
