@@ -11,11 +11,13 @@ _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 _SENTENCE_ENDINGS = re.compile(r"(?<=[.!?])\s+")
 
 try:
-    from nltk.tokenize import sent_tokenize as _nltk_sent_tokenize
+    import spacy
 
-    _HAS_NLTK = True
+    _nlp = spacy.blank("en")
+    _nlp.add_pipe("sentencizer")
+    _HAS_SPACY = True
 except ImportError:
-    _HAS_NLTK = False
+    _HAS_SPACY = False
 
 
 class SemanticChunker(Chunker):
@@ -153,24 +155,20 @@ class SemanticChunker(Chunker):
     def _split_sentences(self, text: str) -> list[str]:
         """Split text into sentences.
 
-        Uses nltk.tokenize.sent_tokenize when available for better handling
-        of abbreviations (Dr., U.S.), decimal numbers (3.14), URLs, etc.
-        Falls back to regex splitting when nltk is not installed or punkt
-        tokenizer data is missing.
+        Uses spaCy's sentencizer when available for better handling of
+        sentence boundaries. Falls back to regex splitting when spaCy
+        is not installed.
         """
-        if _HAS_NLTK:
-            try:
-                return self._split_sentences_nltk(text)
-            except LookupError:
-                pass  # punkt_tab data not downloaded, fall back to regex
+        if _HAS_SPACY:
+            return self._split_sentences_spacy(text)
         # Regex fallback
         sentences = _SENTENCE_ENDINGS.split(text)
         return [s.strip() for s in sentences if s.strip()]
 
-    def _split_sentences_nltk(self, text: str) -> list[str]:
-        """Split text into sentences using nltk's Punkt tokenizer."""
-        sentences = _nltk_sent_tokenize(text)
-        return [s.strip() for s in sentences if s.strip()]
+    def _split_sentences_spacy(self, text: str) -> list[str]:
+        """Split text into sentences using spaCy's sentencizer."""
+        doc = _nlp(text)
+        return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
 
     def _fixed_split(self, text: str) -> list[str]:
         """Fixed-size split for text that can't be split semantically."""

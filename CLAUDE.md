@@ -72,5 +72,5 @@ IMPORTANT: When bumping the version, always update **all four files** and regene
 - **Graph backends need `str()` at boundary** — Neo4j/Kuzu/Memgraph don't support native UUIDs, so convert at the graph DB boundary only
 - **Shared engine pools** — `StorageFactory` caches engines by normalized URL. Backends sharing the same URL reuse one `AsyncEngine`. Shared-engine backends must skip `dispose()` on disconnect
 - **Transactions** — use `async with coordinator.transaction() as txn:` for atomic multi-backend operations. Backend write methods accept optional `session` parameter to join an existing transaction
-- **NLTK is optional** — `_HAS_NLTK` flag controls sentence splitting. Code must handle `LookupError` when punkt_tab data is missing (falls back to regex)
+- **spaCy is optional** — `_HAS_SPACY` flag controls sentence splitting. Uses blank model with `sentencizer` pipe (no model download needed). Falls back to regex when spaCy is not installed
 - **Downstream consumers** — `genesis` and `khora-benchmarks` depend on khora. Check compatibility when changing public APIs. `lake.storage` is a stable public API used by both

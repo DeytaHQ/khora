@@ -81,7 +81,7 @@ Three chunking strategies are available:
 | Strategy | How It Works | Best For |
 |----------|--------------|----------|
 | **Fixed** | Split by token count | Predictable sizing |
-| **Semantic** | Split at sentence boundaries (optional NLTK via `khora[nlp]`) | Natural language |
+| **Semantic** | Split at sentence boundaries (optional spaCy via `khora[nlp]`) | Natural language |
 | **Recursive** | Try paragraphs, then lines, then sentences | Structured docs |
 
 The overlap (typically 50 tokens) ensures context isn't lost at chunk boundaries.
