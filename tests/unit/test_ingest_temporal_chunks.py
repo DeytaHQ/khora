@@ -125,6 +125,10 @@ class TestIngestTemporalChunks:
         assert tc.tags == ["meeting", "conference"]
         assert tc.content == "Alice met Bob at the conference."
         assert isinstance(tc.metadata, dict)
+        # Verify metadata is JSON-serializable (no UUID objects)
+        import json
+
+        json.dumps(tc.metadata)  # raises TypeError if UUIDs leak through
 
     @pytest.mark.asyncio
     async def test_process_document_without_temporal_store_unchanged(self) -> None:

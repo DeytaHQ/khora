@@ -562,7 +562,6 @@ async def process_document(
 
                 # Also write to khora_chunks for VectorCypher/Skeleton engines
                 if temporal_store is not None:
-                    from dataclasses import asdict
                     from datetime import UTC, datetime
 
                     from khora.engines.skeleton.backends import TemporalChunk
@@ -587,7 +586,17 @@ async def process_document(
                             channel=doc_metadata.get("channel"),
                             tags=doc_metadata.get("tags", []),
                             confidence=1.0,
-                            metadata=asdict(chunk.metadata) if chunk.metadata else {},
+                            metadata=(
+                                {
+                                    "chunk_index": chunk.metadata.chunk_index,
+                                    "start_char": chunk.metadata.start_char,
+                                    "end_char": chunk.metadata.end_char,
+                                    "token_count": chunk.metadata.token_count,
+                                    **chunk.metadata.custom,
+                                }
+                                if chunk.metadata
+                                else {}
+                            ),
                         )
                         for chunk in chunks
                     ]
