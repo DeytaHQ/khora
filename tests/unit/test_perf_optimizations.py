@@ -240,7 +240,8 @@ class TestB11CacheKeyOptimization:
         embedder = LiteLLMEmbedder(model="test-model", max_retries=1)
 
         mock_response = MagicMock()
-        mock_response.data = [{"embedding": [0.1, 0.2]}]
+        # Use pre-normalized vector so L2-normalization is a no-op
+        mock_response.data = [{"embedding": [1.0, 0.0]}]
         mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
 
         with (
@@ -250,9 +251,9 @@ class TestB11CacheKeyOptimization:
             mock_telem.return_value.record_llm_call = MagicMock()
             result = await embedder.embed_batch(["hello"])
 
-        assert result == [[0.1, 0.2]]
+        assert result == [[1.0, 0.0]]
         # Verify it was cached
-        assert embedder._cache_get("hello") == [0.1, 0.2]
+        assert embedder._cache_get("hello") == [1.0, 0.0]
 
 
 class TestB12ParseResponseAcceptsDict:
@@ -323,7 +324,8 @@ class TestB10EmbeddingDeduplication:
 
         mock_response = MagicMock()
         # Only ONE embedding returned because dedup reduces to 1 unique text
-        mock_response.data = [{"embedding": [0.1, 0.2]}]
+        # Use pre-normalized vector so L2-normalization is a no-op
+        mock_response.data = [{"embedding": [1.0, 0.0]}]
         mock_response.usage = MagicMock(prompt_tokens=5, total_tokens=5)
 
         with (
@@ -335,9 +337,9 @@ class TestB10EmbeddingDeduplication:
 
         # All three should get the same embedding
         assert len(result) == 3
-        assert result[0] == [0.1, 0.2]
-        assert result[1] == [0.1, 0.2]
-        assert result[2] == [0.1, 0.2]
+        assert result[0] == [1.0, 0.0]
+        assert result[1] == [1.0, 0.0]
+        assert result[2] == [1.0, 0.0]
 
         # API should have been called with only 1 unique text
         call_args = mock_api.call_args
@@ -349,10 +351,10 @@ class TestB10EmbeddingDeduplication:
         embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
 
         mock_response = MagicMock()
-        # 2 unique texts → 2 embeddings
+        # 2 unique texts → 2 pre-normalized embeddings
         mock_response.data = [
-            {"embedding": [0.1, 0.2]},
-            {"embedding": [0.3, 0.4]},
+            {"embedding": [1.0, 0.0]},
+            {"embedding": [0.0, 1.0]},
         ]
         mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
 
@@ -364,9 +366,9 @@ class TestB10EmbeddingDeduplication:
             result = await embedder.embed_batch(["alpha", "beta", "alpha"])
 
         assert len(result) == 3
-        assert result[0] == [0.1, 0.2]  # alpha
-        assert result[1] == [0.3, 0.4]  # beta
-        assert result[2] == [0.1, 0.2]  # alpha (dedup)
+        assert result[0] == [1.0, 0.0]  # alpha
+        assert result[1] == [0.0, 1.0]  # beta
+        assert result[2] == [1.0, 0.0]  # alpha (dedup)
 
         # Only 2 unique texts sent to API
         call_args = mock_api.call_args
@@ -376,11 +378,12 @@ class TestB10EmbeddingDeduplication:
     async def test_dedup_with_cache(self) -> None:
         """Deduplication works alongside cache."""
         embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
-        embedder._cache_put("cached", [0.5, 0.6])
+        # Cached value is already normalized
+        embedder._cache_put("cached", [1.0, 0.0])
 
         mock_response = MagicMock()
-        # 1 unique uncached text
-        mock_response.data = [{"embedding": [0.7, 0.8]}]
+        # 1 unique uncached text — pre-normalized vector
+        mock_response.data = [{"embedding": [0.0, 1.0]}]
         mock_response.usage = MagicMock(prompt_tokens=5, total_tokens=5)
 
         with (
@@ -390,9 +393,9 @@ class TestB10EmbeddingDeduplication:
             mock_telem.return_value.record_llm_call = MagicMock()
             result = await embedder.embed_batch(["cached", "new_text", "new_text"])
 
-        assert result[0] == [0.5, 0.6]  # from cache
-        assert result[1] == [0.7, 0.8]  # from API
-        assert result[2] == [0.7, 0.8]  # dedup'd from API
+        assert result[0] == [1.0, 0.0]  # from cache
+        assert result[1] == [0.0, 1.0]  # from API (normalized)
+        assert result[2] == [0.0, 1.0]  # dedup'd from API
 
         # Only 1 text sent to API (new_text, deduplicated)
         call_args = mock_api.call_args
@@ -662,9 +665,10 @@ class TestEmbeddingBatchDedup:
         texts = ["alpha", "beta", "alpha", "beta"]
 
         mock_response = MagicMock()
+        # Use pre-normalized 1-D unit vectors
         mock_response.data = [
-            {"embedding": [0.1]},
-            {"embedding": [0.2]},
+            {"embedding": [1.0]},
+            {"embedding": [1.0]},
         ]
         mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
 
@@ -676,10 +680,10 @@ class TestEmbeddingBatchDedup:
             result = await embedder.embed_batch(texts)
 
         assert len(result) == 4
-        assert result[0] == [0.1]  # alpha
-        assert result[1] == [0.2]  # beta
-        assert result[2] == [0.1]  # alpha (dedup)
-        assert result[3] == [0.2]  # beta (dedup)
+        assert result[0] == [1.0]  # alpha
+        assert result[1] == [1.0]  # beta
+        assert result[2] == [1.0]  # alpha (dedup)
+        assert result[3] == [1.0]  # beta (dedup)
 
         # API called once (2 unique texts fit in batch_size=2)
         assert mock_api.await_count == 1

@@ -9,6 +9,7 @@ mod bm25;
 mod cosine;
 mod entity_resolution;
 mod keyword_extract;
+mod mmr;
 mod pagerank;
 mod rrf;
 mod string_sim;
@@ -77,6 +78,9 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Temporal filtering
     m.add_function(wrap_pyfunction!(temporal::batch_temporal_filter, m)?)?;
     m.add_function(wrap_pyfunction!(temporal::batch_recency_scores, m)?)?;
+
+    // MMR diversity selection
+    m.add_function(wrap_pyfunction!(mmr::mmr_diversity_select, m)?)?;
 
     Ok(())
 }

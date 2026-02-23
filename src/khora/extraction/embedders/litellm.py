@@ -237,6 +237,12 @@ class LiteLLMEmbedder(Embedder):
             else:
                 unique_embeddings = await self._embed_batch_internal(unique_texts)
 
+            # L2-normalize all embeddings so dot product == cosine similarity
+            # downstream (batch_dot_product is ~3x faster than batch_cosine).
+            from khora._accel import normalize_embeddings_batch
+
+            unique_embeddings = normalize_embeddings_batch(unique_embeddings)
+
             # Map deduplicated results back to original positions and populate cache
             for i, (idx, key) in enumerate(zip(uncached_indices, uncached_keys)):
                 embedding = unique_embeddings[dedup_indices[i]]

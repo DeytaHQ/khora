@@ -535,6 +535,13 @@ async def process_document(
 
         # R-2: Prepend document title for embeddings (better embedding space separation)
         doc_title = document.metadata.title if document.metadata and hasattr(document.metadata, "title") else ""
+
+        # R-4: Propagate document title into chunk metadata for reranker context
+        if doc_title:
+            for chunk in chunks:
+                if chunk.metadata and isinstance(chunk.metadata.custom, dict):
+                    chunk.metadata.custom.setdefault("title", doc_title)
+
         original_contents: dict[UUID, str] = {}
         if doc_title:
             for chunk in chunks:

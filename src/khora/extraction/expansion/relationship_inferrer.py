@@ -404,6 +404,9 @@ class RelationshipInferrer:
             frozenset({"DATE", "URL"}),
             frozenset({"DATE", "EMAIL"}),
             frozenset({"URL", "EMAIL"}),
+            frozenset({"DATE", "LOCATION"}),
+            frozenset({"URL", "LOCATION"}),
+            frozenset({"EMAIL", "LOCATION"}),
         }
 
         entity_lookup = {e.id: e for e in entities}

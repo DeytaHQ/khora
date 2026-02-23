@@ -699,8 +699,23 @@ class HybridQueryEngine:
                     cfg.keyword_weight = understanding.search_strategy.keyword_weight
                     cfg.max_graph_depth = understanding.search_strategy.graph_depth
 
-                # Adaptive top-k: reduce evidence for single-topic queries
+                # Adaptive top-k: very focused tier for single-entity queries
                 if (
+                    understanding.complexity_score < 0.3
+                    and not understanding.requires_multi_step
+                    and cfg.max_chunks > 3
+                ):
+                    cfg.max_chunks = 3
+                    cfg.max_entities = 3
+                    cfg.min_chunk_similarity = max(cfg.min_chunk_similarity, 0.25)
+                    cfg.min_entity_similarity = max(cfg.min_entity_similarity, 0.25)
+                    metadata["adaptive_top_k"] = {"reduced": True, "reason": "very_focused"}
+                    logger.debug(
+                        f"Adaptive top-k: very_focused to {cfg.max_chunks} "
+                        f"(complexity={understanding.complexity_score:.2f})"
+                    )
+                # Adaptive top-k: reduce evidence for single-topic queries
+                elif (
                     understanding.complexity_score < 0.5
                     and not understanding.requires_multi_step
                     and cfg.max_chunks > 5
@@ -1510,11 +1525,10 @@ class HybridQueryEngine:
                 # Score based on entity score and mention count
                 chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
 
-                # Filter by cosine similarity when query_embedding is provided
+                # Filter by similarity when query_embedding is provided
+                # (embeddings are pre-normalized at ingest, so dot product == cosine)
                 if query_embedding is not None and chunk.embedding is not None:
-                    from khora._accel import cosine_similarity as _cos_sim
-
-                    sim = _cos_sim(query_embedding, chunk.embedding)
+                    sim = sum(a * b for a, b in zip(query_embedding, chunk.embedding))
                     if sim < _min_graph_sim:
                         continue
                 # If no embedding on chunk, include anyway (fallback)
@@ -2434,6 +2448,7 @@ class HybridQueryEngine:
         """Maximal Marginal Relevance selection for diversity.
 
         Balances relevance to query with diversity among selected results.
+        Uses Rust-accelerated MMR when available via ``_accel.mmr_diversity_select``.
 
         Args:
             chunks: Candidate chunks with scores
@@ -2444,7 +2459,7 @@ class HybridQueryEngine:
         Returns:
             Selected chunks with adjusted scores
         """
-        import numpy as np
+        from khora._accel import mmr_diversity_select, normalize_embeddings_batch
 
         if len(chunks) <= k:
             return chunks
@@ -2461,58 +2476,24 @@ class HybridQueryEngine:
         if all(e is None for e in chunk_embeddings):
             return chunks[:k]
 
-        # Convert to numpy arrays
-        query_vec = np.array(query_embedding)
-        selected: list[tuple[Any, float]] = []
-        selected_indices: set[int] = set()
-        remaining_indices = set(range(len(chunks)))
+        # For candidates missing embeddings, use the query embedding as a
+        # placeholder (their relevance score will dominate the MMR calc).
+        filled_embeddings: list[list[float]] = [emb if emb is not None else query_embedding for emb in chunk_embeddings]
 
-        def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-            """Compute cosine similarity between two vectors."""
-            norm_a = np.linalg.norm(a)
-            norm_b = np.linalg.norm(b)
-            if norm_a == 0 or norm_b == 0:
-                return 0.0
-            return float(np.dot(a, b) / (norm_a * norm_b))
+        # Compute relevance scores as cosine similarity to query.
+        # Pre-normalize all embeddings (including query) so dot product = cosine.
+        all_vectors = [query_embedding] + filled_embeddings
+        normalized = normalize_embeddings_batch(all_vectors)
+        norm_query = normalized[0]
+        norm_embeddings = normalized[1:]
 
-        while len(selected) < k and remaining_indices:
-            best_idx = -1
-            best_mmr_score = float("-inf")
+        # Relevance = dot(norm_query, norm_embedding_i) for each candidate
+        scores = [sum(a * b for a, b in zip(norm_query, emb)) for emb in norm_embeddings]
 
-            for idx in remaining_indices:
-                chunk, relevance_score = chunks[idx]
-                embedding = chunk_embeddings[idx]
+        # Run MMR selection on pre-normalized embeddings
+        selected_indices = mmr_diversity_select(norm_embeddings, scores, lambda_param, k)
 
-                if embedding is None:
-                    # Use original score as relevance
-                    query_sim = relevance_score
-                else:
-                    query_sim = cosine_similarity(query_vec, np.array(embedding))
-
-                # Calculate max similarity to already selected
-                max_sim_to_selected = 0.0
-                if selected_indices:
-                    for sel_idx in selected_indices:
-                        sel_embedding = chunk_embeddings[sel_idx]
-                        if embedding is not None and sel_embedding is not None:
-                            sim = cosine_similarity(np.array(embedding), np.array(sel_embedding))
-                            max_sim_to_selected = max(max_sim_to_selected, sim)
-
-                # MMR score: lambda * relevance - (1 - lambda) * max_similarity
-                mmr_score = lambda_param * query_sim - (1 - lambda_param) * max_sim_to_selected
-
-                if mmr_score > best_mmr_score:
-                    best_mmr_score = mmr_score
-                    best_idx = idx
-
-            if best_idx >= 0:
-                selected.append(chunks[best_idx])
-                selected_indices.add(best_idx)
-                remaining_indices.remove(best_idx)
-            else:
-                break
-
-        return selected
+        return [chunks[i] for i in selected_indices]
 
     async def find_related_entities(
         self,

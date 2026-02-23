@@ -45,6 +45,10 @@ BIDIRECTIONAL_TYPES: dict[str, str] = {
     "HAS_REPORT": "REPORTS_TO",
     "OWNS": "OWNED_BY",
     "OWNED_BY": "OWNS",
+    "LEADS": "LED_BY",
+    "LED_BY": "LEADS",
+    "ASSIGNED_TO": "HAS_ASSIGNEE",
+    "HAS_ASSIGNEE": "ASSIGNED_TO",
 }
 
 
@@ -252,6 +256,16 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX rel_relates_to_valid_from IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.valid_from)",
             "CREATE INDEX rel_collaborates_valid_from IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.valid_from)",
             "CREATE INDEX rel_associated_valid_from IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.valid_from)",
+            "CREATE INDEX rel_depends_valid_from IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.valid_from)",
+            "CREATE INDEX rel_owns_valid_from IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.valid_from)",
+            "CREATE INDEX rel_works_for_valid_from IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.valid_from)",
+            "CREATE INDEX rel_implements_valid_from IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.valid_from)",
+            "CREATE INDEX rel_part_of_valid_from IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.valid_from)",
+            # temporal indexes on relationship created_at (for "when was this edge created?" queries)
+            "CREATE INDEX rel_relates_to_created_at IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.created_at)",
+            "CREATE INDEX rel_collaborates_created_at IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.created_at)",
+            "CREATE INDEX rel_associated_created_at IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.created_at)",
+            "CREATE INDEX rel_depends_created_at IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.created_at)",
         ]
 
         async with self._driver.session(database=self._database) as session:

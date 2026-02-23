@@ -47,6 +47,7 @@ try:
     from khora_accel import extract_keywords as _rust_extract_keywords
     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
     from khora_accel import levenshtein_similarity as _rust_levenshtein
+    from khora_accel import mmr_diversity_select as _rust_mmr_diversity_select
     from khora_accel import normalize_embeddings_batch as _rust_normalize_embeddings_batch
     from khora_accel import normalize_entity_name as _rust_normalize_entity_name
     from khora_accel import normalize_entity_names_batch as _rust_normalize_entity_names_batch
@@ -1060,3 +1061,114 @@ def batch_dot_product(
             results.append((i, dot))
     results.sort(key=lambda x: x[1], reverse=True)
     return results
+
+
+# ---------------------------------------------------------------------------
+# MMR diversity selection
+# ---------------------------------------------------------------------------
+
+
+def mmr_diversity_select(
+    embeddings: list[list[float]],
+    scores: list[float],
+    lambda_param: float,
+    k: int,
+) -> list[int]:
+    """Greedy Maximal Marginal Relevance diversity selection.
+
+    Iteratively picks the candidate maximising:
+        lambda * relevance - (1 - lambda) * max_similarity_to_selected
+
+    Embeddings should be pre-normalized (dot product = cosine similarity).
+    Uses Rust > numpy > pure Python.
+
+    Args:
+        embeddings: One embedding vector per candidate.
+        scores: Relevance score per candidate.
+        lambda_param: Tradeoff (0 = pure diversity, 1 = pure relevance).
+        k: Number of items to select.
+
+    Returns:
+        Indices of selected items in selection order.
+    """
+    n = len(embeddings)
+    if n == 0 or k == 0:
+        return []
+    k = min(k, n)
+
+    if _HAS_RUST and _HAS_NUMPY:
+        mat = np.asarray(embeddings, dtype=np.float32)
+        return _rust_mmr_diversity_select(mat, scores, lambda_param, k)
+
+    # NumPy fallback
+    if _HAS_NUMPY:
+        mat = np.asarray(embeddings, dtype=np.float32)
+        scores_arr = np.asarray(scores, dtype=np.float32)
+        available = [True] * n
+        selected: list[int] = []
+        max_sim = np.full(n, -np.inf, dtype=np.float32)
+        one_minus_lambda = 1.0 - lambda_param
+
+        for _ in range(k):
+            best_idx = -1
+            best_mmr = float("-inf")
+
+            for i in range(n):
+                if not available[i]:
+                    continue
+                sim_to_sel = 0.0 if not selected else max(0.0, float(max_sim[i]))
+                mmr = lambda_param * float(scores_arr[i]) - one_minus_lambda * sim_to_sel
+                if mmr > best_mmr:
+                    best_mmr = mmr
+                    best_idx = i
+
+            if best_idx < 0:
+                break
+
+            available[best_idx] = False
+            selected.append(best_idx)
+
+            # Update max similarities
+            dots = mat @ mat[best_idx]
+            for i in range(n):
+                if available[i] and dots[i] > max_sim[i]:
+                    max_sim[i] = dots[i]
+
+        return selected
+
+    # Pure-Python fallback
+    available = [True] * n
+    selected = []
+    max_sim = [float("-inf")] * n
+    one_minus_lambda = 1.0 - lambda_param
+
+    def _dot(a: list[float], b: list[float]) -> float:
+        return sum(x * y for x, y in zip(a, b))
+
+    for _ in range(k):
+        best_idx = -1
+        best_mmr = float("-inf")
+
+        for i in range(n):
+            if not available[i]:
+                continue
+            sim_to_sel = 0.0 if not selected else max(0.0, max_sim[i])
+            mmr = lambda_param * scores[i] - one_minus_lambda * sim_to_sel
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = i
+
+        if best_idx < 0:
+            break
+
+        available[best_idx] = False
+        selected.append(best_idx)
+
+        # Update max similarities
+        for i in range(n):
+            if available[i]:
+                d = _dot(embeddings[best_idx], embeddings[i])
+                if d > max_sim[i]:
+                    max_sim[i] = d
+
+    return selected

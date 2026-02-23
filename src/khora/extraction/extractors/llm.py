@@ -111,6 +111,8 @@ Guidelines:
 - Consider implicit relationships: if entities are mentioned together or in the same context, they likely have a relationship even if not explicitly stated.
 - Use ASSOCIATED_WITH or RELATES_TO for weaker/implied connections when a more specific type doesn't fit.
 
+Before returning your response, verify that each extracted entity has at least one relationship connecting it to another entity. If an entity appears isolated, re-examine the text for implicit connections (e.g., co-location, temporal co-occurrence, shared attributes).
+
 Return ONLY valid JSON, no other text."""
 
 # Second-pass prompt for focused relationship extraction (G-6: two-pass extraction)
@@ -719,7 +721,7 @@ class LLMEntityExtractor(EntityExtractor):
         """
         num_entities = len(result.entities)
         num_relationships = len(result.relationships)
-        return num_entities > 3 and num_relationships < 2
+        return num_entities > 3 and num_relationships < max(2, num_entities // 2)
 
     async def _extract_additional_relationships(
         self,

@@ -339,6 +339,9 @@ class EntityModel(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
         Index("ix_entities_namespace_mentions", "namespace_id", mention_count.desc()),
+        # Partial indexes for temporal filtering (only rows with non-NULL values)
+        Index("ix_entities_valid_from", "valid_from", postgresql_where="valid_from IS NOT NULL"),
+        Index("ix_entities_valid_until", "valid_until", postgresql_where="valid_until IS NOT NULL"),
     )
 
     def __repr__(self) -> str:
