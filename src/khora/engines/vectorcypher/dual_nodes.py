@@ -21,6 +21,8 @@ from uuid import UUID, uuid4
 
 from loguru import logger
 
+from khora.storage.backends.mixins import deserialize_dict, serialize_dict
+
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
@@ -139,7 +141,7 @@ class DualNodeManager:
             author=chunk.author,
             channel=chunk.channel,
             confidence=chunk.confidence,
-            metadata=chunk.metadata or {},
+            metadata=serialize_dict(chunk.metadata or {}),
         )
 
         async with self._driver.session(database=self._database) as session:
@@ -189,7 +191,7 @@ class DualNodeManager:
                     "author": chunk.author,
                     "channel": chunk.channel,
                     "confidence": chunk.confidence,
-                    "metadata": chunk.metadata or {},
+                    "metadata": serialize_dict(chunk.metadata or {}),
                 }
             )
 
@@ -429,6 +431,11 @@ class DualNodeManager:
                 return [record.data() async for record in result]
 
             records = await session.execute_read(_work)
+
+        # Deserialize metadata from JSON string back to dict
+        for record in records:
+            if "metadata" in record:
+                record["metadata"] = deserialize_dict(record["metadata"])
 
         return records
 
