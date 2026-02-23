@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from khora.core.models import Chunk, ChunkMetadata
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherResult,
@@ -75,8 +76,9 @@ class TestVectorCypherResult:
             confidence=0.8,
             reasoning="test",
         )
+        chunk = Chunk(id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content="test")
         result = VectorCypherResult(
-            chunks=[({"id": "c1", "content": "test"}, 0.9)],
+            chunks=[(chunk, 0.9)],
             entities=[],
             routing_decision=routing,
             metadata={"test": True},
@@ -164,12 +166,15 @@ class TestRetrieverSimpleRetrieve:
         # Mock vector store search
         chunk_id = uuid4()
         doc_id = uuid4()
+        ns_id = uuid4()
         mock_result = MagicMock()
         mock_result.chunk = MagicMock()
         mock_result.chunk.id = chunk_id
+        mock_result.chunk.namespace_id = ns_id
         mock_result.chunk.content = "test chunk content"
         mock_result.chunk.document_id = doc_id
         mock_result.chunk.occurred_at = None
+        mock_result.chunk.created_at = None
         mock_result.chunk.metadata = {}
         mock_result.combined_score = 0.85
         mock_result.similarity = 0.85
@@ -233,11 +238,17 @@ class TestRetrieverFuseResults:
             embedder=AsyncMock(),
         )
 
+    def _make_chunk(self, content: str = "test") -> Chunk:
+        """Helper to create a Chunk with given content."""
+        return Chunk(id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content=content)
+
     def test_fuse_basic(self, retriever: VectorCypherRetriever) -> None:
         """Test basic fusion of vector and graph results."""
         id1, id2 = uuid4(), uuid4()
-        vector_chunks = [(id1, 0.9, {"content": "vec"})]
-        graph_chunks = [(id2, 0.8, {"content": "graph"})]
+        c1 = Chunk(id=id1, namespace_id=uuid4(), document_id=uuid4(), content="vec")
+        c2 = Chunk(id=id2, namespace_id=uuid4(), document_id=uuid4(), content="graph")
+        vector_chunks = [(id1, 0.9, c1)]
+        graph_chunks = [(id2, 0.8, c2)]
 
         fused = retriever._fuse_results(vector_chunks, graph_chunks)
 
@@ -246,8 +257,9 @@ class TestRetrieverFuseResults:
     def test_fuse_with_normalization(self, retriever: VectorCypherRetriever) -> None:
         """Test fusion with score normalization."""
         id1 = uuid4()
-        vector_chunks = [(id1, 0.9, {"content": "test"})]
-        graph_chunks = [(id1, 5.0, {"content": "test"})]
+        c1 = Chunk(id=id1, namespace_id=uuid4(), document_id=uuid4(), content="test")
+        vector_chunks = [(id1, 0.9, c1)]
+        graph_chunks = [(id1, 5.0, c1)]
 
         fused = retriever._fuse_results(
             vector_chunks,
@@ -260,6 +272,8 @@ class TestRetrieverFuseResults:
     def test_fuse_with_routing_simple(self, retriever: VectorCypherRetriever) -> None:
         """Test fusion uses simple weights for SIMPLE routing."""
         id1, id2 = uuid4(), uuid4()
+        c1 = Chunk(id=id1, namespace_id=uuid4(), document_id=uuid4(), content="v")
+        c2 = Chunk(id=id2, namespace_id=uuid4(), document_id=uuid4(), content="g")
         routing = RoutingDecision(
             complexity=QueryComplexity.SIMPLE,
             use_graph=False,
@@ -269,8 +283,8 @@ class TestRetrieverFuseResults:
         )
 
         fused = retriever._fuse_results(
-            [(id1, 0.9, {"content": "v"})],
-            [(id2, 0.8, {"content": "g"})],
+            [(id1, 0.9, c1)],
+            [(id2, 0.8, c2)],
             routing=routing,
         )
 
@@ -280,6 +294,8 @@ class TestRetrieverFuseResults:
     def test_fuse_with_routing_complex(self, retriever: VectorCypherRetriever) -> None:
         """Test fusion uses complex weights for COMPLEX routing."""
         id1, id2 = uuid4(), uuid4()
+        c1 = Chunk(id=id1, namespace_id=uuid4(), document_id=uuid4(), content="v")
+        c2 = Chunk(id=id2, namespace_id=uuid4(), document_id=uuid4(), content="g")
         routing = RoutingDecision(
             complexity=QueryComplexity.COMPLEX,
             use_graph=True,
@@ -289,8 +305,8 @@ class TestRetrieverFuseResults:
         )
 
         fused = retriever._fuse_results(
-            [(id1, 0.9, {"content": "v"})],
-            [(id2, 0.8, {"content": "g"})],
+            [(id1, 0.9, c1)],
+            [(id2, 0.8, c2)],
             routing=routing,
         )
 
@@ -321,17 +337,23 @@ class TestRetrieverRecencyScores:
         from khora.engines.vectorcypher.fusion import FusedResult
 
         id1, id2 = uuid4(), uuid4()
+        chunk1 = Chunk(
+            id=id1,
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="old",
+            metadata=ChunkMetadata(custom={"occurred_at": "2020-01-01T00:00:00+00:00"}),
+        )
+        chunk2 = Chunk(
+            id=id2,
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="recent",
+            metadata=ChunkMetadata(custom={"occurred_at": "2026-02-14T00:00:00+00:00"}),
+        )
         results = [
-            FusedResult(
-                item_id=id1,
-                item={"occurred_at": "2020-01-01T00:00:00+00:00"},
-                rrf_score=0.9,
-            ),
-            FusedResult(
-                item_id=id2,
-                item={"occurred_at": "2026-02-14T00:00:00+00:00"},
-                rrf_score=0.8,
-            ),
+            FusedResult(item_id=id1, item=chunk1, rrf_score=0.9),
+            FusedResult(item_id=id2, item=chunk2, rrf_score=0.8),
         ]
 
         scores = retriever._calculate_recency_scores(results)
@@ -344,18 +366,19 @@ class TestRetrieverRecencyScores:
         from khora.engines.vectorcypher.fusion import FusedResult
 
         id1 = uuid4()
-        results = [FusedResult(item_id=id1, item={"content": "no date"}, rrf_score=0.9)]
+        chunk = Chunk(id=id1, namespace_id=uuid4(), document_id=uuid4(), content="no date")
+        results = [FusedResult(item_id=id1, item=chunk, rrf_score=0.9)]
 
         scores = retriever._calculate_recency_scores(results)
 
         assert scores[id1] == 0.5  # Default for missing dates
 
-    def test_recency_scores_non_dict_item(self, retriever: VectorCypherRetriever) -> None:
-        """Test default recency score for non-dict items."""
+    def test_recency_scores_non_chunk_item(self, retriever: VectorCypherRetriever) -> None:
+        """Test default recency score for non-Chunk items."""
         from khora.engines.vectorcypher.fusion import FusedResult
 
         id1 = uuid4()
-        results = [FusedResult(item_id=id1, item="not a dict", rrf_score=0.9)]
+        results = [FusedResult(item_id=id1, item="not a chunk", rrf_score=0.9)]
 
         scores = retriever._calculate_recency_scores(results)
 

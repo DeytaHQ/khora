@@ -826,53 +826,49 @@ class VectorCypherEngine:
 
     def _validate_recall_results(
         self,
-        chunks: list[tuple[dict[str, Any], float]],
+        chunks: list[tuple[Chunk, float]],
         query: str,
         *,
         min_content_length: int = 10,
-    ) -> list[tuple[dict[str, Any], float]]:
+    ) -> list[tuple[Chunk, float]]:
         """Validate and filter retrieval results.
 
         Removes duplicates, filters out empty content, ensures scores are normalized,
         and logs quality warnings.
 
         Args:
-            chunks: List of (chunk_dict, score) tuples
+            chunks: List of (chunk, score) tuples
             query: Original query text for logging context
             min_content_length: Minimum content length to accept
 
         Returns:
-            Validated and filtered list of (chunk_dict, score) tuples
+            Validated and filtered list of (chunk, score) tuples
         """
-        validated: list[tuple[dict[str, Any], float]] = []
-        seen_ids: set[str] = set()
+        validated: list[tuple[Chunk, float]] = []
+        seen_ids: set[UUID] = set()
         empty_count = 0
         duplicate_count = 0
 
-        for chunk_dict, score in chunks:
-            if not isinstance(chunk_dict, dict):
-                logger.warning(f"Skipping non-dict chunk result: {type(chunk_dict)}")
+        for chunk, score in chunks:
+            if not isinstance(chunk, Chunk):
+                logger.warning(f"Skipping non-Chunk result: {type(chunk)}")
                 continue
-
-            chunk_id = chunk_dict.get("id", "")
 
             # Skip duplicates
-            if chunk_id and chunk_id in seen_ids:
+            if chunk.id in seen_ids:
                 duplicate_count += 1
                 continue
-            if chunk_id:
-                seen_ids.add(chunk_id)
+            seen_ids.add(chunk.id)
 
             # Skip empty content
-            content = chunk_dict.get("content", "")
-            if not content or len(content.strip()) < min_content_length:
+            if not chunk.content or len(chunk.content.strip()) < min_content_length:
                 empty_count += 1
                 continue
 
             # Normalize score to [0, 1]
             normalized_score = min(max(score, 0.0), 1.0)
 
-            validated.append((chunk_dict, normalized_score))
+            validated.append((chunk, normalized_score))
 
         # Log quality warnings
         if duplicate_count > 0:
@@ -930,9 +926,8 @@ class VectorCypherEngine:
 
         # Build context text from validated chunks
         context_parts = []
-        for chunk_dict, score in validated_chunks:
-            if isinstance(chunk_dict, dict):
-                context_parts.append(chunk_dict.get("content", ""))
+        for chunk, score in validated_chunks:
+            context_parts.append(chunk.content)
 
         context_text = "\n\n---\n\n".join(context_parts[:limit])
 

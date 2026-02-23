@@ -18,7 +18,7 @@ from uuid import UUID
 from loguru import logger
 
 from khora.config import KhoraConfig, load_config
-from khora.core.models import Document, Entity, MemoryNamespace
+from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
 
 if TYPE_CHECKING:
@@ -68,8 +68,8 @@ class RecallResult:
 
     query: str
     namespace_id: UUID
-    chunks: list[tuple[Any, float]]
-    entities: list[tuple[Any, float]]
+    chunks: list[tuple[Chunk, float]]
+    entities: list[tuple[Entity, float]]
     context_text: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
