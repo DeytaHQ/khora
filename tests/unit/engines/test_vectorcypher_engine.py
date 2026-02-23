@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from khora.core.models import Chunk
 from khora.engines.vectorcypher.engine import (
     ExtractionQualityMetrics,
     VectorCypherConfig,
@@ -388,11 +389,20 @@ class TestVectorCypherEngineRecall:
             confidence=0.8,
             reasoning="test",
         )
+        chunk1 = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="This is a test chunk with enough content to pass validation",
+        )
+        chunk2 = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="Another test chunk that is also long enough to pass validation",
+        )
         retriever_result = VectorCypherResult(
-            chunks=[
-                ({"id": "c1", "content": "This is a test chunk with enough content to pass validation"}, 0.9),
-                ({"id": "c2", "content": "Another test chunk that is also long enough to pass validation"}, 0.7),
-            ],
+            chunks=[(chunk1, 0.9), (chunk2, 0.7)],
             entities=[],
             routing_decision=routing,
             metadata={"search_mode": "simple_vector"},
@@ -427,11 +437,21 @@ class TestVectorCypherEngineRecall:
             confidence=0.8,
             reasoning="test",
         )
+        dup_id = uuid4()
+        dup_chunk1 = Chunk(
+            id=dup_id,
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="Duplicate chunk content that is long enough for validation",
+        )
+        dup_chunk2 = Chunk(
+            id=dup_id,
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="Duplicate chunk content that is long enough for validation",
+        )
         retriever_result = VectorCypherResult(
-            chunks=[
-                ({"id": "c1", "content": "Duplicate chunk content that is long enough for validation"}, 0.9),
-                ({"id": "c1", "content": "Duplicate chunk content that is long enough for validation"}, 0.8),
-            ],
+            chunks=[(dup_chunk1, 0.9), (dup_chunk2, 0.8)],
             entities=[],
             routing_decision=routing,
             metadata={},
@@ -652,48 +672,66 @@ class TestVectorCypherEngineValidateRecallResults:
 
     def test_filters_empty_content(self, engine: VectorCypherEngine) -> None:
         """Test that chunks with empty content are filtered out."""
-        chunks = [
-            ({"id": "c1", "content": ""}, 0.9),
-            ({"id": "c2", "content": "Valid long enough content for testing"}, 0.8),
-        ]
+        c1 = Chunk(id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content="")
+        c2 = Chunk(
+            id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content="Valid long enough content for testing"
+        )
+        chunks = [(c1, 0.9), (c2, 0.8)]
         result = engine._validate_recall_results(chunks, "test query")
         assert len(result) == 1
-        assert result[0][0]["id"] == "c2"
+        assert result[0][0].id == c2.id
 
     def test_filters_short_content(self, engine: VectorCypherEngine) -> None:
         """Test that chunks with very short content are filtered."""
-        chunks = [
-            ({"id": "c1", "content": "short"}, 0.9),
-            ({"id": "c2", "content": "This content is long enough to pass minimum length validation"}, 0.8),
-        ]
+        c1 = Chunk(id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content="short")
+        c2 = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="This content is long enough to pass minimum length validation",
+        )
+        chunks = [(c1, 0.9), (c2, 0.8)]
         result = engine._validate_recall_results(chunks, "test")
         assert len(result) == 1
 
     def test_removes_duplicates(self, engine: VectorCypherEngine) -> None:
         """Test that duplicate chunks are removed."""
-        chunks = [
-            ({"id": "c1", "content": "First occurrence with enough content"}, 0.9),
-            ({"id": "c1", "content": "First occurrence with enough content"}, 0.8),
-        ]
+        shared_id = uuid4()
+        c1 = Chunk(
+            id=shared_id, namespace_id=uuid4(), document_id=uuid4(), content="First occurrence with enough content"
+        )
+        c2 = Chunk(
+            id=shared_id, namespace_id=uuid4(), document_id=uuid4(), content="First occurrence with enough content"
+        )
+        chunks = [(c1, 0.9), (c2, 0.8)]
         result = engine._validate_recall_results(chunks, "test")
         assert len(result) == 1
 
     def test_normalizes_scores(self, engine: VectorCypherEngine) -> None:
         """Test that scores are clamped to [0, 1]."""
-        chunks = [
-            ({"id": "c1", "content": "Content that has a very high score value assigned to it"}, 1.5),
-            ({"id": "c2", "content": "Content that has a negative score value assigned to it"}, -0.5),
-        ]
+        c1 = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="Content that has a very high score value assigned to it",
+        )
+        c2 = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="Content that has a negative score value assigned to it",
+        )
+        chunks = [(c1, 1.5), (c2, -0.5)]
         result = engine._validate_recall_results(chunks, "test")
         assert result[0][1] == 1.0
         assert result[1][1] == 0.0
 
-    def test_skips_non_dict_chunks(self, engine: VectorCypherEngine) -> None:
-        """Test that non-dict chunks are skipped."""
-        chunks = [
-            ("not a dict", 0.9),
-            ({"id": "c1", "content": "Valid content that passes all checks"}, 0.8),
-        ]
+    def test_skips_non_chunk_objects(self, engine: VectorCypherEngine) -> None:
+        """Test that non-Chunk objects are skipped."""
+        c1 = Chunk(
+            id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content="Valid content that passes all checks"
+        )
+        chunks = [("not a chunk", 0.9), (c1, 0.8)]
         result = engine._validate_recall_results(chunks, "test")
         assert len(result) == 1
 

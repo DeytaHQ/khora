@@ -19,7 +19,16 @@ from uuid import UUID
 from loguru import logger
 
 from khora.config import KhoraConfig, LiteLLMConfig
-from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+from khora.core.models import (
+    Chunk,
+    ChunkMetadata,
+    Document,
+    DocumentMetadata,
+    Entity,
+    MemoryNamespace,
+    Organization,
+    Workspace,
+)
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -419,18 +428,23 @@ class SkeletonConstructionEngine:
 
         # Build context text
         context_parts = []
-        chunks_with_scores = []
+        chunks_with_scores: list[tuple[Chunk, float]] = []
         for result in results:
             context_parts.append(result.chunk.content)
-            # Convert TemporalChunk to a simple dict for RecallResult
-            chunk_dict = {
-                "id": result.chunk.id,
-                "content": result.chunk.content,
-                "document_id": result.chunk.document_id,
-                "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
-                "metadata": result.chunk.metadata,
-            }
-            chunks_with_scores.append((chunk_dict, result.combined_score or result.similarity))
+            chunk = Chunk(
+                id=result.chunk.id,
+                namespace_id=result.chunk.namespace_id,
+                document_id=result.chunk.document_id,
+                content=result.chunk.content,
+                metadata=ChunkMetadata(
+                    custom={
+                        "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
+                        **(result.chunk.metadata or {}),
+                    }
+                ),
+                created_at=result.chunk.created_at or result.chunk.occurred_at,
+            )
+            chunks_with_scores.append((chunk, result.combined_score or result.similarity))
 
         context_text = "\n\n---\n\n".join(context_parts[:limit])
 

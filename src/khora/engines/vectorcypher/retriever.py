@@ -26,6 +26,8 @@ from uuid import UUID
 from loguru import logger
 from neo4j.exceptions import Neo4jError
 
+from khora.core.models import Chunk, ChunkMetadata, Entity
+
 from .dual_nodes import DualNodeManager
 from .fusion import (
     FusedResult,
@@ -48,8 +50,8 @@ if TYPE_CHECKING:
 class VectorCypherResult:
     """Result from VectorCypher retrieval."""
 
-    chunks: list[tuple[dict[str, Any], float]]
-    entities: list[tuple[dict[str, Any], float]]
+    chunks: list[tuple[Chunk, float]]
+    entities: list[tuple[Entity, float]]
     routing_decision: RoutingDecision
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -371,20 +373,16 @@ class VectorCypherRetriever:
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
 
         # Build entity results with name/type from graph neighborhoods
-        entity_results = []
+        entity_results: list[tuple[Entity, float]] = []
         for eid, score in entry_entities[: self._config.max_entities]:
             info = entity_info_map.get(str(eid), {})
-            entity_results.append(
-                (
-                    {
-                        "id": str(eid),
-                        "name": info.get("name", ""),
-                        "entity_type": info.get("entity_type", ""),
-                        "score": score,
-                    },
-                    score,
-                )
+            entity = Entity(
+                id=eid,
+                namespace_id=namespace_id,
+                name=info.get("name", ""),
+                entity_type=info.get("entity_type", ""),
             )
+            entity_results.append((entity, score))
 
         return VectorCypherResult(
             chunks=chunk_results,
@@ -452,16 +450,22 @@ class VectorCypherRetriever:
             query_text=query,
         )
 
-        chunk_results = []
+        chunk_results: list[tuple[Chunk, float]] = []
         for r in results:
-            chunk_dict = {
-                "id": str(r.chunk.id),
-                "content": r.chunk.content,
-                "document_id": str(r.chunk.document_id),
-                "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
-                "metadata": r.chunk.metadata,
-            }
-            chunk_results.append((chunk_dict, r.combined_score or r.similarity))
+            chunk = Chunk(
+                id=r.chunk.id,
+                namespace_id=r.chunk.namespace_id,
+                document_id=r.chunk.document_id,
+                content=r.chunk.content,
+                metadata=ChunkMetadata(
+                    custom={
+                        "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
+                        **(r.chunk.metadata or {}),
+                    }
+                ),
+                created_at=r.chunk.created_at or r.chunk.occurred_at,
+            )
+            chunk_results.append((chunk, r.combined_score or r.similarity))
 
         return VectorCypherResult(
             chunks=chunk_results,
@@ -555,7 +559,7 @@ class VectorCypherRetriever:
         namespace_id: UUID,
         temporal_filter: TemporalFilter | None,
         limit: int,
-    ) -> list[tuple[UUID, float, dict[str, Any]]]:
+    ) -> list[tuple[UUID, float, Chunk]]:
         """Fetch chunks connected to entities via MENTIONED_IN.
 
         Args:
@@ -565,7 +569,7 @@ class VectorCypherRetriever:
             limit: Maximum chunks to return
 
         Returns:
-            List of (chunk_id, score, chunk_data) tuples
+            List of (chunk_id, score, chunk) tuples
         """
         chunk_records = await self._dual_nodes.get_chunks_by_entities(
             entity_ids=entity_ids,
@@ -574,7 +578,7 @@ class VectorCypherRetriever:
             limit=limit,
         )
 
-        results = []
+        results: list[tuple[UUID, float, Chunk]] = []
         for record in chunk_records:
             chunk_id = UUID(record["chunk_id"])
             # Score based on mention count and entity coverage
@@ -582,15 +586,20 @@ class VectorCypherRetriever:
             entity_count = len(record.get("entity_ids", []))
             score = score * (1 + 0.1 * entity_count)  # Boost for multiple entity connections
 
-            chunk_data = {
-                "id": record["chunk_id"],
-                "content": record["content"],
-                "document_id": record["document_id"],
-                "occurred_at": record.get("occurred_at"),
-                "metadata": record.get("metadata", {}),
-                "connected_entities": record.get("entity_ids", []),
-            }
-            results.append((chunk_id, score, chunk_data))
+            chunk = Chunk(
+                id=chunk_id,
+                namespace_id=namespace_id,
+                document_id=UUID(record["document_id"]),
+                content=record["content"],
+                metadata=ChunkMetadata(
+                    custom={
+                        "occurred_at": record.get("occurred_at"),
+                        "connected_entities": record.get("entity_ids", []),
+                        **(record.get("metadata") or {}),
+                    }
+                ),
+            )
+            results.append((chunk_id, score, chunk))
 
         return results
 
@@ -601,7 +610,7 @@ class VectorCypherRetriever:
         temporal_filter: TemporalFilter | None,
         query_text: str,
         limit: int,
-    ) -> list[tuple[UUID, float, dict[str, Any]]]:
+    ) -> list[tuple[UUID, float, Chunk]]:
         """Direct vector search on chunks via pgvector.
 
         Args:
@@ -612,7 +621,7 @@ class VectorCypherRetriever:
             limit: Maximum results
 
         Returns:
-            List of (chunk_id, score, chunk_data) tuples
+            List of (chunk_id, score, chunk) tuples
         """
         results = await self._vector_store.search(
             namespace_id=namespace_id,
@@ -627,23 +636,29 @@ class VectorCypherRetriever:
             (
                 r.chunk.id,
                 r.combined_score or r.similarity,
-                {
-                    "id": str(r.chunk.id),
-                    "content": r.chunk.content,
-                    "document_id": str(r.chunk.document_id),
-                    "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
-                    "metadata": r.chunk.metadata,
-                },
+                Chunk(
+                    id=r.chunk.id,
+                    namespace_id=r.chunk.namespace_id,
+                    document_id=r.chunk.document_id,
+                    content=r.chunk.content,
+                    metadata=ChunkMetadata(
+                        custom={
+                            "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
+                            **(r.chunk.metadata or {}),
+                        }
+                    ),
+                    created_at=r.chunk.created_at or r.chunk.occurred_at,
+                ),
             )
             for r in results
         ]
 
     def _lazy_expand_chunks(
         self,
-        vector_only_chunks: list[tuple[UUID, float, dict[str, Any]]],
+        vector_only_chunks: list[tuple[UUID, float, Chunk]],
         entry_entities: list[tuple[UUID, float]],
         entity_info_map: dict[str, dict[str, str]],
-    ) -> list[tuple[UUID, float, dict[str, Any]]]:
+    ) -> list[tuple[UUID, float, Chunk]]:
         """Expand vector-only chunks by keyword matching against known entities.
 
         For chunks retrieved via vector search that have no MENTIONED_IN edges,
@@ -665,16 +680,16 @@ class VectorCypherRetriever:
         if not entity_names:
             return []
 
-        results = []
-        for chunk_id, _vec_score, chunk_data in vector_only_chunks:
+        results: list[tuple[UUID, float, Chunk]] = []
+        for chunk_id, _vec_score, chunk in vector_only_chunks:
             # Check cache first
             if chunk_id in self._expansion_cache:
                 cached_score = self._expansion_cache[chunk_id]
                 if cached_score > 0:
-                    results.append((chunk_id, cached_score, chunk_data))
+                    results.append((chunk_id, cached_score, chunk))
                 continue
 
-            content = chunk_data.get("content", "")
+            content = chunk.content
             if not content:
                 self._expansion_cache[chunk_id] = 0.0
                 continue
@@ -684,7 +699,7 @@ class VectorCypherRetriever:
             if matches:
                 # Weak signal: 0.5 per matched entity name
                 expansion_score = len(matches) * 0.5
-                results.append((chunk_id, expansion_score, chunk_data))
+                results.append((chunk_id, expansion_score, chunk))
                 self._expansion_cache[chunk_id] = expansion_score
             else:
                 self._expansion_cache[chunk_id] = 0.0
@@ -693,8 +708,8 @@ class VectorCypherRetriever:
 
     def _fuse_results(
         self,
-        vector_chunks: list[tuple[UUID, float, dict[str, Any]]],
-        graph_chunks: list[tuple[UUID, float, dict[str, Any]]],
+        vector_chunks: list[tuple[UUID, float, Chunk]],
+        graph_chunks: list[tuple[UUID, float, Chunk]],
         *,
         use_normalization: bool = False,
         routing: RoutingDecision | None = None,
@@ -755,28 +770,31 @@ class VectorCypherRetriever:
 
         for r in results:
             item = r.item
-            if isinstance(item, dict):
+            occurred_at_str = None
+            if isinstance(item, Chunk):
+                custom = item.metadata.custom if item.metadata else {}
+                occurred_at_str = custom.get("occurred_at")
+            elif isinstance(item, dict):
                 occurred_at_str = item.get("occurred_at")
-                if occurred_at_str:
-                    try:
-                        occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
-                        if occurred_at.tzinfo is None:
-                            occurred_at = occurred_at.replace(tzinfo=UTC)
-                        days_old = (now - occurred_at).days
-                        if self._config.recency_decay_type == "exponential":
-                            # Half-life semantics: score = 0.5 at decay_days
-                            half_life_lambda = math.log(2) / decay_days
-                            recency = math.exp(-half_life_lambda * days_old)
-                        else:
-                            # Linear decay with cliff at decay_days
-                            recency = max(0.0, 1.0 - (days_old / decay_days))
-                        scores[r.item_id] = recency
-                    except (ValueError, TypeError):
-                        scores[r.item_id] = 0.5  # Default for unparseable dates
-                else:
-                    scores[r.item_id] = 0.5  # Default for missing dates
+
+            if occurred_at_str:
+                try:
+                    occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
+                    if occurred_at.tzinfo is None:
+                        occurred_at = occurred_at.replace(tzinfo=UTC)
+                    days_old = (now - occurred_at).days
+                    if self._config.recency_decay_type == "exponential":
+                        # Half-life semantics: score = 0.5 at decay_days
+                        half_life_lambda = math.log(2) / decay_days
+                        recency = math.exp(-half_life_lambda * days_old)
+                    else:
+                        # Linear decay with cliff at decay_days
+                        recency = max(0.0, 1.0 - (days_old / decay_days))
+                    scores[r.item_id] = recency
+                except (ValueError, TypeError):
+                    scores[r.item_id] = 0.5  # Default for unparseable dates
             else:
-                scores[r.item_id] = 0.5
+                scores[r.item_id] = 0.5  # Default for missing dates
 
         return scores
 
