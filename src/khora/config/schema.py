@@ -421,6 +421,11 @@ class KhoraConfig(BaseSettings):
     # Pipeline configuration
     pipelines: PipelineSettings = Field(default_factory=PipelineSettings)
 
+    @property
+    def pipeline(self) -> PipelineSettings:
+        """Alias so engine code can use ``config.pipeline.*``."""
+        return self.pipelines
+
     # Tenancy configuration
     tenancy: TenancySettings = Field(default_factory=TenancySettings)
 
