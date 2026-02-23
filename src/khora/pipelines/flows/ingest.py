@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from khora.core.models import Chunk, Document, Entity, Relationship
+    from khora.engines.skeleton.backends import TemporalVectorStore
     from khora.extraction.embedders import Embedder
     from khora.extraction.expansion.entity_index import EntityIndex
     from khora.extraction.skills import ExpertiseConfig
@@ -359,6 +360,7 @@ async def process_document(
     extraction_context: dict[str, Any] | None = None,
     entity_index: EntityIndex | None = None,
     shared_embedder: Any | None = None,
+    temporal_store: TemporalVectorStore | None = None,
     extraction_timeout: int = 120,
     extraction_max_retries: int = 3,
     extraction_retry_wait: float = 2.0,
@@ -548,7 +550,7 @@ async def process_document(
         # Step 4 & 5: Store chunks and entities in parallel
         # Chunks go to pgvector, entities go to graph+vector - independent writes
         async def _store_chunks():
-            """Store chunks to vector backend."""
+            """Store chunks to vector backend and optional temporal store."""
             async with pipeline_stage(
                 "ingestion",
                 "storage",
@@ -557,6 +559,48 @@ async def process_document(
                 extra_metadata={"chunk_count": len(chunks), "entity_count": len(entities)},
             ):
                 await storage.create_chunks_batch(chunks)
+
+                # Also write to khora_chunks for VectorCypher/Skeleton engines
+                if temporal_store is not None:
+                    from datetime import UTC, datetime
+
+                    from khora.engines.skeleton.backends import TemporalChunk
+
+                    doc_metadata: dict[str, Any] = {}
+                    if document.metadata and document.metadata.custom:
+                        doc_metadata = document.metadata.custom
+
+                    occurred_at = _extract_source_timestamp(doc_metadata) or getattr(document, "created_at", None)
+
+                    temporal_chunks = [
+                        TemporalChunk(
+                            id=chunk.id,
+                            namespace_id=chunk.namespace_id,
+                            document_id=chunk.document_id,
+                            content=chunk.content,
+                            embedding=chunk.embedding,
+                            occurred_at=occurred_at,
+                            created_at=datetime.now(UTC),
+                            source_system=doc_metadata.get("source_system"),
+                            author=doc_metadata.get("author"),
+                            channel=doc_metadata.get("channel"),
+                            tags=doc_metadata.get("tags", []),
+                            confidence=1.0,
+                            metadata=(
+                                {
+                                    "chunk_index": chunk.metadata.chunk_index,
+                                    "start_char": chunk.metadata.start_char,
+                                    "end_char": chunk.metadata.end_char,
+                                    "token_count": chunk.metadata.token_count,
+                                    **chunk.metadata.custom,
+                                }
+                                if chunk.metadata
+                                else {}
+                            ),
+                        )
+                        for chunk in chunks
+                    ]
+                    await temporal_store.create_chunks_batch(temporal_chunks)
 
         async def _store_entities() -> tuple[list[tuple[Entity, bool]], dict[str, str], list[Entity]]:
             """Store entities with deduplication. Returns (results, id_mapping, entities_needing_embeddings)."""
@@ -728,6 +772,7 @@ async def ingest_documents(
     skip_resolution: bool = False,
     shared_embedder: Any | None = None,
     shared_entity_index: Any | None = None,
+    temporal_store: TemporalVectorStore | None = None,
     extraction_timeout: int = 120,
     extraction_max_retries: int = 3,
     extraction_retry_wait: float = 2.0,
@@ -860,6 +905,7 @@ async def ingest_documents(
                 extraction_context=doc_context,
                 entity_index=shared_entity_index,
                 shared_embedder=shared_embedder,
+                temporal_store=temporal_store,
                 extraction_timeout=extraction_timeout,
                 extraction_max_retries=extraction_max_retries,
                 extraction_retry_wait=extraction_retry_wait,
