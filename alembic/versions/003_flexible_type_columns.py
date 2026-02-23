@@ -27,22 +27,18 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     # Convert entity_type from enum to varchar
-    op.execute(
-        """
+    op.execute("""
         ALTER TABLE entities
         ALTER COLUMN entity_type TYPE VARCHAR(64)
         USING entity_type::text
-        """
-    )
+        """)
 
     # Convert relationship_type from enum to varchar
-    op.execute(
-        """
+    op.execute("""
         ALTER TABLE relationships
         ALTER COLUMN relationship_type TYPE VARCHAR(64)
         USING relationship_type::text
-        """
-    )
+        """)
 
     # Drop the old enum types (they are no longer referenced)
     op.execute("DROP TYPE IF EXISTS entity_type")
@@ -51,16 +47,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Recreate the enum types
-    op.execute(
-        """
+    op.execute("""
         CREATE TYPE entity_type AS ENUM (
             'PERSON', 'ORGANIZATION', 'LOCATION', 'CONCEPT',
             'EVENT', 'PRODUCT', 'TECHNOLOGY', 'DATE', 'CUSTOM'
         )
-        """
-    )
-    op.execute(
-        """
+        """)
+    op.execute("""
         CREATE TYPE relationship_type AS ENUM (
             'WORKS_FOR', 'KNOWS', 'MANAGES', 'REPORTS_TO',
             'COLLABORATES_WITH', 'OWNS', 'PART_OF', 'COMPETES_WITH',
@@ -69,12 +62,10 @@ def downgrade() -> None:
             'PRECEDES', 'FOLLOWS', 'CONCURRENT_WITH',
             'ASSOCIATED_WITH', 'CUSTOM'
         )
-        """
-    )
+        """)
 
     # Convert back — any non-standard values become CUSTOM/CONCEPT
-    op.execute(
-        """
+    op.execute("""
         ALTER TABLE entities
         ALTER COLUMN entity_type TYPE entity_type
         USING CASE
@@ -84,10 +75,8 @@ def downgrade() -> None:
             ) THEN entity_type::entity_type
             ELSE 'CONCEPT'::entity_type
         END
-        """
-    )
-    op.execute(
-        """
+        """)
+    op.execute("""
         ALTER TABLE relationships
         ALTER COLUMN relationship_type TYPE relationship_type
         USING CASE
@@ -101,5 +90,4 @@ def downgrade() -> None:
             ) THEN relationship_type::relationship_type
             ELSE 'RELATES_TO'::relationship_type
         END
-        """
-    )
+        """)
