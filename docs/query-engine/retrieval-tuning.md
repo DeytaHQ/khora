@@ -167,6 +167,43 @@ KHORA_QUERY__ENTITY_LINKING_FUZZY_THRESHOLD=0.6
 KHORA_QUERY__ENTITY_LINKING_EMBEDDING_THRESHOLD=0.4
 ```
 
+### Adaptive Top-K with "Very Focused" Tier (v0.3.1)
+
+The query engine uses the `complexity_score` from query understanding to determine how many chunks to retrieve. In v0.3.1, a new "very_focused" tier was added for simple factual queries:
+
+| Tier | Complexity | Chunk Limit | Use Case |
+|------|-----------|-------------|----------|
+| `very_focused` | < 0.3 | 3 | Simple factual lookups |
+| `focused` | 0.3–0.5 | 5 | Single-entity queries |
+| `moderate` | 0.5–0.7 | 10 | Multi-entity queries |
+| `broad` | > 0.7 | 15 | Complex multi-hop queries |
+
+The very_focused tier reduces noise for straightforward questions where a single chunk is likely sufficient. The complexity score is computed during query understanding based on entity count, relationship complexity, and temporal references.
+
+### MMR Diversity Selection (v0.3.1)
+
+The diversity stage (Stage 5 of the query pipeline) uses Maximal Marginal Relevance to select a diverse set of results from the candidate pool. In v0.3.1:
+
+1. **Enabled by default**: `enable_diversity` now defaults to `True` in both `QueryConfig` and `QuerySettings`. Previously, `QuerySettings` defaulted to `False`, which meant the diversity stage was never activated via environment config.
+
+2. **Rust acceleration**: MMR selection uses a 3-tier fallback (Rust → NumPy → pure Python). The Rust implementation in `khora-accel` uses SIMD-friendly dot product with GIL release, providing ~5x speedup over pure Python for typical result set sizes.
+
+3. **Pre-normalized embeddings**: Embeddings are now L2-normalized at ingest time, allowing MMR to use dot product instead of cosine similarity (~3x speedup since normalization is amortized).
+
+Configuration:
+```python
+config = QueryConfig(
+    enable_diversity=True,    # default: True (changed in v0.3.1)
+    diversity_lambda=0.7,     # balance: 1.0 = pure relevance, 0.0 = pure diversity
+)
+```
+
+Environment variable:
+```bash
+KHORA_QUERY__ENABLE_DIVERSITY=true   # default
+KHORA_QUERY__DIVERSITY_LAMBDA=0.7
+```
+
 ## What's Next
 
 These changes should eliminate the zero-result problem and significantly improve retrieval quality on descriptive/paraphrased queries. The benchmark should be re-run to validate the expected impact:
@@ -179,5 +216,4 @@ These changes should eliminate the zero-result problem and significantly improve
 
 Further improvements to consider:
 - **HyDE (Hypothetical Document Embeddings)**: Generating a hypothetical document for the query would improve embedding similarity for descriptive queries. Already implemented but disabled by default (`enable_hyde=False`).
-- **Adaptive pipeline complexity**: Using the `complexity_score` from query understanding to skip expensive steps for simple queries.
 - **SearchMode.ALL as default**: Now that keyword search runs in HYBRID, the distinction between HYBRID and ALL is smaller — HYBRID is effectively ALL.

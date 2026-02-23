@@ -121,12 +121,10 @@ def upgrade() -> None:
     )
 
     # Create BRIN index for time-series optimization on temporal_edges
-    op.execute(
-        """
+    op.execute("""
         CREATE INDEX ix_temporal_edges_occurred_brin
         ON temporal_edges USING BRIN (occurred_at)
-        """
-    )
+        """)
 
     # Create composite index for entity pair + time queries
     op.create_index(

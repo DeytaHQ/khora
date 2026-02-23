@@ -173,9 +173,16 @@ class StorageSettings(BaseModel):
     neo4j_database: str = Field(default="neo4j", description="[deprecated] Neo4j database name")
 
     # HNSW index tuning
-    hnsw_m: int = Field(default=16, description="HNSW index M parameter (max connections per layer)")
-    hnsw_ef_construction: int = Field(default=64, description="HNSW index ef_construction (build-time search width)")
+    hnsw_m: int = Field(default=24, description="HNSW index M parameter (max connections per layer)")
+    hnsw_ef_construction: int = Field(default=128, description="HNSW index ef_construction (build-time search width)")
     hnsw_ef_search: int = Field(default=200, description="HNSW ef_search for query-time accuracy")
+
+    # Half-precision vectors (requires pgvector extension >= 0.7.0)
+    use_halfvec: bool = Field(
+        default=False,
+        description="Use halfvec (float16) for HNSW indexes. Halves index size with minimal recall loss. "
+        "Requires pgvector extension >= 0.7.0. Column data remains full precision (vector type).",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -263,6 +270,18 @@ class PipelineSettings(BaseModel):
         description="Entity types to extract",
     )
 
+    # Entity embedding skip rules — skip embedding generation for low-value entity types
+    skip_embedding_entity_types: list[str] = Field(
+        default=["DATE", "URL", "EMAIL"],
+        description="Entity types to skip embedding for when mention_count is below threshold. "
+        "These types rarely benefit from vector similarity search.",
+    )
+    skip_embedding_mention_threshold: int = Field(
+        default=1,
+        description="Skip embedding for entities in skip_embedding_entity_types with "
+        "mention_count <= this value. Set to 0 to skip all single-mention entities of these types.",
+    )
+
 
 class TenancySettings(BaseModel):
     """Multi-tenancy configuration settings."""
@@ -348,7 +367,7 @@ class QuerySettings(BaseModel):
     stage4_rerank_limit: int = Field(
         default=50, ge=10, le=100, description="Number of candidates to send to neural reranking in Stage 4"
     )
-    enable_diversity: bool = Field(default=False, description="Enable MMR-style diversity selection in Stage 5")
+    enable_diversity: bool = Field(default=True, description="Enable MMR-style diversity selection in Stage 5")
     diversity_lambda: float = Field(
         default=0.5, ge=0.0, le=1.0, description="Diversity vs relevance tradeoff (0=pure diversity, 1=pure relevance)"
     )

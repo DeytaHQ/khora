@@ -25,14 +25,12 @@ def column_exists(table_name: str, column_name: str) -> bool:
     """Check if a column exists in a table."""
     bind = op.get_bind()
     result = bind.execute(
-        sa.text(
-            """
+        sa.text("""
             SELECT EXISTS (
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = :table_name AND column_name = :column_name
             )
-            """
-        ),
+            """),
         {"table_name": table_name, "column_name": column_name},
     )
     return result.scalar()
@@ -42,13 +40,11 @@ def constraint_exists(constraint_name: str) -> bool:
     """Check if a constraint exists."""
     bind = op.get_bind()
     result = bind.execute(
-        sa.text(
-            """
+        sa.text("""
             SELECT EXISTS (
                 SELECT 1 FROM pg_constraint WHERE conname = :constraint_name
             )
-            """
-        ),
+            """),
         {"constraint_name": constraint_name},
     )
     return result.scalar()
@@ -58,13 +54,11 @@ def index_exists(index_name: str) -> bool:
     """Check if an index exists."""
     bind = op.get_bind()
     result = bind.execute(
-        sa.text(
-            """
+        sa.text("""
             SELECT EXISTS (
                 SELECT 1 FROM pg_indexes WHERE indexname = :index_name
             )
-            """
-        ),
+            """),
         {"index_name": index_name},
     )
     return result.scalar()

@@ -1,0 +1,205 @@
+# Slack Message Extraction Expertise
+# Specialized entity types and relationships for Slack messages
+
+name: slack
+version: "1.0.0"
+description: "Entity and relationship extraction specialized for Slack messages and conversations"
+
+system_prompt: |
+  You are an expert entity extraction system specialized in analyzing Slack messages
+  and conversations. Your task is to identify and extract entities and their
+  relationships from Slack content with high precision.
+
+  Guidelines:
+  - Extract people mentioned in messages, channels, and conversations
+  - Identify organizations, projects, and topics discussed
+  - Capture temporal information (message timestamps, deadlines, events)
+  - For direct messages, extract the message recipient as a PERSON entity and
+    create a MESSAGED or SENT_MESSAGE_TO relationship between the sender and recipient
+  - Track channel context and thread relationships
+  - Identify action items, decisions, and commitments made in messages
+
+entity_types:
+  - name: PERSON
+    description: "A Slack user, mentioned person, or message participant"
+    attributes:
+      required: [name]
+      optional: [title, role, email, organization, slack_handle]
+    identifiers: [name, email, slack_handle]
+    aliases: [USER, MEMBER, PARTICIPANT]
+
+  - name: ORGANIZATION
+    description: "A company, team, department, or organized group mentioned in messages"
+    attributes:
+      required: [name]
+      optional: [type, industry, location]
+    identifiers: [name]
+    aliases: [COMPANY, TEAM, DEPARTMENT]
+
+  - name: CHANNEL
+    description: "A Slack channel or conversation space"
+    attributes:
+      required: [name]
+      optional: [purpose, topic, is_private]
+    identifiers: [name]
+    aliases: [ROOM, CONVERSATION]
+
+  - name: PROJECT
+    description: "A project, initiative, or work item discussed in messages"
+    attributes:
+      required: [name]
+      optional: [status, deadline, owner]
+    identifiers: [name]
+    aliases: [INITIATIVE, WORKSTREAM, EPIC]
+
+  - name: CONCEPT
+    description: "An abstract idea, topic, or subject being discussed"
+    attributes:
+      required: [name]
+      optional: [category, definition]
+    identifiers: [name]
+    aliases: [TOPIC, IDEA, SUBJECT]
+
+  - name: TECHNOLOGY
+    description: "A tool, software, platform, or technical system mentioned"
+    attributes:
+      required: [name]
+      optional: [type, version, vendor]
+    identifiers: [name]
+    aliases: [TOOL, SOFTWARE, PLATFORM]
+
+  - name: EVENT
+    description: "A meeting, deadline, milestone, or scheduled occurrence"
+    attributes:
+      required: [name]
+      optional: [date, location, participants, type]
+    identifiers: [name, date]
+    aliases: [MEETING, DEADLINE, MILESTONE]
+
+  - name: DATE
+    description: "A specific date, time, or temporal reference in messages"
+    attributes:
+      required: [value]
+      optional: [type, precision]
+    identifiers: [value]
+    aliases: [TIME, TIMESTAMP]
+
+  - name: LOCATION
+    description: "A geographic place or virtual location referenced in messages"
+    attributes:
+      required: [name]
+      optional: [type, country, address]
+    identifiers: [name]
+    aliases: [PLACE, ADDRESS]
+
+relationship_types:
+  - name: MESSAGED
+    description: "Sent a direct message to another person"
+    source_types: [PERSON]
+    target_types: [PERSON]
+
+  - name: SENT_MESSAGE_TO
+    description: "Sent a message to a person (alternative to MESSAGED)"
+    source_types: [PERSON]
+    target_types: [PERSON]
+
+  - name: MENTIONED
+    description: "Mentioned or referenced a person in a message"
+    source_types: [PERSON]
+    target_types: [PERSON, ORGANIZATION, PROJECT, TECHNOLOGY]
+
+  - name: POSTED_IN
+    description: "Posted a message in a channel"
+    source_types: [PERSON]
+    target_types: [CHANNEL]
+
+  - name: MEMBER_OF
+    description: "Member of a Slack channel or team"
+    source_types: [PERSON]
+    target_types: [CHANNEL, ORGANIZATION]
+
+  - name: WORKS_FOR
+    description: "Employment or contractor relationship"
+    source_types: [PERSON]
+    target_types: [ORGANIZATION]
+
+  - name: WORKS_ON
+    description: "Working on a project or initiative"
+    source_types: [PERSON]
+    target_types: [PROJECT]
+
+  - name: MANAGES
+    description: "Management or supervisory relationship"
+    source_types: [PERSON]
+    target_types: [PERSON, PROJECT]
+
+  - name: REPORTS_TO
+    description: "Reporting hierarchy relationship"
+    source_types: [PERSON]
+    target_types: [PERSON]
+
+  - name: COLLABORATES_WITH
+    description: "Working together on projects or initiatives"
+    source_types: [PERSON, ORGANIZATION]
+    target_types: [PERSON, ORGANIZATION]
+    bidirectional: true
+
+  - name: ASSIGNED_TO
+    description: "Task or action item assigned to a person"
+    source_types: [PROJECT, EVENT]
+    target_types: [PERSON]
+
+  - name: RELATES_TO
+    description: "General association or connection"
+    source_types: ["*"]
+    target_types: ["*"]
+
+  - name: ASSOCIATED_WITH
+    description: "General association without specific semantics"
+    source_types: ["*"]
+    target_types: ["*"]
+    bidirectional: true
+
+  - name: USES
+    description: "Usage or utilization of a technology or tool"
+    source_types: [PERSON, ORGANIZATION, PROJECT]
+    target_types: [TECHNOLOGY]
+
+  - name: LOCATED_IN
+    description: "Physical or virtual location"
+    source_types: [PERSON, ORGANIZATION, EVENT]
+    target_types: [LOCATION]
+
+tool_schemas:
+  slack:
+    message:
+      fields: [sender, recipient, channel, timestamp, text, thread_ts]
+      message_types: [channel_message, direct_message, thread_reply]
+    channel:
+      fields: [name, purpose, topic, members]
+
+correlation_rules:
+  - name: person_handle_match
+    description: "Match people by Slack handle"
+    match_fields: [slack_handle]
+    entity_types: [PERSON]
+    confidence: 0.95
+
+  - name: person_email_match
+    description: "Match people by email address"
+    match_fields: [email]
+    entity_types: [PERSON]
+    confidence: 0.95
+
+inference_rules: []
+
+confidence:
+  min_entity: 0.5
+  min_relationship: 0.5
+  min_inferred: 0.3
+
+expansion:
+  enabled: true
+  depth: 2
+  cross_tool_unification: true
+  relationship_inference: false

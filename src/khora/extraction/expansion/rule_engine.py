@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from khora.core.models import Entity, Relationship
     from khora.extraction.skills import CorrelationRule, ExpertiseConfig, InferenceRule
 
+# Ordinal names for multi-condition entity maps (first, second, third, ...)
+_ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")
+
 
 @dataclass
 class RuleMatch:
@@ -417,92 +420,123 @@ class RuleEngine:
                         )
                     )
         else:
-            # Multi-condition rule - use indexed lookups for O(k) instead of O(n)
-            second_condition = rule.when[1]
-            second_rel_type = second_condition.relationship
+            # Multi-condition rule (2+ conditions) - iterative chain walking
+            # Each partial match tracks: (matched_rels, entity_map)
+            # Uses indexed lookups for O(k) per step where k = rels per entity.
 
-            for rel1 in first_rels:
+            # Initialize partial matches from first condition
+            partial_matches: list[tuple[list[Relationship], dict[str, dict[str, Entity]]]] = []
+            for rel in first_rels:
+                source = self._find_entity_by_id(rel.source_entity_id, context)
+                target = self._find_entity_by_id(rel.target_entity_id, context)
+                if source and target:
+                    entity_map: dict[str, dict[str, Entity]] = {
+                        _ORDINALS[0]: {"source": source, "target": target},
+                    }
+                    partial_matches.append(([rel], entity_map))
+
+            # Walk through remaining conditions (2nd, 3rd, ... Nth)
+            for cond_idx in range(1, len(rule.when)):
+                if not partial_matches:
+                    break
+                condition = rule.when[cond_idx]
+                cond_rel_type = condition.relationship
+                ordinal = _ORDINALS[cond_idx] if cond_idx < len(_ORDINALS) else f"cond_{cond_idx}"
+
+                next_partial: list[tuple[list[Relationship], dict[str, dict[str, Entity]]]] = []
+
+                for matched_rels, emap in partial_matches:
+                    if len(next_partial) + len(matches) >= max_matches:
+                        break
+
+                    # Find candidate relationships connected to the previous rel's entities
+                    prev_rel = matched_rels[-1]
+                    candidate_rels: list[Relationship] = []
+
+                    # Chain pattern: prev.target -> next.source
+                    target_key = str(prev_rel.target_entity_id)
+                    for cand in context.rels_by_source.get(target_key, []):
+                        cand_type = str(
+                            cand.relationship_type.value
+                            if hasattr(cand.relationship_type, "value")
+                            else cand.relationship_type
+                        )
+                        if cand_type == cond_rel_type:
+                            candidate_rels.append(cand)
+
+                    # Shared source pattern: prev.source == next.source
+                    source_key = str(prev_rel.source_entity_id)
+                    for cand in context.rels_by_source.get(source_key, []):
+                        cand_type = str(
+                            cand.relationship_type.value
+                            if hasattr(cand.relationship_type, "value")
+                            else cand.relationship_type
+                        )
+                        if cand_type == cond_rel_type and cand not in candidate_rels:
+                            candidate_rels.append(cand)
+
+                    # Shared target pattern: prev.target == next.target
+                    for cand in context.rels_by_target.get(target_key, []):
+                        cand_type = str(
+                            cand.relationship_type.value
+                            if hasattr(cand.relationship_type, "value")
+                            else cand.relationship_type
+                        )
+                        if cand_type == cond_rel_type and cand not in candidate_rels:
+                            candidate_rels.append(cand)
+
+                    # Filter by type constraints
+                    candidate_rels = self._filter_relationships_by_types(
+                        candidate_rels, condition.source_type, condition.target_type, context
+                    )
+
+                    for cand in candidate_rels:
+                        cand_source = self._find_entity_by_id(cand.source_entity_id, context)
+                        cand_target = self._find_entity_by_id(cand.target_entity_id, context)
+                        if cand_source and cand_target:
+                            new_emap = {**emap, ordinal: {"source": cand_source, "target": cand_target}}
+                            next_partial.append((matched_rels + [cand], new_emap))
+
+                partial_matches = next_partial
+
+            # Convert complete matches to RuleMatch objects
+            for matched_rels, emap in partial_matches:
                 if len(matches) >= max_matches:
                     break
 
-                # Get candidate second relationships connected to rel1's entities
-                # Instead of iterating ALL second_rels, only check those connected to rel1
-                candidate_rels: list[Relationship] = []
+                inferred_source = self._resolve_entity_ref(rule.then_source, emap)
+                inferred_target = self._resolve_entity_ref(rule.then_target, emap)
 
-                # Chain pattern: rel1.target -> rel2.source
-                target_key = str(rel1.target_entity_id)
-                for rel2 in context.rels_by_source.get(target_key, []):
-                    rel2_type = str(
-                        rel2.relationship_type.value
-                        if hasattr(rel2.relationship_type, "value")
-                        else rel2.relationship_type
+                # Skip self-referential matches early
+                if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
+                    continue
+
+                # Collect all matched entities (deduplicated, preserving order)
+                all_entities: list[Entity] = []
+                seen_ids: set[str] = set()
+                for group in emap.values():
+                    for entity in group.values():
+                        eid = str(entity.id)
+                        if eid not in seen_ids:
+                            all_entities.append(entity)
+                            seen_ids.add(eid)
+
+                metadata: dict[str, Any] = {
+                    "then_relationship": rule.then_relationship,
+                    "then_source": rule.then_source,
+                    "then_target": rule.then_target,
+                }
+                metadata.update(emap)
+
+                matches.append(
+                    RuleMatch(
+                        rule_name=rule.name,
+                        matched_relationships=matched_rels,
+                        matched_entities=all_entities,
+                        confidence=rule.confidence,
+                        metadata=metadata,
                     )
-                    if rel2_type == second_rel_type:
-                        candidate_rels.append(rel2)
-
-                # Shared source pattern: rel1.source == rel2.source
-                source_key = str(rel1.source_entity_id)
-                for rel2 in context.rels_by_source.get(source_key, []):
-                    rel2_type = str(
-                        rel2.relationship_type.value
-                        if hasattr(rel2.relationship_type, "value")
-                        else rel2.relationship_type
-                    )
-                    if rel2_type == second_rel_type and rel2 not in candidate_rels:
-                        candidate_rels.append(rel2)
-
-                # Shared target pattern: rel1.target == rel2.target
-                for rel2 in context.rels_by_target.get(target_key, []):
-                    rel2_type = str(
-                        rel2.relationship_type.value
-                        if hasattr(rel2.relationship_type, "value")
-                        else rel2.relationship_type
-                    )
-                    if rel2_type == second_rel_type and rel2 not in candidate_rels:
-                        candidate_rels.append(rel2)
-
-                # Filter candidates by type
-                candidate_rels = self._filter_relationships_by_types(
-                    candidate_rels, second_condition.source_type, second_condition.target_type, context
                 )
-
-                # Create matches from candidates
-                for rel2 in candidate_rels:
-                    if len(matches) >= max_matches:
-                        break
-                    source1 = self._find_entity_by_id(rel1.source_entity_id, context)
-                    target1 = self._find_entity_by_id(rel1.target_entity_id, context)
-                    source2 = self._find_entity_by_id(rel2.source_entity_id, context)
-                    target2 = self._find_entity_by_id(rel2.target_entity_id, context)
-
-                    if all([source1, target1, source2, target2]):
-                        # Resolve which entities would be used for the inferred relationship
-                        entity_map = {
-                            "first": {"source": source1, "target": target1},
-                            "second": {"source": source2, "target": target2},
-                        }
-                        inferred_source = self._resolve_entity_ref(rule.then_source, entity_map)
-                        inferred_target = self._resolve_entity_ref(rule.then_target, entity_map)
-
-                        # Skip self-referential matches early (don't count against rule limit)
-                        if inferred_source and inferred_target and inferred_source.id == inferred_target.id:
-                            continue
-
-                        matches.append(
-                            RuleMatch(
-                                rule_name=rule.name,
-                                matched_relationships=[rel1, rel2],
-                                matched_entities=[source1, target1, source2, target2],
-                                confidence=rule.confidence,
-                                metadata={
-                                    "then_relationship": rule.then_relationship,
-                                    "then_source": rule.then_source,
-                                    "then_target": rule.then_target,
-                                    "first": {"source": source1, "target": target1},
-                                    "second": {"source": source2, "target": target2},
-                                },
-                            )
-                        )
 
         return matches
 

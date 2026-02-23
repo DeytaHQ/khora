@@ -57,7 +57,7 @@ class TestTemporalFilter:
         assert f.operator == TemporalOperator.AFTER
         assert f.start_time is not None
         # start_time should be roughly 7 days ago
-        delta = datetime.now() - f.start_time
+        delta = datetime.now(UTC) - f.start_time
         assert 6.9 < delta.total_seconds() / 86400 < 7.1
 
     def test_last_hours(self) -> None:
@@ -103,7 +103,7 @@ class TestTemporalFilter:
         f = TemporalFilter(relative_days=7)
         s, e = f.get_effective_times()
         assert s is not None
-        delta = datetime.now() - s
+        delta = datetime.now(UTC) - s
         assert 6.9 < delta.total_seconds() / 86400 < 7.1
         assert e is None
 
@@ -112,7 +112,7 @@ class TestTemporalFilter:
         f = TemporalFilter(relative_hours=12)
         s, e = f.get_effective_times()
         assert s is not None
-        delta = datetime.now() - s
+        delta = datetime.now(UTC) - s
         assert 11.9 < delta.total_seconds() / 3600 < 12.1
 
     def test_matches_before(self) -> None:
@@ -223,7 +223,7 @@ class TestTemporalQuery:
         """Very recent timestamps get high scores."""
         tq = TemporalQuery(query="test")
         tq.with_recency_bias(weight=0.5, decay_days=30.0)
-        score = tq.calculate_recency_score(datetime.utcnow())
+        score = tq.calculate_recency_score(datetime.now(UTC))
         # Recent item: decay ≈ 1.0, score ≈ (1-0.5) + 0.5*1.0 = 1.0
         assert score > 0.95
 
@@ -231,7 +231,7 @@ class TestTemporalQuery:
         """Old timestamps get lower scores."""
         tq = TemporalQuery(query="test")
         tq.with_recency_bias(weight=0.5, decay_days=30.0)
-        old_time = datetime.utcnow() - timedelta(days=90)
+        old_time = datetime.now(UTC) - timedelta(days=90)
         score = tq.calculate_recency_score(old_time)
         # 90 days with 30-day half-life: decay = 0.5^3 = 0.125
         # score = 0.5 + 0.5 * 0.125 = 0.5625
@@ -241,7 +241,7 @@ class TestTemporalQuery:
         """Half-life works correctly: score at decay_days is predictable."""
         tq = TemporalQuery(query="test")
         tq.with_recency_bias(weight=1.0, decay_days=30.0)
-        half_life_time = datetime.utcnow() - timedelta(days=30)
+        half_life_time = datetime.now(UTC) - timedelta(days=30)
         score = tq.calculate_recency_score(half_life_time)
         # With weight=1.0: score = (1-1.0) + 1.0 * 0.5^1 = 0.5
         assert abs(score - 0.5) < 0.02

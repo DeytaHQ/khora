@@ -124,7 +124,16 @@ class CrossEncoderReranker(Reranker):
             model = self._get_model()
 
             # Prepare pairs for cross-encoder
-            pairs = [(query, c.content) for c in candidates]
+            pairs = []
+            for c in candidates:
+                doc_title = ""
+                custom = getattr(c.metadata, "custom", None) if hasattr(c.metadata, "custom") else None
+                if custom is None and isinstance(c.metadata, dict):
+                    custom = c.metadata.get("custom")
+                if isinstance(custom, dict):
+                    doc_title = custom.get("title", "")
+                content_with_meta = f"[{doc_title}] {c.content}" if doc_title else c.content
+                pairs.append((query, content_with_meta))
 
             # Score in batches
             scores = model.predict(pairs, batch_size=self._batch_size)
@@ -192,8 +201,12 @@ Document:
 
 Score the relevance from 0 to 10 where:
 - 0: Completely irrelevant
-- 5: Somewhat relevant, mentions related topics
+- 1-3: Topically related but answers a DIFFERENT question or discusses a different entity/event
+- 5: Somewhat relevant, mentions related topics but lacks specificity
+- 7-8: Relevant, addresses the query with useful information
 - 10: Highly relevant, directly answers or addresses the query
+
+IMPORTANT: Be strict about confounders. A passage that shares keywords with the query but discusses a different person, project, event, or time period should score 1-3, NOT 5+. Only score 5+ if the passage genuinely helps answer the specific question asked.
 
 Respond with ONLY a single number (0-10), nothing else."""
 
@@ -206,8 +219,16 @@ Passages:
 
 Score each passage from 0 to 10 where:
 - 0: Completely irrelevant
-- 5: Somewhat relevant, mentions related topics
-- 10: Highly relevant, directly answers or addresses the query
+- 1-3: CONFOUNDER — shares keywords or topics with the query but answers a different question, discusses a different entity/person, or refers to a different time period or context
+- 5: Somewhat relevant, mentions related topics but lacks specificity to the query
+- 7-8: Relevant, addresses the query with useful information from the right context
+- 10: Highly relevant, directly answers or addresses the specific query
+
+IMPORTANT confounder detection rules:
+- If the query asks about person A but the passage discusses person B (even in the same organization), score 1-3
+- If the query asks about a specific project/event but the passage discusses a different one, score 1-3
+- If the passage shares keywords but the core subject or context differs from the query, score 1-3
+- Only score 5+ when the passage provides information that genuinely helps answer the SPECIFIC question
 
 Respond with ONLY a JSON object: {{"scores": [score1, score2, ...]}}
 The scores array must have exactly {count} numbers, one per passage in order."""
@@ -273,7 +294,17 @@ class LLMReranker(Reranker):
 
         async def score_batch(batch: list[RerankCandidate[T]]) -> list[float]:
             """Score a batch of candidates in a single LLM call."""
-            passages = "\n".join(f"[{i + 1}] {c.content[:500]}" for i, c in enumerate(batch))
+            passage_lines = []
+            for i, c in enumerate(batch):
+                doc_title = ""
+                custom = getattr(c.metadata, "custom", None) if hasattr(c.metadata, "custom") else None
+                if custom is None and isinstance(c.metadata, dict):
+                    custom = c.metadata.get("custom")
+                if isinstance(custom, dict):
+                    doc_title = custom.get("title", "")
+                prefix = f"[{doc_title}] " if doc_title else ""
+                passage_lines.append(f"[{i + 1}] {prefix}{c.content[:500]}")
+            passages = "\n".join(passage_lines)
             prompt = LLM_BATCH_RERANK_PROMPT.format(
                 query=query,
                 passages=passages,

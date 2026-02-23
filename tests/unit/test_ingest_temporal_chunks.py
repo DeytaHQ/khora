@@ -53,7 +53,7 @@ def _make_document_mock(doc_id, ns_id, content, metadata_custom=None):
     doc.id = doc_id
     doc.namespace_id = ns_id
     doc.content = content
-    doc.metadata = MagicMock(custom=metadata_custom or {})
+    doc.metadata = MagicMock(custom=metadata_custom or {}, title="")
     doc.created_at = datetime.now(UTC)
     doc.mark_processing = MagicMock()
     doc.mark_completed = MagicMock()

@@ -112,7 +112,8 @@ class TestEmbed:
     async def test_single_text(self) -> None:
         """embed delegates to embed_batch."""
         embedder = LiteLLMEmbedder(model="test-model", max_retries=1)
-        expected = [0.1, 0.2, 0.3]
+        # Use a pre-normalized vector so L2-normalization is a no-op
+        expected = [0.0, 0.0, 1.0]
 
         mock_response = MagicMock()
         mock_response.data = [{"embedding": expected}]
@@ -152,9 +153,10 @@ class TestEmbedBatch:
         embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
 
         mock_response = MagicMock()
+        # Use pre-normalized vectors so L2-normalization is a no-op
         mock_response.data = [
-            {"embedding": [0.1, 0.2]},
-            {"embedding": [0.3, 0.4]},
+            {"embedding": [1.0, 0.0]},
+            {"embedding": [0.0, 1.0]},
         ]
         mock_response.usage = MagicMock(prompt_tokens=20, total_tokens=20)
 
@@ -166,16 +168,18 @@ class TestEmbedBatch:
             result = await embedder.embed_batch(["text1", "text2"])
 
         assert len(result) == 2
-        assert result[0] == [0.1, 0.2]
+        assert result[0] == [1.0, 0.0]
 
     @pytest.mark.asyncio
     async def test_caching_integration(self) -> None:
         """Previously cached texts are not re-embedded."""
         embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
-        embedder._cache_put("cached", [0.5, 0.6])
+        # Cached values are already normalized (stored post-normalization)
+        embedder._cache_put("cached", [1.0, 0.0])
 
         mock_response = MagicMock()
-        mock_response.data = [{"embedding": [0.7, 0.8]}]
+        # Use pre-normalized vector so L2-normalization is a no-op
+        mock_response.data = [{"embedding": [0.0, 1.0]}]
         mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
 
         with (
@@ -185,8 +189,8 @@ class TestEmbedBatch:
             mock_telem.return_value.record_llm_call = MagicMock()
             result = await embedder.embed_batch(["cached", "new_text"])
 
-        assert result[0] == [0.5, 0.6]  # From cache
-        assert result[1] == [0.7, 0.8]  # From API
+        assert result[0] == [1.0, 0.0]  # From cache
+        assert result[1] == [0.0, 1.0]  # From API (normalized)
 
 
 class TestEmbedBatchInternal:

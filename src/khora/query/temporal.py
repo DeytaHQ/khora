@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum
+from typing import Any
 
 
 class TemporalOperator(str, Enum):
@@ -68,7 +69,7 @@ class TemporalFilter:
         """Create a filter for the last N days."""
         return cls(
             operator=TemporalOperator.AFTER,
-            start_time=datetime.now() - timedelta(days=days),
+            start_time=datetime.now(UTC) - timedelta(days=days),
         )
 
     @classmethod
@@ -76,7 +77,7 @@ class TemporalFilter:
         """Create a filter for the last N hours."""
         return cls(
             operator=TemporalOperator.AFTER,
-            start_time=datetime.now() - timedelta(hours=hours),
+            start_time=datetime.now(UTC) - timedelta(hours=hours),
         )
 
     @classmethod
@@ -101,9 +102,9 @@ class TemporalFilter:
 
         # Handle relative times
         if self.relative_days is not None:
-            start = datetime.now() - timedelta(days=self.relative_days)
+            start = datetime.now(UTC) - timedelta(days=self.relative_days)
         if self.relative_hours is not None:
-            start = datetime.now() - timedelta(hours=self.relative_hours)
+            start = datetime.now(UTC) - timedelta(hours=self.relative_hours)
 
         return start, end
 
@@ -189,12 +190,10 @@ class TemporalQuery:
         import math
 
         # Normalize both to naive UTC for comparison
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         ts = timestamp
 
         if ts.tzinfo is not None:
-            from datetime import UTC
-
             ts = ts.astimezone(UTC).replace(tzinfo=None)
 
         age_days = (now - ts).total_seconds() / (24 * 60 * 60)
@@ -210,3 +209,108 @@ class TemporalQuery:
         if self.context_window_days is None:
             return None
         return TemporalFilter.last_days(self.context_window_days)
+
+
+# ---------------------------------------------------------------------------
+# Batch helpers — convert datetimes to epoch seconds and call Rust-accelerated
+# batch operations from _accel.py.  Used by query/engine.py hot paths.
+# ---------------------------------------------------------------------------
+
+
+def _dt_to_epoch(dt: datetime | None) -> float | None:
+    """Convert a datetime to epoch seconds, normalizing timezone."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC).replace(tzinfo=None)
+    epoch = datetime(1970, 1, 1)
+    return (dt - epoch).total_seconds()
+
+
+def batch_filter_chunks(
+    chunks_and_scores: list[tuple[Any, float]],
+    temporal_filter: TemporalFilter,
+) -> list[tuple[Any, float]]:
+    """Filter a list of (chunk, score) by temporal_filter.matches(), batched.
+
+    Extracts created_at from each chunk, converts to epoch seconds, and uses
+    the Rust-accelerated batch_temporal_filter for the comparison.
+
+    Falls back to per-item TemporalFilter.matches() if chunks have no created_at.
+    """
+    from khora._accel import batch_temporal_filter
+
+    if not chunks_and_scores:
+        return []
+
+    start, end = temporal_filter.get_effective_times()
+    operator = temporal_filter.operator.value  # e.g. "before", "after", "between"
+    start_secs = _dt_to_epoch(TemporalFilter._normalize_tz(start))
+    end_secs = _dt_to_epoch(TemporalFilter._normalize_tz(end))
+
+    # Collect epoch seconds from chunk.created_at
+    timestamps: list[float] = []
+    valid = True
+    for chunk, _score in chunks_and_scores:
+        created_at = getattr(chunk, "created_at", None)
+        if created_at is None:
+            valid = False
+            break
+        ts = _dt_to_epoch(TemporalFilter._normalize_tz(created_at))
+        if ts is None:
+            valid = False
+            break
+        timestamps.append(ts)
+
+    if not valid:
+        # Fallback: per-item filtering (e.g. missing created_at)
+        return [(c, s) for c, s in chunks_and_scores if temporal_filter.matches(c.created_at)]
+
+    mask = batch_temporal_filter(timestamps, operator, start_secs, end_secs)
+    return [pair for pair, keep in zip(chunks_and_scores, mask) if keep]
+
+
+def batch_apply_recency(
+    chunks_and_scores: list[tuple[Any, float]],
+    recency_weight: float,
+    decay_days: float,
+) -> list[tuple[Any, float]]:
+    """Multiply chunk scores by recency scores, batched.
+
+    Extracts created_at from each chunk, converts to epoch seconds, and uses
+    the Rust-accelerated batch_recency_scores. Returns a new list of
+    (chunk, score * recency_score) sorted descending.
+    """
+    from khora._accel import batch_recency_scores
+
+    if not chunks_and_scores or recency_weight == 0.0:
+        return chunks_and_scores
+
+    now_secs = _dt_to_epoch(datetime.now(UTC).replace(tzinfo=None))
+    if now_secs is None:
+        return chunks_and_scores
+
+    timestamps: list[float] = []
+    valid = True
+    for chunk, _score in chunks_and_scores:
+        created_at = getattr(chunk, "created_at", None)
+        if created_at is None:
+            valid = False
+            break
+        ts = _dt_to_epoch(TemporalFilter._normalize_tz(created_at))
+        if ts is None:
+            valid = False
+            break
+        timestamps.append(ts)
+
+    if not valid:
+        # Fallback: per-item scoring
+        tq = TemporalQuery(query="").with_recency_bias(recency_weight, decay_days)
+        result = [(c, s * tq.calculate_recency_score(c.created_at)) for c, s in chunks_and_scores]
+        result.sort(key=lambda x: x[1], reverse=True)
+        return result
+
+    scores = batch_recency_scores(timestamps, now_secs, decay_days, recency_weight)
+    result = [(c, s * rs) for (c, s), rs in zip(chunks_and_scores, scores)]
+    result.sort(key=lambda x: x[1], reverse=True)
+    return result

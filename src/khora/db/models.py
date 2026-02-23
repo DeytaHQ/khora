@@ -266,7 +266,7 @@ class ChunkModel(Base):
             "ix_chunks_embedding_hnsw",
             "embedding",
             postgresql_using="hnsw",
-            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_with={"m": 24, "ef_construction": 128},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
         # GIN index for full-text search
@@ -330,15 +330,18 @@ class EntityModel(Base):
     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="entities")
 
     __table_args__ = (
-        Index("ix_entities_namespace_name_type", "namespace_id", "name", "entity_type"),
+        UniqueConstraint("namespace_id", "name", "entity_type", name="uq_entities_namespace_name_type"),
         Index(
             "ix_entities_embedding_hnsw",
             "embedding",
             postgresql_using="hnsw",
-            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_with={"m": 24, "ef_construction": 128},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
         Index("ix_entities_namespace_mentions", "namespace_id", mention_count.desc()),
+        # Partial indexes for temporal filtering (only rows with non-NULL values)
+        Index("ix_entities_valid_from", "valid_from", postgresql_where="valid_from IS NOT NULL"),
+        Index("ix_entities_valid_until", "valid_until", postgresql_where="valid_until IS NOT NULL"),
     )
 
     def __repr__(self) -> str:

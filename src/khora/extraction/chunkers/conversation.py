@@ -58,6 +58,7 @@ class ConversationChunkerConfig:
     """Configuration for the conversation chunker."""
 
     time_gap_minutes: int = 15
+    session_gap_minutes: int = 30
     max_group_size: int = 50
     min_group_size: int = 2
     semantic_threshold: float | None = None
@@ -111,7 +112,8 @@ class ConversationChunker(Chunker):
             messages: List of SlackMessage objects.
 
         Returns:
-            List of ChunkResult objects with per-message metadata.
+            List of ChunkResult objects with per-message metadata
+            including ``session_id`` for session boundary tracking.
         """
         if not messages:
             return []
@@ -131,11 +133,14 @@ class ConversationChunker(Chunker):
         # Step 3: enforce size limits
         all_groups = self._enforce_size_limits(all_groups)
 
+        # Step 4: assign session IDs based on session boundary gaps
+        session_ids = self._assign_session_ids(all_groups)
+
         # Build ChunkResults
         results: list[ChunkResult] = []
         for idx, group in enumerate(all_groups):
             if group:
-                results.append(self._build_chunk_result(group, idx))
+                results.append(self._build_chunk_result(group, idx, session_id=session_ids[idx]))
 
         # Re-index sequentially
         for i, r in enumerate(results):
@@ -236,6 +241,41 @@ class ConversationChunker(Chunker):
 
         return merged
 
+    def _assign_session_ids(self, groups: list[list[SlackMessage]]) -> list[int]:
+        """Assign session IDs to groups based on time gaps between them.
+
+        Groups separated by more than ``session_gap_minutes`` are assigned
+        different session IDs.  Groups within the same session share an ID.
+
+        Args:
+            groups: Ordered list of message groups.
+
+        Returns:
+            List of session IDs (one per group), starting from 0.
+        """
+        if not groups:
+            return []
+
+        session_gap_seconds = self.config.session_gap_minutes * 60
+        session_ids: list[int] = [0]
+        current_session = 0
+
+        for i in range(1, len(groups)):
+            prev_group = groups[i - 1]
+            curr_group = groups[i]
+
+            if prev_group and curr_group:
+                prev_end = max(m.timestamp for m in prev_group)
+                curr_start = min(m.timestamp for m in curr_group)
+                gap = (curr_start - prev_end).total_seconds()
+
+                if gap > session_gap_seconds:
+                    current_session += 1
+
+            session_ids.append(current_session)
+
+        return session_ids
+
     def _format_group(self, messages: list[SlackMessage]) -> str:
         """Render messages as ``[HH:MM] author: text`` lines.
 
@@ -251,15 +291,16 @@ class ConversationChunker(Chunker):
             lines.append(f"[{time_str}] {msg.author}: {msg.text}")
         return "\n".join(lines)
 
-    def _build_chunk_result(self, messages: list[SlackMessage], index: int) -> ChunkResult:
+    def _build_chunk_result(self, messages: list[SlackMessage], index: int, *, session_id: int = 0) -> ChunkResult:
         """Build a ChunkResult with per-message metadata.
 
         Args:
             messages: Messages in this chunk.
             index: Chunk index.
+            session_id: Session boundary identifier for cross-session retrieval.
 
         Returns:
-            ChunkResult with content and metadata.
+            ChunkResult with content and metadata including ``session_id``.
         """
         content = self._format_group(messages)
 
@@ -292,6 +333,7 @@ class ConversationChunker(Chunker):
             "source_type": "slack_conversation",
             "channel": channel,
             "thread_ts": thread_ts,
+            "session_id": session_id,
             "message_count": len(messages),
             "time_start": messages[0].timestamp.isoformat(),
             "time_end": messages[-1].timestamp.isoformat(),

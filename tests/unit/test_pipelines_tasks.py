@@ -130,9 +130,10 @@ class TestEmbedChunks:
         chunks = [_make_chunk("text1"), _make_chunk("text2")]
 
         mock_response = MagicMock()
+        # Use pre-normalized vectors so L2-normalization is a no-op
         mock_response.data = [
-            {"embedding": [0.1, 0.2]},
-            {"embedding": [0.3, 0.4]},
+            {"embedding": [1.0, 0.0]},
+            {"embedding": [0.0, 1.0]},
         ]
         mock_response.usage = MagicMock(prompt_tokens=20, total_tokens=20)
 
@@ -149,7 +150,7 @@ class TestEmbedChunks:
                 chunk.embedding_model = "test-model"
 
         assert len(chunks) == 2
-        assert chunks[0].embedding == [0.1, 0.2]
+        assert chunks[0].embedding == [1.0, 0.0]
         assert chunks[0].embedding_model == "test-model"
 
 

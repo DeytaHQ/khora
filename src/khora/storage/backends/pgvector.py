@@ -55,6 +55,7 @@ class PgVectorBackend(AsyncSessionMixin):
         pool_size: int = 10,
         max_overflow: int = 20,
         hnsw_ef_search: int = 200,
+        use_halfvec: bool = False,
         engine: AsyncEngine | None = None,
     ) -> None:
         """Initialize the pgvector backend.
@@ -66,6 +67,8 @@ class PgVectorBackend(AsyncSessionMixin):
             pool_size: Connection pool size
             max_overflow: Maximum overflow connections
             hnsw_ef_search: HNSW ef_search for query-time accuracy
+            use_halfvec: Use halfvec (float16) for similarity search.
+                Requires pgvector extension >= 0.7.0.
             engine: Optional shared engine (skip dispose on disconnect)
         """
         # Convert to async URL if needed
@@ -80,6 +83,8 @@ class PgVectorBackend(AsyncSessionMixin):
         self._pool_size = pool_size
         self._max_overflow = max_overflow
         self._hnsw_ef_search = hnsw_ef_search
+        self._use_halfvec = use_halfvec
+        self._halfvec_available: bool | None = None  # Detected at connect time
         self._engine: AsyncEngine | None = engine
         self._engine_shared: bool = engine is not None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -108,6 +113,16 @@ class PgVectorBackend(AsyncSessionMixin):
         async with self._engine.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
+        # Detect halfvec support (pgvector >= 0.7.0)
+        if self._use_halfvec:
+            self._halfvec_available = await self._detect_halfvec_support()
+            if self._halfvec_available:
+                logger.info("halfvec (float16) support detected — enabled for similarity search")
+            else:
+                logger.warning(
+                    "halfvec requested but pgvector extension < 0.7.0 — " "falling back to full-precision vectors"
+                )
+
         logger.info("Connected to pgvector")
 
     async def disconnect(self) -> None:
@@ -130,6 +145,27 @@ class PgVectorBackend(AsyncSessionMixin):
             return True
         except Exception as e:
             logger.error(f"pgvector health check failed: {e}")
+            return False
+
+    @property
+    def halfvec_enabled(self) -> bool:
+        """Whether halfvec is both requested and available."""
+        return self._use_halfvec and self._halfvec_available is True
+
+    async def _detect_halfvec_support(self) -> bool:
+        """Check if the pgvector extension supports halfvec (>= 0.7.0)."""
+        try:
+            async with self._get_session() as session:
+                result = await session.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'vector'"))
+                row = result.first()
+                if row is None:
+                    return False
+                version_str = row[0]
+                parts = version_str.split(".")
+                major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+                return (major, minor) >= (0, 7)
+        except Exception as e:
+            logger.debug(f"Failed to detect pgvector version: {e}")
             return False
 
     async def create_tables(self) -> None:
@@ -247,6 +283,22 @@ class PgVectorBackend(AsyncSessionMixin):
             await session.commit()
             return result.rowcount  # type: ignore[unresolved-attribute]
 
+    def _cosine_similarity(self, embedding_col, query_embedding: list[float]):
+        """Build cosine similarity expression, using halfvec cast when enabled.
+
+        When halfvec is enabled, both the column and query vector are cast to
+        halfvec to ensure the planner uses the halfvec expression index and
+        avoids upcasting back to float32.
+        """
+        if self.halfvec_enabled:
+            from pgvector.sqlalchemy import HALFVEC
+
+            dim = self._embedding_dimension
+            casted_col = func.cast(embedding_col, HALFVEC(dim))
+            casted_query = func.cast(query_embedding, HALFVEC(dim))
+            return 1 - casted_col.cosine_distance(casted_query)
+        return 1 - embedding_col.cosine_distance(query_embedding)
+
     async def search_similar(
         self,
         namespace_id: UUID,
@@ -259,11 +311,10 @@ class PgVectorBackend(AsyncSessionMixin):
         """Search for similar chunks using vector similarity.
 
         Uses cosine similarity for matching. Returns list of (chunk, similarity_score) tuples.
+        When halfvec is enabled, casts to float16 for faster index scans.
         """
         async with self._get_session() as session:
-            # Build cosine similarity expression
-            # pgvector uses <=> for cosine distance, so similarity = 1 - distance
-            similarity = 1 - ChunkModel.embedding.cosine_distance(query_embedding)
+            similarity = self._cosine_similarity(ChunkModel.embedding, query_embedding)
 
             query = (
                 select(ChunkModel, similarity.label("similarity"))
@@ -365,7 +416,12 @@ class PgVectorBackend(AsyncSessionMixin):
         await _retry_on_deadlock(self._upsert_entity, entity)
 
     async def _upsert_entity(self, entity) -> None:
-        """Internal upsert used by both create_entity and update_entity."""
+        """Internal upsert used by both create_entity and update_entity.
+
+        Uses the unique constraint on (namespace_id, name, entity_type) to
+        properly merge entities with the same identity, matching Neo4j's
+        MERGE semantics.
+        """
         from sqlalchemy.dialects.postgresql import insert
 
         async with self._get_session() as session:
@@ -391,9 +447,8 @@ class PgVectorBackend(AsyncSessionMixin):
                 updated_at=entity.updated_at,
             )
             stmt = stmt.on_conflict_do_update(
-                index_elements=["id"],
+                constraint="uq_entities_namespace_name_type",
                 set_={
-                    "name": stmt.excluded.name,
                     "description": stmt.excluded.description,
                     "attributes": stmt.excluded.attributes,
                     "source_document_ids": stmt.excluded.source_document_ids,
@@ -491,9 +546,8 @@ class PgVectorBackend(AsyncSessionMixin):
             async with self._get_session() as session:
                 stmt = insert(EntityModel).values(values)
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=["id"],
+                    constraint="uq_entities_namespace_name_type",
                     set_={
-                        "name": stmt.excluded.name,
                         "description": stmt.excluded.description,
                         "attributes": stmt.excluded.attributes,
                         "source_document_ids": stmt.excluded.source_document_ids,
@@ -585,12 +639,13 @@ class PgVectorBackend(AsyncSessionMixin):
         """Search for similar entities by embedding.
 
         Returns list of (entity_id, similarity_score) tuples.
+        When halfvec is enabled, casts to float16 for faster index scans.
         """
         async with self._get_session() as session:
             # Increase HNSW search accuracy for this transaction
             await session.execute(text(f"SET LOCAL hnsw.ef_search = {self._hnsw_ef_search}"))
 
-            similarity = 1 - EntityModel.embedding.cosine_distance(query_embedding)
+            similarity = self._cosine_similarity(EntityModel.embedding, query_embedding)
 
             query = (
                 select(EntityModel.id, similarity.label("similarity"))

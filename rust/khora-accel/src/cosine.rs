@@ -149,6 +149,82 @@ pub fn pairwise_cosine_above_threshold(
     })
 }
 
+/// L2-normalize a batch of embedding vectors.
+///
+/// Each vector is divided by its L2 norm. Zero vectors are returned as-is.
+/// Uses rayon for parallelism on batches > 64 vectors.
+/// Releases the GIL during computation.
+#[pyfunction]
+pub fn normalize_embeddings_batch(
+    py: Python<'_>,
+    vectors: Vec<Vec<f32>>,
+) -> Vec<Vec<f32>> {
+    py.allow_threads(|| {
+        let normalize_one = |vec: &Vec<f32>| -> Vec<f32> {
+            let sq_sum: f64 = vec.iter().map(|&v| (v as f64) * (v as f64)).sum();
+            if sq_sum == 0.0 {
+                return vec.clone();
+            }
+            let norm = sq_sum.sqrt();
+            vec.iter().map(|&v| (v as f64 / norm) as f32).collect()
+        };
+
+        if vectors.len() < 64 {
+            vectors.iter().map(normalize_one).collect()
+        } else {
+            vectors.par_iter().map(normalize_one).collect()
+        }
+    })
+}
+
+/// Batch dot product: one query against N candidate vectors (pre-normalized).
+///
+/// For pre-normalized vectors, dot product equals cosine similarity.
+/// Skips norm computation for faster scoring.
+///
+/// Accepts numpy arrays via zero-copy. Releases GIL during computation.
+/// Returns `(index, similarity)` pairs above `threshold`, sorted descending.
+#[pyfunction]
+#[pyo3(signature = (query, candidates, threshold))]
+pub fn batch_dot_product(
+    py: Python<'_>,
+    query: PyReadonlyArray1<'_, f32>,
+    candidates: PyReadonlyArray2<'_, f32>,
+    threshold: f32,
+) -> Vec<(usize, f32)> {
+    let q_array = query.as_array();
+    let c_array = candidates.as_array();
+
+    let q_owned = q_array.to_owned();
+    let c_owned = c_array.to_owned();
+
+    py.allow_threads(|| {
+        let q = q_owned.as_slice().unwrap();
+        let n_candidates = c_owned.nrows();
+
+        let mut results: Vec<(usize, f32)> = (0..n_candidates)
+            .into_par_iter()
+            .filter_map(|i| {
+                let row = c_owned.row(i);
+                let dot: f64 = q
+                    .iter()
+                    .zip(row.iter())
+                    .map(|(&a, &b)| (a as f64) * (b as f64))
+                    .sum();
+                let sim = dot as f32;
+                if sim >= threshold {
+                    Some((i, sim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
+        results
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +263,59 @@ mod tests {
         let v2 = vec![-1.0, 0.0];
         let sim = cosine_similarity(v1, v2);
         assert!((sim + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_unit_vector() {
+        // Already unit-length vector should stay the same
+        let vectors = vec![vec![1.0, 0.0, 0.0]];
+        let result = normalize_one(&vectors[0]);
+        assert!((result[0] - 1.0).abs() < 1e-6);
+        assert!(result[1].abs() < 1e-6);
+        assert!(result[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_arbitrary_vector() {
+        let vectors = vec![vec![3.0, 4.0]];
+        let result = normalize_one(&vectors[0]);
+        // norm = 5.0, so normalized = [0.6, 0.8]
+        assert!((result[0] - 0.6).abs() < 1e-5);
+        assert!((result[1] - 0.8).abs() < 1e-5);
+        // Check that L2 norm is 1.0
+        let norm: f64 = result.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_zero_vector() {
+        let vectors = vec![vec![0.0, 0.0, 0.0]];
+        let result = normalize_one(&vectors[0]);
+        assert!(result.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_dot_product_normalized_equals_cosine() {
+        // For normalized vectors, dot product should equal cosine similarity
+        let v1 = vec![3.0f32, 4.0];
+        let v2 = vec![1.0f32, 2.0];
+        let cosine = cosine_similarity(v1.clone(), v2.clone());
+
+        // Normalize
+        let n1 = normalize_one(&v1);
+        let n2 = normalize_one(&v2);
+
+        // Dot product of normalized vectors
+        let dot: f32 = n1.iter().zip(n2.iter()).map(|(a, b)| a * b).sum();
+        assert!((dot - cosine).abs() < 1e-5);
+    }
+
+    fn normalize_one(vec: &Vec<f32>) -> Vec<f32> {
+        let sq_sum: f64 = vec.iter().map(|&v| (v as f64) * (v as f64)).sum();
+        if sq_sum == 0.0 {
+            return vec.clone();
+        }
+        let norm = sq_sum.sqrt();
+        vec.iter().map(|&v| (v as f64 / norm) as f32).collect()
     }
 }

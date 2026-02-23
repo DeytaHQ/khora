@@ -180,6 +180,7 @@ class VectorCypherEngine:
                 "postgresql_pool_size": config.storage.postgresql_pool_size,
                 "postgresql_max_overflow": config.storage.postgresql_max_overflow,
                 "pgvector_embedding_dimension": config.storage.embedding_dimension,
+                "pgvector_use_halfvec": config.storage.use_halfvec,
                 "graph_config": graph_config,
                 "vector_config": config.get_vector_config(),
             }

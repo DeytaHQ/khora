@@ -904,6 +904,19 @@ class Stats:
 | `DOCUMENT` | Referenced documents |
 | `OTHER` | Uncategorized entities |
 
+### Changes in v0.3.1
+
+| Feature | Description |
+|---------|-------------|
+| MMR diversity | Enabled by default — Rust-accelerated diversity selection prevents same-document dominance |
+| Pre-normalized embeddings | Embeddings L2-normalized at ingest; scoring uses dot product (~3x faster) |
+| Entity dedup constraint | `UNIQUE(namespace_id, name, entity_type)` with automatic dedup migration |
+| Adaptive top-k | "Very focused" tier (complexity < 0.3 → 3 chunks) for precise single-entity queries |
+| Slack extraction skill | Built-in `slack.yaml` with DM recipient extraction and MESSAGED relationships |
+| Two-pass extraction | Triggers when entity-to-relationship ratio is low, not just `< 2` relationships |
+| Temporal indexes | Neo4j relationship temporal indexes + PostgreSQL partial indexes on valid_from/valid_until |
+| HNSW tuning | m=24, ef_construction=128 for improved vector recall |
+
 ### Changes in v0.3.0
 
 | API | Status |

@@ -37,6 +37,8 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 - `db/models.py` — SQLAlchemy ORM (all UUID columns use `as_uuid=True`)
 - `engines/` — GraphRAG (default), Skeleton Construction, VectorCypher
 - `query/engine.py` — `HybridQueryEngine` search pipeline
+- `_accel.py` — Rust/NumPy/Python acceleration facade (MMR, cosine, temporal, BM25, etc.)
+- `pipelines/flows/ingest.py` — Document ingestion pipeline with entity ID mapping
 
 ## Engine Selection
 
@@ -74,3 +76,7 @@ IMPORTANT: When bumping the version, always update **all four files** and regene
 - **Transactions** — use `async with coordinator.transaction() as txn:` for atomic multi-backend operations. Backend write methods accept optional `session` parameter to join an existing transaction
 - **spaCy is optional** — `_HAS_SPACY` flag controls sentence splitting. Uses blank model with `sentencizer` pipe (no model download needed). Falls back to regex when spaCy is not installed
 - **Downstream consumers** — `genesis` and `khora-benchmarks` depend on khora. Check compatibility when changing public APIs. `lake.storage` is a stable public API used by both
+- **Entity unique constraint** — `entities(namespace_id, name, entity_type)` has a UNIQUE constraint (migration 008). Entity upserts use `ON CONFLICT` on this constraint. Dedup migration is irreversible
+- **Pre-normalized embeddings** — All embeddings are L2-normalized at ingest time. Scoring uses `batch_dot_product` instead of `batch_cosine_similarity` for ~3x speedup. Dot product of unit vectors = cosine similarity
+- **MMR diversity enabled by default** — `enable_diversity=True` in `QuerySettings`. The MMR stage runs in Rust via `_accel.mmr_diversity_select` with NumPy and pure-Python fallbacks
+- **`ty` type checker** — Pre-commit hook runs `ty check src/` which has ~40 pre-existing warnings (unresolved Rust imports, coordinator type narrowing). Use `SKIP=ty` when committing if these block you

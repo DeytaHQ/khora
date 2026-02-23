@@ -113,60 +113,40 @@ class PgVectorTemporalStore(TemporalVectorStore):
             await conn.run_sync(metadata.create_all)
 
             # Create BRIN index on occurred_at
-            await conn.execute(
-                text(
-                    """
+            await conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_occurred_brin
                 ON khora_chunks USING BRIN (occurred_at)
-                """
-                )
-            )
+                """))
 
             # Create HNSW index on embedding
-            await conn.execute(
-                text(
-                    f"""
+            await conn.execute(text(f"""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_embedding_hnsw
                 ON khora_chunks USING hnsw (embedding vector_cosine_ops)
                 WITH (m = {self._hnsw_m}, ef_construction = {self._hnsw_ef_construction})
-                """
-                )
-            )
+                """))
 
             # Create GIN index on content_tsv
-            await conn.execute(
-                text(
-                    """
+            await conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_content_tsv
                 ON khora_chunks USING GIN (content_tsv)
-                """
-                )
-            )
+                """))
 
             # Create trigger for auto-updating content_tsv
             # Note: Each statement must be executed separately (asyncpg limitation)
-            await conn.execute(
-                text(
-                    """
+            await conn.execute(text("""
                 CREATE OR REPLACE FUNCTION khora_chunks_content_tsv_trigger() RETURNS trigger AS $$
                 BEGIN
                     NEW.content_tsv := to_tsvector('english', NEW.content);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """
-                )
-            )
+                """))
             await conn.execute(text("DROP TRIGGER IF EXISTS khora_chunks_content_tsv_update ON khora_chunks"))
-            await conn.execute(
-                text(
-                    """
+            await conn.execute(text("""
                 CREATE TRIGGER khora_chunks_content_tsv_update
                 BEFORE INSERT OR UPDATE ON khora_chunks
                 FOR EACH ROW EXECUTE FUNCTION khora_chunks_content_tsv_trigger()
-                """
-                )
-            )
+                """))
 
         self._connected = True
         logger.info("PgVectorTemporalStore connected")

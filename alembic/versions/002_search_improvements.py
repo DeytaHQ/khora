@@ -25,37 +25,29 @@ def upgrade() -> None:
     op.drop_index("ix_entities_embedding", table_name="entities", if_exists=True)
 
     # --- Create HNSW indexes ---
-    op.execute(
-        """
+    op.execute("""
         CREATE INDEX ix_chunks_embedding_hnsw
         ON chunks USING hnsw (embedding vector_cosine_ops)
         WITH (m = 16, ef_construction = 64)
-        """
-    )
-    op.execute(
-        """
+        """)
+    op.execute("""
         CREATE INDEX ix_entities_embedding_hnsw
         ON entities USING hnsw (embedding vector_cosine_ops)
         WITH (m = 16, ef_construction = 64)
-        """
-    )
+        """)
 
     # --- Add tsvector column for full-text search ---
-    op.execute(
-        """
+    op.execute("""
         ALTER TABLE chunks
         ADD COLUMN content_tsv tsvector
         GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
-        """
-    )
+        """)
 
     # --- GIN index on tsvector column ---
-    op.execute(
-        """
+    op.execute("""
         CREATE INDEX ix_chunks_content_tsv
         ON chunks USING gin (content_tsv)
-        """
-    )
+        """)
 
 
 def downgrade() -> None:
@@ -68,17 +60,13 @@ def downgrade() -> None:
     op.drop_index("ix_entities_embedding_hnsw", table_name="entities", if_exists=True)
 
     # --- Recreate IVFFlat indexes ---
-    op.execute(
-        """
+    op.execute("""
         CREATE INDEX ix_chunks_embedding
         ON chunks USING ivfflat (embedding vector_cosine_ops)
         WITH (lists = 100)
-        """
-    )
-    op.execute(
-        """
+        """)
+    op.execute("""
         CREATE INDEX ix_entities_embedding
         ON entities USING ivfflat (embedding vector_cosine_ops)
         WITH (lists = 100)
-        """
-    )
+        """)

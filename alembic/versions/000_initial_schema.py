@@ -34,32 +34,26 @@ def upgrade() -> None:
     # Create enum types
     op.execute("CREATE TYPE tenancy_mode AS ENUM ('shared', 'isolated')")
     op.execute("CREATE TYPE document_status AS ENUM ('pending', 'processing', 'completed', 'failed')")
-    op.execute(
-        """CREATE TYPE entity_type AS ENUM (
+    op.execute("""CREATE TYPE entity_type AS ENUM (
             'PERSON', 'ORGANIZATION', 'LOCATION', 'EVENT', 'CONCEPT',
             'PRODUCT', 'TECHNOLOGY', 'DOCUMENT', 'PROJECT', 'TASK',
             'MEETING', 'DECISION', 'METRIC', 'GOAL', 'CUSTOM'
-        )"""
-    )
-    op.execute(
-        """CREATE TYPE relationship_type AS ENUM (
+        )""")
+    op.execute("""CREATE TYPE relationship_type AS ENUM (
             'RELATES_TO', 'WORKS_FOR', 'WORKS_WITH', 'MANAGES', 'REPORTS_TO',
             'OWNS', 'CREATED', 'MODIFIED', 'MENTIONED_IN', 'DISCUSSED_IN',
             'PARTICIPATED_IN', 'ATTENDED', 'DECIDED', 'ASSIGNED_TO', 'BLOCKED_BY',
             'DEPENDS_ON', 'PART_OF', 'LOCATED_IN', 'OCCURRED_AT', 'CAUSED',
             'INFLUENCED', 'SIMILAR_TO', 'OPPOSITE_OF', 'DERIVED_FROM', 'CUSTOM'
-        )"""
-    )
-    op.execute(
-        """CREATE TYPE event_type AS ENUM (
+        )""")
+    op.execute("""CREATE TYPE event_type AS ENUM (
             'DOCUMENT_CREATED', 'DOCUMENT_UPDATED', 'DOCUMENT_DELETED', 'DOCUMENT_PROCESSED',
             'ENTITY_CREATED', 'ENTITY_UPDATED', 'ENTITY_MERGED', 'ENTITY_DELETED',
             'RELATIONSHIP_CREATED', 'RELATIONSHIP_UPDATED', 'RELATIONSHIP_DELETED',
             'EPISODE_CREATED', 'EPISODE_UPDATED', 'EPISODE_DELETED',
             'MEMORY_QUERIED', 'MEMORY_RECALLED', 'MEMORY_CONSOLIDATED',
             'NAMESPACE_CREATED', 'NAMESPACE_UPDATED', 'NAMESPACE_DELETED'
-        )"""
-    )
+        )""")
 
     # Enable pgvector extension
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")

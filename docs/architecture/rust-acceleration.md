@@ -73,17 +73,20 @@ The `KHORA_ACCEL_BACKEND` environment variable overrides auto-detection:
 Backend availability is logged at import time via the `_HAS_RUST`,
 `_HAS_NUMPY`, and `_HAS_RAPIDFUZZ` flags in `_accel.py`.
 
-## Module Reference (8 Modules, 18 Exported Functions)
+## Module Reference (11 Modules, 25+ Exported Functions)
 
-### `cosine.rs` — Vector Similarity (3 functions)
+### `cosine.rs` — Vector Similarity (5 functions)
 
-Provides single-pair, batch (1-to-N), and all-pairs cosine similarity.
+Provides single-pair, batch (1-to-N), all-pairs cosine similarity,
+batch dot product, and embedding normalization.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `cosine_similarity` | `(vec1: Vec<f32>, vec2: Vec<f32>) -> f32` | Single-pair cosine similarity via fused dot+norm single pass. Accumulates in f64 for precision, casts result to f32. Returns 0.0 on dimension mismatch or zero norms. |
 | `batch_cosine_similarity` | `(py, query: PyReadonlyArray1<f32>, candidates: PyReadonlyArray2<f32>, threshold: f32) -> Vec<(usize, f32)>` | 1-to-N cosine: one query vector against a matrix of candidates. Returns `(index, similarity)` pairs above threshold, sorted descending. |
 | `pairwise_cosine_above_threshold` | `(py, embeddings: PyReadonlyArray2<f32>, threshold: f32) -> Vec<(usize, usize, f32)>` | All-pairs cosine similarity. Returns `(i, j, similarity)` triples where `i < j` and `similarity >= threshold`. |
+| `batch_dot_product` | `(py, query: PyReadonlyArray1<f32>, candidates: PyReadonlyArray2<f32>, threshold: f32) -> Vec<(usize, f32)>` | 1-to-N dot product for pre-normalized embeddings (where dot product = cosine similarity). ~3x faster than `batch_cosine_similarity` since it skips norm computation. Returns `(index, score)` pairs above threshold, sorted descending. |
+| `normalize_embeddings_batch` | `(py, embeddings: PyReadonlyArray2<f32>) -> Vec<Vec<f32>>` | L2-normalize a batch of embedding vectors. Each row is divided by its L2 norm. Zero-norm vectors are returned unchanged. |
 
 **Rust techniques:**
 - **NumPy zero-copy** — `PyReadonlyArray1` / `PyReadonlyArray2` borrow numpy buffers directly; owned copies are made only to release the GIL.
@@ -92,9 +95,55 @@ Provides single-pair, batch (1-to-N), and all-pairs cosine similarity.
 - **Pre-computed norms** — Query norm and per-row norms computed once, avoiding redundant sqrt calls.
 
 **Python consumers:**
-- `khora.extraction.expansion.entity_index` — `batch_cosine_similarity` for entity embedding similarity
+- `khora.extraction.expansion.entity_index` — `batch_dot_product` for entity embedding similarity (pre-normalized vectors)
 - `khora.extraction.expansion.cross_tool_unifier` — `cosine_similarity` for entity deduplication
 - `khora._accel.pairwise_cosine_above_threshold` — used by entity resolution pipelines
+- `khora.query.engine` — `batch_dot_product` for graph result filtering
+- `khora.extraction.embedders.litellm` — embeddings are L2-normalized at ingest time, enabling dot product scoring everywhere
+
+---
+
+### `mmr.rs` — MMR Diversity Selection (1 function)
+
+Greedy Maximal Marginal Relevance for diversity-aware result selection.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `mmr_diversity_select` | `(py, embeddings: PyReadonlyArray2<f32>, scores: Vec<f32>, lambda_param: f32, k: usize) -> Vec<usize>` | Greedy MMR selection: iteratively picks the candidate maximizing `lambda * relevance - (1 - lambda) * max_similarity_to_selected`. Returns indices in selection order. |
+
+**Algorithm:**
+- **Incremental max-similarity tracking** — maintains a running `max_sim[i]` for each unselected candidate, updated as new items are selected. Complexity is O(k*n) instead of O(k*n*k).
+- **Cache-friendly layout** — embeddings stored in a flat contiguous buffer for vectorized access.
+- **SIMD-friendly dot product** — inner `dot_f32` function uses `unsafe get_unchecked` for auto-vectorization.
+
+**Rust techniques:**
+- **GIL release** — `py.allow_threads(|| { ... })` during the entire selection loop.
+- **NumPy zero-copy** — `PyReadonlyArray2` borrows the embedding matrix; owned copy made once before GIL release.
+- **Early exit** — returns immediately if k >= n or no candidates available.
+
+**Python consumers:**
+- `khora._accel.mmr_diversity_select` — primary entry point with 3-tier fallback (Rust > NumPy > pure Python)
+- `khora.query.engine._mmr_diversity_select` — wired into Stage 5 of the query pipeline when `enable_diversity=True`
+
+---
+
+### `temporal.rs` — Temporal Filtering (2 functions)
+
+Batch datetime comparison and recency scoring for temporal queries.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `batch_temporal_filter` | `(py, timestamps: Vec<Option<f64>>, after: Option<f64>, before: Option<f64>) -> Vec<bool>` | Batch datetime range filtering. Timestamps are Unix epoch floats. Returns boolean mask. `None` timestamps pass the filter. |
+| `batch_recency_scores` | `(py, timestamps: Vec<Option<f64>>, reference: f64, half_life_days: f64) -> Vec<f64>` | Exponential decay recency scoring. Score = `exp(-lambda * age_days)` where `lambda = ln(2) / half_life_days`. `None` timestamps receive score 0.5. |
+
+**Rust techniques:**
+- **Rayon parallel** — both functions use `par_iter()` for large input batches.
+- **GIL release** — `py.allow_threads(|| { ... })` during computation.
+- **No datetime parsing** — timestamps arrive as pre-computed Unix epoch floats, avoiding chrono/datetime overhead.
+
+**Python consumers:**
+- `khora._accel.batch_temporal_filter` — used by temporal query pipeline
+- `khora._accel.batch_recency_scores` — used for recency-biased ranking
 
 ---
 

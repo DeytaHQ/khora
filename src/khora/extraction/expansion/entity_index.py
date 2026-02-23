@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from khora._accel import batch_cosine_similarity, levenshtein_similarity, normalize_entity_name
+from khora._accel import batch_dot_product, levenshtein_similarity, normalize_entity_name
 from khora.core.models.entity import entity_type_str
 
 if TYPE_CHECKING:
@@ -280,8 +280,8 @@ class EntityIndex:
         if not valid_candidates:
             return []
 
-        # Batch cosine similarity (uses numpy when available)
-        scored = batch_cosine_similarity(entity.embedding, candidate_embeddings, threshold=threshold)
+        # Batch dot product (embeddings are pre-normalized at ingest, so dot == cosine)
+        scored = batch_dot_product(entity.embedding, candidate_embeddings, threshold=threshold)
         results: list[tuple[Entity, float]] = [(valid_candidates[idx], sim) for idx, sim in scored]
 
         results.sort(key=lambda x: x[1], reverse=True)
