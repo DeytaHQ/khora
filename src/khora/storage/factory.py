@@ -69,6 +69,7 @@ class StorageConfig:
     # pgvector configuration (can share PostgreSQL URL) — legacy
     pgvector_url: str | None = None
     pgvector_embedding_dimension: int = 1536
+    pgvector_use_halfvec: bool = False
 
     # Neo4j configuration — legacy
     neo4j_url: str | None = None
@@ -230,6 +231,7 @@ class StorageFactory:
                     echo=self.config.postgresql_echo,
                     pool_size=self.config.postgresql_pool_size,
                     max_overflow=self.config.postgresql_max_overflow,
+                    use_halfvec=self.config.pgvector_use_halfvec,
                     engine=engine,
                 )
             elif backend_name and backend_name in _VECTOR_REGISTRY:
@@ -252,6 +254,7 @@ class StorageFactory:
             echo=self.config.postgresql_echo,
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
+            use_halfvec=self.config.pgvector_use_halfvec,
             engine=engine,
         )
 

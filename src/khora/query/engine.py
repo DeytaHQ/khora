@@ -262,11 +262,44 @@ class QueryResult:
         return [entity for entity, _ in self.entities]
 
     def get_context_text(self, max_chunks: int = 5) -> str:
-        """Get concatenated text from top chunks for LLM context."""
-        texts = []
+        """Get concatenated text from top chunks for LLM context.
+
+        Groups chunks by document title/source for better readability.
+        """
+        # Group chunks by title
+        groups: dict[str, list[str]] = {}
         for chunk, score in self.chunks[:max_chunks]:
-            texts.append(chunk.content)
-        return "\n\n---\n\n".join(texts)
+            title = self._extract_chunk_title(chunk)
+            groups.setdefault(title, []).append(chunk.content)
+
+        sections = []
+        for title, contents in groups.items():
+            if title:
+                sections.append(f"--- From: {title} ---\n" + "\n\n".join(contents))
+            else:
+                sections.extend(contents)
+        return "\n\n---\n\n".join(sections)
+
+    @staticmethod
+    def _extract_chunk_title(chunk: Any) -> str:
+        """Extract title from chunk metadata."""
+        meta = getattr(chunk, "metadata", None)
+        if meta is None:
+            return ""
+        # DocumentMetadata object with .title attribute
+        title = getattr(meta, "title", "")
+        if title:
+            return title
+        # dict-style metadata
+        if isinstance(meta, dict):
+            title = meta.get("title", "")
+            if title:
+                return title
+        # Try custom dict
+        custom = getattr(meta, "custom", None)
+        if isinstance(custom, dict):
+            return custom.get("title", "")
+        return ""
 
     def get_full_metadata(self) -> dict[str, Any]:
         """Get complete metadata including search method contributions."""
@@ -340,8 +373,14 @@ class QueryConfig:
     stage1_recall_limit: int = 200
     stage3_filter_limit: int = 50
     stage4_rerank_limit: int = 50
-    enable_diversity: bool = False
+    enable_diversity: bool = True
     diversity_lambda: float = 0.5
+
+    # Narrative coherence scoring
+    enable_narrative_coherence: bool = True
+    coherence_boost_per_entity: float = 0.2
+    coherence_max_boost: float = 0.5
+    coherence_isolation_penalty: float = 0.15
 
     @classmethod
     def from_settings(cls, settings: Any) -> QueryConfig:
@@ -465,6 +504,29 @@ class HybridQueryEngine:
 
         # Cached rerankers (keyed by method name) so model is loaded once
         self._rerankers: dict[str, Any] = {}
+
+    def invalidate_caches(self, namespace_id: UUID) -> None:
+        """Invalidate BM25 keyword index and query caches for a namespace.
+
+        Call this after ingesting new documents so stale results are not served.
+
+        Args:
+            namespace_id: Namespace whose caches should be cleared.
+        """
+        ns_key = str(namespace_id)
+        self._keyword_searchers.pop(ns_key, None)
+        # QueryCache keys are hashed with namespace_id; the invalidate() method
+        # currently clears the whole cache as a safe fallback.  Re-creating the
+        # cache object achieves the same effect without needing an event loop.
+        self._cache = type(self._cache)(
+            max_size=self._cache._max_size,
+            ttl_seconds=int(self._cache._ttl.total_seconds()),
+        )
+        self._understanding_cache = type(self._understanding_cache)(
+            max_size=self._understanding_cache._max_size,
+            ttl_seconds=int(self._understanding_cache._ttl.total_seconds()),
+        )
+        logger.debug(f"Invalidated caches for namespace {namespace_id}")
 
     async def query(
         self,
@@ -636,6 +698,21 @@ class HybridQueryEngine:
                     cfg.graph_weight = understanding.search_strategy.graph_weight
                     cfg.keyword_weight = understanding.search_strategy.keyword_weight
                     cfg.max_graph_depth = understanding.search_strategy.graph_depth
+
+                # Adaptive top-k: reduce evidence for single-topic queries
+                if (
+                    understanding.complexity_score < 0.5
+                    and not understanding.requires_multi_step
+                    and cfg.max_chunks > 5
+                ):
+                    cfg.max_chunks = 5
+                    cfg.max_entities = 5
+                    cfg.min_chunk_similarity = max(cfg.min_chunk_similarity, 0.15)
+                    cfg.min_entity_similarity = max(cfg.min_entity_similarity, 0.15)
+                    metadata["adaptive_top_k"] = {"reduced": True, "reason": "single_topic"}
+                    logger.debug(
+                        f"Adaptive top-k: reduced to {cfg.max_chunks} (complexity={understanding.complexity_score:.2f})"
+                    )
 
                 logger.debug(
                     f"Query understanding: intent={understanding.intent.name}, "
@@ -1015,18 +1092,17 @@ class HybridQueryEngine:
                         boosted_entities.append((entity, score))
                 fused_entities = sorted(boosted_entities, key=lambda x: x[1], reverse=True)
 
-            # Step 5: Apply temporal filter
+            # Step 5: Apply temporal filter (batch-accelerated via Rust)
             if temporal_filter:
-                fused_chunks = [(c, s) for c, s in fused_chunks if temporal_filter.matches(c.created_at)]
+                from .temporal import batch_filter_chunks
 
-            # Apply recency bias
+                fused_chunks = batch_filter_chunks(fused_chunks, temporal_filter)
+
+            # Apply recency bias (batch-accelerated via Rust)
             if cfg.apply_recency_bias:
-                temporal_query = TemporalQuery(query_text).with_recency_bias(
-                    cfg.recency_weight,
-                    cfg.recency_decay_days,
-                )
-                fused_chunks = [(c, s * temporal_query.calculate_recency_score(c.created_at)) for c, s in fused_chunks]
-                fused_chunks.sort(key=lambda x: x[1], reverse=True)
+                from .temporal import batch_apply_recency
+
+                fused_chunks = batch_apply_recency(fused_chunks, cfg.recency_weight, cfg.recency_decay_days)
 
             # Step 6: Reranking (optional, skip for small result sets)
             metrics.reranking_timer.start()
@@ -1065,6 +1141,10 @@ class HybridQueryEngine:
 
             metrics.reranking_timer.stop()
 
+            # Step 6.5: Narrative coherence scoring
+            if cfg.enable_narrative_coherence and len(fused_chunks) >= 3:
+                fused_chunks = self._apply_narrative_coherence(fused_chunks, fused_entities, cfg)
+
             # Step 7: Limit results
             fused_chunks = fused_chunks[: cfg.max_chunks]
             fused_entities = fused_entities[: cfg.max_entities]
@@ -1088,6 +1168,15 @@ class HybridQueryEngine:
         metadata["temporal"] = temporal_info.to_dict()
         metadata["metrics"] = metrics.to_dict()
 
+        # Cross-session expansion: when few results are found and chunks
+        # carry session_id metadata (conversation data), search adjacent
+        # sessions to improve recall across session boundaries.
+        if len(fused_chunks) < 2:
+            expanded = await self._expand_adjacent_sessions(fused_chunks, namespace_id)
+            if expanded:
+                fused_chunks = expanded
+                metadata["session_expansion"] = True
+
         result = QueryResult(
             chunks=fused_chunks,
             entities=fused_entities,
@@ -1102,6 +1191,155 @@ class HybridQueryEngine:
         await self._cache.set(query_text, namespace_id, cfg.mode.name, result)
 
         return result
+
+    async def _expand_adjacent_sessions(
+        self,
+        chunks: list[tuple[Any, float]],
+        namespace_id: UUID,
+    ) -> list[tuple[Any, float]] | None:
+        """Expand search to adjacent sessions when few results are found.
+
+        When conversation chunks carry ``session_id`` metadata and the initial
+        search returns sparse results, this fetches chunks from neighbouring
+        sessions (session_id ± 1) to improve cross-session recall.
+
+        Args:
+            chunks: Current (sparse) result set.
+            namespace_id: Namespace to search in.
+
+        Returns:
+            Expanded chunk list, or ``None`` if expansion was not applicable.
+        """
+        if not chunks:
+            return None
+
+        # Collect session IDs from result chunks
+        session_ids: set[int] = set()
+        for chunk, _ in chunks:
+            meta = getattr(chunk, "metadata", None)
+            if meta is None:
+                continue
+            # Support both dict and object-style metadata
+            if isinstance(meta, dict):
+                sid = meta.get("session_id") or (meta.get("custom", {}) or {}).get("session_id")
+            else:
+                custom = getattr(meta, "custom", None)
+                sid = custom.get("session_id") if isinstance(custom, dict) else None
+            if sid is not None:
+                session_ids.add(int(sid))
+
+        if not session_ids:
+            return None
+
+        # Build adjacent session IDs
+        adjacent: set[int] = set()
+        for sid in session_ids:
+            adjacent.add(sid - 1)
+            adjacent.add(sid + 1)
+        adjacent -= session_ids  # Only look at sessions we don't already have
+
+        if not adjacent:
+            return None
+
+        # Query storage for chunks with adjacent session IDs
+        try:
+            adjacent_chunks = await self._storage.search_chunks_by_metadata(
+                namespace_id,
+                metadata_filter={"session_id": list(adjacent)},
+                limit=10,
+            )
+        except (AttributeError, NotImplementedError):
+            # Storage backend doesn't support metadata search
+            logger.debug("Session expansion skipped: storage does not support metadata search")
+            return None
+        except Exception as e:
+            logger.debug(f"Session expansion failed: {e}")
+            return None
+
+        if not adjacent_chunks:
+            return None
+
+        # Merge: original chunks first, then adjacent with a discounted score
+        existing_ids = {str(c.id) for c, _ in chunks}
+        expanded = list(chunks)
+        for adj_chunk in adjacent_chunks:
+            if isinstance(adj_chunk, tuple):
+                chunk_obj, score = adj_chunk
+            else:
+                chunk_obj, score = adj_chunk, 0.3
+            if str(chunk_obj.id) not in existing_ids:
+                expanded.append((chunk_obj, score * 0.8))  # Discount adjacent session results
+                existing_ids.add(str(chunk_obj.id))
+
+        logger.debug(
+            f"Session expansion: added {len(expanded) - len(chunks)} chunks " f"from adjacent sessions {adjacent}"
+        )
+        return expanded
+
+    def _apply_narrative_coherence(
+        self,
+        chunks: list[tuple[Any, float]],
+        entities: list[tuple[Any, float]],
+        config: QueryConfig,
+    ) -> list[tuple[Any, float]]:
+        """Apply narrative coherence scoring to retrieved chunks.
+
+        Chunks that share entities with other retrieved chunks get a coherence
+        boost (they belong to the same narrative).  Isolated chunks that don't
+        share entities with any other retrieved chunk are penalized (they may
+        be cross-narrative contamination).
+
+        Args:
+            chunks: Retrieved (chunk, score) pairs.
+            entities: Retrieved (entity, score) pairs.
+            config: Query configuration with coherence settings.
+
+        Returns:
+            Re-scored and re-sorted chunk list.
+        """
+        if not chunks or not entities:
+            return chunks
+
+        # Build a map: chunk_id → set of entity names associated with that chunk
+        chunk_entity_map: dict[str, set[str]] = {}
+        for entity, _ in entities:
+            for chunk_id in getattr(entity, "source_chunk_ids", []):
+                chunk_entity_map.setdefault(str(chunk_id), set()).add(entity.name)
+
+        # For each retrieved chunk, find which entities it's associated with
+        chunk_entities: list[set[str]] = []
+        for chunk, _ in chunks:
+            cid = str(chunk.id)
+            chunk_entities.append(chunk_entity_map.get(cid, set()))
+
+        # Count entity overlaps between each chunk and the rest of the result set
+        scored: list[tuple[Any, float]] = []
+        for i, (chunk, score) in enumerate(chunks):
+            my_entities = chunk_entities[i]
+            if not my_entities:
+                scored.append((chunk, score))
+                continue
+
+            # Count how many other chunks share at least one entity
+            shared_count = 0
+            for j, other_entities in enumerate(chunk_entities):
+                if i != j and my_entities & other_entities:
+                    shared_count += 1
+
+            if shared_count > 0:
+                # Coherence boost: more shared entities = higher boost (capped)
+                boost = min(
+                    shared_count * config.coherence_boost_per_entity,
+                    config.coherence_max_boost,
+                )
+                scored.append((chunk, score * (1 + boost)))
+            else:
+                # Isolation penalty: chunk has entities but none overlap with results
+                scored.append((chunk, score * (1 - config.coherence_isolation_penalty)))
+
+        # Re-sort by adjusted score
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
 
     async def _timed_search(
         self,
@@ -1263,10 +1501,23 @@ class HybridQueryEngine:
         # Batch fetch all chunks in a single query
         if chunk_ids_to_fetch:
             chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch)
+
+            # Embedding similarity filtering: when a query embedding is available,
+            # drop graph-sourced chunks whose embedding is too dissimilar.
+            _min_graph_sim = 0.3
             for chunk_id, chunk in chunks_map.items():
                 entity, score = chunk_id_to_info[chunk_id]
                 # Score based on entity score and mention count
                 chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+
+                # Filter by cosine similarity when query_embedding is provided
+                if query_embedding is not None and chunk.embedding is not None:
+                    from khora._accel import cosine_similarity as _cos_sim
+
+                    sim = _cos_sim(query_embedding, chunk.embedding)
+                    if sim < _min_graph_sim:
+                        continue
+                # If no embedding on chunk, include anyway (fallback)
                 chunks.append((chunk, chunk_score))
 
         return {
@@ -1548,6 +1799,60 @@ class HybridQueryEngine:
         return min(boost, 0.3)  # Cap at 0.3
 
     # -------------------------------------------------------------------------
+    # Temporal Re-ranking
+    # -------------------------------------------------------------------------
+
+    _RECENCY_KEYWORDS = frozenset({"recent", "recently", "latest", "last", "newest", "new", "current"})
+    _EARLIEST_KEYWORDS = frozenset({"first", "earliest", "before", "oldest", "original", "initial"})
+
+    def _apply_temporal_reranking(
+        self,
+        chunks: list[tuple[Any, float]],
+        understanding: Any,
+    ) -> list[tuple[Any, float]]:
+        """Blend relevance scores with temporal position when temporal intent is detected.
+
+        Args:
+            chunks: Scored chunks (already sorted by relevance).
+            understanding: UnderstandingResult with temporal_references.
+
+        Returns:
+            Re-scored and re-sorted chunk list.
+        """
+        temporal_weight = 0.3
+
+        # Determine sort direction from temporal reference text
+        ascending = False  # default: most recent first (descending)
+        refs_text = " ".join(ref.text.lower() for ref in getattr(understanding, "temporal_references", []))
+        if self._EARLIEST_KEYWORDS & set(refs_text.split()):
+            ascending = True
+
+        # Sort a copy by created_at to determine temporal rank.
+        # Use a tuple key so chunks missing created_at sort to the end
+        # instead of raising TypeError when compared with datetimes.
+        sorted_by_time = sorted(
+            chunks,
+            key=lambda x: (
+                (1, getattr(x[0], "created_at", None)) if getattr(x[0], "created_at", None) is not None else (0, 0)
+            ),
+            reverse=not ascending,
+        )
+        n = len(sorted_by_time)
+        # Map chunk id -> temporal position score (best temporal match = 1.0)
+        temporal_scores: dict[Any, float] = {}
+        for rank, (chunk, _score) in enumerate(sorted_by_time):
+            temporal_scores[id(chunk)] = 1.0 - (rank / max(n - 1, 1))
+
+        # Blend
+        blended = []
+        for chunk, relevance_score in chunks:
+            t_score = temporal_scores.get(id(chunk), 0.0)
+            blended_score = (1 - temporal_weight) * relevance_score + temporal_weight * t_score
+            blended.append((chunk, blended_score))
+        blended.sort(key=lambda x: x[1], reverse=True)
+        return blended
+
+    # -------------------------------------------------------------------------
     # Multi-Stage Ranking Pipeline
     # -------------------------------------------------------------------------
 
@@ -1700,6 +2005,10 @@ class HybridQueryEngine:
         )
 
         logger.debug(f"Stage 4 (Rerank): {len(stage4_chunks)} chunks")
+
+        # Stage 4.5: Narrative coherence scoring
+        if config.enable_narrative_coherence and len(stage4_chunks) >= 3:
+            stage4_chunks = self._apply_narrative_coherence(stage4_chunks, stage3_entities, config)
 
         # Stage 5: Diversity & Final Selection
         metrics.stage5_diversity_timer.start()
@@ -1994,20 +2303,22 @@ class HybridQueryEngine:
         """
         filtered_chunks = chunks
 
-        # Apply temporal filter
+        # Apply temporal filter (batch-accelerated via Rust)
         if temporal_filter:
-            filtered_chunks = [(c, s) for c, s in filtered_chunks if temporal_filter.matches(c.created_at)]
+            from .temporal import batch_filter_chunks
 
-        # Apply recency bias
+            filtered_chunks = batch_filter_chunks(filtered_chunks, temporal_filter)
+
+        # Apply recency bias (batch-accelerated via Rust)
         if config.apply_recency_bias:
-            temporal_query = TemporalQuery(query="").with_recency_bias(
-                config.recency_weight,
-                config.recency_decay_days,
-            )
-            filtered_chunks = [
-                (c, s * temporal_query.calculate_recency_score(c.created_at)) for c, s in filtered_chunks
-            ]
-            filtered_chunks.sort(key=lambda x: x[1], reverse=True)
+            from .temporal import batch_apply_recency
+
+            filtered_chunks = batch_apply_recency(filtered_chunks, config.recency_weight, config.recency_decay_days)
+
+        # Temporal re-ranking: blend relevance with temporal position when
+        # the query understanding detects temporal intent.
+        if understanding and getattr(understanding, "has_temporal", False) and filtered_chunks:
+            filtered_chunks = self._apply_temporal_reranking(filtered_chunks, understanding)
 
         # Apply source priority boosting
         if understanding and understanding.source_priority:

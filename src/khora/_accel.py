@@ -37,13 +37,17 @@ try:
         RustBM25Index,
     )
     from khora_accel import batch_cosine_similarity as _rust_batch_cosine
+    from khora_accel import batch_dot_product as _rust_batch_dot_product
     from khora_accel import batch_levenshtein as _rust_batch_levenshtein
+    from khora_accel import batch_recency_scores as _rust_batch_recency_scores
     from khora_accel import batch_sequence_match as _rust_batch_sequence_match
+    from khora_accel import batch_temporal_filter as _rust_batch_temporal_filter
     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
     from khora_accel import cosine_similarity as _rust_cosine
     from khora_accel import extract_keywords as _rust_extract_keywords
     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
     from khora_accel import levenshtein_similarity as _rust_levenshtein
+    from khora_accel import normalize_embeddings_batch as _rust_normalize_embeddings_batch
     from khora_accel import normalize_entity_name as _rust_normalize_entity_name
     from khora_accel import normalize_entity_names_batch as _rust_normalize_entity_names_batch
     from khora_accel import normalize_scores as _rust_normalize_scores
@@ -886,4 +890,173 @@ def resolve_entities_enhanced(
         else:
             results.append(None)
 
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Temporal filtering (batch operations)
+# ---------------------------------------------------------------------------
+
+_SECONDS_PER_DAY = 86400.0
+_LN_HALF = -0.6931471805599453  # math.log(0.5)
+
+
+def batch_temporal_filter(
+    timestamps_secs: list[float],
+    operator: str,
+    start_secs: float | None = None,
+    end_secs: float | None = None,
+) -> list[bool]:
+    """Batch temporal filter: test each timestamp against a temporal range.
+
+    Args:
+        timestamps_secs: Epoch seconds for each item.
+        operator: One of "before", "after", "between".
+        start_secs: Start boundary (epoch seconds), or None.
+        end_secs: End boundary (epoch seconds), or None.
+
+    Returns:
+        Boolean mask — True if the timestamp matches the filter.
+    """
+    if _HAS_RUST:
+        return _rust_batch_temporal_filter(timestamps_secs, operator, start_secs, end_secs)
+
+    # Pure-Python fallback
+    results: list[bool] = []
+    for ts in timestamps_secs:
+        if operator == "before":
+            results.append(end_secs is None or ts < end_secs)
+        elif operator == "after":
+            results.append(start_secs is None or ts > start_secs)
+        elif operator == "between":
+            after_start = start_secs is None or ts >= start_secs
+            before_end = end_secs is None or ts <= end_secs
+            results.append(after_start and before_end)
+        else:
+            results.append(True)
+    return results
+
+
+def batch_recency_scores(
+    timestamps_secs: list[float],
+    now_secs: float,
+    decay_days: float,
+    recency_weight: float,
+) -> list[float]:
+    """Batch recency scores using exponential decay.
+
+    For each timestamp computes:
+        (1 - recency_weight) + recency_weight * 0.5^(age_days / decay_days)
+
+    Args:
+        timestamps_secs: Epoch seconds for each item.
+        now_secs: Current time as epoch seconds.
+        decay_days: Half-life in days.
+        recency_weight: Blending weight (0 = no bias, 1 = full decay).
+
+    Returns:
+        Recency score per timestamp.
+    """
+    if _HAS_RUST:
+        return _rust_batch_recency_scores(timestamps_secs, now_secs, decay_days, recency_weight)
+
+    # Pure-Python fallback
+    if recency_weight == 0.0:
+        return [1.0] * len(timestamps_secs)
+
+    base = 1.0 - recency_weight
+    decay_factor = _LN_HALF / decay_days if decay_days > 0 else 0.0
+
+    scores: list[float] = []
+    for ts in timestamps_secs:
+        age_days = (now_secs - ts) / _SECONDS_PER_DAY
+        decay = math.exp(decay_factor * age_days)
+        scores.append(base + recency_weight * decay)
+    return scores
+
+
+# ---------------------------------------------------------------------------
+# Embedding normalization and dot product
+# ---------------------------------------------------------------------------
+
+
+def normalize_embeddings_batch(
+    vectors: list[list[float]],
+) -> list[list[float]]:
+    """L2-normalize a batch of embedding vectors.
+
+    Each vector is divided by its L2 norm. Zero vectors are returned as-is.
+    Uses Rust (rayon parallel) > numpy > pure Python.
+
+    Args:
+        vectors: List of embedding vectors.
+
+    Returns:
+        List of L2-normalized vectors.
+    """
+    if _HAS_RUST:
+        return _rust_normalize_embeddings_batch(vectors)
+
+    if _HAS_NUMPY:
+        result = []
+        for vec in vectors:
+            arr = np.asarray(vec, dtype=np.float32)
+            norm = float(np.linalg.norm(arr))
+            if norm == 0.0:
+                result.append(vec)
+            else:
+                result.append((arr / norm).tolist())
+        return result
+
+    # Pure-Python fallback
+    result = []
+    for vec in vectors:
+        sq_sum = sum(v * v for v in vec)
+        if sq_sum == 0.0:
+            result.append(list(vec))
+        else:
+            norm = math.sqrt(sq_sum)
+            result.append([v / norm for v in vec])
+    return result
+
+
+def batch_dot_product(
+    query: list[float],
+    candidates: list[list[float]],
+    threshold: float = 0.0,
+) -> list[tuple[int, float]]:
+    """Batch dot product: one query against N candidates (pre-normalized).
+
+    For pre-normalized vectors, dot product equals cosine similarity but
+    skips norm computation.
+
+    Returns (index, score) pairs above threshold, sorted descending.
+    """
+    if len(candidates) == 0:
+        return []
+
+    if _HAS_RUST and _HAS_NUMPY:
+        q = np.asarray(query, dtype=np.float32)
+        mat = np.asarray(candidates, dtype=np.float32)
+        return _rust_batch_dot_product(q, mat, threshold)
+
+    if _HAS_NUMPY:
+        q = np.asarray(query, dtype=np.float32)
+        mat = np.asarray(candidates, dtype=np.float32)
+        dots = mat @ q
+        results = []
+        for i in range(len(dots)):
+            s = float(dots[i])
+            if s >= threshold:
+                results.append((i, s))
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
+
+    # Pure-Python fallback
+    results = []
+    for i, cand in enumerate(candidates):
+        dot = sum(a * b for a, b in zip(query, cand))
+        if dot >= threshold:
+            results.append((i, dot))
+    results.sort(key=lambda x: x[1], reverse=True)
     return results

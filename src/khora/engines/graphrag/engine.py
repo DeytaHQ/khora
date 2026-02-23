@@ -122,6 +122,7 @@ class GraphRAGEngine:
                 neo4j_password=config.get_neo4j_password(),
                 neo4j_database=config.get_neo4j_database(),
                 pgvector_embedding_dimension=config.storage.embedding_dimension,
+                pgvector_use_halfvec=config.storage.use_halfvec,
                 graph_config=graph_config,
                 vector_config=vector_config,
             )
@@ -305,6 +306,9 @@ class GraphRAGEngine:
             f"{result['relationships']} relationships in {timings['total_ms']:.1f}ms"
         )
 
+        # Invalidate query caches so new documents are visible to searches
+        self._get_query_engine().invalidate_caches(namespace_id)
+
         return RememberResult(
             document_id=document.id,
             namespace_id=namespace_id,
@@ -471,6 +475,9 @@ class GraphRAGEngine:
             f"{result.get('total_chunks', 0)} chunks, {result.get('total_entities', 0)} entities "
             f"in {timings['total_ms']:.1f}ms ({timings.get('docs_per_second', 0):.1f} docs/sec)"
         )
+
+        # Invalidate query caches so new documents are visible to searches
+        self._get_query_engine().invalidate_caches(namespace_id)
 
         # Call progress callback if provided
         if on_progress:

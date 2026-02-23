@@ -31,6 +31,54 @@ if TYPE_CHECKING:
     from khora.storage import StorageCoordinator
 
 
+def _should_skip_entity_embedding(
+    entity,
+    skip_types: list[str],
+    mention_threshold: int,
+) -> bool:
+    """Check if an entity should skip embedding generation.
+
+    Low-value entity types (DATE, URL, EMAIL) don't benefit from vector
+    similarity search. Skipping embedding saves API cost and storage.
+
+    Args:
+        entity: Entity to check.
+        skip_types: Entity type names to skip (case-insensitive).
+        mention_threshold: When 0, skip ALL entities of the listed types
+            regardless of mention count.  When >0, only skip if
+            ``entity.mention_count <= mention_threshold``.
+    """
+    if not skip_types:
+        return False
+    entity_type = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
+    if entity_type.upper() not in (t.upper() for t in skip_types):
+        return False
+    # threshold=0 means skip all entities of these types unconditionally
+    if mention_threshold == 0:
+        return True
+    return entity.mention_count <= mention_threshold
+
+
+def _find_entity_key(normalized_name: str, all_entities: dict[str, Any]) -> str | None:
+    """Find entity key by exact match first, then fuzzy Levenshtein matching."""
+    from khora._accel import levenshtein_similarity
+
+    # Exact prefix match first (fast path)
+    exact = next((k for k in all_entities if k.startswith(f"{normalized_name}:")), None)
+    if exact:
+        return exact
+    # Fuzzy match: compare normalized name against entity name portion of key
+    best_key = None
+    best_sim = 0.0
+    for k in all_entities:
+        entity_name = k.split(":")[0]
+        sim = levenshtein_similarity(normalized_name, entity_name)
+        if sim > best_sim and sim > 0.8:
+            best_sim = sim
+            best_key = k
+    return best_key
+
+
 async def stream_extract_and_embed_entities(
     chunks: list[Chunk],
     embedder: Embedder,
@@ -46,6 +94,8 @@ async def stream_extract_and_embed_entities(
     embedding_batch_size: int = 100,
     extraction_batch_size: int = 10,
     extraction_max_tokens: int | None = None,
+    skip_embedding_entity_types: list[str] | None = None,
+    skip_embedding_mention_threshold: int = 1,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities from chunks and embed them in a streaming fashion.
 
@@ -143,13 +193,26 @@ async def stream_extract_and_embed_entities(
                             existing.source_document_ids.append(chunk.document_id)
                         if chunk.id not in existing.source_chunk_ids:
                             existing.source_chunk_ids.append(chunk.id)
-                        if existing.valid_from and chunk.created_at < existing.valid_from:
-                            existing.valid_from = chunk.created_at
+                        # Use earliest known valid_from (prefer LLM-extracted over chunk ts)
+                        _t = extracted.temporal
+                        _vf = _parse_temporal_date(_t.valid_from) if _t else None
+                        candidate_from = _vf or chunk.created_at
+                        if existing.valid_from and candidate_from and candidate_from < existing.valid_from:
+                            existing.valid_from = candidate_from
+                        # Widen valid_until to latest extracted value
+                        _vu = _parse_temporal_date(_t.valid_until) if _t else None
+                        if _vu and (not existing.valid_until or _vu > existing.valid_until):
+                            existing.valid_until = _vu
                     else:
                         try:
                             entity_type: EntityType | str = EntityType(extracted.entity_type)
                         except ValueError:
                             entity_type = extracted.entity_type or "CONCEPT"
+
+                        # Prefer LLM-extracted temporal bounds over chunk timestamp
+                        _t = extracted.temporal
+                        _vf = _parse_temporal_date(_t.valid_from) if _t else None
+                        _vu = _parse_temporal_date(_t.valid_until) if _t else None
 
                         entity = Entity(
                             namespace_id=chunk.namespace_id,
@@ -160,7 +223,8 @@ async def stream_extract_and_embed_entities(
                             source_document_ids=[chunk.document_id],
                             source_chunk_ids=[chunk.id],
                             confidence=extracted.confidence,
-                            valid_from=chunk.created_at,
+                            valid_from=_vf or chunk.created_at,
+                            valid_until=_vu,
                         )
                         all_entities[key] = entity
                         # Queue entity for embedding as soon as it's extracted
@@ -178,16 +242,15 @@ async def stream_extract_and_embed_entities(
 
                     norm_source = normalize_entity_name(extracted_rel.source_entity)
                     norm_target = normalize_entity_name(extracted_rel.target_entity)
-                    source_key = next(
-                        (k for k in all_entities if k.startswith(f"{norm_source}:")),
-                        None,
-                    )
-                    target_key = next(
-                        (k for k in all_entities if k.startswith(f"{norm_target}:")),
-                        None,
-                    )
+                    source_key = _find_entity_key(norm_source, all_entities)
+                    target_key = _find_entity_key(norm_target, all_entities)
 
                     if source_key and target_key:
+                        # Prefer LLM-extracted temporal bounds for relationships
+                        _rt = extracted_rel.temporal
+                        _rvf = _parse_temporal_date(_rt.valid_from if _rt else None)
+                        _rvu = _parse_temporal_date(_rt.valid_until if _rt else None)
+
                         relationship = Relationship(
                             namespace_id=chunk.namespace_id,
                             source_entity_id=all_entities[source_key].id,
@@ -198,7 +261,8 @@ async def stream_extract_and_embed_entities(
                             source_document_ids=[chunk.document_id],
                             source_chunk_ids=[chunk.id],
                             confidence=extracted_rel.confidence,
-                            valid_from=chunk.created_at,
+                            valid_from=_rvf or chunk.created_at,
+                            valid_until=_rvu,
                         )
                         all_relationships.append(relationship)
 
@@ -241,6 +305,12 @@ async def stream_extract_and_embed_entities(
                 # Extraction complete, flush remaining batch
                 await embed_batch()
                 break
+
+            # Skip embedding for low-value entity types
+            _skip_types = skip_embedding_entity_types or []
+            if _skip_types and _should_skip_entity_embedding(entity, _skip_types, skip_embedding_mention_threshold):
+                embedded_entities.append(entity)  # Add without embedding
+                continue
 
             batch.append(entity)
             if len(batch) >= embedding_batch_size:
@@ -286,6 +356,25 @@ def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
             except (ValueError, TypeError):
                 continue
     return None
+
+
+def _parse_temporal_date(value: str | None) -> datetime | None:
+    """Parse an ISO date string from LLM-extracted temporal info.
+
+    Returns a datetime if parseable, None otherwise.
+    """
+    if not value:
+        return None
+    from datetime import datetime
+
+    try:
+        if "T" in value:
+            if value.endswith("Z"):
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return datetime.fromisoformat(value)
+        return datetime.fromisoformat(value + "T00:00:00+00:00")
+    except (ValueError, TypeError):
+        return None
 
 
 async def stage_document(
@@ -366,6 +455,8 @@ async def process_document(
     extraction_retry_wait: float = 2.0,
     extraction_batch_size: int = 10,
     extraction_max_tokens: int | None = None,
+    skip_embedding_entity_types: list[str] | None = None,
+    skip_embedding_mention_threshold: int = 1,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -437,6 +528,19 @@ async def process_document(
             )
         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
 
+        # T-2: Propagate document source timestamp to chunks
+        if document.created_at:
+            for chunk in chunks:
+                chunk.created_at = document.created_at
+
+        # R-2: Prepend document title for embeddings (better embedding space separation)
+        doc_title = document.metadata.title if document.metadata and hasattr(document.metadata, "title") else ""
+        original_contents: dict[UUID, str] = {}
+        if doc_title:
+            for chunk in chunks:
+                original_contents[chunk.id] = chunk.content
+                chunk.content = f"{doc_title}: {chunk.content}"
+
         # Steps 2 & 3: Embed + Extract concurrently (both depend only on chunks)
         async def _embed_with_telemetry():
             async with pipeline_stage(
@@ -466,6 +570,13 @@ async def process_document(
             _embed_with_telemetry(), _extract_with_telemetry()
         )
         chunks = embedded_chunks
+
+        # R-2: Restore original content after embedding
+        if original_contents:
+            for chunk in chunks:
+                if chunk.id in original_contents:
+                    chunk.content = original_contents[chunk.id]
+
         logger.debug(f"Document {document.id}: generated embeddings")
         logger.debug(f"Document {document.id}: {len(entities)} entities, {len(relationships)} relationships extracted")
 
@@ -640,16 +751,29 @@ async def process_document(
                     )
 
                 store_results: list[tuple[Entity, bool]] = []
-                for i, (entity, is_new) in enumerate(upsert_results):
+
+                # Build name+type -> stored_id mapping from upsert results
+                name_type_to_stored: dict[str, str] = {}
+                for entity, is_new in upsert_results:
+                    et = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
+                    key = f"{normalize_entity_name(entity.name)}:{et}"
                     stored_id = str(entity.id)
+                    name_type_to_stored[key] = stored_id
                     entity_id_mapping[stored_id] = stored_id
-                    # If upsert changed the ID (Neo4j MERGE with existing entity),
-                    # also map the original extraction ID to the stored ID
-                    if i < len(pre_upsert_ids) and pre_upsert_ids[i] != stored_id:
-                        entity_id_mapping[pre_upsert_ids[i]] = stored_id
-                    # New entities always need embeddings; existing only if missing
                     needs_embedding = is_new or not entity.embedding
                     store_results.append((entity, needs_embedding))
+
+                # Map every original entity ID to its stored counterpart by name+type
+                for orig_entity in entities:
+                    et = (
+                        orig_entity.entity_type.value
+                        if hasattr(orig_entity.entity_type, "value")
+                        else str(orig_entity.entity_type)
+                    )
+                    key = f"{normalize_entity_name(orig_entity.name)}:{et}"
+                    stored_id = name_type_to_stored.get(key)
+                    if stored_id:
+                        entity_id_mapping[str(orig_entity.id)] = stored_id
                 # Collect entities that need embeddings
                 entities_needing = [e for e, needs in store_results if needs]
                 _es_ctx["output_count"] = len(store_results)
@@ -668,30 +792,46 @@ async def process_document(
             """Generate and store entity embeddings. Returns count embedded."""
             if not entities_needing_embeddings:
                 return 0
+
+            # Filter out low-value entity types that don't benefit from vector search
+            _skip_types = skip_embedding_entity_types or []
+            if _skip_types:
+                embeddable = [
+                    e
+                    for e in entities_needing_embeddings
+                    if not _should_skip_entity_embedding(e, _skip_types, skip_embedding_mention_threshold)
+                ]
+                skipped = len(entities_needing_embeddings) - len(embeddable)
+                if skipped:
+                    logger.debug(
+                        f"Document {document.id}: skipped embedding for {skipped} low-value entities "
+                        f"(types={_skip_types}, threshold={skip_embedding_mention_threshold})"
+                    )
+            else:
+                embeddable = entities_needing_embeddings
+
+            if not embeddable:
+                return 0
+
             async with pipeline_stage(
                 "ingestion",
                 "entity_embedding",
                 _run_id,
                 namespace_id=_ns_id,
-                input_count=len(entities_needing_embeddings),
+                input_count=len(embeddable),
             ) as _ee_ctx:
                 from khora.extraction.embedders import LiteLLMEmbedder
 
                 embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
-                entity_texts = [
-                    f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings
-                ]
+                entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in embeddable]
                 entity_embeddings = await embedder.embed_batch(entity_texts)
                 updates = [
-                    (entity.id, embedding, embedding_model)
-                    for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
+                    (entity.id, embedding, embedding_model) for entity, embedding in zip(embeddable, entity_embeddings)
                 ]
                 await storage.update_entity_embeddings_batch(updates)
-                _ee_ctx["output_count"] = len(entities_needing_embeddings)
-            logger.debug(
-                f"Document {document.id}: generated embeddings for {len(entities_needing_embeddings)} entities"
-            )
-            return len(entities_needing_embeddings)
+                _ee_ctx["output_count"] = len(embeddable)
+            logger.debug(f"Document {document.id}: generated embeddings for {len(embeddable)} entities")
+            return len(embeddable)
 
         async def _store_relationships() -> tuple[int, int]:
             """Remap and batch-store relationships. Returns (stored_count, skipped)."""
@@ -778,6 +918,8 @@ async def ingest_documents(
     extraction_retry_wait: float = 2.0,
     extraction_batch_size: int = 10,
     extraction_max_tokens: int | None = None,
+    skip_embedding_entity_types: list[str] | None = None,
+    skip_embedding_mention_threshold: int = 1,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -911,6 +1053,8 @@ async def ingest_documents(
                 extraction_retry_wait=extraction_retry_wait,
                 extraction_batch_size=extraction_batch_size,
                 extraction_max_tokens=extraction_max_tokens,
+                skip_embedding_entity_types=skip_embedding_entity_types,
+                skip_embedding_mention_threshold=skip_embedding_mention_threshold,
             )
 
     results = await asyncio.gather(

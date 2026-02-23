@@ -172,7 +172,7 @@ class TestMultiStageConfig:
         assert config.stage1_recall_limit == 200
         assert config.stage3_filter_limit == 50
         assert config.stage4_rerank_limit == 50
-        assert config.enable_diversity is False
+        assert config.enable_diversity is True
         assert config.diversity_lambda == 0.5
 
     def test_custom_config(self) -> None:

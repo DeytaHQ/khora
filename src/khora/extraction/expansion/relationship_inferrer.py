@@ -363,6 +363,80 @@ class RelationshipInferrer:
         logger.debug(f"Inference complete: {len(all_inferred)} total relationships inferred")
         return all_inferred
 
+    def infer_co_occurrences(
+        self,
+        entities: list[Entity],
+        *,
+        min_co_occurrences: int = 2,
+    ) -> list[InferredRelationship]:
+        """Infer CO_OCCURS_WITH relationships for entities sharing source chunks.
+
+        Entities extracted from the same chunk but without an explicit relationship
+        get a CO_OCCURS_WITH edge. Filters by entity type pair validity to avoid
+        noise from low-value pairings (e.g., DATE + URL).
+
+        Args:
+            entities: Entities with source_chunk_ids populated
+            min_co_occurrences: Minimum shared chunks to create a relationship
+
+        Returns:
+            List of inferred CO_OCCURS_WITH relationships
+        """
+        # Build chunk_id -> entities mapping
+        chunk_to_entities: dict[UUID, list[Entity]] = {}
+        for entity in entities:
+            for chunk_id in entity.source_chunk_ids:
+                chunk_to_entities.setdefault(chunk_id, []).append(entity)
+
+        # Count co-occurrences for each entity pair
+        pair_counts: Counter[tuple[UUID, UUID]] = Counter()
+        for chunk_entities in chunk_to_entities.values():
+            for i, e1 in enumerate(chunk_entities):
+                for e2 in chunk_entities[i + 1 :]:
+                    pair = (min(e1.id, e2.id), max(e1.id, e2.id))
+                    pair_counts[pair] += 1
+
+        # Entity type pairs that produce noisy co-occurrence edges
+        INVALID_PAIRS = {
+            frozenset({"DATE", "DATE"}),
+            frozenset({"URL", "URL"}),
+            frozenset({"EMAIL", "EMAIL"}),
+            frozenset({"DATE", "URL"}),
+            frozenset({"DATE", "EMAIL"}),
+            frozenset({"URL", "EMAIL"}),
+        }
+
+        entity_lookup = {e.id: e for e in entities}
+        inferred: list[InferredRelationship] = []
+
+        for (id1, id2), count in pair_counts.items():
+            if count < min_co_occurrences:
+                continue
+            e1 = entity_lookup.get(id1)
+            e2 = entity_lookup.get(id2)
+            if not e1 or not e2:
+                continue
+
+            et1 = e1.entity_type.value if hasattr(e1.entity_type, "value") else str(e1.entity_type)
+            et2 = e2.entity_type.value if hasattr(e2.entity_type, "value") else str(e2.entity_type)
+            if frozenset({et1, et2}) in INVALID_PAIRS:
+                continue
+
+            confidence = min(0.7, 0.3 + 0.1 * count)
+            inferred.append(
+                InferredRelationship(
+                    source_entity_id=id1,
+                    target_entity_id=id2,
+                    relationship_type="CO_OCCURS_WITH",
+                    description=f"Co-occurs in {count} chunks",
+                    confidence=confidence,
+                    rule_name="co_occurrence",
+                )
+            )
+
+        logger.debug(f"Co-occurrence inference: {len(inferred)} relationships from {len(pair_counts)} pairs")
+        return inferred
+
     def infer_from_pattern(
         self,
         entities: list[Entity],

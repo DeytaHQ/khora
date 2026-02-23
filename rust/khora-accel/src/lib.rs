@@ -12,6 +12,7 @@ mod keyword_extract;
 mod pagerank;
 mod rrf;
 mod string_sim;
+mod temporal;
 mod utils;
 
 /// khora_accel — Rust-accelerated operations for Khora
@@ -24,6 +25,13 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         cosine::pairwise_cosine_above_threshold,
         m
     )?)?;
+
+    // Embedding normalization and dot product
+    m.add_function(wrap_pyfunction!(
+        cosine::normalize_embeddings_batch,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(cosine::batch_dot_product, m)?)?;
 
     // String similarity
     m.add_function(wrap_pyfunction!(string_sim::levenshtein_similarity, m)?)?;
@@ -65,6 +73,10 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         keyword_extract::extract_keywords_batch,
         m
     )?)?;
+
+    // Temporal filtering
+    m.add_function(wrap_pyfunction!(temporal::batch_temporal_filter, m)?)?;
+    m.add_function(wrap_pyfunction!(temporal::batch_recency_scores, m)?)?;
 
     Ok(())
 }

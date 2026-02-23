@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import re as _re
+from copy import copy
 from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from loguru import logger
 from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
@@ -27,6 +28,24 @@ from khora.storage.backends.mixins import serialize_dict as _serialize_dict
 # Neo4j relationship labels must be valid identifiers: letters, digits, underscores.
 # LLM-generated types like "at-risk" or "works for" need sanitizing.
 _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
+
+
+# Bidirectional relationship types and their inverses
+BIDIRECTIONAL_TYPES: dict[str, str] = {
+    "MANAGES": "MANAGED_BY",
+    "MANAGED_BY": "MANAGES",
+    "WORKS_FOR": "EMPLOYS",
+    "EMPLOYS": "WORKS_FOR",
+    "PART_OF": "CONTAINS",
+    "CONTAINS": "PART_OF",
+    "DEPENDS_ON": "DEPENDENCY_OF",
+    "DEPENDENCY_OF": "DEPENDS_ON",
+    "COLLABORATES_WITH": "COLLABORATES_WITH",
+    "REPORTS_TO": "HAS_REPORT",
+    "HAS_REPORT": "REPORTS_TO",
+    "OWNS": "OWNED_BY",
+    "OWNED_BY": "OWNS",
+}
 
 
 def _sanitize_neo4j_label(label: str) -> str:
@@ -201,6 +220,9 @@ class Neo4jBackend(GraphBackendBase):
             "FOR (e:Entity) REQUIRE (e.namespace_id, e.name, e.entity_type) IS UNIQUE",
             # Composite: namespace + type (for list queries filtering by type without name)
             "CREATE INDEX entity_ns_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.entity_type)",
+            # Composite: namespace + valid_from/valid_until (for temporal queries)
+            "CREATE INDEX entity_ns_valid_from IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.valid_from)",
+            "CREATE INDEX entity_ns_valid_until IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.valid_until)",
             # Entity source_tool (for source-aware queries)
             "CREATE INDEX entity_source_tool IF NOT EXISTS FOR (e:Entity) ON (e.source_tool)",
             # Entity confidence (for threshold filtering: min_entity_confidence)
@@ -226,6 +248,10 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
             "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",
             "CREATE INDEX rel_depends_conf IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
+            # temporal indexes on relationship valid_from (for "what existed at time T?" queries)
+            "CREATE INDEX rel_relates_to_valid_from IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.valid_from)",
+            "CREATE INDEX rel_collaborates_valid_from IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.valid_from)",
+            "CREATE INDEX rel_associated_valid_from IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.valid_from)",
         ]
 
         async with self._driver.session(database=self._database) as session:
@@ -511,11 +537,13 @@ class Neo4jBackend(GraphBackendBase):
         relationships: list[Relationship],
         *,
         batch_size: int = 200,
+        _skip_inverse: bool = False,
     ) -> int:
         """Batch create relationships using UNWIND with parallel type processing.
 
         Relationships are grouped by type and each type group is processed
         in parallel using separate Neo4j sessions for better throughput.
+        Uses MERGE to prevent duplicate edges (matched on source/target + namespace).
         """
         if not relationships:
             return 0
@@ -542,21 +570,28 @@ class Neo4jBackend(GraphBackendBase):
                 UNWIND $rows AS row
                 MATCH (source:Entity {{id: row.source_id}})
                 MATCH (target:Entity {{id: row.target_id}})
-                CREATE (source)-[r:{rel_type} {{
-                    id: row.id,
-                    namespace_id: row.namespace_id,
-                    description: row.description,
-                    properties: row.properties,
-                    source_document_ids: row.source_document_ids,
-                    source_chunk_ids: row.source_chunk_ids,
-                    valid_from: row.valid_from,
-                    valid_until: row.valid_until,
-                    confidence: row.confidence,
-                    weight: row.weight,
-                    metadata: row.metadata,
-                    created_at: row.created_at,
-                    updated_at: row.updated_at
-                }}]->(target)
+                MERGE (source)-[r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
+                ON CREATE SET
+                    r.id = row.id,
+                    r.description = row.description,
+                    r.properties = row.properties,
+                    r.source_document_ids = row.source_document_ids,
+                    r.source_chunk_ids = row.source_chunk_ids,
+                    r.valid_from = row.valid_from,
+                    r.valid_until = row.valid_until,
+                    r.confidence = row.confidence,
+                    r.weight = row.weight,
+                    r.metadata = row.metadata,
+                    r.created_at = row.created_at,
+                    r.updated_at = row.updated_at
+                ON MATCH SET
+                    r.description = CASE WHEN size(row.description) > size(coalesce(r.description, ''))
+                        THEN row.description ELSE r.description END,
+                    r.source_document_ids = r.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN r.source_document_ids],
+                    r.source_chunk_ids = r.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN r.source_chunk_ids],
+                    r.confidence = CASE WHEN row.confidence > r.confidence THEN row.confidence ELSE r.confidence END,
+                    r.weight = CASE WHEN row.weight > r.weight THEN row.weight ELSE r.weight END,
+                    r.updated_at = row.updated_at
                 RETURN count(r) AS created
                 """
 
@@ -572,6 +607,33 @@ class Neo4jBackend(GraphBackendBase):
         # Type groups in parallel (different Cypher queries), batches sequential within each
         results = await asyncio.gather(*[_create_type_group(rel_type, rels) for rel_type, rels in type_groups.items()])
         total_created = sum(results)
+
+        # G-5: Create inverse relationships for bidirectional types
+        if not _skip_inverse:
+            inverse_rels = []
+            for rel in relationships:
+                rel_type_str = _sanitize_neo4j_label(
+                    rel.relationship_type.value
+                    if isinstance(rel.relationship_type, RelationshipType)
+                    else rel.relationship_type
+                )
+                inverse_type = BIDIRECTIONAL_TYPES.get(rel_type_str)
+                if inverse_type and inverse_type != rel_type_str:
+                    # Create inverse with swapped source/target
+                    inv = copy(rel)
+                    inv.id = uuid4()
+                    inv.source_entity_id = rel.target_entity_id
+                    inv.target_entity_id = rel.source_entity_id
+                    inv.relationship_type = inverse_type
+                    inv.description = f"Inverse of: {rel.description}" if rel.description else ""
+                    inverse_rels.append(inv)
+
+            if inverse_rels:
+                inverse_count = await self.create_relationships_batch(
+                    inverse_rels, batch_size=batch_size, _skip_inverse=True
+                )
+                total_created += inverse_count
+                logger.debug(f"Created {inverse_count} inverse relationships")
 
         logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
         return total_created
@@ -616,25 +678,32 @@ class Neo4jBackend(GraphBackendBase):
         )
 
         async def _create(tx: AsyncManagedTransaction) -> None:
-            # Use dynamic relationship type
+            # Use dynamic relationship type with MERGE to prevent duplicates
             query = f"""
             MATCH (source:Entity {{id: $source_id}})
             MATCH (target:Entity {{id: $target_id}})
-            CREATE (source)-[r:{rel_type} {{
-                id: $id,
-                namespace_id: $namespace_id,
-                description: $description,
-                properties: $properties,
-                source_document_ids: $source_document_ids,
-                source_chunk_ids: $source_chunk_ids,
-                valid_from: $valid_from,
-                valid_until: $valid_until,
-                confidence: $confidence,
-                weight: $weight,
-                metadata: $metadata,
-                created_at: $created_at,
-                updated_at: $updated_at
-            }}]->(target)
+            MERGE (source)-[r:{rel_type} {{namespace_id: $namespace_id}}]->(target)
+            ON CREATE SET
+                r.id = $id,
+                r.description = $description,
+                r.properties = $properties,
+                r.source_document_ids = $source_document_ids,
+                r.source_chunk_ids = $source_chunk_ids,
+                r.valid_from = $valid_from,
+                r.valid_until = $valid_until,
+                r.confidence = $confidence,
+                r.weight = $weight,
+                r.metadata = $metadata,
+                r.created_at = $created_at,
+                r.updated_at = $updated_at
+            ON MATCH SET
+                r.description = CASE WHEN size($description) > size(coalesce(r.description, ''))
+                    THEN $description ELSE r.description END,
+                r.source_document_ids = r.source_document_ids + [x IN $source_document_ids WHERE NOT x IN r.source_document_ids],
+                r.source_chunk_ids = r.source_chunk_ids + [x IN $source_chunk_ids WHERE NOT x IN r.source_chunk_ids],
+                r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
+                r.weight = CASE WHEN $weight > r.weight THEN $weight ELSE r.weight END,
+                r.updated_at = $updated_at
             """
             await tx.run(query, **params)
 
