@@ -421,7 +421,14 @@ skill = ExtractionSkill.business_intel()
 # Research papers
 skill = ExtractionSkill.research_papers()
 # Types: PERSON, ORGANIZATION, CONCEPT, TECHNOLOGY, EVENT
+
+# Slack messages (v0.3.1)
+skill = ExtractionSkill.slack()
+# Types: PERSON, CHANNEL, TEAM, TOPIC, PROJECT, DECISION
+# Extracts DM recipients, conversation threads, and team dynamics
 ```
+
+The Slack skill (`extraction/skills/builtin/slack.yaml`) is designed for ingesting Slack workspace exports and DM histories. It includes correlation rules for matching users by Slack handle, and inference rules for team membership and collaboration patterns.
 
 ## API Usage
 

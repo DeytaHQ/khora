@@ -2,6 +2,159 @@
 
 All notable changes to Khora are documented here.
 
+## [0.3.1] — Benchmark-Driven Optimizations
+
+### Why: restoring incremental MRR and improving retrieval quality
+
+Benchmark run `2f7d4b0b` revealed that incremental ingestion (add
+documents in multiple batches) produced an MRR of 0.0 — newly ingested
+content was effectively invisible to queries. Root cause analysis by a
+6-specialist agent team identified compounding bugs in entity ID
+mapping, BM25 cache invalidation, and a config mismatch that disabled
+the diversity stage. This release fixes those bugs, then layers on
+graph density, temporal accuracy, evidence quality, and Rust
+acceleration improvements identified during the same analysis.
+
+### Critical bug fixes (P0)
+
+**BM25 cache invalidation.** After `remember()` or `remember_batch()`,
+the GraphRAG engine now calls `invalidate_caches()` on the query engine
+so stale BM25 indexes are rebuilt. Previously, keyword search results
+were frozen to the state at first query.
+
+**Entity ID mapping.** Neo4j's `MERGE` mutates `entity.id` in-place
+when an existing node is found. The post-ingestion ID mapping loop now
+reads from a `pre_upsert_ids` snapshot taken before the MERGE, so
+relationship source/target IDs point at the correct graph nodes.
+
+**Neo4j relationship MERGE semantics.** Relationships now use `MERGE`
+with `ON CREATE SET` / `ON MATCH SET` instead of `CREATE`, preventing
+duplicate edges when the same relationship is ingested across batches.
+
+**Entity unique constraint.** A new Alembic migration
+(`008_entity_dedup_and_indexes`) deduplicates entities by
+`(namespace_id, name, entity_type)`, merges their
+`source_document_ids`, re-points foreign keys, and adds a `UNIQUE`
+constraint. The pgvector backend's entity upsert uses `ON CONFLICT` on
+this constraint.
+
+**`datetime.now(UTC)`.** Four instances of timezone-naive
+`datetime.now()` in `query/temporal.py` now use `datetime.now(UTC)`.
+
+**Temporal sort TypeError.** The fallback key for sorting chunks by
+`created_at` now uses `datetime.min` instead of `0`, preventing
+`TypeError` when comparing `int` to `datetime`.
+
+### Retrieval quality
+
+**MMR diversity enabled by default.** `QuerySettings.enable_diversity`
+now defaults to `True`, matching the `QueryConfig` dataclass. The MMR
+stage (Stage 5) rejects same-document dominance and improves confounder
+rejection.
+
+**Adaptive top-k "very_focused" tier.** Queries with complexity < 0.3
+(single-entity factual lookups) now return at most 3 chunks with a
+0.25 minimum similarity, reducing noise for simple queries.
+
+**Title propagation.** Document titles are propagated into
+`chunk.metadata.custom["title"]` during ingestion, giving the
+cross-encoder reranker reliable title context.
+
+**Selective entity embedding.** Low-value entity types (DATE, URL,
+EMAIL) with mention count ≤ 1 skip embedding generation, reducing LLM
+calls during ingestion. Controlled by
+`KHORA_PIPELINE__SKIP_EMBEDDING_ENTITY_TYPES` and
+`KHORA_PIPELINE__SKIP_EMBEDDING_MENTION_THRESHOLD`.
+
+### Graph density (G-1 through G-6)
+
+**Extraction prompt verification.** The LLM extraction prompt now
+includes a verification instruction asking the model to confirm each
+entity has at least one relationship before returning.
+
+**Two-pass extraction threshold.** The second extraction pass now
+triggers when `num_relationships < max(2, num_entities // 2)` instead
+of the previous fixed `< 2`, catching sparse graphs with many isolated
+entities.
+
+**Expanded INVALID_PAIRS.** Co-occurrence inference now rejects
+DATE↔LOCATION, URL↔LOCATION, and EMAIL↔LOCATION pairs in addition to
+existing invalid combinations.
+
+**More bidirectional types.** Neo4j relationship creation now generates
+reverse edges for LEADS↔LED_BY and ASSIGNED_TO↔HAS_ASSIGNEE, in
+addition to the existing bidirectional types.
+
+### Temporal accuracy (T-1 through T-6)
+
+JSON schema temporal fields, source timestamp propagation, temporal
+re-ranking, session boundary detection, and UTC normalization were all
+implemented. Neo4j now creates temporal indexes on relationship
+`valid_from` and `created_at` properties for the highest-volume
+relationship types.
+
+### Database optimizations
+
+**HNSW tuning.** Migration `007_hnsw_parameter_tuning` sets `m=24`
+and `ef_construction=128` (up from 16/64), improving vector recall at
+the cost of slightly larger indexes.
+
+**Halfvec infrastructure.** `StorageSettings.use_halfvec` enables
+float16 HNSW indexes (requires pgvector ≥ 0.7.0). Column data remains
+full precision.
+
+**Entity temporal indexes.** Partial indexes on `entities.valid_from`
+and `entities.valid_until` (WHERE NOT NULL) accelerate temporal
+filtering.
+
+**khora_chunks composite index.** New index on
+`khora_chunks(namespace_id, document_id)` supports Skeleton and
+VectorCypher engine queries.
+
+### Rust acceleration
+
+**MMR diversity selection.** New `mmr.rs` module implements greedy
+Maximal Marginal Relevance in Rust with SIMD-friendly dot product, GIL
+release, and incremental max-similarity tracking. 10-50x faster than
+the Python loop. Falls back to NumPy, then pure Python.
+
+**Pre-normalized embeddings.** The LiteLLM embedder now L2-normalizes
+all embeddings at ingest time. Scoring switches from
+`batch_cosine_similarity` to `batch_dot_product` (~3x faster since it
+skips redundant normalization).
+
+**Temporal filtering.** New `temporal.rs` module provides batch
+datetime comparison and recency scoring with rayon parallelism and GIL
+release.
+
+### Cross-narrative contamination (N-1, N-2)
+
+Narrative coherence scoring and source-aware context assembly were
+added to reduce cross-topic contamination in multi-document memory
+lakes.
+
+### Genesis integration (GN-1, GN-2, GN-3)
+
+GitHub and Jira sources now route to `technical_project` expertise.
+The rule engine supports up to 8 inference conditions. A new Slack
+skill (`extraction/skills/builtin/slack.yaml`) provides DM recipient
+extraction guidance with MESSAGED and SENT_MESSAGE_TO relationship
+types.
+
+### Integration tests
+
+25 new tests in `tests/integration/test_incremental_ingestion.py`
+cover batch 1/2/3 ingestion, entity MERGE across batches, relationship
+MERGE, BM25 cache invalidation, and full remember→recall flows.
+
+### Migrations
+
+- `007_hnsw_parameter_tuning` — HNSW m=24, ef_construction=128
+- `008_entity_dedup_and_indexes` — Entity dedup + unique constraint,
+  khora_chunks composite index, entity temporal partial indexes
+
+---
+
 ## [0.3.0] — Engineering Improvements
 
 ### Why: removing accidental complexity
