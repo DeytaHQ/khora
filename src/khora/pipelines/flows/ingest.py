@@ -51,7 +51,8 @@ def _should_skip_entity_embedding(
     if not skip_types:
         return False
     entity_type = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
-    if entity_type.upper() not in (t.upper() for t in skip_types):
+    _skip_upper = frozenset(t.upper() for t in skip_types)
+    if entity_type.upper() not in _skip_upper:
         return False
     # threshold=0 means skip all entities of these types unconditionally
     if mention_threshold == 0:
@@ -179,13 +180,16 @@ async def stream_extract_and_embed_entities(
 
             # Process results and queue entities
             all_entities: dict[str, Entity] = {}
+            chunk_entity_keys: dict[UUID, list[str]] = {}  # chunk_id -> entity keys
 
             for chunk, result in zip(chunks, results):
+                chunk_keys: list[str] = []
                 for extracted in result.entities:
                     if extracted.confidence < min_entity_confidence:
                         continue
 
                     key = f"{normalize_entity_name(extracted.name)}:{extracted.entity_type}"
+                    chunk_keys.append(key)
                     if key in all_entities:
                         existing = all_entities[key]
                         existing.mention_count += 1
@@ -230,6 +234,8 @@ async def stream_extract_and_embed_entities(
                         # Queue entity for embedding as soon as it's extracted
                         await entity_queue.put(entity)
 
+                chunk_entity_keys[chunk.id] = chunk_keys
+
                 # Process relationships
                 for extracted_rel in result.relationships:
                     if extracted_rel.confidence < min_relationship_confidence:
@@ -265,6 +271,44 @@ async def stream_extract_and_embed_entities(
                             valid_until=_rvu,
                         )
                         all_relationships.append(relationship)
+
+            # 1.1: Add co-occurrence edges between entities in the same chunk
+            existing_pairs: set[tuple[UUID, UUID]] = {
+                (r.source_entity_id, r.target_entity_id) for r in all_relationships
+            }
+            existing_pairs |= {(r.target_entity_id, r.source_entity_id) for r in all_relationships}
+            co_occurrence_count = 0
+            for chunk in chunks:
+                keys = chunk_entity_keys.get(chunk.id, [])
+                unique_keys = list(dict.fromkeys(keys))  # dedupe, preserve order
+                if len(unique_keys) < 2:
+                    continue
+                for i, key_a in enumerate(unique_keys):
+                    for key_b in unique_keys[i + 1 :]:
+                        if key_a not in all_entities or key_b not in all_entities:
+                            continue
+                        ent_a = all_entities[key_a]
+                        ent_b = all_entities[key_b]
+                        pair = (min(ent_a.id, ent_b.id), max(ent_a.id, ent_b.id))
+                        if pair in existing_pairs or (pair[1], pair[0]) in existing_pairs:
+                            continue
+                        existing_pairs.add(pair)
+                        all_relationships.append(
+                            Relationship(
+                                namespace_id=chunk.namespace_id,
+                                source_entity_id=ent_a.id,
+                                target_entity_id=ent_b.id,
+                                relationship_type="ASSOCIATED_WITH",
+                                description="Co-occurs in same chunk",
+                                properties={},
+                                source_document_ids=[chunk.document_id],
+                                source_chunk_ids=[chunk.id],
+                                confidence=0.4,
+                            )
+                        )
+                        co_occurrence_count += 1
+            if co_occurrence_count:
+                logger.debug(f"Added {co_occurrence_count} co-occurrence edges")
 
         finally:
             # Signal completion

@@ -6,7 +6,6 @@ queries within a configurable time-to-live window.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -26,13 +25,13 @@ class QueryCache:
         self._cache: dict[str, tuple[datetime, Any]] = {}
         self._max_size = max_size
         self._ttl = timedelta(seconds=ttl_seconds)
-        self._lock = asyncio.Lock()
         self._hits = 0
         self._misses = 0
 
     @staticmethod
     def _make_key(query: str, namespace_id: UUID, mode: str) -> str:
-        return sha256(f"{query}:{namespace_id}:{mode}".encode()).hexdigest()
+        normalized = query.strip().lower()
+        return sha256(f"{normalized}:{namespace_id}:{mode}".encode()).hexdigest()
 
     async def get(self, query: str, namespace_id: UUID, mode: str) -> Any | None:
         """Look up a cached result.
@@ -40,18 +39,17 @@ class QueryCache:
         Returns None on miss or expiry.
         """
         key = self._make_key(query, namespace_id, mode)
-        async with self._lock:
-            entry = self._cache.get(key)
-            if entry is not None:
-                timestamp, result = entry
-                if datetime.now() - timestamp < self._ttl:
-                    self._hits += 1
-                    self._record_cache_event(True, namespace_id)
-                    return result
-                del self._cache[key]
-            self._misses += 1
-            self._record_cache_event(False, namespace_id)
-            return None
+        entry = self._cache.get(key)
+        if entry is not None:
+            timestamp, result = entry
+            if datetime.now() - timestamp < self._ttl:
+                self._hits += 1
+                self._record_cache_event(True, namespace_id)
+                return result
+            del self._cache[key]
+        self._misses += 1
+        self._record_cache_event(False, namespace_id)
+        return None
 
     @staticmethod
     def _record_cache_event(hit: bool, namespace_id: UUID) -> None:
@@ -69,11 +67,10 @@ class QueryCache:
     async def set(self, query: str, namespace_id: UUID, mode: str, result: Any) -> None:
         """Store a result in the cache, evicting the oldest entry if full."""
         key = self._make_key(query, namespace_id, mode)
-        async with self._lock:
-            if len(self._cache) >= self._max_size:
-                oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
-                del self._cache[oldest_key]
-            self._cache[key] = (datetime.now(), result)
+        if len(self._cache) >= self._max_size:
+            oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
+            del self._cache[oldest_key]
+        self._cache[key] = (datetime.now(), result)
 
     async def invalidate(self, namespace_id: UUID | None = None) -> int:
         """Remove entries, optionally filtered by namespace.
@@ -86,16 +83,15 @@ class QueryCache:
         Returns:
             Number of entries removed.
         """
-        async with self._lock:
-            if namespace_id is None:
-                count = len(self._cache)
-                self._cache.clear()
-                return count
-            # Namespace is hashed into the key, so we can't filter efficiently.
-            # Clear everything as a safe fallback.
+        if namespace_id is None:
             count = len(self._cache)
             self._cache.clear()
             return count
+        # Namespace is hashed into the key, so we can't filter efficiently.
+        # Clear everything as a safe fallback.
+        count = len(self._cache)
+        self._cache.clear()
+        return count
 
     @property
     def stats(self) -> dict[str, int]:

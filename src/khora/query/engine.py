@@ -497,7 +497,7 @@ class HybridQueryEngine:
         self._cache = QueryCache()
 
         # Understanding cache (keyed by normalized query + namespace)
-        self._understanding_cache = QueryCache(max_size=500, ttl_seconds=120)
+        self._understanding_cache = QueryCache(max_size=500, ttl_seconds=600)
 
         # Keyword searcher (built per namespace)
         self._keyword_searchers: dict[str, KeywordSearcher] = {}
@@ -645,15 +645,21 @@ class HybridQueryEngine:
                     # Use lightweight prompt unless caller explicitly opted out
                     use_lightweight = _lightweight_understanding if _lightweight_understanding is not None else True
                     async with pipeline_stage("query", "understanding", _run_id, namespace_id=namespace_id):
-                        understanding = await self._query_understanding.understand(
+                        understanding_coro = self._query_understanding.understand(
                             query_text,
                             expand_query=cfg.enable_query_expansion,
                             extract_entities=cfg.enable_entity_extraction,
                             detect_temporal=cfg.enable_temporal_detection,
                             lightweight=use_lightweight,
                         )
+                        try:
+                            understanding = await asyncio.wait_for(understanding_coro, timeout=2.0)
+                        except TimeoutError:
+                            logger.warning("Query understanding timed out after 2s, using heuristic fallback")
+                            understanding = self._heuristic_understanding(query_text)
                     # Cache the understanding result
-                    await self._understanding_cache.set(query_text, namespace_id, "understanding", understanding)
+                    if understanding is not None:
+                        await self._understanding_cache.set(query_text, namespace_id, "understanding", understanding)
                 except Exception as e:
                     logger.warning(f"Query understanding failed: {e}")
 
@@ -1107,11 +1113,9 @@ class HybridQueryEngine:
                         boosted_entities.append((entity, score))
                 fused_entities = sorted(boosted_entities, key=lambda x: x[1], reverse=True)
 
-            # Step 5: Apply temporal filter (batch-accelerated via Rust)
+            # Step 5: Apply soft temporal scoring (exponential decay outside window)
             if temporal_filter:
-                from .temporal import batch_filter_chunks
-
-                fused_chunks = batch_filter_chunks(fused_chunks, temporal_filter)
+                fused_chunks = self._soft_temporal_score(fused_chunks, temporal_filter)
 
             # Apply recency bias (batch-accelerated via Rust)
             if cfg.apply_recency_bias:
@@ -1183,10 +1187,11 @@ class HybridQueryEngine:
         metadata["temporal"] = temporal_info.to_dict()
         metadata["metrics"] = metrics.to_dict()
 
-        # Cross-session expansion: when few results are found and chunks
-        # carry session_id metadata (conversation data), search adjacent
-        # sessions to improve recall across session boundaries.
-        if len(fused_chunks) < 2:
+        # Cross-session expansion: when few results are found or temporal
+        # intent is detected, search adjacent sessions to improve recall
+        # across session boundaries.
+        _has_temporal_intent = understanding is not None and getattr(understanding, "has_temporal", False)
+        if len(fused_chunks) < 2 or _has_temporal_intent:
             expanded = await self._expand_adjacent_sessions(fused_chunks, namespace_id)
             if expanded:
                 fused_chunks = expanded
@@ -1515,24 +1520,55 @@ class HybridQueryEngine:
 
         # Batch fetch all chunks in a single query
         if chunk_ids_to_fetch:
+            from khora._accel import batch_dot_product
+
             chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch)
 
-            # Embedding similarity filtering: when a query embedding is available,
-            # drop graph-sourced chunks whose embedding is too dissimilar.
             _min_graph_sim = 0.3
-            for chunk_id, chunk in chunks_map.items():
-                entity, score = chunk_id_to_info[chunk_id]
-                # Score based on entity score and mention count
-                chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
 
-                # Filter by similarity when query_embedding is provided
-                # (embeddings are pre-normalized at ingest, so dot product == cosine)
-                if query_embedding is not None and chunk.embedding is not None:
-                    sim = sum(a * b for a, b in zip(query_embedding, chunk.embedding))
-                    if sim < _min_graph_sim:
-                        continue
-                # If no embedding on chunk, include anyway (fallback)
-                chunks.append((chunk, chunk_score))
+            # Separate chunks with/without embeddings for batch processing
+            if query_embedding is not None:
+                # Collect chunks that have embeddings for batch dot product
+                embeddable_ids: list[Any] = []
+                embeddable_embeddings: list[list[float]] = []
+                no_embedding_ids: list[Any] = []
+
+                for chunk_id, chunk in chunks_map.items():
+                    if chunk.embedding is not None:
+                        embeddable_ids.append(chunk_id)
+                        embeddable_embeddings.append(chunk.embedding)
+                    else:
+                        no_embedding_ids.append(chunk_id)
+
+                # Batch compute similarities for all chunks with embeddings
+                sim_results: dict[Any, float] = {}
+                if embeddable_embeddings:
+                    dot_scores = batch_dot_product(query_embedding, embeddable_embeddings, threshold=0.0)
+                    for idx, sim in dot_scores:
+                        sim_results[embeddable_ids[idx]] = sim
+
+                # Score chunks: blend query similarity with entity score
+                for chunk_id, chunk in chunks_map.items():
+                    entity, score = chunk_id_to_info[chunk_id]
+                    entity_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+
+                    if chunk_id in sim_results:
+                        query_sim = sim_results[chunk_id]
+                        if query_sim < _min_graph_sim:
+                            continue
+                        # Blend: 60% query similarity + 40% entity score
+                        chunk_score = 0.6 * query_sim + 0.4 * entity_score
+                    else:
+                        # No embedding — fall back to entity score only
+                        chunk_score = entity_score
+
+                    chunks.append((chunk, chunk_score))
+            else:
+                # No query embedding — use entity scores only
+                for chunk_id, chunk in chunks_map.items():
+                    entity, score = chunk_id_to_info[chunk_id]
+                    chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+                    chunks.append((chunk, chunk_score))
 
         return {
             "source": "graph",
@@ -1786,6 +1822,27 @@ class HybridQueryEngine:
         return True
 
     @staticmethod
+    def _heuristic_understanding(query_text: str) -> UnderstandingResult | None:
+        """Build a lightweight UnderstandingResult from heuristics when LLM times out."""
+        from .understanding import AnswerType, QueryIntent, TemporalReference
+
+        has_temporal = bool(_TEMPORAL_PATTERN.search(query_text))
+        temporal_refs: list[TemporalReference] = []
+        if has_temporal:
+            for m in _TEMPORAL_PATTERN.finditer(query_text):
+                temporal_refs.append(TemporalReference(type="relative", text=m.group()))
+
+        return UnderstandingResult(
+            original_query=query_text,
+            intent=QueryIntent.TEMPORAL if has_temporal else QueryIntent.SEARCH,
+            answer_type=AnswerType.UNKNOWN,
+            temporal_references=temporal_refs,
+            keywords=re.findall(r"\b\w{3,}\b", query_text.lower()),
+            complexity_score=0.5,
+            reasoning="heuristic fallback (LLM timeout)",
+        )
+
+    @staticmethod
     def _attribute_relevance_boost(entity: Any, keywords: list[str]) -> float:
         """Score boost based on entity attribute value matches with query keywords.
 
@@ -1865,6 +1922,119 @@ class HybridQueryEngine:
             blended.append((chunk, blended_score))
         blended.sort(key=lambda x: x[1], reverse=True)
         return blended
+
+    @staticmethod
+    def _soft_temporal_score(
+        chunks: list[tuple[Any, float]],
+        temporal_filter: TemporalFilter,
+    ) -> list[tuple[Any, float]]:
+        """Apply soft temporal scoring with exponential decay.
+
+        Chunks inside the temporal window keep full score.
+        Chunks outside get exponential decay based on distance.
+        Chunks >30 days outside are hard-filtered.
+        """
+        import math
+
+        from .temporal import TemporalFilter as _TF
+        from .temporal import _dt_to_epoch
+
+        start, end = temporal_filter.get_effective_times()
+        start_secs = _dt_to_epoch(_TF._normalize_tz(start)) if start else None
+        end_secs = _dt_to_epoch(_TF._normalize_tz(end)) if end else None
+
+        _SECS_PER_DAY = 86400.0
+        _HARD_CUTOFF_DAYS = 30.0
+        _HALF_LIFE_HOURS = 24.0
+        _DECAY_FACTOR = -0.6931471805599453 / (_HALF_LIFE_HOURS * 3600.0)
+
+        result: list[tuple[Any, float]] = []
+        for chunk, score in chunks:
+            created_at = getattr(chunk, "created_at", None)
+            if created_at is None:
+                result.append((chunk, score))
+                continue
+
+            ts = _dt_to_epoch(_TF._normalize_tz(created_at))
+            if ts is None:
+                result.append((chunk, score))
+                continue
+
+            # Check if inside window
+            inside = True
+            secs_outside = 0.0
+            if start_secs is not None and ts < start_secs:
+                inside = False
+                secs_outside = start_secs - ts
+            elif end_secs is not None and ts > end_secs:
+                inside = False
+                secs_outside = ts - end_secs
+
+            if inside:
+                result.append((chunk, score))
+            else:
+                days_outside = secs_outside / _SECS_PER_DAY
+                if days_outside > _HARD_CUTOFF_DAYS:
+                    continue
+                decay = math.exp(_DECAY_FACTOR * secs_outside)
+                result.append((chunk, score * decay))
+
+        result.sort(key=lambda x: x[1], reverse=True)
+        return result
+
+    @staticmethod
+    def _apply_entity_presence_scoring(
+        chunks: list[tuple[Any, float]],
+        understanding: Any,
+    ) -> list[tuple[Any, float]]:
+        """Apply entity-presence penalty for confounder rejection.
+
+        For each chunk, check how many query-mentioned entities appear in
+        the chunk text (case-insensitive). Apply multiplicative penalty
+        based on entity match ratio.
+        """
+        entity_names: list[str] = []
+        for e in understanding.entities:
+            entity_names.append(e.name.lower())
+            for alias in getattr(e, "aliases", []) or []:
+                entity_names.append(alias.lower())
+
+        if not entity_names:
+            return chunks
+
+        result: list[tuple[Any, float]] = []
+        for chunk, score in chunks:
+            content = getattr(chunk, "content", "")
+            if not content or not entity_names:
+                result.append((chunk, score))
+                continue
+
+            content_lower = content.lower()
+            # Count how many unique query entities appear in the chunk
+            unique_entities = {e.name.lower() for e in understanding.entities}
+            matched = 0
+            for ename in unique_entities:
+                if ename in content_lower:
+                    matched += 1
+                    continue
+                # Check aliases
+                aliases = []
+                for e in understanding.entities:
+                    if e.name.lower() == ename:
+                        aliases = [a.lower() for a in (getattr(e, "aliases", []) or [])]
+                        break
+                if any(a in content_lower for a in aliases):
+                    matched += 1
+
+            if len(unique_entities) > 0:
+                match_ratio = matched / len(unique_entities)
+                penalty = max(0.5, match_ratio)
+                result.append((chunk, score * penalty))
+            else:
+                result.append((chunk, score))
+
+        result.sort(key=lambda x: x[1], reverse=True)
+        return result
 
     # -------------------------------------------------------------------------
     # Multi-Stage Ranking Pipeline
@@ -2317,11 +2487,11 @@ class HybridQueryEngine:
         """
         filtered_chunks = chunks
 
-        # Apply temporal filter (batch-accelerated via Rust)
+        # Apply soft temporal scoring instead of hard filtering.
+        # Chunks inside the window get full score; chunks outside get
+        # exponential decay.  Only hard-filter chunks >30 days outside.
         if temporal_filter:
-            from .temporal import batch_filter_chunks
-
-            filtered_chunks = batch_filter_chunks(filtered_chunks, temporal_filter)
+            filtered_chunks = self._soft_temporal_score(filtered_chunks, temporal_filter)
 
         # Apply recency bias (batch-accelerated via Rust)
         if config.apply_recency_bias:
@@ -2346,6 +2516,11 @@ class HybridQueryEngine:
                 for entity, score in entities
             ]
             entities.sort(key=lambda x: x[1], reverse=True)
+
+        # Entity-presence scoring for confounder rejection:
+        # penalize chunks that don't mention query-referenced entities.
+        if understanding and understanding.entities and filtered_chunks:
+            filtered_chunks = self._apply_entity_presence_scoring(filtered_chunks, understanding)
 
         # Limit to stage3_filter_limit
         filtered_chunks = filtered_chunks[: config.stage3_filter_limit]
@@ -2459,6 +2634,7 @@ class HybridQueryEngine:
         Returns:
             Selected chunks with adjusted scores
         """
+        from khora._accel import batch_dot_product as _bdp
         from khora._accel import mmr_diversity_select, normalize_embeddings_batch
 
         if len(chunks) <= k:
@@ -2487,8 +2663,11 @@ class HybridQueryEngine:
         norm_query = normalized[0]
         norm_embeddings = normalized[1:]
 
-        # Relevance = dot(norm_query, norm_embedding_i) for each candidate
-        scores = [sum(a * b for a, b in zip(norm_query, emb)) for emb in norm_embeddings]
+        # Relevance = batch dot product (Rust/NumPy accelerated)
+        dot_results = _bdp(norm_query, norm_embeddings, threshold=0.0)
+        scores = [0.0] * len(norm_embeddings)
+        for idx, sim in dot_results:
+            scores[idx] = sim
 
         # Run MMR selection on pre-normalized embeddings
         selected_indices = mmr_diversity_select(norm_embeddings, scores, lambda_param, k)

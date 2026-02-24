@@ -272,8 +272,24 @@ class LLMEntityExtractor(EntityExtractor):
         for m in _PROPER_NOUN_RE.finditer(text):
             _add(m.group(), "PERSON", 0.5)
 
+        # Create pairwise CO_OCCURS_WITH relationships for co-occurring entities
+        relationships: list[ExtractedRelationship] = []
+        if len(entities) >= 2:
+            for i, e1 in enumerate(entities):
+                for e2 in entities[i + 1 :]:
+                    relationships.append(
+                        ExtractedRelationship(
+                            source_entity=e1.name,
+                            target_entity=e2.name,
+                            relationship_type="CO_OCCURS_WITH",
+                            description="Co-occurs in same text",
+                            confidence=0.4,
+                        )
+                    )
+
         return ExtractionResult(
             entities=entities,
+            relationships=relationships,
             metadata={"extraction_method": "regex"},
         )
 
@@ -721,7 +737,7 @@ class LLMEntityExtractor(EntityExtractor):
         """
         num_entities = len(result.entities)
         num_relationships = len(result.relationships)
-        return num_entities > 3 and num_relationships < max(2, num_entities // 2)
+        return num_entities >= 2 and num_relationships < num_entities - 1
 
     async def _extract_additional_relationships(
         self,
