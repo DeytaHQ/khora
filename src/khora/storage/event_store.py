@@ -69,6 +69,7 @@ class PostgreSQLEventStore(AsyncSessionMixin):
                 echo=self._echo,
                 pool_size=self._pool_size,
                 max_overflow=self._max_overflow,
+                connect_args={"sslmode": "disable"},
             )
         self._session_factory = async_sessionmaker(
             self._engine,

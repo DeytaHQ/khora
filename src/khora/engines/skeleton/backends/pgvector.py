@@ -106,7 +106,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
         if database_url.startswith("postgresql://"):
             database_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
 
-        self._engine = create_async_engine(database_url, pool_size=5, max_overflow=10)
+        self._engine = create_async_engine(
+            database_url, pool_size=5, max_overflow=10, connect_args={"sslmode": "disable"}
+        )
 
         # Create tables if they don't exist
         async with self._engine.begin() as conn:

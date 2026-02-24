@@ -174,6 +174,7 @@ class StorageFactory:
                 echo=echo,
                 pool_size=pool_size,
                 max_overflow=max_overflow,
+                connect_args={"sslmode": "disable"},
             )
             logger.debug(f"Created shared engine for {key}")
         return self._engine_cache[key]
