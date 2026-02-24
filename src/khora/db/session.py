@@ -51,7 +51,7 @@ class DatabaseManager:
                 echo=os.getenv("KHORA_DEBUG", "").lower() == "true",
                 pool_size=20,
                 max_overflow=30,
-                connect_args={"sslmode": "disable"},
+                connect_args={"ssl": False},
             )
         return self._engine
 

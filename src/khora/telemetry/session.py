@@ -28,5 +28,5 @@ def create_telemetry_engine(database_url: str) -> AsyncEngine:
         pool_size=5,
         max_overflow=5,
         pool_pre_ping=True,
-        connect_args={"sslmode": "disable"},
+        connect_args={"ssl": False},
     )

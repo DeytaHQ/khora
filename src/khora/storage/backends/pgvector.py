@@ -101,7 +101,7 @@ class PgVectorBackend(AsyncSessionMixin):
                 echo=self._echo,
                 pool_size=self._pool_size,
                 max_overflow=self._max_overflow,
-                connect_args={"sslmode": "disable"},
+                connect_args={"ssl": False},
             )
 
         self._session_factory = async_sessionmaker(
