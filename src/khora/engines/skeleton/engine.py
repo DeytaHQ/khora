@@ -556,16 +556,15 @@ class SkeletonConstructionEngine:
         storage = self._get_storage()
         temporal_store = self._get_temporal_store()
 
-        # Verify namespace if provided
+        # Fetch document once and verify namespace if provided
+        document = await storage.get_document(document_id)
         if namespace_id:
-            document = await storage.get_document(document_id)
             if document and document.namespace_id != namespace_id:
                 logger.warning(f"Document {document_id} not in namespace {namespace_id}")
                 return False
 
         # Delete from temporal store
-        doc = await storage.get_document(document_id)
-        ns_id = namespace_id or (doc.namespace_id if doc else namespace_id)
+        ns_id = namespace_id or (document.namespace_id if document else namespace_id)
         if ns_id is None:
             logger.warning(f"Cannot determine namespace for document {document_id}")
             return False
