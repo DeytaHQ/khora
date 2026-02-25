@@ -44,6 +44,7 @@ try:
     from khora_accel import batch_temporal_filter as _rust_batch_temporal_filter
     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
     from khora_accel import cosine_similarity as _rust_cosine
+    from khora_accel import detect_communities as _rust_detect_communities
     from khora_accel import extract_keywords as _rust_extract_keywords
     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
     from khora_accel import levenshtein_similarity as _rust_levenshtein
@@ -1066,6 +1067,100 @@ def batch_dot_product(
 # ---------------------------------------------------------------------------
 # MMR diversity selection
 # ---------------------------------------------------------------------------
+
+
+def detect_communities(
+    n: int,
+    edges: list[tuple[int, int, float]],
+    resolution: float = 1.0,
+    max_iter: int = 10,
+) -> list[int]:
+    """Detect communities using Louvain-style modularity optimization.
+
+    Args:
+        n: Number of nodes (IDs are 0..n-1).
+        edges: (src, dst, weight) triples (undirected — provide both directions).
+        resolution: Modularity resolution parameter (higher = smaller communities).
+        max_iter: Maximum optimization passes.
+
+    Returns:
+        Community ID per node (0-indexed, -1 for isolated nodes).
+    """
+    if _HAS_RUST:
+        return _rust_detect_communities(n, edges, resolution, max_iter)
+
+    # Pure-Python fallback (same Louvain algorithm)
+    if n == 0:
+        return []
+
+    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+    strengths: list[float] = [0.0] * n
+    total_weight = 0.0
+
+    for src, dst, weight in edges:
+        if 0 <= src < n and 0 <= dst < n and src != dst:
+            adj[src].append((dst, weight))
+            strengths[src] += weight
+            total_weight += weight
+
+    m = total_weight / 2.0
+    if m == 0.0:
+        return [-1] * n
+
+    community: list[int] = list(range(n))
+    sigma_tot: list[float] = list(strengths)
+
+    for _ in range(max_iter):
+        moved = False
+
+        for i in range(n):
+            if strengths[i] == 0.0:
+                continue
+
+            ki = strengths[i]
+            ci = community[i]
+
+            sigma_tot[ci] -= ki
+
+            k_in: dict[int, float] = {}
+            for nb, w in adj[i]:
+                cnb = community[nb]
+                k_in[cnb] = k_in.get(cnb, 0.0) + w
+
+            k_i_in_ci = k_in.get(ci, 0.0)
+            gain_ci = k_i_in_ci / m - resolution * sigma_tot[ci] * ki / (2.0 * m * m)
+
+            best_c = ci
+            best_gain = gain_ci
+
+            for c, k_i_in_c in k_in.items():
+                if c == ci:
+                    continue
+                gain = k_i_in_c / m - resolution * sigma_tot[c] * ki / (2.0 * m * m)
+                if gain > best_gain:
+                    best_gain = gain
+                    best_c = c
+
+            community[i] = best_c
+            sigma_tot[best_c] += ki
+
+            if best_c != ci:
+                moved = True
+
+        if not moved:
+            break
+
+    id_map: dict[int, int] = {}
+    result: list[int] = [-1] * n
+
+    for i in range(n):
+        if strengths[i] > 0.0:
+            c = community[i]
+            if c not in id_map:
+                id_map[c] = len(id_map)
+            result[i] = id_map[c]
+
+    return result
 
 
 def mmr_diversity_select(

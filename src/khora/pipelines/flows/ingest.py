@@ -80,6 +80,88 @@ def _find_entity_key(normalized_name: str, all_entities: dict[str, Any]) -> str 
     return best_key
 
 
+async def _extract_cross_chunk_relationships(
+    chunks: list,
+    entities_by_chunk: dict,
+    extractor,
+    extraction_context: dict,
+    *,
+    max_windows: int = 50,
+) -> list:
+    """Extract relationships spanning chunk boundaries via overlapping windows.
+
+    Creates overlapping windows of 2 consecutive chunks and runs the extractor
+    on the combined text to find relationships between entities that cross chunk
+    boundaries. Deduplicates results across windows by (source, rel_type, target).
+
+    This is opt-in — requires ``cross_chunk_extraction=True`` in extraction_context.
+    Increases LLM calls by up to ``len(chunks) - 1`` (capped at ``max_windows``).
+
+    Args:
+        chunks: Chunk objects with ``.content``, ``.id``, and optional ``.metadata.chunk_index``
+        entities_by_chunk: Mapping of chunk_id to list of entity name strings in that chunk
+        extractor: Initialized entity extractor (e.g. LLMEntityExtractor)
+        extraction_context: Context dict; must contain ``cross_chunk_extraction=True``
+        max_windows: Maximum windows to process (cap on extra LLM calls)
+
+    Returns:
+        Deduplicated list of ExtractedRelationship objects found across windows
+    """
+    if not extraction_context.get("cross_chunk_extraction", False):
+        return []
+    if len(chunks) < 2:
+        return []
+
+    def _chunk_index(c) -> int:
+        if hasattr(c, "metadata") and c.metadata and hasattr(c.metadata, "chunk_index"):
+            return c.metadata.chunk_index or 0
+        return 0
+
+    sorted_chunks = sorted(chunks, key=_chunk_index)
+    seen_triples: set[tuple[str, str, str]] = set()
+    new_relationships: list = []
+
+    for i in range(min(len(sorted_chunks) - 1, max_windows)):
+        chunk_a = sorted_chunks[i]
+        chunk_b = sorted_chunks[i + 1]
+
+        names_a = entities_by_chunk.get(chunk_a.id, [])
+        names_b = entities_by_chunk.get(chunk_b.id, [])
+        all_names = list(dict.fromkeys(names_a + names_b))  # dedupe, preserve order
+
+        if not all_names:
+            continue
+
+        combined_text = f"{chunk_a.content}\n\n{chunk_b.content}"
+        window_ctx = {**extraction_context, "known_entities": all_names}
+
+        try:
+            results = await extractor.extract_multi(
+                [combined_text],
+                batch_size=1,
+                max_input_tokens=None,
+                context=window_ctx,
+            )
+        except Exception as exc:
+            logger.warning(f"Cross-chunk extraction failed for window {i}: {exc}")
+            continue
+
+        if not results:
+            continue
+
+        for extracted_rel in results[0].relationships:
+            triple = (
+                extracted_rel.source_entity.lower(),
+                (extracted_rel.relationship_type or "").upper(),
+                extracted_rel.target_entity.lower(),
+            )
+            if triple not in seen_triples:
+                seen_triples.add(triple)
+                new_relationships.append(extracted_rel)
+
+    return new_relationships
+
+
 async def stream_extract_and_embed_entities(
     chunks: list[Chunk],
     embedder: Embedder,
@@ -321,6 +403,56 @@ async def stream_extract_and_embed_entities(
                         co_occurrence_count += 1
             if co_occurrence_count:
                 logger.debug(f"Added {co_occurrence_count} co-occurrence edges")
+
+            # 3.3: Cross-chunk relationship extraction (opt-in, disabled by default)
+            if extraction_context and extraction_context.get("cross_chunk_extraction", False):
+                _entities_by_chunk: dict[UUID, list[str]] = {
+                    cid: [k.split(":")[0] for k in keys] for cid, keys in chunk_entity_keys.items()
+                }
+                cross_rels_raw = await _extract_cross_chunk_relationships(
+                    chunks, _entities_by_chunk, extractor, extraction_context
+                )
+                if cross_rels_raw:
+                    logger.info(f"Cross-chunk extraction: found {len(cross_rels_raw)} candidate relationships")
+                    added_cross = 0
+                    for extracted_rel in cross_rels_raw:
+                        norm_src = _norm_cache.get(
+                            extracted_rel.source_entity,
+                            extracted_rel.source_entity.lower().strip(),
+                        )
+                        norm_tgt = _norm_cache.get(
+                            extracted_rel.target_entity,
+                            extracted_rel.target_entity.lower().strip(),
+                        )
+                        source_key = _find_entity_key(norm_src, all_entities)
+                        target_key = _find_entity_key(norm_tgt, all_entities)
+                        if not source_key or not target_key:
+                            continue
+                        ent_a = all_entities[source_key]
+                        ent_b = all_entities[target_key]
+                        pair = (min(ent_a.id, ent_b.id), max(ent_a.id, ent_b.id))
+                        if pair in existing_pairs or (pair[1], pair[0]) in existing_pairs:
+                            continue
+                        existing_pairs.add(pair)
+                        try:
+                            cross_rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
+                        except ValueError:
+                            cross_rel_type = extracted_rel.relationship_type or "RELATES_TO"
+                        all_relationships.append(
+                            Relationship(
+                                namespace_id=chunks[0].namespace_id,
+                                source_entity_id=ent_a.id,
+                                target_entity_id=ent_b.id,
+                                relationship_type=cross_rel_type,
+                                description=extracted_rel.description,
+                                properties=getattr(extracted_rel, "properties", {}),
+                                source_document_ids=[chunks[0].document_id],
+                                source_chunk_ids=[],
+                                confidence=extracted_rel.confidence,
+                            )
+                        )
+                        added_cross += 1
+                    logger.debug(f"Cross-chunk extraction: added {added_cross} new relationships")
 
         finally:
             # Signal completion

@@ -1144,6 +1144,159 @@ class Neo4jBackend(GraphBackendBase):
 
             return neighborhoods
 
+    async def get_temporal_neighbors(
+        self,
+        entity_id: UUID,
+        namespace_id: UUID,
+        *,
+        valid_after: datetime | None = None,
+        valid_before: datetime | None = None,
+        max_hops: int = 2,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get neighboring entities connected via relationships within a time window.
+
+        Traverses 1..max_hops relationships and filters by their valid_from/valid_until
+        properties to return only temporally relevant neighbors.
+
+        Args:
+            entity_id: Starting entity ID
+            namespace_id: Namespace to restrict traversal to
+            valid_after: Only traverse relationships where valid_from >= this value
+            valid_before: Only traverse relationships where valid_until <= this value
+            max_hops: Maximum path length (1–4 recommended)
+            limit: Maximum neighbor entities to return
+
+        Returns:
+            List of neighbor entity property dicts
+        """
+        driver = self._get_driver()
+
+        params: dict[str, Any] = {
+            "entity_id": str(entity_id),
+            "namespace_id": str(namespace_id),
+            "limit": limit,
+        }
+
+        rel_conditions: list[str] = []
+        if valid_after is not None:
+            rel_conditions.append("(rel.valid_from IS NULL OR rel.valid_from >= $valid_after)")
+            params["valid_after"] = valid_after.isoformat()
+        if valid_before is not None:
+            rel_conditions.append("(rel.valid_until IS NULL OR rel.valid_until <= $valid_before)")
+            params["valid_before"] = valid_before.isoformat()
+
+        temporal_filter = ""
+        if rel_conditions:
+            conditions_str = " AND ".join(rel_conditions)
+            temporal_filter = f"\n  AND ALL(rel IN r WHERE {conditions_str})"
+
+        query = f"""
+        MATCH (e:Entity {{id: $entity_id, namespace_id: $namespace_id}})
+        MATCH (e)-[r*1..{max_hops}]-(neighbor:Entity)
+        WHERE neighbor.namespace_id = $namespace_id
+          AND neighbor.id <> $entity_id{temporal_filter}
+        RETURN DISTINCT properties(neighbor) AS props
+        LIMIT $limit
+        """
+
+        async def _read(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+            result = await tx.run(query, **params)
+            records = await result.data()
+            return [r["props"] for r in records]
+
+        async with driver.session(database=self._database) as session:
+            return await session.execute_read(_read)
+
+    async def create_session_links(
+        self,
+        namespace_id: UUID,
+    ) -> int:
+        """Create NEXT_SESSION edges between consecutive session chunks.
+
+        Reads Chunk nodes from the namespace, groups them by session_id stored
+        in their metadata, orders sessions by earliest chunk timestamp, and
+        creates NEXT_SESSION relationships from the last chunk of each session
+        to the first chunk of the next session.
+
+        Args:
+            namespace_id: Namespace to process
+
+        Returns:
+            Number of NEXT_SESSION edges created
+        """
+        driver = self._get_driver()
+
+        # Step 1: Fetch all chunk IDs, timestamps, and metadata
+        async def _fetch_chunks(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+            result = await tx.run(
+                """
+                MATCH (c:Chunk {namespace_id: $namespace_id})
+                RETURN c.id AS id,
+                       coalesce(c.occurred_at, c.created_at) AS ts,
+                       c.metadata AS metadata
+                ORDER BY ts
+                """,
+                namespace_id=str(namespace_id),
+            )
+            return await result.data()
+
+        async with driver.session(database=self._database) as session:
+            rows = await session.execute_read(_fetch_chunks)
+
+        if not rows:
+            return 0
+
+        # Step 2: Group chunks by session_id (stored in serialized metadata JSON)
+        sessions: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            metadata = _deserialize_dict(row.get("metadata"))
+            session_id = (metadata or {}).get("session_id")
+            if not session_id:
+                continue
+            sessions.setdefault(str(session_id), []).append(row)
+
+        if len(sessions) < 2:
+            return 0
+
+        # Step 3: Sort sessions by earliest chunk timestamp
+        ordered_sessions = sorted(
+            sessions.values(),
+            key=lambda chunks: min(
+                (c["ts"] for c in chunks if c.get("ts")),
+                default="",
+            ),
+        )
+
+        # Step 4: Build (last_of_session_A, first_of_session_B) link pairs
+        links = [
+            {"from_id": ordered_sessions[i][-1]["id"], "to_id": ordered_sessions[i + 1][0]["id"]}
+            for i in range(len(ordered_sessions) - 1)
+        ]
+
+        if not links:
+            return 0
+
+        async def _create_links(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                """
+                UNWIND $links AS link
+                MATCH (a:Chunk {id: link.from_id})
+                MATCH (b:Chunk {id: link.to_id})
+                MERGE (a)-[r:NEXT_SESSION]->(b)
+                RETURN count(r) AS created
+                """,
+                links=links,
+            )
+            record = await result.single()
+            return record["created"] if record else 0
+
+        async with driver.session(database=self._database) as session:
+            created = await session.execute_write(_create_links)
+
+        logger.debug(f"Created {created} NEXT_SESSION edges for namespace {namespace_id}")
+        return created
+
     async def search_entities_by_attribute(
         self,
         namespace_id: UUID,
