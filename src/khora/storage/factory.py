@@ -281,6 +281,7 @@ class StorageFactory:
                 user=self.config.neo4j_user,
                 password=self.config.neo4j_password,
                 database=self.config.neo4j_database,
+                max_connection_pool_size=100,
             )
         except ImportError:
             logger.warning("neo4j package not installed, graph backend disabled")
