@@ -6,7 +6,6 @@ in Neo4j graph database.
 
 from __future__ import annotations
 
-import asyncio
 import re as _re
 from copy import copy
 from datetime import datetime
@@ -519,8 +518,19 @@ class Neo4jBackend(GraphBackendBase):
 
         results: list[tuple[Entity, bool]] = []
 
-        for start in range(0, len(entities), batch_size):
-            batch = entities[start : start + batch_size]
+        # Sort entities by MERGE key to ensure deterministic lock ordering
+        # across concurrent transactions, preventing deadlocks.
+        sorted_entities = sorted(
+            entities,
+            key=lambda e: (
+                str(e.namespace_id),
+                e.name,
+                e.entity_type.value if isinstance(e.entity_type, EntityType) else e.entity_type,
+            ),
+        )
+
+        for start in range(0, len(sorted_entities), batch_size):
+            batch = sorted_entities[start : start + batch_size]
             rows = [_entity_to_cypher_params(e) for e in batch]
 
             async def _upsert_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
@@ -564,12 +574,12 @@ class Neo4jBackend(GraphBackendBase):
         relationships: list[Relationship],
         *,
         batch_size: int = 200,
-        _skip_inverse: bool = False,
     ) -> int:
-        """Batch create relationships using UNWIND with parallel type processing.
+        """Batch create relationships using UNWIND with sequential type processing.
 
-        Relationships are grouped by type and each type group is processed
-        in parallel using separate Neo4j sessions for better throughput.
+        Relationships (including inverse/bidirectional) are grouped by type
+        and each type group is processed sequentially in sorted order to
+        ensure deterministic lock ordering and prevent Neo4j deadlocks.
         Uses MERGE to prevent duplicate edges (matched on source/target + namespace).
         """
         if not relationships:
@@ -577,9 +587,28 @@ class Neo4jBackend(GraphBackendBase):
 
         driver = self._get_driver()
 
+        # Build inverse relationships upfront so they share the same pass,
+        # eliminating a second round of write transactions on overlapping nodes.
+        all_rels = list(relationships)
+        for rel in relationships:
+            rel_type_str = _sanitize_neo4j_label(
+                rel.relationship_type.value
+                if isinstance(rel.relationship_type, RelationshipType)
+                else rel.relationship_type
+            )
+            inverse_type = BIDIRECTIONAL_TYPES.get(rel_type_str)
+            if inverse_type and inverse_type != rel_type_str:
+                inv = copy(rel)
+                inv.id = uuid4()
+                inv.source_entity_id = rel.target_entity_id
+                inv.target_entity_id = rel.source_entity_id
+                inv.relationship_type = inverse_type
+                inv.description = f"Inverse of: {rel.description}" if rel.description else ""
+                all_rels.append(inv)
+
         # Group by relationship type (required for dynamic rel type in Cypher)
         type_groups: dict[str, list[Relationship]] = {}
-        for rel in relationships:
+        for rel in all_rels:
             rel_type = _sanitize_neo4j_label(
                 rel.relationship_type.value
                 if isinstance(rel.relationship_type, RelationshipType)
@@ -589,9 +618,12 @@ class Neo4jBackend(GraphBackendBase):
 
         async def _create_type_group(rel_type: str, rels: list[Relationship]) -> int:
             """Create all batches for a single relationship type sequentially."""
+            # Sort by (source_entity_id, target_entity_id) to ensure deterministic
+            # lock ordering across concurrent transactions.
+            sorted_rels = sorted(rels, key=lambda r: (str(r.source_entity_id), str(r.target_entity_id)))
             type_total = 0
-            for start in range(0, len(rels), batch_size):
-                batch = rels[start : start + batch_size]
+            for start in range(0, len(sorted_rels), batch_size):
+                batch = sorted_rels[start : start + batch_size]
                 rows = [_relationship_to_cypher_params(r) for r in batch]
                 query = f"""
                 UNWIND $rows AS row
@@ -631,38 +663,17 @@ class Neo4jBackend(GraphBackendBase):
                     type_total += await session.execute_write(_tx)
             return type_total
 
-        # Type groups in parallel (different Cypher queries), batches sequential within each
-        results = await asyncio.gather(*[_create_type_group(rel_type, rels) for rel_type, rels in type_groups.items()])
-        total_created = sum(results)
+        # Process type groups sequentially in sorted order for deterministic
+        # lock ordering across concurrent callers, preventing deadlocks.
+        total_created = 0
+        for rel_type in sorted(type_groups):
+            total_created += await _create_type_group(rel_type, type_groups[rel_type])
 
-        # G-5: Create inverse relationships for bidirectional types
-        if not _skip_inverse:
-            inverse_rels = []
-            for rel in relationships:
-                rel_type_str = _sanitize_neo4j_label(
-                    rel.relationship_type.value
-                    if isinstance(rel.relationship_type, RelationshipType)
-                    else rel.relationship_type
-                )
-                inverse_type = BIDIRECTIONAL_TYPES.get(rel_type_str)
-                if inverse_type and inverse_type != rel_type_str:
-                    # Create inverse with swapped source/target
-                    inv = copy(rel)
-                    inv.id = uuid4()
-                    inv.source_entity_id = rel.target_entity_id
-                    inv.target_entity_id = rel.source_entity_id
-                    inv.relationship_type = inverse_type
-                    inv.description = f"Inverse of: {rel.description}" if rel.description else ""
-                    inverse_rels.append(inv)
+        inverse_count = len(all_rels) - len(relationships)
+        if inverse_count > 0:
+            logger.debug(f"Included {inverse_count} inverse relationships")
 
-            if inverse_rels:
-                inverse_count = await self.create_relationships_batch(
-                    inverse_rels, batch_size=batch_size, _skip_inverse=True
-                )
-                total_created += inverse_count
-                logger.debug(f"Created {inverse_count} inverse relationships")
-
-        logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
+        logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types sequentially)")
         return total_created
 
     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
