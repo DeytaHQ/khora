@@ -29,6 +29,10 @@ from khora.storage.backends.mixins import serialize_dict as _serialize_dict
 # LLM-generated types like "at-risk" or "works for" need sanitizing.
 _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
 
+# Limits concurrent Neo4j relationship write transactions across ALL
+# documents to prevent cross-document deadlocks on overlapping entity nodes.
+_RELATIONSHIP_WRITE_SEM = asyncio.Semaphore(8)
+
 
 # Bidirectional relationship types and their inverses
 BIDIRECTIONAL_TYPES: dict[str, str] = {
@@ -667,10 +671,8 @@ class Neo4jBackend(GraphBackendBase):
         # Bounded parallelism — up to 4 concurrent type groups to restore
         # throughput while limiting deadlock surface. The driver's built-in
         # retry (retry_delay_jitter_factor=0.5) handles any remaining contention.
-        _sem = asyncio.Semaphore(4)
-
         async def _limited_create(rel_type: str, rels: list[Relationship]) -> int:
-            async with _sem:
+            async with _RELATIONSHIP_WRITE_SEM:
                 return await _create_type_group(rel_type, rels)
 
         results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
