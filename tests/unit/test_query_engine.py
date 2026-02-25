@@ -113,7 +113,7 @@ class TestQueryConfig:
         assert config.apply_recency_bias is True
         assert config.enable_query_understanding is False
         assert config.reranking_method == "llm"
-        assert config.enable_hyde is True
+        assert config.enable_hyde == "always"
         # Multi-stage assertions
         assert config.enable_multi_stage is True
         assert config.stage1_recall_limit == 150

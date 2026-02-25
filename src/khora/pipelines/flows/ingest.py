@@ -16,7 +16,7 @@ from uuid import UUID
 
 from loguru import logger
 
-from khora._accel import normalize_entity_name
+from khora._accel import normalize_entity_names_batch
 
 from ..registry import pipeline
 
@@ -182,13 +182,25 @@ async def stream_extract_and_embed_entities(
             all_entities: dict[str, Entity] = {}
             chunk_entity_keys: dict[UUID, list[str]] = {}  # chunk_id -> entity keys
 
+            # 2.10: Batch-normalize all entity names upfront (single FFI call)
+            _all_names: set[str] = set()
+            for _r in results:
+                for _e in _r.entities:
+                    _all_names.add(_e.name)
+                for _rel in _r.relationships:
+                    _all_names.add(_rel.source_entity)
+                    _all_names.add(_rel.target_entity)
+            _names_list = list(_all_names)
+            _normalized_names = normalize_entity_names_batch(_names_list) if _names_list else []
+            _norm_cache: dict[str, str] = dict(zip(_names_list, _normalized_names))
+
             for chunk, result in zip(chunks, results):
                 chunk_keys: list[str] = []
                 for extracted in result.entities:
                     if extracted.confidence < min_entity_confidence:
                         continue
 
-                    key = f"{normalize_entity_name(extracted.name)}:{extracted.entity_type}"
+                    key = f"{_norm_cache[extracted.name]}:{extracted.entity_type}"
                     chunk_keys.append(key)
                     if key in all_entities:
                         existing = all_entities[key]
@@ -220,7 +232,7 @@ async def stream_extract_and_embed_entities(
 
                         entity = Entity(
                             namespace_id=chunk.namespace_id,
-                            name=normalize_entity_name(extracted.name),
+                            name=_norm_cache[extracted.name],
                             entity_type=entity_type,
                             description=extracted.description,
                             attributes=extracted.attributes,
@@ -246,8 +258,8 @@ async def stream_extract_and_embed_entities(
                     except ValueError:
                         rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
-                    norm_source = normalize_entity_name(extracted_rel.source_entity)
-                    norm_target = normalize_entity_name(extracted_rel.target_entity)
+                    norm_source = _norm_cache[extracted_rel.source_entity]
+                    norm_target = _norm_cache[extracted_rel.target_entity]
                     source_key = _find_entity_key(norm_source, all_entities)
                     target_key = _find_entity_key(norm_target, all_entities)
 
@@ -476,6 +488,70 @@ async def stage_document(
     )
 
     return await storage.create_document(document)
+
+
+async def stage_documents_batch(
+    doc_inputs: list[dict[str, Any]],
+    namespace_id: UUID,
+    storage: StorageCoordinator,
+) -> list[Document | None]:
+    """Batch stage documents with single-query checksum dedup.
+
+    Computes all checksums upfront and checks for existing documents
+    in a single batch query instead of N individual queries.
+
+    Returns:
+        List parallel to doc_inputs: Document if new, None if unchanged
+    """
+    from datetime import UTC, datetime
+
+    from khora.core.models import Document, DocumentMetadata
+
+    if not doc_inputs:
+        return []
+
+    # Compute all checksums upfront
+    checksums = [compute_checksum(doc.get("content", "")) for doc in doc_inputs]
+
+    # Single batch query for existing documents (replaces N individual queries)
+    existing = await storage.get_documents_by_checksums(namespace_id, checksums)
+
+    results: list[Document | None] = []
+    for doc_input, checksum in zip(doc_inputs, checksums):
+        if checksum in existing:
+            logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing[checksum].status})")
+            results.append(None)
+            continue
+
+        content = doc_input.get("content", "")
+        custom_metadata = doc_input.get("metadata", {})
+        metadata = DocumentMetadata(
+            source=doc_input.get("source", ""),
+            source_type=doc_input.get("source_type", "manual"),
+            content_type=doc_input.get("content_type", "text/plain"),
+            title=doc_input.get("title", ""),
+            author=doc_input.get("author", ""),
+            language=doc_input.get("language", "en"),
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            custom=custom_metadata,
+        )
+
+        source_timestamp = _extract_source_timestamp(custom_metadata)
+        created_at = source_timestamp or datetime.now(UTC)
+
+        document = Document(
+            namespace_id=namespace_id,
+            content=content,
+            metadata=metadata,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+        doc = await storage.create_document(document)
+        results.append(doc)
+
+    return results
 
 
 async def process_document(
@@ -803,11 +879,16 @@ async def process_document(
 
                 store_results: list[tuple[Entity, bool]] = []
 
+                # Batch-normalize entity names for mapping (single FFI call)
+                _store_names = list({e.name for e, _ in upsert_results} | {e.name for e in entities})
+                _store_normalized = normalize_entity_names_batch(_store_names) if _store_names else []
+                _store_norm = dict(zip(_store_names, _store_normalized))
+
                 # Build name+type -> stored_id mapping from upsert results
                 name_type_to_stored: dict[str, str] = {}
                 for entity, is_new in upsert_results:
                     et = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
-                    key = f"{normalize_entity_name(entity.name)}:{et}"
+                    key = f"{_store_norm[entity.name]}:{et}"
                     stored_id = str(entity.id)
                     name_type_to_stored[key] = stored_id
                     entity_id_mapping[stored_id] = stored_id
@@ -821,7 +902,7 @@ async def process_document(
                         if hasattr(orig_entity.entity_type, "value")
                         else str(orig_entity.entity_type)
                     )
-                    key = f"{normalize_entity_name(orig_entity.name)}:{et}"
+                    key = f"{_store_norm[orig_entity.name]}:{et}"
                     stored_id = name_type_to_stored.get(key)
                     if stored_id:
                         entity_id_mapping[str(orig_entity.id)] = stored_id
@@ -1037,16 +1118,9 @@ async def ingest_documents(
             if existing_entities:
                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
 
-    # Phase 1: Stage documents (can run in parallel too)
-    # Staging ops are fast (~5ms each), so matching doc concurrency is sufficient.
-    # Higher values just queue in the SA pool without throughput benefit.
-    staging_semaphore = asyncio.Semaphore(max_concurrent_documents)
-
-    async def stage_with_limit(doc_input):
-        async with staging_semaphore:
-            return await stage_document(doc_input, namespace_id, storage)
-
-    staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+    # Phase 1: Batch checksum dedup + stage new documents
+    # Single batch query replaces N individual get_document_by_checksum calls.
+    staged_results = await stage_documents_batch(documents, namespace_id, storage)
     staged_docs = [doc for doc in staged_results if doc is not None]
 
     # Build mapping from staged doc ID to original dict for per-doc overrides

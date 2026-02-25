@@ -28,7 +28,7 @@ from .linking import EntityLinker, LinkingResult
 from .metrics import SearchMetrics
 from .reranking import RerankCandidate, create_reranker
 from .temporal import TemporalFilter, TemporalQuery
-from .understanding import QueryUnderstanding, UnderstandingResult
+from .understanding import QueryIntent, QueryUnderstanding, UnderstandingResult
 
 _TEMPORAL_PATTERN = re.compile(
     r"\b(yesterday|today|last\s+\w+|this\s+\w+|ago|since|before|after|"
@@ -357,6 +357,7 @@ class QueryConfig:
     # Reranking settings
     enable_reranking: bool = True
     reranking_method: str = "cross_encoder"
+    reranking_model: str | None = None
     reranking_top_n: int = 50
     reranking_final_k: int = 10
 
@@ -365,7 +366,7 @@ class QueryConfig:
     keyword_search_method: str = "fulltext"
 
     # HyDE settings
-    enable_hyde: bool = False
+    enable_hyde: str = "auto"
     hyde_num_hypotheticals: int = 1
 
     # Multi-stage ranking pipeline settings
@@ -422,13 +423,18 @@ class QueryConfig:
             # Reranking
             enable_reranking=settings.enable_reranking,
             reranking_method=settings.reranking_method,
+            reranking_model=settings.reranking_model,
             reranking_top_n=settings.reranking_top_n,
             reranking_final_k=settings.reranking_final_k,
             # Keyword search
             enable_keyword_search=settings.enable_keyword_search,
             keyword_search_method=settings.keyword_search_method,
-            # HyDE
-            enable_hyde=settings.enable_hyde,
+            # HyDE — settings.enable_hyde is already normalized to str by the validator
+            enable_hyde=(
+                settings.enable_hyde
+                if isinstance(settings.enable_hyde, str)
+                else ("always" if settings.enable_hyde else "never")
+            ),
             hyde_num_hypotheticals=settings.hyde_num_hypotheticals,
             # Multi-stage ranking pipeline
             enable_multi_stage=settings.enable_multi_stage,
@@ -480,9 +486,9 @@ class HybridQueryEngine:
         # Entity linker (created per-query with embedder)
         self._entity_linker: EntityLinker | None = None
 
-        # HyDE expander
+        # HyDE expander — create if mode allows HyDE (auto or always)
         self._hyde_expander: HyDEExpander | None = None  # type: ignore[unresolved-reference]
-        if self._config.enable_hyde and self._embedder:
+        if self._config.enable_hyde in ("auto", "always") and self._embedder:
             from .hyde import HyDEExpander
 
             self._hyde_expander = HyDEExpander(
@@ -504,6 +510,11 @@ class HybridQueryEngine:
 
         # Cached rerankers (keyed by method name) so model is loaded once
         self._rerankers: dict[str, Any] = {}
+
+        # Per-query entity similarity cache to avoid duplicate DB queries
+        # when both _vector_search and _graph_search need entity similarities.
+        # Keyed by id(embedding), cleared at the start of each query().
+        self._entity_similarity_cache: dict[int, asyncio.Task[Any]] = {}
 
     def invalidate_caches(self, namespace_id: UUID) -> None:
         """Invalidate BM25 keyword index and query caches for a namespace.
@@ -581,6 +592,9 @@ class HybridQueryEngine:
             )
 
         cfg = config or self._config
+
+        # Clear per-query entity similarity cache
+        self._entity_similarity_cache.clear()
 
         # Check cache
         cached = await self._cache.get(query_text, namespace_id, cfg.mode.name)
@@ -705,14 +719,15 @@ class HybridQueryEngine:
                     cfg.keyword_weight = understanding.search_strategy.keyword_weight
                     cfg.max_graph_depth = understanding.search_strategy.graph_depth
 
-                # Adaptive top-k: very focused tier for single-entity queries
+                # Adaptive top-k: reduce evidence for focused queries, but keep
+                # a generous floor to avoid losing evidence chunks.
                 if (
                     understanding.complexity_score < 0.3
                     and not understanding.requires_multi_step
-                    and cfg.max_chunks > 3
+                    and cfg.max_chunks > 8
                 ):
-                    cfg.max_chunks = 3
-                    cfg.max_entities = 3
+                    cfg.max_chunks = 8
+                    cfg.max_entities = 8
                     cfg.min_chunk_similarity = max(cfg.min_chunk_similarity, 0.25)
                     cfg.min_entity_similarity = max(cfg.min_entity_similarity, 0.25)
                     metadata["adaptive_top_k"] = {"reduced": True, "reason": "very_focused"}
@@ -720,14 +735,13 @@ class HybridQueryEngine:
                         f"Adaptive top-k: very_focused to {cfg.max_chunks} "
                         f"(complexity={understanding.complexity_score:.2f})"
                     )
-                # Adaptive top-k: reduce evidence for single-topic queries
                 elif (
                     understanding.complexity_score < 0.5
                     and not understanding.requires_multi_step
-                    and cfg.max_chunks > 5
+                    and cfg.max_chunks > 8
                 ):
-                    cfg.max_chunks = 5
-                    cfg.max_entities = 5
+                    cfg.max_chunks = 8
+                    cfg.max_entities = 8
                     cfg.min_chunk_similarity = max(cfg.min_chunk_similarity, 0.15)
                     cfg.min_entity_similarity = max(cfg.min_entity_similarity, 0.15)
                     metadata["adaptive_top_k"] = {"reduced": True, "reason": "single_topic"}
@@ -800,10 +814,16 @@ class HybridQueryEngine:
         if self._embedder and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
             query_embedding = await self._embedder.embed(query_text)
 
-            # Apply HyDE expansion
+            # Apply HyDE expansion based on mode
             if query_embedding is not None and self._hyde_expander:
-                query_embedding = await self._hyde_expander.expand_query_embedding(query_text, query_embedding)
-                metadata["hyde_applied"] = True
+                should_hyde = False
+                if cfg.enable_hyde == "always":
+                    should_hyde = True
+                elif cfg.enable_hyde == "auto" and understanding is not None:
+                    should_hyde = understanding.complexity_score > 0.6 or understanding.intent == QueryIntent.TEMPORAL
+                if should_hyde:
+                    query_embedding = await self._hyde_expander.expand_query_embedding(query_text, query_embedding)
+                    metadata["hyde_applied"] = True
 
         # Step 3-7: Execute search pipeline (multi-stage or legacy)
         if cfg.enable_multi_stage:
@@ -862,13 +882,27 @@ class HybridQueryEngine:
             metrics.search_timer.start()
             search_start_time = time.perf_counter()
 
+            # Pre-compute expanded query embeddings in parallel (2.7)
+            expanded_embeddings: dict[int, list[float] | None] = {0: query_embedding}
+            if (
+                self._embedder
+                and len(queries_to_search) > 1
+                and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL)
+            ):
+                embed_tasks = [self._embedder.embed(queries_to_search[i]) for i in range(1, len(queries_to_search))]
+                embed_results = await asyncio.gather(*embed_tasks, return_exceptions=True)
+                for idx, result in enumerate(embed_results):
+                    if isinstance(result, Exception):
+                        logger.warning(f"Failed to embed expanded query {idx + 1}: {result}")
+                        expanded_embeddings[idx + 1] = None
+                    else:
+                        expanded_embeddings[idx + 1] = result
+
             for i, q in enumerate(queries_to_search):
                 suffix = "" if i == 0 else f"_exp{i}"
 
-                # Get query embedding for expanded queries
-                current_embedding = query_embedding if i == 0 else None
-                if self._embedder and i > 0 and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
-                    current_embedding = await self._embedder.embed(q)
+                # Use pre-computed embedding
+                current_embedding = expanded_embeddings.get(i)
 
                 # Execute searches in parallel based on mode
                 tasks = []
@@ -1130,6 +1164,7 @@ class HybridQueryEngine:
                     if cfg.reranking_method not in self._rerankers:
                         self._rerankers[cfg.reranking_method] = create_reranker(
                             method=cfg.reranking_method,
+                            model=cfg.reranking_model,
                             llm_config=self._llm_config,
                         )
                     reranker = self._rerankers[cfg.reranking_method]
@@ -1192,7 +1227,7 @@ class HybridQueryEngine:
         # across session boundaries.
         _has_temporal_intent = understanding is not None and getattr(understanding, "has_temporal", False)
         if len(fused_chunks) < 2 or _has_temporal_intent:
-            expanded = await self._expand_adjacent_sessions(fused_chunks, namespace_id)
+            expanded = await self._expand_adjacent_sessions(fused_chunks, namespace_id, understanding=understanding)
             if expanded:
                 fused_chunks = expanded
                 metadata["session_expansion"] = True
@@ -1216,16 +1251,20 @@ class HybridQueryEngine:
         self,
         chunks: list[tuple[Any, float]],
         namespace_id: UUID,
+        *,
+        understanding: UnderstandingResult | None = None,
     ) -> list[tuple[Any, float]] | None:
-        """Expand search to adjacent sessions when few results are found.
+        """Expand search to sessions sharing entities with the current results.
 
-        When conversation chunks carry ``session_id`` metadata and the initial
-        search returns sparse results, this fetches chunks from neighbouring
-        sessions (session_id ± 1) to improve cross-session recall.
+        Uses entity-based linking: extracts entity names from the query
+        understanding and current results, then searches for other chunks
+        mentioning those entities. Falls back to sequential session_id ± 1
+        adjacency if entity-based expansion finds nothing.
 
         Args:
             chunks: Current (sparse) result set.
             namespace_id: Namespace to search in.
+            understanding: Query understanding result for entity names.
 
         Returns:
             Expanded chunk list, or ``None`` if expansion was not applicable.
@@ -1233,13 +1272,51 @@ class HybridQueryEngine:
         if not chunks:
             return None
 
-        # Collect session IDs from result chunks
+        existing_ids = {str(c.id) for c, _ in chunks}
+
+        # --- Entity-based expansion ---
+        # Collect entity names from query understanding
+        entity_names: list[str] = []
+        if understanding and understanding.entities:
+            for e in understanding.entities:
+                entity_names.append(e.name)
+                entity_names.extend(e.aliases)
+
+        if entity_names:
+            entity_chunks: list[tuple[Any, float]] = []
+            # Search for chunks mentioning query entities (limit queries to avoid unbounded work)
+            for name in entity_names[:5]:
+                try:
+                    results = await self._storage.search_fulltext_chunks(
+                        namespace_id,
+                        name,
+                        limit=5,
+                    )
+                    for chunk_or_tuple in results:
+                        if isinstance(chunk_or_tuple, tuple):
+                            chunk_obj, score = chunk_or_tuple
+                        else:
+                            chunk_obj, score = chunk_or_tuple, 0.3
+                        if str(chunk_obj.id) not in existing_ids:
+                            entity_chunks.append((chunk_obj, score * 0.7))
+                            existing_ids.add(str(chunk_obj.id))
+                except Exception:
+                    continue
+
+            if entity_chunks:
+                expanded = list(chunks) + entity_chunks
+                logger.debug(
+                    f"Session expansion (entity-based): added {len(entity_chunks)} chunks "
+                    f"for entities {entity_names[:5]}"
+                )
+                return expanded
+
+        # --- Fallback: sequential session_id ± 1 ---
         session_ids: set[int] = set()
         for chunk, _ in chunks:
             meta = getattr(chunk, "metadata", None)
             if meta is None:
                 continue
-            # Support both dict and object-style metadata
             if isinstance(meta, dict):
                 sid = meta.get("session_id") or (meta.get("custom", {}) or {}).get("session_id")
             else:
@@ -1251,17 +1328,15 @@ class HybridQueryEngine:
         if not session_ids:
             return None
 
-        # Build adjacent session IDs
         adjacent: set[int] = set()
         for sid in session_ids:
             adjacent.add(sid - 1)
             adjacent.add(sid + 1)
-        adjacent -= session_ids  # Only look at sessions we don't already have
+        adjacent -= session_ids
 
         if not adjacent:
             return None
 
-        # Query storage for chunks with adjacent session IDs
         try:
             adjacent_chunks = await self._storage.search_chunks_by_metadata(
                 namespace_id,
@@ -1269,7 +1344,6 @@ class HybridQueryEngine:
                 limit=10,
             )
         except (AttributeError, NotImplementedError):
-            # Storage backend doesn't support metadata search
             logger.debug("Session expansion skipped: storage does not support metadata search")
             return None
         except Exception as e:
@@ -1279,8 +1353,6 @@ class HybridQueryEngine:
         if not adjacent_chunks:
             return None
 
-        # Merge: original chunks first, then adjacent with a discounted score
-        existing_ids = {str(c.id) for c, _ in chunks}
         expanded = list(chunks)
         for adj_chunk in adjacent_chunks:
             if isinstance(adj_chunk, tuple):
@@ -1288,11 +1360,12 @@ class HybridQueryEngine:
             else:
                 chunk_obj, score = adj_chunk, 0.3
             if str(chunk_obj.id) not in existing_ids:
-                expanded.append((chunk_obj, score * 0.8))  # Discount adjacent session results
+                expanded.append((chunk_obj, score * 0.8))
                 existing_ids.add(str(chunk_obj.id))
 
         logger.debug(
-            f"Session expansion: added {len(expanded) - len(chunks)} chunks " f"from adjacent sessions {adjacent}"
+            f"Session expansion (sequential): added {len(expanded) - len(chunks)} chunks "
+            f"from adjacent sessions {adjacent}"
         )
         return expanded
 
@@ -1383,6 +1456,33 @@ class HybridQueryEngine:
             result["latency_ms"] = latency_ms
         return result
 
+    async def _cached_entity_search(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        limit: int,
+        min_similarity: float,
+    ) -> list[tuple[UUID, float]]:
+        """Search similar entities with per-query deduplication.
+
+        Uses a shared asyncio.Task so concurrent calls from _vector_search
+        and _graph_search within the same asyncio.gather share a single
+        database query.
+        """
+        cache_key = id(query_embedding)
+        if cache_key not in self._entity_similarity_cache:
+            max_limit = max(limit, 20)
+            self._entity_similarity_cache[cache_key] = asyncio.ensure_future(
+                self._storage.search_similar_entities(
+                    namespace_id,
+                    query_embedding,
+                    limit=max_limit,
+                    min_similarity=min_similarity,
+                )
+            )
+        results = await self._entity_similarity_cache[cache_key]
+        return results[:limit]
+
     async def _vector_search(
         self,
         namespace_id: UUID,
@@ -1398,8 +1498,8 @@ class HybridQueryEngine:
             min_similarity=config.min_chunk_similarity,
         )
 
-        # Search entities
-        entity_ids_scores = await self._storage.search_similar_entities(
+        # Search entities (uses per-query cache to deduplicate with _graph_search)
+        entity_ids_scores = await self._cached_entity_search(
             namespace_id,
             query_embedding,
             limit=config.max_entities * 2,
@@ -1454,9 +1554,9 @@ class HybridQueryEngine:
                     linked_scores[entity_id] = 1.0  # High confidence from linking
                     seen_entity_ids.add(entity_id)
 
-        # Similar entities via embedding
+        # Similar entities via embedding (uses per-query cache to deduplicate with _vector_search)
         if query_embedding is not None:
-            entity_ids_scores = await self._storage.search_similar_entities(
+            entity_ids_scores = await self._cached_entity_search(
                 namespace_id,
                 query_embedding,
                 limit=5,
@@ -1470,6 +1570,7 @@ class HybridQueryEngine:
                     seen_entity_ids.add(entity_id)
 
             # Fallback: if no entities found, retry with no threshold
+            # (not cached — different parameters, only fires when primary returns empty)
             if not all_entity_ids_to_fetch and config.min_entity_similarity > 0:
                 entity_ids_scores = await self._storage.search_similar_entities(
                     namespace_id,
@@ -2261,13 +2362,27 @@ class HybridQueryEngine:
 
         search_start_time = time.perf_counter()
 
+        # Pre-compute expanded query embeddings in parallel (2.7)
+        expanded_embeddings: dict[int, list[float] | None] = {0: query_embedding}
+        if (
+            self._embedder
+            and len(queries_to_search) > 1
+            and config.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL)
+        ):
+            embed_tasks = [self._embedder.embed(queries_to_search[i]) for i in range(1, len(queries_to_search))]
+            embed_results = await asyncio.gather(*embed_tasks, return_exceptions=True)
+            for idx, result in enumerate(embed_results):
+                if isinstance(result, Exception):
+                    logger.warning(f"Failed to embed expanded query {idx + 1}: {result}")
+                    expanded_embeddings[idx + 1] = None
+                else:
+                    expanded_embeddings[idx + 1] = result
+
         for i, q in enumerate(queries_to_search):
             suffix = "" if i == 0 else f"_exp{i}"
 
-            # Get query embedding for this query variant
-            current_embedding = query_embedding if i == 0 else None
-            if self._embedder and i > 0 and config.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
-                current_embedding = await self._embedder.embed(q)
+            # Use pre-computed embedding
+            current_embedding = expanded_embeddings.get(i)
 
             # Execute searches in parallel
             tasks = []
@@ -2550,6 +2665,7 @@ class HybridQueryEngine:
             if config.reranking_method not in self._rerankers:
                 self._rerankers[config.reranking_method] = create_reranker(
                     method=config.reranking_method,
+                    model=config.reranking_model,
                     llm_config=self._llm_config,
                 )
             reranker = self._rerankers[config.reranking_method]
