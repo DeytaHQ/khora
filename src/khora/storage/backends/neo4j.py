@@ -114,7 +114,9 @@ class Neo4jBackend(GraphBackendBase):
         user: str = "neo4j",
         password: str = "",
         database: str = "neo4j",
-        max_connection_pool_size: int = 50,
+        max_connection_pool_size: int = 100,
+        connection_acquisition_timeout: float = 30.0,
+        retry_delay_jitter_factor: float = 0.5,
     ) -> None:
         """Initialize the Neo4j backend.
 
@@ -124,12 +126,16 @@ class Neo4jBackend(GraphBackendBase):
             password: Database password
             database: Database name
             max_connection_pool_size: Maximum connection pool size
+            connection_acquisition_timeout: Timeout waiting for a connection from the pool
+            retry_delay_jitter_factor: Jitter factor for transaction retry delays (0.0-1.0)
         """
         self._url = url
         self._user = user
         self._password = password
         self._database = database
         self._max_connection_pool_size = max_connection_pool_size
+        self._connection_acquisition_timeout = connection_acquisition_timeout
+        self._retry_delay_jitter_factor = retry_delay_jitter_factor
         self._driver: AsyncDriver | None = None
         self._owns_driver: bool = True
 
@@ -141,6 +147,9 @@ class Neo4jBackend(GraphBackendBase):
             user=config.user,
             password=config.password,
             database=config.database,
+            max_connection_pool_size=getattr(config, "max_connection_pool_size", 100),
+            connection_acquisition_timeout=getattr(config, "connection_acquisition_timeout", 30.0),
+            retry_delay_jitter_factor=getattr(config, "retry_delay_jitter_factor", 0.5),
         )
 
     @classmethod
@@ -163,6 +172,8 @@ class Neo4jBackend(GraphBackendBase):
         instance._password = ""
         instance._database = database
         instance._max_connection_pool_size = 0
+        instance._connection_acquisition_timeout = 30.0
+        instance._retry_delay_jitter_factor = 0.5
         instance._driver = driver
         instance._owns_driver = False
         return instance
@@ -179,6 +190,8 @@ class Neo4jBackend(GraphBackendBase):
             self._url,
             auth=(self._user, self._password),
             max_connection_pool_size=self._max_connection_pool_size,
+            connection_acquisition_timeout=self._connection_acquisition_timeout,
+            retry_delay_jitter_factor=self._retry_delay_jitter_factor,
         )
         # Verify connectivity
         await self._driver.verify_connectivity()

@@ -61,6 +61,13 @@ class Neo4jConfig(BaseModel):
     user: str = Field(default="neo4j", description="Neo4j username")
     password: str = Field(default="", description="Neo4j password")
     database: str = Field(default="neo4j", description="Neo4j database name")
+    max_connection_pool_size: int = Field(default=100, description="Neo4j connection pool size")
+    connection_acquisition_timeout: float = Field(
+        default=30.0, description="Timeout in seconds waiting for a connection from the pool"
+    )
+    retry_delay_jitter_factor: float = Field(
+        default=0.5, description="Jitter factor for transaction retry delays (0.0-1.0)"
+    )
 
 
 class KuzuConfig(BaseModel):
