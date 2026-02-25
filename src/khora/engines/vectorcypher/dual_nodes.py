@@ -510,6 +510,85 @@ class DualNodeManager:
 
         return {record["source_id"]: record["related_entities"] for record in records}
 
+    async def get_temporal_chunks(
+        self,
+        namespace_id: UUID,
+        entity_ids: list[UUID],
+        *,
+        after: datetime | None = None,
+        before: datetime | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Get chunks connected to entities via MENTIONED_IN within a time range.
+
+        Matches (:Entity)-[:MENTIONED_IN]->(:Chunk) and filters chunks by
+        occurred_at or created_at falling within the given time window.
+
+        Args:
+            namespace_id: Namespace to restrict results to
+            entity_ids: Entity IDs whose connected chunks to retrieve
+            after: Include only chunks with occurred_at/created_at >= this value
+            before: Include only chunks with occurred_at/created_at <= this value
+            limit: Maximum chunks to return
+
+        Returns:
+            List of chunk property dicts with entity connection info
+        """
+        if not entity_ids:
+            return []
+
+        params: dict[str, Any] = {
+            "entity_ids": [str(eid) for eid in entity_ids],
+            "namespace_id": str(namespace_id),
+            "limit": limit,
+        }
+
+        conditions: list[str] = []
+        if after is not None:
+            conditions.append(
+                "(coalesce(c.occurred_at, c.created_at) IS NULL OR " "coalesce(c.occurred_at, c.created_at) >= $after)"
+            )
+            params["after"] = after.isoformat()
+        if before is not None:
+            conditions.append(
+                "(coalesce(c.occurred_at, c.created_at) IS NULL OR " "coalesce(c.occurred_at, c.created_at) <= $before)"
+            )
+            params["before"] = before.isoformat()
+
+        where_extra = ""
+        if conditions:
+            where_extra = "\nAND " + "\nAND ".join(conditions)
+
+        query = f"""
+        MATCH (e:Entity)-[r:MENTIONED_IN]->(c:Chunk)
+        WHERE e.id IN $entity_ids
+        AND c.namespace_id = $namespace_id{where_extra}
+        RETURN c.id AS chunk_id,
+               c.content AS content,
+               c.document_id AS document_id,
+               c.occurred_at AS occurred_at,
+               c.created_at AS created_at,
+               c.metadata AS metadata,
+               collect(DISTINCT e.id) AS entity_ids,
+               sum(r.mention_count) AS total_mentions
+        ORDER BY coalesce(c.occurred_at, c.created_at) DESC
+        LIMIT $limit
+        """
+
+        async with self._driver.session(database=self._database) as session:
+
+            async def _work(tx):
+                result = await tx.run(query, **params)
+                return [record.data() async for record in result]
+
+            records = await session.execute_read(_work)
+
+        for record in records:
+            if "metadata" in record:
+                record["metadata"] = deserialize_dict(record["metadata"])
+
+        return records
+
     async def delete_chunks_by_document(
         self,
         document_id: UUID,

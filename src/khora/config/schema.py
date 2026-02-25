@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Discriminator, Field, Tag, model_validator
+from pydantic import BaseModel, Discriminator, Field, Tag, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -337,7 +337,10 @@ class QuerySettings(BaseModel):
     # Reranking
     enable_reranking: bool = Field(default=True, description="Enable result reranking")
     reranking_method: str = Field(default="cross_encoder", description="Reranking method: cross_encoder, llm")
-    reranking_model: str | None = Field(default=None, description="Model for reranking (cross-encoder model or LLM)")
+    reranking_model: str | None = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-12-v2",
+        description="Model for reranking (cross-encoder model or LLM)",
+    )
     reranking_top_n: int = Field(default=50, ge=1, description="Number of candidates to rerank")
     reranking_final_k: int = Field(default=10, ge=1, description="Number of results after reranking")
 
@@ -349,10 +352,25 @@ class QuerySettings(BaseModel):
     keyword_search_language: str = Field(default="english", description="Language for stemming and stopwords")
 
     # HyDE
-    enable_hyde: bool = Field(default=False, description="Enable HyDE query expansion")
+    enable_hyde: str = Field(
+        default="auto",
+        description="HyDE mode: 'auto' (enable for complex/temporal queries), 'always', 'never'. "
+        "Also accepts bool for backward compatibility (True='always', False='never').",
+    )
     hyde_num_hypotheticals: int = Field(
         default=1, ge=1, le=5, description="Number of hypothetical documents to generate"
     )
+
+    @field_validator("enable_hyde", mode="before")
+    @classmethod
+    def _normalize_enable_hyde(cls, v: Any) -> str:
+        if v is True:
+            return "always"
+        if v is False:
+            return "never"
+        if isinstance(v, str) and v in ("auto", "always", "never"):
+            return v
+        return "auto"
 
     # Multi-stage ranking pipeline
     enable_multi_stage: bool = Field(

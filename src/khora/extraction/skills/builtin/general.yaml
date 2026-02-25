@@ -199,16 +199,59 @@ correlation_rules:
     entity_types: [ORGANIZATION]
     confidence: 0.9
 
-# No inference rules for general expertise
-inference_rules: []
+inference_rules:
+  - name: transitive_works_for
+    description: "If A WORKS_FOR B and B PART_OF C, then A WORKS_FOR C"
+    when:
+      - relationship: WORKS_FOR
+        source_type: PERSON
+        target_type: ORGANIZATION
+      - relationship: PART_OF
+        source_type: ORGANIZATION
+        target_type: ORGANIZATION
+    then:
+      relationship: WORKS_FOR
+      source: first.source
+      target: second.target
+    confidence: 0.5
+
+  - name: shared_organization
+    description: "If A WORKS_FOR O and B WORKS_FOR O, then A COLLABORATES_WITH B"
+    when:
+      - relationship: WORKS_FOR
+        source_type: PERSON
+        target_type: ORGANIZATION
+      - relationship: WORKS_FOR
+        source_type: PERSON
+        target_type: ORGANIZATION
+    then:
+      relationship: COLLABORATES_WITH
+      source: first.source
+      target: second.source
+    confidence: 0.4
+
+  - name: located_in_headquarters
+    description: "If PERSON WORKS_FOR ORG and ORG HEADQUARTERED_IN LOC, then PERSON LOCATED_IN LOC"
+    when:
+      - relationship: WORKS_FOR
+        source_type: PERSON
+        target_type: ORGANIZATION
+      - relationship: HEADQUARTERED_IN
+        source_type: ORGANIZATION
+        target_type: LOCATION
+    then:
+      relationship: LOCATED_IN
+      source: first.source
+      target: second.target
+    confidence: 0.4
 
 confidence:
   min_entity: 0.5
-  min_relationship: 0.5
+  min_relationship: 0.35
   min_inferred: 0.3
 
 expansion:
   enabled: true
   depth: 2
   cross_tool_unification: true
-  relationship_inference: false
+  relationship_inference: true

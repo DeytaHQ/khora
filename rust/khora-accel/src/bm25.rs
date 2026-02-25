@@ -6,6 +6,7 @@
 
 use hashbrown::{HashMap, HashSet};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -269,28 +270,30 @@ impl RustBM25Index {
         let doc_freqs = &self.doc_freqs;
         let doc_lengths = &self.doc_lengths;
 
-        // Release GIL for scoring
+        // Release GIL for scoring — parallelised with rayon
         let mut results: Vec<(u32, f32)> = py.allow_threads(|| {
-            let mut results = Vec::with_capacity(candidate_set.len());
-            for doc_idx in candidate_set {
-                let df = &doc_freqs[doc_idx as usize];
-                let dl = doc_lengths[doc_idx as usize] as f32;
+            let candidates: Vec<u32> = candidate_set.into_iter().collect();
 
-                let mut s = 0.0f32;
-                for (i, &tok_idx) in query_tok_indices.iter().enumerate() {
-                    let tf = match df.get(&tok_idx) {
-                        Some(&c) => c as f32,
-                        None => continue,
-                    };
-                    let num = tf * (k1 + 1.0);
-                    let den = tf + k1 * (1.0 - b + b * dl / avg_dl);
-                    s += idfs[i] * num / den;
-                }
+            let mut results: Vec<(u32, f32)> = candidates
+                .into_par_iter()
+                .filter_map(|doc_idx| {
+                    let df = &doc_freqs[doc_idx as usize];
+                    let dl = doc_lengths[doc_idx as usize] as f32;
 
-                if s >= min_score {
-                    results.push((doc_idx, s));
-                }
-            }
+                    let mut s = 0.0f32;
+                    for (i, &tok_idx) in query_tok_indices.iter().enumerate() {
+                        let tf = match df.get(&tok_idx) {
+                            Some(&c) => c as f32,
+                            None => continue,
+                        };
+                        let num = tf * (k1 + 1.0);
+                        let den = tf + k1 * (1.0 - b + b * dl / avg_dl);
+                        s += idfs[i] * num / den;
+                    }
+
+                    if s >= min_score { Some((doc_idx, s)) } else { None }
+                })
+                .collect();
 
             results.sort_by(|a, b_| b_.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             results.truncate(limit);

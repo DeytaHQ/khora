@@ -16,7 +16,7 @@ from uuid import UUID
 
 from loguru import logger
 
-from khora._accel import normalize_entity_name
+from khora._accel import normalize_entity_names_batch
 
 from ..registry import pipeline
 
@@ -51,7 +51,8 @@ def _should_skip_entity_embedding(
     if not skip_types:
         return False
     entity_type = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
-    if entity_type.upper() not in (t.upper() for t in skip_types):
+    _skip_upper = frozenset(t.upper() for t in skip_types)
+    if entity_type.upper() not in _skip_upper:
         return False
     # threshold=0 means skip all entities of these types unconditionally
     if mention_threshold == 0:
@@ -77,6 +78,88 @@ def _find_entity_key(normalized_name: str, all_entities: dict[str, Any]) -> str 
             best_sim = sim
             best_key = k
     return best_key
+
+
+async def _extract_cross_chunk_relationships(
+    chunks: list,
+    entities_by_chunk: dict,
+    extractor,
+    extraction_context: dict,
+    *,
+    max_windows: int = 50,
+) -> list:
+    """Extract relationships spanning chunk boundaries via overlapping windows.
+
+    Creates overlapping windows of 2 consecutive chunks and runs the extractor
+    on the combined text to find relationships between entities that cross chunk
+    boundaries. Deduplicates results across windows by (source, rel_type, target).
+
+    This is opt-in — requires ``cross_chunk_extraction=True`` in extraction_context.
+    Increases LLM calls by up to ``len(chunks) - 1`` (capped at ``max_windows``).
+
+    Args:
+        chunks: Chunk objects with ``.content``, ``.id``, and optional ``.metadata.chunk_index``
+        entities_by_chunk: Mapping of chunk_id to list of entity name strings in that chunk
+        extractor: Initialized entity extractor (e.g. LLMEntityExtractor)
+        extraction_context: Context dict; must contain ``cross_chunk_extraction=True``
+        max_windows: Maximum windows to process (cap on extra LLM calls)
+
+    Returns:
+        Deduplicated list of ExtractedRelationship objects found across windows
+    """
+    if not extraction_context.get("cross_chunk_extraction", False):
+        return []
+    if len(chunks) < 2:
+        return []
+
+    def _chunk_index(c) -> int:
+        if hasattr(c, "metadata") and c.metadata and hasattr(c.metadata, "chunk_index"):
+            return c.metadata.chunk_index or 0
+        return 0
+
+    sorted_chunks = sorted(chunks, key=_chunk_index)
+    seen_triples: set[tuple[str, str, str]] = set()
+    new_relationships: list = []
+
+    for i in range(min(len(sorted_chunks) - 1, max_windows)):
+        chunk_a = sorted_chunks[i]
+        chunk_b = sorted_chunks[i + 1]
+
+        names_a = entities_by_chunk.get(chunk_a.id, [])
+        names_b = entities_by_chunk.get(chunk_b.id, [])
+        all_names = list(dict.fromkeys(names_a + names_b))  # dedupe, preserve order
+
+        if not all_names:
+            continue
+
+        combined_text = f"{chunk_a.content}\n\n{chunk_b.content}"
+        window_ctx = {**extraction_context, "known_entities": all_names}
+
+        try:
+            results = await extractor.extract_multi(
+                [combined_text],
+                batch_size=1,
+                max_input_tokens=None,
+                context=window_ctx,
+            )
+        except Exception as exc:
+            logger.warning(f"Cross-chunk extraction failed for window {i}: {exc}")
+            continue
+
+        if not results:
+            continue
+
+        for extracted_rel in results[0].relationships:
+            triple = (
+                extracted_rel.source_entity.lower(),
+                (extracted_rel.relationship_type or "").upper(),
+                extracted_rel.target_entity.lower(),
+            )
+            if triple not in seen_triples:
+                seen_triples.add(triple)
+                new_relationships.append(extracted_rel)
+
+    return new_relationships
 
 
 async def stream_extract_and_embed_entities(
@@ -179,13 +262,28 @@ async def stream_extract_and_embed_entities(
 
             # Process results and queue entities
             all_entities: dict[str, Entity] = {}
+            chunk_entity_keys: dict[UUID, list[str]] = {}  # chunk_id -> entity keys
+
+            # 2.10: Batch-normalize all entity names upfront (single FFI call)
+            _all_names: set[str] = set()
+            for _r in results:
+                for _e in _r.entities:
+                    _all_names.add(_e.name)
+                for _rel in _r.relationships:
+                    _all_names.add(_rel.source_entity)
+                    _all_names.add(_rel.target_entity)
+            _names_list = list(_all_names)
+            _normalized_names = normalize_entity_names_batch(_names_list) if _names_list else []
+            _norm_cache: dict[str, str] = dict(zip(_names_list, _normalized_names))
 
             for chunk, result in zip(chunks, results):
+                chunk_keys: list[str] = []
                 for extracted in result.entities:
                     if extracted.confidence < min_entity_confidence:
                         continue
 
-                    key = f"{normalize_entity_name(extracted.name)}:{extracted.entity_type}"
+                    key = f"{_norm_cache[extracted.name]}:{extracted.entity_type}"
+                    chunk_keys.append(key)
                     if key in all_entities:
                         existing = all_entities[key]
                         existing.mention_count += 1
@@ -216,7 +314,7 @@ async def stream_extract_and_embed_entities(
 
                         entity = Entity(
                             namespace_id=chunk.namespace_id,
-                            name=normalize_entity_name(extracted.name),
+                            name=_norm_cache[extracted.name],
                             entity_type=entity_type,
                             description=extracted.description,
                             attributes=extracted.attributes,
@@ -230,6 +328,8 @@ async def stream_extract_and_embed_entities(
                         # Queue entity for embedding as soon as it's extracted
                         await entity_queue.put(entity)
 
+                chunk_entity_keys[chunk.id] = chunk_keys
+
                 # Process relationships
                 for extracted_rel in result.relationships:
                     if extracted_rel.confidence < min_relationship_confidence:
@@ -240,8 +340,8 @@ async def stream_extract_and_embed_entities(
                     except ValueError:
                         rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
-                    norm_source = normalize_entity_name(extracted_rel.source_entity)
-                    norm_target = normalize_entity_name(extracted_rel.target_entity)
+                    norm_source = _norm_cache[extracted_rel.source_entity]
+                    norm_target = _norm_cache[extracted_rel.target_entity]
                     source_key = _find_entity_key(norm_source, all_entities)
                     target_key = _find_entity_key(norm_target, all_entities)
 
@@ -265,6 +365,94 @@ async def stream_extract_and_embed_entities(
                             valid_until=_rvu,
                         )
                         all_relationships.append(relationship)
+
+            # 1.1: Add co-occurrence edges between entities in the same chunk
+            existing_pairs: set[tuple[UUID, UUID]] = {
+                (r.source_entity_id, r.target_entity_id) for r in all_relationships
+            }
+            existing_pairs |= {(r.target_entity_id, r.source_entity_id) for r in all_relationships}
+            co_occurrence_count = 0
+            for chunk in chunks:
+                keys = chunk_entity_keys.get(chunk.id, [])
+                unique_keys = list(dict.fromkeys(keys))  # dedupe, preserve order
+                if len(unique_keys) < 2:
+                    continue
+                for i, key_a in enumerate(unique_keys):
+                    for key_b in unique_keys[i + 1 :]:
+                        if key_a not in all_entities or key_b not in all_entities:
+                            continue
+                        ent_a = all_entities[key_a]
+                        ent_b = all_entities[key_b]
+                        pair = (min(ent_a.id, ent_b.id), max(ent_a.id, ent_b.id))
+                        if pair in existing_pairs or (pair[1], pair[0]) in existing_pairs:
+                            continue
+                        existing_pairs.add(pair)
+                        all_relationships.append(
+                            Relationship(
+                                namespace_id=chunk.namespace_id,
+                                source_entity_id=ent_a.id,
+                                target_entity_id=ent_b.id,
+                                relationship_type="ASSOCIATED_WITH",
+                                description="Co-occurs in same chunk",
+                                properties={},
+                                source_document_ids=[chunk.document_id],
+                                source_chunk_ids=[chunk.id],
+                                confidence=0.4,
+                            )
+                        )
+                        co_occurrence_count += 1
+            if co_occurrence_count:
+                logger.debug(f"Added {co_occurrence_count} co-occurrence edges")
+
+            # 3.3: Cross-chunk relationship extraction (opt-in, disabled by default)
+            if extraction_context and extraction_context.get("cross_chunk_extraction", False):
+                _entities_by_chunk: dict[UUID, list[str]] = {
+                    cid: [k.split(":")[0] for k in keys] for cid, keys in chunk_entity_keys.items()
+                }
+                cross_rels_raw = await _extract_cross_chunk_relationships(
+                    chunks, _entities_by_chunk, extractor, extraction_context
+                )
+                if cross_rels_raw:
+                    logger.info(f"Cross-chunk extraction: found {len(cross_rels_raw)} candidate relationships")
+                    added_cross = 0
+                    for extracted_rel in cross_rels_raw:
+                        norm_src = _norm_cache.get(
+                            extracted_rel.source_entity,
+                            extracted_rel.source_entity.lower().strip(),
+                        )
+                        norm_tgt = _norm_cache.get(
+                            extracted_rel.target_entity,
+                            extracted_rel.target_entity.lower().strip(),
+                        )
+                        source_key = _find_entity_key(norm_src, all_entities)
+                        target_key = _find_entity_key(norm_tgt, all_entities)
+                        if not source_key or not target_key:
+                            continue
+                        ent_a = all_entities[source_key]
+                        ent_b = all_entities[target_key]
+                        pair = (min(ent_a.id, ent_b.id), max(ent_a.id, ent_b.id))
+                        if pair in existing_pairs or (pair[1], pair[0]) in existing_pairs:
+                            continue
+                        existing_pairs.add(pair)
+                        try:
+                            cross_rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
+                        except ValueError:
+                            cross_rel_type = extracted_rel.relationship_type or "RELATES_TO"
+                        all_relationships.append(
+                            Relationship(
+                                namespace_id=chunks[0].namespace_id,
+                                source_entity_id=ent_a.id,
+                                target_entity_id=ent_b.id,
+                                relationship_type=cross_rel_type,
+                                description=extracted_rel.description,
+                                properties=getattr(extracted_rel, "properties", {}),
+                                source_document_ids=[chunks[0].document_id],
+                                source_chunk_ids=[],
+                                confidence=extracted_rel.confidence,
+                            )
+                        )
+                        added_cross += 1
+                    logger.debug(f"Cross-chunk extraction: added {added_cross} new relationships")
 
         finally:
             # Signal completion
@@ -432,6 +620,70 @@ async def stage_document(
     )
 
     return await storage.create_document(document)
+
+
+async def stage_documents_batch(
+    doc_inputs: list[dict[str, Any]],
+    namespace_id: UUID,
+    storage: StorageCoordinator,
+) -> list[Document | None]:
+    """Batch stage documents with single-query checksum dedup.
+
+    Computes all checksums upfront and checks for existing documents
+    in a single batch query instead of N individual queries.
+
+    Returns:
+        List parallel to doc_inputs: Document if new, None if unchanged
+    """
+    from datetime import UTC, datetime
+
+    from khora.core.models import Document, DocumentMetadata
+
+    if not doc_inputs:
+        return []
+
+    # Compute all checksums upfront
+    checksums = [compute_checksum(doc.get("content", "")) for doc in doc_inputs]
+
+    # Single batch query for existing documents (replaces N individual queries)
+    existing = await storage.get_documents_by_checksums(namespace_id, checksums)
+
+    results: list[Document | None] = []
+    for doc_input, checksum in zip(doc_inputs, checksums):
+        if checksum in existing:
+            logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing[checksum].status})")
+            results.append(None)
+            continue
+
+        content = doc_input.get("content", "")
+        custom_metadata = doc_input.get("metadata", {})
+        metadata = DocumentMetadata(
+            source=doc_input.get("source", ""),
+            source_type=doc_input.get("source_type", "manual"),
+            content_type=doc_input.get("content_type", "text/plain"),
+            title=doc_input.get("title", ""),
+            author=doc_input.get("author", ""),
+            language=doc_input.get("language", "en"),
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            custom=custom_metadata,
+        )
+
+        source_timestamp = _extract_source_timestamp(custom_metadata)
+        created_at = source_timestamp or datetime.now(UTC)
+
+        document = Document(
+            namespace_id=namespace_id,
+            content=content,
+            metadata=metadata,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+        doc = await storage.create_document(document)
+        results.append(doc)
+
+    return results
 
 
 async def process_document(
@@ -759,11 +1011,16 @@ async def process_document(
 
                 store_results: list[tuple[Entity, bool]] = []
 
+                # Batch-normalize entity names for mapping (single FFI call)
+                _store_names = list({e.name for e, _ in upsert_results} | {e.name for e in entities})
+                _store_normalized = normalize_entity_names_batch(_store_names) if _store_names else []
+                _store_norm = dict(zip(_store_names, _store_normalized))
+
                 # Build name+type -> stored_id mapping from upsert results
                 name_type_to_stored: dict[str, str] = {}
                 for entity, is_new in upsert_results:
                     et = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
-                    key = f"{normalize_entity_name(entity.name)}:{et}"
+                    key = f"{_store_norm[entity.name]}:{et}"
                     stored_id = str(entity.id)
                     name_type_to_stored[key] = stored_id
                     entity_id_mapping[stored_id] = stored_id
@@ -777,7 +1034,7 @@ async def process_document(
                         if hasattr(orig_entity.entity_type, "value")
                         else str(orig_entity.entity_type)
                     )
-                    key = f"{normalize_entity_name(orig_entity.name)}:{et}"
+                    key = f"{_store_norm[orig_entity.name]}:{et}"
                     stored_id = name_type_to_stored.get(key)
                     if stored_id:
                         entity_id_mapping[str(orig_entity.id)] = stored_id
@@ -993,16 +1250,9 @@ async def ingest_documents(
             if existing_entities:
                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
 
-    # Phase 1: Stage documents (can run in parallel too)
-    # Staging ops are fast (~5ms each), so matching doc concurrency is sufficient.
-    # Higher values just queue in the SA pool without throughput benefit.
-    staging_semaphore = asyncio.Semaphore(max_concurrent_documents)
-
-    async def stage_with_limit(doc_input):
-        async with staging_semaphore:
-            return await stage_document(doc_input, namespace_id, storage)
-
-    staged_results = await asyncio.gather(*[stage_with_limit(doc) for doc in documents])
+    # Phase 1: Batch checksum dedup + stage new documents
+    # Single batch query replaces N individual get_document_by_checksum calls.
+    staged_results = await stage_documents_batch(documents, namespace_id, storage)
     staged_docs = [doc for doc in staged_results if doc is not None]
 
     # Build mapping from staged doc ID to original dict for per-doc overrides

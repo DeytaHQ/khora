@@ -28,7 +28,7 @@ from .linking import EntityLinker, LinkingResult
 from .metrics import SearchMetrics
 from .reranking import RerankCandidate, create_reranker
 from .temporal import TemporalFilter, TemporalQuery
-from .understanding import QueryUnderstanding, UnderstandingResult
+from .understanding import QueryIntent, QueryUnderstanding, UnderstandingResult
 
 _TEMPORAL_PATTERN = re.compile(
     r"\b(yesterday|today|last\s+\w+|this\s+\w+|ago|since|before|after|"
@@ -357,6 +357,7 @@ class QueryConfig:
     # Reranking settings
     enable_reranking: bool = True
     reranking_method: str = "cross_encoder"
+    reranking_model: str | None = None
     reranking_top_n: int = 50
     reranking_final_k: int = 10
 
@@ -365,7 +366,7 @@ class QueryConfig:
     keyword_search_method: str = "fulltext"
 
     # HyDE settings
-    enable_hyde: bool = False
+    enable_hyde: str = "auto"
     hyde_num_hypotheticals: int = 1
 
     # Multi-stage ranking pipeline settings
@@ -422,13 +423,18 @@ class QueryConfig:
             # Reranking
             enable_reranking=settings.enable_reranking,
             reranking_method=settings.reranking_method,
+            reranking_model=settings.reranking_model,
             reranking_top_n=settings.reranking_top_n,
             reranking_final_k=settings.reranking_final_k,
             # Keyword search
             enable_keyword_search=settings.enable_keyword_search,
             keyword_search_method=settings.keyword_search_method,
-            # HyDE
-            enable_hyde=settings.enable_hyde,
+            # HyDE — settings.enable_hyde is already normalized to str by the validator
+            enable_hyde=(
+                settings.enable_hyde
+                if isinstance(settings.enable_hyde, str)
+                else ("always" if settings.enable_hyde else "never")
+            ),
             hyde_num_hypotheticals=settings.hyde_num_hypotheticals,
             # Multi-stage ranking pipeline
             enable_multi_stage=settings.enable_multi_stage,
@@ -480,9 +486,9 @@ class HybridQueryEngine:
         # Entity linker (created per-query with embedder)
         self._entity_linker: EntityLinker | None = None
 
-        # HyDE expander
+        # HyDE expander — create if mode allows HyDE (auto or always)
         self._hyde_expander: HyDEExpander | None = None  # type: ignore[unresolved-reference]
-        if self._config.enable_hyde and self._embedder:
+        if self._config.enable_hyde in ("auto", "always") and self._embedder:
             from .hyde import HyDEExpander
 
             self._hyde_expander = HyDEExpander(
@@ -497,13 +503,18 @@ class HybridQueryEngine:
         self._cache = QueryCache()
 
         # Understanding cache (keyed by normalized query + namespace)
-        self._understanding_cache = QueryCache(max_size=500, ttl_seconds=120)
+        self._understanding_cache = QueryCache(max_size=500, ttl_seconds=600)
 
         # Keyword searcher (built per namespace)
         self._keyword_searchers: dict[str, KeywordSearcher] = {}
 
         # Cached rerankers (keyed by method name) so model is loaded once
         self._rerankers: dict[str, Any] = {}
+
+        # Per-query entity similarity cache to avoid duplicate DB queries
+        # when both _vector_search and _graph_search need entity similarities.
+        # Keyed by id(embedding), cleared at the start of each query().
+        self._entity_similarity_cache: dict[int, asyncio.Task[Any]] = {}
 
     def invalidate_caches(self, namespace_id: UUID) -> None:
         """Invalidate BM25 keyword index and query caches for a namespace.
@@ -582,6 +593,9 @@ class HybridQueryEngine:
 
         cfg = config or self._config
 
+        # Clear per-query entity similarity cache
+        self._entity_similarity_cache.clear()
+
         # Check cache
         cached = await self._cache.get(query_text, namespace_id, cfg.mode.name)
         if cached is not None:
@@ -645,15 +659,21 @@ class HybridQueryEngine:
                     # Use lightweight prompt unless caller explicitly opted out
                     use_lightweight = _lightweight_understanding if _lightweight_understanding is not None else True
                     async with pipeline_stage("query", "understanding", _run_id, namespace_id=namespace_id):
-                        understanding = await self._query_understanding.understand(
+                        understanding_coro = self._query_understanding.understand(
                             query_text,
                             expand_query=cfg.enable_query_expansion,
                             extract_entities=cfg.enable_entity_extraction,
                             detect_temporal=cfg.enable_temporal_detection,
                             lightweight=use_lightweight,
                         )
+                        try:
+                            understanding = await asyncio.wait_for(understanding_coro, timeout=2.0)
+                        except TimeoutError:
+                            logger.warning("Query understanding timed out after 2s, using heuristic fallback")
+                            understanding = self._heuristic_understanding(query_text)
                     # Cache the understanding result
-                    await self._understanding_cache.set(query_text, namespace_id, "understanding", understanding)
+                    if understanding is not None:
+                        await self._understanding_cache.set(query_text, namespace_id, "understanding", understanding)
                 except Exception as e:
                     logger.warning(f"Query understanding failed: {e}")
 
@@ -699,14 +719,15 @@ class HybridQueryEngine:
                     cfg.keyword_weight = understanding.search_strategy.keyword_weight
                     cfg.max_graph_depth = understanding.search_strategy.graph_depth
 
-                # Adaptive top-k: very focused tier for single-entity queries
+                # Adaptive top-k: reduce evidence for focused queries, but keep
+                # a generous floor to avoid losing evidence chunks.
                 if (
                     understanding.complexity_score < 0.3
                     and not understanding.requires_multi_step
-                    and cfg.max_chunks > 3
+                    and cfg.max_chunks > 8
                 ):
-                    cfg.max_chunks = 3
-                    cfg.max_entities = 3
+                    cfg.max_chunks = 8
+                    cfg.max_entities = 8
                     cfg.min_chunk_similarity = max(cfg.min_chunk_similarity, 0.25)
                     cfg.min_entity_similarity = max(cfg.min_entity_similarity, 0.25)
                     metadata["adaptive_top_k"] = {"reduced": True, "reason": "very_focused"}
@@ -714,14 +735,13 @@ class HybridQueryEngine:
                         f"Adaptive top-k: very_focused to {cfg.max_chunks} "
                         f"(complexity={understanding.complexity_score:.2f})"
                     )
-                # Adaptive top-k: reduce evidence for single-topic queries
                 elif (
                     understanding.complexity_score < 0.5
                     and not understanding.requires_multi_step
-                    and cfg.max_chunks > 5
+                    and cfg.max_chunks > 8
                 ):
-                    cfg.max_chunks = 5
-                    cfg.max_entities = 5
+                    cfg.max_chunks = 8
+                    cfg.max_entities = 8
                     cfg.min_chunk_similarity = max(cfg.min_chunk_similarity, 0.15)
                     cfg.min_entity_similarity = max(cfg.min_entity_similarity, 0.15)
                     metadata["adaptive_top_k"] = {"reduced": True, "reason": "single_topic"}
@@ -794,10 +814,16 @@ class HybridQueryEngine:
         if self._embedder and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
             query_embedding = await self._embedder.embed(query_text)
 
-            # Apply HyDE expansion
+            # Apply HyDE expansion based on mode
             if query_embedding is not None and self._hyde_expander:
-                query_embedding = await self._hyde_expander.expand_query_embedding(query_text, query_embedding)
-                metadata["hyde_applied"] = True
+                should_hyde = False
+                if cfg.enable_hyde == "always":
+                    should_hyde = True
+                elif cfg.enable_hyde == "auto" and understanding is not None:
+                    should_hyde = understanding.complexity_score > 0.6 or understanding.intent == QueryIntent.TEMPORAL
+                if should_hyde:
+                    query_embedding = await self._hyde_expander.expand_query_embedding(query_text, query_embedding)
+                    metadata["hyde_applied"] = True
 
         # Step 3-7: Execute search pipeline (multi-stage or legacy)
         if cfg.enable_multi_stage:
@@ -856,13 +882,27 @@ class HybridQueryEngine:
             metrics.search_timer.start()
             search_start_time = time.perf_counter()
 
+            # Pre-compute expanded query embeddings in parallel (2.7)
+            expanded_embeddings: dict[int, list[float] | None] = {0: query_embedding}
+            if (
+                self._embedder
+                and len(queries_to_search) > 1
+                and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL)
+            ):
+                embed_tasks = [self._embedder.embed(queries_to_search[i]) for i in range(1, len(queries_to_search))]
+                embed_results = await asyncio.gather(*embed_tasks, return_exceptions=True)
+                for idx, result in enumerate(embed_results):
+                    if isinstance(result, Exception):
+                        logger.warning(f"Failed to embed expanded query {idx + 1}: {result}")
+                        expanded_embeddings[idx + 1] = None
+                    else:
+                        expanded_embeddings[idx + 1] = result
+
             for i, q in enumerate(queries_to_search):
                 suffix = "" if i == 0 else f"_exp{i}"
 
-                # Get query embedding for expanded queries
-                current_embedding = query_embedding if i == 0 else None
-                if self._embedder and i > 0 and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
-                    current_embedding = await self._embedder.embed(q)
+                # Use pre-computed embedding
+                current_embedding = expanded_embeddings.get(i)
 
                 # Execute searches in parallel based on mode
                 tasks = []
@@ -1107,11 +1147,9 @@ class HybridQueryEngine:
                         boosted_entities.append((entity, score))
                 fused_entities = sorted(boosted_entities, key=lambda x: x[1], reverse=True)
 
-            # Step 5: Apply temporal filter (batch-accelerated via Rust)
+            # Step 5: Apply soft temporal scoring (exponential decay outside window)
             if temporal_filter:
-                from .temporal import batch_filter_chunks
-
-                fused_chunks = batch_filter_chunks(fused_chunks, temporal_filter)
+                fused_chunks = self._soft_temporal_score(fused_chunks, temporal_filter)
 
             # Apply recency bias (batch-accelerated via Rust)
             if cfg.apply_recency_bias:
@@ -1126,6 +1164,7 @@ class HybridQueryEngine:
                     if cfg.reranking_method not in self._rerankers:
                         self._rerankers[cfg.reranking_method] = create_reranker(
                             method=cfg.reranking_method,
+                            model=cfg.reranking_model,
                             llm_config=self._llm_config,
                         )
                     reranker = self._rerankers[cfg.reranking_method]
@@ -1183,11 +1222,12 @@ class HybridQueryEngine:
         metadata["temporal"] = temporal_info.to_dict()
         metadata["metrics"] = metrics.to_dict()
 
-        # Cross-session expansion: when few results are found and chunks
-        # carry session_id metadata (conversation data), search adjacent
-        # sessions to improve recall across session boundaries.
-        if len(fused_chunks) < 2:
-            expanded = await self._expand_adjacent_sessions(fused_chunks, namespace_id)
+        # Cross-session expansion: when few results are found or temporal
+        # intent is detected, search adjacent sessions to improve recall
+        # across session boundaries.
+        _has_temporal_intent = understanding is not None and getattr(understanding, "has_temporal", False)
+        if len(fused_chunks) < 2 or _has_temporal_intent:
+            expanded = await self._expand_adjacent_sessions(fused_chunks, namespace_id, understanding=understanding)
             if expanded:
                 fused_chunks = expanded
                 metadata["session_expansion"] = True
@@ -1211,16 +1251,20 @@ class HybridQueryEngine:
         self,
         chunks: list[tuple[Any, float]],
         namespace_id: UUID,
+        *,
+        understanding: UnderstandingResult | None = None,
     ) -> list[tuple[Any, float]] | None:
-        """Expand search to adjacent sessions when few results are found.
+        """Expand search to sessions sharing entities with the current results.
 
-        When conversation chunks carry ``session_id`` metadata and the initial
-        search returns sparse results, this fetches chunks from neighbouring
-        sessions (session_id ± 1) to improve cross-session recall.
+        Uses entity-based linking: extracts entity names from the query
+        understanding and current results, then searches for other chunks
+        mentioning those entities. Falls back to sequential session_id ± 1
+        adjacency if entity-based expansion finds nothing.
 
         Args:
             chunks: Current (sparse) result set.
             namespace_id: Namespace to search in.
+            understanding: Query understanding result for entity names.
 
         Returns:
             Expanded chunk list, or ``None`` if expansion was not applicable.
@@ -1228,13 +1272,51 @@ class HybridQueryEngine:
         if not chunks:
             return None
 
-        # Collect session IDs from result chunks
+        existing_ids = {str(c.id) for c, _ in chunks}
+
+        # --- Entity-based expansion ---
+        # Collect entity names from query understanding
+        entity_names: list[str] = []
+        if understanding and understanding.entities:
+            for e in understanding.entities:
+                entity_names.append(e.name)
+                entity_names.extend(e.aliases)
+
+        if entity_names:
+            entity_chunks: list[tuple[Any, float]] = []
+            # Search for chunks mentioning query entities (limit queries to avoid unbounded work)
+            for name in entity_names[:5]:
+                try:
+                    results = await self._storage.search_fulltext_chunks(
+                        namespace_id,
+                        name,
+                        limit=5,
+                    )
+                    for chunk_or_tuple in results:
+                        if isinstance(chunk_or_tuple, tuple):
+                            chunk_obj, score = chunk_or_tuple
+                        else:
+                            chunk_obj, score = chunk_or_tuple, 0.3
+                        if str(chunk_obj.id) not in existing_ids:
+                            entity_chunks.append((chunk_obj, score * 0.7))
+                            existing_ids.add(str(chunk_obj.id))
+                except Exception:
+                    continue
+
+            if entity_chunks:
+                expanded = list(chunks) + entity_chunks
+                logger.debug(
+                    f"Session expansion (entity-based): added {len(entity_chunks)} chunks "
+                    f"for entities {entity_names[:5]}"
+                )
+                return expanded
+
+        # --- Fallback: sequential session_id ± 1 ---
         session_ids: set[int] = set()
         for chunk, _ in chunks:
             meta = getattr(chunk, "metadata", None)
             if meta is None:
                 continue
-            # Support both dict and object-style metadata
             if isinstance(meta, dict):
                 sid = meta.get("session_id") or (meta.get("custom", {}) or {}).get("session_id")
             else:
@@ -1246,17 +1328,15 @@ class HybridQueryEngine:
         if not session_ids:
             return None
 
-        # Build adjacent session IDs
         adjacent: set[int] = set()
         for sid in session_ids:
             adjacent.add(sid - 1)
             adjacent.add(sid + 1)
-        adjacent -= session_ids  # Only look at sessions we don't already have
+        adjacent -= session_ids
 
         if not adjacent:
             return None
 
-        # Query storage for chunks with adjacent session IDs
         try:
             adjacent_chunks = await self._storage.search_chunks_by_metadata(
                 namespace_id,
@@ -1264,7 +1344,6 @@ class HybridQueryEngine:
                 limit=10,
             )
         except (AttributeError, NotImplementedError):
-            # Storage backend doesn't support metadata search
             logger.debug("Session expansion skipped: storage does not support metadata search")
             return None
         except Exception as e:
@@ -1274,8 +1353,6 @@ class HybridQueryEngine:
         if not adjacent_chunks:
             return None
 
-        # Merge: original chunks first, then adjacent with a discounted score
-        existing_ids = {str(c.id) for c, _ in chunks}
         expanded = list(chunks)
         for adj_chunk in adjacent_chunks:
             if isinstance(adj_chunk, tuple):
@@ -1283,11 +1360,12 @@ class HybridQueryEngine:
             else:
                 chunk_obj, score = adj_chunk, 0.3
             if str(chunk_obj.id) not in existing_ids:
-                expanded.append((chunk_obj, score * 0.8))  # Discount adjacent session results
+                expanded.append((chunk_obj, score * 0.8))
                 existing_ids.add(str(chunk_obj.id))
 
         logger.debug(
-            f"Session expansion: added {len(expanded) - len(chunks)} chunks " f"from adjacent sessions {adjacent}"
+            f"Session expansion (sequential): added {len(expanded) - len(chunks)} chunks "
+            f"from adjacent sessions {adjacent}"
         )
         return expanded
 
@@ -1378,6 +1456,33 @@ class HybridQueryEngine:
             result["latency_ms"] = latency_ms
         return result
 
+    async def _cached_entity_search(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        limit: int,
+        min_similarity: float,
+    ) -> list[tuple[UUID, float]]:
+        """Search similar entities with per-query deduplication.
+
+        Uses a shared asyncio.Task so concurrent calls from _vector_search
+        and _graph_search within the same asyncio.gather share a single
+        database query.
+        """
+        cache_key = id(query_embedding)
+        if cache_key not in self._entity_similarity_cache:
+            max_limit = max(limit, 20)
+            self._entity_similarity_cache[cache_key] = asyncio.ensure_future(
+                self._storage.search_similar_entities(
+                    namespace_id,
+                    query_embedding,
+                    limit=max_limit,
+                    min_similarity=min_similarity,
+                )
+            )
+        results = await self._entity_similarity_cache[cache_key]
+        return results[:limit]
+
     async def _vector_search(
         self,
         namespace_id: UUID,
@@ -1393,8 +1498,8 @@ class HybridQueryEngine:
             min_similarity=config.min_chunk_similarity,
         )
 
-        # Search entities
-        entity_ids_scores = await self._storage.search_similar_entities(
+        # Search entities (uses per-query cache to deduplicate with _graph_search)
+        entity_ids_scores = await self._cached_entity_search(
             namespace_id,
             query_embedding,
             limit=config.max_entities * 2,
@@ -1449,9 +1554,9 @@ class HybridQueryEngine:
                     linked_scores[entity_id] = 1.0  # High confidence from linking
                     seen_entity_ids.add(entity_id)
 
-        # Similar entities via embedding
+        # Similar entities via embedding (uses per-query cache to deduplicate with _vector_search)
         if query_embedding is not None:
-            entity_ids_scores = await self._storage.search_similar_entities(
+            entity_ids_scores = await self._cached_entity_search(
                 namespace_id,
                 query_embedding,
                 limit=5,
@@ -1465,6 +1570,7 @@ class HybridQueryEngine:
                     seen_entity_ids.add(entity_id)
 
             # Fallback: if no entities found, retry with no threshold
+            # (not cached — different parameters, only fires when primary returns empty)
             if not all_entity_ids_to_fetch and config.min_entity_similarity > 0:
                 entity_ids_scores = await self._storage.search_similar_entities(
                     namespace_id,
@@ -1515,24 +1621,55 @@ class HybridQueryEngine:
 
         # Batch fetch all chunks in a single query
         if chunk_ids_to_fetch:
+            from khora._accel import batch_dot_product
+
             chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch)
 
-            # Embedding similarity filtering: when a query embedding is available,
-            # drop graph-sourced chunks whose embedding is too dissimilar.
             _min_graph_sim = 0.3
-            for chunk_id, chunk in chunks_map.items():
-                entity, score = chunk_id_to_info[chunk_id]
-                # Score based on entity score and mention count
-                chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
 
-                # Filter by similarity when query_embedding is provided
-                # (embeddings are pre-normalized at ingest, so dot product == cosine)
-                if query_embedding is not None and chunk.embedding is not None:
-                    sim = sum(a * b for a, b in zip(query_embedding, chunk.embedding))
-                    if sim < _min_graph_sim:
-                        continue
-                # If no embedding on chunk, include anyway (fallback)
-                chunks.append((chunk, chunk_score))
+            # Separate chunks with/without embeddings for batch processing
+            if query_embedding is not None:
+                # Collect chunks that have embeddings for batch dot product
+                embeddable_ids: list[Any] = []
+                embeddable_embeddings: list[list[float]] = []
+                no_embedding_ids: list[Any] = []
+
+                for chunk_id, chunk in chunks_map.items():
+                    if chunk.embedding is not None:
+                        embeddable_ids.append(chunk_id)
+                        embeddable_embeddings.append(chunk.embedding)
+                    else:
+                        no_embedding_ids.append(chunk_id)
+
+                # Batch compute similarities for all chunks with embeddings
+                sim_results: dict[Any, float] = {}
+                if embeddable_embeddings:
+                    dot_scores = batch_dot_product(query_embedding, embeddable_embeddings, threshold=0.0)
+                    for idx, sim in dot_scores:
+                        sim_results[embeddable_ids[idx]] = sim
+
+                # Score chunks: blend query similarity with entity score
+                for chunk_id, chunk in chunks_map.items():
+                    entity, score = chunk_id_to_info[chunk_id]
+                    entity_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+
+                    if chunk_id in sim_results:
+                        query_sim = sim_results[chunk_id]
+                        if query_sim < _min_graph_sim:
+                            continue
+                        # Blend: 60% query similarity + 40% entity score
+                        chunk_score = 0.6 * query_sim + 0.4 * entity_score
+                    else:
+                        # No embedding — fall back to entity score only
+                        chunk_score = entity_score
+
+                    chunks.append((chunk, chunk_score))
+            else:
+                # No query embedding — use entity scores only
+                for chunk_id, chunk in chunks_map.items():
+                    entity, score = chunk_id_to_info[chunk_id]
+                    chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+                    chunks.append((chunk, chunk_score))
 
         return {
             "source": "graph",
@@ -1786,6 +1923,27 @@ class HybridQueryEngine:
         return True
 
     @staticmethod
+    def _heuristic_understanding(query_text: str) -> UnderstandingResult | None:
+        """Build a lightweight UnderstandingResult from heuristics when LLM times out."""
+        from .understanding import AnswerType, QueryIntent, TemporalReference
+
+        has_temporal = bool(_TEMPORAL_PATTERN.search(query_text))
+        temporal_refs: list[TemporalReference] = []
+        if has_temporal:
+            for m in _TEMPORAL_PATTERN.finditer(query_text):
+                temporal_refs.append(TemporalReference(type="relative", text=m.group()))
+
+        return UnderstandingResult(
+            original_query=query_text,
+            intent=QueryIntent.TEMPORAL if has_temporal else QueryIntent.SEARCH,
+            answer_type=AnswerType.UNKNOWN,
+            temporal_references=temporal_refs,
+            keywords=re.findall(r"\b\w{3,}\b", query_text.lower()),
+            complexity_score=0.5,
+            reasoning="heuristic fallback (LLM timeout)",
+        )
+
+    @staticmethod
     def _attribute_relevance_boost(entity: Any, keywords: list[str]) -> float:
         """Score boost based on entity attribute value matches with query keywords.
 
@@ -1865,6 +2023,119 @@ class HybridQueryEngine:
             blended.append((chunk, blended_score))
         blended.sort(key=lambda x: x[1], reverse=True)
         return blended
+
+    @staticmethod
+    def _soft_temporal_score(
+        chunks: list[tuple[Any, float]],
+        temporal_filter: TemporalFilter,
+    ) -> list[tuple[Any, float]]:
+        """Apply soft temporal scoring with exponential decay.
+
+        Chunks inside the temporal window keep full score.
+        Chunks outside get exponential decay based on distance.
+        Chunks >30 days outside are hard-filtered.
+        """
+        import math
+
+        from .temporal import TemporalFilter as _TF
+        from .temporal import _dt_to_epoch
+
+        start, end = temporal_filter.get_effective_times()
+        start_secs = _dt_to_epoch(_TF._normalize_tz(start)) if start else None
+        end_secs = _dt_to_epoch(_TF._normalize_tz(end)) if end else None
+
+        _SECS_PER_DAY = 86400.0
+        _HARD_CUTOFF_DAYS = 30.0
+        _HALF_LIFE_HOURS = 24.0
+        _DECAY_FACTOR = -0.6931471805599453 / (_HALF_LIFE_HOURS * 3600.0)
+
+        result: list[tuple[Any, float]] = []
+        for chunk, score in chunks:
+            created_at = getattr(chunk, "created_at", None)
+            if created_at is None:
+                result.append((chunk, score))
+                continue
+
+            ts = _dt_to_epoch(_TF._normalize_tz(created_at))
+            if ts is None:
+                result.append((chunk, score))
+                continue
+
+            # Check if inside window
+            inside = True
+            secs_outside = 0.0
+            if start_secs is not None and ts < start_secs:
+                inside = False
+                secs_outside = start_secs - ts
+            elif end_secs is not None and ts > end_secs:
+                inside = False
+                secs_outside = ts - end_secs
+
+            if inside:
+                result.append((chunk, score))
+            else:
+                days_outside = secs_outside / _SECS_PER_DAY
+                if days_outside > _HARD_CUTOFF_DAYS:
+                    continue
+                decay = math.exp(_DECAY_FACTOR * secs_outside)
+                result.append((chunk, score * decay))
+
+        result.sort(key=lambda x: x[1], reverse=True)
+        return result
+
+    @staticmethod
+    def _apply_entity_presence_scoring(
+        chunks: list[tuple[Any, float]],
+        understanding: Any,
+    ) -> list[tuple[Any, float]]:
+        """Apply entity-presence penalty for confounder rejection.
+
+        For each chunk, check how many query-mentioned entities appear in
+        the chunk text (case-insensitive). Apply multiplicative penalty
+        based on entity match ratio.
+        """
+        entity_names: list[str] = []
+        for e in understanding.entities:
+            entity_names.append(e.name.lower())
+            for alias in getattr(e, "aliases", []) or []:
+                entity_names.append(alias.lower())
+
+        if not entity_names:
+            return chunks
+
+        result: list[tuple[Any, float]] = []
+        for chunk, score in chunks:
+            content = getattr(chunk, "content", "")
+            if not content or not entity_names:
+                result.append((chunk, score))
+                continue
+
+            content_lower = content.lower()
+            # Count how many unique query entities appear in the chunk
+            unique_entities = {e.name.lower() for e in understanding.entities}
+            matched = 0
+            for ename in unique_entities:
+                if ename in content_lower:
+                    matched += 1
+                    continue
+                # Check aliases
+                aliases = []
+                for e in understanding.entities:
+                    if e.name.lower() == ename:
+                        aliases = [a.lower() for a in (getattr(e, "aliases", []) or [])]
+                        break
+                if any(a in content_lower for a in aliases):
+                    matched += 1
+
+            if len(unique_entities) > 0:
+                match_ratio = matched / len(unique_entities)
+                penalty = max(0.5, match_ratio)
+                result.append((chunk, score * penalty))
+            else:
+                result.append((chunk, score))
+
+        result.sort(key=lambda x: x[1], reverse=True)
+        return result
 
     # -------------------------------------------------------------------------
     # Multi-Stage Ranking Pipeline
@@ -2091,13 +2362,27 @@ class HybridQueryEngine:
 
         search_start_time = time.perf_counter()
 
+        # Pre-compute expanded query embeddings in parallel (2.7)
+        expanded_embeddings: dict[int, list[float] | None] = {0: query_embedding}
+        if (
+            self._embedder
+            and len(queries_to_search) > 1
+            and config.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL)
+        ):
+            embed_tasks = [self._embedder.embed(queries_to_search[i]) for i in range(1, len(queries_to_search))]
+            embed_results = await asyncio.gather(*embed_tasks, return_exceptions=True)
+            for idx, result in enumerate(embed_results):
+                if isinstance(result, Exception):
+                    logger.warning(f"Failed to embed expanded query {idx + 1}: {result}")
+                    expanded_embeddings[idx + 1] = None
+                else:
+                    expanded_embeddings[idx + 1] = result
+
         for i, q in enumerate(queries_to_search):
             suffix = "" if i == 0 else f"_exp{i}"
 
-            # Get query embedding for this query variant
-            current_embedding = query_embedding if i == 0 else None
-            if self._embedder and i > 0 and config.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
-                current_embedding = await self._embedder.embed(q)
+            # Use pre-computed embedding
+            current_embedding = expanded_embeddings.get(i)
 
             # Execute searches in parallel
             tasks = []
@@ -2317,11 +2602,11 @@ class HybridQueryEngine:
         """
         filtered_chunks = chunks
 
-        # Apply temporal filter (batch-accelerated via Rust)
+        # Apply soft temporal scoring instead of hard filtering.
+        # Chunks inside the window get full score; chunks outside get
+        # exponential decay.  Only hard-filter chunks >30 days outside.
         if temporal_filter:
-            from .temporal import batch_filter_chunks
-
-            filtered_chunks = batch_filter_chunks(filtered_chunks, temporal_filter)
+            filtered_chunks = self._soft_temporal_score(filtered_chunks, temporal_filter)
 
         # Apply recency bias (batch-accelerated via Rust)
         if config.apply_recency_bias:
@@ -2346,6 +2631,11 @@ class HybridQueryEngine:
                 for entity, score in entities
             ]
             entities.sort(key=lambda x: x[1], reverse=True)
+
+        # Entity-presence scoring for confounder rejection:
+        # penalize chunks that don't mention query-referenced entities.
+        if understanding and understanding.entities and filtered_chunks:
+            filtered_chunks = self._apply_entity_presence_scoring(filtered_chunks, understanding)
 
         # Limit to stage3_filter_limit
         filtered_chunks = filtered_chunks[: config.stage3_filter_limit]
@@ -2375,6 +2665,7 @@ class HybridQueryEngine:
             if config.reranking_method not in self._rerankers:
                 self._rerankers[config.reranking_method] = create_reranker(
                     method=config.reranking_method,
+                    model=config.reranking_model,
                     llm_config=self._llm_config,
                 )
             reranker = self._rerankers[config.reranking_method]
@@ -2459,6 +2750,7 @@ class HybridQueryEngine:
         Returns:
             Selected chunks with adjusted scores
         """
+        from khora._accel import batch_dot_product as _bdp
         from khora._accel import mmr_diversity_select, normalize_embeddings_batch
 
         if len(chunks) <= k:
@@ -2487,8 +2779,11 @@ class HybridQueryEngine:
         norm_query = normalized[0]
         norm_embeddings = normalized[1:]
 
-        # Relevance = dot(norm_query, norm_embedding_i) for each candidate
-        scores = [sum(a * b for a, b in zip(norm_query, emb)) for emb in norm_embeddings]
+        # Relevance = batch dot product (Rust/NumPy accelerated)
+        dot_results = _bdp(norm_query, norm_embeddings, threshold=0.0)
+        scores = [0.0] * len(norm_embeddings)
+        for idx, sim in dot_results:
+            scores[idx] = sim
 
         # Run MMR selection on pre-normalized embeddings
         selected_indices = mmr_diversity_select(norm_embeddings, scores, lambda_param, k)

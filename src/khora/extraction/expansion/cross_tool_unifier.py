@@ -421,7 +421,57 @@ class CrossToolUnifier:
         merge_groups: list[set[UUID]],
         entities: list[Entity],
     ) -> list[Relationship]:
-        """Find new relationships to create based on correlation rules."""
-        # This would create relationships like SAME_AS or REFERENCES
-        # For now, return empty list - implementation depends on requirements
-        return []
+        """Create CROSS_REFERENCED relationships when entities from different documents merge."""
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from khora.core.models import Relationship
+
+        entity_lookup = {e.id: e for e in entities}
+        new_rels: list[Relationship] = []
+
+        for group in merge_groups:
+            group_entities = [entity_lookup[eid] for eid in group if eid in entity_lookup]
+            if len(group_entities) < 2:
+                continue
+
+            # Check if entities span multiple documents
+            all_doc_ids: set[UUID] = set()
+            for e in group_entities:
+                all_doc_ids.update(e.source_document_ids)
+
+            if len(all_doc_ids) < 2:
+                continue
+
+            # Create CROSS_REFERENCED between the merged entity pairs
+            base = group_entities[0]
+            for other in group_entities[1:]:
+                # Only create if they come from different documents
+                base_docs = set(base.source_document_ids)
+                other_docs = set(other.source_document_ids)
+                if base_docs & other_docs:
+                    continue
+
+                new_rels.append(
+                    Relationship(
+                        id=uuid4(),
+                        namespace_id=base.namespace_id,
+                        source_entity_id=base.id,
+                        target_entity_id=other.id,
+                        relationship_type="CROSS_REFERENCED",
+                        description=f"Entity '{base.name}' referenced across documents",
+                        properties={"inferred": True},
+                        source_document_ids=list(all_doc_ids),
+                        source_chunk_ids=[],
+                        confidence=0.7,
+                        created_at=datetime.now(UTC),
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+
+        if new_rels:
+            logger.debug(
+                f"Created {len(new_rels)} CROSS_REFERENCED relationships from {len(merge_groups)} merge groups"
+            )
+
+        return new_rels

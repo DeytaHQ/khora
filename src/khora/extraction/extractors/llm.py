@@ -54,7 +54,7 @@ DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract e
 
 # Extraction prompt template with temporal awareness
 EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
-
+{document_context}
 Entity types to extract: {entity_types}
 Relationship types to use: {relationship_types}
 
@@ -101,17 +101,17 @@ Return a JSON object with the following structure:
 }}
 
 Guidelines:
+- Extract all named entities mentioned or implied in the text — if a person, organization, location, or concept is referenced even indirectly, extract it
 - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
 - Include aliases for entities that have multiple names/abbreviations
 - Extract temporal information when dates, times, or relative time references appear
 - For events, capture the when, who, and what
-- Be thorough but precise - only extract entities that are clearly mentioned
 - Ensure relationship source/target names match extracted entity names exactly
-- For every pair of extracted entities that have any direct or implied connection, create a relationship. Prioritize relationship completeness — it is better to have a weak relationship than no relationship.
-- Consider implicit relationships: if entities are mentioned together or in the same context, they likely have a relationship even if not explicitly stated.
-- Use ASSOCIATED_WITH or RELATES_TO for weaker/implied connections when a more specific type doesn't fit.
+- RELATIONSHIP DENSITY: For N extracted entities, aim to identify N to 2N relationships between them. Include both explicit relationships (stated directly) and implicit ones (inferred from context, co-occurrence, or logical connection)
+- For every pair of extracted entities that have any direct or implied connection, create a relationship. It is better to have a weak relationship than no relationship
+- Use ASSOCIATED_WITH or RELATES_TO for weaker/implied connections when a more specific type doesn't fit
 
-Before returning your response, verify that each extracted entity has at least one relationship connecting it to another entity. If an entity appears isolated, re-examine the text for implicit connections (e.g., co-location, temporal co-occurrence, shared attributes).
+Before returning your response, verify that each extracted entity has at least one relationship connecting it to another entity. If an entity appears isolated, re-examine the text for implicit connections (e.g., co-location, temporal co-occurrence, shared attributes, being mentioned in the same document).
 
 Return ONLY valid JSON, no other text."""
 
@@ -272,8 +272,24 @@ class LLMEntityExtractor(EntityExtractor):
         for m in _PROPER_NOUN_RE.finditer(text):
             _add(m.group(), "PERSON", 0.5)
 
+        # Create pairwise CO_OCCURS_WITH relationships for co-occurring entities
+        relationships: list[ExtractedRelationship] = []
+        if len(entities) >= 2:
+            for i, e1 in enumerate(entities):
+                for e2 in entities[i + 1 :]:
+                    relationships.append(
+                        ExtractedRelationship(
+                            source_entity=e1.name,
+                            target_entity=e2.name,
+                            relationship_type="CO_OCCURS_WITH",
+                            description="Co-occurs in same text",
+                            confidence=0.4,
+                        )
+                    )
+
         return ExtractionResult(
             entities=entities,
+            relationships=relationships,
             metadata={"extraction_method": "regex"},
         )
 
@@ -721,7 +737,7 @@ class LLMEntityExtractor(EntityExtractor):
         """
         num_entities = len(result.entities)
         num_relationships = len(result.relationships)
-        return num_entities > 3 and num_relationships < max(2, num_entities // 2)
+        return num_entities >= 2 and num_relationships < num_entities - 1
 
     async def _extract_additional_relationships(
         self,
@@ -937,6 +953,50 @@ class LLMEntityExtractor(EntityExtractor):
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _build_document_context(context: dict[str, Any] | None) -> str:
+        """Build temporal document context block for extraction prompts.
+
+        When document_created_at is available in the context dict, generates
+        instructions for the LLM to resolve relative temporal references.
+
+        Args:
+            context: Optional context dict that may contain document_created_at
+
+        Returns:
+            Document context string to include in the prompt, or empty string
+        """
+        if not context:
+            return ""
+
+        created_at = context.get("document_created_at")
+        if not created_at:
+            return ""
+
+        # Convert to string if it's a datetime object
+        if hasattr(created_at, "isoformat"):
+            created_at_str = created_at.isoformat()
+        else:
+            created_at_str = str(created_at)
+
+        lines = [
+            "\nDOCUMENT CONTEXT:",
+            f"- Document created: {created_at_str}",
+        ]
+
+        source_tool = context.get("source_tool")
+        if source_tool:
+            lines.append(f"- Source: {source_tool}")
+
+        lines.append(
+            "\nWhen you encounter relative temporal references (e.g., 'yesterday', "
+            "'last week', 'three days ago'), resolve them to absolute ISO 8601 dates "
+            "using the document creation date as reference. Always provide ISO 8601 "
+            "dates in temporal fields, not relative references."
+        )
+
+        return "\n".join(lines)
+
     def _render_extraction_prompt(
         self,
         text: str,
@@ -985,10 +1045,14 @@ class LLMEntityExtractor(EntityExtractor):
         else:
             relationship_types = DEFAULT_RELATIONSHIP_TYPES
 
+        # Build document temporal context from the context dict
+        document_context = self._build_document_context(context)
+
         prompt = EXTRACTION_PROMPT.format(
             entity_types=", ".join(entity_types),
             relationship_types=", ".join(relationship_types),
             text=text[:8000],  # Truncate very long texts
+            document_context=document_context,
         )
         if tool_context:
             prompt = tool_context + "\n\n" + prompt

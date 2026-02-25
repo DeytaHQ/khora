@@ -7,7 +7,7 @@ using pgvector extension in PostgreSQL.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
@@ -21,6 +21,13 @@ from khora.storage.backends.mixins import AsyncSessionMixin
 
 if TYPE_CHECKING:
     pass
+
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
 
 
 _DEADLOCK_MAX_RETRIES = 3
@@ -307,6 +314,9 @@ class PgVectorBackend(AsyncSessionMixin):
         limit: int = 10,
         min_similarity: float = 0.0,
         filter_document_ids: list[UUID] | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        metadata_filters: dict[str, Any] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search for similar chunks using vector similarity.
 
@@ -332,6 +342,16 @@ class PgVectorBackend(AsyncSessionMixin):
             if min_similarity > 0:
                 query = query.where(similarity >= min_similarity)
 
+            if created_after is not None:
+                query = query.where(ChunkModel.created_at >= created_after)
+
+            if created_before is not None:
+                query = query.where(ChunkModel.created_at <= created_before)
+
+            if metadata_filters:
+                for key, value in metadata_filters.items():
+                    query = query.where(ChunkModel.metadata_.op("->>")(key) == value)
+
             result = await session.execute(query)
             rows = result.all()
 
@@ -352,7 +372,11 @@ class PgVectorBackend(AsyncSessionMixin):
                 token_count=model.token_count,
                 custom=model.metadata_,
             ),
-            embedding=list(model.embedding) if model.embedding is not None else None,
+            embedding=(
+                np.asarray(model.embedding, dtype=np.float32)
+                if (_HAS_NUMPY and model.embedding is not None)
+                else (list(model.embedding) if model.embedding is not None else None)
+            ),
             embedding_model=model.embedding_model,
             created_at=model.created_at,
         )
@@ -495,7 +519,11 @@ class PgVectorBackend(AsyncSessionMixin):
             source_document_ids=model.source_document_ids or [],
             source_chunk_ids=model.source_chunk_ids or [],
             mention_count=model.mention_count,
-            embedding=list(model.embedding) if model.embedding is not None else None,
+            embedding=(
+                np.asarray(model.embedding, dtype=np.float32)
+                if (_HAS_NUMPY and model.embedding is not None)
+                else (list(model.embedding) if model.embedding is not None else None)
+            ),
             embedding_model=model.embedding_model or "",
             valid_from=model.valid_from,
             valid_until=model.valid_until,

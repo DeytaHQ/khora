@@ -6,6 +6,7 @@
 use pyo3::prelude::*;
 
 mod bm25;
+mod community;
 mod cosine;
 mod entity_resolution;
 mod keyword_extract;
@@ -81,6 +82,9 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // MMR diversity selection
     m.add_function(wrap_pyfunction!(mmr::mmr_diversity_select, m)?)?;
+
+    // Community detection
+    m.add_function(wrap_pyfunction!(community::detect_communities, m)?)?;
 
     Ok(())
 }
