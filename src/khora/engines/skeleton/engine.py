@@ -564,7 +564,11 @@ class SkeletonConstructionEngine:
                 return False
 
         # Delete from temporal store
-        ns_id = namespace_id or (await storage.get_document(document_id)).namespace_id
+        doc = await storage.get_document(document_id)
+        ns_id = namespace_id or (doc.namespace_id if doc else namespace_id)
+        if ns_id is None:
+            logger.warning(f"Cannot determine namespace for document {document_id}")
+            return False
         await temporal_store.delete_chunks_by_document(document_id, ns_id)
 
         # Delete from relational storage
