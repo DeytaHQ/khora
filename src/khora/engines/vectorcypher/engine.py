@@ -53,6 +53,66 @@ if TYPE_CHECKING:
     from khora.storage import StorageCoordinator
 
 
+_MAX_COOCCURRENCE_PER_CHUNK = 15
+
+
+def _build_cooccurrence_relationships(
+    entities: list[Entity],
+    namespace_id: UUID,
+    existing_relationships: list[Relationship],
+) -> list[Relationship]:
+    """Create ASSOCIATED_WITH edges between entities sharing the same chunk.
+
+    This mirrors the co-occurrence logic in ``pipelines/flows/ingest.py:369-405``
+    to ensure VectorCypher builds equally dense graphs.  Capped at
+    ``_MAX_COOCCURRENCE_PER_CHUNK`` per chunk to prevent quadratic explosion.
+    """
+    # Build chunk → entities map
+    chunk_entity_map: dict[UUID, list[Entity]] = {}
+    for entity in entities:
+        for chunk_id in entity.source_chunk_ids:
+            chunk_entity_map.setdefault(chunk_id, []).append(entity)
+
+    # Collect existing pairs to avoid duplicates
+    existing_pairs: set[tuple[UUID, UUID]] = set()
+    for r in existing_relationships:
+        pair = (min(r.source_entity_id, r.target_entity_id), max(r.source_entity_id, r.target_entity_id))
+        existing_pairs.add(pair)
+
+    cooccurrence_rels: list[Relationship] = []
+    for chunk_id, chunk_entities in chunk_entity_map.items():
+        if len(chunk_entities) < 2:
+            continue
+        chunk_count = 0
+        for i, e1 in enumerate(chunk_entities):
+            for e2 in chunk_entities[i + 1 :]:
+                pair = (min(e1.id, e2.id), max(e1.id, e2.id))
+                if pair in existing_pairs:
+                    continue
+                existing_pairs.add(pair)
+                cooccurrence_rels.append(
+                    Relationship(
+                        source_entity_id=e1.id,
+                        target_entity_id=e2.id,
+                        relationship_type="ASSOCIATED_WITH",
+                        namespace_id=namespace_id,
+                        description="Co-occurs in same chunk",
+                        properties={},
+                        confidence=0.4,
+                    )
+                )
+                chunk_count += 1
+                if chunk_count >= _MAX_COOCCURRENCE_PER_CHUNK:
+                    break
+            if chunk_count >= _MAX_COOCCURRENCE_PER_CHUNK:
+                break
+
+    if cooccurrence_rels:
+        logger.debug(f"VectorCypher: added {len(cooccurrence_rels)} co-occurrence edges")
+
+    return cooccurrence_rels
+
+
 @dataclass(slots=True)
 class ExtractionQualityMetrics:
     """Track extraction quality for monitoring."""
@@ -105,12 +165,15 @@ class VectorCypherConfig:
     query_cache_ttl_seconds: int = 0  # 0 = disabled
     query_cache_max_size: int = 100
 
+    # Extraction concurrency (aligned with ingest pipeline's default of 20)
+    max_concurrent_extractions: int = 20
+
     # Streaming pipeline (A-1: batch entity storage across documents)
     streaming_pipeline: bool = True
     enable_smart_resolution: bool = True
 
-    # Lazy entity expansion
-    lazy_entity_expansion: bool = False
+    # Lazy entity expansion (recovers graph signal for non-core chunks)
+    lazy_entity_expansion: bool = True
 
     # Search thresholds
     fusion_hybrid_alpha: float = 0.7
@@ -219,10 +282,12 @@ class VectorCypherEngine:
                 "Neo4j URL is required for VectorCypher engine. Set GENESIS_NEO4J_URL or configure graph_config."
             )
 
+        neo4j_cfg = self._config.get_graph_config()
+        pool_size = getattr(neo4j_cfg, "max_connection_pool_size", 100) if neo4j_cfg else 100
         self._neo4j_driver = AsyncGraphDatabase.driver(
             neo4j_url,
             auth=(self._config.get_neo4j_user(), self._config.get_neo4j_password()),
-            max_connection_pool_size=50,
+            max_connection_pool_size=pool_size,
         )
         await self._neo4j_driver.verify_connectivity()
 
@@ -585,10 +650,13 @@ class VectorCypherEngine:
         if not chunks:
             return 0, 0
 
-        # Build skeleton index
-        skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
-        skeleton.add_chunks_batch(chunks)
-        core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+        # Skip skeleton overhead for small documents (≤2 chunks)
+        if len(chunks) <= 2:
+            core_ids = {c.id for c in chunks}
+        else:
+            skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+            skeleton.add_chunks_batch(chunks)
+            core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
         logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
 
@@ -618,7 +686,7 @@ class VectorCypherEngine:
             skill_name=skill_name,
             expertise=expertise,
             model=model,
-            max_concurrent=self._config.llm.max_concurrent_llm_calls,
+            max_concurrent=self._vc_config.max_concurrent_extractions,
         )
 
         if not entities:
@@ -637,6 +705,11 @@ class VectorCypherEngine:
 
         # Store entities in Neo4j + pgvector
         await storage.upsert_entities_batch(namespace_id, entities)
+
+        # Create co-occurrence relationships between entities in the same chunk
+        cooccurrence_rels = _build_cooccurrence_relationships(entities, namespace_id, relationships)
+        if cooccurrence_rels:
+            relationships = list(relationships) + cooccurrence_rels
 
         # Store relationships in Neo4j
         relationships_created = 0
@@ -687,9 +760,13 @@ class VectorCypherEngine:
         if not chunks:
             return [], [], []
 
-        skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
-        skeleton.add_chunks_batch(chunks)
-        core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+        # Skip skeleton overhead for small documents (≤2 chunks)
+        if len(chunks) <= 2:
+            core_ids = {c.id for c in chunks}
+        else:
+            skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+            skeleton.add_chunks_batch(chunks)
+            core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
         logger.debug(f"Skeleton indexing (deferred): {len(core_ids)}/{len(chunks)} core chunks")
 
@@ -714,7 +791,7 @@ class VectorCypherEngine:
             skill_name=skill_name,
             expertise=expertise,
             model=model,
-            max_concurrent=self._config.llm.max_concurrent_llm_calls,
+            max_concurrent=self._vc_config.max_concurrent_extractions,
         )
 
         if not entities:
@@ -727,6 +804,11 @@ class VectorCypherEngine:
         for entity, embedding in zip(entities, entity_embeddings):
             entity.embedding = embedding
             entity.embedding_model = embedder.model_name
+
+        # Create co-occurrence relationships between entities in the same chunk
+        cooccurrence_rels = _build_cooccurrence_relationships(entities, namespace_id, relationships)
+        if cooccurrence_rels:
+            relationships = list(relationships) + cooccurrence_rels
 
         # Build entity-chunk links
         entity_chunk_links: list[EntityChunkLink] = []

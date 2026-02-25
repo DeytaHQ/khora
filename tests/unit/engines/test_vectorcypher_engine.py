@@ -43,7 +43,7 @@ class TestVectorCypherConfig:
         assert config.query_cache_max_size == 100
         assert config.streaming_pipeline is True
         assert config.enable_smart_resolution is True
-        assert config.lazy_entity_expansion is False
+        assert config.lazy_entity_expansion is True
         assert config.fusion_hybrid_alpha == 0.7
         assert config.retriever_min_entity_similarity == 0.3
 
