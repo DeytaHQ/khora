@@ -372,13 +372,19 @@ async def stream_extract_and_embed_entities(
             }
             existing_pairs |= {(r.target_entity_id, r.source_entity_id) for r in all_relationships}
             co_occurrence_count = 0
+            _MAX_COOCCURRENCE_PER_CHUNK = 15  # Cap O(n^2) explosion
             for chunk in chunks:
                 keys = chunk_entity_keys.get(chunk.id, [])
                 unique_keys = list(dict.fromkeys(keys))  # dedupe, preserve order
                 if len(unique_keys) < 2:
                     continue
+                chunk_co_count = 0
                 for i, key_a in enumerate(unique_keys):
+                    if chunk_co_count >= _MAX_COOCCURRENCE_PER_CHUNK:
+                        break
                     for key_b in unique_keys[i + 1 :]:
+                        if chunk_co_count >= _MAX_COOCCURRENCE_PER_CHUNK:
+                            break
                         if key_a not in all_entities or key_b not in all_entities:
                             continue
                         ent_a = all_entities[key_a]
@@ -400,6 +406,7 @@ async def stream_extract_and_embed_entities(
                                 confidence=0.4,
                             )
                         )
+                        chunk_co_count += 1
                         co_occurrence_count += 1
             if co_occurrence_count:
                 logger.debug(f"Added {co_occurrence_count} co-occurrence edges")

@@ -6,6 +6,7 @@ in Neo4j graph database.
 
 from __future__ import annotations
 
+import asyncio
 import re as _re
 from copy import copy
 from datetime import datetime
@@ -663,17 +664,23 @@ class Neo4jBackend(GraphBackendBase):
                     type_total += await session.execute_write(_tx)
             return type_total
 
-        # Process type groups sequentially in sorted order for deterministic
-        # lock ordering across concurrent callers, preventing deadlocks.
-        total_created = 0
-        for rel_type in sorted(type_groups):
-            total_created += await _create_type_group(rel_type, type_groups[rel_type])
+        # Bounded parallelism — up to 4 concurrent type groups to restore
+        # throughput while limiting deadlock surface. The driver's built-in
+        # retry (retry_delay_jitter_factor=0.5) handles any remaining contention.
+        _sem = asyncio.Semaphore(4)
+
+        async def _limited_create(rel_type: str, rels: list[Relationship]) -> int:
+            async with _sem:
+                return await _create_type_group(rel_type, rels)
+
+        results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
+        total_created = sum(results)
 
         inverse_count = len(all_rels) - len(relationships)
         if inverse_count > 0:
             logger.debug(f"Included {inverse_count} inverse relationships")
 
-        logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types sequentially)")
+        logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
         return total_created
 
     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
