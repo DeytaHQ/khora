@@ -892,7 +892,7 @@ class HybridQueryEngine:
                 embed_tasks = [self._embedder.embed(queries_to_search[i]) for i in range(1, len(queries_to_search))]
                 embed_results = await asyncio.gather(*embed_tasks, return_exceptions=True)
                 for idx, result in enumerate(embed_results):
-                    if isinstance(result, Exception):
+                    if isinstance(result, BaseException):
                         logger.warning(f"Failed to embed expanded query {idx + 1}: {result}")
                         expanded_embeddings[idx + 1] = None
                     else:
@@ -1338,7 +1338,7 @@ class HybridQueryEngine:
             return None
 
         try:
-            adjacent_chunks = await self._storage.search_chunks_by_metadata(
+            adjacent_chunks = await self._storage.search_chunks_by_metadata(  # type: ignore[unresolved-attribute]
                 namespace_id,
                 metadata_filter={"session_id": list(adjacent)},
                 limit=10,
@@ -2372,7 +2372,7 @@ class HybridQueryEngine:
             embed_tasks = [self._embedder.embed(queries_to_search[i]) for i in range(1, len(queries_to_search))]
             embed_results = await asyncio.gather(*embed_tasks, return_exceptions=True)
             for idx, result in enumerate(embed_results):
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     logger.warning(f"Failed to embed expanded query {idx + 1}: {result}")
                     expanded_embeddings[idx + 1] = None
                 else:

@@ -682,12 +682,15 @@ class StorageCoordinator:
         logger.debug(f"upsert_entities_batch: {len(entities)} entities, has_graph={has_graph}, has_vector={has_vector}")
 
         if has_graph and has_vector:
+            assert self.graph is not None  # narrowed by has_graph
+            assert self.vector is not None  # narrowed by has_vector
             graph_results, _ = await asyncio.gather(
                 self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
                 self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),  # type: ignore[unresolved-attribute]
             )
             results = graph_results
         elif has_graph:
+            assert self.graph is not None
             results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
         elif has_vector:
             results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)  # type: ignore[unresolved-attribute]

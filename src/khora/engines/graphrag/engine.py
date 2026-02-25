@@ -352,7 +352,7 @@ class GraphRAGEngine:
             config.enable_temporal_detection = False
             config.enable_entity_linking = False
             config.enable_reranking = False
-            config.enable_hyde = False
+            config.enable_hyde = "never"
 
         result = await self._get_query_engine().query(query, namespace_id, config=config, agentic=agentic)
 

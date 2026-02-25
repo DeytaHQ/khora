@@ -190,6 +190,10 @@ class RelationalBackendProtocol(Protocol):
         """Set the sync checkpoint for a source."""
         ...
 
+    def _get_session(self) -> Any:
+        """Get a database session (provided by AsyncSessionMixin)."""
+        ...
+
 
 @runtime_checkable
 class VectorBackendProtocol(Protocol):
