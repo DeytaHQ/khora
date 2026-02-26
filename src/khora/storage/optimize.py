@@ -314,10 +314,17 @@ async def reindex_hnsw_concurrently(engine) -> dict:
     # so we use the raw connection with autocommit.
     for idx_name in HNSW_INDEXES:
         try:
-            logger.info(f"Reindexing {idx_name} concurrently...")
             async with engine.connect() as conn:
                 await conn.execution_options(isolation_level="AUTOCOMMIT")
-                await conn.execute(text(f"REINDEX INDEX CONCURRENTLY IF EXISTS {idx_name}"))
+                row = await conn.execute(
+                    text("SELECT 1 FROM pg_indexes WHERE indexname = :name"),
+                    {"name": idx_name},
+                )
+                if row.scalar() is None:
+                    logger.debug(f"Index {idx_name} does not exist, skipping reindex")
+                    continue
+                logger.info(f"Reindexing {idx_name} concurrently...")
+                await conn.execute(text(f"REINDEX INDEX CONCURRENTLY {idx_name}"))
             result["indexes_reindexed"] += 1
             logger.info(f"Reindexed {idx_name}")
         except Exception as e:
