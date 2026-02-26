@@ -68,7 +68,7 @@ pub fn extract_keywords(content: &str) -> Vec<String> {
 /// Releases the GIL so Python threads are not blocked.
 #[pyfunction]
 pub fn extract_keywords_batch(py: Python<'_>, contents: Vec<String>) -> Vec<Vec<String>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         contents
             .par_iter()
             .map(|c| extract_keywords_inner(c))

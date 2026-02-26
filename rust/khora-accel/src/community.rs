@@ -37,7 +37,7 @@ pub fn detect_communities(
     resolution: f64,
     max_iter: usize,
 ) -> Vec<i32> {
-    py.allow_threads(|| {
+    py.detach(|| {
         if n == 0 {
             return Vec::new();
         }

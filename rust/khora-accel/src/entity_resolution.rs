@@ -39,7 +39,7 @@ pub fn resolve_entities_batch(
         .map(|aliases| aliases.iter().map(|a| a.to_lowercase()).collect())
         .collect();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         new_names
             .par_iter()
             .map(|new_name| {
@@ -156,7 +156,7 @@ pub fn resolve_entities_enhanced(
     let existing_types_upper: Vec<String> =
         existing_types.iter().map(|t| t.to_uppercase()).collect();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         new_names
             .par_iter()
             .zip(new_types.par_iter())
