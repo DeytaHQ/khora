@@ -1043,7 +1043,7 @@ wheels = [
 
 [[package]]
 name = "khora"
-version = "0.3.4"
+version = "0.3.5"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -1207,7 +1207,7 @@ dev = [
 
 [[package]]
 name = "khora-accel"
-version = "0.3.3"
+version = "0.3.5"
 source = { editable = "rust/khora-accel" }
 
 [[package]]

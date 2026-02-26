@@ -247,7 +247,7 @@ inference_rules:
 
 confidence:
   min_entity: 0.5
-  min_relationship: 0.35
+  min_relationship: 0.25
   min_inferred: 0.3
 
 expansion:
