@@ -1473,11 +1473,23 @@ class VectorCypherEngine:
         query_embedding = await embedder.embed(query)
 
         # Search via storage coordinator
-        return await self._get_storage().search_entities_by_embedding(  # type: ignore[unresolved-attribute]
-            namespace_id=namespace_id,
-            embedding=query_embedding,
+        storage = self._get_storage()
+        entity_ids_scores = await storage.search_similar_entities(
+            namespace_id,
+            query_embedding,
             limit=limit,
+            min_similarity=0.0,
         )
+
+        if not entity_ids_scores:
+            return []
+
+        # Batch fetch all entities in a single query (avoids N+1)
+        entity_ids = [entity_id for entity_id, _ in entity_ids_scores]
+        entities_map = await storage.get_entities_batch(entity_ids)
+
+        # Return entities in score order, filtering out any that weren't found
+        return [entities_map[eid] for eid, _score in entity_ids_scores if eid in entities_map]
 
     # =========================================================================
     # Document Operations
