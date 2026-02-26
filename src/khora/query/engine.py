@@ -1548,7 +1548,7 @@ class HybridQueryEngine:
 
         # Linked entities (high priority)
         if linked_entity_ids:
-            for entity_id in linked_entity_ids[:5]:
+            for entity_id in linked_entity_ids[:10]:
                 if entity_id not in seen_entity_ids:
                     all_entity_ids_to_fetch.append(entity_id)
                     linked_scores[entity_id] = 1.0  # High confidence from linking
@@ -1559,11 +1559,11 @@ class HybridQueryEngine:
             entity_ids_scores = await self._cached_entity_search(
                 namespace_id,
                 query_embedding,
-                limit=5,
+                limit=10,
                 min_similarity=config.min_entity_similarity,
             )
 
-            for entity_id, score in entity_ids_scores[:3]:
+            for entity_id, score in entity_ids_scores[:8]:
                 if entity_id not in seen_entity_ids:
                     all_entity_ids_to_fetch.append(entity_id)
                     similar_scores[entity_id] = score
@@ -1575,10 +1575,10 @@ class HybridQueryEngine:
                 entity_ids_scores = await self._storage.search_similar_entities(
                     namespace_id,
                     query_embedding,
-                    limit=3,
+                    limit=5,
                     min_similarity=0.0,
                 )
-                for entity_id, score in entity_ids_scores[:3]:
+                for entity_id, score in entity_ids_scores[:5]:
                     if entity_id not in seen_entity_ids:
                         all_entity_ids_to_fetch.append(entity_id)
                         similar_scores[entity_id] = score

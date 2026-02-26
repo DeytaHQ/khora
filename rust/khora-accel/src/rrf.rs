@@ -79,7 +79,7 @@ pub fn weighted_rrf_normalized(
     vector_weight: f64,
     graph_weight: f64,
 ) -> Vec<(String, f64)> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut scores: HashMap<String, f64> = HashMap::new();
         let mut score_contributions: HashMap<String, f64> = HashMap::new();
 

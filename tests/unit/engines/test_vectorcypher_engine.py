@@ -39,7 +39,7 @@ class TestVectorCypherConfig:
         assert config.temporal_recency_weight == 0.2
         assert config.temporal_recency_decay_days == 30
         assert config.recency_decay_type == "exponential"
-        assert config.query_cache_ttl_seconds == 0
+        assert config.query_cache_ttl_seconds == 300
         assert config.query_cache_max_size == 100
         assert config.streaming_pipeline is True
         assert config.enable_smart_resolution is True

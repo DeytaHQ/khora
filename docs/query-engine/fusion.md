@@ -201,7 +201,7 @@ result = await engine.query(
 
 ## Implementation Details
 
-The fusion happens in `src/khora/query/fusion.py`:
+The HybridQueryEngine fusion happens in `src/khora/query/fusion.py`. The VectorCypher engine has its own fusion in `src/khora/engines/vectorcypher/fusion.py`:
 
 ```python
 def reciprocal_rank_fusion(
@@ -254,6 +254,36 @@ RRF has several nice properties:
 5. **Tunable** - Weights and k let you adjust behavior
 
 Research has shown RRF performs comparably to learned fusion methods while being much simpler to implement and understand.
+
+## Coherence Scoring (v0.3.5)
+
+After RRF fusion, the VectorCypher retriever applies a lightweight coherence signal to penalize word-shuffled confounders — documents that share the same vocabulary as a relevant chunk but in a nonsensical order. This avoids the cost of an LLM reranking call for obvious confounders.
+
+### How It Works
+
+`bigram_coherence_score()` evaluates text by checking function-word transitions: articles should precede content words, prepositions should precede noun phrases, and so on. Genuine text has predictable bigram patterns; word-shuffled text does not.
+
+### Integration
+
+`apply_coherence_boost()` blends the coherence score into the RRF score:
+
+```
+final_score = (1 - coherence_weight) * rrf_score + coherence_weight * coherence_score
+```
+
+The default `coherence_weight=0.1` applies a gentle adjustment — enough to demote obvious confounders without overriding the RRF ranking for legitimate results.
+
+### Configuration
+
+```python
+from khora.engines.vectorcypher import RetrieverConfig
+
+config = RetrieverConfig(
+    coherence_weight=0.1,  # default; set to 0.0 to disable
+)
+```
+
+> **Note:** Coherence scoring only applies to the VectorCypher retriever pipeline. The HybridQueryEngine's RRF fusion (in `query/fusion.py`) does not include this stage.
 
 ## Practical Example
 

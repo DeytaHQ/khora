@@ -2,6 +2,70 @@
 
 All notable changes to Khora are documented here.
 
+## [0.3.5] — Phase 3 Benchmark Optimizations
+
+### Temporal retrieval
+
+- Propagate document custom metadata to chunk metadata, fixing 57% zero-recall
+  on temporal queries where session-level fields (author, channel) were missing
+  from chunks.
+- Fall back to `thread_id` when `channel` is absent for session filtering.
+
+### Graph density
+
+- Expand graph search entry points from ~8 to ~18 seed entities for broader
+  traversal coverage.
+- Lower relationship confidence threshold from 0.35 to 0.25 for denser graphs.
+- Relax entity dedup Levenshtein threshold from 0.8 to 0.7 to merge name
+  variants (e.g., "J. Smith" / "John Smith").
+
+### Adversarial / confounder rejection
+
+- Add bigram coherence scoring (`bigram_coherence_score()`) to penalize
+  word-shuffled confounders without LLM cost. Integrated into VectorCypher's
+  RRF fusion via `apply_coherence_boost()` with `coherence_weight=0.1`.
+
+### Performance
+
+- Enable query result caching in VectorCypher (`query_cache_ttl_seconds=300`,
+  `query_cache_max_size=100`).
+- Raise router LLM confidence threshold from 0.7 to 0.85 to reduce
+  mis-routed queries.
+
+### Housekeeping
+
+- Version bump 0.3.4 → 0.3.5.
+
+---
+
+## [0.3.4] — ty Type Checker Clean
+
+- Resolve all remaining `ty` diagnostics — `ty check src/` now passes with
+  zero warnings.
+- Version bump 0.3.3 → 0.3.4.
+
+---
+
+## [0.3.3] — Neo4j Deadlock Fixes
+
+- Shared semaphore for Neo4j relationship writes to prevent deadlocks during
+  concurrent batch ingestion.
+- Tune Neo4j driver parameters (`max_transaction_retry_time`,
+  `connection_acquisition_timeout`) to reduce transaction deadlock retries.
+- Version bump 0.3.2 → 0.3.3.
+
+---
+
+## [0.3.2] — Phase 2 Benchmark Optimizations
+
+- Restore parallel Neo4j writes and reduce relationship volume.
+- Add co-occurrence edges, lazy entity expansion, skeleton skip, and
+  concurrency alignment.
+- Phase 2 benchmark optimizations for improved ingestion throughput.
+- Version bump 0.3.1 → 0.3.2.
+
+---
+
 ## [0.3.1] — Benchmark-Driven Optimizations
 
 ### Why: restoring incremental MRR and improving retrieval quality

@@ -29,7 +29,7 @@ pub fn mmr_diversity_select(
     let e_array = embeddings.as_array();
     let e_owned = e_array.to_owned();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let n = e_owned.nrows();
         if n == 0 || k == 0 {
             return Vec::new();

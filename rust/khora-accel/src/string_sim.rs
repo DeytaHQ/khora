@@ -84,7 +84,7 @@ pub fn batch_levenshtein(
     candidates: Vec<String>,
     threshold: f64,
 ) -> Vec<(usize, f64)> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let q = query.to_lowercase();
 
         let mut results: Vec<(usize, f64)> = candidates
@@ -130,7 +130,7 @@ pub fn normalize_entity_name(name: &str) -> String {
 #[pyfunction]
 #[pyo3(signature = (names))]
 pub fn normalize_entity_names_batch(py: Python<'_>, names: Vec<String>) -> Vec<String> {
-    py.allow_threads(|| names.par_iter().map(|n| normalize_single(n)).collect())
+    py.detach(|| names.par_iter().map(|n| normalize_single(n)).collect())
 }
 
 /// Batch sequence match ratio: one query against N candidates.
@@ -145,7 +145,7 @@ pub fn batch_sequence_match(
     candidates: Vec<String>,
     threshold: f64,
 ) -> Vec<(usize, f64)> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let q = query.to_lowercase();
 
         let mut results: Vec<(usize, f64)> = candidates

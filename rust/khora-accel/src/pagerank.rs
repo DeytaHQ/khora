@@ -32,7 +32,7 @@ pub fn pagerank(
     max_iter: usize,
     tol: f64,
 ) -> Vec<f64> {
-    py.allow_threads(|| {
+    py.detach(|| {
         if n == 0 {
             return Vec::new();
         }
@@ -98,7 +98,7 @@ pub fn build_chunk_edges(
     keyword_chunk_ids: Vec<Vec<usize>>,
     idf_scores: Vec<f64>,
 ) -> Vec<(usize, usize, f64)> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut edges = Vec::new();
 
         for (keyword_idx, chunk_ids) in keyword_chunk_ids.iter().enumerate() {

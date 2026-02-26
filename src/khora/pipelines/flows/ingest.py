@@ -74,7 +74,7 @@ def _find_entity_key(normalized_name: str, all_entities: dict[str, Any]) -> str 
     for k in all_entities:
         entity_name = k.split(":")[0]
         sim = levenshtein_similarity(normalized_name, entity_name)
-        if sim > best_sim and sim > 0.8:
+        if sim > best_sim and sim > 0.7:
             best_sim = sim
             best_key = k
     return best_key

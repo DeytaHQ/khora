@@ -204,6 +204,30 @@ KHORA_QUERY__ENABLE_DIVERSITY=true   # default
 KHORA_QUERY__DIVERSITY_LAMBDA=0.7
 ```
 
+### Coherence Scoring (v0.3.5)
+
+The VectorCypher retriever applies a lightweight text coherence signal after RRF fusion to penalize word-shuffled confounders. This is particularly effective when using `raw=True` (no LLM reranking), where confounders would otherwise rank alongside genuine results.
+
+**How it works:** `bigram_coherence_score()` checks function-word transitions (articles → content words, prepositions → noun phrases). Genuine text has predictable bigram patterns; word-shuffled text does not. The score is blended into the RRF score via `apply_coherence_boost()`.
+
+**Configuration:**
+
+```python
+config = RetrieverConfig(
+    coherence_weight=0.1,  # default; tunable 0.0–0.5
+)
+```
+
+| Weight | Effect |
+|--------|--------|
+| 0.0 | Disabled — pure RRF ranking |
+| 0.1 | Default — gentle confounder demotion |
+| 0.3+ | Aggressive — may over-penalize informal text |
+
+Coherence scoring complements, but does not replace, MMR diversity selection. MMR removes same-document dominance; coherence scoring removes incoherent text. Both can be enabled simultaneously (the default).
+
+> **Note:** Coherence scoring only applies to the VectorCypher retriever pipeline.
+
 ## What's Next
 
 These changes should eliminate the zero-result problem and significantly improve retrieval quality on descriptive/paraphrased queries. The benchmark should be re-run to validate the expected impact:

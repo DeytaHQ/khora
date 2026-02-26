@@ -319,9 +319,74 @@ def apply_recency_boost(
     return results
 
 
+def bigram_coherence_score(text: str) -> float:
+    """Score text coherence based on word transition patterns.
+
+    Natural text has predictable transitions: articles before nouns,
+    prepositions before noun phrases. Word-shuffled text breaks these patterns.
+
+    Returns value in [0.0, 1.0] where 1.0 = coherent natural text.
+    """
+    words = text.lower().split()
+    n = len(words)
+    if n < 6:
+        return 1.0  # Too short to assess
+
+    _ARTICLES = frozenset({"the", "a", "an", "this", "that", "these", "those"})
+    _PREPOSITIONS = frozenset({"in", "of", "to", "for", "with", "on", "at", "by", "from", "about"})
+    _FUNCTION = _ARTICLES | _PREPOSITIONS | frozenset({"is", "are", "was", "were", "and", "or", "but", "not"})
+
+    coherent = 0
+    total = 0
+    for i in range(n - 1):
+        w1, w2 = words[i], words[i + 1]
+        if w1 in _ARTICLES:
+            total += 1
+            if w2 not in _FUNCTION:
+                coherent += 1
+        elif w1 in _PREPOSITIONS:
+            total += 1
+            if w2 in _ARTICLES or w2 not in _PREPOSITIONS:
+                coherent += 1
+
+    if total == 0:
+        return 1.0
+
+    return coherent / total
+
+
+def apply_coherence_boost(
+    results: list[FusedResult],
+    *,
+    coherence_weight: float = 0.1,
+) -> list[FusedResult]:
+    """Apply coherence-based re-ranking to penalize word-shuffled confounders.
+
+    Computes a bigram coherence score for each chunk's content and blends
+    it with the existing RRF score. Shuffled text scores low, natural text
+    scores high.
+
+    Args:
+        results: List of FusedResult (items must have .content attribute)
+        coherence_weight: Weight for coherence signal (default: 0.1)
+
+    Returns:
+        Results with adjusted scores, re-sorted
+    """
+    for r in results:
+        content = getattr(r.item, "content", None) or ""
+        coherence = bigram_coherence_score(content)
+        r.rrf_score = (1 - coherence_weight) * r.rrf_score + coherence_weight * coherence
+
+    results.sort(key=lambda x: x.rrf_score, reverse=True)
+    return results
+
+
 __all__ = [
     "FusedResult",
+    "apply_coherence_boost",
     "apply_recency_boost",
+    "bigram_coherence_score",
     "normalize_scores",
     "reciprocal_rank_fusion",
     "weighted_rrf",

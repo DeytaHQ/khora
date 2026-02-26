@@ -388,6 +388,37 @@ With Rust handling CPU-intensive work, Python's event loop has more headroom for
 
 These higher limits are safe because Rust acceleration reduces per-operation CPU time, leaving the GIL free for asyncio tasks.
 
+## Phase 8: VectorCypher Query Optimizations (v0.3.5)
+
+### Query Result Caching
+
+The VectorCypher engine now caches query results with LRU eviction:
+
+```python
+from khora.engines.vectorcypher import VectorCypherConfig
+
+config = VectorCypherConfig(
+    query_cache_ttl_seconds=300,   # 5-minute TTL (default)
+    query_cache_max_size=100,      # Max cached entries (default)
+)
+```
+
+Cache key is `sha256(query + namespace_id + mode)`. The cache is checked at the start of the retriever pipeline and populated on completion. Any `remember()` or `forget()` call invalidates the cache for the affected namespace.
+
+### Coherence Scoring
+
+A lightweight bigram coherence analysis is applied after RRF fusion to penalize word-shuffled confounders:
+
+```python
+from khora.engines.vectorcypher import RetrieverConfig
+
+config = RetrieverConfig(
+    coherence_weight=0.1,  # default; set to 0.0 to disable
+)
+```
+
+`bigram_coherence_score()` checks function-word transitions (articles → content words, prepositions → noun phrases). The score is blended into the RRF score via `apply_coherence_boost()`. This adds negligible latency (pure Python string analysis, no LLM calls) while improving confounder rejection when `raw=True` (no LLM reranking).
+
 ## What's Next
 
 - **[Query Engine Overview](../query-engine/overview.md)** -- How the full search pipeline works

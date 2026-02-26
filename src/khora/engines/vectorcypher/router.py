@@ -55,7 +55,7 @@ class RouterConfig:
     llm_model: str = "gpt-4o-mini"  # Fallback model if llm_config not provided
 
     # Confidence threshold for LLM fallback
-    llm_confidence_threshold: float = 0.7  # Use LLM if heuristic confidence below this
+    llm_confidence_threshold: float = 0.85  # Use LLM if heuristic confidence below this
 
     # Depth settings
     simple_depth: int = 0

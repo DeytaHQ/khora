@@ -271,7 +271,7 @@ impl RustBM25Index {
         let doc_lengths = &self.doc_lengths;
 
         // Release GIL for scoring — parallelised with rayon
-        let mut results: Vec<(u32, f32)> = py.allow_threads(|| {
+        let mut results: Vec<(u32, f32)> = py.detach(|| {
             let candidates: Vec<u32> = candidate_set.into_iter().collect();
 
             let mut results: Vec<(u32, f32)> = candidates

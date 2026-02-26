@@ -25,7 +25,7 @@ extractor = LLMEntityExtractor(
     max_tokens=4000,           # Output token limit
     timeout=60,                # Request timeout (seconds)
     max_retries=3,             # Retry count
-    max_concurrent=5,          # Parallel extractions
+    max_concurrent=10,         # Parallel extractions
 )
 ```
 
@@ -39,7 +39,7 @@ config = LiteLLMConfig(
     max_tokens=4000,
     timeout=60,
     max_retries=3,
-    max_concurrent_llm_calls=5,
+    max_concurrent_llm_calls=10,
 )
 
 extractor = LLMEntityExtractor.from_config(config)
@@ -281,7 +281,7 @@ Extraction uses a semaphore for rate limiting:
 
 ```python
 class LLMEntityExtractor:
-    def __init__(self, ..., max_concurrent: int = 5):
+    def __init__(self, ..., max_concurrent: int = 10):
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
     async def extract(self, text: str, ...):
@@ -320,6 +320,10 @@ results = await extractor.extract_multi(
 ```
 
 This means extraction time scales with the single slowest batch, not the sum of all batches. For a document with 15 chunks, this is roughly 3-5x faster than sequential processing.
+
+### Two-Pass Relationship Extraction
+
+The extractor automatically runs a second-pass relationship extraction when `num_relationships < num_entities - 1`, using `RELATIONSHIP_EXTRACTION_PROMPT`. This targets sparse graphs where entities were extracted but relationships between them were missed. The second pass is automatic and not configurable — it triggers whenever the entity-to-relationship ratio suggests missing connections.
 
 ## JSON Parsing
 

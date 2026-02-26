@@ -31,6 +31,7 @@ from khora.core.models import Chunk, ChunkMetadata, Entity
 from .dual_nodes import DualNodeManager
 from .fusion import (
     FusedResult,
+    apply_coherence_boost,
     apply_recency_boost,
     normalize_scores,
     weighted_rrf,
@@ -85,6 +86,9 @@ class RetrieverConfig:
     recency_weight: float = 0.2
     recency_decay_days: int = 30
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
+
+    # Coherence scoring (penalizes word-shuffled confounders)
+    coherence_weight: float = 0.1
 
     # Search thresholds
     min_entity_similarity: float = 0.3
@@ -364,6 +368,13 @@ class VectorCypherRetriever:
                 fused_results,
                 recency_scores,
                 recency_weight=self._config.recency_weight,
+            )
+
+        # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
+        if self._config.coherence_weight > 0:
+            fused_results = apply_coherence_boost(
+                fused_results,
+                coherence_weight=self._config.coherence_weight,
             )
 
         # Normalize scores

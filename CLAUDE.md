@@ -24,7 +24,7 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 
 - **Engines are pluggable** — implement `MemoryEngineProtocol` in `engines/protocol.py`
 - **Graph backends are interchangeable** — all implement `GraphBackend` in `storage/backends/base.py`
-- **Extraction skills are YAML-defined** — see `extraction/skills/definitions/`
+- **Extraction skills are YAML-defined** — see `extraction/skills/builtin/`
 - **Multi-tenancy:** Organization → Workspace → MemoryNamespace
 - **Config via env vars** — prefix `KHORA_`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
 
@@ -79,4 +79,4 @@ IMPORTANT: When bumping the version, always update **all four files** and regene
 - **Entity unique constraint** — `entities(namespace_id, name, entity_type)` has a UNIQUE constraint (migration 008). Entity upserts use `ON CONFLICT` on this constraint. Dedup migration is irreversible
 - **Pre-normalized embeddings** — All embeddings are L2-normalized at ingest time. Scoring uses `batch_dot_product` instead of `batch_cosine_similarity` for ~3x speedup. Dot product of unit vectors = cosine similarity
 - **MMR diversity enabled by default** — `enable_diversity=True` in `QuerySettings`. The MMR stage runs in Rust via `_accel.mmr_diversity_select` with NumPy and pure-Python fallbacks
-- **`ty` type checker** — Pre-commit hook runs `ty check src/` which has ~40 pre-existing warnings (unresolved Rust imports, coordinator type narrowing). Use `SKIP=ty` when committing if these block you
+- **`ty` type checker** — Pre-commit hook runs `ty check src/` which passes clean (`All checks passed!`). If ty fails on your changes, fix the diagnostics before committing

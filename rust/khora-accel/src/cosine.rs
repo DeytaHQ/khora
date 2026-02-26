@@ -51,7 +51,7 @@ pub fn batch_cosine_similarity(
     let q_owned = q_array.to_owned();
     let c_owned = c_array.to_owned();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let q = q_owned.as_slice().unwrap();
         let n_candidates = c_owned.nrows();
 
@@ -104,7 +104,7 @@ pub fn pairwise_cosine_above_threshold(
     let e_array = embeddings.as_array();
     let e_owned = e_array.to_owned();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let n = e_owned.nrows();
         if n < 2 {
             return Vec::new();
@@ -159,7 +159,7 @@ pub fn normalize_embeddings_batch(
     py: Python<'_>,
     vectors: Vec<Vec<f32>>,
 ) -> Vec<Vec<f32>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let normalize_one = |vec: &Vec<f32>| -> Vec<f32> {
             let sq_sum: f64 = vec.iter().map(|&v| (v as f64) * (v as f64)).sum();
             if sq_sum == 0.0 {
@@ -198,7 +198,7 @@ pub fn batch_dot_product(
     let q_owned = q_array.to_owned();
     let c_owned = c_array.to_owned();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let q = q_owned.as_slice().unwrap();
         let n_candidates = c_owned.nrows();
 

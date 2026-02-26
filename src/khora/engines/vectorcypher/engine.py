@@ -162,7 +162,7 @@ class VectorCypherConfig:
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
 
     # Query caching
-    query_cache_ttl_seconds: int = 0  # 0 = disabled
+    query_cache_ttl_seconds: int = 300  # 5 min TTL
     query_cache_max_size: int = 100
 
     # Extraction concurrency (aligned with ingest pipeline's default of 20)
@@ -575,13 +575,14 @@ class VectorCypherEngine:
                 created_at=datetime.now(UTC),
                 source_system=doc_metadata.get("source_system"),
                 author=doc_metadata.get("author"),
-                channel=doc_metadata.get("channel"),
+                channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
                 tags=doc_metadata.get("tags", []),
                 confidence=1.0,
                 metadata={
                     "chunk_index": i,
                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                    **{k: v for k, v in doc_metadata.items() if isinstance(v, (str, int, float, bool))},
                 },
             )
             temporal_chunks.append(temporal_chunk)
@@ -872,13 +873,14 @@ class VectorCypherEngine:
                 created_at=datetime.now(UTC),
                 source_system=doc_metadata.get("source_system"),
                 author=doc_metadata.get("author"),
-                channel=doc_metadata.get("channel"),
+                channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
                 tags=doc_metadata.get("tags", []),
                 confidence=1.0,
                 metadata={
                     "chunk_index": i,
                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                    **{k: v for k, v in doc_metadata.items() if isinstance(v, (str, int, float, bool))},
                 },
             )
             temporal_chunks.append(temporal_chunk)

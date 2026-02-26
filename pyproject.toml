@@ -1,6 +1,6 @@
 [project]
 name = "khora"
-version = "0.3.4"
+version = "0.3.5"
 description = "Khora is Memory Lake"
 readme = "README.md"
 authors = [
@@ -9,25 +9,25 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     # Configuration
-    "pydantic-settings>=2.12.0",
+    "pydantic-settings>=2.13.1",
     "pyyaml>=6.0.3",
-    "jinja2>=3.1.0",
+    "jinja2>=3.1.6",
     # FastAPI service
-    "fastapi>=0.128.1",
-    "uvicorn[standard]>=0.40.0",
+    "fastapi>=0.133.1",
+    "uvicorn[standard]>=0.41.0",
     "httpx>=0.28.1",
     # CLI
-    "click>=8.3.0",
+    "click>=8.3.1",
     # Async support
     "asyncpg>=0.31.0",
     # Database
-    "sqlalchemy[asyncio]>=2.0.46",
-    "alembic>=1.18.3",
+    "sqlalchemy[asyncio]>=2.0.47",
+    "alembic>=1.18.4",
     # Terminal UI
-    "rich>=14.3.2",
+    "rich>=14.3.3",
     "loguru>=0.7.3",
     # LLM Access (unified interface)
-    "litellm>=1.81.8",
+    "litellm>=1.81.15",
     # Graph database
     "neo4j>=6.1.0",
     # Vector database
@@ -35,23 +35,23 @@ dependencies = [
     # Token counting
     "tiktoken>=0.12.0",
     # Neural reranking
-    "sentence-transformers>=3.0.0",
+    "sentence-transformers>=5.2.3",
     # Retry logic
-    "tenacity>=9.1.3",
+    "tenacity>=9.1.4",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
-    "pytest-mock>=3.15.0",
+    "pytest-mock>=3.15.1",
     "pytest-asyncio>=1.3.0",
-    "coverage>=7.13.3",
-    "black>=26.0.0",
-    "ruff>=0.15.0",
-    "isort>=7.0.0",
-    "prek>=0.3.1",
-    "ty>=0.0.15",
+    "coverage>=7.13.4",
+    "black>=26.1.0",
+    "ruff>=0.15.2",
+    "isort>=8.0.0",
+    "prek>=0.3.3",
+    "ty>=0.0.18",
 ]
 # Data storage backends
 postgres = [
@@ -60,21 +60,21 @@ postgres = [
 ]
 # Graph backends
 neo4j = ["neo4j>=6.1.0"]
-kuzu = ["kuzu>=0.8.0"]
+kuzu = ["kuzu>=0.11.3"]
 memgraph = ["neo4j>=6.1.0"]  # Memgraph uses bolt protocol via neo4j driver
 arcadedb = ["httpx>=0.28.0"]
 # All graph backends
-graph-all = ["neo4j>=6.1.0", "kuzu>=0.8.0", "httpx>=0.28.0"]
+graph-all = ["neo4j>=6.1.0", "kuzu>=0.11.3", "httpx>=0.28.1"]
 # Weaviate vector database
-weaviate = ["weaviate-client>=4.10.0"]
+weaviate = ["weaviate-client>=4.20.1"]
 # All backends
 all-backends = [
     "neo4j>=6.1.0",
-    "kuzu>=0.8.0",
+    "kuzu>=0.11.3",
     "asyncpg>=0.31.0",
     "pgvector>=0.4.2",
-    "httpx>=0.28.0",
-    "weaviate-client>=4.10.0",
+    "httpx>=0.28.1",
+    "weaviate-client>=4.20.1",
 ]
 # Neural reranking
 reranking = [
@@ -184,14 +184,14 @@ khora-accel = { path = "rust/khora-accel", editable = true }
 
 [dependency-groups]
 dev = [
-    "prek>=0.3.1",
+    "prek>=0.3.3",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
-    "black>=26.0.0",
-    "ruff>=0.15.0",
-    "isort>=7.0.0",
-    "ty>=0.0.15",
-    "rapidfuzz>=3.0.0",  # For ty type checking of optional accel module
-    "spacy>=3.8.0",
+    "black>=26.1.0",
+    "ruff>=0.15.2",
+    "isort>=8.0.0",
+    "ty>=0.0.18",
+    "rapidfuzz>=3.14.3",  # For ty type checking of optional accel module
+    "spacy>=3.8.11",
 ]

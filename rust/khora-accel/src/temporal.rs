@@ -36,7 +36,7 @@ pub fn batch_temporal_filter(
     let start = start_secs;
     let end = end_secs;
 
-    py.allow_threads(move || {
+    py.detach(move || {
         if timestamps_secs.len() < 512 {
             // Small batches: sequential is faster (no rayon overhead)
             timestamps_secs
@@ -70,7 +70,7 @@ pub fn batch_recency_scores(
     decay_days: f64,
     recency_weight: f64,
 ) -> Vec<f64> {
-    py.allow_threads(move || {
+    py.detach(move || {
         // Fast path
         if recency_weight == 0.0 {
             return vec![1.0; timestamps_secs.len()];
