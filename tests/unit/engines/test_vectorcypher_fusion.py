@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import random
+from types import SimpleNamespace
 from uuid import uuid4
 
 from khora.engines.vectorcypher.fusion import (
     FusedResult,
+    apply_coherence_boost,
     apply_recency_boost,
+    bigram_coherence_score,
     normalize_scores,
     reciprocal_rank_fusion,
     weighted_rrf,
@@ -368,3 +372,112 @@ class TestApplyRecencyBoost:
         """Test recency boost on empty results."""
         boosted = apply_recency_boost([], {}, recency_weight=0.2)
         assert boosted == []
+
+
+class TestBigramCoherenceScore:
+    """Tests for bigram_coherence_score function."""
+
+    def test_short_text_returns_one(self) -> None:
+        """Text with < 6 words is too short to assess, returns 1.0."""
+        assert bigram_coherence_score("hello world") == 1.0
+        assert bigram_coherence_score("one two three four five") == 1.0
+
+    def test_empty_string_returns_one(self) -> None:
+        """Empty string has < 6 words, returns 1.0."""
+        assert bigram_coherence_score("") == 1.0
+
+    def test_coherent_text_scores_high(self) -> None:
+        """Natural English text with proper article/preposition patterns scores high."""
+        text = "The cat sat on the mat in the garden by the old house"
+        score = bigram_coherence_score(text)
+        assert score > 0.8
+
+    def test_shuffled_text_scores_lower(self) -> None:
+        """Shuffled text scores strictly lower than its coherent source."""
+        text = "The researchers found that the results of the experiment were in the expected range and the data from the survey confirmed the hypothesis about the impact on the population"
+        coherent_score = bigram_coherence_score(text)
+
+        words = text.split()
+        rng = random.Random(42)
+        rng.shuffle(words)
+        shuffled_score = bigram_coherence_score(" ".join(words))
+
+        assert shuffled_score < coherent_score
+
+    def test_no_function_words_returns_one(self) -> None:
+        """Text with only content words (no articles/prepositions) has total == 0."""
+        text = "quantum computing neural networks machine learning algorithms data"
+        score = bigram_coherence_score(text)
+        assert score == 1.0
+
+
+class TestApplyCoherenceBoost:
+    """Tests for apply_coherence_boost function."""
+
+    def test_coherent_items_maintain_order(self) -> None:
+        """Items with coherent content preserve their relative ranking."""
+        id1, id2 = uuid4(), uuid4()
+        results = [
+            FusedResult(
+                item_id=id1,
+                item=SimpleNamespace(content="The report discusses the impact of the new policy on trade"),
+                rrf_score=0.9,
+            ),
+            FusedResult(
+                item_id=id2,
+                item=SimpleNamespace(content="A study found that the results were in the expected range"),
+                rrf_score=0.8,
+            ),
+        ]
+
+        boosted = apply_coherence_boost(results, coherence_weight=0.1)
+        assert boosted[0].item_id == id1
+        assert boosted[1].item_id == id2
+
+    def test_shuffled_item_gets_demoted(self) -> None:
+        """An item with shuffled content ranks lower than one with coherent content."""
+        coherent_id, shuffled_id = uuid4(), uuid4()
+        coherent_text = "The report discusses the impact of the new policy on trade"
+        words = coherent_text.split()
+        rng = random.Random(99)
+        rng.shuffle(words)
+        shuffled_text = " ".join(words)
+
+        results = [
+            FusedResult(
+                item_id=shuffled_id,
+                item=SimpleNamespace(content=shuffled_text),
+                rrf_score=0.8,
+            ),
+            FusedResult(
+                item_id=coherent_id,
+                item=SimpleNamespace(content=coherent_text),
+                rrf_score=0.8,
+            ),
+        ]
+
+        boosted = apply_coherence_boost(results, coherence_weight=0.3)
+        assert boosted[0].item_id == coherent_id
+
+    def test_zero_weight_is_noop(self) -> None:
+        """coherence_weight=0.0 should not change scores."""
+        id1, id2 = uuid4(), uuid4()
+        results = [
+            FusedResult(item_id=id1, item=SimpleNamespace(content="anything"), rrf_score=0.9),
+            FusedResult(item_id=id2, item=SimpleNamespace(content="whatever"), rrf_score=0.8),
+        ]
+
+        boosted = apply_coherence_boost(results, coherence_weight=0.0)
+        assert boosted[0].rrf_score == 0.9
+        assert boosted[1].rrf_score == 0.8
+
+    def test_items_without_content_attribute(self) -> None:
+        """Items lacking a .content attribute get coherence 1.0 (treated as neutral)."""
+        id1 = uuid4()
+        results = [
+            FusedResult(item_id=id1, item={"no_content": True}, rrf_score=0.9),
+        ]
+
+        boosted = apply_coherence_boost(results, coherence_weight=0.2)
+        # coherence=1.0 for empty content (< 6 words): (1-0.2)*0.9 + 0.2*1.0 = 0.92
+        assert abs(boosted[0].rrf_score - 0.92) < 1e-10
