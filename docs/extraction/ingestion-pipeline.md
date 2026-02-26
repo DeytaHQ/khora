@@ -418,7 +418,7 @@ documents = [
 
 result = await lake.remember_batch(
     documents,
-    max_concurrent=5,
+    max_concurrent=10,
 )
 ```
 

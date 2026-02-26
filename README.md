@@ -22,7 +22,7 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 ### Key Features
 
 - **Library-First Design**: Use as a Python library or deploy as a FastAPI service
-- **Pluggable Engines**: Choose GraphRAG (knowledge graphs) or Skeleton (temporal-first)
+- **Pluggable Engines**: Choose GraphRAG, VectorCypher, or Skeleton
 - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
 - **Multi-Tenancy**: Namespace-level isolation (shared mode with ACLs designed but not yet active — see `docs/design/namespace-optimization-plan.md`)
 - **Event Sourcing**: Immutable event log for temporal queries and audit trails
@@ -752,7 +752,7 @@ class MemoryLake:
         *,
         namespace: str | UUID | None = None,
         skill_name: str = "general_entities",
-        max_concurrent: int = 5,
+        max_concurrent: int = 10,
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
@@ -903,6 +903,18 @@ class Stats:
 | `PRODUCT` | Goods, services |
 | `DOCUMENT` | Referenced documents |
 | `OTHER` | Uncategorized entities |
+
+### Changes in v0.3.5
+
+| Feature | Description |
+|---------|-------------|
+| Metadata propagation | Document custom metadata (author, channel) now propagated to chunk metadata for temporal filtering |
+| Coherence scoring | Bigram coherence scoring penalizes word-shuffled confounders (`coherence_weight=0.1`) |
+| Query caching | VectorCypher query result caching with 300s TTL, LRU eviction at 100 entries |
+| Entity dedup relaxed | Levenshtein threshold 0.8 → 0.7 to merge name variants |
+| Relationship threshold | Confidence threshold 0.35 → 0.25 for denser graph extraction |
+| Graph seed expansion | Graph search entry points expanded from ~8 to ~18 seed entities |
+| Router confidence | LLM router confidence threshold raised 0.7 → 0.85 |
 
 ### Changes in v0.3.1
 

@@ -201,9 +201,11 @@ Confidence thresholds for filtering:
 @dataclass
 class ConfidenceConfig:
     min_entity: float = 0.5        # Minimum entity confidence
-    min_relationship: float = 0.5  # Minimum relationship confidence
+    min_relationship: float = 0.5  # Minimum relationship confidence (see note below)
     min_inferred: float = 0.3      # Minimum inferred relationship confidence
 ```
+
+> **Note (v0.3.5):** The `min_relationship` default of 0.5 shown above is the dataclass fallback. The builtin `general.yaml` skill overrides this to `min_relationship: 0.25` for denser relationship extraction. If you are using the `general_entities` skill (the default), the effective threshold is 0.25.
 
 ## ExpansionConfig
 

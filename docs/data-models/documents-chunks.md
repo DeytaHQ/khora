@@ -239,7 +239,7 @@ documents = [
 result = await lake.remember_batch(
     documents,
     skill_name="general_entities",
-    max_concurrent=5,
+    max_concurrent=10,
 )
 
 print(f"Processed: {result['processed_documents']}")
