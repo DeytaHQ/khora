@@ -29,9 +29,10 @@ from khora.storage.backends.mixins import serialize_dict as _serialize_dict
 # LLM-generated types like "at-risk" or "works for" need sanitizing.
 _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
 
-# Limits concurrent Neo4j relationship write transactions across ALL
-# documents to prevent cross-document deadlocks on overlapping entity nodes.
-_RELATIONSHIP_WRITE_SEM = asyncio.Semaphore(8)
+# Default concurrency limits for Neo4j write transactions.
+# Actual semaphores are created per-instance (see Neo4jBackend.__init__).
+_DEFAULT_ENTITY_WRITE_CONCURRENCY = 12
+_DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY = 8
 
 
 # Bidirectional relationship types and their inverses
@@ -119,8 +120,10 @@ class Neo4jBackend(GraphBackendBase):
         password: str = "",
         database: str = "neo4j",
         max_connection_pool_size: int = 100,
-        connection_acquisition_timeout: float = 30.0,
+        connection_acquisition_timeout: float = 60.0,
         retry_delay_jitter_factor: float = 0.5,
+        entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
+        relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
     ) -> None:
         """Initialize the Neo4j backend.
 
@@ -132,6 +135,8 @@ class Neo4jBackend(GraphBackendBase):
             max_connection_pool_size: Maximum connection pool size
             connection_acquisition_timeout: Timeout waiting for a connection from the pool
             retry_delay_jitter_factor: Jitter factor for transaction retry delays (0.0-1.0)
+            entity_write_concurrency: Max concurrent entity write transactions
+            relationship_write_concurrency: Max concurrent relationship write transactions
         """
         self._url = url
         self._user = user
@@ -142,6 +147,8 @@ class Neo4jBackend(GraphBackendBase):
         self._retry_delay_jitter_factor = retry_delay_jitter_factor
         self._driver: AsyncDriver | None = None
         self._owns_driver: bool = True
+        self._entity_write_sem = asyncio.Semaphore(entity_write_concurrency)
+        self._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
 
     @classmethod
     def from_config(cls, config: Any) -> Neo4jBackend:
@@ -152,8 +159,12 @@ class Neo4jBackend(GraphBackendBase):
             password=config.password,
             database=config.database,
             max_connection_pool_size=getattr(config, "max_connection_pool_size", 100),
-            connection_acquisition_timeout=getattr(config, "connection_acquisition_timeout", 30.0),
+            connection_acquisition_timeout=getattr(config, "connection_acquisition_timeout", 60.0),
             retry_delay_jitter_factor=getattr(config, "retry_delay_jitter_factor", 0.5),
+            entity_write_concurrency=getattr(config, "entity_write_concurrency", _DEFAULT_ENTITY_WRITE_CONCURRENCY),
+            relationship_write_concurrency=getattr(
+                config, "relationship_write_concurrency", _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY
+            ),
         )
 
     @classmethod
@@ -176,10 +187,12 @@ class Neo4jBackend(GraphBackendBase):
         instance._password = ""
         instance._database = database
         instance._max_connection_pool_size = 0
-        instance._connection_acquisition_timeout = 30.0
+        instance._connection_acquisition_timeout = 60.0
         instance._retry_delay_jitter_factor = 0.5
         instance._driver = driver
         instance._owns_driver = False
+        instance._entity_write_sem = asyncio.Semaphore(_DEFAULT_ENTITY_WRITE_CONCURRENCY)
+        instance._relationship_write_sem = asyncio.Semaphore(_DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY)
         return instance
 
     async def connect(self) -> None:
@@ -512,8 +525,8 @@ class Neo4jBackend(GraphBackendBase):
                 e.description = CASE WHEN size(row.description) > size(coalesce(e.description, ''))
                     THEN row.description ELSE e.description END,
                 e.attributes = row.attributes,
-                e.source_document_ids = e.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN e.source_document_ids],
-                e.source_chunk_ids = e.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN e.source_chunk_ids],
+                e.source_document_ids = (e.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN e.source_document_ids])[-100..],
+                e.source_chunk_ids = (e.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN e.source_chunk_ids])[-250..],
                 e.mention_count = e.mention_count + row.mention_count,
                 e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
                 e.updated_at = row.updated_at
@@ -542,8 +555,9 @@ class Neo4jBackend(GraphBackendBase):
                 result = await tx.run(_UPSERT_CYPHER, rows=rows)
                 return await result.data()
 
-            async with driver.session(database=self._database) as session:
-                records = await session.execute_write(_upsert_tx)
+            async with self._entity_write_sem:
+                async with driver.session(database=self._database) as session:
+                    records = await session.execute_write(_upsert_tx)
 
             # Build result mapping - each input entity should get exactly one result
             input_id_to_entity = {str(e.id): e for e in batch}
@@ -651,8 +665,8 @@ class Neo4jBackend(GraphBackendBase):
                 ON MATCH SET
                     r.description = CASE WHEN size(row.description) > size(coalesce(r.description, ''))
                         THEN row.description ELSE r.description END,
-                    r.source_document_ids = r.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN r.source_document_ids],
-                    r.source_chunk_ids = r.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN r.source_chunk_ids],
+                    r.source_document_ids = (r.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN r.source_document_ids])[-100..],
+                    r.source_chunk_ids = (r.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN r.source_chunk_ids])[-250..],
                     r.confidence = CASE WHEN row.confidence > r.confidence THEN row.confidence ELSE r.confidence END,
                     r.weight = CASE WHEN row.weight > r.weight THEN row.weight ELSE r.weight END,
                     r.updated_at = row.updated_at
@@ -672,7 +686,7 @@ class Neo4jBackend(GraphBackendBase):
         # throughput while limiting deadlock surface. The driver's built-in
         # retry (retry_delay_jitter_factor=0.5) handles any remaining contention.
         async def _limited_create(rel_type: str, rels: list[Relationship]) -> int:
-            async with _RELATIONSHIP_WRITE_SEM:
+            async with self._relationship_write_sem:
                 return await _create_type_group(rel_type, rels)
 
         results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
@@ -746,8 +760,8 @@ class Neo4jBackend(GraphBackendBase):
             ON MATCH SET
                 r.description = CASE WHEN size($description) > size(coalesce(r.description, ''))
                     THEN $description ELSE r.description END,
-                r.source_document_ids = r.source_document_ids + [x IN $source_document_ids WHERE NOT x IN r.source_document_ids],
-                r.source_chunk_ids = r.source_chunk_ids + [x IN $source_chunk_ids WHERE NOT x IN r.source_chunk_ids],
+                r.source_document_ids = (r.source_document_ids + [x IN $source_document_ids WHERE NOT x IN r.source_document_ids])[-100..],
+                r.source_chunk_ids = (r.source_chunk_ids + [x IN $source_chunk_ids WHERE NOT x IN r.source_chunk_ids])[-250..],
                 r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
                 r.weight = CASE WHEN $weight > r.weight THEN $weight ELSE r.weight END,
                 r.updated_at = $updated_at
