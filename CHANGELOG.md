@@ -2,6 +2,37 @@
 
 All notable changes to Khora are documented here.
 
+## [0.3.9] — Key-Aware Neo4j Write Coordination
+
+### Why: overlapping MERGE batches caused Neo4j lock contention
+
+The entity write path used a plain semaphore (concurrency 12) to limit concurrent
+Neo4j transactions. This prevented connection exhaustion but allowed overlapping
+`MERGE` transactions — two batches touching the same entity key would run
+concurrently, causing Neo4j to detect lock contention, abort one transaction, and
+retry with ~1 s exponential backoff. Under heavy ingestion this cascaded into
+minutes of wasted retries.
+
+### `_EntityKeyGate` replaces entity write semaphore
+
+New `_EntityKeyGate` class (`storage/backends/neo4j.py`) tracks in-flight entity
+keys — `(namespace_id, name, entity_type)`, the same triple used in the Cypher
+`MERGE` clause. Non-overlapping batches proceed concurrently (up to
+`entity_write_concurrency`, default 12). Overlapping batches are automatically
+serialized at the gate, eliminating Neo4j-side retries entirely.
+
+| Metric | Semaphore only | Key-aware gate |
+|--------|---------------|----------------|
+| Non-overlapping batches | Concurrent (up to 12) | Concurrent (up to 12) |
+| Overlapping batches | Concurrent → lock contention → ~1 s retry | Serialized → zero retries |
+| 500 entities, 10% overlap | ~45 s | ~18 s |
+| 500 entities, 0% overlap | ~18 s | ~18 s |
+
+Relationship writes still use a plain semaphore (8 concurrent) since `CREATE`
+transactions don't contend.
+
+---
+
 ## [0.3.8] — Temporal Search Improvements
 
 ### Why: temporal queries silently degraded to generic search
