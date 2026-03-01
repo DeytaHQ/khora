@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
@@ -671,6 +671,7 @@ class QueryUnderstanding:
                 date_str = date_str[:-1]
 
             # Try common formats
+            parsed_dt: datetime | None = None
             for fmt in [
                 "%Y-%m-%dT%H:%M:%S.%f",
                 "%Y-%m-%dT%H:%M:%S",
@@ -678,15 +679,31 @@ class QueryUnderstanding:
                 "%Y-%m-%d",
             ]:
                 try:
-                    return datetime.strptime(date_str, fmt)
+                    parsed_dt = datetime.strptime(date_str, fmt)
+                    break
                 except ValueError:
                     continue
 
             # Last resort
-            return datetime.fromisoformat(date_str)
+            if parsed_dt is None:
+                parsed_dt = datetime.fromisoformat(date_str)
+
+            # Validate the parsed date
+            if parsed_dt is not None:
+                now = datetime.now()
+                # Reject dates in the far future (> 1 year from now)
+                if parsed_dt > now + timedelta(days=365):
+                    logger.warning(f"Rejected future date from LLM: {date_str}")
+                    return None
+                # Reject dates before 2000
+                if parsed_dt.year < 2000:
+                    logger.warning(f"Rejected ancient date from LLM: {date_str}")
+                    return None
+
+            return parsed_dt
 
         except (ValueError, TypeError) as e:
-            logger.debug(f"Failed to parse ISO date '{date_str}': {e}")
+            logger.warning(f"Failed to parse ISO date '{date_str}': {e}")
             return None
 
     def _extract_keywords_simple(self, query: str) -> list[str]:

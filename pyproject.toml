@@ -1,6 +1,6 @@
 [project]
 name = "khora"
-version = "0.3.7"
+version = "0.3.8"
 description = "Khora is Memory Lake"
 readme = "README.md"
 authors = [
@@ -38,6 +38,8 @@ dependencies = [
     "sentence-transformers>=5.2.3",
     # Retry logic
     "tenacity>=9.1.4",
+    # Temporal date parsing
+    "dateparser>=1.2.0",
 ]
 
 [project.optional-dependencies]

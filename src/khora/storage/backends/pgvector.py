@@ -207,6 +207,7 @@ class PgVectorBackend(AsyncSessionMixin):
             embedding=chunk.embedding,
             embedding_model=chunk.embedding_model,
             created_at=chunk.created_at,
+            source_timestamp=getattr(chunk, "source_timestamp", None),
         )
         session.add(model)
         if commit:
@@ -243,6 +244,7 @@ class PgVectorBackend(AsyncSessionMixin):
                 embedding=chunk.embedding,
                 embedding_model=chunk.embedding_model,
                 created_at=chunk.created_at,
+                source_timestamp=getattr(chunk, "source_timestamp", None),
             )
             for chunk in chunks
         ]
@@ -343,10 +345,12 @@ class PgVectorBackend(AsyncSessionMixin):
                 query = query.where(similarity >= min_similarity)
 
             if created_after is not None:
-                query = query.where(ChunkModel.created_at >= created_after)
+                temporal_col = func.coalesce(ChunkModel.source_timestamp, ChunkModel.created_at)
+                query = query.where(temporal_col >= created_after)
 
             if created_before is not None:
-                query = query.where(ChunkModel.created_at <= created_before)
+                temporal_col = func.coalesce(ChunkModel.source_timestamp, ChunkModel.created_at)
+                query = query.where(temporal_col <= created_before)
 
             if metadata_filters:
                 for key, value in metadata_filters.items():
@@ -379,6 +383,7 @@ class PgVectorBackend(AsyncSessionMixin):
             ),
             embedding_model=model.embedding_model,
             created_at=model.created_at,
+            source_timestamp=getattr(model, "source_timestamp", None),
         )
 
     # =========================================================================
@@ -392,6 +397,8 @@ class PgVectorBackend(AsyncSessionMixin):
         *,
         limit: int = 10,
         language: str = "english",
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search chunks using PostgreSQL full-text search with ts_rank.
 
@@ -411,6 +418,14 @@ class PgVectorBackend(AsyncSessionMixin):
                 .order_by(rank.desc())
                 .limit(limit)
             )
+
+            if created_after is not None:
+                temporal_col = func.coalesce(ChunkModel.source_timestamp, ChunkModel.created_at)
+                query = query.where(temporal_col >= created_after)
+
+            if created_before is not None:
+                temporal_col = func.coalesce(ChunkModel.source_timestamp, ChunkModel.created_at)
+                query = query.where(temporal_col <= created_before)
 
             result = await session.execute(query)
             rows = result.all()
