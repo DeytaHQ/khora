@@ -299,7 +299,12 @@ class VectorCypherEngine:
 
         neo4j_database = self._config.get_neo4j_database() or "neo4j"
         if self._storage.graph is not None:
-            self._storage.graph = Neo4jBackend.from_driver(self._neo4j_driver, database=neo4j_database)
+            self._storage.graph = Neo4jBackend.from_driver(
+                self._neo4j_driver,
+                database=neo4j_database,
+                entity_write_concurrency=getattr(neo4j_cfg, "entity_write_concurrency", 12),
+                relationship_write_concurrency=getattr(neo4j_cfg, "relationship_write_concurrency", 8),
+            )
 
         await self._storage.connect()
 
