@@ -248,11 +248,11 @@ def batch_filter_chunks(
     start_secs = _dt_to_epoch(TemporalFilter._normalize_tz(start))
     end_secs = _dt_to_epoch(TemporalFilter._normalize_tz(end))
 
-    # Collect epoch seconds from chunk.created_at
+    # Collect epoch seconds from chunk.source_timestamp or chunk.created_at
     timestamps: list[float] = []
     valid = True
     for chunk, _score in chunks_and_scores:
-        created_at = getattr(chunk, "created_at", None)
+        created_at = getattr(chunk, "source_timestamp", None) or getattr(chunk, "created_at", None)
         if created_at is None:
             valid = False
             break

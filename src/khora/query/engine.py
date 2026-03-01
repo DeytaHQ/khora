@@ -383,6 +383,12 @@ class QueryConfig:
     coherence_max_boost: float = 0.5
     coherence_isolation_penalty: float = 0.15
 
+    # Two-tier temporal resolver
+    enable_temporal_resolver: bool = True
+    temporal_resolver_strategy: str = "hybrid"
+    temporal_sql_pushdown: bool = True
+    temporal_date_validation: bool = True
+
     @classmethod
     def from_settings(cls, settings: Any) -> QueryConfig:
         """Create QueryConfig from QuerySettings.
@@ -443,6 +449,11 @@ class QueryConfig:
             stage4_rerank_limit=settings.stage4_rerank_limit,
             enable_diversity=settings.enable_diversity,
             diversity_lambda=settings.diversity_lambda,
+            # Two-tier temporal resolver
+            enable_temporal_resolver=getattr(settings, "enable_temporal_resolver", True),
+            temporal_resolver_strategy=getattr(settings, "temporal_resolver_strategy", "hybrid"),
+            temporal_sql_pushdown=getattr(settings, "temporal_sql_pushdown", True),
+            temporal_date_validation=getattr(settings, "temporal_date_validation", True),
         )
 
 
@@ -643,6 +654,38 @@ class HybridQueryEngine:
             "namespace_id": str(namespace_id),
         }
 
+        # Fast temporal resolution (dateparser, runs in <1ms)
+        if cfg.enable_temporal_resolver and cfg.temporal_resolver_strategy in ("dateparser", "hybrid"):
+            from .temporal_resolver import ResolvedRange, TemporalResolver
+
+            resolver = TemporalResolver()
+            fast_result = resolver.resolve_fast(query_text)
+            if fast_result and (fast_result.start or fast_result.end):
+                if cfg.temporal_date_validation:
+                    validated = resolver.validate_dates(fast_result.start, fast_result.end)
+                    fast_result = ResolvedRange(
+                        start=validated[0],
+                        end=validated[1],
+                        confidence=fast_result.confidence,
+                        expression=fast_result.expression,
+                        source=fast_result.source,
+                    )
+                if fast_result.start or fast_result.end:
+                    temporal_filter = TemporalFilter(
+                        start_date=fast_result.start,
+                        end_date=fast_result.end,
+                    )
+                    temporal_info.detected = True
+                    temporal_info.time_start = fast_result.start
+                    temporal_info.time_end = fast_result.end
+                    temporal_info.filter_applied = True
+                    metadata["temporal_resolver"] = {
+                        "source": fast_result.source,
+                        "confidence": fast_result.confidence,
+                        "expression": fast_result.expression,
+                    }
+                    logger.debug(f"Fast temporal resolver: {fast_result.start} to {fast_result.end}")
+
         # Step 1: Query Understanding
         # Check cache FIRST (fastest path), then heuristic, then LLM call
         metrics.understanding_timer.start()
@@ -772,6 +815,12 @@ class HybridQueryEngine:
                         )
                         temporal_info.filter_applied = True
                         logger.debug(f"Temporal filter applied: {temporal_info.time_start} to {temporal_info.time_end}")
+
+        # Auto-enable recency bias when temporal intent is detected
+        if temporal_info.detected and not cfg.apply_recency_bias:
+            cfg.apply_recency_bias = True
+            cfg.recency_weight = max(cfg.recency_weight, 0.2)
+            metadata["auto_recency_bias"] = True
 
         metrics.understanding_timer.stop()
 
@@ -908,9 +957,16 @@ class HybridQueryEngine:
                 tasks = []
                 task_types = []  # Track which task is which for timing
 
+                legacy_sql_temporal = temporal_filter if cfg.temporal_sql_pushdown else None
+
                 if cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and current_embedding is not None:
                     tasks.append(
-                        self._timed_search(self._vector_search(namespace_id, current_embedding, cfg), "vector")
+                        self._timed_search(
+                            self._vector_search(
+                                namespace_id, current_embedding, cfg, temporal_filter=legacy_sql_temporal
+                            ),
+                            "vector",
+                        )
                     )
                     task_types.append("vector")
 
@@ -925,7 +981,14 @@ class HybridQueryEngine:
                 if cfg.mode in (SearchMode.HYBRID, SearchMode.ALL) and cfg.enable_keyword_search:
                     keywords = understanding.keywords if understanding else None
                     if cfg.keyword_search_method == "fulltext":
-                        tasks.append(self._timed_search(self._keyword_search_fulltext(namespace_id, q, cfg), "keyword"))
+                        tasks.append(
+                            self._timed_search(
+                                self._keyword_search_fulltext(
+                                    namespace_id, q, cfg, temporal_filter=legacy_sql_temporal
+                                ),
+                                "keyword",
+                            )
+                        )
                     else:
                         tasks.append(
                             self._timed_search(self._keyword_search_bm25(namespace_id, q, cfg, keywords), "keyword")
@@ -1488,14 +1551,25 @@ class HybridQueryEngine:
         namespace_id: UUID,
         query_embedding: list[float],
         config: QueryConfig,
+        temporal_filter: TemporalFilter | None = None,
     ) -> dict[str, Any]:
         """Perform vector similarity search."""
+        # Extract temporal bounds for SQL pushdown
+        created_after = None
+        created_before = None
+        if temporal_filter:
+            start, end = temporal_filter.get_effective_times()
+            created_after = start
+            created_before = end
+
         # Search chunks
         chunk_results = await self._storage.search_similar_chunks(
             namespace_id,
             query_embedding,
             limit=config.max_chunks * 2,  # Get extra for fusion
             min_similarity=config.min_chunk_similarity,
+            created_after=created_after,
+            created_before=created_before,
         )
 
         # Search entities (uses per-query cache to deduplicate with _graph_search)
@@ -1773,6 +1847,7 @@ class HybridQueryEngine:
         namespace_id: UUID,
         query_text: str,
         config: QueryConfig,
+        temporal_filter: TemporalFilter | None = None,
     ) -> dict[str, Any]:
         """Perform PostgreSQL full-text search using tsvector/tsquery.
 
@@ -1782,11 +1857,20 @@ class HybridQueryEngine:
         try:
             from khora.telemetry import get_collector as _get_tc
 
+            created_after = None
+            created_before = None
+            if temporal_filter:
+                start, end = temporal_filter.get_effective_times()
+                created_after = start
+                created_before = end
+
             _kw_start = time.perf_counter()
             results = await self._storage.search_fulltext_chunks(
                 namespace_id,
                 query_text,
                 limit=config.max_chunks * 2,
+                created_after=created_after,
+                created_before=created_before,
             )
             _get_tc().record_pipeline_stage(
                 pipeline="query",
@@ -1930,8 +2014,24 @@ class HybridQueryEngine:
         has_temporal = bool(_TEMPORAL_PATTERN.search(query_text))
         temporal_refs: list[TemporalReference] = []
         if has_temporal:
-            for m in _TEMPORAL_PATTERN.finditer(query_text):
-                temporal_refs.append(TemporalReference(type="relative", text=m.group()))
+            try:
+                from .temporal_resolver import TemporalResolver
+
+                resolver = TemporalResolver()
+                for m in _TEMPORAL_PATTERN.finditer(query_text):
+                    resolved = resolver.resolve_fast(m.group())
+                    temporal_refs.append(
+                        TemporalReference(
+                            type="relative",
+                            text=m.group(),
+                            start_date=resolved.start if resolved else None,
+                            end_date=resolved.end if resolved else None,
+                        )
+                    )
+            except Exception:
+                # Fallback: temporal pattern detected but no dates resolved
+                for m in _TEMPORAL_PATTERN.finditer(query_text):
+                    temporal_refs.append(TemporalReference(type="relative", text=m.group()))
 
         return UnderstandingResult(
             original_query=query_text,
@@ -2191,6 +2291,7 @@ class HybridQueryEngine:
             understanding=understanding,
             linked_entity_ids=linked_entity_ids,
             graph_info=graph_info,
+            temporal_filter=temporal_filter,
         )
         metrics.stage1_recall_timer.stop()
         metrics.stage1_candidate_count = sum(len(v) for v in stage1_chunks.values())
@@ -2329,6 +2430,7 @@ class HybridQueryEngine:
         understanding: Any | None,
         linked_entity_ids: list[UUID],
         graph_info: GraphTraversalInfo,
+        temporal_filter: TemporalFilter | None = None,
     ) -> tuple[
         dict[str, list[tuple[Any, float]]],
         dict[str, list[tuple[Any, float]]],
@@ -2388,6 +2490,8 @@ class HybridQueryEngine:
             tasks = []
             task_types = []
 
+            sql_temporal = temporal_filter if config.temporal_sql_pushdown else None
+
             if config.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and current_embedding is not None:
                 # Create a temporary config with higher limits for broad recall
                 recall_cfg = QueryConfig(
@@ -2397,7 +2501,10 @@ class HybridQueryEngine:
                     min_entity_similarity=config.min_entity_similarity * 0.5,
                 )
                 tasks.append(
-                    self._timed_search(self._vector_search(namespace_id, current_embedding, recall_cfg), "vector")
+                    self._timed_search(
+                        self._vector_search(namespace_id, current_embedding, recall_cfg, temporal_filter=sql_temporal),
+                        "vector",
+                    )
                 )
                 task_types.append("vector")
 
@@ -2423,7 +2530,10 @@ class HybridQueryEngine:
                     # Create config with higher limit for recall
                     recall_cfg = QueryConfig(max_chunks=keyword_limit)
                     tasks.append(
-                        self._timed_search(self._keyword_search_fulltext(namespace_id, q, recall_cfg), "keyword")
+                        self._timed_search(
+                            self._keyword_search_fulltext(namespace_id, q, recall_cfg, temporal_filter=sql_temporal),
+                            "keyword",
+                        )
                     )
                 else:
                     recall_cfg = QueryConfig(max_chunks=keyword_limit)

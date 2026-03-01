@@ -266,3 +266,107 @@ class TestTemporalQuery:
         assert f is not None
         assert f.operator == TemporalOperator.AFTER
         assert f.start_time is not None
+
+
+class TestParseIsoDateValidation:
+    """Tests for _parse_iso_date() validation added in temporal improvements."""
+
+    def test_rejects_far_future_dates(self) -> None:
+        """Dates >1 year in the future are rejected."""
+        from khora.query.understanding import QueryUnderstanding
+
+        qu = QueryUnderstanding.__new__(QueryUnderstanding)
+        result = qu._parse_iso_date("2030-06-01T00:00:00")
+        assert result is None
+
+    def test_rejects_pre_2000_dates(self) -> None:
+        """Dates before 2000 are rejected."""
+        from khora.query.understanding import QueryUnderstanding
+
+        qu = QueryUnderstanding.__new__(QueryUnderstanding)
+        result = qu._parse_iso_date("1995-06-01T00:00:00")
+        assert result is None
+
+    def test_accepts_valid_recent_date(self) -> None:
+        """Valid recent dates pass validation."""
+        from khora.query.understanding import QueryUnderstanding
+
+        qu = QueryUnderstanding.__new__(QueryUnderstanding)
+        result = qu._parse_iso_date("2025-06-01T00:00:00")
+        assert result is not None
+        assert result.year == 2025
+        assert result.month == 6
+
+    def test_accepts_date_only_format(self) -> None:
+        """Date-only format like 2025-01-15 works."""
+        from khora.query.understanding import QueryUnderstanding
+
+        qu = QueryUnderstanding.__new__(QueryUnderstanding)
+        result = qu._parse_iso_date("2025-01-15")
+        assert result is not None
+        assert result.year == 2025
+
+    def test_handles_z_suffix(self) -> None:
+        """ISO dates with Z suffix are parsed correctly."""
+        from khora.query.understanding import QueryUnderstanding
+
+        qu = QueryUnderstanding.__new__(QueryUnderstanding)
+        result = qu._parse_iso_date("2025-06-01T12:00:00Z")
+        assert result is not None
+        assert result.year == 2025
+
+    def test_none_input(self) -> None:
+        """None input returns None."""
+        from khora.query.understanding import QueryUnderstanding
+
+        qu = QueryUnderstanding.__new__(QueryUnderstanding)
+        assert qu._parse_iso_date(None) is None
+
+    def test_null_string(self) -> None:
+        """'null' string returns None."""
+        from khora.query.understanding import QueryUnderstanding
+
+        qu = QueryUnderstanding.__new__(QueryUnderstanding)
+        assert qu._parse_iso_date("null") is None
+
+    def test_invalid_string(self) -> None:
+        """Invalid date string returns None."""
+        from khora.query.understanding import QueryUnderstanding
+
+        qu = QueryUnderstanding.__new__(QueryUnderstanding)
+        assert qu._parse_iso_date("not-a-date") is None
+
+
+class TestHeuristicUnderstandingTemporalResolution:
+    """Tests for _heuristic_understanding producing actual dates via TemporalResolver."""
+
+    def test_heuristic_resolves_last_week(self) -> None:
+        """Heuristic fallback now resolves 'last week' to actual dates."""
+        from khora.query.engine import HybridQueryEngine
+
+        result = HybridQueryEngine._heuristic_understanding("What happened last week?")
+        assert result is not None
+        assert result.has_temporal is True
+        # Check that temporal references have actual dates
+        if result.temporal_references:
+            ref = result.temporal_references[0]
+            assert ref.start_date is not None or ref.end_date is not None
+
+    def test_heuristic_resolves_yesterday(self) -> None:
+        """Heuristic fallback resolves 'yesterday' to actual dates."""
+        from khora.query.engine import HybridQueryEngine
+
+        result = HybridQueryEngine._heuristic_understanding("Show me yesterday's messages")
+        assert result is not None
+        assert result.has_temporal is True
+        if result.temporal_references:
+            ref = result.temporal_references[0]
+            assert ref.start_date is not None or ref.end_date is not None
+
+    def test_heuristic_non_temporal_query(self) -> None:
+        """Non-temporal queries still work without temporal refs."""
+        from khora.query.engine import HybridQueryEngine
+
+        result = HybridQueryEngine._heuristic_understanding("How does authentication work?")
+        assert result is not None
+        assert result.has_temporal is False

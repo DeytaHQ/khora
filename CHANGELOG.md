@@ -2,6 +2,94 @@
 
 All notable changes to Khora are documented here.
 
+## [0.3.8] — Temporal Search Improvements
+
+### Why: temporal queries silently degraded to generic search
+
+When the LLM timed out (2s budget), the heuristic fallback detected temporal
+*intent* but produced `start_date=None, end_date=None`, so no temporal filter
+was applied. "What happened last week?" returned the same results as "What
+happened?". Additionally, temporal filtering happened post-retrieval in Stage 3
+(Python-side soft scoring on 200 candidates) instead of as SQL WHERE clauses in
+Stage 1, wasting retrieval budget. Chunks also lacked source timestamps — a
+Slack message sent Jan 15 but ingested Jan 20 appeared as a Jan 20 event.
+
+### Two-tier temporal resolver
+
+New `TemporalResolver` class (`query/temporal_resolver.py`) provides fast
+dateparser-based resolution (~0.25ms with `languages=['en']`) with LLM fallback
+for natural language temporal expressions ("last week", "yesterday",
+"January 2025", "Q3 2024", "3 weeks ago", etc.). The resolver runs before the
+LLM understanding call and sets temporal filters immediately when dateparser
+succeeds. When dateparser fails on a recognized temporal pattern, the resolver
+falls back to regex-based granularity inference via `_point_to_range()`.
+
+Date validation rejects dates >1 year in the future, before 2000, and
+automatically swaps inverted ranges and caps future dates.
+
+### SQL-level temporal pushdown
+
+Temporal filters are now applied as WHERE clauses in Stage 1 SQL queries
+(both pgvector similarity and fulltext search) instead of post-retrieval
+Python-side filtering in Stage 3. `StorageCoordinator.search_similar_chunks()`
+and `search_fulltext_chunks()` accept `created_after`/`created_before` params
+that thread through to the pgvector backend.
+
+### Source timestamps
+
+New `source_timestamp` column on `chunks` and `documents` tables
+(migration 009). The ingest pipeline extracts timestamps from metadata fields
+(`sent_at`, `created_at`, `timestamp`, `date`) and propagates them to documents
+and chunks. Temporal filtering uses `COALESCE(source_timestamp, created_at)` so
+content is filtered by when it actually occurred, not when it was ingested.
+
+### Configuration
+
+New fields in `QuerySettings`: `enable_temporal_resolver` (default `True`),
+`temporal_resolver_strategy` (`"hybrid"` / `"dateparser"` / `"llm"`),
+`temporal_sql_pushdown` (default `True`), `temporal_date_validation`
+(default `True`). All features are backward-compatible and toggleable.
+
+### Other improvements
+
+- Heuristic fallback now resolves actual dates via `TemporalResolver` instead
+  of leaving `start_date=None`
+- Auto-recency bias when temporal intent is detected (minimum weight 0.2)
+- ISO date parse failures promoted from DEBUG to WARNING
+- Database indexes: `ix_chunks_created_at`, `ix_chunks_ns_created`,
+  `ix_documents_created_at`, `ix_chunks_source_ts` (partial)
+- New dependency: `dateparser>=1.2.0`
+
+### Migrations
+
+- `009_temporal_search_indexes` — temporal indexes, `source_timestamp` columns
+
+---
+
+## [0.3.7] — Stability Fixes
+
+### Fixed
+
+- Cap Neo4j write concurrency and bound provenance list growth to prevent OOM
+  under high-volume ingestion (#28)
+- Remove invalid `IF EXISTS` from `REINDEX` command that caused PostgreSQL
+  errors on older versions (#27)
+
+### Added
+
+- TTOJ team profile templates (#29)
+
+---
+
+## [0.3.6] — VectorCypher Entity Search Fix
+
+### Fixed
+
+- VectorCypher entity search called a non-existent coordinator method,
+  causing `AttributeError` on entity-heavy queries (DYT-180) (#26)
+
+---
+
 ## [0.3.5] — Phase 3 Benchmark Optimizations
 
 ### Temporal retrieval

@@ -492,6 +492,8 @@ class StorageCoordinator:
         limit: int = 10,
         min_similarity: float = 0.0,
         filter_document_ids: list[UUID] | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search for similar chunks."""
         if not self.vector:
@@ -502,6 +504,8 @@ class StorageCoordinator:
             limit=limit,
             min_similarity=min_similarity,
             filter_document_ids=filter_document_ids,
+            created_after=created_after,
+            created_before=created_before,
         )
 
     @_record_storage_op("search_fulltext_chunks", "pgvector")
@@ -512,6 +516,8 @@ class StorageCoordinator:
         *,
         limit: int = 10,
         language: str = "english",
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search chunks using PostgreSQL full-text search."""
         if not self.vector:
@@ -521,6 +527,8 @@ class StorageCoordinator:
             query_text,
             limit=limit,
             language=language,
+            created_after=created_after,
+            created_before=created_before,
         )
 
     async def count_chunks(self, namespace_id: UUID) -> int:

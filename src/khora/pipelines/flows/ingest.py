@@ -624,6 +624,7 @@ async def stage_document(
         metadata=metadata,
         created_at=created_at,
         updated_at=created_at,  # Set updated_at to source time too
+        source_timestamp=source_timestamp,
     )
 
     return await storage.create_document(document)
@@ -685,6 +686,7 @@ async def stage_documents_batch(
             metadata=metadata,
             created_at=created_at,
             updated_at=created_at,
+            source_timestamp=source_timestamp,
         )
 
         doc = await storage.create_document(document)

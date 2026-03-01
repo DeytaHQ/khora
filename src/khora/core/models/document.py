@@ -63,6 +63,7 @@ class Document:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     processed_at: datetime | None = None
+    source_timestamp: datetime | None = None
 
     @property
     def is_processed(self) -> bool:
@@ -122,6 +123,7 @@ class Chunk:
 
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    source_timestamp: datetime | None = None
 
     @property
     def has_embedding(self) -> bool:

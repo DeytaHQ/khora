@@ -399,6 +399,22 @@ class QuerySettings(BaseModel):
         default=0.5, ge=0.0, le=1.0, description="Diversity vs relevance tradeoff (0=pure diversity, 1=pure relevance)"
     )
 
+    # Two-tier temporal resolver
+    enable_temporal_resolver: bool = Field(
+        default=True, description="Enable two-tier temporal resolver (dateparser + LLM)"
+    )
+    temporal_resolver_strategy: str = Field(
+        default="hybrid",
+        description="Temporal resolver strategy: 'dateparser' (fast only), 'llm' (LLM only), 'hybrid' (dateparser + LLM fallback)",
+    )
+    temporal_sql_pushdown: bool = Field(
+        default=True,
+        description="Push temporal filters to Stage 1 SQL WHERE clauses instead of post-retrieval filtering",
+    )
+    temporal_date_validation: bool = Field(
+        default=True, description="Validate LLM-generated dates (swap inverted, cap future, reject ancient)"
+    )
+
 
 class KhoraConfig(BaseSettings):
     """Main application configuration."""
