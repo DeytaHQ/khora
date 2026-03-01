@@ -401,6 +401,8 @@ ON CREATE SET n.id = e.id, n.description = e.description, ...
 ON MATCH SET n.description = e.description, n.updated_at = e.updated_at, ...
 ```
 
+**Concurrent batch coordination**: Non-overlapping entity batches run concurrently (up to `entity_write_concurrency`, default 12), but batches that share entity keys are automatically serialized by `_EntityKeyGate` to avoid Neo4j lock contention. A key is the `(namespace_id, name, entity_type)` triple — the same triple used in the `MERGE` clause. This means two batches touching completely different entities proceed in parallel, while two batches that both contain "Microsoft/ORGANIZATION" are queued so only one MERGE transaction runs at a time for that key.
+
 **PostgreSQL implementation** uses a single multi-row `INSERT ... ON CONFLICT DO UPDATE` — all entities in one SQL statement rather than individual inserts.
 
 ### Relationship Batch Create

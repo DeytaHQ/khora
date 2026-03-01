@@ -355,6 +355,13 @@ extraction_semaphore = asyncio.Semaphore(20)
 staging_semaphore = asyncio.Semaphore(20)
 ```
 
+**Neo4j write-level coordination** prevents lock contention during storage:
+
+| Write type | Mechanism | Concurrency | Why |
+|-----------|-----------|-------------|-----|
+| Entity writes | `_EntityKeyGate` (key-aware) | 12 concurrent, serializes overlapping keys | MERGE transactions on the same `(namespace_id, name, entity_type)` would cause Neo4j lock contention and ~1 s retry backoff |
+| Relationship writes | `asyncio.Semaphore` | 8 concurrent | CREATE transactions don't contend — each is a new edge |
+
 These are configurable:
 
 ```python
