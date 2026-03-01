@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import re as _re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import copy
 from datetime import datetime
 from typing import Any
@@ -30,9 +32,46 @@ from khora.storage.backends.mixins import serialize_dict as _serialize_dict
 _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
 
 # Default concurrency limits for Neo4j write transactions.
-# Actual semaphores are created per-instance (see Neo4jBackend.__init__).
 _DEFAULT_ENTITY_WRITE_CONCURRENCY = 12
 _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY = 8
+
+
+class _EntityKeyGate:
+    """Key-aware concurrency gate for Neo4j MERGE transactions.
+
+    Tracks in-flight entity keys (namespace_id, name, entity_type).
+    Allows non-overlapping batches to proceed concurrently.
+    Serializes overlapping batches to prevent Neo4j lock contention.
+    """
+
+    def __init__(self, max_concurrent: int) -> None:
+        self._condition = asyncio.Condition()
+        self._in_flight: set[tuple[str, str, str]] = set()
+        self._active = 0
+        self._max_concurrent = max_concurrent
+
+    @asynccontextmanager
+    async def acquire(self, entities: list) -> AsyncIterator[None]:
+        keys = {
+            (
+                str(e.namespace_id),
+                e.name,
+                e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type),
+            )
+            for e in entities
+        }
+        async with self._condition:
+            while (keys & self._in_flight) or self._active >= self._max_concurrent:
+                await self._condition.wait()
+            self._in_flight |= keys
+            self._active += 1
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._in_flight -= keys
+                self._active -= 1
+                self._condition.notify_all()
 
 
 # Bidirectional relationship types and their inverses
@@ -147,7 +186,7 @@ class Neo4jBackend(GraphBackendBase):
         self._retry_delay_jitter_factor = retry_delay_jitter_factor
         self._driver: AsyncDriver | None = None
         self._owns_driver: bool = True
-        self._entity_write_sem = asyncio.Semaphore(entity_write_concurrency)
+        self._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
         self._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
 
     @classmethod
@@ -168,7 +207,14 @@ class Neo4jBackend(GraphBackendBase):
         )
 
     @classmethod
-    def from_driver(cls, driver: AsyncDriver, *, database: str = "neo4j") -> Neo4jBackend:
+    def from_driver(
+        cls,
+        driver: AsyncDriver,
+        *,
+        database: str = "neo4j",
+        entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
+        relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
+    ) -> Neo4jBackend:
         """Create a Neo4jBackend from an existing AsyncDriver.
 
         The backend will NOT close the driver on disconnect, since
@@ -177,6 +223,8 @@ class Neo4jBackend(GraphBackendBase):
         Args:
             driver: An existing Neo4j async driver
             database: Database name
+            entity_write_concurrency: Max concurrent entity write transactions
+            relationship_write_concurrency: Max concurrent relationship write transactions
 
         Returns:
             Neo4jBackend wrapping the shared driver
@@ -191,8 +239,8 @@ class Neo4jBackend(GraphBackendBase):
         instance._retry_delay_jitter_factor = 0.5
         instance._driver = driver
         instance._owns_driver = False
-        instance._entity_write_sem = asyncio.Semaphore(_DEFAULT_ENTITY_WRITE_CONCURRENCY)
-        instance._relationship_write_sem = asyncio.Semaphore(_DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY)
+        instance._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
+        instance._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
         return instance
 
     async def connect(self) -> None:
@@ -555,7 +603,7 @@ class Neo4jBackend(GraphBackendBase):
                 result = await tx.run(_UPSERT_CYPHER, rows=rows)
                 return await result.data()
 
-            async with self._entity_write_sem:
+            async with self._entity_key_gate.acquire(batch):
                 async with driver.session(database=self._database) as session:
                     records = await session.execute_write(_upsert_tx)
 

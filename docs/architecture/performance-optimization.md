@@ -419,6 +419,34 @@ config = RetrieverConfig(
 
 `bigram_coherence_score()` checks function-word transitions (articles → content words, prepositions → noun phrases). The score is blended into the RRF score via `apply_coherence_boost()`. This adds negligible latency (pure Python string analysis, no LLM calls) while improving confounder rejection when `raw=True` (no LLM reranking).
 
+## Phase 9: Neo4j Write Contention Elimination (v0.3.9)
+
+### The Problem
+
+The entity write path used a plain semaphore (concurrency 12) to limit concurrent Neo4j transactions. This prevented connection exhaustion but did nothing about *overlapping* MERGE transactions: two batches that both touch "Microsoft/ORGANIZATION" would run concurrently, causing Neo4j to detect lock contention, abort one transaction, and retry with ~1 s exponential backoff. Under heavy ingestion this cascaded into minutes of wasted retries.
+
+### The Solution: `_EntityKeyGate`
+
+`_EntityKeyGate` replaces the entity write semaphore with key-aware coordination. It tracks in-flight entity keys — `(namespace_id, name, entity_type)`, the same triple used in the Cypher `MERGE` clause — and only serializes batches whose keys overlap. Non-overlapping batches still proceed concurrently up to `entity_write_concurrency` (default 12).
+
+```python
+async with self._entity_key_gate.acquire(entities):
+    await self._execute_write(tx_func, entities=cypher_params)
+```
+
+### Before / After
+
+| Metric | Semaphore only | Key-aware gate |
+|--------|---------------|----------------|
+| Non-overlapping batches | Concurrent (up to 12) | Concurrent (up to 12) |
+| Overlapping batches | Concurrent → lock contention → ~1 s retry backoff | Serialized at gate → zero retries |
+| 500 entities, 10% overlap | ~45 s (retries dominate) | ~18 s |
+| 500 entities, 0% overlap | ~18 s | ~18 s (same — no contention) |
+
+### Relationship Writes
+
+Relationship writes still use a plain semaphore (8 concurrent). Since relationships use `CREATE` (not `MERGE`), there is no lock contention between concurrent transactions — each relationship is a new edge, so no two transactions compete for the same lock.
+
 ## What's Next
 
 - **[Query Engine Overview](../query-engine/overview.md)** -- How the full search pipeline works
