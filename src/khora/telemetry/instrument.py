@@ -38,17 +38,16 @@ def instrument_llm(operation: str):
                     result = await fn(*args, **kwargs)
                     # Set span attributes while span is still active
                     latency_ms = (time.perf_counter() - start) * 1000
-                    if span is not None:
-                        model = ""
-                        total_tokens = 0
-                        if result is not None:
-                            usage = getattr(result, "usage", None)
-                            if usage is not None:
-                                total_tokens = getattr(usage, "total_tokens", 0) or 0
-                            model = getattr(result, "model", "") or ""
-                        span.set_attribute("model", model)
-                        span.set_attribute("total_tokens", total_tokens)
-                        span.set_attribute("latency_ms", latency_ms)
+                    model = ""
+                    total_tokens = 0
+                    if result is not None:
+                        usage = getattr(result, "usage", None)
+                        if usage is not None:
+                            total_tokens = getattr(usage, "total_tokens", 0) or 0
+                        model = getattr(result, "model", "") or ""
+                    span.set_attribute("model", model)
+                    span.set_attribute("total_tokens", total_tokens)
+                    span.set_attribute("latency_ms", latency_ms)
                 return result
             except Exception as exc:
                 status = "error"
@@ -124,11 +123,10 @@ def instrument_storage(backend: str, operation: str):
                     elif result is not None:
                         record_count = 1
                     # Set span attributes while span is still active
-                    if span is not None:
-                        latency_ms = (time.perf_counter() - start) * 1000
-                        span.set_attribute("status", "success")
-                        span.set_attribute("latency_ms", latency_ms)
-                        span.set_attribute("record_count", record_count)
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    span.set_attribute("status", "success")
+                    span.set_attribute("latency_ms", latency_ms)
+                    span.set_attribute("record_count", record_count)
                 return result
             except Exception as exc:
                 status = "error"
@@ -200,11 +198,10 @@ async def pipeline_stage(
         with trace_span(span_name, input_count=input_count) as span:
             yield ctx
             # Set span attributes while span is still active
-            if span is not None:
-                latency_ms = (time.perf_counter() - start) * 1000
-                span.set_attribute("output_count", ctx.get("output_count", 0))
-                span.set_attribute("status", "success")
-                span.set_attribute("latency_ms", latency_ms)
+            latency_ms = (time.perf_counter() - start) * 1000
+            span.set_attribute("output_count", ctx.get("output_count", 0))
+            span.set_attribute("status", "success")
+            span.set_attribute("latency_ms", latency_ms)
     except Exception as exc:
         status = "error"
         error_msg = str(exc)[:500]

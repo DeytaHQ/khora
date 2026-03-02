@@ -19,7 +19,7 @@ import pytest
 from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult
 from khora.telemetry import NoOpCollector
 from khora.telemetry.instrument import instrument_llm, instrument_storage, pipeline_stage
-from khora.telemetry.logfire_integration import trace_span
+from khora.telemetry.logfire_integration import NoOpSpan, trace_span
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -129,11 +129,11 @@ def _make_mock_trace_span():
 class TestLogfireSpanNoLogfire:
     """Tests for trace_span when logfire is not installed."""
 
-    def test_yields_none_when_absent(self):
-        """trace_span yields None when _HAS_LOGFIRE is False."""
+    def test_yields_noop_span_when_absent(self):
+        """trace_span yields a NoOpSpan when _HAS_LOGFIRE is False."""
         with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
             with trace_span("test.span", key="value") as span:
-                assert span is None
+                assert isinstance(span, NoOpSpan)
 
     def test_context_manager_works_when_absent(self):
         """trace_span context manager enters and exits cleanly."""
@@ -142,13 +142,26 @@ class TestLogfireSpanNoLogfire:
             with trace_span("test.span") as span:
                 result = "executed"
             assert result == "executed"
-            assert span is None
+            assert isinstance(span, NoOpSpan)
 
     def test_no_errors_with_attributes_when_absent(self):
         """Passing attributes when logfire is absent causes no errors."""
         with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
             with trace_span("test.span", foo="bar", count=42) as span:
-                assert span is None
+                assert isinstance(span, NoOpSpan)
+
+    def test_noop_span_set_attribute_is_silent(self):
+        """NoOpSpan.set_attribute does nothing without raising."""
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with trace_span("test.span") as span:
+                span.set_attribute("key", "value")
+                span.set_attribute("count", 42)
+
+    def test_noop_span_set_attributes_is_silent(self):
+        """NoOpSpan.set_attributes does nothing without raising."""
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with trace_span("test.span") as span:
+                span.set_attributes({"key": "value", "count": "42"})
 
 
 class TestLogfireSpanWithLogfire:
@@ -368,7 +381,7 @@ class TestNoOpBehavior:
         # The module is already imported; verify the flag mechanism works.
         with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
             with trace_span("test") as span:
-                assert span is None
+                assert isinstance(span, NoOpSpan)
 
     @pytest.mark.asyncio
     async def test_all_decorated_functions_work_without_logfire(self, recording_collector):

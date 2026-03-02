@@ -63,9 +63,8 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
                 with trace_span(span_name, backend=backend) as span:
                     result = await func(*args, **kwargs)
                     elapsed = _time.perf_counter() - t0
-                    if span is not None:
-                        span.set_attribute("latency_ms", elapsed * 1000)
-                        span.set_attribute("status", "success")
+                    span.set_attribute("latency_ms", elapsed * 1000)
+                    span.set_attribute("status", "success")
                 get_collector().record_storage_op(
                     operation=operation,
                     backend=backend,
