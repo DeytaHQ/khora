@@ -540,92 +540,101 @@ class VectorCypherEngine:
         from khora.pipelines.chunking import create_chunker  # type: ignore[unresolved-import]
         from khora.pipelines.chunking.config import ChunkerConfig  # type: ignore[unresolved-import]
 
-        storage = self._get_storage()
-        embedder = self._get_embedder()
-        temporal_store = self._get_temporal_store()
-        dual_nodes = self._get_dual_nodes()
+        with trace_span(
+            "khora.vectorcypher.process_document",
+            namespace_id=str(document.namespace_id),
+            document_id=str(document.id),
+        ) as span:
+            storage = self._get_storage()
+            embedder = self._get_embedder()
+            temporal_store = self._get_temporal_store()
+            dual_nodes = self._get_dual_nodes()
 
-        # Create chunker
-        chunker_config = ChunkerConfig(
-            strategy=self._config.pipeline.chunking_strategy,
-            chunk_size=self._config.pipeline.chunk_size,
-            chunk_overlap=self._config.pipeline.chunk_overlap,
-        )
-        chunker = create_chunker(chunker_config)
+            # Create chunker
+            chunker_config = ChunkerConfig(
+                strategy=self._config.pipeline.chunking_strategy,
+                chunk_size=self._config.pipeline.chunk_size,
+                chunk_overlap=self._config.pipeline.chunk_overlap,
+            )
+            chunker = create_chunker(chunker_config)
 
-        # Chunk the document
-        raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
+            # Chunk the document
+            raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
 
-        if not raw_chunks:
-            document.mark_completed(0, 0)
+            if not raw_chunks:
+                document.mark_completed(0, 0)
+                await storage.update_document(document)
+                span.set_attribute("chunk_count", 0)
+                return 0, 0, 0
+
+            # Embed chunks in batch
+            chunk_texts = [c.content for c in raw_chunks]
+            embeddings = await embedder.embed_batch(chunk_texts)
+
+            # Extract metadata
+            doc_metadata = document.metadata.custom if document.metadata else {}
+
+            # Create temporal chunks
+            temporal_chunks = []
+            for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+                temporal_chunk = TemporalChunk(
+                    id=None,
+                    namespace_id=document.namespace_id,
+                    document_id=document.id,
+                    content=raw_chunk.content,
+                    embedding=embedding,
+                    occurred_at=occurred_at,
+                    created_at=datetime.now(UTC),
+                    source_system=doc_metadata.get("source_system"),
+                    author=doc_metadata.get("author"),
+                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                    tags=doc_metadata.get("tags", []),
+                    confidence=1.0,
+                    metadata={
+                        "chunk_index": i,
+                        "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+                        "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                        **{k: v for k, v in doc_metadata.items() if isinstance(v, (str, int, float, bool))},
+                    },
+                )
+                temporal_chunks.append(temporal_chunk)
+
+            # Store in pgvector
+            stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+
+            # Update temporal_chunks with assigned IDs
+            for i, stored in enumerate(stored_chunks):
+                temporal_chunks[i].id = stored.id
+
+            # Create Chunk nodes in Neo4j
+            await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+
+            # Skeleton-based entity extraction (for core chunks only)
+            entities_extracted = 0
+            relationships_created = 0
+
+            if self._config.pipeline.extract_entities:
+                entities_extracted, relationships_created = await self._run_skeleton_extraction(
+                    temporal_chunks,
+                    document.namespace_id,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    extraction_model=extraction_model,
+                )
+
+            # Update document status
+            document.mark_completed(len(stored_chunks), entities_extracted)
             await storage.update_document(document)
-            return 0, 0, 0
 
-        # Embed chunks in batch
-        chunk_texts = [c.content for c in raw_chunks]
-        embeddings = await embedder.embed_batch(chunk_texts)
-
-        # Extract metadata
-        doc_metadata = document.metadata.custom if document.metadata else {}
-
-        # Create temporal chunks
-        temporal_chunks = []
-        for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-            temporal_chunk = TemporalChunk(
-                id=None,
-                namespace_id=document.namespace_id,
-                document_id=document.id,
-                content=raw_chunk.content,
-                embedding=embedding,
-                occurred_at=occurred_at,
-                created_at=datetime.now(UTC),
-                source_system=doc_metadata.get("source_system"),
-                author=doc_metadata.get("author"),
-                channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                tags=doc_metadata.get("tags", []),
-                confidence=1.0,
-                metadata={
-                    "chunk_index": i,
-                    "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                    "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                    **{k: v for k, v in doc_metadata.items() if isinstance(v, (str, int, float, bool))},
-                },
-            )
-            temporal_chunks.append(temporal_chunk)
-
-        # Store in pgvector
-        stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-
-        # Update temporal_chunks with assigned IDs
-        for i, stored in enumerate(stored_chunks):
-            temporal_chunks[i].id = stored.id
-
-        # Create Chunk nodes in Neo4j
-        await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
-
-        # Skeleton-based entity extraction (for core chunks only)
-        entities_extracted = 0
-        relationships_created = 0
-
-        if self._config.pipeline.extract_entities:
-            entities_extracted, relationships_created = await self._run_skeleton_extraction(
-                temporal_chunks,
-                document.namespace_id,
-                skill_name=skill_name,
-                expertise=expertise,
-                extraction_model=extraction_model,
+            logger.debug(
+                f"Processed document {document.id}: {len(stored_chunks)} chunks, "
+                f"{entities_extracted} entities, {relationships_created} relationships"
             )
 
-        # Update document status
-        document.mark_completed(len(stored_chunks), entities_extracted)
-        await storage.update_document(document)
-
-        logger.debug(
-            f"Processed document {document.id}: {len(stored_chunks)} chunks, "
-            f"{entities_extracted} entities, {relationships_created} relationships"
-        )
-
-        return len(stored_chunks), entities_extracted, relationships_created
+            span.set_attribute("chunk_count", len(stored_chunks))
+            span.set_attribute("entities_extracted", entities_extracted)
+            span.set_attribute("relationships_created", relationships_created)
+            return len(stored_chunks), entities_extracted, relationships_created
 
     async def _run_skeleton_extraction(
         self,
@@ -657,93 +666,102 @@ class VectorCypherEngine:
         if not chunks:
             return 0, 0
 
-        # Skip skeleton overhead for small documents (≤2 chunks)
-        if len(chunks) <= 2:
-            core_ids = {c.id for c in chunks}
-        else:
-            skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
-            skeleton.add_chunks_batch(chunks)
-            core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+        with trace_span(
+            "khora.vectorcypher.skeleton_extraction",
+            namespace_id=str(namespace_id),
+            total_chunks=len(chunks),
+        ) as span:
+            # Skip skeleton overhead for small documents (≤2 chunks)
+            if len(chunks) <= 2:
+                core_ids = {c.id for c in chunks}
+            else:
+                skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+                skeleton.add_chunks_batch(chunks)
+                core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
-        logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
+            logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
+            span.set_attribute("core_chunks", len(core_ids))
 
-        if not core_ids:
-            return 0, 0
+            if not core_ids:
+                return 0, 0
 
-        # Get core chunks
-        core_temporal_chunks = [c for c in chunks if c.id in core_ids]
+            # Get core chunks
+            core_temporal_chunks = [c for c in chunks if c.id in core_ids]
 
-        # Convert TemporalChunk -> Chunk for extract_entities()
-        chunk_objects = []
-        for tc in core_temporal_chunks:
-            chunk_objects.append(
-                Chunk(
-                    id=tc.id,
-                    namespace_id=tc.namespace_id,
-                    document_id=tc.document_id,
-                    content=tc.content,
-                    created_at=tc.created_at or tc.occurred_at,
-                )
-            )
-
-        # Run LLM extraction on core chunks
-        model = extraction_model or self._config.llm.model
-        entities, relationships = await extract_entities(
-            chunk_objects,
-            skill_name=skill_name,
-            expertise=expertise,
-            model=model,
-            max_concurrent=self._vc_config.max_concurrent_extractions,
-        )
-
-        if not entities:
-            return 0, 0
-
-        # Compute entity embeddings (matching ingest pipeline format)
-        embedder = self._get_embedder()
-        entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities]
-        entity_embeddings = await embedder.embed_batch(entity_texts)
-        for entity, embedding in zip(entities, entity_embeddings):
-            entity.embedding = embedding
-            entity.embedding_model = embedder.model_name
-
-        storage = self._get_storage()
-        dual_nodes = self._get_dual_nodes()
-
-        # Store entities in Neo4j + pgvector
-        await storage.upsert_entities_batch(namespace_id, entities)
-
-        # Create co-occurrence relationships between entities in the same chunk
-        cooccurrence_rels = _build_cooccurrence_relationships(entities, namespace_id, relationships)
-        if cooccurrence_rels:
-            relationships = list(relationships) + cooccurrence_rels
-
-        # Store relationships in Neo4j
-        relationships_created = 0
-        if relationships:
-            relationships_created = await storage.create_relationships_batch(relationships)
-
-        # Build entity-chunk links from source_chunk_ids
-        entity_chunk_links: list[EntityChunkLink] = []
-        for entity in entities:
-            for chunk_id in entity.source_chunk_ids:
-                entity_chunk_links.append(
-                    EntityChunkLink(
-                        entity_id=entity.id,
-                        chunk_id=chunk_id,
+            # Convert TemporalChunk -> Chunk for extract_entities()
+            chunk_objects = []
+            for tc in core_temporal_chunks:
+                chunk_objects.append(
+                    Chunk(
+                        id=tc.id,
+                        namespace_id=tc.namespace_id,
+                        document_id=tc.document_id,
+                        content=tc.content,
+                        created_at=tc.created_at or tc.occurred_at,
                     )
                 )
 
-        # Create MENTIONED_IN edges in Neo4j
-        if entity_chunk_links:
-            await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
+            # Run LLM extraction on core chunks
+            model = extraction_model or self._config.llm.model
+            entities, relationships = await extract_entities(
+                chunk_objects,
+                skill_name=skill_name,
+                expertise=expertise,
+                model=model,
+                max_concurrent=self._vc_config.max_concurrent_extractions,
+            )
 
-        logger.debug(
-            f"Skeleton extraction: {len(entities)} entities, "
-            f"{relationships_created} relationships from {len(core_temporal_chunks)} core chunks"
-        )
+            if not entities:
+                span.set_attribute("entities_extracted", 0)
+                return 0, 0
 
-        return len(entities), relationships_created
+            # Compute entity embeddings (matching ingest pipeline format)
+            embedder = self._get_embedder()
+            entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities]
+            entity_embeddings = await embedder.embed_batch(entity_texts)
+            for entity, embedding in zip(entities, entity_embeddings):
+                entity.embedding = embedding
+                entity.embedding_model = embedder.model_name
+
+            storage = self._get_storage()
+            dual_nodes = self._get_dual_nodes()
+
+            # Store entities in Neo4j + pgvector
+            await storage.upsert_entities_batch(namespace_id, entities)
+
+            # Create co-occurrence relationships between entities in the same chunk
+            cooccurrence_rels = _build_cooccurrence_relationships(entities, namespace_id, relationships)
+            if cooccurrence_rels:
+                relationships = list(relationships) + cooccurrence_rels
+
+            # Store relationships in Neo4j
+            relationships_created = 0
+            if relationships:
+                relationships_created = await storage.create_relationships_batch(relationships)
+
+            # Build entity-chunk links from source_chunk_ids
+            entity_chunk_links: list[EntityChunkLink] = []
+            for entity in entities:
+                for chunk_id in entity.source_chunk_ids:
+                    entity_chunk_links.append(
+                        EntityChunkLink(
+                            entity_id=entity.id,
+                            chunk_id=chunk_id,
+                        )
+                    )
+
+            # Create MENTIONED_IN edges in Neo4j
+            if entity_chunk_links:
+                await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
+
+            logger.debug(
+                f"Skeleton extraction: {len(entities)} entities, "
+                f"{relationships_created} relationships from {len(core_temporal_chunks)} core chunks"
+            )
+
+            span.set_attribute("entities_extracted", len(entities))
+            span.set_attribute("relationships_created", relationships_created)
+            return len(entities), relationships_created
 
     async def _run_skeleton_extraction_deferred(
         self,

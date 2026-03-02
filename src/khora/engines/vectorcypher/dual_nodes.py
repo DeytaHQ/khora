@@ -172,56 +172,63 @@ class DualNodeManager:
         if not chunks:
             return []
 
-        # Prepare batch data
-        chunk_data = []
-        chunk_ids = []
+        with trace_span(
+            "khora.neo4j.create_chunk_nodes_batch",
+            chunk_count=len(chunks),
+            namespace_id=str(namespace_id),
+        ):
+            # Prepare batch data
+            chunk_data = []
+            chunk_ids = []
 
-        for chunk in chunks:
-            chunk_id = chunk.id or uuid4()
-            chunk_ids.append(chunk_id)
+            for chunk in chunks:
+                chunk_id = chunk.id or uuid4()
+                chunk_ids.append(chunk_id)
 
-            chunk_data.append(
-                {
-                    "id": str(chunk_id),
-                    "namespace_id": str(namespace_id),
-                    "document_id": str(chunk.document_id),
-                    "content": chunk.content,
-                    "occurred_at": chunk.occurred_at.isoformat() if chunk.occurred_at else None,
-                    "created_at": chunk.created_at.isoformat() if chunk.created_at else datetime.now(UTC).isoformat(),
-                    "source_system": chunk.source_system,
-                    "author": chunk.author,
-                    "channel": chunk.channel,
-                    "confidence": chunk.confidence,
-                    "metadata": serialize_dict(chunk.metadata or {}),
-                }
-            )
+                chunk_data.append(
+                    {
+                        "id": str(chunk_id),
+                        "namespace_id": str(namespace_id),
+                        "document_id": str(chunk.document_id),
+                        "content": chunk.content,
+                        "occurred_at": chunk.occurred_at.isoformat() if chunk.occurred_at else None,
+                        "created_at": (
+                            chunk.created_at.isoformat() if chunk.created_at else datetime.now(UTC).isoformat()
+                        ),
+                        "source_system": chunk.source_system,
+                        "author": chunk.author,
+                        "channel": chunk.channel,
+                        "confidence": chunk.confidence,
+                        "metadata": serialize_dict(chunk.metadata or {}),
+                    }
+                )
 
-        query = """
-        UNWIND $chunks AS chunk
-        CREATE (c:Chunk {
-            id: chunk.id,
-            namespace_id: chunk.namespace_id,
-            document_id: chunk.document_id,
-            content: chunk.content,
-            occurred_at: chunk.occurred_at,
-            created_at: chunk.created_at,
-            source_system: chunk.source_system,
-            author: chunk.author,
-            channel: chunk.channel,
-            confidence: chunk.confidence,
-            metadata: chunk.metadata
-        })
-        """
+            query = """
+            UNWIND $chunks AS chunk
+            CREATE (c:Chunk {
+                id: chunk.id,
+                namespace_id: chunk.namespace_id,
+                document_id: chunk.document_id,
+                content: chunk.content,
+                occurred_at: chunk.occurred_at,
+                created_at: chunk.created_at,
+                source_system: chunk.source_system,
+                author: chunk.author,
+                channel: chunk.channel,
+                confidence: chunk.confidence,
+                metadata: chunk.metadata
+            })
+            """
 
-        async with self._driver.session(database=self._database) as session:
+            async with self._driver.session(database=self._database) as session:
 
-            async def _work(tx):
-                await tx.run(query, chunks=chunk_data)
+                async def _work(tx):
+                    await tx.run(query, chunks=chunk_data)
 
-            await session.execute_write(_work)
+                await session.execute_write(_work)
 
-        logger.debug(f"Created {len(chunk_ids)} Chunk nodes in batch")
-        return chunk_ids
+            logger.debug(f"Created {len(chunk_ids)} Chunk nodes in batch")
+            return chunk_ids
 
     async def link_entity_to_chunk(
         self,
@@ -272,33 +279,34 @@ class DualNodeManager:
         if not links:
             return
 
-        link_data = [
-            {
-                "entity_id": str(link.entity_id),
-                "chunk_id": str(link.chunk_id),
-                "mention_count": link.mention_count,
-                "context": link.context,
-            }
-            for link in links
-        ]
+        with trace_span("khora.neo4j.link_entities_to_chunks_batch", link_count=len(links)):
+            link_data = [
+                {
+                    "entity_id": str(link.entity_id),
+                    "chunk_id": str(link.chunk_id),
+                    "mention_count": link.mention_count,
+                    "context": link.context,
+                }
+                for link in links
+            ]
 
-        query = """
-        UNWIND $links AS link
-        MATCH (e:Entity {id: link.entity_id})
-        MATCH (c:Chunk {id: link.chunk_id})
-        MERGE (e)-[r:MENTIONED_IN]->(c)
-        ON CREATE SET r.mention_count = link.mention_count, r.context = link.context
-        ON MATCH SET r.mention_count = r.mention_count + link.mention_count
-        """
+            query = """
+            UNWIND $links AS link
+            MATCH (e:Entity {id: link.entity_id})
+            MATCH (c:Chunk {id: link.chunk_id})
+            MERGE (e)-[r:MENTIONED_IN]->(c)
+            ON CREATE SET r.mention_count = link.mention_count, r.context = link.context
+            ON MATCH SET r.mention_count = r.mention_count + link.mention_count
+            """
 
-        async with self._driver.session(database=self._database) as session:
+            async with self._driver.session(database=self._database) as session:
 
-            async def _work(tx):
-                await tx.run(query, links=link_data)
+                async def _work(tx):
+                    await tx.run(query, links=link_data)
 
-            await session.execute_write(_work)
+                await session.execute_write(_work)
 
-        logger.debug(f"Created {len(links)} MENTIONED_IN relationships")
+            logger.debug(f"Created {len(links)} MENTIONED_IN relationships")
 
     async def link_chunk_to_time(
         self,
