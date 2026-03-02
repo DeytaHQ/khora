@@ -24,7 +24,7 @@ from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import HybridQueryEngine, QueryConfig, SearchMode
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
-from khora.telemetry import trace_span
+from khora.telemetry import trace
 
 if TYPE_CHECKING:
     pass
@@ -620,6 +620,7 @@ class GraphRAGEngine:
         """List entities in a namespace."""
         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
 
+    @trace("khora.find_related_entities", result=lambda r: {"result_count": len(r)})
     async def find_related_entities(
         self,
         entity_id: UUID,
@@ -629,17 +630,12 @@ class GraphRAGEngine:
         limit: int = 20,
     ) -> list[tuple[Entity, float]]:
         """Find entities related to a given entity."""
-        with trace_span(
-            "khora.find_related_entities", entity_id=str(entity_id), namespace_id=str(namespace_id)
-        ) as span:
-            result = await self._get_query_engine().find_related_entities(
-                entity_id,
-                namespace_id,
-                max_depth=max_depth,
-                limit=limit,
-            )
-            span.set_attribute("result_count", len(result))
-            return result
+        return await self._get_query_engine().find_related_entities(
+            entity_id,
+            namespace_id,
+            max_depth=max_depth,
+            limit=limit,
+        )
 
     # =========================================================================
     # Document Operations
@@ -658,6 +654,7 @@ class GraphRAGEngine:
         """List documents in a namespace."""
         return await self._get_storage().list_documents(namespace_id, limit=limit)
 
+    @trace("khora.search_entities", exclude={"query"}, result=lambda r: {"result_count": len(r)})
     async def search_entities(
         self,
         query: str,
@@ -669,38 +666,30 @@ class GraphRAGEngine:
 
         Uses batch entity fetching to avoid N+1 queries for better performance.
         """
-        with trace_span("khora.search_entities", namespace_id=str(namespace_id)) as span:
-            # Embed the query
-            if self._embedder is None:
-                raise RuntimeError("GraphRAG engine not connected. Call connect() first.")
+        # Embed the query
+        if self._embedder is None:
+            raise RuntimeError("GraphRAG engine not connected. Call connect() first.")
 
-            query_embedding = await self._embedder.embed(query)
+        query_embedding = await self._embedder.embed(query)
 
-            # Search similar entities
-            storage = self._get_storage()
-            entity_ids_scores = await storage.search_similar_entities(
-                namespace_id,
-                query_embedding,
-                limit=limit,
-                min_similarity=0.0,
-            )
+        # Search similar entities
+        storage = self._get_storage()
+        entity_ids_scores = await storage.search_similar_entities(
+            namespace_id,
+            query_embedding,
+            limit=limit,
+            min_similarity=0.0,
+        )
 
-            if not entity_ids_scores:
-                span.set_attribute("result_count", 0)
-                return []
+        if not entity_ids_scores:
+            return []
 
-            # Batch fetch all entities in a single query (avoids N+1)
-            entity_ids = [entity_id for entity_id, _ in entity_ids_scores]
-            entities_map = await storage.get_entities_batch(entity_ids)
+        # Batch fetch all entities in a single query (avoids N+1)
+        entity_ids = [entity_id for entity_id, _ in entity_ids_scores]
+        entities_map = await storage.get_entities_batch(entity_ids)
 
-            # Return entities in score order, filtering out any that weren't found
-            entities = []
-            for entity_id, _score in entity_ids_scores:
-                if entity_id in entities_map:
-                    entities.append(entities_map[entity_id])
-
-            span.set_attribute("result_count", len(entities))
-            return entities
+        # Return entities in score order, filtering out any that weren't found
+        return [entities_map[eid] for eid, _score in entity_ids_scores if eid in entities_map]
 
     async def stats(self, namespace_id: UUID) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace."""

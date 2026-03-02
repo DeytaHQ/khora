@@ -26,6 +26,7 @@ from .collector import TelemetryCollector
 from .context import clear_trace_id, ensure_trace_id, get_trace_id, set_trace_id
 from .logfire_integration import trace_span
 from .noop import NoOpCollector
+from .trace_decorator import trace
 
 if TYPE_CHECKING:
     from .config import TelemetryConfig
@@ -41,6 +42,7 @@ __all__ = [
     "ensure_trace_id",
     "clear_trace_id",
     "trace_span",
+    "trace",
 ]
 
 _collector: TelemetryCollector | NoOpCollector = NoOpCollector()

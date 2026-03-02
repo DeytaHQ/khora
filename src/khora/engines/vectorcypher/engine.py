@@ -41,7 +41,7 @@ from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.storage import StorageConfig, create_storage_coordinator
-from khora.telemetry import trace_span
+from khora.telemetry import trace, trace_span
 
 from .dual_nodes import DualNodeManager, EntityChunkLink
 from .retriever import RetrieverConfig, VectorCypherRetriever
@@ -1456,6 +1456,7 @@ class VectorCypherEngine:
         """List entities in a namespace."""
         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
 
+    @trace("khora.find_related_entities", result=lambda r: {"result_count": len(r)})
     async def find_related_entities(
         self,
         entity_id: UUID,
@@ -1465,30 +1466,27 @@ class VectorCypherEngine:
         limit: int = 20,
     ) -> list[tuple[Entity, float]]:
         """Find entities related to a given entity via graph traversal."""
-        with trace_span(
-            "khora.find_related_entities", entity_id=str(entity_id), namespace_id=str(namespace_id)
-        ) as span:
-            dual_nodes = self._get_dual_nodes()
+        dual_nodes = self._get_dual_nodes()
 
-            neighborhoods = await dual_nodes.get_entity_neighborhoods(
-                entity_ids=[entity_id],
-                namespace_id=namespace_id,
-                depth=max_depth,
-                limit_per_entity=limit,
-            )
+        neighborhoods = await dual_nodes.get_entity_neighborhoods(
+            entity_ids=[entity_id],
+            namespace_id=namespace_id,
+            depth=max_depth,
+            limit_per_entity=limit,
+        )
 
-            results: list[tuple[Entity, float]] = []
-            entity_infos = neighborhoods.get(str(entity_id), [])
+        results: list[tuple[Entity, float]] = []
+        entity_infos = neighborhoods.get(str(entity_id), [])
 
-            for info in entity_infos[:limit]:
-                entity = await self._get_storage().get_entity(UUID(info["id"]))
-                if entity:
-                    score = 1.0 / (1 + info.get("distance", 1))
-                    results.append((entity, score))
+        for info in entity_infos[:limit]:
+            entity = await self._get_storage().get_entity(UUID(info["id"]))
+            if entity:
+                score = 1.0 / (1 + info.get("distance", 1))
+                results.append((entity, score))
 
-            span.set_attribute("result_count", len(results))
-            return results
+        return results
 
+    @trace("khora.search_entities", exclude={"query"}, result=lambda r: {"result_count": len(r)})
     async def search_entities(
         self,
         query: str,
@@ -1497,31 +1495,27 @@ class VectorCypherEngine:
         limit: int = 10,
     ) -> list[Entity]:
         """Search entities by query text using embedding similarity."""
-        with trace_span("khora.search_entities", namespace_id=str(namespace_id)) as span:
-            embedder = self._get_embedder()
-            query_embedding = await embedder.embed(query)
+        embedder = self._get_embedder()
+        query_embedding = await embedder.embed(query)
 
-            # Search via storage coordinator
-            storage = self._get_storage()
-            entity_ids_scores = await storage.search_similar_entities(
-                namespace_id,
-                query_embedding,
-                limit=limit,
-                min_similarity=0.0,
-            )
+        # Search via storage coordinator
+        storage = self._get_storage()
+        entity_ids_scores = await storage.search_similar_entities(
+            namespace_id,
+            query_embedding,
+            limit=limit,
+            min_similarity=0.0,
+        )
 
-            if not entity_ids_scores:
-                span.set_attribute("result_count", 0)
-                return []
+        if not entity_ids_scores:
+            return []
 
-            # Batch fetch all entities in a single query (avoids N+1)
-            entity_ids = [entity_id for entity_id, _ in entity_ids_scores]
-            entities_map = await storage.get_entities_batch(entity_ids)
+        # Batch fetch all entities in a single query (avoids N+1)
+        entity_ids = [entity_id for entity_id, _ in entity_ids_scores]
+        entities_map = await storage.get_entities_batch(entity_ids)
 
-            # Return entities in score order, filtering out any that weren't found
-            result = [entities_map[eid] for eid, _score in entity_ids_scores if eid in entities_map]
-            span.set_attribute("result_count", len(result))
-            return result
+        # Return entities in score order, filtering out any that weren't found
+        return [entities_map[eid] for eid, _score in entity_ids_scores if eid in entities_map]
 
     # =========================================================================
     # Document Operations

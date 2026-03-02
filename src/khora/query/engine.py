@@ -22,7 +22,7 @@ from uuid import UUID
 
 from loguru import logger
 
-from khora.telemetry import trace_span
+from khora.telemetry import trace, trace_span
 
 from .fusion import reciprocal_rank_fusion
 from .keyword import KeywordSearcher, normalize_bm25_score
@@ -1549,6 +1549,11 @@ class HybridQueryEngine:
         results = await self._entity_similarity_cache[cache_key]
         return results[:limit]
 
+    @trace(
+        "khora.query.vector_search",
+        include={"namespace_id"},
+        result=lambda r: {"chunk_count": len(r["chunks"]), "entity_count": len(r["entities"])},
+    )
     async def _vector_search(
         self,
         namespace_id: UUID,
@@ -1557,46 +1562,42 @@ class HybridQueryEngine:
         temporal_filter: TemporalFilter | None = None,
     ) -> dict[str, Any]:
         """Perform vector similarity search."""
-        with trace_span("khora.query.vector_search", namespace_id=str(namespace_id)) as span:
-            # Extract temporal bounds for SQL pushdown
-            created_after = None
-            created_before = None
-            if temporal_filter:
-                start, end = temporal_filter.get_effective_times()
-                created_after = start
-                created_before = end
+        # Extract temporal bounds for SQL pushdown
+        created_after = None
+        created_before = None
+        if temporal_filter:
+            start, end = temporal_filter.get_effective_times()
+            created_after = start
+            created_before = end
 
-            # Search chunks
-            chunk_results = await self._storage.search_similar_chunks(
-                namespace_id,
-                query_embedding,
-                limit=config.max_chunks * 2,  # Get extra for fusion
-                min_similarity=config.min_chunk_similarity,
-                created_after=created_after,
-                created_before=created_before,
-            )
+        # Search chunks
+        chunk_results = await self._storage.search_similar_chunks(
+            namespace_id,
+            query_embedding,
+            limit=config.max_chunks * 2,  # Get extra for fusion
+            min_similarity=config.min_chunk_similarity,
+            created_after=created_after,
+            created_before=created_before,
+        )
 
-            # Search entities (uses per-query cache to deduplicate with _graph_search)
-            entity_ids_scores = await self._cached_entity_search(
-                namespace_id,
-                query_embedding,
-                limit=config.max_entities * 2,
-                min_similarity=config.min_entity_similarity,
-            )
+        # Search entities (uses per-query cache to deduplicate with _graph_search)
+        entity_ids_scores = await self._cached_entity_search(
+            namespace_id,
+            query_embedding,
+            limit=config.max_entities * 2,
+            min_similarity=config.min_entity_similarity,
+        )
 
-            # Fetch full entities in batch (optimization: single query instead of N queries)
-            entity_ids = [eid for eid, _ in entity_ids_scores]
-            entities_map = await self._storage.get_entities_batch(entity_ids)
-            entities = [(entities_map[eid], score) for eid, score in entity_ids_scores if eid in entities_map]
+        # Fetch full entities in batch (optimization: single query instead of N queries)
+        entity_ids = [eid for eid, _ in entity_ids_scores]
+        entities_map = await self._storage.get_entities_batch(entity_ids)
+        entities = [(entities_map[eid], score) for eid, score in entity_ids_scores if eid in entities_map]
 
-            span.set_attribute("chunk_count", len(chunk_results))
-            span.set_attribute("entity_count", len(entities))
-
-            return {
-                "source": "vector",
-                "chunks": chunk_results,
-                "entities": entities,
-            }
+        return {
+            "source": "vector",
+            "chunks": chunk_results,
+            "entities": entities,
+        }
 
     async def _graph_search(
         self,
@@ -1780,6 +1781,11 @@ class HybridQueryEngine:
             "entities": [],
         }
 
+    @trace(
+        "khora.query.keyword_search",
+        include={"namespace_id"},
+        result=lambda r: {"result_count": len(r.get("chunks", []))},
+    )
     async def _keyword_search_bm25(
         self,
         namespace_id: UUID,
@@ -1798,68 +1804,67 @@ class HybridQueryEngine:
         Returns:
             Dict with chunks and entities
         """
-        with trace_span("khora.query.keyword_search", namespace_id=str(namespace_id)) as span:
-            ns_key = str(namespace_id)
+        ns_key = str(namespace_id)
 
-            # Build or get keyword index for this namespace
-            if ns_key not in self._keyword_searchers:
-                try:
-                    # Fetch all chunks for the namespace (up to a limit)
-                    chunks = await self._storage.list_chunks(
-                        namespace_id,
-                        limit=10000,  # Reasonable limit for in-memory index
-                    )
-                    if chunks:
-                        searcher = KeywordSearcher(
-                            use_stemming=True,
-                            remove_stopwords=True,
-                        )
-                        searcher.index_chunks(chunks)
-                        self._keyword_searchers[ns_key] = searcher
-                        logger.debug(f"Built BM25 index with {len(chunks)} chunks")
-                    else:
-                        logger.debug("No chunks to index for keyword search")
-                        span.set_attribute("result_count", 0)
-                        return {"source": "keyword", "chunks": [], "entities": []}
-                except Exception as e:
-                    logger.warning(f"Failed to build keyword index: {e}")
-                    span.set_attribute("result_count", 0)
-                    return {"source": "keyword", "chunks": [], "entities": []}
-
-            searcher = self._keyword_searchers.get(ns_key)
-            if not searcher:
-                span.set_attribute("result_count", 0)
-                return {"source": "keyword", "chunks": [], "entities": []}
-
+        # Build or get keyword index for this namespace
+        if ns_key not in self._keyword_searchers:
             try:
-                # Use keywords if available, otherwise use query text
-                if keywords:
-                    results = searcher.search_with_keywords(
-                        keywords,
-                        limit=config.max_chunks * 2,
-                        min_score=0.1,
+                # Fetch all chunks for the namespace (up to a limit)
+                chunks = await self._storage.list_chunks(
+                    namespace_id,
+                    limit=10000,  # Reasonable limit for in-memory index
+                )
+                if chunks:
+                    searcher = KeywordSearcher(
+                        use_stemming=True,
+                        remove_stopwords=True,
                     )
+                    searcher.index_chunks(chunks)
+                    self._keyword_searchers[ns_key] = searcher
+                    logger.debug(f"Built BM25 index with {len(chunks)} chunks")
                 else:
-                    results = searcher.search(
-                        query_text,
-                        limit=config.max_chunks * 2,
-                        min_score=0.1,
-                    )
-
-                # Normalize BM25 scores to 0-1 range
-                normalized_results = [(chunk, normalize_bm25_score(score)) for chunk, score in results]
-
-                span.set_attribute("result_count", len(normalized_results))
-                return {
-                    "source": "keyword",
-                    "chunks": normalized_results,
-                    "entities": [],  # Keyword search doesn't directly find entities
-                }
+                    logger.debug("No chunks to index for keyword search")
+                    return {"source": "keyword", "chunks": [], "entities": []}
             except Exception as e:
-                logger.warning(f"Keyword search failed: {e}")
-                span.set_attribute("result_count", 0)
+                logger.warning(f"Failed to build keyword index: {e}")
                 return {"source": "keyword", "chunks": [], "entities": []}
 
+        searcher = self._keyword_searchers.get(ns_key)
+        if not searcher:
+            return {"source": "keyword", "chunks": [], "entities": []}
+
+        try:
+            # Use keywords if available, otherwise use query text
+            if keywords:
+                results = searcher.search_with_keywords(
+                    keywords,
+                    limit=config.max_chunks * 2,
+                    min_score=0.1,
+                )
+            else:
+                results = searcher.search(
+                    query_text,
+                    limit=config.max_chunks * 2,
+                    min_score=0.1,
+                )
+
+            # Normalize BM25 scores to 0-1 range
+            normalized_results = [(chunk, normalize_bm25_score(score)) for chunk, score in results]
+
+            return {
+                "source": "keyword",
+                "chunks": normalized_results,
+                "entities": [],  # Keyword search doesn't directly find entities
+            }
+        except Exception as e:
+            logger.warning(f"Keyword search failed: {e}")
+            return {"source": "keyword", "chunks": [], "entities": []}
+
+    @trace(
+        "khora.query.keyword_search_fulltext",
+        include={"namespace_id"},
+        result=lambda r: {"result_count": len(r.get("chunks", []))},
+    )
     async def _keyword_search_fulltext(
         self,
         namespace_id: UUID,
@@ -1872,51 +1877,48 @@ class HybridQueryEngine:
         Unlike BM25, this runs entirely in PostgreSQL using the GIN-indexed
         content_tsv column, with no chunk count limit.
         """
-        with trace_span("khora.query.keyword_search_fulltext", namespace_id=str(namespace_id)) as span:
-            try:
-                from khora.telemetry import get_collector as _get_tc
+        try:
+            from khora.telemetry import get_collector as _get_tc
 
-                created_after = None
-                created_before = None
-                if temporal_filter:
-                    start, end = temporal_filter.get_effective_times()
-                    created_after = start
-                    created_before = end
+            created_after = None
+            created_before = None
+            if temporal_filter:
+                start, end = temporal_filter.get_effective_times()
+                created_after = start
+                created_before = end
 
-                _kw_start = time.perf_counter()
-                results = await self._storage.search_fulltext_chunks(
-                    namespace_id,
-                    query_text,
-                    limit=config.max_chunks * 2,
-                    created_after=created_after,
-                    created_before=created_before,
-                )
-                _get_tc().record_pipeline_stage(
-                    pipeline="query",
-                    stage="keyword_search",
-                    latency_ms=(time.perf_counter() - _kw_start) * 1000,
-                    output_count=len(results),
-                    namespace_id=namespace_id,
-                    metadata={"method": "fulltext"},
-                )
+            _kw_start = time.perf_counter()
+            results = await self._storage.search_fulltext_chunks(
+                namespace_id,
+                query_text,
+                limit=config.max_chunks * 2,
+                created_after=created_after,
+                created_before=created_before,
+            )
+            _get_tc().record_pipeline_stage(
+                pipeline="query",
+                stage="keyword_search",
+                latency_ms=(time.perf_counter() - _kw_start) * 1000,
+                output_count=len(results),
+                namespace_id=namespace_id,
+                metadata={"method": "fulltext"},
+            )
 
-                # Normalize ts_rank scores to 0-1 range
-                if results:
-                    max_score = max(s for _, s in results) or 1.0
-                    normalized = [(chunk, score / max_score) for chunk, score in results]
-                else:
-                    normalized = []
+            # Normalize ts_rank scores to 0-1 range
+            if results:
+                max_score = max(s for _, s in results) or 1.0
+                normalized = [(chunk, score / max_score) for chunk, score in results]
+            else:
+                normalized = []
 
-                span.set_attribute("result_count", len(normalized))
-                return {
-                    "source": "keyword",
-                    "chunks": normalized,
-                    "entities": [],
-                }
-            except Exception as e:
-                logger.warning(f"Full-text search failed: {e}")
-                span.set_attribute("result_count", 0)
-                return {"source": "keyword", "chunks": [], "entities": []}
+            return {
+                "source": "keyword",
+                "chunks": normalized,
+                "entities": [],
+            }
+        except Exception as e:
+            logger.warning(f"Full-text search failed: {e}")
+            return {"source": "keyword", "chunks": [], "entities": []}
 
     def _apply_source_priority(
         self,
@@ -2924,6 +2926,11 @@ class HybridQueryEngine:
 
         return [chunks[i] for i in selected_indices]
 
+    @trace(
+        "khora.query.find_related_entities",
+        include={"entity_id", "max_depth"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def find_related_entities(
         self,
         entity_id: UUID,
@@ -2945,36 +2952,33 @@ class HybridQueryEngine:
         Returns:
             List of (entity, relevance_score) tuples
         """
-        with trace_span("khora.query.find_related_entities", entity_id=str(entity_id), max_depth=max_depth) as span:
-            neighborhood = await self._storage.get_neighborhood(
-                entity_id,
-                depth=max_depth,
-                limit=limit,
-            )
+        neighborhood = await self._storage.get_neighborhood(
+            entity_id,
+            depth=max_depth,
+            limit=limit,
+        )
 
-            entity_nodes = neighborhood.get("entities", [])
-            if not entity_nodes:
-                span.set_attribute("result_count", 0)
-                return []
+        entity_nodes = neighborhood.get("entities", [])
+        if not entity_nodes:
+            return []
 
-            # Collect all entity IDs for batch fetch
-            entity_ids = [UUID(node["id"]) for node in entity_nodes]
+        # Collect all entity IDs for batch fetch
+        entity_ids = [UUID(node["id"]) for node in entity_nodes]
 
-            # Batch fetch all entities in a single query (avoids N+1)
-            entities_map = await self._storage.get_entities_batch(entity_ids)
+        # Batch fetch all entities in a single query (avoids N+1)
+        entities_map = await self._storage.get_entities_batch(entity_ids)
 
-            # Score based on path length (shorter = higher score)
-            # This is simplified - full impl would consider actual path lengths
-            base_score = 1.0 / (1 + len(neighborhood.get("relationships", [])))
+        # Score based on path length (shorter = higher score)
+        # This is simplified - full impl would consider actual path lengths
+        base_score = 1.0 / (1 + len(neighborhood.get("relationships", [])))
 
-            entities = []
-            for node in entity_nodes:
-                eid = UUID(node["id"])
-                if eid in entities_map:
-                    entities.append((entities_map[eid], base_score))
+        entities = []
+        for node in entity_nodes:
+            eid = UUID(node["id"])
+            if eid in entities_map:
+                entities.append((entities_map[eid], base_score))
 
-            span.set_attribute("result_count", len(entities))
-            return entities
+        return entities
 
     async def temporal_query(
         self,

@@ -26,7 +26,7 @@ from khora.storage.backends.mixins import (
 from khora.storage.backends.mixins import deserialize_dict as _deserialize_dict
 from khora.storage.backends.mixins import element_to_dict as _element_to_dict
 from khora.storage.backends.mixins import serialize_dict as _serialize_dict
-from khora.telemetry import trace_span
+from khora.telemetry import trace
 
 # Neo4j relationship labels must be valid identifiers: letters, digits, underscores.
 # LLM-generated types like "at-risk" or "works for" need sanitizing.
@@ -864,6 +864,11 @@ class Neo4jBackend(GraphBackendBase):
             deleted = await session.execute_write(_delete)
             return deleted > 0
 
+    @trace(
+        "khora.neo4j.get_entity_relationships",
+        include={"entity_id", "direction"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def get_entity_relationships(
         self,
         entity_id: UUID,
@@ -873,37 +878,34 @@ class Neo4jBackend(GraphBackendBase):
         limit: int = 100,
     ) -> list[Relationship]:
         """Get relationships for an entity."""
-        with trace_span("khora.neo4j.get_entity_relationships", entity_id=str(entity_id), direction=direction) as span:
-            driver = self._get_driver()
+        driver = self._get_driver()
 
-            # Build relationship type filter
-            rel_filter = ""
-            if relationship_types:
-                rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
+        # Build relationship type filter
+        rel_filter = ""
+        if relationship_types:
+            rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
-            # Build direction query
-            if direction == "outgoing":
-                pattern = f"(e)-[r{rel_filter}]->(other)"
-            elif direction == "incoming":
-                pattern = f"(other)-[r{rel_filter}]->(e)"
-            else:  # both
-                pattern = f"(e)-[r{rel_filter}]-(other)"
+        # Build direction query
+        if direction == "outgoing":
+            pattern = f"(e)-[r{rel_filter}]->(other)"
+        elif direction == "incoming":
+            pattern = f"(other)-[r{rel_filter}]->(e)"
+        else:  # both
+            pattern = f"(e)-[r{rel_filter}]-(other)"
 
-            query = f"""
-            MATCH {pattern}
-            WHERE e.id = $entity_id
-            RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
-            LIMIT $limit
-            """
+        query = f"""
+        MATCH {pattern}
+        WHERE e.id = $entity_id
+        RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
+        LIMIT $limit
+        """
 
-            async with driver.session(database=self._database) as session:
-                result = await session.run(query, entity_id=str(entity_id), limit=limit)
-                records = await result.data()
-                relationships = [
-                    self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
-                ]
-                span.set_attribute("result_count", len(relationships))
-                return relationships
+        async with driver.session(database=self._database) as session:
+            result = await session.run(query, entity_id=str(entity_id), limit=limit)
+            records = await result.data()
+            return [
+                self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
+            ]
 
     def _record_to_relationship(
         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
@@ -1091,6 +1093,11 @@ class Neo4jBackend(GraphBackendBase):
     # Graph traversal
     # =========================================================================
 
+    @trace(
+        "khora.neo4j.find_paths",
+        include={"source_entity_id", "target_entity_id", "max_depth"},
+        result=lambda r: {"path_count": len(r)},
+    )
     async def find_paths(
         self,
         namespace_id: UUID,
@@ -1101,50 +1108,48 @@ class Neo4jBackend(GraphBackendBase):
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Find paths between two entities."""
-        with trace_span(
-            "khora.neo4j.find_paths",
-            source_id=str(source_entity_id),
-            target_id=str(target_entity_id),
-            max_depth=max_depth,
-        ) as span:
-            driver = self._get_driver()
+        driver = self._get_driver()
 
-            rel_filter = ""
-            if relationship_types:
-                rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
+        rel_filter = ""
+        if relationship_types:
+            rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
-            query = f"""
-            MATCH path = shortestPath(
-                (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+        query = f"""
+        MATCH path = shortestPath(
+            (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+        )
+        WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+        RETURN path
+        LIMIT 10
+        """
+
+        async with driver.session(database=self._database) as session:
+            result = await session.run(
+                query,
+                source_id=str(source_entity_id),
+                target_id=str(target_entity_id),
+                namespace_id=str(namespace_id),
             )
-            WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
-            RETURN path
-            LIMIT 10
-            """
+            records = await result.data()
 
-            async with driver.session(database=self._database) as session:
-                result = await session.run(
-                    query,
-                    source_id=str(source_entity_id),
-                    target_id=str(target_entity_id),
-                    namespace_id=str(namespace_id),
-                )
-                records = await result.data()
+            paths = []
+            for record in records:
+                path = record["path"]
+                path_elements = []
+                for element in path:
+                    if hasattr(element, "items"):  # Node
+                        path_elements.append({"type": "node", "data": _element_to_dict(element)})
+                    else:  # Relationship
+                        path_elements.append({"type": "relationship", "data": _element_to_dict(element)})
+                paths.append(path_elements)
 
-                paths = []
-                for record in records:
-                    path = record["path"]
-                    path_elements = []
-                    for element in path:
-                        if hasattr(element, "items"):  # Node
-                            path_elements.append({"type": "node", "data": _element_to_dict(element)})
-                        else:  # Relationship
-                            path_elements.append({"type": "relationship", "data": _element_to_dict(element)})
-                    paths.append(path_elements)
+            return paths
 
-                span.set_attribute("path_count", len(paths))
-                return paths
-
+    @trace(
+        "khora.neo4j.get_neighborhood",
+        include={"entity_id", "depth"},
+        result=lambda r: {"node_count": len(r.get("entities", [])), "rel_count": len(r.get("relationships", []))},
+    )
     async def get_neighborhood(
         self,
         entity_id: UUID,
@@ -1154,51 +1159,51 @@ class Neo4jBackend(GraphBackendBase):
         limit: int = 50,
     ) -> dict[str, Any]:
         """Get the neighborhood of an entity up to a certain depth."""
-        with trace_span("khora.neo4j.get_neighborhood", entity_id=str(entity_id), depth=depth) as span:
-            driver = self._get_driver()
+        driver = self._get_driver()
 
-            rel_filter = ""
-            if relationship_types:
-                rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
+        rel_filter = ""
+        if relationship_types:
+            rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
-            query = f"""
-            MATCH (center:Entity {{id: $entity_id}})
-            CALL apoc.path.subgraphAll(center, {{
-                maxLevel: {depth},
-                relationshipFilter: '{rel_filter.lstrip(":")}',
-                limit: $limit
-            }})
-            YIELD nodes, relationships
-            RETURN nodes, relationships
-            """
+        query = f"""
+        MATCH (center:Entity {{id: $entity_id}})
+        CALL apoc.path.subgraphAll(center, {{
+            maxLevel: {depth},
+            relationshipFilter: '{rel_filter.lstrip(":")}',
+            limit: $limit
+        }})
+        YIELD nodes, relationships
+        RETURN nodes, relationships
+        """
 
-            # Fallback query if APOC is not available
-            fallback_query = f"""
-            MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
-            RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
-            LIMIT $limit
-            """
+        # Fallback query if APOC is not available
+        fallback_query = f"""
+        MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+        RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+        LIMIT $limit
+        """
 
-            async with driver.session(database=self._database) as session:
-                try:
-                    result = await session.run(query, entity_id=str(entity_id), limit=limit)
-                    record = await result.single()
-                except Exception:
-                    # Fallback if APOC not available
-                    result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
-                    record = await result.single()
+        async with driver.session(database=self._database) as session:
+            try:
+                result = await session.run(query, entity_id=str(entity_id), limit=limit)
+                record = await result.single()
+            except Exception:
+                # Fallback if APOC not available
+                result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
+                record = await result.single()
 
-                if record:
-                    nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
-                    relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
-                    span.set_attribute("node_count", len(nodes))
-                    span.set_attribute("rel_count", len(relationships))
-                    return {"entities": nodes, "relationships": relationships}
+            if record:
+                nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
+                relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
+                return {"entities": nodes, "relationships": relationships}
 
-                span.set_attribute("node_count", 0)
-                span.set_attribute("rel_count", 0)
-                return {"entities": [], "relationships": []}
+            return {"entities": [], "relationships": []}
 
+    @trace(
+        "khora.neo4j.get_neighborhoods_batch",
+        include={"entity_ids", "depth"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def get_neighborhoods_batch(
         self,
         entity_ids: list[UUID],
@@ -1221,41 +1226,39 @@ class Neo4jBackend(GraphBackendBase):
         if not entity_ids:
             return {}
 
-        with trace_span("khora.neo4j.get_neighborhoods_batch", entity_count=len(entity_ids), depth=depth) as span:
-            driver = self._get_driver()
-            id_strings = [str(eid) for eid in entity_ids]
+        driver = self._get_driver()
+        id_strings = [str(eid) for eid in entity_ids]
 
-            rel_filter = ""
-            if relationship_types:
-                rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
+        rel_filter = ""
+        if relationship_types:
+            rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
-            # Use UNWIND to process all entities in a single query
-            query = f"""
-            UNWIND $entity_ids AS eid
-            MATCH (center:Entity {{id: eid}})
-            OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-            WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
-            RETURN eid, neighbors, rels
-            """
+        # Use UNWIND to process all entities in a single query
+        query = f"""
+        UNWIND $entity_ids AS eid
+        MATCH (center:Entity {{id: eid}})
+        OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+        With eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+        RETURN eid, neighbors, rels
+        """
 
-            async with driver.session(database=self._database) as session:
-                result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
-                records = await result.data()
+        async with driver.session(database=self._database) as session:
+            result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
+            records = await result.data()
 
-                neighborhoods = {}
-                for record in records:
-                    eid = UUID(record["eid"])
-                    nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
-                    relationships = []
-                    for rel_list in record.get("rels") or []:
-                        if rel_list:
-                            for r in rel_list if isinstance(rel_list, list) else [rel_list]:
-                                if r:
-                                    relationships.append(_element_to_dict(r))
-                    neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+            neighborhoods = {}
+            for record in records:
+                eid = UUID(record["eid"])
+                nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
+                relationships = []
+                for rel_list in record.get("rels") or []:
+                    if rel_list:
+                        for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+                            if r:
+                                relationships.append(_element_to_dict(r))
+                neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
 
-                span.set_attribute("result_count", len(neighborhoods))
-                return neighborhoods
+            return neighborhoods
 
     async def get_temporal_neighbors(
         self,
