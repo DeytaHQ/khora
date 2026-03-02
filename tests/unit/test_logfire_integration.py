@@ -19,7 +19,7 @@ import pytest
 from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult
 from khora.telemetry import NoOpCollector
 from khora.telemetry.instrument import instrument_llm, instrument_storage, pipeline_stage
-from khora.telemetry.logfire_integration import NoOpSpan, trace_span
+from khora.telemetry.logfire_integration import LogfireSpan, NoOpSpan, trace_span
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -168,7 +168,7 @@ class TestLogfireSpanWithLogfire:
     """Tests for trace_span when logfire is installed (mocked)."""
 
     def test_creates_span_with_correct_name(self):
-        """trace_span creates a span with the given name."""
+        """trace_span creates a LogfireSpan wrapping the real span."""
         mock_logfire, mock_span = _make_mock_trace_span()
 
         with (
@@ -176,7 +176,8 @@ class TestLogfireSpanWithLogfire:
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
         ):
             with trace_span("khora.test.operation") as span:
-                assert span is mock_span
+                assert isinstance(span, LogfireSpan)
+                assert span._inner is mock_span
 
         mock_logfire.span.assert_called_once_with("khora.test.operation")
 
