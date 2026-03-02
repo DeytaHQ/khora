@@ -880,3 +880,188 @@ class TestCoordinatorRecordStorageOpExceptionPath:
         assert recording_collector.storage_calls[0]["status"] == "error"
         assert recording_collector.storage_calls[0]["operation"] == "test_create"
         assert recording_collector.storage_calls[0]["backend"] == "postgresql"
+
+
+# =========================================================================
+# 7. Deep tracing span tests (query pipeline, engines, neo4j)
+# =========================================================================
+
+
+class TestQueryEngineDeepTracing:
+    """Tests that query engine methods create correct trace spans."""
+
+    @pytest.mark.asyncio
+    async def test_vector_search_creates_span(self):
+        """_vector_search creates a khora.query.vector_search span."""
+        mock_logfire, mock_span = _make_mock_trace_span()
+        ns_id = uuid4()
+
+        from khora.query.engine import HybridQueryEngine
+
+        engine = object.__new__(HybridQueryEngine)
+        engine._storage = MagicMock()
+        engine._storage.search_similar_chunks = AsyncMock(return_value=[])
+        engine._storage.get_entities_batch = AsyncMock(return_value={})
+        engine._entity_search_cache = {}
+
+        async def _cached(ns, emb, *, limit, min_similarity):
+            return []
+
+        engine._cached_entity_search = _cached
+
+        from khora.query import QueryConfig
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            result = await engine._vector_search(ns_id, [0.1] * 10, QueryConfig())
+
+        assert result["source"] == "vector"
+        mock_logfire.span.assert_called_once_with("khora.query.vector_search", namespace_id=str(ns_id))
+        mock_span.set_attribute.assert_any_call("chunk_count", 0)
+        mock_span.set_attribute.assert_any_call("entity_count", 0)
+
+    @pytest.mark.asyncio
+    async def test_keyword_search_bm25_creates_span(self):
+        """_keyword_search_bm25 creates a khora.query.keyword_search span."""
+        mock_logfire, mock_span = _make_mock_trace_span()
+        ns_id = uuid4()
+
+        from khora.query.engine import HybridQueryEngine
+
+        engine = object.__new__(HybridQueryEngine)
+        engine._keyword_searchers = {}
+        engine._storage = MagicMock()
+        engine._storage.list_chunks = AsyncMock(return_value=[])
+
+        from khora.query import QueryConfig
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            result = await engine._keyword_search_bm25(ns_id, "test query", QueryConfig())
+
+        assert result["source"] == "keyword"
+        mock_logfire.span.assert_called_once_with("khora.query.keyword_search", namespace_id=str(ns_id))
+        mock_span.set_attribute.assert_any_call("result_count", 0)
+
+    @pytest.mark.asyncio
+    async def test_find_related_entities_creates_span(self):
+        """find_related_entities creates a khora.query.find_related_entities span."""
+        mock_logfire, mock_span = _make_mock_trace_span()
+        entity_id = uuid4()
+        ns_id = uuid4()
+
+        from khora.query.engine import HybridQueryEngine
+
+        engine = object.__new__(HybridQueryEngine)
+        engine._storage = MagicMock()
+        engine._storage.get_neighborhood = AsyncMock(return_value={"entities": [], "relationships": []})
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            result = await engine.find_related_entities(entity_id, ns_id)
+
+        assert result == []
+        mock_logfire.span.assert_called_once_with(
+            "khora.query.find_related_entities",
+            entity_id=str(entity_id),
+            max_depth=2,
+        )
+        mock_span.set_attribute.assert_any_call("result_count", 0)
+
+    @pytest.mark.asyncio
+    async def test_stage4_rerank_creates_span(self):
+        """_stage4_rerank creates a khora.query.rerank span."""
+        mock_logfire, mock_span = _make_mock_trace_span()
+
+        from khora.query.engine import HybridQueryEngine
+
+        engine = object.__new__(HybridQueryEngine)
+        engine._llm_config = MagicMock()
+
+        mock_chunk = MagicMock()
+        mock_chunk.content = "test"
+        mock_chunk.metadata = {}
+        chunks = [(mock_chunk, 0.9), (mock_chunk, 0.8), (mock_chunk, 0.7)]
+
+        mock_reranker = MagicMock()
+        mock_reranked = [MagicMock(item=mock_chunk, final_score=0.95)]
+        mock_reranker.rerank = AsyncMock(return_value=mock_reranked)
+        engine._rerankers = {"cross_encoder": mock_reranker}
+
+        from khora.query import QueryConfig
+
+        config = QueryConfig()
+        config.enable_reranking = True
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            result = await engine._stage4_rerank(chunks, "test query", config)
+
+        assert len(result) == 1
+        mock_logfire.span.assert_called_once_with("khora.query.rerank", candidate_count=3)
+        mock_span.set_attribute.assert_any_call("reranked_count", 1)
+
+
+class TestEngineDeepTracing:
+    """Tests that engine entry points create correct trace spans."""
+
+    @pytest.mark.asyncio
+    async def test_graphrag_search_entities_creates_span(self):
+        """GraphRAG search_entities creates a khora.search_entities span."""
+        mock_logfire, mock_span = _make_mock_trace_span()
+        ns_id = uuid4()
+
+        from khora.engines.graphrag.engine import GraphRAGEngine
+
+        engine = object.__new__(GraphRAGEngine)
+        engine._embedder = MagicMock()
+        engine._embedder.embed = AsyncMock(return_value=[0.1] * 10)
+        mock_storage = MagicMock()
+        mock_storage.search_similar_entities = AsyncMock(return_value=[])
+        engine._storage = mock_storage
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            result = await engine.search_entities("test query", ns_id)
+
+        assert result == []
+        mock_logfire.span.assert_called_once_with("khora.search_entities", namespace_id=str(ns_id))
+        mock_span.set_attribute.assert_any_call("result_count", 0)
+
+    @pytest.mark.asyncio
+    async def test_graphrag_find_related_entities_creates_span(self):
+        """GraphRAG find_related_entities creates a khora.find_related_entities span."""
+        mock_logfire, mock_span = _make_mock_trace_span()
+        entity_id = uuid4()
+        ns_id = uuid4()
+
+        from khora.engines.graphrag.engine import GraphRAGEngine
+
+        engine = object.__new__(GraphRAGEngine)
+        mock_query_engine = MagicMock()
+        mock_query_engine.find_related_entities = AsyncMock(return_value=[])
+        engine._query_engine = mock_query_engine
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            result = await engine.find_related_entities(entity_id, ns_id)
+
+        assert result == []
+        mock_logfire.span.assert_called_once_with(
+            "khora.find_related_entities",
+            entity_id=str(entity_id),
+            namespace_id=str(ns_id),
+        )
+        mock_span.set_attribute.assert_any_call("result_count", 0)
