@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 from loguru import logger
 
 from khora.storage.backends.mixins import deserialize_dict, serialize_dict
+from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
@@ -379,65 +380,67 @@ class DualNodeManager:
         if not entity_ids:
             return []
 
-        # Build temporal filter conditions
-        temporal_conditions = []
-        params: dict[str, Any] = {
-            "entity_ids": [str(eid) for eid in entity_ids],
-            "namespace_id": str(namespace_id),
-            "limit": limit,
-        }
+        with trace_span("khora.neo4j.get_chunks_by_entities", entity_count=len(entity_ids)) as span:
+            # Build temporal filter conditions
+            temporal_conditions = []
+            params: dict[str, Any] = {
+                "entity_ids": [str(eid) for eid in entity_ids],
+                "namespace_id": str(namespace_id),
+                "limit": limit,
+            }
 
-        if temporal_filter:
-            if temporal_filter.occurred_after:
-                temporal_conditions.append("c.occurred_at >= $occurred_after")
-                params["occurred_after"] = temporal_filter.occurred_after.isoformat()
-            if temporal_filter.occurred_before:
-                temporal_conditions.append("c.occurred_at < $occurred_before")
-                params["occurred_before"] = temporal_filter.occurred_before.isoformat()
-            if temporal_filter.source_system:
-                temporal_conditions.append("c.source_system = $source_system")
-                params["source_system"] = temporal_filter.source_system
-            if temporal_filter.author:
-                temporal_conditions.append("c.author = $author")
-                params["author"] = temporal_filter.author
-            if temporal_filter.channel:
-                temporal_conditions.append("c.channel = $channel")
-                params["channel"] = temporal_filter.channel
+            if temporal_filter:
+                if temporal_filter.occurred_after:
+                    temporal_conditions.append("c.occurred_at >= $occurred_after")
+                    params["occurred_after"] = temporal_filter.occurred_after.isoformat()
+                if temporal_filter.occurred_before:
+                    temporal_conditions.append("c.occurred_at < $occurred_before")
+                    params["occurred_before"] = temporal_filter.occurred_before.isoformat()
+                if temporal_filter.source_system:
+                    temporal_conditions.append("c.source_system = $source_system")
+                    params["source_system"] = temporal_filter.source_system
+                if temporal_filter.author:
+                    temporal_conditions.append("c.author = $author")
+                    params["author"] = temporal_filter.author
+                if temporal_filter.channel:
+                    temporal_conditions.append("c.channel = $channel")
+                    params["channel"] = temporal_filter.channel
 
-        where_clause = ""
-        if temporal_conditions:
-            where_clause = "AND " + " AND ".join(temporal_conditions)
+            where_clause = ""
+            if temporal_conditions:
+                where_clause = "AND " + " AND ".join(temporal_conditions)
 
-        query = f"""
-        MATCH (e:Entity)-[r:MENTIONED_IN]->(c:Chunk)
-        WHERE e.id IN $entity_ids
-        AND c.namespace_id = $namespace_id
-        {where_clause}
-        RETURN c.id AS chunk_id,
-               c.content AS content,
-               c.document_id AS document_id,
-               c.occurred_at AS occurred_at,
-               c.metadata AS metadata,
-               collect(DISTINCT e.id) AS entity_ids,
-               sum(r.mention_count) AS total_mentions
-        ORDER BY total_mentions DESC
-        LIMIT $limit
-        """
+            query = f"""
+            MATCH (e:Entity)-[r:MENTIONED_IN]->(c:Chunk)
+            WHERE e.id IN $entity_ids
+            AND c.namespace_id = $namespace_id
+            {where_clause}
+            RETURN c.id AS chunk_id,
+                   c.content AS content,
+                   c.document_id AS document_id,
+                   c.occurred_at AS occurred_at,
+                   c.metadata AS metadata,
+                   collect(DISTINCT e.id) AS entity_ids,
+                   sum(r.mention_count) AS total_mentions
+            ORDER BY total_mentions DESC
+            LIMIT $limit
+            """
 
-        async with self._driver.session(database=self._database) as session:
+            async with self._driver.session(database=self._database) as session:
 
-            async def _work(tx):
-                result = await tx.run(query, **params)
-                return [record.data() async for record in result]
+                async def _work(tx):
+                    result = await tx.run(query, **params)
+                    return [record.data() async for record in result]
 
-            records = await session.execute_read(_work)
+                records = await session.execute_read(_work)
 
-        # Deserialize metadata from JSON string back to dict
-        for record in records:
-            if "metadata" in record:
-                record["metadata"] = deserialize_dict(record["metadata"])
+            # Deserialize metadata from JSON string back to dict
+            for record in records:
+                if "metadata" in record:
+                    record["metadata"] = deserialize_dict(record["metadata"])
 
-        return records
+            span.set_attribute("chunk_count", len(records))
+            return records
 
     async def get_entity_neighborhoods(
         self,
@@ -468,47 +471,50 @@ class DualNodeManager:
         if not entity_ids:
             return {}
 
-        depth = min(max(1, depth), 4)  # Clamp to 1-4
+        with trace_span("khora.neo4j.get_entity_neighborhoods", entity_count=len(entity_ids), depth=depth) as span:
+            depth = min(max(1, depth), 4)  # Clamp to 1-4
 
-        # OPTIMIZATION: Single query fetches all neighborhoods in batch
-        # Uses UNWIND internally via IN clause + collect() aggregation
-        # This avoids N separate queries for N entity IDs
-        query = f"""
-        UNWIND $entity_ids AS eid
-        MATCH (e:Entity {{id: eid, namespace_id: $namespace_id}})
-        OPTIONAL MATCH path = (e)-[*1..{depth}]-(related:Entity)
-        WHERE related.namespace_id = $namespace_id
-          AND related.id <> e.id
-        WITH e, related,
-             CASE WHEN related IS NOT NULL THEN length(path) ELSE null END AS distance
-        ORDER BY e.id, distance
-        WITH e, collect(DISTINCT CASE
-            WHEN related IS NOT NULL THEN {{
-                id: related.id,
-                name: related.name,
-                entity_type: related.entity_type,
-                distance: distance
-            }}
-            ELSE null
-        END)[0..$limit] AS related_raw
-        RETURN e.id AS source_id,
-               [x IN related_raw WHERE x IS NOT NULL] AS related_entities
-        """
+            # OPTIMIZATION: Single query fetches all neighborhoods in batch
+            # Uses UNWIND internally via IN clause + collect() aggregation
+            # This avoids N separate queries for N entity IDs
+            query = f"""
+            UNWIND $entity_ids AS eid
+            MATCH (e:Entity {{id: eid, namespace_id: $namespace_id}})
+            OPTIONAL MATCH path = (e)-[*1..{depth}]-(related:Entity)
+            WHERE related.namespace_id = $namespace_id
+              AND related.id <> e.id
+            WITH e, related,
+                 CASE WHEN related IS NOT NULL THEN length(path) ELSE null END AS distance
+            ORDER BY e.id, distance
+            WITH e, collect(DISTINCT CASE
+                WHEN related IS NOT NULL THEN {{
+                    id: related.id,
+                    name: related.name,
+                    entity_type: related.entity_type,
+                    distance: distance
+                }}
+                ELSE null
+            END)[0..$limit] AS related_raw
+            RETURN e.id AS source_id,
+                   [x IN related_raw WHERE x IS NOT NULL] AS related_entities
+            """
 
-        async with self._driver.session(database=self._database) as session:
+            async with self._driver.session(database=self._database) as session:
 
-            async def _work(tx):
-                result = await tx.run(
-                    query,
-                    entity_ids=[str(eid) for eid in entity_ids],
-                    namespace_id=str(namespace_id),
-                    limit=limit_per_entity,
-                )
-                return [record.data() async for record in result]
+                async def _work(tx):
+                    result = await tx.run(
+                        query,
+                        entity_ids=[str(eid) for eid in entity_ids],
+                        namespace_id=str(namespace_id),
+                        limit=limit_per_entity,
+                    )
+                    return [record.data() async for record in result]
 
-            records = await session.execute_read(_work)
+                records = await session.execute_read(_work)
 
-        return {record["source_id"]: record["related_entities"] for record in records}
+            result = {record["source_id"]: record["related_entities"] for record in records}
+            span.set_attribute("result_count", len(result))
+            return result
 
     async def get_temporal_chunks(
         self,
