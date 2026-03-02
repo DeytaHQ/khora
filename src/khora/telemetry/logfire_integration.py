@@ -10,6 +10,7 @@ Install with::
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -23,7 +24,7 @@ except ImportError:
 
 
 @contextmanager
-def logfire_span(name: str, /, **attributes: Any):
+def logfire_span(name: str, /, **attributes: Any) -> Iterator[Any]:
     """Emit a Logfire span if available, otherwise no-op."""
     if _HAS_LOGFIRE:
         with _logfire.span(name, **attributes) as span:

@@ -54,12 +54,14 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
     just let the decorator handle timing.
     """
 
+    span_name = f"khora.storage.{operation}"
+
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             t0 = _time.perf_counter()
             try:
-                with logfire_span(f"khora.storage.{operation}", backend=backend) as span:
+                with logfire_span(span_name, backend=backend) as span:
                     result = await func(*args, **kwargs)
                     elapsed = _time.perf_counter() - t0
                     if span is not None:

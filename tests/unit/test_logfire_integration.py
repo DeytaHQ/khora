@@ -677,3 +677,192 @@ class TestCoordinatorLogfireBridging:
             result = await do_thing()
 
         assert result == [1, 2, 3]
+
+
+# =========================================================================
+# 6. Exception path tests
+# =========================================================================
+
+
+class TestInstrumentLLMExceptionPath:
+    """Tests that instrument_llm handles exceptions correctly."""
+
+    @pytest.mark.asyncio
+    async def test_exception_is_reraised(self, recording_collector):
+        """instrument_llm re-raises exceptions from the decorated function."""
+
+        @instrument_llm("failing_op")
+        async def failing_llm_call():
+            raise ValueError("LLM call failed")
+
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with pytest.raises(ValueError, match="LLM call failed"):
+                await failing_llm_call()
+
+    @pytest.mark.asyncio
+    async def test_collector_records_error_status(self, recording_collector):
+        """Custom telemetry collector records the call with status='error'."""
+
+        @instrument_llm("failing_op")
+        async def failing_llm_call():
+            raise ValueError("LLM call failed")
+
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with pytest.raises(ValueError):
+                await failing_llm_call()
+
+        assert len(recording_collector.llm_calls) == 1
+        assert recording_collector.llm_calls[0]["status"] == "error"
+        assert recording_collector.llm_calls[0]["operation"] == "failing_op"
+        assert "LLM call failed" in recording_collector.llm_calls[0]["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_logfire_span_created_on_exception(self, recording_collector):
+        """When logfire is present, a span is still created even if function raises."""
+        mock_logfire, mock_span = _make_mock_logfire_span()
+
+        @instrument_llm("failing_op")
+        async def failing_llm_call():
+            raise ValueError("LLM call failed")
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            with pytest.raises(ValueError):
+                await failing_llm_call()
+
+        mock_logfire.span.assert_called_once_with("khora.llm.failing_op")
+
+
+class TestInstrumentStorageExceptionPath:
+    """Tests that instrument_storage handles exceptions correctly."""
+
+    @pytest.mark.asyncio
+    async def test_exception_is_reraised(self, recording_collector):
+        """instrument_storage re-raises exceptions from the decorated function."""
+
+        @instrument_storage("neo4j", "create_entity")
+        async def failing_storage_op():
+            raise RuntimeError("Connection lost")
+
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with pytest.raises(RuntimeError, match="Connection lost"):
+                await failing_storage_op()
+
+    @pytest.mark.asyncio
+    async def test_collector_records_error_status(self, recording_collector):
+        """collector.record_storage_op is called with status='error'."""
+
+        @instrument_storage("neo4j", "create_entity")
+        async def failing_storage_op():
+            raise RuntimeError("Connection lost")
+
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with pytest.raises(RuntimeError):
+                await failing_storage_op()
+
+        assert len(recording_collector.storage_calls) == 1
+        assert recording_collector.storage_calls[0]["status"] == "error"
+        assert recording_collector.storage_calls[0]["backend"] == "neo4j"
+        assert recording_collector.storage_calls[0]["operation"] == "create_entity"
+        assert "Connection lost" in recording_collector.storage_calls[0]["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_logfire_span_created_on_exception(self, recording_collector):
+        """When logfire is present, a span is still created even if function raises."""
+        mock_logfire, mock_span = _make_mock_logfire_span()
+
+        @instrument_storage("pgvector", "search_similar")
+        async def failing_storage_op():
+            raise RuntimeError("Connection lost")
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            with pytest.raises(RuntimeError):
+                await failing_storage_op()
+
+        mock_logfire.span.assert_called_once_with("khora.storage.search_similar", backend="pgvector")
+
+
+class TestPipelineStageExceptionPath:
+    """Tests that pipeline_stage handles exceptions correctly."""
+
+    @pytest.mark.asyncio
+    async def test_exception_is_reraised(self, recording_collector):
+        """pipeline_stage re-raises exceptions from the context body."""
+        run_id = uuid4()
+
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with pytest.raises(ValueError, match="Pipeline failed"):
+                async with pipeline_stage("ingestion", "chunking", run_id, input_count=5):
+                    raise ValueError("Pipeline failed")
+
+    @pytest.mark.asyncio
+    async def test_collector_records_error_status(self, recording_collector):
+        """collector.record_pipeline_stage is called with status='error'."""
+        run_id = uuid4()
+
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with pytest.raises(ValueError):
+                async with pipeline_stage("ingestion", "chunking", run_id, input_count=5):
+                    raise ValueError("Pipeline failed")
+
+        assert len(recording_collector.pipeline_calls) == 1
+        assert recording_collector.pipeline_calls[0]["status"] == "error"
+        assert recording_collector.pipeline_calls[0]["pipeline"] == "ingestion"
+        assert recording_collector.pipeline_calls[0]["stage"] == "chunking"
+        assert "Pipeline failed" in recording_collector.pipeline_calls[0]["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_logfire_span_created_on_exception(self, recording_collector):
+        """When logfire is present, a span is still created even if body raises."""
+        mock_logfire, mock_span = _make_mock_logfire_span()
+        run_id = uuid4()
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
+        ):
+            with pytest.raises(ValueError):
+                async with pipeline_stage("ingestion", "chunking", run_id, input_count=5):
+                    raise ValueError("Pipeline failed")
+
+        mock_logfire.span.assert_called_once_with("khora.ingestion.chunking", input_count=5)
+
+
+class TestCoordinatorRecordStorageOpExceptionPath:
+    """Tests that _record_storage_op handles exceptions correctly."""
+
+    @pytest.mark.asyncio
+    async def test_exception_is_reraised(self):
+        """_record_storage_op re-raises exceptions from the decorated function."""
+        from khora.storage.coordinator import _record_storage_op
+
+        @_record_storage_op("test_create", "postgresql")
+        async def failing_op():
+            raise RuntimeError("DB error")
+
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with pytest.raises(RuntimeError, match="DB error"):
+                await failing_op()
+
+    @pytest.mark.asyncio
+    async def test_collector_records_error_status(self, recording_collector):
+        """collector.record_storage_op is called with status='error'."""
+        from khora.storage.coordinator import _record_storage_op
+
+        @_record_storage_op("test_create", "postgresql")
+        async def failing_op():
+            raise RuntimeError("DB error")
+
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
+            with pytest.raises(RuntimeError):
+                await failing_op()
+
+        assert len(recording_collector.storage_calls) == 1
+        assert recording_collector.storage_calls[0]["status"] == "error"
+        assert recording_collector.storage_calls[0]["operation"] == "test_create"
+        assert recording_collector.storage_calls[0]["backend"] == "postgresql"
