@@ -32,6 +32,7 @@ from khora.core.models import (
     Workspace,
 )
 from khora.telemetry import get_collector
+from khora.telemetry.logfire_integration import logfire_span
 
 if TYPE_CHECKING:
     from .backends.base import (
@@ -58,8 +59,12 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
         async def wrapper(*args, **kwargs):
             t0 = _time.perf_counter()
             try:
-                result = await func(*args, **kwargs)
-                elapsed = _time.perf_counter() - t0
+                with logfire_span(f"khora.storage.{operation}", backend=backend) as span:
+                    result = await func(*args, **kwargs)
+                    elapsed = _time.perf_counter() - t0
+                    if span is not None:
+                        span.set_attribute("latency_ms", elapsed * 1000)
+                        span.set_attribute("status", "success")
                 get_collector().record_storage_op(
                     operation=operation,
                     backend=backend,

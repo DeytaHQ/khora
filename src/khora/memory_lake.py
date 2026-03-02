@@ -20,6 +20,7 @@ from loguru import logger
 from khora.config import KhoraConfig, load_config
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
+from khora.telemetry.logfire_integration import logfire_span
 
 if TYPE_CHECKING:
     from khora.engines.protocol import MemoryEngineProtocol
@@ -318,14 +319,15 @@ class MemoryLake:
         ensure_trace_id()
         try:
             namespace_id = await self._resolve_namespace(namespace)
-            return await self._get_engine().remember(
-                content,
-                namespace_id,
-                title=title,
-                source=source,
-                metadata=metadata,
-                skill_name=skill_name,
-            )
+            with logfire_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
+                return await self._get_engine().remember(
+                    content,
+                    namespace_id,
+                    title=title,
+                    source=source,
+                    metadata=metadata,
+                    skill_name=skill_name,
+                )
         finally:
             clear_trace_id()
 
@@ -373,15 +375,16 @@ class MemoryLake:
         ensure_trace_id()
         try:
             namespace_id = await self._resolve_namespace(namespace)
-            return await self._get_engine().remember_batch(
-                documents,
-                namespace_id,
-                skill_name=skill_name,
-                max_concurrent=max_concurrent,
-                deduplicate=deduplicate,
-                infer_relationships=infer_relationships,
-                on_progress=on_progress,
-            )
+            with logfire_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
+                return await self._get_engine().remember_batch(
+                    documents,
+                    namespace_id,
+                    skill_name=skill_name,
+                    max_concurrent=max_concurrent,
+                    deduplicate=deduplicate,
+                    infer_relationships=infer_relationships,
+                    on_progress=on_progress,
+                )
         finally:
             clear_trace_id()
 
@@ -434,15 +437,16 @@ class MemoryLake:
         ensure_trace_id()
         try:
             namespace_id = await self._resolve_namespace(namespace)
-            return await self._get_engine().recall(
-                query,
-                namespace_id,
-                limit=limit,
-                mode=mode,
-                min_similarity=min_similarity,
-                agentic=agentic,
-                raw=raw,
-            )
+            with logfire_span("khora.recall", namespace_id=str(namespace_id), query_length=len(query)):
+                return await self._get_engine().recall(
+                    query,
+                    namespace_id,
+                    limit=limit,
+                    mode=mode,
+                    min_similarity=min_similarity,
+                    agentic=agentic,
+                    raw=raw,
+                )
         finally:
             clear_trace_id()
 
@@ -465,7 +469,12 @@ class MemoryLake:
         if namespace:
             namespace_id = await self._resolve_namespace(namespace)
 
-        return await self._get_engine().forget(document_id, namespace_id)
+        with logfire_span(
+            "khora.forget",
+            namespace_id=str(namespace_id) if namespace_id else "",
+            document_id=str(document_id),
+        ):
+            return await self._get_engine().forget(document_id, namespace_id)
 
     # =========================================================================
     # Entity Operations

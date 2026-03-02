@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
+from .logfire_integration import logfire_span
+
 
 def instrument_llm(operation: str):
     """Decorator for async functions that make LLM calls.
@@ -31,7 +33,21 @@ def instrument_llm(operation: str):
             error_msg: str | None = None
             result = None
             try:
-                result = await fn(*args, **kwargs)
+                with logfire_span(f"khora.llm.{operation}") as span:
+                    result = await fn(*args, **kwargs)
+                    # Set span attributes after call completes
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    model = ""
+                    total_tokens = 0
+                    if result is not None:
+                        usage = getattr(result, "usage", None)
+                        if usage is not None:
+                            total_tokens = getattr(usage, "total_tokens", 0) or 0
+                        model = getattr(result, "model", "") or ""
+                    if span is not None:
+                        span.set_attribute("model", model)
+                        span.set_attribute("total_tokens", total_tokens)
+                        span.set_attribute("latency_ms", latency_ms)
                 return result
             except Exception as exc:
                 status = "error"
@@ -98,12 +114,18 @@ def instrument_storage(backend: str, operation: str):
                         break
 
             try:
-                result = await fn(*args, **kwargs)
-                # Try to guess record count from result
-                if isinstance(result, list):
-                    record_count = len(result)
-                elif result is not None:
-                    record_count = 1
+                with logfire_span(f"khora.storage.{operation}", backend=backend) as span:
+                    result = await fn(*args, **kwargs)
+                    # Try to guess record count from result
+                    if isinstance(result, list):
+                        record_count = len(result)
+                    elif result is not None:
+                        record_count = 1
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    if span is not None:
+                        span.set_attribute("status", "success")
+                        span.set_attribute("latency_ms", latency_ms)
+                        span.set_attribute("record_count", record_count)
                 return result
             except Exception as exc:
                 status = "error"
@@ -171,7 +193,13 @@ async def pipeline_stage(
     status = "success"
     error_msg: str | None = None
     try:
-        yield ctx
+        with logfire_span(f"khora.{pipeline_name}.{stage}", input_count=input_count) as span:
+            yield ctx
+            latency_ms = (time.perf_counter() - start) * 1000
+            if span is not None:
+                span.set_attribute("output_count", ctx.get("output_count", 0))
+                span.set_attribute("status", "success")
+                span.set_attribute("latency_ms", latency_ms)
     except Exception as exc:
         status = "error"
         error_msg = str(exc)[:500]
