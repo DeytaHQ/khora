@@ -1,7 +1,7 @@
-"""Optional Logfire integration for Khora telemetry.
+"""Optional OTEL span integration for Khora telemetry.
 
-When ``logfire`` is installed, ``logfire_span`` emits real OpenTelemetry spans
-via the Logfire SDK.  Otherwise it yields ``None`` (zero-cost no-op).
+When ``logfire`` is installed, :func:`trace_span` emits real OpenTelemetry
+spans via the Logfire SDK.  Otherwise it yields ``None`` (zero-cost no-op).
 
 Install with::
 
@@ -24,8 +24,8 @@ except ImportError:
 
 
 @contextmanager
-def logfire_span(name: str, /, **attributes: Any) -> Iterator[Any]:
-    """Emit a Logfire span if available, otherwise no-op."""
+def trace_span(name: str, /, **attributes: Any) -> Iterator[Any]:
+    """Emit an OTEL span if an exporter is installed, otherwise no-op."""
     if _HAS_LOGFIRE:
         with _logfire.span(name, **attributes) as span:
             yield span

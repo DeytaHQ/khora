@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
-from .logfire_integration import logfire_span
+from .logfire_integration import trace_span
 
 
 def instrument_llm(operation: str):
@@ -34,7 +34,7 @@ def instrument_llm(operation: str):
             error_msg: str | None = None
             result = None
             try:
-                with logfire_span(span_name) as span:
+                with trace_span(span_name) as span:
                     result = await fn(*args, **kwargs)
                     # Set span attributes while span is still active
                     latency_ms = (time.perf_counter() - start) * 1000
@@ -116,7 +116,7 @@ def instrument_storage(backend: str, operation: str):
                         break
 
             try:
-                with logfire_span(span_name, backend=backend) as span:
+                with trace_span(span_name, backend=backend) as span:
                     result = await fn(*args, **kwargs)
                     # Try to guess record count from result
                     if isinstance(result, list):
@@ -197,7 +197,7 @@ async def pipeline_stage(
     status = "success"
     error_msg: str | None = None
     try:
-        with logfire_span(span_name, input_count=input_count) as span:
+        with trace_span(span_name, input_count=input_count) as span:
             yield ctx
             # Set span attributes while span is still active
             if span is not None:

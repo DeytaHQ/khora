@@ -31,8 +31,7 @@ from khora.core.models import (
     Relationship,
     Workspace,
 )
-from khora.telemetry import get_collector
-from khora.telemetry.logfire_integration import logfire_span
+from khora.telemetry import get_collector, trace_span
 
 if TYPE_CHECKING:
     from .backends.base import (
@@ -61,7 +60,7 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
         async def wrapper(*args, **kwargs):
             t0 = _time.perf_counter()
             try:
-                with logfire_span(span_name, backend=backend) as span:
+                with trace_span(span_name, backend=backend) as span:
                     result = await func(*args, **kwargs)
                     elapsed = _time.perf_counter() - t0
                     if span is not None:

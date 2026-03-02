@@ -20,7 +20,7 @@ from loguru import logger
 from khora.config import KhoraConfig, load_config
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
-from khora.telemetry.logfire_integration import logfire_span
+from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
     from khora.engines.protocol import MemoryEngineProtocol
@@ -319,7 +319,7 @@ class MemoryLake:
         ensure_trace_id()
         try:
             namespace_id = await self._resolve_namespace(namespace)
-            with logfire_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
+            with trace_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
                 return await self._get_engine().remember(
                     content,
                     namespace_id,
@@ -375,7 +375,7 @@ class MemoryLake:
         ensure_trace_id()
         try:
             namespace_id = await self._resolve_namespace(namespace)
-            with logfire_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
+            with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
                 return await self._get_engine().remember_batch(
                     documents,
                     namespace_id,
@@ -437,7 +437,7 @@ class MemoryLake:
         ensure_trace_id()
         try:
             namespace_id = await self._resolve_namespace(namespace)
-            with logfire_span("khora.recall", namespace_id=str(namespace_id), query_length=len(query)):
+            with trace_span("khora.recall", namespace_id=str(namespace_id), query_length=len(query)):
                 return await self._get_engine().recall(
                     query,
                     namespace_id,
@@ -469,7 +469,7 @@ class MemoryLake:
         if namespace:
             namespace_id = await self._resolve_namespace(namespace)
 
-        with logfire_span(
+        with trace_span(
             "khora.forget",
             namespace_id=str(namespace_id) if namespace_id else "",
             document_id=str(document_id),

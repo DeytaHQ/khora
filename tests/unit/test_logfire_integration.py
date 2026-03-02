@@ -1,8 +1,8 @@
 """Tests for optional Logfire/OTEL integration.
 
 Validates that:
-- logfire_span() works as a no-op when logfire is absent
-- logfire_span() emits real spans when logfire is present (mocked)
+- trace_span() works as a no-op when logfire is absent
+- trace_span() emits real spans when logfire is present (mocked)
 - Decorated functions (instrument_llm, instrument_storage, pipeline_stage)
   emit logfire spans with correct names and attributes
 - MemoryLake.remember/recall/forget/remember_batch create top-level spans
@@ -19,7 +19,7 @@ import pytest
 from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult
 from khora.telemetry import NoOpCollector
 from khora.telemetry.instrument import instrument_llm, instrument_storage, pipeline_stage
-from khora.telemetry.logfire_integration import logfire_span
+from khora.telemetry.logfire_integration import trace_span
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,7 +107,7 @@ def _make_lake(*, connected: bool = False) -> MemoryLake:
     return lake
 
 
-def _make_mock_logfire_span():
+def _make_mock_trace_span():
     """Create a mock logfire.span context manager that tracks set_attribute calls."""
     mock_span = MagicMock()
     mock_span.set_attribute = MagicMock()
@@ -122,24 +122,24 @@ def _make_mock_logfire_span():
 
 
 # =========================================================================
-# 1. logfire_span helper tests
+# 1. trace_span helper tests
 # =========================================================================
 
 
 class TestLogfireSpanNoLogfire:
-    """Tests for logfire_span when logfire is not installed."""
+    """Tests for trace_span when logfire is not installed."""
 
     def test_yields_none_when_absent(self):
-        """logfire_span yields None when _HAS_LOGFIRE is False."""
+        """trace_span yields None when _HAS_LOGFIRE is False."""
         with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
-            with logfire_span("test.span", key="value") as span:
+            with trace_span("test.span", key="value") as span:
                 assert span is None
 
     def test_context_manager_works_when_absent(self):
-        """logfire_span context manager enters and exits cleanly."""
+        """trace_span context manager enters and exits cleanly."""
         with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
             result = "untouched"
-            with logfire_span("test.span") as span:
+            with trace_span("test.span") as span:
                 result = "executed"
             assert result == "executed"
             assert span is None
@@ -147,48 +147,48 @@ class TestLogfireSpanNoLogfire:
     def test_no_errors_with_attributes_when_absent(self):
         """Passing attributes when logfire is absent causes no errors."""
         with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
-            with logfire_span("test.span", foo="bar", count=42) as span:
+            with trace_span("test.span", foo="bar", count=42) as span:
                 assert span is None
 
 
 class TestLogfireSpanWithLogfire:
-    """Tests for logfire_span when logfire is installed (mocked)."""
+    """Tests for trace_span when logfire is installed (mocked)."""
 
     def test_creates_span_with_correct_name(self):
-        """logfire_span creates a span with the given name."""
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        """trace_span creates a span with the given name."""
+        mock_logfire, mock_span = _make_mock_trace_span()
 
         with (
             patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
         ):
-            with logfire_span("khora.test.operation") as span:
+            with trace_span("khora.test.operation") as span:
                 assert span is mock_span
 
         mock_logfire.span.assert_called_once_with("khora.test.operation")
 
     def test_passes_attributes_to_span(self):
-        """logfire_span passes keyword attributes to logfire.span()."""
-        mock_logfire, _ = _make_mock_logfire_span()
+        """trace_span passes keyword attributes to logfire.span()."""
+        mock_logfire, _ = _make_mock_trace_span()
 
         with (
             patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
         ):
-            with logfire_span("khora.test.op", backend="neo4j", count=5):
+            with trace_span("khora.test.op", backend="neo4j", count=5):
                 pass
 
         mock_logfire.span.assert_called_once_with("khora.test.op", backend="neo4j", count=5)
 
     def test_span_set_attribute_works(self):
         """set_attribute on the yielded span works when logfire is present."""
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        mock_logfire, mock_span = _make_mock_trace_span()
 
         with (
             patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
         ):
-            with logfire_span("khora.test.op") as span:
+            with trace_span("khora.test.op") as span:
                 span.set_attribute("latency_ms", 42.5)
                 span.set_attribute("status", "success")
 
@@ -205,9 +205,9 @@ class TestInstrumentLLMLogfire:
     """Tests for @instrument_llm logfire span emission."""
 
     @pytest.mark.asyncio
-    async def test_emits_logfire_span_when_present(self, recording_collector):
+    async def test_emits_trace_span_when_present(self, recording_collector):
         """instrument_llm emits a logfire span with correct name."""
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        mock_logfire, mock_span = _make_mock_trace_span()
 
         @instrument_llm("entity_extraction")
         async def my_llm_call():
@@ -249,9 +249,9 @@ class TestInstrumentStorageLogfire:
     """Tests for @instrument_storage logfire span emission."""
 
     @pytest.mark.asyncio
-    async def test_emits_logfire_span_when_present(self, recording_collector):
+    async def test_emits_trace_span_when_present(self, recording_collector):
         """instrument_storage emits a logfire span with correct name and attributes."""
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        mock_logfire, mock_span = _make_mock_trace_span()
 
         @instrument_storage("pgvector", "search_similar")
         async def search():
@@ -289,7 +289,7 @@ class TestInstrumentStorageLogfire:
     @pytest.mark.asyncio
     async def test_custom_telemetry_fires_regardless(self, recording_collector):
         """Custom telemetry (collector.record_storage_op) fires whether or not logfire is present."""
-        mock_logfire, _ = _make_mock_logfire_span()
+        mock_logfire, _ = _make_mock_trace_span()
 
         @instrument_storage("neo4j", "create_entity")
         async def create():
@@ -318,9 +318,9 @@ class TestPipelineStageLogfire:
     """Tests for pipeline_stage logfire span emission."""
 
     @pytest.mark.asyncio
-    async def test_emits_logfire_span_when_present(self, recording_collector):
+    async def test_emits_trace_span_when_present(self, recording_collector):
         """pipeline_stage emits a logfire span with correct name and attributes."""
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        mock_logfire, mock_span = _make_mock_trace_span()
         run_id = uuid4()
 
         with (
@@ -367,7 +367,7 @@ class TestNoOpBehavior:
         # This test verifies the module itself handles ImportError.
         # The module is already imported; verify the flag mechanism works.
         with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
-            with logfire_span("test") as span:
+            with trace_span("test") as span:
                 assert span is None
 
     @pytest.mark.asyncio
@@ -421,12 +421,12 @@ class TestMemoryLakeSpans:
             )
         )
 
-        mock_logfire, _ = _make_mock_logfire_span()
+        mock_logfire, _ = _make_mock_trace_span()
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.logfire_span") as mock_span_fn,
+            patch("khora.memory_lake.trace_span") as mock_span_fn,
         ):
             # Use a real context manager that yields None so the code runs
             from contextlib import contextmanager
@@ -466,7 +466,7 @@ class TestMemoryLakeSpans:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.logfire_span") as mock_span_fn,
+            patch("khora.memory_lake.trace_span") as mock_span_fn,
         ):
             from contextlib import contextmanager
 
@@ -491,7 +491,7 @@ class TestMemoryLakeSpans:
         doc_id = uuid4()
         lake._engine.forget = AsyncMock(return_value=True)
 
-        with patch("khora.memory_lake.logfire_span") as mock_span_fn:
+        with patch("khora.memory_lake.trace_span") as mock_span_fn:
             from contextlib import contextmanager
 
             @contextmanager
@@ -530,7 +530,7 @@ class TestMemoryLakeSpans:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.logfire_span") as mock_span_fn,
+            patch("khora.memory_lake.trace_span") as mock_span_fn,
         ):
             from contextlib import contextmanager
 
@@ -573,7 +573,7 @@ class TestSpanAttributeWhitelist:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.logfire_span") as mock_span_fn,
+            patch("khora.memory_lake.trace_span") as mock_span_fn,
         ):
             from contextlib import contextmanager
 
@@ -613,7 +613,7 @@ class TestSpanAttributeWhitelist:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.logfire_span") as mock_span_fn,
+            patch("khora.memory_lake.trace_span") as mock_span_fn,
         ):
             from contextlib import contextmanager
 
@@ -641,11 +641,11 @@ class TestCoordinatorLogfireBridging:
     """Tests that _record_storage_op in coordinator emits logfire spans."""
 
     @pytest.mark.asyncio
-    async def test_record_storage_op_emits_logfire_span(self):
+    async def test_record_storage_op_emits_trace_span(self):
         """_record_storage_op decorator emits a logfire span when logfire is present."""
         from khora.storage.coordinator import _record_storage_op
 
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        mock_logfire, mock_span = _make_mock_trace_span()
 
         @_record_storage_op("test_create", "postgresql")
         async def create_thing():
@@ -717,9 +717,9 @@ class TestInstrumentLLMExceptionPath:
         assert "LLM call failed" in recording_collector.llm_calls[0]["error_message"]
 
     @pytest.mark.asyncio
-    async def test_logfire_span_created_on_exception(self, recording_collector):
+    async def test_trace_span_created_on_exception(self, recording_collector):
         """When logfire is present, a span is still created even if function raises."""
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        mock_logfire, mock_span = _make_mock_trace_span()
 
         @instrument_llm("failing_op")
         async def failing_llm_call():
@@ -769,9 +769,9 @@ class TestInstrumentStorageExceptionPath:
         assert "Connection lost" in recording_collector.storage_calls[0]["error_message"]
 
     @pytest.mark.asyncio
-    async def test_logfire_span_created_on_exception(self, recording_collector):
+    async def test_trace_span_created_on_exception(self, recording_collector):
         """When logfire is present, a span is still created even if function raises."""
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        mock_logfire, mock_span = _make_mock_trace_span()
 
         @instrument_storage("pgvector", "search_similar")
         async def failing_storage_op():
@@ -817,9 +817,9 @@ class TestPipelineStageExceptionPath:
         assert "Pipeline failed" in recording_collector.pipeline_calls[0]["error_message"]
 
     @pytest.mark.asyncio
-    async def test_logfire_span_created_on_exception(self, recording_collector):
+    async def test_trace_span_created_on_exception(self, recording_collector):
         """When logfire is present, a span is still created even if body raises."""
-        mock_logfire, mock_span = _make_mock_logfire_span()
+        mock_logfire, mock_span = _make_mock_trace_span()
         run_id = uuid4()
 
         with (
