@@ -29,7 +29,8 @@ from collections.abc import Callable
 from typing import Any, overload
 from uuid import UUID
 
-from .logfire_integration import _HAS_LOGFIRE, trace_span
+from . import logfire_integration as _li
+from .logfire_integration import trace_span
 
 # Types safe to pass directly as span attributes
 _SAFE_TYPES = (str, int, float, bool, type(None))
@@ -62,7 +63,7 @@ def _extract_span_attributes(
             attrs[name] = value
         elif isinstance(value, enum.Enum):
             attrs[name] = value.value
-        elif isinstance(value, (list, tuple)):
+        elif isinstance(value, (list, tuple, set, frozenset)):
             attrs[f"{name}_count"] = len(value)
         # else: skip complex objects silently
 
@@ -79,12 +80,22 @@ def _make_wrapper(
 ) -> Callable:
     """Build the sync or async wrapper with short-circuit when logfire is absent."""
     sig = inspect.signature(fn)
+    param_names = set(sig.parameters.keys()) - {"self", "cls"}
+
+    if include is not None:
+        unknown = set(include) - param_names
+        if unknown:
+            raise ValueError(f"include param(s) {unknown} not found in {fn.__name__}() signature")
+    if exclude:
+        unknown = set(exclude) - param_names
+        if unknown:
+            raise ValueError(f"exclude param(s) {unknown} not found in {fn.__name__}() signature")
 
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not _HAS_LOGFIRE:
+            if not _li._HAS_LOGFIRE:
                 return await fn(*args, **kwargs)
             attrs = _extract_span_attributes(sig, args, kwargs, include=include, exclude=exclude)
             with trace_span(span_name, **attrs) as span:
@@ -101,7 +112,7 @@ def _make_wrapper(
 
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not _HAS_LOGFIRE:
+            if not _li._HAS_LOGFIRE:
                 return fn(*args, **kwargs)
             attrs = _extract_span_attributes(sig, args, kwargs, include=include, exclude=exclude)
             with trace_span(span_name, **attrs) as span:
@@ -147,13 +158,39 @@ def trace(
     function call with zero overhead — no span created, no argument
     extraction.
 
+    Argument capture rules:
+        - ``self`` / ``cls`` parameters are always skipped.
+        - ``UUID`` values are converted to ``str``.
+        - ``Enum`` values are converted to their ``.value``.
+        - ``list``, ``tuple``, ``set``, and ``frozenset`` are captured as
+          ``{name}_count`` (the length, not the contents).
+        - ``str``, ``int``, ``float``, ``bool``, and ``None`` pass through
+          unchanged.
+        - All other types (dict, custom objects, etc.) are silently skipped.
+        - Default parameter values are captured when the caller omits them.
+        - The ``result`` extractor receives the return value and should return
+          a ``dict[str, Any]`` of extra span attributes.  If it raises, the
+          error is silently suppressed and the return value is still returned.
+
+    Decorator order:
+        Place ``@trace`` as the **outermost** (topmost) decorator so that
+        the span wraps the fully-decorated function.  Inner decorators
+        (e.g. ``@retry``, ``@cache``) will execute inside the span::
+
+            @trace("khora.my_op")      # outermost — creates the span first
+            @retry(max_attempts=3)
+            async def my_op(...):
+                ...
+
     Args:
         fn_or_name: The function (bare ``@trace``) or span name string.
         result: Callable taking the return value and returning a dict of
             extra span attributes.
         exclude: Parameter names to exclude from span attributes.
+            Validated at decoration time — unknown names raise ``ValueError``.
         include: Parameter names to include (allowlist, mutually exclusive
-            with *exclude*).
+            with *exclude*).  Validated at decoration time — unknown names
+            raise ``ValueError``.
     """
     if include is not None and exclude is not None:
         raise ValueError("Cannot specify both 'include' and 'exclude'")

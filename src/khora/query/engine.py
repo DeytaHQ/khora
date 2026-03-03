@@ -1782,7 +1782,7 @@ class HybridQueryEngine:
         }
 
     @trace(
-        "khora.query.keyword_search",
+        "khora.query.keyword_search_bm25",
         include={"namespace_id"},
         result=lambda r: {"result_count": len(r.get("chunks", []))},
     )

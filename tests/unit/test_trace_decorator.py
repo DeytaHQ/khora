@@ -61,7 +61,7 @@ class TestTraceDecoratorForms:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -82,7 +82,7 @@ class TestTraceDecoratorForms:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -100,7 +100,7 @@ class TestTraceDecoratorForms:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -120,7 +120,7 @@ class TestTraceDecoratorForms:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -147,7 +147,7 @@ class TestArgumentCapture:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -169,7 +169,7 @@ class TestArgumentCapture:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -190,7 +190,7 @@ class TestArgumentCapture:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -209,7 +209,7 @@ class TestArgumentCapture:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -225,6 +225,27 @@ class TestArgumentCapture:
         assert calls[0][1]["ids_count"] == 2
 
     @pytest.mark.asyncio
+    async def test_set_frozenset_length(self) -> None:
+        """Sets and frozensets are captured as {name}_count."""
+        mock_ts, span, calls = _make_recording_trace_span()
+
+        with (
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
+            patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
+        ):
+
+            @trace("khora.test")
+            async def fn(tags: set, ids: frozenset):
+                return None
+
+            await fn({"a", "b", "c"}, frozenset([1, 2]))
+
+        assert "tags" not in calls[0][1]
+        assert calls[0][1]["tags_count"] == 3
+        assert "ids" not in calls[0][1]
+        assert calls[0][1]["ids_count"] == 2
+
+    @pytest.mark.asyncio
     async def test_enum_value(self) -> None:
         """Enum args are converted to their .value."""
         mock_ts, span, calls = _make_recording_trace_span()
@@ -234,7 +255,7 @@ class TestArgumentCapture:
             OUTGOING = "outgoing"
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -261,7 +282,7 @@ class TestIncludeExclude:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -281,7 +302,7 @@ class TestIncludeExclude:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -299,6 +320,40 @@ class TestIncludeExclude:
         with pytest.raises(ValueError, match="Cannot specify both"):
             trace("khora.test", include={"a"}, exclude={"b"})
 
+    def test_include_unknown_param_raises(self) -> None:
+        """include with param names not in the function signature raises ValueError."""
+        with pytest.raises(ValueError, match="include param.*not_a_param.*not found"):
+
+            @trace("khora.test", include={"not_a_param"})
+            async def fn(x: int) -> int:
+                return x
+
+    def test_exclude_unknown_param_raises(self) -> None:
+        """exclude with param names not in the function signature raises ValueError."""
+        with pytest.raises(ValueError, match="exclude param.*bogus.*not found"):
+
+            @trace("khora.test", exclude={"bogus"})
+            async def fn(x: int) -> int:
+                return x
+
+    def test_include_valid_params_accepted(self) -> None:
+        """include with valid param names does not raise."""
+
+        @trace("khora.test", include={"x"})
+        async def fn(x: int, y: int) -> int:
+            return x + y
+
+        assert fn.__name__ == "fn"
+
+    def test_exclude_valid_params_accepted(self) -> None:
+        """exclude with valid param names does not raise."""
+
+        @trace("khora.test", exclude={"y"})
+        async def fn(x: int, y: int) -> int:
+            return x + y
+
+        assert fn.__name__ == "fn"
+
 
 # ---------------------------------------------------------------------------
 # Tests: result extractor
@@ -314,7 +369,7 @@ class TestResultExtractor:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -333,7 +388,7 @@ class TestResultExtractor:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -353,7 +408,7 @@ class TestResultExtractor:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -381,7 +436,7 @@ class TestEdgeCases:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 
@@ -397,7 +452,7 @@ class TestEdgeCases:
         """When _HAS_LOGFIRE is False, function is called directly with no span."""
         call_count = 0
 
-        with patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", False):
+        with patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", False):
 
             @trace("khora.test")
             async def fn(x: int) -> int:
@@ -428,7 +483,7 @@ class TestEdgeCases:
         mock_ts, span, calls = _make_recording_trace_span()
 
         with (
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
+            patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.trace_decorator.trace_span", mock_ts),
         ):
 

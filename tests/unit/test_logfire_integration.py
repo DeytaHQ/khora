@@ -914,7 +914,6 @@ class TestQueryEngineDeepTracing:
         with (
             patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
         ):
             result = await engine._vector_search(ns_id, [0.1] * 10, QueryConfig())
 
@@ -925,7 +924,7 @@ class TestQueryEngineDeepTracing:
 
     @pytest.mark.asyncio
     async def test_keyword_search_bm25_creates_span(self):
-        """_keyword_search_bm25 creates a khora.query.keyword_search span."""
+        """_keyword_search_bm25 creates a khora.query.keyword_search_bm25 span."""
         mock_logfire, mock_span = _make_mock_trace_span()
         ns_id = uuid4()
 
@@ -941,12 +940,11 @@ class TestQueryEngineDeepTracing:
         with (
             patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
         ):
             result = await engine._keyword_search_bm25(ns_id, "test query", QueryConfig())
 
         assert result["source"] == "keyword"
-        mock_logfire.span.assert_called_once_with("khora.query.keyword_search", namespace_id=str(ns_id))
+        mock_logfire.span.assert_called_once_with("khora.query.keyword_search_bm25", namespace_id=str(ns_id))
         mock_span.set_attribute.assert_any_call("result_count", 0)
 
     @pytest.mark.asyncio
@@ -965,7 +963,6 @@ class TestQueryEngineDeepTracing:
         with (
             patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
         ):
             result = await engine.find_related_entities(entity_id, ns_id)
 
@@ -1034,7 +1031,6 @@ class TestEngineDeepTracing:
         with (
             patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
         ):
             result = await engine.search_entities("test query", ns_id)
 
@@ -1063,7 +1059,6 @@ class TestEngineDeepTracing:
         with (
             patch("khora.telemetry.logfire_integration._HAS_LOGFIRE", True),
             patch("khora.telemetry.logfire_integration._logfire", mock_logfire),
-            patch("khora.telemetry.trace_decorator._HAS_LOGFIRE", True),
         ):
             result = await engine.find_related_entities(entity_id, ns_id)
 
