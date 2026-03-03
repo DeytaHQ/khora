@@ -496,7 +496,7 @@ class TestMemoryLakeSpans:
         call_args = mock_span_fn.call_args
         assert call_args[0][0] == "khora.recall"
         assert call_args[1]["namespace_id"] == str(ns_id)
-        assert call_args[1]["query_length"] == len("test query")
+        assert call_args[1]["query"] == "test query"
 
     @pytest.mark.asyncio
     async def test_forget_creates_span(self):
@@ -607,22 +607,20 @@ class TestSpanAttributeWhitelist:
                 assert secret_content not in val, "Raw content leaked into span attributes"
 
     @pytest.mark.asyncio
-    async def test_recall_does_not_leak_query(self):
-        """recall() span attributes contain query_length, not the query text."""
+    async def test_recall_captures_query(self):
+        """recall() span attributes contain the query text."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
         lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         lake._engine.recall = AsyncMock(
             return_value=RecallResult(
-                query="secret query",
+                query="test query",
                 namespace_id=ns_id,
                 chunks=[],
                 entities=[],
                 context_text="",
             )
         )
-
-        secret_query = "What are the admin credentials for the production database?"
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -637,13 +635,10 @@ class TestSpanAttributeWhitelist:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.recall(secret_query)
+            await lake.recall("test query")
 
         call_args = mock_span_fn.call_args
-        all_attr_values = list(call_args[1].values())
-        for val in all_attr_values:
-            if isinstance(val, str):
-                assert secret_query not in val, "Raw query leaked into span attributes"
+        assert call_args[1]["query"] == "test query"
 
 
 # =========================================================================

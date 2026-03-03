@@ -437,7 +437,7 @@ class MemoryLake:
         ensure_trace_id()
         try:
             namespace_id = await self._resolve_namespace(namespace)
-            with trace_span("khora.recall", namespace_id=str(namespace_id), query=query):
+            with trace_span("khora.recall", namespace_id=str(namespace_id), query_length=len(query)):
                 return await self._get_engine().recall(
                     query,
                     namespace_id,
