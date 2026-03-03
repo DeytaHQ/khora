@@ -31,6 +31,7 @@ Use the existing `source` field (URL, file path, etc.) as an **optional update k
 - If a doc is first ingested without source, then later re-ingested with a source and different content → creates a second document (no retroactive identity assignment).
 - Concurrent updates to the same source race; **last writer wins** (no locking in v1).
 - On update: old chunks are deleted, entity/relationship `source_document_ids` are pruned, orphaned entities/relationships (sole source was this doc) are deleted.
+- Cross-backend cleanup (Neo4j + pgvector) is best-effort; if one backend fails mid-cleanup, stale references may persist until the next update of the same source.
 - The document UUID is **reused** on update so external consumers referencing doc IDs see continuity.
 
 ## Future Considerations
@@ -38,3 +39,4 @@ Use the existing `source` field (URL, file path, etc.) as an **optional update k
 - A dedicated `external_id` column could be added if `source` proves insufficient as an identity key.
 - Backfill support (`update_document_source()`) could be added to retroactively assign sources.
 - `SELECT ... FOR UPDATE` could be added if concurrent update races become problematic.
+- Error handling and retry logic for partial cleanup failures across backends.

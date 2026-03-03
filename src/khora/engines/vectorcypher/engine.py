@@ -1099,6 +1099,7 @@ class VectorCypherEngine:
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        allow_update: bool = True,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 

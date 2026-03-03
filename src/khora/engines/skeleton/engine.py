@@ -583,6 +583,7 @@ class SkeletonConstructionEngine:
         deduplicate: bool = True,
         infer_relationships: bool = False,  # Not used in Skeleton Construction engine
         on_progress: Callable[[int, int], None] | None = None,
+        allow_update: bool = True,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 

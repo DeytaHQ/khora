@@ -123,6 +123,7 @@ class MemoryEngineProtocol(Protocol):
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        allow_update: bool = True,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -134,6 +135,7 @@ class MemoryEngineProtocol(Protocol):
             deduplicate: Deduplicate entities across documents
             infer_relationships: Infer relationships after ingestion
             on_progress: Callback(processed_count, total_count) for progress updates
+            allow_update: When True, detect and update existing documents by source
 
         Returns:
             BatchResult with aggregated statistics

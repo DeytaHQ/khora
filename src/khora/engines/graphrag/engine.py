@@ -428,6 +428,7 @@ class GraphRAGEngine:
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        allow_update: bool = True,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -500,6 +501,7 @@ class GraphRAGEngine:
             shared_embedder=shared_embedder,
             shared_entity_index=shared_entity_index,
             enable_expansion=infer_relationships,
+            allow_update=allow_update,
         )
         timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000

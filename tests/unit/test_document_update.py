@@ -425,6 +425,37 @@ class TestCoordinatorCleanup:
 
         assert stats["chunks_deleted"] == 0
         assert stats["entities_updated"] == 0
+        assert stats["errors"] == []
+
+    @pytest.mark.asyncio
+    async def test_cleanup_partial_failure_continues(self) -> None:
+        """Cleanup continues when one backend step fails."""
+        doc_id = uuid4()
+        ns_id = uuid4()
+
+        vec = MagicMock()
+        vec.delete_chunks_by_document = AsyncMock(side_effect=RuntimeError("connection lost"))
+        vec.remove_document_from_entity_sources = AsyncMock(return_value=(2, 1))
+        vec.remove_document_from_relationship_sources = AsyncMock(return_value=(1, 0))
+
+        graph = MagicMock()
+        graph.remove_document_from_entities = AsyncMock(return_value=([uuid4()], []))
+        graph.remove_document_from_relationships = AsyncMock(side_effect=RuntimeError("graph timeout"))
+
+        coord = StorageCoordinator(vector=vec, graph=graph)
+        stats = await coord.cleanup_document_references(doc_id, ns_id)
+
+        # Chunk deletion failed
+        assert stats["chunks_deleted"] == 0
+        assert "chunks" in stats["errors"]
+
+        # Graph relationship cleanup failed
+        assert "graph_relationships" in stats["errors"]
+
+        # Vector entity cleanup still ran and max(graph=1, vector=2) = 2
+        assert stats["entities_updated"] == 2
+        vec.remove_document_from_entity_sources.assert_awaited_once()
+        vec.remove_document_from_relationship_sources.assert_awaited_once()
 
 
 # ===========================================================================
@@ -463,6 +494,168 @@ class TestCoordinatorSourceLookup:
         coord = StorageCoordinator()
         with pytest.raises(RuntimeError, match="Relational backend not configured"):
             await coord.get_document_by_source(uuid4(), "src")
+
+
+# ===========================================================================
+# PostgreSQL source lookup — duplicate handling
+# ===========================================================================
+
+
+class TestPostgresqlDuplicateSource:
+    """Tests that source lookup returns newest document when duplicates exist."""
+
+    @pytest.mark.asyncio
+    async def test_get_document_by_source_returns_newest(self) -> None:
+        """get_document_by_source returns the most recently updated document."""
+        from datetime import UTC, datetime
+
+        ns_id = uuid4()
+        source = "https://example.com/report"
+
+        # Create a document representing the newest version
+        new_doc = _make_document(namespace_id=ns_id, source=source, content="new version")
+
+        # Simulate the PostgreSQL backend by mocking the session
+        # The ORDER BY updated_at DESC + .first() should return newest
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        backend = PostgreSQLBackend.__new__(PostgreSQLBackend)
+
+        # Mock the session context manager and query result
+        mock_scalars = MagicMock()
+        mock_scalars.first.return_value = MagicMock(
+            id=new_doc.id,
+            namespace_id=ns_id,
+            content="new version",
+            status="completed",
+            chunk_count=3,
+            entity_count=5,
+            error_message=None,
+            processed_at=None,
+            source_timestamp=None,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 6, 1, tzinfo=UTC),
+            source=source,
+            source_type="api",
+            content_type="text/plain",
+            title="",
+            author="",
+            language="en",
+            checksum=new_doc.metadata.checksum,
+            size_bytes=len("new version".encode("utf-8")),
+            custom_metadata={},
+        )
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value = mock_scalars
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def mock_get_session():
+            yield mock_session
+
+        backend._get_session = mock_get_session
+
+        result = await backend.get_document_by_source(ns_id, source)
+
+        assert result is not None
+        assert result.id == new_doc.id
+        # Verify the query was executed (session.execute was called)
+        mock_session.execute.assert_awaited_once()
+        # Verify the SQL includes ORDER BY by inspecting the compiled query
+        call_args = mock_session.execute.call_args
+        query = call_args[0][0]
+        compiled = str(query.compile(compile_kwargs={"literal_binds": True}))
+        assert "ORDER BY" in compiled
+        assert "updated_at" in compiled
+
+    @pytest.mark.asyncio
+    async def test_get_documents_by_sources_keeps_newest(self) -> None:
+        """get_documents_by_sources returns newest document per source."""
+        from datetime import UTC, datetime
+
+        ns_id = uuid4()
+        source = "https://example.com/report"
+
+        new_doc = _make_document(namespace_id=ns_id, source=source, content="new")
+        old_doc = _make_document(namespace_id=ns_id, source=source, content="old")
+
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        backend = PostgreSQLBackend.__new__(PostgreSQLBackend)
+
+        # Mock two models returned in DESC order (newest first)
+        new_model = MagicMock(
+            id=new_doc.id,
+            namespace_id=ns_id,
+            content="new",
+            status="completed",
+            chunk_count=3,
+            entity_count=5,
+            error_message=None,
+            processed_at=None,
+            source_timestamp=None,
+            created_at=datetime(2024, 6, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 6, 1, tzinfo=UTC),
+            source=source,
+            source_type="api",
+            content_type="text/plain",
+            title="",
+            author="",
+            language="en",
+            checksum=new_doc.metadata.checksum,
+            size_bytes=len("new".encode("utf-8")),
+            custom_metadata={},
+        )
+        old_model = MagicMock(
+            id=old_doc.id,
+            namespace_id=ns_id,
+            content="old",
+            status="completed",
+            chunk_count=3,
+            entity_count=5,
+            error_message=None,
+            processed_at=None,
+            source_timestamp=None,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
+            source=source,
+            source_type="api",
+            content_type="text/plain",
+            title="",
+            author="",
+            language="en",
+            checksum=old_doc.metadata.checksum,
+            size_bytes=len("old".encode("utf-8")),
+            custom_metadata={},
+        )
+
+        mock_scalars = MagicMock()
+        mock_scalars.all.return_value = [new_model, old_model]
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value = mock_scalars
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def mock_get_session():
+            yield mock_session
+
+        backend._get_session = mock_get_session
+
+        result = await backend.get_documents_by_sources(ns_id, [source])
+
+        assert source in result
+        # Should keep the newest (first in DESC order)
+        assert result[source].id == new_doc.id
 
 
 # ===========================================================================

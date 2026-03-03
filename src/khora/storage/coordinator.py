@@ -430,8 +430,12 @@ class StorageCoordinator:
         2. Remove doc from entity source_document_ids; delete orphaned entities (graph + vector)
         3. Remove doc from relationship source_document_ids; delete orphaned relationships (graph + vector)
 
+        Each step is independently guarded — if one backend fails, cleanup
+        continues with remaining steps so partial progress is not lost.
+
         Returns:
-            Stats dict with cleanup counts
+            Stats dict with cleanup counts and an ``errors`` list naming
+            any steps that failed.
         """
         stats: dict[str, Any] = {
             "chunks_deleted": 0,
@@ -439,42 +443,68 @@ class StorageCoordinator:
             "entities_deleted": 0,
             "relationships_updated": 0,
             "relationships_deleted": 0,
+            "errors": [],
         }
 
         # 1. Delete old chunks
         if self.vector:
-            stats["chunks_deleted"] = await self.vector.delete_chunks_by_document(document_id)
+            try:
+                stats["chunks_deleted"] = await self.vector.delete_chunks_by_document(document_id)
+            except Exception:
+                logger.warning(f"Failed to delete chunks for document {document_id}", exc_info=True)
+                stats["errors"].append("chunks")
 
         # 2. Entity cleanup — graph backend
         if self.graph and hasattr(self.graph, "remove_document_from_entities"):
-            updated_ids, deleted_ids = await self.graph.remove_document_from_entities(document_id, namespace_id)
-            stats["entities_updated"] = len(updated_ids)
-            stats["entities_deleted"] = len(deleted_ids)
+            try:
+                updated_ids, deleted_ids = await self.graph.remove_document_from_entities(document_id, namespace_id)
+                stats["entities_updated"] = len(updated_ids)
+                stats["entities_deleted"] = len(deleted_ids)
+            except Exception:
+                logger.warning(f"Failed graph entity cleanup for document {document_id}", exc_info=True)
+                stats["errors"].append("graph_entities")
 
         # 3. Relationship cleanup — graph backend
         if self.graph and hasattr(self.graph, "remove_document_from_relationships"):
-            rel_updated, rel_deleted = await self.graph.remove_document_from_relationships(document_id, namespace_id)
-            stats["relationships_updated"] = rel_updated
-            stats["relationships_deleted"] = rel_deleted
+            try:
+                rel_updated, rel_deleted = await self.graph.remove_document_from_relationships(
+                    document_id, namespace_id
+                )
+                stats["relationships_updated"] = rel_updated
+                stats["relationships_deleted"] = rel_deleted
+            except Exception:
+                logger.warning(f"Failed graph relationship cleanup for document {document_id}", exc_info=True)
+                stats["errors"].append("graph_relationships")
 
         # 4. Entity cleanup — vector/SQL backend
         if self.vector and hasattr(self.vector, "remove_document_from_entity_sources"):
-            vec_ent_updated, vec_ent_deleted = await self.vector.remove_document_from_entity_sources(document_id)
-            # Use max of graph/vector counts (they operate on same logical entities)
-            stats["entities_updated"] = max(stats["entities_updated"], vec_ent_updated)
-            stats["entities_deleted"] = max(stats["entities_deleted"], vec_ent_deleted)
+            try:
+                vec_ent_updated, vec_ent_deleted = await self.vector.remove_document_from_entity_sources(document_id)
+                # Use max of graph/vector counts (they operate on same logical entities)
+                stats["entities_updated"] = max(stats["entities_updated"], vec_ent_updated)
+                stats["entities_deleted"] = max(stats["entities_deleted"], vec_ent_deleted)
+            except Exception:
+                logger.warning(f"Failed vector entity cleanup for document {document_id}", exc_info=True)
+                stats["errors"].append("vector_entities")
 
         # 5. Relationship cleanup — vector/SQL backend
         if self.vector and hasattr(self.vector, "remove_document_from_relationship_sources"):
-            vec_rel_updated, vec_rel_deleted = await self.vector.remove_document_from_relationship_sources(document_id)
-            stats["relationships_updated"] = max(stats["relationships_updated"], vec_rel_updated)
-            stats["relationships_deleted"] = max(stats["relationships_deleted"], vec_rel_deleted)
+            try:
+                vec_rel_updated, vec_rel_deleted = await self.vector.remove_document_from_relationship_sources(
+                    document_id
+                )
+                stats["relationships_updated"] = max(stats["relationships_updated"], vec_rel_updated)
+                stats["relationships_deleted"] = max(stats["relationships_deleted"], vec_rel_deleted)
+            except Exception:
+                logger.warning(f"Failed vector relationship cleanup for document {document_id}", exc_info=True)
+                stats["errors"].append("vector_relationships")
 
         logger.info(
             f"Cleanup for document {document_id}: "
             f"{stats['chunks_deleted']} chunks, "
             f"{stats['entities_updated']} entities updated / {stats['entities_deleted']} deleted, "
             f"{stats['relationships_updated']} rels updated / {stats['relationships_deleted']} deleted"
+            + (f" (errors: {stats['errors']})" if stats["errors"] else "")
         )
 
         return stats

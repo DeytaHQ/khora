@@ -550,7 +550,9 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
         async with self._get_session() as session:
             result = await session.execute(
-                select(DocumentModel).where(DocumentModel.namespace_id == namespace_id, DocumentModel.source == source)
+                select(DocumentModel)
+                .where(DocumentModel.namespace_id == namespace_id, DocumentModel.source == source)
+                .order_by(DocumentModel.updated_at.desc())
             )
             model = result.scalars().first()
             return self._document_model_to_domain(model) if model else None
@@ -573,13 +575,19 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
         async with self._get_session() as session:
             result = await session.execute(
-                select(DocumentModel).where(
+                select(DocumentModel)
+                .where(
                     DocumentModel.namespace_id == namespace_id,
                     DocumentModel.source.in_(non_empty),
                 )
+                .order_by(DocumentModel.updated_at.desc())
             )
             models = result.scalars().all()
-            return {m.source: self._document_model_to_domain(m) for m in models}
+            result_dict: dict[str, Document] = {}
+            for m in models:
+                if m.source not in result_dict:  # keep first (newest due to DESC)
+                    result_dict[m.source] = self._document_model_to_domain(m)
+            return result_dict
 
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.

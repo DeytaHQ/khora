@@ -24,7 +24,7 @@ from ..registry import pipeline
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from khora.core.models import Chunk, Document, Entity, Relationship
+    from khora.core.models import Chunk, Document, DocumentMetadata, Entity, Relationship
     from khora.engines.skeleton.backends import TemporalVectorStore
     from khora.extraction.embedders import Embedder
     from khora.extraction.expansion.entity_index import EntityIndex
@@ -573,6 +573,23 @@ def _parse_temporal_date(value: str | None) -> datetime | None:
         return None
 
 
+def _build_document_metadata(doc_input: dict[str, Any], checksum: str) -> DocumentMetadata:
+    """Build a DocumentMetadata from a document input dict and checksum."""
+    from khora.core.models import DocumentMetadata
+
+    return DocumentMetadata(
+        source=doc_input.get("source", ""),
+        source_type=doc_input.get("source_type", "manual"),
+        content_type=doc_input.get("content_type", "text/plain"),
+        title=doc_input.get("title", ""),
+        author=doc_input.get("author", ""),
+        language=doc_input.get("language", "en"),
+        checksum=checksum,
+        size_bytes=len(doc_input.get("content", "").encode("utf-8")),
+        custom=doc_input.get("metadata", {}),
+    )
+
+
 async def stage_document(
     doc_input: dict[str, Any],
     namespace_id: UUID,
@@ -592,7 +609,7 @@ async def stage_document(
     """
     from datetime import UTC, datetime
 
-    from khora.core.models import Document, DocumentMetadata
+    from khora.core.models import Document
 
     content = doc_input.get("content", "")
     checksum = compute_checksum(content)
@@ -611,21 +628,10 @@ async def stage_document(
             # Clean up old data and update existing document
             await storage.cleanup_document_references(existing_by_source.id, namespace_id)
 
-            custom_metadata = doc_input.get("metadata", {})
-            source_timestamp = _extract_source_timestamp(custom_metadata)
+            source_timestamp = _extract_source_timestamp(doc_input.get("metadata", {}))
 
             existing_by_source.content = content
-            existing_by_source.metadata = DocumentMetadata(
-                source=source,
-                source_type=doc_input.get("source_type", "manual"),
-                content_type=doc_input.get("content_type", "text/plain"),
-                title=doc_input.get("title", ""),
-                author=doc_input.get("author", ""),
-                language=doc_input.get("language", "en"),
-                checksum=checksum,
-                size_bytes=len(content.encode("utf-8")),
-                custom=custom_metadata,
-            )
+            existing_by_source.metadata = _build_document_metadata(doc_input, checksum)
             existing_by_source.status = DocumentStatus.PENDING
             existing_by_source.chunk_count = 0
             existing_by_source.entity_count = 0
@@ -636,24 +642,11 @@ async def stage_document(
             logger.info(f"Updating document {existing_by_source.id} (source={source!r})")
             return await storage.update_document(existing_by_source)
 
-    # Extract custom metadata
-    custom_metadata = doc_input.get("metadata", {})
-
     # Create document
-    metadata = DocumentMetadata(
-        source=source,
-        source_type=doc_input.get("source_type", "manual"),
-        content_type=doc_input.get("content_type", "text/plain"),
-        title=doc_input.get("title", ""),
-        author=doc_input.get("author", ""),
-        language=doc_input.get("language", "en"),
-        checksum=checksum,
-        size_bytes=len(content.encode("utf-8")),
-        custom=custom_metadata,
-    )
+    metadata = _build_document_metadata(doc_input, checksum)
 
     # Use source timestamp if available, otherwise use current time
-    source_timestamp = _extract_source_timestamp(custom_metadata)
+    source_timestamp = _extract_source_timestamp(doc_input.get("metadata", {}))
     created_at = source_timestamp or datetime.now(UTC)
 
     document = Document(
@@ -686,7 +679,7 @@ async def stage_documents_batch(
     """
     from datetime import UTC, datetime
 
-    from khora.core.models import Document, DocumentMetadata
+    from khora.core.models import Document
 
     if not doc_inputs:
         return []
@@ -723,17 +716,7 @@ async def stage_documents_batch(
 
             source_timestamp = _extract_source_timestamp(custom_metadata)
             existing_doc.content = content
-            existing_doc.metadata = DocumentMetadata(
-                source=source,
-                source_type=doc_input.get("source_type", "manual"),
-                content_type=doc_input.get("content_type", "text/plain"),
-                title=doc_input.get("title", ""),
-                author=doc_input.get("author", ""),
-                language=doc_input.get("language", "en"),
-                checksum=checksum,
-                size_bytes=len(content.encode("utf-8")),
-                custom=custom_metadata,
-            )
+            existing_doc.metadata = _build_document_metadata(doc_input, checksum)
             existing_doc.status = DocumentStatus.PENDING
             existing_doc.chunk_count = 0
             existing_doc.entity_count = 0
@@ -746,17 +729,7 @@ async def stage_documents_batch(
             results.append(doc)
             continue
 
-        metadata = DocumentMetadata(
-            source=source,
-            source_type=doc_input.get("source_type", "manual"),
-            content_type=doc_input.get("content_type", "text/plain"),
-            title=doc_input.get("title", ""),
-            author=doc_input.get("author", ""),
-            language=doc_input.get("language", "en"),
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=custom_metadata,
-        )
+        metadata = _build_document_metadata(doc_input, checksum)
 
         source_timestamp = _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)

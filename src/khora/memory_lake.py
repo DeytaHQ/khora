@@ -352,6 +352,7 @@ class MemoryLake:
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        allow_update: bool = True,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -377,6 +378,7 @@ class MemoryLake:
             deduplicate: Deduplicate entities across documents (default: True)
             infer_relationships: Infer relationships after ingestion (default: True)
             on_progress: Callback(processed_count, total_count) for progress updates
+            allow_update: When True, detect and update existing documents by source
 
         Returns:
             BatchResult with aggregated statistics
@@ -395,6 +397,7 @@ class MemoryLake:
                     deduplicate=deduplicate,
                     infer_relationships=infer_relationships,
                     on_progress=on_progress,
+                    allow_update=allow_update,
                 )
         finally:
             clear_trace_id()
