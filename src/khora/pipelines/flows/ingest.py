@@ -17,6 +17,7 @@ from uuid import UUID
 from loguru import logger
 
 from khora._accel import normalize_entity_names_batch
+from khora.core.models.document import DocumentStatus
 
 from ..registry import pipeline
 
@@ -576,10 +577,14 @@ async def stage_document(
     doc_input: dict[str, Any],
     namespace_id: UUID,
     storage: StorageCoordinator,
+    *,
+    allow_update: bool = True,
 ) -> Document | None:
     """Stage a document for processing.
 
     Checks if document already exists (by checksum) and creates it if new.
+    When allow_update is True and source matches an existing document with
+    different content, cleans up and updates the existing document.
     Uses source system timestamp for created_at when available.
 
     Returns:
@@ -598,12 +603,45 @@ async def stage_document(
         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
         return None
 
+    # Source-based update detection
+    source = doc_input.get("source", "")
+    if allow_update and source:
+        existing_by_source = await storage.get_document_by_source(namespace_id, source)
+        if existing_by_source:
+            # Clean up old data and update existing document
+            await storage.cleanup_document_references(existing_by_source.id, namespace_id)
+
+            custom_metadata = doc_input.get("metadata", {})
+            source_timestamp = _extract_source_timestamp(custom_metadata)
+
+            existing_by_source.content = content
+            existing_by_source.metadata = DocumentMetadata(
+                source=source,
+                source_type=doc_input.get("source_type", "manual"),
+                content_type=doc_input.get("content_type", "text/plain"),
+                title=doc_input.get("title", ""),
+                author=doc_input.get("author", ""),
+                language=doc_input.get("language", "en"),
+                checksum=checksum,
+                size_bytes=len(content.encode("utf-8")),
+                custom=custom_metadata,
+            )
+            existing_by_source.status = DocumentStatus.PENDING
+            existing_by_source.chunk_count = 0
+            existing_by_source.entity_count = 0
+            existing_by_source.error_message = None
+            existing_by_source.processed_at = None
+            existing_by_source.source_timestamp = source_timestamp
+
+            logger.info(f"Updating document {existing_by_source.id} (source={source!r})")
+            return await storage.update_document(existing_by_source)
+
     # Extract custom metadata
     custom_metadata = doc_input.get("metadata", {})
 
     # Create document
     metadata = DocumentMetadata(
-        source=doc_input.get("source", ""),
+        source=source,
         source_type=doc_input.get("source_type", "manual"),
         content_type=doc_input.get("content_type", "text/plain"),
         title=doc_input.get("title", ""),
@@ -634,14 +672,17 @@ async def stage_documents_batch(
     doc_inputs: list[dict[str, Any]],
     namespace_id: UUID,
     storage: StorageCoordinator,
+    *,
+    allow_update: bool = True,
 ) -> list[Document | None]:
     """Batch stage documents with single-query checksum dedup.
 
     Computes all checksums upfront and checks for existing documents
     in a single batch query instead of N individual queries.
+    When allow_update is True, detects source-based updates in batch.
 
     Returns:
-        List parallel to doc_inputs: Document if new, None if unchanged
+        List parallel to doc_inputs: Document if new/updated, None if unchanged
     """
     from datetime import UTC, datetime
 
@@ -656,6 +697,14 @@ async def stage_documents_batch(
     # Single batch query for existing documents (replaces N individual queries)
     existing = await storage.get_documents_by_checksums(namespace_id, checksums)
 
+    # Batch source lookup for update detection
+    source_matches: dict[str, Document] = {}
+    if allow_update:
+        sources = [doc.get("source", "") for doc in doc_inputs]
+        non_deduped_sources = [s for s, cs in zip(sources, checksums) if cs not in existing and s]
+        if non_deduped_sources:
+            source_matches = await storage.get_documents_by_sources(namespace_id, non_deduped_sources)
+
     results: list[Document | None] = []
     for doc_input, checksum in zip(doc_inputs, checksums):
         if checksum in existing:
@@ -664,9 +713,41 @@ async def stage_documents_batch(
             continue
 
         content = doc_input.get("content", "")
+        source = doc_input.get("source", "")
         custom_metadata = doc_input.get("metadata", {})
+
+        # Source-based update detection
+        if allow_update and source and source in source_matches:
+            existing_doc = source_matches[source]
+            await storage.cleanup_document_references(existing_doc.id, namespace_id)
+
+            source_timestamp = _extract_source_timestamp(custom_metadata)
+            existing_doc.content = content
+            existing_doc.metadata = DocumentMetadata(
+                source=source,
+                source_type=doc_input.get("source_type", "manual"),
+                content_type=doc_input.get("content_type", "text/plain"),
+                title=doc_input.get("title", ""),
+                author=doc_input.get("author", ""),
+                language=doc_input.get("language", "en"),
+                checksum=checksum,
+                size_bytes=len(content.encode("utf-8")),
+                custom=custom_metadata,
+            )
+            existing_doc.status = DocumentStatus.PENDING
+            existing_doc.chunk_count = 0
+            existing_doc.entity_count = 0
+            existing_doc.error_message = None
+            existing_doc.processed_at = None
+            existing_doc.source_timestamp = source_timestamp
+
+            logger.info(f"Updating document {existing_doc.id} (source={source!r})")
+            doc = await storage.update_document(existing_doc)
+            results.append(doc)
+            continue
+
         metadata = DocumentMetadata(
-            source=doc_input.get("source", ""),
+            source=source,
             source_type=doc_input.get("source_type", "manual"),
             content_type=doc_input.get("content_type", "text/plain"),
             title=doc_input.get("title", ""),
@@ -1259,9 +1340,11 @@ async def ingest_documents(
             if existing_entities:
                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
 
-    # Phase 1: Batch checksum dedup + stage new documents
+    # Phase 1: Batch checksum dedup + stage new/updated documents
     # Single batch query replaces N individual get_document_by_checksum calls.
-    staged_results = await stage_documents_batch(documents, namespace_id, storage)
+    # Source-based update detection is included when allow_update is True.
+    allow_update = kwargs.get("allow_update", True)
+    staged_results = await stage_documents_batch(documents, namespace_id, storage, allow_update=allow_update)
     staged_docs = [doc for doc in staged_results if doc is not None]
 
     # Build mapping from staged doc ID to original dict for per-doc overrides

@@ -20,6 +20,7 @@ from loguru import logger
 
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace, Organization, Workspace
+from khora.core.models.document import DocumentStatus
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import HybridQueryEngine, QueryConfig, SearchMode
@@ -223,6 +224,7 @@ class GraphRAGEngine:
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
+        allow_update: bool = True,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -234,6 +236,7 @@ class GraphRAGEngine:
         """
         timings: dict[str, float] = {}
         total_start = time.perf_counter()
+        is_update = False
 
         # Compute checksum
         start = time.perf_counter()
@@ -259,23 +262,58 @@ class GraphRAGEngine:
                 metadata={"duplicate": True, "status": str(existing.status), "timings": timings},
             )
 
-        # Create document
-        start = time.perf_counter()
-        doc_metadata = DocumentMetadata(
-            title=title,
-            source=source,
-            source_type="api",
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=metadata or {},
-        )
-        document = Document(
-            namespace_id=namespace_id,
-            content=content,
-            metadata=doc_metadata,
-        )
-        document = await storage.create_document(document)
-        timings["document_create_ms"] = (time.perf_counter() - start) * 1000
+        # Source-based update detection: same source, different content
+        document: Document | None = None
+        if allow_update and source:
+            start = time.perf_counter()
+            existing_by_source = await storage.get_document_by_source(namespace_id, source)
+            timings["source_check_ms"] = (time.perf_counter() - start) * 1000
+
+            if existing_by_source:
+                # Clean up old data
+                start = time.perf_counter()
+                cleanup_stats = await storage.cleanup_document_references(existing_by_source.id, namespace_id)
+                timings["cleanup_ms"] = (time.perf_counter() - start) * 1000
+
+                # Update existing document record with new content
+                start = time.perf_counter()
+                existing_by_source.content = content
+                existing_by_source.metadata = DocumentMetadata(
+                    title=title,
+                    source=source,
+                    source_type="api",
+                    checksum=checksum,
+                    size_bytes=len(content.encode("utf-8")),
+                    custom=metadata or {},
+                )
+                existing_by_source.status = DocumentStatus.PENDING
+                existing_by_source.chunk_count = 0
+                existing_by_source.entity_count = 0
+                existing_by_source.error_message = None
+                existing_by_source.processed_at = None
+                document = await storage.update_document(existing_by_source)
+                timings["document_update_ms"] = (time.perf_counter() - start) * 1000
+                is_update = True
+                logger.info(f"Updating document {document.id} (source={source!r}, " f"cleanup: {cleanup_stats})")
+
+        # Create new document if not an update
+        if document is None:
+            start = time.perf_counter()
+            doc_metadata = DocumentMetadata(
+                title=title,
+                source=source,
+                source_type="api",
+                checksum=checksum,
+                size_bytes=len(content.encode("utf-8")),
+                custom=metadata or {},
+            )
+            document = Document(
+                namespace_id=namespace_id,
+                content=content,
+                metadata=doc_metadata,
+            )
+            document = await storage.create_document(document)
+            timings["document_create_ms"] = (time.perf_counter() - start) * 1000
 
         # Process through pipeline (handles chunking, embedding, extraction in parallel)
         from khora.pipelines.flows.ingest import process_document
@@ -316,6 +354,7 @@ class GraphRAGEngine:
             chunks_created=result["chunks"],
             entities_extracted=result["entities"],
             relationships_created=result["relationships"],
+            updated=is_update,
             metadata={
                 "timings": timings,
                 "quality_metrics": {

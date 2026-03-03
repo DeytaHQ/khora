@@ -36,6 +36,7 @@ class RememberResult:
     chunks_created: int
     entities_extracted: int
     relationships_created: int
+    updated: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -50,6 +51,7 @@ class BatchResult:
     chunks: int
     entities: int
     relationships: int
+    updated: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -294,6 +296,7 @@ class MemoryLake:
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
+        allow_update: bool = True,
     ) -> RememberResult:
         """Store content in the memory lake.
 
@@ -303,6 +306,11 @@ class MemoryLake:
         3. Generates embeddings
         4. Extracts entities and relationships
 
+        When a document with the same source already exists and content has
+        changed, the old chunks/entities/relationships are cleaned up and
+        the document is re-processed (requires non-empty ``source`` and
+        ``allow_update=True``).
+
         Args:
             content: Content to remember
             namespace: Namespace name, ID, or None for default
@@ -310,6 +318,8 @@ class MemoryLake:
             source: Optional source identifier
             metadata: Optional metadata
             skill_name: Extraction skill to use
+            allow_update: When True and source matches an existing document with
+                different content, update instead of creating new (default: True)
 
         Returns:
             RememberResult with details
@@ -327,6 +337,7 @@ class MemoryLake:
                     source=source,
                     metadata=metadata,
                     skill_name=skill_name,
+                    allow_update=allow_update,
                 )
         finally:
             clear_trace_id()

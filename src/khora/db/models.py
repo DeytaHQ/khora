@@ -215,6 +215,12 @@ class DocumentModel(Base):
     __table_args__ = (
         Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),
         Index("ix_documents_namespace_source_type", "namespace_id", "source_type"),
+        Index(
+            "ix_documents_namespace_source",
+            "namespace_id",
+            "source",
+            postgresql_where="source != ''",
+        ),
     )
 
     def __repr__(self) -> str:

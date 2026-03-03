@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_after_attempt, wait_exponential
 
 from khora.core.models import Chunk, ChunkMetadata
-from khora.db.models import Base, ChunkModel, EntityModel
+from khora.db.models import Base, ChunkModel, EntityModel, RelationshipModel
 from khora.storage.backends.mixins import AsyncSessionMixin
 
 if TYPE_CHECKING:
@@ -768,3 +768,79 @@ class PgVectorBackend(AsyncSessionMixin):
                 "chunk_embeddings": chunk_count.scalar_one(),
                 "entity_embeddings": entity_count.scalar_one(),
             }
+
+    # =========================================================================
+    # Document update cleanup operations
+    # =========================================================================
+
+    async def remove_document_from_entity_sources(self, document_id: UUID) -> tuple[int, int]:
+        """Remove a document ID from entity source_document_ids arrays.
+
+        Uses PostgreSQL array_remove(). Deletes entities where the array
+        becomes empty (orphaned entities).
+
+        Returns:
+            Tuple of (updated_count, deleted_count)
+        """
+        async with self._get_session() as session:
+            # Remove doc ID from all entities that reference it
+            update_result = await session.execute(
+                update(EntityModel)
+                .where(EntityModel.source_document_ids.any(document_id))
+                .values(
+                    source_document_ids=func.array_remove(EntityModel.source_document_ids, document_id),
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(EntityModel.id)
+            )
+            updated_ids = [row[0] for row in update_result.all()]
+
+            # Delete entities where source_document_ids is now empty
+            deleted_count = 0
+            if updated_ids:
+                delete_result = await session.execute(
+                    delete(EntityModel).where(
+                        EntityModel.id.in_(updated_ids),
+                        func.array_length(EntityModel.source_document_ids, 1).is_(None),
+                    )
+                )
+                deleted_count = delete_result.rowcount  # type: ignore[assignment]
+
+            await session.commit()
+            return len(updated_ids), deleted_count
+
+    async def remove_document_from_relationship_sources(self, document_id: UUID) -> tuple[int, int]:
+        """Remove a document ID from relationship source_document_ids arrays.
+
+        Uses PostgreSQL array_remove(). Deletes relationships where the array
+        becomes empty (orphaned relationships).
+
+        Returns:
+            Tuple of (updated_count, deleted_count)
+        """
+        async with self._get_session() as session:
+            # Remove doc ID from all relationships that reference it
+            update_result = await session.execute(
+                update(RelationshipModel)
+                .where(RelationshipModel.source_document_ids.any(document_id))
+                .values(
+                    source_document_ids=func.array_remove(RelationshipModel.source_document_ids, document_id),
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(RelationshipModel.id)
+            )
+            updated_ids = [row[0] for row in update_result.all()]
+
+            # Delete relationships where source_document_ids is now empty
+            deleted_count = 0
+            if updated_ids:
+                delete_result = await session.execute(
+                    delete(RelationshipModel).where(
+                        RelationshipModel.id.in_(updated_ids),
+                        func.array_length(RelationshipModel.source_document_ids, 1).is_(None),
+                    )
+                )
+                deleted_count = delete_result.rowcount  # type: ignore[assignment]
+
+            await session.commit()
+            return len(updated_ids), deleted_count

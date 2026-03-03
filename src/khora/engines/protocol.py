@@ -54,6 +54,7 @@ class MemoryEngineProtocol(Protocol):
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
+        allow_update: bool = True,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -64,6 +65,9 @@ class MemoryEngineProtocol(Protocol):
             source: Optional source identifier
             metadata: Optional metadata
             skill_name: Extraction skill to use
+            allow_update: When True and source matches an existing document with
+                different content, update the existing document instead of creating
+                a new one. When False, always create a new document.
 
         Returns:
             RememberResult with details

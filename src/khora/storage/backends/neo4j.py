@@ -1441,3 +1441,88 @@ class Neo4jBackend(GraphBackendBase):
             )
             records = await result.data()
             return [self._record_to_entity(r["e"]) for r in records]
+
+    # =========================================================================
+    # Document update cleanup
+    # =========================================================================
+
+    async def remove_document_from_entities(
+        self, document_id: UUID, namespace_id: UUID
+    ) -> tuple[list[UUID], list[UUID]]:
+        """Remove a document ID from entity source_document_ids in Neo4j.
+
+        Entities whose source_document_ids become empty are deleted (DETACH DELETE
+        removes their relationships too).
+
+        Returns:
+            Tuple of (updated_entity_ids, deleted_entity_ids)
+        """
+        driver = self._get_driver()
+        doc_id_str = str(document_id)
+        ns_id_str = str(namespace_id)
+
+        query = """
+        MATCH (e:Entity {namespace_id: $ns})
+        WHERE $doc_id IN e.source_document_ids
+        SET e.source_document_ids = [x IN e.source_document_ids WHERE x <> $doc_id]
+        WITH e, e.id AS eid, size(e.source_document_ids) AS remaining
+        WITH e, eid, remaining,
+             CASE WHEN remaining = 0 THEN true ELSE false END AS should_delete
+        WITH collect(CASE WHEN should_delete THEN null ELSE eid END) AS updated_ids,
+             collect(CASE WHEN should_delete THEN e ELSE null END) AS to_delete,
+             collect(CASE WHEN should_delete THEN eid ELSE null END) AS deleted_ids
+        UNWIND to_delete AS d
+        WITH updated_ids, deleted_ids, d
+        WHERE d IS NOT NULL
+        DETACH DELETE d
+        RETURN
+            [x IN updated_ids WHERE x IS NOT NULL] AS updated,
+            [x IN deleted_ids WHERE x IS NOT NULL] AS deleted
+        """
+
+        async with driver.session(database=self._database) as session:
+            result = await session.run(query, ns=ns_id_str, doc_id=doc_id_str)
+            record = await result.single()
+
+            if record is None:
+                return [], []
+
+            updated = [UUID(uid) for uid in (record["updated"] or [])]
+            deleted = [UUID(did) for did in (record["deleted"] or [])]
+            return updated, deleted
+
+    async def remove_document_from_relationships(self, document_id: UUID, namespace_id: UUID) -> tuple[int, int]:
+        """Remove a document ID from relationship source_document_ids in Neo4j.
+
+        Relationships whose source_document_ids become empty are deleted.
+
+        Returns:
+            Tuple of (updated_count, deleted_count)
+        """
+        driver = self._get_driver()
+        doc_id_str = str(document_id)
+        ns_id_str = str(namespace_id)
+
+        query = """
+        MATCH ()-[r]->()
+        WHERE r.namespace_id = $ns AND $doc_id IN r.source_document_ids
+        SET r.source_document_ids = [x IN r.source_document_ids WHERE x <> $doc_id]
+        WITH r, size(r.source_document_ids) AS remaining
+        WITH collect(CASE WHEN remaining = 0 THEN r ELSE null END) AS to_delete,
+             sum(CASE WHEN remaining > 0 THEN 1 ELSE 0 END) AS updated_count,
+             sum(CASE WHEN remaining = 0 THEN 1 ELSE 0 END) AS deleted_count
+        UNWIND to_delete AS d
+        WITH updated_count, deleted_count, d
+        WHERE d IS NOT NULL
+        DELETE d
+        RETURN updated_count, deleted_count
+        """
+
+        async with driver.session(database=self._database) as session:
+            result = await session.run(query, ns=ns_id_str, doc_id=doc_id_str)
+            record = await result.single()
+
+            if record is None:
+                return 0, 0
+
+            return record["updated_count"] or 0, record["deleted_count"] or 0

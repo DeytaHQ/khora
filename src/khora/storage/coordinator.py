@@ -422,11 +422,80 @@ class StorageCoordinator:
 
         return await self.relational.delete_document(document_id)
 
+    async def cleanup_document_references(self, document_id: UUID, namespace_id: UUID) -> dict[str, Any]:
+        """Clean up chunks, entity refs, and relationship refs for a document.
+
+        Used before re-processing an updated document. Orchestrates:
+        1. Delete old chunks (vector backend)
+        2. Remove doc from entity source_document_ids; delete orphaned entities (graph + vector)
+        3. Remove doc from relationship source_document_ids; delete orphaned relationships (graph + vector)
+
+        Returns:
+            Stats dict with cleanup counts
+        """
+        stats: dict[str, Any] = {
+            "chunks_deleted": 0,
+            "entities_updated": 0,
+            "entities_deleted": 0,
+            "relationships_updated": 0,
+            "relationships_deleted": 0,
+        }
+
+        # 1. Delete old chunks
+        if self.vector:
+            stats["chunks_deleted"] = await self.vector.delete_chunks_by_document(document_id)
+
+        # 2. Entity cleanup — graph backend
+        if self.graph and hasattr(self.graph, "remove_document_from_entities"):
+            updated_ids, deleted_ids = await self.graph.remove_document_from_entities(document_id, namespace_id)
+            stats["entities_updated"] = len(updated_ids)
+            stats["entities_deleted"] = len(deleted_ids)
+
+        # 3. Relationship cleanup — graph backend
+        if self.graph and hasattr(self.graph, "remove_document_from_relationships"):
+            rel_updated, rel_deleted = await self.graph.remove_document_from_relationships(document_id, namespace_id)
+            stats["relationships_updated"] = rel_updated
+            stats["relationships_deleted"] = rel_deleted
+
+        # 4. Entity cleanup — vector/SQL backend
+        if self.vector and hasattr(self.vector, "remove_document_from_entity_sources"):
+            vec_ent_updated, vec_ent_deleted = await self.vector.remove_document_from_entity_sources(document_id)
+            # Use max of graph/vector counts (they operate on same logical entities)
+            stats["entities_updated"] = max(stats["entities_updated"], vec_ent_updated)
+            stats["entities_deleted"] = max(stats["entities_deleted"], vec_ent_deleted)
+
+        # 5. Relationship cleanup — vector/SQL backend
+        if self.vector and hasattr(self.vector, "remove_document_from_relationship_sources"):
+            vec_rel_updated, vec_rel_deleted = await self.vector.remove_document_from_relationship_sources(document_id)
+            stats["relationships_updated"] = max(stats["relationships_updated"], vec_rel_updated)
+            stats["relationships_deleted"] = max(stats["relationships_deleted"], vec_rel_deleted)
+
+        logger.info(
+            f"Cleanup for document {document_id}: "
+            f"{stats['chunks_deleted']} chunks, "
+            f"{stats['entities_updated']} entities updated / {stats['entities_deleted']} deleted, "
+            f"{stats['relationships_updated']} rels updated / {stats['relationships_deleted']} deleted"
+        )
+
+        return stats
+
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by its content checksum."""
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.get_document_by_checksum(namespace_id, checksum)
+
+    async def get_document_by_source(self, namespace_id: UUID, source: str) -> Document | None:
+        """Get a document by its source (for update detection)."""
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_document_by_source(namespace_id, source)  # type: ignore[unresolved-attribute]
+
+    async def get_documents_by_sources(self, namespace_id: UUID, sources: list[str]) -> dict[str, Document]:
+        """Fetch documents by source in a single query (batch update detection)."""
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_documents_by_sources(namespace_id, sources)  # type: ignore[unresolved-attribute]
 
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.

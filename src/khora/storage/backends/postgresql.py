@@ -540,6 +540,47 @@ class PostgreSQLBackend(AsyncSessionMixin):
             models = result.scalars().all()
             return {m.id: self._document_model_to_domain(m) for m in models}
 
+    async def get_document_by_source(self, namespace_id: UUID, source: str) -> Document | None:
+        """Get a document by its source (for update detection).
+
+        Returns None if source is empty or no match found.
+        """
+        if not source:
+            return None
+
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(DocumentModel.namespace_id == namespace_id, DocumentModel.source == source)
+            )
+            model = result.scalars().first()
+            return self._document_model_to_domain(model) if model else None
+
+    async def get_documents_by_sources(self, namespace_id: UUID, sources: list[str]) -> dict[str, Document]:
+        """Fetch documents by source in a single query.
+
+        Used for batch update detection. Filters out empty sources.
+
+        Args:
+            namespace_id: Namespace to search in
+            sources: List of source identifiers to look up
+
+        Returns:
+            Dictionary mapping source to Document (only for existing documents)
+        """
+        non_empty = [s for s in sources if s]
+        if not non_empty:
+            return {}
+
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.namespace_id == namespace_id,
+                    DocumentModel.source.in_(non_empty),
+                )
+            )
+            models = result.scalars().all()
+            return {m.source: self._document_model_to_domain(m) for m in models}
+
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
 

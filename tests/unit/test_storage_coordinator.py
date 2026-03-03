@@ -371,6 +371,59 @@ class TestEventOps:
             await coord.append_event(MagicMock())
 
 
+class TestSourceLookupOps:
+    """Tests for source-based document lookup (update detection)."""
+
+    @pytest.mark.asyncio
+    async def test_get_document_by_source(self) -> None:
+        """get_document_by_source delegates to relational."""
+        ns_id = uuid4()
+        rel = MagicMock()
+        rel.get_document_by_source = AsyncMock(return_value=None)
+        coord = StorageCoordinator(relational=rel)
+        await coord.get_document_by_source(ns_id, "https://example.com/doc")
+        rel.get_document_by_source.assert_awaited_once_with(ns_id, "https://example.com/doc")
+
+    @pytest.mark.asyncio
+    async def test_get_documents_by_sources(self) -> None:
+        """get_documents_by_sources delegates to relational."""
+        ns_id = uuid4()
+        rel = MagicMock()
+        rel.get_documents_by_sources = AsyncMock(return_value={})
+        coord = StorageCoordinator(relational=rel)
+        await coord.get_documents_by_sources(ns_id, ["src1", "src2"])
+        rel.get_documents_by_sources.assert_awaited_once_with(ns_id, ["src1", "src2"])
+
+    @pytest.mark.asyncio
+    async def test_get_document_by_source_no_relational(self) -> None:
+        """get_document_by_source without relational raises RuntimeError."""
+        coord = StorageCoordinator()
+        with pytest.raises(RuntimeError, match="Relational backend not configured"):
+            await coord.get_document_by_source(uuid4(), "src")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_document_references(self) -> None:
+        """cleanup_document_references orchestrates vector + graph cleanup."""
+        doc_id = uuid4()
+        ns_id = uuid4()
+
+        vec = MagicMock()
+        vec.delete_chunks_by_document = AsyncMock(return_value=5)
+        vec.remove_document_from_entity_sources = AsyncMock(return_value=(3, 1))
+        vec.remove_document_from_relationship_sources = AsyncMock(return_value=(2, 0))
+
+        graph = MagicMock()
+        graph.remove_document_from_entities = AsyncMock(return_value=([uuid4()], [uuid4()]))
+        graph.remove_document_from_relationships = AsyncMock(return_value=(1, 1))
+
+        coord = StorageCoordinator(vector=vec, graph=graph)
+        stats = await coord.cleanup_document_references(doc_id, ns_id)
+
+        vec.delete_chunks_by_document.assert_awaited_once_with(doc_id)
+        graph.remove_document_from_entities.assert_awaited_once_with(doc_id, ns_id)
+        assert stats["chunks_deleted"] == 5
+
+
 class TestBatchOps:
     """Tests for batch operations."""
 
