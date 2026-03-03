@@ -9,8 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from khora.core.models.source import Source
 
 
 class DocumentStatus(str, Enum):
@@ -116,6 +119,9 @@ class Chunk:
     document_id: UUID = field(default_factory=uuid4)
     content: str = ""
     metadata: ChunkMetadata = field(default_factory=ChunkMetadata)
+
+    # Citation source resolved from parent document
+    source: Source | None = None
 
     # Embedding vector (stored in pgvector)
     embedding: list[float] | None = None

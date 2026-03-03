@@ -10,7 +10,9 @@ and ``register_source_alias()``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
+from uuid import UUID
 
 
 class SourceTool(str, Enum):
@@ -28,6 +30,17 @@ class SourceTool(str, Enum):
     URL = "url"
     API = "api"
     UNKNOWN = "unknown"
+
+
+@dataclass(slots=True, frozen=True)
+class Source:
+    """Citation source resolved from a parent document."""
+
+    document_id: UUID
+    title: str = ""
+    url: str = ""  # from Document.metadata.source
+    source_type: str = ""  # transport: "file", "url", "api"
+    source_tool: str = ""  # canonical SaaS tool: "slack", "linear"
 
 
 # Dynamic registry for source types added by downstream projects.

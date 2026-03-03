@@ -9,8 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from khora.core.models.source import Source
 
 
 class EntityType(str, Enum):
@@ -97,6 +100,7 @@ class Entity:
     # Source tracking
     source_document_ids: list[UUID] = field(default_factory=list)
     source_chunk_ids: list[UUID] = field(default_factory=list)
+    source_documents: list[Source] = field(default_factory=list)
     mention_count: int = 1
 
     # Embedding for entity similarity search

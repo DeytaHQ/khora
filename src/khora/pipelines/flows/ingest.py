@@ -605,6 +605,7 @@ async def stage_document(
     metadata = DocumentMetadata(
         source=doc_input.get("source", ""),
         source_type=doc_input.get("source_type", "manual"),
+        source_tool=doc_input.get("source_tool", ""),
         content_type=doc_input.get("content_type", "text/plain"),
         title=doc_input.get("title", ""),
         author=doc_input.get("author", ""),
@@ -668,6 +669,7 @@ async def stage_documents_batch(
         metadata = DocumentMetadata(
             source=doc_input.get("source", ""),
             source_type=doc_input.get("source_type", "manual"),
+            source_tool=doc_input.get("source_tool", ""),
             content_type=doc_input.get("content_type", "text/plain"),
             title=doc_input.get("title", ""),
             author=doc_input.get("author", ""),

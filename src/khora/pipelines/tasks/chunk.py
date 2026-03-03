@@ -27,6 +27,7 @@ async def chunk_document(
         List of Chunk objects
     """
     from khora.core.models import Chunk, ChunkMetadata
+    from khora.core.models.source import Source
     from khora.extraction.chunkers import create_chunker
 
     # Create chunker
@@ -34,6 +35,15 @@ async def chunk_document(
 
     # Chunk the document
     chunk_results = chunker.chunk(document.content)
+
+    # Build citation source from parent document (denormalized at ingest time)
+    doc_source = Source(
+        document_id=document.id,
+        title=document.metadata.title,
+        url=document.metadata.source,
+        source_type=document.metadata.source_type,
+        source_tool=document.metadata.source_tool,
+    )
 
     # Convert to Chunk objects
     # Inherit document timestamp and custom metadata so they propagate to search results
@@ -54,6 +64,7 @@ async def chunk_document(
                 token_count=result.token_count,
                 custom=custom,
             ),
+            source=doc_source,
             created_at=document.created_at,  # Inherit source timestamp from document
         )
         chunks.append(chunk)

@@ -221,6 +221,7 @@ class GraphRAGEngine:
         *,
         title: str = "",
         source: str = "",
+        source_tool: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
     ) -> RememberResult:
@@ -265,6 +266,7 @@ class GraphRAGEngine:
             title=title,
             source=source,
             source_type="api",
+            source_tool=source_tool,
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
             custom=metadata or {},
@@ -422,6 +424,7 @@ class GraphRAGEngine:
                     "title": doc_data.get("title", ""),
                     "source": doc_data.get("source", ""),
                     "source_type": "api",
+                    "source_tool": doc_data.get("source_tool", ""),
                     "metadata": doc_data.get("metadata", {}),
                 }
             )

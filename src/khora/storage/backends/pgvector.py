@@ -241,6 +241,10 @@ class PgVectorBackend(AsyncSessionMixin):
                 end_char=chunk.metadata.end_char,
                 token_count=chunk.metadata.token_count,
                 metadata_=chunk.metadata.custom,
+                source_title=chunk.source.title if chunk.source else "",
+                source_url=chunk.source.url if chunk.source else "",
+                source_type=chunk.source.source_type if chunk.source else "",
+                source_tool=chunk.source.source_tool if chunk.source else "",
                 embedding=chunk.embedding,
                 embedding_model=chunk.embedding_model,
                 created_at=chunk.created_at,
@@ -363,6 +367,19 @@ class PgVectorBackend(AsyncSessionMixin):
 
     def _chunk_model_to_domain(self, model: ChunkModel) -> Chunk:
         """Convert ChunkModel to domain Chunk."""
+        from khora.core.models.source import Source
+
+        # Reconstruct Source from denormalized columns (any non-empty field means source exists)
+        source: Source | None = None
+        if model.source_title or model.source_url or model.source_type or model.source_tool:
+            source = Source(
+                document_id=model.document_id,
+                title=model.source_title,
+                url=model.source_url,
+                source_type=model.source_type,
+                source_tool=model.source_tool,
+            )
+
         return Chunk(
             id=model.id,
             namespace_id=model.namespace_id,
@@ -376,6 +393,7 @@ class PgVectorBackend(AsyncSessionMixin):
                 token_count=model.token_count,
                 custom=model.metadata_,
             ),
+            source=source,
             embedding=(
                 np.asarray(model.embedding, dtype=np.float32)
                 if (_HAS_NUMPY and model.embedding is not None)

@@ -52,6 +52,7 @@ class MemoryEngineProtocol(Protocol):
         *,
         title: str = "",
         source: str = "",
+        source_tool: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
     ) -> RememberResult:
@@ -62,6 +63,7 @@ class MemoryEngineProtocol(Protocol):
             namespace_id: Target namespace UUID
             title: Optional title for the content
             source: Optional source identifier
+            source_tool: Canonical SaaS tool identifier (e.g. "slack", "linear")
             metadata: Optional metadata
             skill_name: Extraction skill to use
 

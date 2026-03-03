@@ -414,6 +414,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             status=document.status,
             source=document.metadata.source,
             source_type=document.metadata.source_type,
+            source_tool=document.metadata.source_tool,
             content_type=document.metadata.content_type,
             title=document.metadata.title,
             author=document.metadata.author,
@@ -479,6 +480,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 status=document.status,
                 source=document.metadata.source,
                 source_type=document.metadata.source_type,
+                source_tool=document.metadata.source_tool,
                 content_type=document.metadata.content_type,
                 title=document.metadata.title,
                 author=document.metadata.author,
@@ -575,6 +577,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             metadata=DocumentMetadata(
                 source=model.source,
                 source_type=model.source_type,
+                source_tool=model.source_tool,
                 content_type=model.content_type,
                 title=model.title,
                 author=model.author,

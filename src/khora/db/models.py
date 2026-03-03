@@ -185,6 +185,7 @@ class DocumentModel(Base):
     # Metadata
     source: Mapped[str] = mapped_column(String(1024), default="")
     source_type: Mapped[str] = mapped_column(String(64), default="")
+    source_tool: Mapped[str] = mapped_column(String(64), default="")
     content_type: Mapped[str] = mapped_column(String(128), default="")
     title: Mapped[str] = mapped_column(String(512), default="")
     author: Mapped[str] = mapped_column(String(255), default="")
@@ -252,6 +253,12 @@ class ChunkModel(Base):
         Computed("to_tsvector('english', content)", persisted=True),
         nullable=True,
     )
+
+    # Denormalized source citation columns (from parent document)
+    source_title: Mapped[str] = mapped_column(String(512), default="")
+    source_url: Mapped[str] = mapped_column(String(1024), default="")
+    source_type: Mapped[str] = mapped_column(String(64), default="")
+    source_tool: Mapped[str] = mapped_column(String(64), default="")
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

@@ -292,6 +292,7 @@ class MemoryLake:
         namespace: str | UUID | None = None,
         title: str = "",
         source: str = "",
+        source_tool: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
     ) -> RememberResult:
@@ -308,6 +309,7 @@ class MemoryLake:
             namespace: Namespace name, ID, or None for default
             title: Optional title for the content
             source: Optional source identifier
+            source_tool: Canonical SaaS tool identifier (e.g. "slack", "linear")
             metadata: Optional metadata
             skill_name: Extraction skill to use
 
@@ -325,6 +327,7 @@ class MemoryLake:
                     namespace_id,
                     title=title,
                     source=source,
+                    source_tool=source_tool,
                     metadata=metadata,
                     skill_name=skill_name,
                 )
@@ -359,6 +362,7 @@ class MemoryLake:
                 - content: str (required)
                 - title: str (optional)
                 - source: str (optional)
+                - source_tool: str (optional) - canonical SaaS tool (e.g. "slack", "linear")
                 - metadata: dict (optional)
             namespace: Namespace name, ID, or None for default
             skill_name: Extraction skill to use
@@ -438,7 +442,7 @@ class MemoryLake:
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.recall", namespace_id=str(namespace_id), query=query):
-                return await self._get_engine().recall(
+                result = await self._get_engine().recall(
                     query,
                     namespace_id,
                     limit=limit,
@@ -447,6 +451,9 @@ class MemoryLake:
                     agentic=agentic,
                     raw=raw,
                 )
+                if result.entities:
+                    await self._resolve_entity_sources([e for e, _ in result.entities])
+                return result
         finally:
             clear_trace_id()
 
@@ -505,12 +512,15 @@ class MemoryLake:
     ) -> list[tuple[Entity, float]]:
         """Find entities related to a given entity."""
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_engine().find_related_entities(
+        results = await self._get_engine().find_related_entities(
             entity_id,
             namespace_id,
             max_depth=max_depth,
             limit=limit,
         )
+        if results:
+            await self._resolve_entity_sources([e for e, _ in results])
+        return results
 
     # =========================================================================
     # Document Operations (Convenience Methods)
@@ -563,7 +573,10 @@ class MemoryLake:
             List of matching Entities (most similar first)
         """
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_engine().search_entities(query, namespace_id, limit=limit)
+        entities = await self._get_engine().search_entities(query, namespace_id, limit=limit)
+        if entities:
+            await self._resolve_entity_sources(entities)
+        return entities
 
     async def stats(self, *, namespace: str | UUID | None = None) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace.
@@ -601,6 +614,33 @@ class MemoryLake:
     # =========================================================================
     # Helpers
     # =========================================================================
+
+    async def _resolve_entity_sources(self, entities: list[Entity]) -> None:
+        """Populate entity.source_documents from source_document_ids."""
+        from khora.core.models.source import Source
+
+        # Filter to actual Entity objects with source_document_ids
+        resolvable = [e for e in entities if isinstance(e, Entity) and e.source_document_ids]
+        if not resolvable:
+            return
+
+        all_doc_ids: set[UUID] = set()
+        for entity in resolvable:
+            all_doc_ids.update(entity.source_document_ids)
+        if not all_doc_ids:
+            return
+        docs = await self.storage.get_documents_batch(list(all_doc_ids))
+        for entity in resolvable:
+            entity.source_documents = [
+                Source(
+                    document_id=did,
+                    title=docs[did].metadata.title if did in docs else "",
+                    url=docs[did].metadata.source if did in docs else "",
+                    source_type=docs[did].metadata.source_type if did in docs else "",
+                    source_tool=docs[did].metadata.source_tool if did in docs else "",
+                )
+                for did in entity.source_document_ids
+            ]
 
     async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
         """Resolve a namespace reference to a UUID."""
