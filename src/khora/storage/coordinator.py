@@ -406,10 +406,20 @@ class StorageCoordinator:
         return await self.relational.list_documents(namespace_id, status=status, limit=limit, offset=offset)
 
     async def update_document(self, document: Document) -> Document:
-        """Update a document."""
+        """Update a document and cascade source metadata to chunks."""
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.update_document(document)
+        result = await self.relational.update_document(document)
+        # Cascade denormalized source columns to chunks
+        if self.vector:
+            await self.vector.update_chunks_source_columns(
+                document.id,
+                source_title=document.metadata.title,
+                source_url=document.metadata.source,
+                source_type=document.metadata.source_type,
+                source_tool=document.metadata.source_tool,
+            )
+        return result
 
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete a document and its chunks."""

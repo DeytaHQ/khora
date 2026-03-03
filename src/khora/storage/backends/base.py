@@ -255,6 +255,18 @@ class VectorBackendProtocol(Protocol):
         """Delete all chunks for a document."""
         ...
 
+    async def update_chunks_source_columns(
+        self,
+        document_id: UUID,
+        *,
+        source_title: str = "",
+        source_url: str = "",
+        source_type: str = "",
+        source_tool: str = "",
+    ) -> int:
+        """Update denormalized source columns on all chunks for a document."""
+        ...
+
     @abstractmethod
     async def search_similar(
         self,

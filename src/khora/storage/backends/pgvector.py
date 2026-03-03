@@ -289,6 +289,37 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             return [self._chunk_model_to_domain(m) for m in result.scalars().all()]
 
+    async def update_chunks_source_columns(
+        self,
+        document_id: UUID,
+        *,
+        source_title: str = "",
+        source_url: str = "",
+        source_type: str = "",
+        source_tool: str = "",
+    ) -> int:
+        """Update denormalized source columns on all chunks for a document.
+
+        Called when document metadata changes so that chunk-level citation
+        fields stay in sync with the parent document.
+
+        Returns:
+            Number of chunks updated.
+        """
+        async with self._get_session() as session:
+            result = await session.execute(
+                update(ChunkModel)
+                .where(ChunkModel.document_id == document_id)
+                .values(
+                    source_title=source_title,
+                    source_url=source_url,
+                    source_type=source_type,
+                    source_tool=source_tool,
+                )
+            )
+            await session.commit()
+            return result.rowcount  # type: ignore[unresolved-attribute]
+
     async def delete_chunks_by_document(self, document_id: UUID) -> int:
         """Delete all chunks for a document."""
         async with self._get_session() as session:
@@ -369,15 +400,18 @@ class PgVectorBackend(AsyncSessionMixin):
         """Convert ChunkModel to domain Chunk."""
         from khora.core.models.source import Source
 
-        # Reconstruct Source from denormalized columns (any non-empty field means source exists)
+        # Reconstruct Source from denormalized columns.
+        # Always construct Source when document_id is present (non-null FK),
+        # even if all metadata fields are empty — chunk_document() always
+        # creates a Source so the round-trip must preserve it.
         source: Source | None = None
-        if model.source_title or model.source_url or model.source_type or model.source_tool:
+        if model.document_id is not None:
             source = Source(
                 document_id=model.document_id,
-                title=model.source_title,
-                url=model.source_url,
-                source_type=model.source_type,
-                source_tool=model.source_tool,
+                title=model.source_title or "",
+                url=model.source_url or "",
+                source_type=model.source_type or "",
+                source_tool=model.source_tool or "",
             )
 
         return Chunk(

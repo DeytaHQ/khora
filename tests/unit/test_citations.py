@@ -14,7 +14,7 @@ import pytest
 from khora.core.models.document import Chunk, Document, DocumentMetadata
 from khora.core.models.entity import Entity, EntityType
 from khora.core.models.source import Source
-from khora.memory_lake import MemoryLake, RecallResult, RememberResult
+from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -565,3 +565,260 @@ class TestNeo4jSourceTool:
         entity = Entity(name="test", entity_type=EntityType.CONCEPT)
         params = _entity_to_cypher_params(entity)
         assert params["source_tool"] == ""
+
+
+# ---------------------------------------------------------------------------
+# M3: remember_batch() source_tool passthrough
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRememberBatchSourceTool:
+    """Tests for source_tool passthrough in remember_batch()."""
+
+    @pytest.mark.asyncio
+    async def test_remember_batch_passes_source_tool_in_documents(self) -> None:
+        """remember_batch() forwards source_tool from document dicts to engine."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+
+        lake._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(
+                total=2,
+                processed=2,
+                skipped=0,
+                failed=0,
+                chunks=4,
+                entities=2,
+                relationships=1,
+            )
+        )
+
+        docs = [
+            {"content": "Slack message about project", "source_tool": "slack"},
+            {"content": "Linear issue description", "source_tool": "linear"},
+        ]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            result = await lake.remember_batch(docs)
+
+        assert isinstance(result, BatchResult)
+        assert result.total == 2
+        assert result.processed == 2
+
+        # Verify the engine received the documents with source_tool intact
+        call_args = lake._engine.remember_batch.call_args
+        forwarded_docs = call_args.args[0]
+        assert forwarded_docs[0]["source_tool"] == "slack"
+        assert forwarded_docs[1]["source_tool"] == "linear"
+
+    @pytest.mark.asyncio
+    async def test_remember_batch_source_tool_absent_defaults_gracefully(self) -> None:
+        """remember_batch() handles documents without source_tool."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+
+        lake._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(
+                total=1,
+                processed=1,
+                skipped=0,
+                failed=0,
+                chunks=2,
+                entities=1,
+                relationships=0,
+            )
+        )
+
+        docs = [{"content": "Plain document without source_tool"}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            result = await lake.remember_batch(docs)
+
+        assert isinstance(result, BatchResult)
+        assert result.processed == 1
+
+        # Document should be forwarded as-is (no source_tool key injected by MemoryLake)
+        call_args = lake._engine.remember_batch.call_args
+        forwarded_docs = call_args.args[0]
+        assert "source_tool" not in forwarded_docs[0] or forwarded_docs[0].get("source_tool", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# M4: pgvector chunk write/read round-trip with Source
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestPgVectorChunkSourceRoundTrip:
+    """Tests for Source data surviving pgvector _chunk_model_to_domain round-trip."""
+
+    def test_chunk_model_to_domain_with_source(self) -> None:
+        """_chunk_model_to_domain reconstructs Source from denormalized columns."""
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        doc_id = uuid4()
+        chunk_id = uuid4()
+        ns_id = uuid4()
+
+        # Simulate a ChunkModel row with source columns populated
+        model = SimpleNamespace(
+            id=chunk_id,
+            namespace_id=ns_id,
+            document_id=doc_id,
+            content="Test chunk content",
+            chunk_index=0,
+            start_char=0,
+            end_char=18,
+            token_count=4,
+            metadata_={},
+            source_title="Slack Message",
+            source_url="https://slack.com/msg/123",
+            source_type="url",
+            source_tool="slack",
+            embedding=None,
+            embedding_model="text-embedding-3-small",
+            created_at=datetime(2024, 6, 15, tzinfo=UTC),
+            source_timestamp=None,
+        )
+
+        backend = PgVectorBackend.__new__(PgVectorBackend)
+        chunk = backend._chunk_model_to_domain(model)
+
+        assert chunk.source is not None
+        assert chunk.source.document_id == doc_id
+        assert chunk.source.title == "Slack Message"
+        assert chunk.source.url == "https://slack.com/msg/123"
+        assert chunk.source.source_type == "url"
+        assert chunk.source.source_tool == "slack"
+
+    def test_chunk_model_to_domain_empty_source_columns_preserves_source(self) -> None:
+        """_chunk_model_to_domain creates Source even when all source columns are empty (H1 fix).
+
+        This is the H1 fix: chunk_document() always creates a Source from the
+        parent document, so the round-trip must preserve it even if all metadata
+        fields are empty strings. Source is created whenever document_id is present.
+        """
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        doc_id = uuid4()
+
+        # Simulate a ChunkModel with all source columns as empty strings
+        model = SimpleNamespace(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=doc_id,
+            content="Chunk with empty metadata",
+            chunk_index=0,
+            start_char=0,
+            end_char=24,
+            token_count=5,
+            metadata_={},
+            source_title="",
+            source_url="",
+            source_type="",
+            source_tool="",
+            embedding=None,
+            embedding_model="",
+            created_at=datetime(2024, 6, 15, tzinfo=UTC),
+            source_timestamp=None,
+        )
+
+        backend = PgVectorBackend.__new__(PgVectorBackend)
+        chunk = backend._chunk_model_to_domain(model)
+
+        # H1 fix: Source is always created when document_id is present,
+        # even with empty metadata fields — round-trip preservation
+        assert chunk.source is not None
+        assert chunk.source.document_id == doc_id
+        assert chunk.source.title == ""
+        assert chunk.source.url == ""
+        assert chunk.source.source_type == ""
+        assert chunk.source.source_tool == ""
+
+    def test_chunk_model_to_domain_null_document_id_no_source(self) -> None:
+        """_chunk_model_to_domain returns source=None when document_id is None."""
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        model = SimpleNamespace(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=None,
+            content="Orphan chunk",
+            chunk_index=0,
+            start_char=0,
+            end_char=12,
+            token_count=2,
+            metadata_={},
+            source_title="",
+            source_url="",
+            source_type="",
+            source_tool="",
+            embedding=None,
+            embedding_model="",
+            created_at=datetime(2024, 6, 15, tzinfo=UTC),
+            source_timestamp=None,
+        )
+
+        backend = PgVectorBackend.__new__(PgVectorBackend)
+        chunk = backend._chunk_model_to_domain(model)
+
+        # No document_id => no Source
+        assert chunk.source is None
+
+    def test_chunk_model_to_domain_partial_source(self) -> None:
+        """_chunk_model_to_domain creates Source when at least one source column is non-empty."""
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        doc_id = uuid4()
+
+        # Only source_tool is set (e.g., document with source_tool but no title/url)
+        model = SimpleNamespace(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=doc_id,
+            content="Chunk with partial source",
+            chunk_index=0,
+            start_char=0,
+            end_char=25,
+            token_count=4,
+            metadata_={},
+            source_title="",
+            source_url="",
+            source_type="",
+            source_tool="linear",
+            embedding=None,
+            embedding_model="",
+            created_at=datetime(2024, 6, 15, tzinfo=UTC),
+            source_timestamp=None,
+        )
+
+        backend = PgVectorBackend.__new__(PgVectorBackend)
+        chunk = backend._chunk_model_to_domain(model)
+
+        # At least one field non-empty => Source created
+        assert chunk.source is not None
+        assert chunk.source.document_id == doc_id
+        assert chunk.source.source_tool == "linear"
+        assert chunk.source.title == ""
+        assert chunk.source.url == ""

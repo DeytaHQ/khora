@@ -125,7 +125,7 @@ class MemoryEngineProtocol(Protocol):
         """Store multiple documents with automatic optimization.
 
         Args:
-            documents: List of document dicts with keys: content, title, source, metadata
+            documents: List of document dicts with keys: content, title, source, source_tool, metadata
             namespace_id: Target namespace UUID
             skill_name: Extraction skill to use
             max_concurrent: Maximum concurrent document processing

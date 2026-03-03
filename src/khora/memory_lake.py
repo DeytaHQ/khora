@@ -616,7 +616,26 @@ class MemoryLake:
     # =========================================================================
 
     async def _resolve_entity_sources(self, entities: list[Entity]) -> None:
-        """Populate entity.source_documents from source_document_ids."""
+        """Populate ``entity.source_documents`` from ``source_document_ids``.
+
+        Fetches parent documents in a single batch query, then builds a
+        :class:`~khora.core.models.source.Source` for each referenced
+        document ID.  Documents that have been deleted since the entity
+        was created are represented as stub Sources with only the
+        ``document_id`` field set (all other fields empty).
+
+        **Namespace isolation** — fetched documents are filtered against
+        the entity's ``namespace_id`` so that a document belonging to a
+        different namespace is never exposed.
+
+        Batch strategy: one ``SELECT ... WHERE id IN (...)`` regardless
+        of entity count (typically <= 50 doc IDs).
+
+        Args:
+            entities: Mutable list of Entity objects whose
+                ``source_documents`` attribute will be populated
+                in-place.
+        """
         from khora.core.models.source import Source
 
         # Filter to actual Entity objects with source_document_ids
@@ -629,7 +648,15 @@ class MemoryLake:
             all_doc_ids.update(entity.source_document_ids)
         if not all_doc_ids:
             return
+
+        # Collect namespace IDs for cross-namespace filtering
+        allowed_ns: set[UUID] = {e.namespace_id for e in resolvable}
+
         docs = await self.storage.get_documents_batch(list(all_doc_ids))
+
+        # Filter out documents that belong to a different namespace
+        docs = {did: doc for did, doc in docs.items() if doc.namespace_id in allowed_ns}
+
         for entity in resolvable:
             entity.source_documents = [
                 Source(
