@@ -26,6 +26,7 @@ from khora.storage.backends.mixins import (
 from khora.storage.backends.mixins import deserialize_dict as _deserialize_dict
 from khora.storage.backends.mixins import element_to_dict as _element_to_dict
 from khora.storage.backends.mixins import serialize_dict as _serialize_dict
+from khora.telemetry import trace
 
 # Neo4j relationship labels must be valid identifiers: letters, digits, underscores.
 # LLM-generated types like "at-risk" or "works for" need sanitizing.
@@ -863,6 +864,11 @@ class Neo4jBackend(GraphBackendBase):
             deleted = await session.execute_write(_delete)
             return deleted > 0
 
+    @trace(
+        "khora.neo4j.get_entity_relationships",
+        include={"entity_id", "direction"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def get_entity_relationships(
         self,
         entity_id: UUID,
@@ -1087,6 +1093,11 @@ class Neo4jBackend(GraphBackendBase):
     # Graph traversal
     # =========================================================================
 
+    @trace(
+        "khora.neo4j.find_paths",
+        include={"source_entity_id", "target_entity_id", "max_depth"},
+        result=lambda r: {"path_count": len(r)},
+    )
     async def find_paths(
         self,
         namespace_id: UUID,
@@ -1134,6 +1145,11 @@ class Neo4jBackend(GraphBackendBase):
 
             return paths
 
+    @trace(
+        "khora.neo4j.get_neighborhood",
+        include={"entity_id", "depth"},
+        result=lambda r: {"node_count": len(r.get("entities", [])), "rel_count": len(r.get("relationships", []))},
+    )
     async def get_neighborhood(
         self,
         entity_id: UUID,
@@ -1183,6 +1199,11 @@ class Neo4jBackend(GraphBackendBase):
 
             return {"entities": [], "relationships": []}
 
+    @trace(
+        "khora.neo4j.get_neighborhoods_batch",
+        include={"entity_ids", "depth"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def get_neighborhoods_batch(
         self,
         entity_ids: list[UUID],
@@ -1217,7 +1238,7 @@ class Neo4jBackend(GraphBackendBase):
         UNWIND $entity_ids AS eid
         MATCH (center:Entity {{id: eid}})
         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-        WITH eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+        With eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
         RETURN eid, neighbors, rels
         """
 

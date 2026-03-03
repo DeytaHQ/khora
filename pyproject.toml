@@ -86,6 +86,8 @@ reranking = [
 accel = [
     "rapidfuzz>=3.0.0",
 ]
+# Observability
+logfire = ["logfire>=4.0"]
 # NLP tools
 nlp = ["spacy>=3.8.0"]
 # Rust-accelerated operations (requires Rust toolchain to build from source)

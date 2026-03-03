@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
+from .logfire_integration import trace_span
+
 
 def instrument_llm(operation: str):
     """Decorator for async functions that make LLM calls.
@@ -19,6 +21,7 @@ def instrument_llm(operation: str):
     Args:
         operation: Logical operation name (e.g. "entity_extraction", "embedding").
     """
+    span_name = f"khora.llm.{operation}"
 
     def decorator(fn):
         @functools.wraps(fn)
@@ -31,7 +34,20 @@ def instrument_llm(operation: str):
             error_msg: str | None = None
             result = None
             try:
-                result = await fn(*args, **kwargs)
+                with trace_span(span_name) as span:
+                    result = await fn(*args, **kwargs)
+                    # Set span attributes while span is still active
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    model = ""
+                    total_tokens = 0
+                    if result is not None:
+                        usage = getattr(result, "usage", None)
+                        if usage is not None:
+                            total_tokens = getattr(usage, "total_tokens", 0) or 0
+                        model = getattr(result, "model", "") or ""
+                    span.set_attribute("model", model)
+                    span.set_attribute("total_tokens", total_tokens)
+                    span.set_attribute("latency_ms", latency_ms)
                 return result
             except Exception as exc:
                 status = "error"
@@ -77,6 +93,7 @@ def instrument_storage(backend: str, operation: str):
         backend: Storage backend name (e.g. "postgresql", "pgvector", "neo4j").
         operation: Operation name (e.g. "create_document").
     """
+    span_name = f"khora.storage.{operation}"
 
     def decorator(fn):
         @functools.wraps(fn)
@@ -98,12 +115,18 @@ def instrument_storage(backend: str, operation: str):
                         break
 
             try:
-                result = await fn(*args, **kwargs)
-                # Try to guess record count from result
-                if isinstance(result, list):
-                    record_count = len(result)
-                elif result is not None:
-                    record_count = 1
+                with trace_span(span_name, backend=backend) as span:
+                    result = await fn(*args, **kwargs)
+                    # Try to guess record count from result
+                    if isinstance(result, list):
+                        record_count = len(result)
+                    elif result is not None:
+                        record_count = 1
+                    # Set span attributes while span is still active
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    span.set_attribute("status", "success")
+                    span.set_attribute("latency_ms", latency_ms)
+                    span.set_attribute("record_count", record_count)
                 return result
             except Exception as exc:
                 status = "error"
@@ -166,12 +189,19 @@ async def pipeline_stage(
     stage_id = hash((pipeline_name, stage, run_id)) & 0x7FFFFFFFFFFFFFFF  # positive int64
     set_parent_event_id(stage_id)
 
+    span_name = f"khora.{pipeline_name}.{stage}"
     ctx: dict[str, Any] = {"output_count": 0}
     start = time.perf_counter()
     status = "success"
     error_msg: str | None = None
     try:
-        yield ctx
+        with trace_span(span_name, input_count=input_count) as span:
+            yield ctx
+            # Set span attributes while span is still active
+            latency_ms = (time.perf_counter() - start) * 1000
+            span.set_attribute("output_count", ctx.get("output_count", 0))
+            span.set_attribute("status", "success")
+            span.set_attribute("latency_ms", latency_ms)
     except Exception as exc:
         status = "error"
         error_msg = str(exc)[:500]

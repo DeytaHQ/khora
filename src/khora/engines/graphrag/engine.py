@@ -24,6 +24,7 @@ from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import HybridQueryEngine, QueryConfig, SearchMode
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+from khora.telemetry import trace
 
 if TYPE_CHECKING:
     pass
@@ -619,6 +620,7 @@ class GraphRAGEngine:
         """List entities in a namespace."""
         return await self._get_storage().list_entities(namespace_id, entity_type=entity_type, limit=limit)
 
+    @trace("khora.find_related_entities", result=lambda r: {"result_count": len(r)})
     async def find_related_entities(
         self,
         entity_id: UUID,
@@ -652,6 +654,7 @@ class GraphRAGEngine:
         """List documents in a namespace."""
         return await self._get_storage().list_documents(namespace_id, limit=limit)
 
+    @trace("khora.search_entities", exclude={"query"}, result=lambda r: {"result_count": len(r)})
     async def search_entities(
         self,
         query: str,
@@ -686,12 +689,7 @@ class GraphRAGEngine:
         entities_map = await storage.get_entities_batch(entity_ids)
 
         # Return entities in score order, filtering out any that weren't found
-        entities = []
-        for entity_id, _score in entity_ids_scores:
-            if entity_id in entities_map:
-                entities.append(entities_map[entity_id])
-
-        return entities
+        return [entities_map[eid] for eid, _score in entity_ids_scores if eid in entities_map]
 
     async def stats(self, namespace_id: UUID) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace."""

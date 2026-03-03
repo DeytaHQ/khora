@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 from loguru import logger
 
 from khora.storage.backends.mixins import deserialize_dict, serialize_dict
+from khora.telemetry import trace
 
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
@@ -154,6 +155,7 @@ class DualNodeManager:
         logger.debug(f"Created Chunk node: {chunk_id}")
         return chunk_id
 
+    @trace("khora.neo4j.create_chunk_nodes_batch")
     async def create_chunk_nodes_batch(
         self,
         chunks: list[TemporalChunk],
@@ -186,7 +188,7 @@ class DualNodeManager:
                     "document_id": str(chunk.document_id),
                     "content": chunk.content,
                     "occurred_at": chunk.occurred_at.isoformat() if chunk.occurred_at else None,
-                    "created_at": chunk.created_at.isoformat() if chunk.created_at else datetime.now(UTC).isoformat(),
+                    "created_at": (chunk.created_at.isoformat() if chunk.created_at else datetime.now(UTC).isoformat()),
                     "source_system": chunk.source_system,
                     "author": chunk.author,
                     "channel": chunk.channel,
@@ -259,6 +261,7 @@ class DualNodeManager:
 
             await session.execute_write(_work)
 
+    @trace("khora.neo4j.link_entities_to_chunks_batch")
     async def link_entities_to_chunks_batch(
         self,
         links: list[EntityChunkLink],
@@ -357,6 +360,11 @@ class DualNodeManager:
 
             await session.execute_write(_work)
 
+    @trace(
+        "khora.neo4j.get_chunks_by_entities",
+        include={"entity_ids", "namespace_id"},
+        result=lambda r: {"chunk_count": len(r)},
+    )
     async def get_chunks_by_entities(
         self,
         entity_ids: list[UUID],
@@ -439,6 +447,11 @@ class DualNodeManager:
 
         return records
 
+    @trace(
+        "khora.neo4j.get_entity_neighborhoods",
+        include={"entity_ids", "depth"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def get_entity_neighborhoods(
         self,
         entity_ids: list[UUID],

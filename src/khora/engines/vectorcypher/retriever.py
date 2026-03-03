@@ -27,6 +27,7 @@ from loguru import logger
 from neo4j.exceptions import Neo4jError
 
 from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.telemetry import trace_span
 
 from .dual_nodes import DualNodeManager
 from .fusion import (
@@ -187,57 +188,37 @@ class VectorCypherRetriever:
         Returns:
             VectorCypherResult with chunks, entities, and metadata
         """
-        limit = limit or self._config.max_chunks
+        with trace_span("khora.vectorcypher.retrieve", namespace_id=str(namespace_id)) as span:
+            limit = limit or self._config.max_chunks
 
-        # Cache check
-        cache_key = ""
-        if self._cache_ttl > 0:
-            cache_key = hashlib.md5(
-                f"{query}:{namespace_id}:{temporal_filter}:{graph_depth}:{limit}".encode()
-            ).hexdigest()
+            # Cache check
+            cache_key = ""
+            if self._cache_ttl > 0:
+                cache_key = hashlib.md5(
+                    f"{query}:{namespace_id}:{temporal_filter}:{graph_depth}:{limit}".encode()
+                ).hexdigest()
 
-            if cache_key in self._cache:
-                cached_time, cached_result = self._cache[cache_key]
-                if time.monotonic() - cached_time < self._cache_ttl:
-                    cached_result.metadata["cache_hit"] = True
-                    return cached_result
-                else:
-                    del self._cache[cache_key]
+                if cache_key in self._cache:
+                    cached_time, cached_result = self._cache[cache_key]
+                    if time.monotonic() - cached_time < self._cache_ttl:
+                        cached_result.metadata["cache_hit"] = True
+                        span.set_attribute("cache_hit", True)
+                        return cached_result
+                    else:
+                        del self._cache[cache_key]
 
-        # Step 1: Route query to determine strategy
-        routing = await self._router.route(query)
-        logger.debug(f"Query routing: {routing.complexity.value} (use_graph={routing.use_graph})")
+            # Step 1: Route query to determine strategy
+            routing = await self._router.route(query)
+            logger.debug(f"Query routing: {routing.complexity.value} (use_graph={routing.use_graph})")
+            span.set_attribute("routing_complexity", routing.complexity.value)
 
-        # Step 2: Embed the query
-        query_embedding = await self._embedder.embed(query)
+            # Step 2: Embed the query
+            query_embedding = await self._embedder.embed(query)
 
-        # Step 3: Vector search for entry points
-        if routing.complexity == QueryComplexity.SIMPLE:
-            # Simple path: direct chunk retrieval
-            result = await self._simple_retrieve(
-                query=query,
-                query_embedding=query_embedding,
-                namespace_id=namespace_id,
-                temporal_filter=temporal_filter,
-                limit=limit,
-                routing=routing,
-            )
-        else:
-            # Complex/moderate path: VectorCypher with parallel execution
-            # Wrap in try/except for graceful fallback on graph failures
-            try:
-                result = await self._vectorcypher_retrieve(
-                    query=query,
-                    query_embedding=query_embedding,
-                    namespace_id=namespace_id,
-                    temporal_filter=temporal_filter,
-                    graph_depth=graph_depth,
-                    limit=limit,
-                    routing=routing,
-                )
-            except Neo4jError as e:
-                logger.warning(f"Graph search failed, falling back to vector-only: {e}")
-                result = await self._vector_only_fallback(
+            # Step 3: Vector search for entry points
+            if routing.complexity == QueryComplexity.SIMPLE:
+                # Simple path: direct chunk retrieval
+                result = await self._simple_retrieve(
                     query=query,
                     query_embedding=query_embedding,
                     namespace_id=namespace_id,
@@ -245,15 +226,40 @@ class VectorCypherRetriever:
                     limit=limit,
                     routing=routing,
                 )
+            else:
+                # Complex/moderate path: VectorCypher with parallel execution
+                # Wrap in try/except for graceful fallback on graph failures
+                try:
+                    result = await self._vectorcypher_retrieve(
+                        query=query,
+                        query_embedding=query_embedding,
+                        namespace_id=namespace_id,
+                        temporal_filter=temporal_filter,
+                        graph_depth=graph_depth,
+                        limit=limit,
+                        routing=routing,
+                    )
+                except Neo4jError as e:
+                    logger.warning(f"Graph search failed, falling back to vector-only: {e}")
+                    result = await self._vector_only_fallback(
+                        query=query,
+                        query_embedding=query_embedding,
+                        namespace_id=namespace_id,
+                        temporal_filter=temporal_filter,
+                        limit=limit,
+                        routing=routing,
+                    )
 
-        # Store in cache
-        if self._cache_ttl > 0 and cache_key:
-            if len(self._cache) >= self._cache_max_size:
-                oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
-                del self._cache[oldest_key]
-            self._cache[cache_key] = (time.monotonic(), result)
+            # Store in cache
+            if self._cache_ttl > 0 and cache_key:
+                if len(self._cache) >= self._cache_max_size:
+                    oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
+                    del self._cache[oldest_key]
+                self._cache[cache_key] = (time.monotonic(), result)
 
-        return result
+            span.set_attribute("chunk_count", len(result.chunks))
+            span.set_attribute("entity_count", len(result.entities))
+            return result
 
     async def _vectorcypher_retrieve(
         self,
@@ -528,41 +534,43 @@ class VectorCypherRetriever:
         if not entry_entity_ids:
             return {}, {}
 
-        depth = min(max(1, depth), self._config.max_depth)
+        with trace_span("khora.vectorcypher.cypher_expand", entry_count=len(entry_entity_ids), depth=depth) as span:
+            depth = min(max(1, depth), self._config.max_depth)
 
-        # Get neighborhoods from dual node manager
-        neighborhoods = await self._dual_nodes.get_entity_neighborhoods(
-            entity_ids=entry_entity_ids,
-            namespace_id=namespace_id,
-            depth=depth,
-            limit_per_entity=20,
-        )
+            # Get neighborhoods from dual node manager
+            neighborhoods = await self._dual_nodes.get_entity_neighborhoods(
+                entity_ids=entry_entity_ids,
+                namespace_id=namespace_id,
+                depth=depth,
+                limit_per_entity=20,
+            )
 
-        # Score entities by distance from entry points and collect entity info
-        entity_scores: dict[UUID, float] = {}
-        entity_info_map: dict[str, dict[str, str]] = {}
+            # Score entities by distance from entry points and collect entity info
+            entity_scores: dict[UUID, float] = {}
+            entity_info_map: dict[str, dict[str, str]] = {}
 
-        for source_id, related in neighborhoods.items():
-            for entity_info in related:
-                entity_id = UUID(entity_info["id"])
-                distance = entity_info["distance"]
-                # Score decreases with distance
-                score = 1.0 / (1 + distance)
+            for source_id, related in neighborhoods.items():
+                for entity_info in related:
+                    entity_id = UUID(entity_info["id"])
+                    distance = entity_info["distance"]
+                    # Score decreases with distance
+                    score = 1.0 / (1 + distance)
 
-                if entity_id in entity_scores:
-                    # Take max score if entity reached multiple ways
-                    entity_scores[entity_id] = max(entity_scores[entity_id], score)
-                else:
-                    entity_scores[entity_id] = score
+                    if entity_id in entity_scores:
+                        # Take max score if entity reached multiple ways
+                        entity_scores[entity_id] = max(entity_scores[entity_id], score)
+                    else:
+                        entity_scores[entity_id] = score
 
-                # Capture name and type (zero-cost, data already fetched)
-                if entity_info["id"] not in entity_info_map:
-                    entity_info_map[entity_info["id"]] = {
-                        "name": entity_info.get("name", ""),
-                        "entity_type": entity_info.get("entity_type", ""),
-                    }
+                    # Capture name and type (zero-cost, data already fetched)
+                    if entity_info["id"] not in entity_info_map:
+                        entity_info_map[entity_info["id"]] = {
+                            "name": entity_info.get("name", ""),
+                            "entity_type": entity_info.get("entity_type", ""),
+                        }
 
-        return entity_scores, entity_info_map
+            span.set_attribute("expanded_entity_count", len(entity_scores))
+            return entity_scores, entity_info_map
 
     async def _fetch_chunks_from_entities(
         self,

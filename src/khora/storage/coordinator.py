@@ -31,7 +31,7 @@ from khora.core.models import (
     Relationship,
     Workspace,
 )
-from khora.telemetry import get_collector
+from khora.telemetry import get_collector, trace_span
 
 if TYPE_CHECKING:
     from .backends.base import (
@@ -53,13 +53,18 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
     just let the decorator handle timing.
     """
 
+    span_name = f"khora.storage.{operation}"
+
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             t0 = _time.perf_counter()
             try:
-                result = await func(*args, **kwargs)
-                elapsed = _time.perf_counter() - t0
+                with trace_span(span_name, backend=backend) as span:
+                    result = await func(*args, **kwargs)
+                    elapsed = _time.perf_counter() - t0
+                    span.set_attribute("latency_ms", elapsed * 1000)
+                    span.set_attribute("status", "success")
                 get_collector().record_storage_op(
                     operation=operation,
                     backend=backend,

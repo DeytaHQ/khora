@@ -22,6 +22,8 @@ from uuid import UUID
 
 from loguru import logger
 
+from khora.telemetry import trace, trace_span
+
 from .fusion import reciprocal_rank_fusion
 from .keyword import KeywordSearcher, normalize_bm25_score
 from .linking import EntityLinker, LinkingResult
@@ -861,7 +863,8 @@ class HybridQueryEngine:
         # Get query embedding for the main query
         query_embedding = None
         if self._embedder and cfg.mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
-            query_embedding = await self._embedder.embed(query_text)
+            with trace_span("khora.query.embedding"):
+                query_embedding = await self._embedder.embed(query_text)
 
             # Apply HyDE expansion based on mode
             if query_embedding is not None and self._hyde_expander:
@@ -1546,6 +1549,11 @@ class HybridQueryEngine:
         results = await self._entity_similarity_cache[cache_key]
         return results[:limit]
 
+    @trace(
+        "khora.query.vector_search",
+        include={"namespace_id"},
+        result=lambda r: {"chunk_count": len(r["chunks"]), "entity_count": len(r["entities"])},
+    )
     async def _vector_search(
         self,
         namespace_id: UUID,
@@ -1611,146 +1619,151 @@ class HybridQueryEngine:
         Returns:
             Dict with chunks, entities, and graph context
         """
-        entities = []
-        graph_context = {}
-        seen_entity_ids: set[UUID] = set()
+        with trace_span("khora.query.graph_search", namespace_id=str(namespace_id)) as span:
+            entities = []
+            graph_context = {}
+            seen_entity_ids: set[UUID] = set()
 
-        # Collect all entity IDs we need to fetch
-        all_entity_ids_to_fetch: list[UUID] = []
-        linked_scores: dict[UUID, float] = {}
-        similar_scores: dict[UUID, float] = {}
+            # Collect all entity IDs we need to fetch
+            all_entity_ids_to_fetch: list[UUID] = []
+            linked_scores: dict[UUID, float] = {}
+            similar_scores: dict[UUID, float] = {}
 
-        # Linked entities (high priority)
-        if linked_entity_ids:
-            for entity_id in linked_entity_ids[:10]:
-                if entity_id not in seen_entity_ids:
-                    all_entity_ids_to_fetch.append(entity_id)
-                    linked_scores[entity_id] = 1.0  # High confidence from linking
-                    seen_entity_ids.add(entity_id)
+            # Linked entities (high priority)
+            if linked_entity_ids:
+                for entity_id in linked_entity_ids[:10]:
+                    if entity_id not in seen_entity_ids:
+                        all_entity_ids_to_fetch.append(entity_id)
+                        linked_scores[entity_id] = 1.0  # High confidence from linking
+                        seen_entity_ids.add(entity_id)
 
-        # Similar entities via embedding (uses per-query cache to deduplicate with _vector_search)
-        if query_embedding is not None:
-            entity_ids_scores = await self._cached_entity_search(
-                namespace_id,
-                query_embedding,
-                limit=10,
-                min_similarity=config.min_entity_similarity,
-            )
-
-            for entity_id, score in entity_ids_scores[:8]:
-                if entity_id not in seen_entity_ids:
-                    all_entity_ids_to_fetch.append(entity_id)
-                    similar_scores[entity_id] = score
-                    seen_entity_ids.add(entity_id)
-
-            # Fallback: if no entities found, retry with no threshold
-            # (not cached — different parameters, only fires when primary returns empty)
-            if not all_entity_ids_to_fetch and config.min_entity_similarity > 0:
-                entity_ids_scores = await self._storage.search_similar_entities(
+            # Similar entities via embedding (uses per-query cache to deduplicate with _vector_search)
+            if query_embedding is not None:
+                entity_ids_scores = await self._cached_entity_search(
                     namespace_id,
                     query_embedding,
-                    limit=5,
-                    min_similarity=0.0,
+                    limit=10,
+                    min_similarity=config.min_entity_similarity,
                 )
-                for entity_id, score in entity_ids_scores[:5]:
+
+                for entity_id, score in entity_ids_scores[:8]:
                     if entity_id not in seen_entity_ids:
                         all_entity_ids_to_fetch.append(entity_id)
                         similar_scores[entity_id] = score
                         seen_entity_ids.add(entity_id)
 
-        # Batch fetch all entities and neighborhoods in parallel
-        if all_entity_ids_to_fetch:
-            # Fetch entities and neighborhoods in parallel
-            entities_map, neighborhoods = await asyncio.gather(
-                self._storage.get_entities_batch(all_entity_ids_to_fetch),
-                self._storage.get_neighborhoods_batch(
-                    all_entity_ids_to_fetch,
-                    depth=config.max_graph_depth,
-                    limit_per_entity=20,
-                ),
-            )
+                # Fallback: if no entities found, retry with no threshold
+                # (not cached — different parameters, only fires when primary returns empty)
+                if not all_entity_ids_to_fetch and config.min_entity_similarity > 0:
+                    entity_ids_scores = await self._storage.search_similar_entities(
+                        namespace_id,
+                        query_embedding,
+                        limit=5,
+                        min_similarity=0.0,
+                    )
+                    for entity_id, score in entity_ids_scores[:5]:
+                        if entity_id not in seen_entity_ids:
+                            all_entity_ids_to_fetch.append(entity_id)
+                            similar_scores[entity_id] = score
+                            seen_entity_ids.add(entity_id)
 
-            # Process results maintaining priority order
-            for entity_id in all_entity_ids_to_fetch:
-                if entity_id in entities_map:
-                    entity = entities_map[entity_id]
-                    score = linked_scores.get(entity_id) or similar_scores.get(entity_id, 0.5)
-                    entities.append((entity, score))
+            # Batch fetch all entities and neighborhoods in parallel
+            if all_entity_ids_to_fetch:
+                # Fetch entities and neighborhoods in parallel
+                entities_map, neighborhoods = await asyncio.gather(
+                    self._storage.get_entities_batch(all_entity_ids_to_fetch),
+                    self._storage.get_neighborhoods_batch(
+                        all_entity_ids_to_fetch,
+                        depth=config.max_graph_depth,
+                        limit_per_entity=20,
+                    ),
+                )
 
-                    # Add neighborhood to context
-                    if entity_id in neighborhoods:
-                        graph_context[str(entity_id)] = neighborhoods[entity_id]
+                # Process results maintaining priority order
+                for entity_id in all_entity_ids_to_fetch:
+                    if entity_id in entities_map:
+                        entity = entities_map[entity_id]
+                        score = linked_scores.get(entity_id) or similar_scores.get(entity_id, 0.5)
+                        entities.append((entity, score))
 
-        # Get related chunks through entities - batch fetch to avoid N+1
-        chunks = []
+                        # Add neighborhood to context
+                        if entity_id in neighborhoods:
+                            graph_context[str(entity_id)] = neighborhoods[entity_id]
 
-        # Collect all unique chunk IDs with their associated entity/score info
-        chunk_ids_to_fetch: list[UUID] = []
-        chunk_id_to_info: dict[UUID, tuple[Any, float]] = {}
-        for entity, score in entities:
-            for chunk_id in entity.source_chunk_ids[:5]:
-                if chunk_id not in chunk_id_to_info:
-                    chunk_ids_to_fetch.append(chunk_id)
-                    chunk_id_to_info[chunk_id] = (entity, score)
+            # Get related chunks through entities - batch fetch to avoid N+1
+            chunks = []
 
-        # Batch fetch all chunks in a single query
-        if chunk_ids_to_fetch:
-            from khora._accel import batch_dot_product
+            # Collect all unique chunk IDs with their associated entity/score info
+            chunk_ids_to_fetch: list[UUID] = []
+            chunk_id_to_info: dict[UUID, tuple[Any, float]] = {}
+            for entity, score in entities:
+                for chunk_id in entity.source_chunk_ids[:5]:
+                    if chunk_id not in chunk_id_to_info:
+                        chunk_ids_to_fetch.append(chunk_id)
+                        chunk_id_to_info[chunk_id] = (entity, score)
 
-            chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch)
+            # Batch fetch all chunks in a single query
+            if chunk_ids_to_fetch:
+                from khora._accel import batch_dot_product
 
-            _min_graph_sim = 0.3
+                chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch)
 
-            # Separate chunks with/without embeddings for batch processing
-            if query_embedding is not None:
-                # Collect chunks that have embeddings for batch dot product
-                embeddable_ids: list[Any] = []
-                embeddable_embeddings: list[list[float]] = []
-                no_embedding_ids: list[Any] = []
+                _min_graph_sim = 0.3
 
-                for chunk_id, chunk in chunks_map.items():
-                    if chunk.embedding is not None:
-                        embeddable_ids.append(chunk_id)
-                        embeddable_embeddings.append(chunk.embedding)
-                    else:
-                        no_embedding_ids.append(chunk_id)
+                # Separate chunks with/without embeddings for batch processing
+                if query_embedding is not None:
+                    # Collect chunks that have embeddings for batch dot product
+                    embeddable_ids: list[Any] = []
+                    embeddable_embeddings: list[list[float]] = []
+                    no_embedding_ids: list[Any] = []
 
-                # Batch compute similarities for all chunks with embeddings
-                sim_results: dict[Any, float] = {}
-                if embeddable_embeddings:
-                    dot_scores = batch_dot_product(query_embedding, embeddable_embeddings, threshold=0.0)
-                    for idx, sim in dot_scores:
-                        sim_results[embeddable_ids[idx]] = sim
+                    for chunk_id, chunk in chunks_map.items():
+                        if chunk.embedding is not None:
+                            embeddable_ids.append(chunk_id)
+                            embeddable_embeddings.append(chunk.embedding)
+                        else:
+                            no_embedding_ids.append(chunk_id)
 
-                # Score chunks: blend query similarity with entity score
-                for chunk_id, chunk in chunks_map.items():
-                    entity, score = chunk_id_to_info[chunk_id]
-                    entity_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+                    # Batch compute similarities for all chunks with embeddings
+                    sim_results: dict[Any, float] = {}
+                    if embeddable_embeddings:
+                        dot_scores = batch_dot_product(query_embedding, embeddable_embeddings, threshold=0.0)
+                        for idx, sim in dot_scores:
+                            sim_results[embeddable_ids[idx]] = sim
 
-                    if chunk_id in sim_results:
-                        query_sim = sim_results[chunk_id]
-                        if query_sim < _min_graph_sim:
-                            continue
-                        # Blend: 60% query similarity + 40% entity score
-                        chunk_score = 0.6 * query_sim + 0.4 * entity_score
-                    else:
-                        # No embedding — fall back to entity score only
-                        chunk_score = entity_score
+                    # Score chunks: blend query similarity with entity score
+                    for chunk_id, chunk in chunks_map.items():
+                        entity, score = chunk_id_to_info[chunk_id]
+                        entity_score = score * (1 + 0.1 * min(entity.mention_count, 10))
 
-                    chunks.append((chunk, chunk_score))
-            else:
-                # No query embedding — use entity scores only
-                for chunk_id, chunk in chunks_map.items():
-                    entity, score = chunk_id_to_info[chunk_id]
-                    chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
-                    chunks.append((chunk, chunk_score))
+                        if chunk_id in sim_results:
+                            query_sim = sim_results[chunk_id]
+                            if query_sim < _min_graph_sim:
+                                continue
+                            # Blend: 60% query similarity + 40% entity score
+                            chunk_score = 0.6 * query_sim + 0.4 * entity_score
+                        else:
+                            # No embedding — fall back to entity score only
+                            chunk_score = entity_score
 
-        return {
-            "source": "graph",
-            "chunks": chunks,
-            "entities": entities,
-            "graph_context": graph_context,
-        }
+                        chunks.append((chunk, chunk_score))
+                else:
+                    # No query embedding — use entity scores only
+                    for chunk_id, chunk in chunks_map.items():
+                        entity, score = chunk_id_to_info[chunk_id]
+                        chunk_score = score * (1 + 0.1 * min(entity.mention_count, 10))
+                        chunks.append((chunk, chunk_score))
+
+            span.set_attribute("linked_entity_count", len(linked_entity_ids or []))
+            span.set_attribute("chunk_count", len(chunks))
+            span.set_attribute("entity_count", len(entities))
+
+            return {
+                "source": "graph",
+                "chunks": chunks,
+                "entities": entities,
+                "graph_context": graph_context,
+            }
 
     async def _keyword_search(
         self,
@@ -1768,6 +1781,11 @@ class HybridQueryEngine:
             "entities": [],
         }
 
+    @trace(
+        "khora.query.keyword_search_bm25",
+        include={"namespace_id"},
+        result=lambda r: {"result_count": len(r.get("chunks", []))},
+    )
     async def _keyword_search_bm25(
         self,
         namespace_id: UUID,
@@ -1842,6 +1860,11 @@ class HybridQueryEngine:
             logger.warning(f"Keyword search failed: {e}")
             return {"source": "keyword", "chunks": [], "entities": []}
 
+    @trace(
+        "khora.query.keyword_search_fulltext",
+        include={"namespace_id"},
+        result=lambda r: {"result_count": len(r.get("chunks", []))},
+    )
     async def _keyword_search_fulltext(
         self,
         namespace_id: UUID,
@@ -2770,41 +2793,44 @@ class HybridQueryEngine:
         if not config.enable_reranking or len(chunks) < 3:
             return chunks
 
-        try:
-            # Get or create reranker
-            if config.reranking_method not in self._rerankers:
-                self._rerankers[config.reranking_method] = create_reranker(
-                    method=config.reranking_method,
-                    model=config.reranking_model,
-                    llm_config=self._llm_config,
+        with trace_span("khora.query.rerank", candidate_count=len(chunks)) as span:
+            try:
+                # Get or create reranker
+                if config.reranking_method not in self._rerankers:
+                    self._rerankers[config.reranking_method] = create_reranker(
+                        method=config.reranking_method,
+                        model=config.reranking_model,
+                        llm_config=self._llm_config,
+                    )
+                reranker = self._rerankers[config.reranking_method]
+
+                # Limit candidates to stage4_rerank_limit
+                candidates_to_rerank = chunks[: config.stage4_rerank_limit]
+
+                candidates = [
+                    RerankCandidate(
+                        item=chunk,
+                        original_score=score,
+                        content=chunk.content,
+                        metadata=chunk.metadata,
+                    )
+                    for chunk, score in candidates_to_rerank
+                ]
+
+                # Rerank - use max_chunks as final limit
+                reranked = await reranker.rerank(
+                    query_text,
+                    candidates,
+                    top_k=config.max_chunks * 2,  # Keep extra for diversity stage
                 )
-            reranker = self._rerankers[config.reranking_method]
 
-            # Limit candidates to stage4_rerank_limit
-            candidates_to_rerank = chunks[: config.stage4_rerank_limit]
+                result = [(r.item, r.final_score) for r in reranked]
+                span.set_attribute("reranked_count", len(result))
+                return result
 
-            candidates = [
-                RerankCandidate(
-                    item=chunk,
-                    original_score=score,
-                    content=chunk.content,
-                    metadata=chunk.metadata,
-                )
-                for chunk, score in candidates_to_rerank
-            ]
-
-            # Rerank - use max_chunks as final limit
-            reranked = await reranker.rerank(
-                query_text,
-                candidates,
-                top_k=config.max_chunks * 2,  # Keep extra for diversity stage
-            )
-
-            return [(r.item, r.final_score) for r in reranked]
-
-        except Exception as e:
-            logger.warning(f"Stage 4 reranking failed: {e}")
-            return chunks
+            except Exception as e:
+                logger.warning(f"Stage 4 reranking failed: {e}")
+                return chunks
 
     def _stage5_diversity(
         self,
@@ -2900,6 +2926,11 @@ class HybridQueryEngine:
 
         return [chunks[i] for i in selected_indices]
 
+    @trace(
+        "khora.query.find_related_entities",
+        include={"entity_id", "max_depth"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def find_related_entities(
         self,
         entity_id: UUID,
