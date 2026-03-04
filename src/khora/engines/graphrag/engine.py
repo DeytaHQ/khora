@@ -262,6 +262,19 @@ class GraphRAGEngine:
                 metadata={"duplicate": True, "status": str(existing.status), "timings": timings},
             )
 
+        def _make_metadata() -> DocumentMetadata:
+            return DocumentMetadata(
+                title=title,
+                source=source,
+                source_type="api",
+                content_type="text/plain",
+                language="en",
+                author="",
+                checksum=checksum,
+                size_bytes=len(content.encode("utf-8")),
+                custom=metadata or {},
+            )
+
         # Source-based update detection: same source, different content
         document: Document | None = None
         if allow_update and source:
@@ -278,14 +291,7 @@ class GraphRAGEngine:
                 # Update existing document record with new content
                 start = time.perf_counter()
                 existing_by_source.content = content
-                existing_by_source.metadata = DocumentMetadata(
-                    title=title,
-                    source=source,
-                    source_type="api",
-                    checksum=checksum,
-                    size_bytes=len(content.encode("utf-8")),
-                    custom=metadata or {},
-                )
+                existing_by_source.metadata = _make_metadata()
                 existing_by_source.status = DocumentStatus.PENDING
                 existing_by_source.chunk_count = 0
                 existing_by_source.entity_count = 0
@@ -299,18 +305,10 @@ class GraphRAGEngine:
         # Create new document if not an update
         if document is None:
             start = time.perf_counter()
-            doc_metadata = DocumentMetadata(
-                title=title,
-                source=source,
-                source_type="api",
-                checksum=checksum,
-                size_bytes=len(content.encode("utf-8")),
-                custom=metadata or {},
-            )
             document = Document(
                 namespace_id=namespace_id,
                 content=content,
-                metadata=doc_metadata,
+                metadata=_make_metadata(),
             )
             document = await storage.create_document(document)
             timings["document_create_ms"] = (time.perf_counter() - start) * 1000
@@ -536,6 +534,7 @@ class GraphRAGEngine:
             chunks=result.get("total_chunks", 0),
             entities=result.get("total_entities", 0),
             relationships=result.get("total_relationships", 0) + result.get("total_inferred_relationships", 0),
+            updated=result.get("updated_documents", 0),
             metadata={"timings": timings},
         )
 

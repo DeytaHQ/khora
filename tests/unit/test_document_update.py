@@ -353,7 +353,7 @@ class TestStageDocumentsBatchUpdate:
             {"content": "new content", "source": "https://example.com/api"},
             {"content": "brand new", "source": ""},
         ]
-        results = await stage_documents_batch(docs, ns_id, storage)
+        results, updated_count = await stage_documents_batch(docs, ns_id, storage)
 
         assert len(results) == 2
         # First doc should be updated (not None)
@@ -361,6 +361,36 @@ class TestStageDocumentsBatchUpdate:
         storage.cleanup_document_references.assert_awaited_once()
         # Second doc should be created
         assert results[1] is not None
+        assert updated_count == 1
+
+    @pytest.mark.asyncio
+    async def test_batch_duplicate_source_skips_second(self) -> None:
+        """Two docs with same source in one batch: first updates, second is skipped."""
+        ns_id = uuid4()
+        old_doc = _make_document(
+            namespace_id=ns_id,
+            source="https://example.com/dup",
+            content="old",
+        )
+        storage = _make_storage_mock()
+        storage.get_documents_by_sources = AsyncMock(return_value={"https://example.com/dup": old_doc})
+
+        from khora.pipelines.flows.ingest import stage_documents_batch
+
+        docs = [
+            {"content": "new v1", "source": "https://example.com/dup"},
+            {"content": "new v2", "source": "https://example.com/dup"},
+        ]
+        results, updated_count = await stage_documents_batch(docs, ns_id, storage)
+
+        assert len(results) == 2
+        # First doc triggers update
+        assert results[0] is not None
+        # Second doc with same source is skipped
+        assert results[1] is None
+        # Cleanup runs exactly once (not twice)
+        storage.cleanup_document_references.assert_awaited_once()
+        assert updated_count == 1
 
 
 # ===========================================================================

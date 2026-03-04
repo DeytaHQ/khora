@@ -667,7 +667,7 @@ async def stage_documents_batch(
     storage: StorageCoordinator,
     *,
     allow_update: bool = True,
-) -> list[Document | None]:
+) -> tuple[list[Document | None], int]:
     """Batch stage documents with single-query checksum dedup.
 
     Computes all checksums upfront and checks for existing documents
@@ -675,14 +675,15 @@ async def stage_documents_batch(
     When allow_update is True, detects source-based updates in batch.
 
     Returns:
-        List parallel to doc_inputs: Document if new/updated, None if unchanged
+        Tuple of (results list parallel to doc_inputs, count of updated documents).
+        Each result is Document if new/updated, None if unchanged/skipped.
     """
     from datetime import UTC, datetime
 
     from khora.core.models import Document
 
     if not doc_inputs:
-        return []
+        return [], 0
 
     # Compute all checksums upfront
     checksums = [compute_checksum(doc.get("content", "")) for doc in doc_inputs]
@@ -699,6 +700,8 @@ async def stage_documents_batch(
             source_matches = await storage.get_documents_by_sources(namespace_id, non_deduped_sources)
 
     results: list[Document | None] = []
+    updated_count = 0
+    processed_sources: set[str] = set()
     for doc_input, checksum in zip(doc_inputs, checksums):
         if checksum in existing:
             logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing[checksum].status})")
@@ -709,8 +712,15 @@ async def stage_documents_batch(
         source = doc_input.get("source", "")
         custom_metadata = doc_input.get("metadata", {})
 
+        # Duplicate source in same batch — skip
+        if allow_update and source and source in source_matches and source in processed_sources:
+            logger.warning(f"Duplicate source {source!r} in batch, skipping (already updated)")
+            results.append(None)
+            continue
+
         # Source-based update detection
         if allow_update and source and source in source_matches:
+            processed_sources.add(source)
             existing_doc = source_matches[source]
             await storage.cleanup_document_references(existing_doc.id, namespace_id)
 
@@ -727,6 +737,7 @@ async def stage_documents_batch(
             logger.info(f"Updating document {existing_doc.id} (source={source!r})")
             doc = await storage.update_document(existing_doc)
             results.append(doc)
+            updated_count += 1
             continue
 
         metadata = _build_document_metadata(doc_input, checksum)
@@ -746,7 +757,7 @@ async def stage_documents_batch(
         doc = await storage.create_document(document)
         results.append(doc)
 
-    return results
+    return results, updated_count
 
 
 async def process_document(
@@ -1317,7 +1328,9 @@ async def ingest_documents(
     # Single batch query replaces N individual get_document_by_checksum calls.
     # Source-based update detection is included when allow_update is True.
     allow_update = kwargs.get("allow_update", True)
-    staged_results = await stage_documents_batch(documents, namespace_id, storage, allow_update=allow_update)
+    staged_results, updated_documents = await stage_documents_batch(
+        documents, namespace_id, storage, allow_update=allow_update
+    )
     staged_docs = [doc for doc in staged_results if doc is not None]
 
     # Build mapping from staged doc ID to original dict for per-doc overrides
@@ -1334,6 +1347,7 @@ async def ingest_documents(
             "total_documents": len(documents),
             "processed_documents": 0,
             "skipped_documents": len(documents),
+            "updated_documents": 0,
             "total_chunks": 0,
             "total_entities": 0,
             "total_relationships": 0,
@@ -1425,6 +1439,7 @@ async def ingest_documents(
         "processed_documents": len(successful_results),
         "skipped_documents": len(documents) - len(staged_docs),
         "failed_documents": error_count,
+        "updated_documents": updated_documents,
         "total_chunks": total_chunks,
         "total_entities": total_entities,
         "total_relationships": total_relationships,
