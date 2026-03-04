@@ -445,16 +445,6 @@ class KhoraConfig(BaseSettings):
         description="Enable authentication (set to False for local development)",
     )
 
-    # API settings
-    api_host: str = Field(
-        default="127.0.0.1",
-        description="API server host",
-    )
-    api_port: int = Field(
-        default=8000,
-        description="API server port",
-    )
-
     # Database for Khora internal state (shortcuts for storage.* URLs)
     # These can be set via KHORA_DATABASE_URL and KHORA_NEO4J_URL environment variables
     # Programmatic values take priority over environment variables

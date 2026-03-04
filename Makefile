@@ -67,10 +67,6 @@ dev:
 dev-down:
 	docker compose down
 
-# Start API server with hot-reload
-serve:
-	uv run khora serve --reload --no-auth
-
 # Run tests with coverage
 test:
 	uv run pytest --cov=src/khora --cov-branch --cov-report=term-missing --cov-fail-under=30

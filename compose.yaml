@@ -1,7 +1,7 @@
 # Khora Development Infrastructure
 #
 # Provides PostgreSQL (with pgvector) and Neo4j for local development.
-# Run your app outside Docker with: uv run khora serve --reload
+# Use khora as a Python library after starting these databases.
 #
 # Usage:
 #   docker compose up -d              # Start databases

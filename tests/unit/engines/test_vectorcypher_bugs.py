@@ -49,8 +49,6 @@ class TestPipelineAttributeName:
             app_name="khora-test",
             environment="test",
             debug=True,
-            api_host="127.0.0.1",
-            api_port=8000,
             auth_enabled=False,
         )
 
@@ -69,8 +67,6 @@ class TestPipelineAttributeName:
             app_name="khora-test",
             environment="test",
             debug=True,
-            api_host="127.0.0.1",
-            api_port=8000,
             auth_enabled=False,
         )
 

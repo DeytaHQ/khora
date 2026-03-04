@@ -7,7 +7,6 @@ from pathlib import Path
 import click
 
 from ..logging_config import setup_logging
-from .server import serve
 
 
 @click.group()
@@ -30,19 +29,11 @@ from .server import serve
 )
 @click.pass_context
 def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | None) -> None:
-    """Khora - Deyta's memory lake and materialization of knowledge.
-
-    Commands:
-    - serve: Start the FastAPI server for API access
-    """
+    """Khora - Deyta's memory lake and materialization of knowledge."""
     setup_logging(level=log_level.upper(), json_logs=json_logs, log_file=log_file)
     ctx.ensure_object(dict)
     ctx.obj["log_level"] = log_level
     ctx.obj["json_logs"] = json_logs
-
-
-# Register commands
-cli.add_command(serve)
 
 
 def main() -> None:

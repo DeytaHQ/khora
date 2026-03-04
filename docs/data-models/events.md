@@ -100,7 +100,7 @@ class EventType(str, Enum):
 |------------|-------------|---------|
 | `system` | Internal system operations | Background cleanup |
 | `user` | User-initiated via UI | Manual document upload |
-| `api` | API call | REST API remember call |
+| `api` | Programmatic API call | `lake.remember()` from application code |
 | `pipeline` | Prefect pipeline | Ingestion pipeline |
 
 ## Factory Methods
