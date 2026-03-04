@@ -7,7 +7,7 @@
 #   make dev               # Start development environment
 #   make test              # Run tests with coverage
 
-.PHONY: help dev dev-down serve test lint format typecheck prek clean \
+.PHONY: help dev dev-down test lint format typecheck prek clean \
         rust-build rust-dev rust-test rust-bench rust-clean \
         docker-run docker-down docker-clean
 
@@ -19,7 +19,6 @@ help:
 	@echo "Development:"
 	@echo "  make dev              Start databases (postgres + neo4j)"
 	@echo "  make dev-down         Stop databases"
-	@echo "  make serve            Start API with hot-reload (requires databases)"
 	@echo "  make test             Run tests with coverage"
 	@echo "  make lint             Run linting (ruff, black, isort, ty)"
 	@echo "  make typecheck        Run type checking (ty)"
@@ -35,7 +34,7 @@ help:
 	@echo "  make rust-clean       Clean Rust build artifacts"
 	@echo ""
 	@echo "Docker:"
-	@echo "  make docker-run       Run full stack (api + databases)"
+	@echo "  make docker-run       Run full stack (databases)"
 	@echo "  make docker-down      Stop full stack"
 	@echo "  make docker-clean     Remove images and volumes"
 	@echo ""
@@ -61,7 +60,7 @@ dev:
 	@echo "Add to .env:"
 	@echo "  KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5434/khora"
 	@echo ""
-	@echo "Start API: make serve"
+	@echo "Run migrations: uv run alembic upgrade head"
 
 # Stop local development databases
 dev-down:
