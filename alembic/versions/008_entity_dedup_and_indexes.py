@@ -161,7 +161,9 @@ def upgrade() -> None:
         text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'khora_chunks')")
     ).scalar()
     if has_khora_chunks:
-        op.execute(text("CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_doc " "ON khora_chunks (namespace_id, document_id)"))
+        op.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_doc " "ON khora_chunks (namespace_id, document_id)")
+        )
 
     # =========================================================================
     # 5.5: Entity temporal partial indexes
