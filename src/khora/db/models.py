@@ -177,7 +177,12 @@ class DocumentModel(Base):
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
-        Enum(DocumentStatus, name="document_status", create_constraint=True),
+        Enum(
+            DocumentStatus,
+            name="document_status",
+            create_constraint=True,
+            values_callable=lambda e: [m.value for m in e],
+        ),
         default=DocumentStatus.PENDING,
         index=True,
     )
@@ -461,7 +466,7 @@ class MemoryEventModel(Base):
         UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     event_type: Mapped[str] = mapped_column(
-        Enum(EventType, name="event_type", create_constraint=True),
+        Enum(EventType, name="event_type", create_constraint=True, values_callable=lambda e: [m.value for m in e]),
         nullable=False,
         index=True,
     )
