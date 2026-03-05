@@ -60,7 +60,7 @@ class OrganizationModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     tenancy_mode: Mapped[str] = mapped_column(
-        Enum(TenancyMode, name="tenancy_mode", create_constraint=True),
+        Enum(TenancyMode, name="tenancy_mode", create_constraint=True, values_callable=lambda e: [m.value for m in e]),
         default=TenancyMode.SHARED,
     )
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
