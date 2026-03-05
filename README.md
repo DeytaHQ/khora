@@ -21,7 +21,7 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 
 ### Key Features
 
-- **Library-First Design**: Use as a Python library or deploy as a FastAPI service
+- **Library-First Design**: Use as a Python library with a simple `remember()`/`recall()`/`forget()` API
 - **Pluggable Engines**: Choose GraphRAG, VectorCypher, or Skeleton
 - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
 - **Multi-Tenancy**: Namespace-level isolation (shared mode with ACLs designed but not yet active — see `docs/design/namespace-optimization-plan.md`)
@@ -367,91 +367,6 @@ async with MemoryLake() as lake:
     print(f"Documents: {stats.documents}, Entities: {stats.entities}")
 ```
 
-### As a Service
-
-```bash
-# Start the API server
-uv run khora serve --reload
-```
-
-#### API Endpoints
-
-**Memory Operations:**
-```bash
-# Store a memory
-curl -X POST http://localhost:8100/memory/remember \
-  -H "Content-Type: application/json" \
-  -d '{
-    "content": "Einstein developed relativity in 1905.",
-    "title": "Physics History",
-    "skill_name": "general_entities"
-  }'
-
-# Recall memories
-curl -X POST http://localhost:8100/memory/recall \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "Who developed relativity?",
-    "limit": 10,
-    "mode": "hybrid"
-  }'
-
-# Get a document
-curl http://localhost:8100/memory/documents/{document_id}
-
-# List entities
-curl "http://localhost:8100/memory/entities?entity_type=PERSON&limit=50"
-
-# Get related entities
-curl "http://localhost:8100/memory/entities/{entity_id}/related?max_depth=2"
-
-# Forget a memory
-curl -X DELETE http://localhost:8100/memory/forget \
-  -H "Content-Type: application/json" \
-  -d '{"document_id": "uuid-here"}'
-```
-
-**Namespace Management:**
-```bash
-# Create organization
-curl -X POST http://localhost:8100/namespaces/organizations \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Acme Corp", "slug": "acme"}'
-
-# Create workspace
-curl -X POST http://localhost:8100/namespaces/workspaces \
-  -H "Content-Type: application/json" \
-  -d '{"organization_id": "org-uuid", "name": "Research"}'
-
-# Create namespace
-curl -X POST http://localhost:8100/namespaces/ \
-  -H "Content-Type: application/json" \
-  -d '{"workspace_id": "ws-uuid", "name": "Physics"}'
-```
-
-**Sync & Pipelines:**
-```bash
-# Ingest documents
-curl -X POST http://localhost:8100/sync/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "namespace_id": "ns-uuid",
-    "documents": [{"content": "Document text..."}],
-    "skill_name": "general_entities"
-  }'
-
-# List available pipelines
-curl http://localhost:8100/sync/pipelines
-```
-
-**Health Checks:**
-```bash
-curl http://localhost:8100/status        # Service status
-curl http://localhost:8100/health        # Health check
-curl http://localhost:8100/health/ready  # Readiness probe
-curl http://localhost:8100/health/live   # Liveness probe
-```
-
 ---
 
 ## Architecture
@@ -459,7 +374,7 @@ curl http://localhost:8100/health/live   # Liveness probe
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                              MemoryLake API                                  │
-│                         (Library + FastAPI Service)                          │
+│                          (Python Library)                                    │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   │
@@ -529,8 +444,6 @@ curl http://localhost:8100/health/live   # Liveness probe
 | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
 | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
 | `KHORA_DEBUG` | Enable debug mode | `false` |
-| `KHORA_API_HOST` | API server host | `127.0.0.1` |
-| `KHORA_API_PORT` | API server port | `8100` |
 | `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
 | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
 | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
@@ -593,14 +506,6 @@ khora/
 ├── src/khora/
 │   ├── __init__.py              # Package exports
 │   ├── memory_lake.py           # Primary MemoryLake class
-│   ├── api/                     # FastAPI application
-│   │   ├── app.py               # App factory with lifespan
-│   │   ├── deps.py              # Dependency injection
-│   │   └── routes/              # API endpoints
-│   │       ├── memory.py        # Remember/recall/forget
-│   │       ├── namespaces.py    # Multi-tenancy management
-│   │       ├── sync.py          # Ingestion pipelines
-│   │       └── status.py        # Health checks
 │   ├── acl/                     # Access control
 │   │   ├── checker.py           # Permission checking
 │   │   └── enforcer.py          # Cross-layer enforcement
@@ -655,9 +560,6 @@ khora/
 ### Commands
 
 ```bash
-# Start development server
-uv run khora serve --reload --no-auth
-
 # Run tests with coverage
 make test
 
@@ -697,7 +599,7 @@ uv run alembic downgrade -1
 make test
 
 # Run specific test file
-uv run pytest tests/unit/test_api.py -v
+uv run pytest tests/unit/test_memory_lake.py -v
 
 # Run with markers
 uv run pytest -m unit        # Unit tests only

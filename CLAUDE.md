@@ -9,7 +9,6 @@ make test              # Run tests (pytest, coverage ≥30%)
 make format            # Format code (black, isort, ruff)
 make lint              # Lint + typecheck (ruff, ty)
 make dev               # Start local databases (postgres + neo4j)
-uv run khora serve --reload  # Dev server
 uv run alembic upgrade head  # Run migrations
 ```
 

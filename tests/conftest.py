@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Generator
 
 import pytest
-from fastapi.testclient import TestClient
 
 from khora.config import KhoraConfig
 
@@ -26,16 +25,5 @@ def test_config() -> KhoraConfig:
         app_name="khora-test",
         environment="test",
         debug=True,
-        api_host="127.0.0.1",
-        api_port=8000,
         auth_enabled=False,  # Disable authentication for tests
     )
-
-
-@pytest.fixture
-def test_client(test_config: KhoraConfig) -> TestClient:
-    """Create a test client for the FastAPI app."""
-    from khora.api.app import create_app
-
-    app = create_app(test_config)
-    return TestClient(app)

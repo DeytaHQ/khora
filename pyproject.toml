@@ -12,10 +12,6 @@ dependencies = [
     "pydantic-settings>=2.13.1",
     "pyyaml>=6.0.3",
     "jinja2>=3.1.6",
-    # FastAPI service
-    "fastapi>=0.133.1",
-    "uvicorn[standard]>=0.41.0",
-    "httpx>=0.28.1",
     # CLI
     "click>=8.3.1",
     # Async support
@@ -167,7 +163,7 @@ extra-paths = ["src"]
 
 [tool.ty.rules]
 # Suppress noisy rules to start green; tighten incrementally
-invalid-argument-type = "ignore"       # 58 errors, mostly third-party stubs (FastAPI/Starlette/SQLAlchemy)
+invalid-argument-type = "ignore"       # third-party stubs (SQLAlchemy, etc.)
 invalid-method-override = "ignore"     # 4 errors, str(Enum) LSP violations in Permission
 possibly-missing-attribute = "ignore"  # 10 warnings, protocol/union narrowing gaps
 unsupported-operator = "ignore"        # 7 errors, dict typed as dict[str, Any] += int
