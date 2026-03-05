@@ -26,6 +26,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Drop column defaults that reference the enum types before converting,
+    # otherwise PostgreSQL refuses to DROP TYPE due to dependent defaults.
+    op.execute("ALTER TABLE entities ALTER COLUMN entity_type DROP DEFAULT")
+    op.execute("ALTER TABLE relationships ALTER COLUMN relationship_type DROP DEFAULT")
+
     # Convert entity_type from enum to varchar
     op.execute("""
         ALTER TABLE entities
