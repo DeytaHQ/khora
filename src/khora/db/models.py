@@ -1,7 +1,7 @@
 """SQLAlchemy models for Khora Memory Lake.
 
 This module defines the complete database schema including:
-- Multi-tenancy (organizations, workspaces, namespaces)
+- Multi-tenancy (namespaces)
 - Documents and chunks with vector embeddings
 - Entities, relationships, and episodes
 - Event sourcing log
@@ -51,61 +51,10 @@ class Base(DeclarativeBase):
 # =============================================================================
 
 
-class OrganizationModel(Base):
-    """Organization - top-level tenant."""
-
-    __tablename__ = "organizations"
-
-    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
-    tenancy_mode: Mapped[str] = mapped_column(
-        Enum(TenancyMode, name="tenancy_mode", create_constraint=True, values_callable=lambda e: [m.value for m in e]),
-        default=TenancyMode.SHARED,
-    )
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-    )
-
-    # Relationships
-    workspaces: Mapped[list[WorkspaceModel]] = relationship("WorkspaceModel", back_populates="organization")
-
-    def __repr__(self) -> str:
-        return f"<Organization(id={self.id!r}, name={self.name!r})>"
-
-
-class WorkspaceModel(Base):
-    """Workspace within an organization."""
-
-    __tablename__ = "workspaces"
-
-    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    organization_id: Mapped[UUIDType] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    description: Mapped[str] = mapped_column(Text, default="")
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
-    )
-
-    # Relationships
-    organization: Mapped[OrganizationModel] = relationship("OrganizationModel", back_populates="workspaces")
-    namespaces: Mapped[list[MemoryNamespaceModel]] = relationship("MemoryNamespaceModel", back_populates="workspace")
-
-    __table_args__ = (UniqueConstraint("organization_id", "slug", name="uq_workspace_org_slug"),)
-
-    def __repr__(self) -> str:
-        return f"<Workspace(id={self.id!r}, name={self.name!r})>"
-
-
 class MemoryNamespaceModel(Base):
     """Memory namespace for isolating memories.
+
+    Namespace is the sole data isolation boundary.
 
     Supports versioning for data replacement workflows:
     - version: Incremental version number (starts at 1)
@@ -116,12 +65,13 @@ class MemoryNamespaceModel(Base):
     __tablename__ = "memory_namespaces"
 
     id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    workspace_id: Mapped[UUIDType] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
-    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
+    tenancy_mode: Mapped[str] = mapped_column(
+        Enum(TenancyMode, name="tenancy_mode", create_constraint=True, values_callable=lambda e: [m.value for m in e]),
+        default=TenancyMode.SHARED,
+    )
 
     # Versioning fields
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -139,7 +89,6 @@ class MemoryNamespaceModel(Base):
     )
 
     # Relationships
-    workspace: Mapped[WorkspaceModel] = relationship("WorkspaceModel", back_populates="namespaces")
     documents: Mapped[list[DocumentModel]] = relationship("DocumentModel", back_populates="namespace")
     chunks: Mapped[list[ChunkModel]] = relationship("ChunkModel", back_populates="namespace")
     entities: Mapped[list[EntityModel]] = relationship("EntityModel", back_populates="namespace")
@@ -151,10 +100,10 @@ class MemoryNamespaceModel(Base):
     )
 
     __table_args__ = (
-        # Only one active namespace per workspace/slug combination
-        UniqueConstraint("workspace_id", "slug", "version", name="uq_namespace_workspace_slug_version"),
+        # Slugs are globally unique per version
+        UniqueConstraint("slug", "version", name="uq_namespace_slug_version"),
         # Partial index for efficient active namespace queries
-        Index("idx_namespace_active", "workspace_id", "slug", postgresql_where="is_active = true"),
+        Index("idx_namespace_slug_active", "slug", "version", postgresql_where="is_active = true"),
     )
 
     def __repr__(self) -> str:
@@ -516,17 +465,11 @@ class PermissionModel(Base):
     principal_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # The resource (what the permission applies to)
-    resource_type: Mapped[str] = mapped_column(
-        String(64), nullable=False, index=True
-    )  # organization, workspace, namespace
+    resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # namespace
     resource_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
 
     # The permission level
     permission: Mapped[str] = mapped_column(String(64), nullable=False)  # read, write, admin, owner
-
-    # Inheritance
-    inherited_from_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    inherited_from_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

@@ -9,7 +9,7 @@ from khora.core.models import Chunk, Document, Entity, Relationship
 from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
 from khora.core.models.entity import EntityType, Episode, RelationshipType
 from khora.core.models.event import EventType, MemoryEvent
-from khora.core.models.tenancy import MemoryNamespace, Organization, TenancyMode, Workspace
+from khora.core.models.tenancy import MemoryNamespace, TenancyMode
 
 
 class TestDocument:
@@ -375,88 +375,53 @@ class TestMemoryEvent:
 
 
 class TestTenancyModels:
-    """Tests for tenancy models (Organization, Workspace, MemoryNamespace)."""
-
-    def test_create_organization(self) -> None:
-        """Test organization creation."""
-        org = Organization(name="Acme Inc", slug="acme")
-        assert org.name == "Acme Inc"
-        assert org.slug == "acme"
-
-    def test_organization_auto_slug(self) -> None:
-        """Test organization auto-generates slug from name."""
-        org = Organization(name="Test Organization")
-        assert org.slug == "test-organization"
-
-    def test_organization_tenancy_mode(self) -> None:
-        """Test organization tenancy mode."""
-        org = Organization(name="Test", tenancy_mode=TenancyMode.ISOLATED)
-        assert org.tenancy_mode == TenancyMode.ISOLATED
-
-    def test_organization_with_metadata(self) -> None:
-        """Test organization with metadata."""
-        org = Organization(
-            name="Test Org",
-            slug="test",
-            metadata={"feature_x": True},
-        )
-        assert org.metadata["feature_x"] is True
-
-    def test_create_workspace(self) -> None:
-        """Test workspace creation."""
-        org_id = uuid4()
-        ws = Workspace(organization_id=org_id, name="Engineering", slug="engineering")
-        assert ws.name == "Engineering"
-        assert ws.organization_id == org_id
-
-    def test_workspace_auto_slug(self) -> None:
-        """Test workspace auto-generates slug from name."""
-        ws = Workspace(organization_id=uuid4(), name="My Workspace")
-        assert ws.slug == "my-workspace"
-
-    def test_workspace_with_description(self) -> None:
-        """Test workspace with description."""
-        ws = Workspace(
-            organization_id=uuid4(),
-            name="Sales",
-            slug="sales",
-            description="Sales team workspace",
-        )
-        assert ws.description == "Sales team workspace"
+    """Tests for tenancy models (MemoryNamespace)."""
 
     def test_create_namespace(self) -> None:
-        """Test namespace creation."""
-        ws_id = uuid4()
-        ns = MemoryNamespace(workspace_id=ws_id, name="Project Alpha", slug="project-alpha")
+        """Test namespace creation without workspace_id."""
+        ns = MemoryNamespace(name="Project Alpha", slug="project-alpha")
         assert ns.name == "Project Alpha"
-        assert ns.workspace_id == ws_id
+        assert ns.slug == "project-alpha"
+        assert ns.id is not None
 
     def test_namespace_auto_slug(self) -> None:
         """Test namespace auto-generates slug from name."""
-        ns = MemoryNamespace(workspace_id=uuid4(), name="My Project")
+        ns = MemoryNamespace(name="My Project")
         assert ns.slug == "my-project"
 
     def test_namespace_with_config(self) -> None:
         """Test namespace with configuration overrides."""
         ns = MemoryNamespace(
-            workspace_id=uuid4(),
             name="Test",
             slug="test",
             config_overrides={"extraction_skill": "technical_docs"},
         )
         assert ns.config_overrides["extraction_skill"] == "technical_docs"
 
-    def test_namespace_full_path(self) -> None:
-        """Test namespace full path property."""
-        ws_id = uuid4()
-        ns = MemoryNamespace(workspace_id=ws_id, name="Test", slug="test-ns")
-        assert ns.full_path == f"{ws_id}/test-ns"
-
     def test_namespace_sync_checkpoints(self) -> None:
         """Test namespace sync checkpoints."""
         ns = MemoryNamespace(
-            workspace_id=uuid4(),
             name="Test",
             sync_checkpoints={"source1": "checkpoint123"},
         )
         assert ns.sync_checkpoints["source1"] == "checkpoint123"
+
+    def test_namespace_tenancy_mode_defaults_to_shared(self) -> None:
+        """Test that MemoryNamespace.tenancy_mode defaults to SHARED."""
+        ns = MemoryNamespace(name="Test")
+        assert ns.tenancy_mode == TenancyMode.SHARED
+
+    def test_namespace_tenancy_mode_isolated(self) -> None:
+        """Test that MemoryNamespace.tenancy_mode can be set to ISOLATED."""
+        ns = MemoryNamespace(name="Test", tenancy_mode=TenancyMode.ISOLATED)
+        assert ns.tenancy_mode == TenancyMode.ISOLATED
+
+    def test_namespace_no_workspace_id_attribute(self) -> None:
+        """Test that MemoryNamespace no longer has workspace_id."""
+        ns = MemoryNamespace(name="Test")
+        assert not hasattr(ns, "workspace_id")
+
+    def test_namespace_no_full_path_attribute(self) -> None:
+        """Test that MemoryNamespace no longer has full_path."""
+        ns = MemoryNamespace(name="Test")
+        assert not hasattr(ns, "full_path")

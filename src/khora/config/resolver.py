@@ -1,6 +1,6 @@
-"""Hierarchical configuration resolver for Khora Memory Lake.
+"""Configuration resolver for Khora Memory Lake.
 
-Resolves configuration values with inheritance from namespace -> workspace -> organization -> global.
+Resolves configuration values with 2-tier inheritance: global defaults -> namespace overrides.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from uuid import UUID
 from loguru import logger
 
 if TYPE_CHECKING:
-    from khora.core.models import MemoryNamespace, Organization, Workspace
+    from khora.core.models import MemoryNamespace
     from khora.storage import StorageCoordinator
 
 
@@ -33,13 +33,11 @@ class ResolvedConfig:
 
 
 class ConfigResolver:
-    """Resolves configuration with hierarchical inheritance.
+    """Resolves configuration with 2-tier inheritance.
 
     Configuration inheritance order (highest to lowest priority):
     1. Namespace config_overrides
-    2. Workspace metadata config
-    3. Organization metadata config
-    4. Global application config
+    2. Global application config
     """
 
     def __init__(
@@ -50,7 +48,7 @@ class ConfigResolver:
         """Initialize the config resolver.
 
         Args:
-            storage: StorageCoordinator for fetching hierarchy
+            storage: StorageCoordinator for fetching namespace
             global_config: Global application configuration
         """
         self._storage = storage
@@ -80,29 +78,17 @@ class ConfigResolver:
             logger.warning(f"Namespace {namespace_id} not found")
             return ResolvedConfig(values=dict(self._global_config), sources={k: "global" for k in self._global_config})
 
-        # Fetch workspace
-        workspace = await self._storage.get_workspace(namespace.workspace_id)
-
-        # Fetch organization if workspace exists
-        organization = None
-        if workspace:
-            organization = await self._storage.get_organization(workspace.organization_id)
-
         return self._merge_configs(
             namespace=namespace,
-            workspace=workspace,
-            organization=organization,
             keys=keys,
         )
 
     def _merge_configs(
         self,
         namespace: MemoryNamespace | None,
-        workspace: Workspace | None,
-        organization: Organization | None,
         keys: list[str] | None,
     ) -> ResolvedConfig:
-        """Merge configurations from all levels."""
+        """Merge configurations from global and namespace levels."""
         result = ResolvedConfig()
 
         # Start with global config
@@ -110,22 +96,6 @@ class ConfigResolver:
             if keys is None or key in keys:
                 result.values[key] = value
                 result.sources[key] = "global"
-
-        # Apply organization config
-        if organization and organization.metadata:
-            config = organization.metadata.get("config", {})
-            for key, value in config.items():
-                if keys is None or key in keys:
-                    result.values[key] = value
-                    result.sources[key] = "organization"
-
-        # Apply workspace config
-        if workspace and workspace.metadata:
-            config = workspace.metadata.get("config", {})
-            for key, value in config.items():
-                if keys is None or key in keys:
-                    result.values[key] = value
-                    result.sources[key] = "workspace"
 
         # Apply namespace config (highest priority)
         if namespace and namespace.config_overrides:
@@ -139,8 +109,6 @@ class ConfigResolver:
     def resolve_immediate(
         self,
         global_config: dict[str, Any] | None = None,
-        organization_config: dict[str, Any] | None = None,
-        workspace_config: dict[str, Any] | None = None,
         namespace_config: dict[str, Any] | None = None,
     ) -> ResolvedConfig:
         """Resolve configuration from provided values (no storage lookup).
@@ -149,8 +117,6 @@ class ConfigResolver:
 
         Args:
             global_config: Global configuration
-            organization_config: Organization-level config
-            workspace_config: Workspace-level config
             namespace_config: Namespace-level config
 
         Returns:
@@ -161,8 +127,6 @@ class ConfigResolver:
         # Apply in order of priority (lowest to highest)
         for config, source in [
             (global_config or self._global_config, "global"),
-            (organization_config or {}, "organization"),
-            (workspace_config or {}, "workspace"),
             (namespace_config or {}, "namespace"),
         ]:
             for key, value in config.items():

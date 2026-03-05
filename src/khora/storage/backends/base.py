@@ -19,9 +19,7 @@ if TYPE_CHECKING:
         Episode,
         MemoryEvent,
         MemoryNamespace,
-        Organization,
         Relationship,
-        Workspace,
     )
 
 
@@ -47,38 +45,6 @@ class RelationalBackendProtocol(Protocol):
         """Check if the backend is healthy and connected."""
         ...
 
-    # Organization operations
-    @abstractmethod
-    async def create_organization(self, org: Organization) -> Organization:
-        """Create a new organization."""
-        ...
-
-    @abstractmethod
-    async def get_organization(self, org_id: UUID) -> Organization | None:
-        """Get an organization by ID."""
-        ...
-
-    @abstractmethod
-    async def get_organization_by_slug(self, slug: str) -> Organization | None:
-        """Get an organization by slug."""
-        ...
-
-    # Workspace operations
-    @abstractmethod
-    async def create_workspace(self, workspace: Workspace) -> Workspace:
-        """Create a new workspace."""
-        ...
-
-    @abstractmethod
-    async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
-        """Get a workspace by ID."""
-        ...
-
-    @abstractmethod
-    async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
-        """List all workspaces in an organization."""
-        ...
-
     # Namespace operations
     @abstractmethod
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
@@ -91,13 +57,15 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_namespace_by_slug(self, workspace_id: UUID, slug: str) -> MemoryNamespace | None:
-        """Get a namespace by workspace ID and slug."""
+    async def get_namespace_by_slug(self, slug: str, *, active_only: bool = True) -> MemoryNamespace | None:
+        """Get a namespace by slug (globally unique)."""
         ...
 
     @abstractmethod
-    async def list_namespaces(self, workspace_id: UUID) -> list[MemoryNamespace]:
-        """List all namespaces in a workspace."""
+    async def list_namespaces(
+        self, *, active_only: bool = True, limit: int = 100, offset: int = 0
+    ) -> list[MemoryNamespace]:
+        """List namespaces with pagination."""
         ...
 
     @abstractmethod
@@ -108,7 +76,6 @@ class RelationalBackendProtocol(Protocol):
     @abstractmethod
     async def create_namespace_version(
         self,
-        workspace_id: UUID,
         slug: str,
         *,
         previous_version: MemoryNamespace | None = None,
@@ -116,7 +83,6 @@ class RelationalBackendProtocol(Protocol):
         """Create a new version of a namespace.
 
         Args:
-            workspace_id: Workspace ID
             slug: Namespace slug
             previous_version: The previous version to supersede (if any)
 

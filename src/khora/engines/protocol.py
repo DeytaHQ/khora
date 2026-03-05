@@ -151,7 +151,6 @@ class MemoryEngineProtocol(Protocol):
     async def create_namespace(
         self,
         name: str,
-        workspace_id: UUID,
         *,
         description: str = "",
         config_overrides: dict[str, Any] | None = None,
@@ -160,7 +159,6 @@ class MemoryEngineProtocol(Protocol):
 
         Args:
             name: Namespace name
-            workspace_id: Parent workspace ID
             description: Optional description
             config_overrides: Optional configuration overrides
 
@@ -188,7 +186,7 @@ class MemoryEngineProtocol(Protocol):
     ) -> UUID:
         """Get or create a namespace by name.
 
-        Creates the default organization and workspace if they don't exist.
+        Creates the namespace if it doesn't exist.
 
         Args:
             name: Namespace name (will be slugified)

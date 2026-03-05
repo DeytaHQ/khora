@@ -14,15 +14,13 @@ from loguru import logger
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from khora.core.models import Document, DocumentMetadata, MemoryNamespace, Organization, TenancyMode, Workspace
+from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentStatus
 from khora.db.models import (
     Base,
     DocumentModel,
     MemoryNamespaceModel,
-    OrganizationModel,
     SyncCheckpointModel,
-    WorkspaceModel,
 )
 from khora.storage.backends.mixins import AsyncSessionMixin, retry_on_deadlock
 
@@ -119,103 +117,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
             await conn.run_sync(Base.metadata.create_all)
 
     # =========================================================================
-    # Organization operations
-    # =========================================================================
-
-    async def create_organization(self, org: Organization) -> Organization:
-        """Create a new organization."""
-        async with self._get_session() as session:
-            model = OrganizationModel(
-                id=org.id,
-                name=org.name,
-                slug=org.slug,
-                tenancy_mode=org.tenancy_mode,
-                metadata_=org.metadata,
-                created_at=org.created_at,
-                updated_at=org.updated_at,
-            )
-            session.add(model)
-            await session.commit()
-            await session.refresh(model)
-            return self._org_model_to_domain(model)
-
-    async def get_organization(self, org_id: UUID) -> Organization | None:
-        """Get an organization by ID."""
-        async with self._get_session() as session:
-            result = await session.execute(select(OrganizationModel).where(OrganizationModel.id == org_id))
-            model = result.scalar_one_or_none()
-            return self._org_model_to_domain(model) if model else None
-
-    async def get_organization_by_slug(self, slug: str) -> Organization | None:
-        """Get an organization by slug."""
-        async with self._get_session() as session:
-            result = await session.execute(select(OrganizationModel).where(OrganizationModel.slug == slug))
-            model = result.scalar_one_or_none()
-            return self._org_model_to_domain(model) if model else None
-
-    def _org_model_to_domain(self, model: OrganizationModel) -> Organization:
-        """Convert OrganizationModel to domain Organization."""
-        return Organization(
-            id=model.id,
-            name=model.name,
-            slug=model.slug,
-            tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
-            metadata=model.metadata_,
-            created_at=model.created_at,
-            updated_at=model.updated_at,
-        )
-
-    # =========================================================================
-    # Workspace operations
-    # =========================================================================
-
-    async def create_workspace(self, workspace: Workspace) -> Workspace:
-        """Create a new workspace."""
-        async with self._get_session() as session:
-            model = WorkspaceModel(
-                id=workspace.id,
-                organization_id=workspace.organization_id,
-                name=workspace.name,
-                slug=workspace.slug,
-                description=workspace.description,
-                metadata_=workspace.metadata,
-                created_at=workspace.created_at,
-                updated_at=workspace.updated_at,
-            )
-            session.add(model)
-            await session.commit()
-            await session.refresh(model)
-            return self._workspace_model_to_domain(model)
-
-    async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
-        """Get a workspace by ID."""
-        async with self._get_session() as session:
-            result = await session.execute(select(WorkspaceModel).where(WorkspaceModel.id == workspace_id))
-            model = result.scalar_one_or_none()
-            return self._workspace_model_to_domain(model) if model else None
-
-    async def list_workspaces(self, organization_id: UUID) -> list[Workspace]:
-        """List all workspaces in an organization."""
-        async with self._get_session() as session:
-            result = await session.execute(
-                select(WorkspaceModel).where(WorkspaceModel.organization_id == organization_id)
-            )
-            return [self._workspace_model_to_domain(m) for m in result.scalars().all()]
-
-    def _workspace_model_to_domain(self, model: WorkspaceModel) -> Workspace:
-        """Convert WorkspaceModel to domain Workspace."""
-        return Workspace(
-            id=model.id,
-            organization_id=model.organization_id,
-            name=model.name,
-            slug=model.slug,
-            description=model.description,
-            metadata=model.metadata_,
-            created_at=model.created_at,
-            updated_at=model.updated_at,
-        )
-
-    # =========================================================================
     # Namespace operations
     # =========================================================================
 
@@ -224,10 +125,10 @@ class PostgreSQLBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             model = MemoryNamespaceModel(
                 id=namespace.id,
-                workspace_id=namespace.workspace_id,
                 name=namespace.name,
                 slug=namespace.slug,
                 description=namespace.description,
+                tenancy_mode=namespace.tenancy_mode,
                 version=namespace.version,
                 is_active=namespace.is_active,
                 previous_version_id=namespace.previous_version_id,
@@ -249,13 +150,10 @@ class PostgreSQLBackend(AsyncSessionMixin):
             model = result.scalar_one_or_none()
             return self._namespace_model_to_domain(model) if model else None
 
-    async def get_namespace_by_slug(
-        self, workspace_id: UUID, slug: str, *, active_only: bool = True
-    ) -> MemoryNamespace | None:
-        """Get a namespace by workspace ID and slug.
+    async def get_namespace_by_slug(self, slug: str, *, active_only: bool = True) -> MemoryNamespace | None:
+        """Get a namespace by slug (globally unique).
 
         Args:
-            workspace_id: Workspace ID
             slug: Namespace slug
             active_only: If True, only return active namespace (default)
 
@@ -264,7 +162,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """
         async with self._get_session() as session:
             query = select(MemoryNamespaceModel).where(
-                MemoryNamespaceModel.workspace_id == workspace_id,
                 MemoryNamespaceModel.slug == slug,
             )
             if active_only:
@@ -273,20 +170,24 @@ class PostgreSQLBackend(AsyncSessionMixin):
             model = result.scalar_one_or_none()
             return self._namespace_model_to_domain(model) if model else None
 
-    async def list_namespaces(self, workspace_id: UUID, *, active_only: bool = True) -> list[MemoryNamespace]:
-        """List all namespaces in a workspace.
+    async def list_namespaces(
+        self, *, active_only: bool = True, limit: int = 100, offset: int = 0
+    ) -> list[MemoryNamespace]:
+        """List namespaces with pagination.
 
         Args:
-            workspace_id: Workspace ID
             active_only: If True, only return active namespaces (default)
+            limit: Maximum namespaces to return
+            offset: Offset for pagination
 
         Returns:
             List of MemoryNamespace objects
         """
         async with self._get_session() as session:
-            query = select(MemoryNamespaceModel).where(MemoryNamespaceModel.workspace_id == workspace_id)
+            query = select(MemoryNamespaceModel)
             if active_only:
                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+            query = query.order_by(MemoryNamespaceModel.id).limit(limit).offset(offset)
             result = await session.execute(query)
             return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
 
@@ -316,10 +217,10 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
         return MemoryNamespace(
             id=model.id,
-            workspace_id=model.workspace_id,
             name=model.name,
             slug=model.slug,
             description=model.description,
+            tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
             version=model.version,
             is_active=model.is_active,
             previous_version_id=model.previous_version_id,
@@ -332,7 +233,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
     async def create_namespace_version(
         self,
-        workspace_id: UUID,
         slug: str,
         *,
         previous_version: MemoryNamespace | None = None,
@@ -343,7 +243,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
         The previous version is marked as inactive.
 
         Args:
-            workspace_id: Workspace ID
             slug: Namespace slug
             previous_version: The previous version to supersede (if any)
 
@@ -364,7 +263,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
         # Create new namespace with incremented version
         namespace = MemoryNamespace(
             id=uuid4(),
-            workspace_id=workspace_id,
             name=previous_version.name if previous_version else f"Namespace {slug}",
             slug=slug,
             description=previous_version.description if previous_version else "",

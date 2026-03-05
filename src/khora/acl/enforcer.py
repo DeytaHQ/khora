@@ -43,18 +43,6 @@ class ACLContext:
 
     principal: Principal
     namespace_id: UUID | None = None
-    workspace_id: UUID | None = None
-    organization_id: UUID | None = None
-
-    @property
-    def parent_ids(self) -> dict[str, UUID]:
-        """Get parent IDs for permission inheritance."""
-        ids = {}
-        if self.workspace_id:
-            ids["workspace"] = self.workspace_id
-        if self.organization_id:
-            ids["organization"] = self.organization_id
-        return ids
 
 
 class ACLEnforcer:
@@ -122,7 +110,6 @@ class ACLEnforcer:
             resource_type,
             resource_id,
             required_permission,
-            parent_ids=context.parent_ids,
         )
 
         if not has_permission:
@@ -148,22 +135,6 @@ class ACLEnforcer:
     def check_namespace_admin(self, context: ACLContext, namespace_id: UUID) -> bool:
         """Check admin permission on a namespace."""
         return self.check_permission(context, "namespace", namespace_id, Permission.ADMIN)
-
-    def check_workspace_read(self, context: ACLContext, workspace_id: UUID) -> bool:
-        """Check read permission on a workspace."""
-        return self.check_permission(context, "workspace", workspace_id, Permission.READ)
-
-    def check_workspace_admin(self, context: ACLContext, workspace_id: UUID) -> bool:
-        """Check admin permission on a workspace."""
-        return self.check_permission(context, "workspace", workspace_id, Permission.ADMIN)
-
-    def check_organization_read(self, context: ACLContext, organization_id: UUID) -> bool:
-        """Check read permission on an organization."""
-        return self.check_permission(context, "organization", organization_id, Permission.READ)
-
-    def check_organization_admin(self, context: ACLContext, organization_id: UUID) -> bool:
-        """Check admin permission on an organization."""
-        return self.check_permission(context, "organization", organization_id, Permission.ADMIN)
 
     def require(
         self,

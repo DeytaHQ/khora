@@ -70,24 +70,17 @@ class PermissionGrant:
     """A permission grant for a principal on a resource."""
 
     principal: Principal
-    resource_type: str  # organization, workspace, namespace
+    resource_type: str  # namespace
     resource_id: UUID
     permission: Permission
     inherited_from: tuple[str, UUID] | None = None  # (resource_type, resource_id) if inherited
 
 
 class ACLChecker:
-    """ACL checker with permission inheritance.
+    """ACL checker for namespace-only permissions."""
 
-    Supports hierarchical permissions:
-    - Organization -> Workspace -> Namespace
-    - Permissions at higher levels cascade down
-    """
-
-    # Resource type hierarchy (parent -> child)
+    # Resource type hierarchy (namespace is the sole boundary)
     HIERARCHY = {
-        "organization": "workspace",
-        "workspace": "namespace",
         "namespace": None,
     }
 
@@ -168,19 +161,14 @@ class ACLChecker:
         resource_type: str,
         resource_id: UUID,
         required_permission: Permission,
-        *,
-        parent_ids: dict[str, UUID] | None = None,
     ) -> bool:
         """Check if a principal has a permission on a resource.
-
-        Checks both direct grants and inherited permissions from parent resources.
 
         Args:
             principal: Principal to check
             resource_type: Type of resource
             resource_id: ID of resource
             required_permission: Permission required
-            parent_ids: Optional dict of parent resource IDs for inheritance
 
         Returns:
             True if permission is granted
@@ -190,16 +178,7 @@ class ACLChecker:
             return True
 
         # Check direct grant
-        if self._has_direct_grant(principal, resource_type, resource_id, required_permission):
-            return True
-
-        # Check inherited permissions from parent resources
-        if parent_ids:
-            for parent_type, parent_id in self._get_parent_chain(resource_type, parent_ids):
-                if self._has_direct_grant(principal, parent_type, parent_id, required_permission):
-                    return True
-
-        return False
+        return self._has_direct_grant(principal, resource_type, resource_id, required_permission)
 
     def _has_direct_grant(
         self,
@@ -220,47 +199,24 @@ class ACLChecker:
                 return True
         return False
 
-    def _get_parent_chain(
-        self,
-        resource_type: str,
-        parent_ids: dict[str, UUID],
-    ) -> list[tuple[str, UUID]]:
-        """Get the chain of parent resources for inheritance."""
-        chain = []
-        current_type = resource_type
-
-        # Walk up the hierarchy
-        for parent_type, child_type in self.HIERARCHY.items():
-            if child_type == current_type and parent_type in parent_ids:
-                chain.append((parent_type, parent_ids[parent_type]))
-                current_type = parent_type
-
-        return chain
-
     def get_effective_permissions(
         self,
         principal: Principal,
         resource_type: str,
         resource_id: UUID,
-        *,
-        parent_ids: dict[str, UUID] | None = None,
     ) -> list[PermissionGrant]:
         """Get all effective permissions for a principal on a resource.
-
-        Includes both direct and inherited permissions.
 
         Args:
             principal: Principal to check
             resource_type: Type of resource
             resource_id: ID of resource
-            parent_ids: Optional dict of parent resource IDs
 
         Returns:
             List of effective PermissionGrant objects
         """
         effective = []
 
-        # Direct grants
         for grant in self._grants:
             if (
                 grant.principal.principal_type == principal.principal_type
@@ -269,26 +225,6 @@ class ACLChecker:
                 and grant.resource_id == resource_id
             ):
                 effective.append(grant)
-
-        # Inherited grants
-        if parent_ids:
-            for parent_type, parent_id in self._get_parent_chain(resource_type, parent_ids):
-                for grant in self._grants:
-                    if (
-                        grant.principal.principal_type == principal.principal_type
-                        and grant.principal.principal_id == principal.principal_id
-                        and grant.resource_type == parent_type
-                        and grant.resource_id == parent_id
-                    ):
-                        # Mark as inherited
-                        inherited_grant = PermissionGrant(
-                            principal=grant.principal,
-                            resource_type=resource_type,
-                            resource_id=resource_id,
-                            permission=grant.permission,
-                            inherited_from=(parent_type, parent_id),
-                        )
-                        effective.append(inherited_grant)
 
         return effective
 
