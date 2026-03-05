@@ -13,7 +13,7 @@ from uuid import UUID
 from loguru import logger
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
-from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from khora.core.models import Chunk, ChunkMetadata
 from khora.db.models import Base, ChunkModel, EntityModel
@@ -39,7 +39,11 @@ async def _retry_on_deadlock(coro_fn, *args, **kwargs):
         stop=stop_after_attempt(_DEADLOCK_MAX_RETRIES),
         wait=wait_exponential(multiplier=0.1, min=0.1, max=0.4),
         retry=retry_if_exception(lambda e: "deadlock" in str(e).lower()),
-        before_sleep=before_sleep_log(logger, "WARNING"),
+        before_sleep=lambda retry_state: logger.warning(
+            "Retrying after deadlock (attempt {}): {!s}",
+            retry_state.attempt_number,
+            retry_state.outcome.exception() if retry_state.outcome and retry_state.outcome.failed else "unknown",
+        ),
         reraise=True,
     ):
         with attempt:
