@@ -69,21 +69,27 @@ def upgrade() -> None:
         op.execute(text("ALTER INDEX IF EXISTS ix_entities_embedding_hnsw_v2 RENAME TO ix_entities_embedding_hnsw"))
 
     # --- khora_chunks HNSW index (skeleton engine backend) ---
+    # khora_chunks is created at runtime by the skeleton engine; skip if absent.
     # ef_construction was already 128 from migration 005; only m changes 16 -> 24.
-    with op.get_context().autocommit_block():
-        op.execute(
-            text(
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_khora_chunks_embedding_hnsw_v2 "
-                "ON khora_chunks USING hnsw (embedding vector_cosine_ops) "
-                "WITH (m = 24, ef_construction = 128)"
+    conn = op.get_bind()
+    has_khora_chunks = conn.execute(
+        text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'khora_chunks')")
+    ).scalar()
+    if has_khora_chunks:
+        with op.get_context().autocommit_block():
+            op.execute(
+                text(
+                    "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_khora_chunks_embedding_hnsw_v2 "
+                    "ON khora_chunks USING hnsw (embedding vector_cosine_ops) "
+                    "WITH (m = 24, ef_construction = 128)"
+                )
             )
-        )
-    with op.get_context().autocommit_block():
-        op.execute(text("DROP INDEX CONCURRENTLY IF EXISTS ix_khora_chunks_embedding_hnsw"))
-    with op.get_context().autocommit_block():
-        op.execute(
-            text("ALTER INDEX IF EXISTS ix_khora_chunks_embedding_hnsw_v2 " "RENAME TO ix_khora_chunks_embedding_hnsw")
-        )
+        with op.get_context().autocommit_block():
+            op.execute(text("DROP INDEX CONCURRENTLY IF EXISTS ix_khora_chunks_embedding_hnsw"))
+        with op.get_context().autocommit_block():
+            op.execute(
+                text("ALTER INDEX IF EXISTS ix_khora_chunks_embedding_hnsw_v2 RENAME TO ix_khora_chunks_embedding_hnsw")
+            )
 
 
 def downgrade() -> None:
