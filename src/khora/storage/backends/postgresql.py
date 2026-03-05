@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
@@ -22,6 +22,7 @@ from khora.db.models import (
     MemoryNamespaceModel,
     SyncCheckpointModel,
 )
+from khora.storage.backends.base import PaginatedResult
 from khora.storage.backends.mixins import AsyncSessionMixin, retry_on_deadlock
 
 if TYPE_CHECKING:
@@ -172,7 +173,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
     async def list_namespaces(
         self, *, active_only: bool = True, limit: int = 100, offset: int = 0
-    ) -> list[MemoryNamespace]:
+    ) -> PaginatedResult[MemoryNamespace]:
         """List namespaces with pagination.
 
         Args:
@@ -181,15 +182,23 @@ class PostgreSQLBackend(AsyncSessionMixin):
             offset: Offset for pagination
 
         Returns:
-            List of MemoryNamespace objects
+            PaginatedResult with namespace items and total count
         """
         async with self._get_session() as session:
-            query = select(MemoryNamespaceModel)
-            if active_only:
-                query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
-            query = query.order_by(MemoryNamespaceModel.id).limit(limit).offset(offset)
+            base_filter = MemoryNamespaceModel.is_active == True if active_only else True  # noqa: E712
+            count_query = select(func.count(MemoryNamespaceModel.id)).where(base_filter)
+            total = (await session.execute(count_query)).scalar_one()
+
+            query = (
+                select(MemoryNamespaceModel)
+                .where(base_filter)
+                .order_by(MemoryNamespaceModel.id)
+                .limit(limit)
+                .offset(offset)
+            )
             result = await session.execute(query)
-            return [self._namespace_model_to_domain(m) for m in result.scalars().all()]
+            items = [self._namespace_model_to_domain(m) for m in result.scalars().all()]
+            return PaginatedResult(items=items, total=total, limit=limit, offset=offset)
 
     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Update a namespace."""

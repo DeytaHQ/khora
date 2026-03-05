@@ -29,6 +29,7 @@ from khora.core.models import (
     MemoryNamespace,
     Relationship,
 )
+from khora.storage.backends.base import PaginatedResult
 from khora.telemetry import get_collector, trace_span
 
 if TYPE_CHECKING:
@@ -293,7 +294,7 @@ class StorageCoordinator:
 
     async def list_namespaces(
         self, *, active_only: bool = True, limit: int = 100, offset: int = 0
-    ) -> list[MemoryNamespace]:
+    ) -> PaginatedResult[MemoryNamespace]:
         """List namespaces with pagination."""
         if not self.relational:
             raise RuntimeError("Relational backend not configured")

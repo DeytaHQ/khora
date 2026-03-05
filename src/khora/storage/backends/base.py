@@ -7,9 +7,12 @@ enabling dependency injection and easy testing with mocks.
 from __future__ import annotations
 
 from abc import abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
 from uuid import UUID
+
+T = TypeVar("T")
 
 if TYPE_CHECKING:
     from khora.core.models import (
@@ -21,6 +24,16 @@ if TYPE_CHECKING:
         MemoryNamespace,
         Relationship,
     )
+
+
+@dataclass(frozen=True)
+class PaginatedResult(Generic[T]):
+    """Paginated query result with total count."""
+
+    items: list[T]
+    total: int
+    limit: int
+    offset: int
 
 
 @runtime_checkable
@@ -64,7 +77,7 @@ class RelationalBackendProtocol(Protocol):
     @abstractmethod
     async def list_namespaces(
         self, *, active_only: bool = True, limit: int = 100, offset: int = 0
-    ) -> list[MemoryNamespace]:
+    ) -> PaginatedResult[MemoryNamespace]:
         """List namespaces with pagination."""
         ...
 
