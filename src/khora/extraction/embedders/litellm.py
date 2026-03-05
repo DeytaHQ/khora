@@ -9,7 +9,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from loguru import logger
-from tenacity import AsyncRetrying, before_sleep_log, stop_after_attempt, wait_exponential
+from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 
 from .base import Embedder
 
@@ -264,7 +264,11 @@ class LiteLLMEmbedder(Embedder):
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self._max_retries),
             wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
-            before_sleep=before_sleep_log(logger, "WARNING"),
+            before_sleep=lambda retry_state: logger.opt(depth=1).warning(
+                "Retrying embedding (attempt {}) after {!s}",
+                retry_state.attempt_number,
+                retry_state.outcome.exception() if retry_state.outcome and retry_state.outcome.failed else "unknown",
+            ),
             reraise=True,
         ):
             with attempt:
