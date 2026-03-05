@@ -24,7 +24,7 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 - **Engines are pluggable** — implement `MemoryEngineProtocol` in `engines/protocol.py`
 - **Graph backends are interchangeable** — all implement `GraphBackend` in `storage/backends/base.py`
 - **Extraction skills are YAML-defined** — see `extraction/skills/builtin/`
-- **Multi-tenancy:** Organization → Workspace → MemoryNamespace
+- **Multi-tenancy:** MemoryNamespace (sole isolation boundary)
 - **Config via env vars** — prefix `KHORA_`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
 
 ## Key Entry Points

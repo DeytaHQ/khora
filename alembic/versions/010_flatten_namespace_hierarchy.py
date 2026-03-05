@@ -88,7 +88,7 @@ def upgrade() -> None:
         "memory_namespaces",
         sa.Column(
             "tenancy_mode",
-            sa.String(20),
+            postgresql.ENUM("shared", "isolated", name="tenancy_mode", create_type=False),
             server_default="shared",
             nullable=False,
         ),
@@ -105,7 +105,7 @@ def upgrade() -> None:
     op.create_index(
         "idx_namespace_slug_active",
         "memory_namespaces",
-        ["slug", "version"],
+        ["slug"],
         postgresql_where=sa.text("is_active = true"),
     )
 
@@ -121,6 +121,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # WARNING: This downgrade is intended for one-time emergency recovery only.
+    # Repeated downgrade->upgrade cycles may produce inconsistent state because
+    # the upgrade deletes org/workspace permission rows and drops the tables,
+    # and the downgrade creates synthetic defaults that won't match original data.
+
     # Reverse step 10: Recreate organizations table
     op.create_table(
         "organizations",

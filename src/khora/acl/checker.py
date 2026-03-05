@@ -73,7 +73,6 @@ class PermissionGrant:
     resource_type: str  # namespace
     resource_id: UUID
     permission: Permission
-    inherited_from: tuple[str, UUID] | None = None  # (resource_type, resource_id) if inherited
 
 
 class ACLChecker:
