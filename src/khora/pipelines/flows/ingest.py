@@ -255,7 +255,9 @@ async def stream_extract_and_embed_entities(
             resolved_relationship_types = relationship_types or None
 
             if resolved_entity_types is None and not expertise:
-                resolved_entity_types = skill.entity_types if hasattr(skill, "entity_types") and skill.entity_types else None
+                resolved_entity_types = (
+                    skill.entity_types if hasattr(skill, "entity_types") and skill.entity_types else None
+                )
 
             results = await extractor.extract_multi(
                 texts,
@@ -424,7 +426,10 @@ async def stream_extract_and_embed_entities(
                     cid: [k.split(":")[0] for k in keys] for cid, keys in chunk_entity_keys.items()
                 }
                 cross_rels_raw = await _extract_cross_chunk_relationships(
-                    chunks, _entities_by_chunk, extractor, extraction_context,
+                    chunks,
+                    _entities_by_chunk,
+                    extractor,
+                    extraction_context,
                     entity_types=entity_types,
                     relationship_types=relationship_types,
                 )

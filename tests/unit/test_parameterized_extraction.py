@@ -7,7 +7,6 @@ threaded through the extraction pipeline: MemoryLake -> Engine -> Extractor -> P
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -20,7 +19,6 @@ from khora.extraction.extractors.llm import (
     LLMEntityExtractor,
 )
 from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
-
 
 # ---------------------------------------------------------------------------
 # Helpers
