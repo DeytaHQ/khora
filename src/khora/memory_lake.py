@@ -291,6 +291,8 @@ class MemoryLake:
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> RememberResult:
         """Store content in the memory lake.
 
@@ -307,6 +309,8 @@ class MemoryLake:
             source: Optional source identifier
             metadata: Optional metadata
             skill_name: Extraction skill to use
+            entity_types: Optional entity types to extract (overrides defaults)
+            relationship_types: Optional relationship types to extract (overrides defaults)
 
         Returns:
             RememberResult with details
@@ -324,6 +328,8 @@ class MemoryLake:
                     source=source,
                     metadata=metadata,
                     skill_name=skill_name,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
                 )
         finally:
             clear_trace_id()
@@ -338,6 +344,8 @@ class MemoryLake:
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -363,6 +371,8 @@ class MemoryLake:
             deduplicate: Deduplicate entities across documents (default: True)
             infer_relationships: Infer relationships after ingestion (default: True)
             on_progress: Callback(processed_count, total_count) for progress updates
+            entity_types: Optional entity types to extract (overrides defaults)
+            relationship_types: Optional relationship types to extract (overrides defaults)
 
         Returns:
             BatchResult with aggregated statistics
@@ -381,6 +391,8 @@ class MemoryLake:
                     deduplicate=deduplicate,
                     infer_relationships=infer_relationships,
                     on_progress=on_progress,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
                 )
         finally:
             clear_trace_id()

@@ -456,6 +456,8 @@ class VectorCypherEngine:
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
         occurred_at: datetime | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -512,6 +514,8 @@ class VectorCypherEngine:
             expertise=expertise,
             extraction_model=extraction_model,
             occurred_at=occurred_at or datetime.now(UTC),
+            entity_types=entity_types,
+            relationship_types=relationship_types,
         )
 
         return RememberResult(
@@ -530,6 +534,8 @@ class VectorCypherEngine:
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
         occurred_at: datetime,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -624,6 +630,8 @@ class VectorCypherEngine:
                     skill_name=skill_name,
                     expertise=expertise,
                     extraction_model=extraction_model,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
                 )
 
             # Update document status
@@ -648,6 +656,8 @@ class VectorCypherEngine:
         skill_name: str = "general_entities",
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> tuple[int, int]:
         """Run skeleton-based entity extraction on core chunks only.
 
@@ -713,6 +723,8 @@ class VectorCypherEngine:
                 expertise=expertise,
                 model=model,
                 max_concurrent=self._vc_config.max_concurrent_extractions,
+                entity_types=entity_types,
+                relationship_types=relationship_types,
             )
 
             if not entities:
@@ -775,6 +787,8 @@ class VectorCypherEngine:
         skill_name: str = "general_entities",
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> tuple[list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Run skeleton extraction but return results instead of storing.
 
@@ -829,6 +843,8 @@ class VectorCypherEngine:
             expertise=expertise,
             model=model,
             max_concurrent=self._vc_config.max_concurrent_extractions,
+            entity_types=entity_types,
+            relationship_types=relationship_types,
         )
 
         if not entities:
@@ -864,6 +880,8 @@ class VectorCypherEngine:
         extraction_model: str | None = None,
         occurred_at: datetime,
         embedding_text_override: str | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Process a document, returning entities for deferred batch storage.
 
@@ -952,6 +970,8 @@ class VectorCypherEngine:
                 skill_name=skill_name,
                 expertise=expertise,
                 extraction_model=extraction_model,
+                entity_types=entity_types,
+                relationship_types=relationship_types,
             )
 
         return len(stored_chunks), entities, relationships, entity_chunk_links
@@ -1170,6 +1190,8 @@ class VectorCypherEngine:
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -1315,6 +1337,8 @@ class VectorCypherEngine:
                             extraction_model=extraction_model,
                             occurred_at=occurred_at or datetime.now(UTC),
                             embedding_text_override=context_by_orig.get(doc_index),
+                            entity_types=entity_types,
+                            relationship_types=relationship_types,
                         )
 
                         # Accumulate entities for batch storage
@@ -1345,6 +1369,8 @@ class VectorCypherEngine:
                             expertise=expertise,
                             extraction_model=extraction_model,
                             occurred_at=occurred_at,
+                            entity_types=entity_types,
+                            relationship_types=relationship_types,
                         )
 
                         async with results_lock:

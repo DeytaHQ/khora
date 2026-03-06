@@ -90,6 +90,7 @@ class EntityExtractor(ABC):
         text: str,
         *,
         entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
     ) -> ExtractionResult:
@@ -98,6 +99,7 @@ class EntityExtractor(ABC):
         Args:
             text: Text to extract from
             entity_types: Optional list of entity types to extract
+            relationship_types: Optional list of relationship types to extract
             expertise: Optional ExpertiseConfig for domain-specific extraction
             context: Optional context dict for prompt template rendering
 
@@ -112,6 +114,7 @@ class EntityExtractor(ABC):
         texts: list[str],
         *,
         entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
     ) -> list[ExtractionResult]:
@@ -120,6 +123,7 @@ class EntityExtractor(ABC):
         Args:
             texts: List of texts to extract from
             entity_types: Optional list of entity types to extract
+            relationship_types: Optional list of relationship types to extract
             expertise: Optional ExpertiseConfig for domain-specific extraction
             context: Optional context dict for prompt template rendering
 
