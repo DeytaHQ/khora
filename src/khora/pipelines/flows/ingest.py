@@ -87,6 +87,8 @@ async def _extract_cross_chunk_relationships(
     extraction_context: dict,
     *,
     max_windows: int = 50,
+    entity_types: list[str] | None = None,
+    relationship_types: list[str] | None = None,
 ) -> list:
     """Extract relationships spanning chunk boundaries via overlapping windows.
 
@@ -138,6 +140,8 @@ async def _extract_cross_chunk_relationships(
         try:
             results = await extractor.extract_multi(
                 [combined_text],
+                entity_types=entity_types,
+                relationship_types=relationship_types,
                 batch_size=1,
                 max_input_tokens=None,
                 context=window_ctx,
@@ -420,7 +424,9 @@ async def stream_extract_and_embed_entities(
                     cid: [k.split(":")[0] for k in keys] for cid, keys in chunk_entity_keys.items()
                 }
                 cross_rels_raw = await _extract_cross_chunk_relationships(
-                    chunks, _entities_by_chunk, extractor, extraction_context
+                    chunks, _entities_by_chunk, extractor, extraction_context,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
                 )
                 if cross_rels_raw:
                     logger.info(f"Cross-chunk extraction: found {len(cross_rels_raw)} candidate relationships")
