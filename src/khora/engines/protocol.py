@@ -54,6 +54,8 @@ class MemoryEngineProtocol(Protocol):
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -64,6 +66,8 @@ class MemoryEngineProtocol(Protocol):
             source: Optional source identifier
             metadata: Optional metadata
             skill_name: Extraction skill to use
+            entity_types: Optional entity types to extract (overrides defaults)
+            relationship_types: Optional relationship types to extract (overrides defaults)
 
         Returns:
             RememberResult with details
@@ -119,6 +123,8 @@ class MemoryEngineProtocol(Protocol):
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -130,6 +136,8 @@ class MemoryEngineProtocol(Protocol):
             deduplicate: Deduplicate entities across documents
             infer_relationships: Infer relationships after ingestion
             on_progress: Callback(processed_count, total_count) for progress updates
+            entity_types: Optional entity types to extract (overrides defaults)
+            relationship_types: Optional relationship types to extract (overrides defaults)
 
         Returns:
             BatchResult with aggregated statistics

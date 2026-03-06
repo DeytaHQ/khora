@@ -223,6 +223,8 @@ class GraphRAGEngine:
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -287,6 +289,8 @@ class GraphRAGEngine:
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+            entity_types=entity_types,
+            relationship_types=relationship_types,
         )
         timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
@@ -389,6 +393,8 @@ class GraphRAGEngine:
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -461,6 +467,8 @@ class GraphRAGEngine:
             shared_embedder=shared_embedder,
             shared_entity_index=shared_entity_index,
             enable_expansion=infer_relationships,
+            entity_types=entity_types,
+            relationship_types=relationship_types,
         )
         timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000

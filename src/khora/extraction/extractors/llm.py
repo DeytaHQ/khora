@@ -611,6 +611,7 @@ class LLMEntityExtractor(EntityExtractor):
         text: str,
         *,
         entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
     ) -> ExtractionResult:  # type: ignore[invalid-return-type]
@@ -619,6 +620,7 @@ class LLMEntityExtractor(EntityExtractor):
         Args:
             text: Text to extract from
             entity_types: Optional list of entity types to extract
+            relationship_types: Optional list of relationship types to extract
             expertise: Optional ExpertiseConfig for domain-specific extraction
             context: Optional context dict for prompt template rendering
 
@@ -628,11 +630,25 @@ class LLMEntityExtractor(EntityExtractor):
         if not text.strip():
             return ExtractionResult()
 
-        # Determine entity types from expertise or fallback
-        if expertise:
+        # Normalize empty lists to None (use defaults)
+        entity_types = entity_types or None
+        relationship_types = relationship_types or None
+
+        # Resolve entity types: explicit param > expertise > default
+        if entity_types is not None:
+            pass  # use as-is
+        elif expertise:
             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
         else:
-            entity_types = entity_types or DEFAULT_ENTITY_TYPES
+            entity_types = DEFAULT_ENTITY_TYPES
+
+        # Resolve relationship types: explicit param > expertise > default
+        if relationship_types is not None:
+            pass  # use as-is
+        elif expertise:
+            relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+        else:
+            relationship_types = DEFAULT_RELATIONSHIP_TYPES
 
         try:
             import litellm
@@ -641,7 +657,9 @@ class LLMEntityExtractor(EntityExtractor):
 
         # Render prompts based on expertise
         system_prompt = self._render_system_prompt(expertise, context)
-        extraction_prompt = self._render_extraction_prompt(text, entity_types, expertise, context)
+        extraction_prompt = self._render_extraction_prompt(
+            text, entity_types, expertise, context, relationship_types=relationship_types
+        )
 
         try:
             async for attempt in AsyncRetrying(
@@ -710,9 +728,6 @@ class LLMEntityExtractor(EntityExtractor):
                     # focused second pass to catch missed connections.
                     # Reference: DeepStruct (Wang et al., 2022)
                     if self._should_run_second_pass(result):
-                        relationship_types = (
-                            expertise.get_relationship_type_names() if expertise else DEFAULT_RELATIONSHIP_TYPES
-                        )
                         second_pass = await self._extract_additional_relationships(
                             result.entities,
                             text,
@@ -1011,8 +1026,22 @@ class LLMEntityExtractor(EntityExtractor):
         entity_types: list[str],
         expertise: ExpertiseConfig | None,
         context: dict[str, Any] | None,
+        *,
+        relationship_types: list[str] | None = None,
     ) -> str:
-        """Render the extraction prompt, optionally using expertise config."""
+        """Render the extraction prompt, optionally using expertise config.
+
+        Args:
+            text: Text to extract from
+            entity_types: Resolved entity types to extract
+            expertise: Optional expertise config
+            context: Optional context dict
+            relationship_types: Resolved relationship types (defaults applied if None)
+        """
+        # Ensure relationship_types is resolved
+        if not relationship_types:
+            relationship_types = DEFAULT_RELATIONSHIP_TYPES
+
         # Build tool context for SaaS-aware extraction
         tool_context = self._build_tool_context(expertise, context)
 
@@ -1026,8 +1055,6 @@ class LLMEntityExtractor(EntityExtractor):
                 from khora.extraction.skills.composer import ExpertiseComposer
 
                 composer = ExpertiseComposer()
-                # Get relationship types from expertise
-                relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
 
                 prompt_context = {
                     **(context or {}),
@@ -1046,12 +1073,6 @@ class LLMEntityExtractor(EntityExtractor):
 
         # Use default extraction prompt
         logger.debug("Using DEFAULT_EXTRACTION_PROMPT (no custom prompt in expertise)")
-        # Use default extraction prompt with optional tool context
-        # Get relationship types from expertise or defaults
-        if expertise:
-            relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
-        else:
-            relationship_types = DEFAULT_RELATIONSHIP_TYPES
 
         # Build document temporal context from the context dict
         document_context = self._build_document_context(context)
@@ -1090,6 +1111,7 @@ class LLMEntityExtractor(EntityExtractor):
         texts: list[str],
         *,
         entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
     ) -> list[ExtractionResult]:
@@ -1102,6 +1124,7 @@ class LLMEntityExtractor(EntityExtractor):
         Args:
             texts: List of texts to extract from
             entity_types: Optional list of entity types to extract
+            relationship_types: Optional list of relationship types to extract
             expertise: Optional ExpertiseConfig for domain-specific extraction
             context: Optional context dict for prompt template rendering
 
@@ -1116,6 +1139,7 @@ class LLMEntityExtractor(EntityExtractor):
         return await self.extract_multi(
             texts,
             entity_types=entity_types,
+            relationship_types=relationship_types,
             expertise=expertise,
             context=context,
         )
@@ -1125,6 +1149,7 @@ class LLMEntityExtractor(EntityExtractor):
         texts: list[str],
         *,
         entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
         batch_size: int = 5,
@@ -1143,6 +1168,7 @@ class LLMEntityExtractor(EntityExtractor):
         Args:
             texts: List of texts to extract from
             entity_types: Optional list of entity types to extract
+            relationship_types: Optional list of relationship types to extract
             expertise: Optional ExpertiseConfig for domain-specific extraction
             context: Optional context dict for prompt template rendering
             batch_size: Maximum number of texts per LLM call (fallback/cap)
@@ -1156,6 +1182,10 @@ class LLMEntityExtractor(EntityExtractor):
         """
         if not texts:
             return []
+
+        # Normalize empty lists to None (use defaults)
+        entity_types = entity_types or None
+        relationship_types = relationship_types or None
 
         # Tiered extraction: separate short texts for regex-only processing
         if tiered_extraction:
@@ -1179,6 +1209,7 @@ class LLMEntityExtractor(EntityExtractor):
             llm_results = await self.extract_multi(
                 llm_texts,
                 entity_types=entity_types,
+                relationship_types=relationship_types,
                 expertise=expertise,
                 context=context,
                 batch_size=batch_size,
@@ -1197,10 +1228,21 @@ class LLMEntityExtractor(EntityExtractor):
                     llm_idx += 1
             return combined
 
-        if expertise:
+        # Resolve entity types: explicit param > expertise > default
+        if entity_types is not None:
+            pass  # use as-is
+        elif expertise:
             entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
         else:
-            entity_types = entity_types or DEFAULT_ENTITY_TYPES
+            entity_types = DEFAULT_ENTITY_TYPES
+
+        # Resolve relationship types: explicit param > expertise > default
+        if relationship_types is not None:
+            pass  # use as-is
+        elif expertise:
+            relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
+        else:
+            relationship_types = DEFAULT_RELATIONSHIP_TYPES
 
         try:
             import litellm
@@ -1238,6 +1280,7 @@ class LLMEntityExtractor(EntityExtractor):
                 tool_context=tool_context,
                 expertise=expertise,
                 context=context,
+                relationship_types=relationship_types,
             )
 
             # Check if batch failed (all results have errors) - fallback to single extraction
@@ -1252,6 +1295,7 @@ class LLMEntityExtractor(EntityExtractor):
                     result = await self.extract(
                         text,
                         entity_types=entity_types,
+                        relationship_types=relationship_types,
                         expertise=expertise,
                         context=context,
                     )
@@ -1278,8 +1322,13 @@ class LLMEntityExtractor(EntityExtractor):
         tool_context: str | None = None,
         expertise: ExpertiseConfig | None = None,
         context: dict[str, Any] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> list[ExtractionResult]:  # type: ignore[invalid-return-type]
         """Extract from a batch of texts in a single LLM call."""
+        # Ensure relationship_types is resolved
+        if not relationship_types:
+            relationship_types = DEFAULT_RELATIONSHIP_TYPES
+
         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
 
         # If expertise has custom extraction prompt, use it with multi-section adaptation
@@ -1297,9 +1346,6 @@ Return a JSON object with a "sections" array, one object per input section:
     ...
 ]}
 Each section follows the entity/relationship format from the instructions above."""
-
-            # Get relationship types from expertise
-            relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
 
             prompt_context = {
                 **(context or {}),
@@ -1321,12 +1367,6 @@ Each section follows the entity/relationship format from the instructions above.
 
         # Fallback to hardcoded prompt (existing behavior)
         if not expertise or not expertise.extraction_prompt:
-            # Get relationship types - expertise may exist but without custom extraction_prompt
-            if expertise:
-                relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
-            else:
-                relationship_types = DEFAULT_RELATIONSHIP_TYPES
-
             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 

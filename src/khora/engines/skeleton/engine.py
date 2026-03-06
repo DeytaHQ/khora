@@ -214,6 +214,8 @@ class SkeletonConstructionEngine:
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         occurred_at: datetime | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -581,6 +583,8 @@ class SkeletonConstructionEngine:
         deduplicate: bool = True,
         infer_relationships: bool = False,  # Not used in Skeleton Construction engine
         on_progress: Callable[[int, int], None] | None = None,
+        entity_types: list[str] | None = None,
+        relationship_types: list[str] | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 

@@ -179,6 +179,8 @@ async def stream_extract_and_embed_entities(
     extraction_max_tokens: int | None = None,
     skip_embedding_entity_types: list[str] | None = None,
     skip_embedding_mention_threshold: int = 1,
+    entity_types: list[str] | None = None,
+    relationship_types: list[str] | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities from chunks and embed them in a streaming fashion.
 
@@ -244,21 +246,22 @@ async def stream_extract_and_embed_entities(
 
             texts = [chunk.content for chunk in chunks]
 
-            if expertise:
-                results = await extractor.extract_multi(
-                    texts,
-                    expertise=expertise,
-                    context=extraction_context,
-                    batch_size=extraction_batch_size,
-                    max_input_tokens=None,
-                )
-            else:
-                results = await extractor.extract_multi(
-                    texts,
-                    entity_types=skill.entity_types,
-                    batch_size=extraction_batch_size,
-                    max_input_tokens=None,
-                )
+            # Resolve types: explicit param > expertise > skill > default
+            resolved_entity_types = entity_types or None
+            resolved_relationship_types = relationship_types or None
+
+            if resolved_entity_types is None and not expertise:
+                resolved_entity_types = skill.entity_types if hasattr(skill, "entity_types") and skill.entity_types else None
+
+            results = await extractor.extract_multi(
+                texts,
+                entity_types=resolved_entity_types,
+                relationship_types=resolved_relationship_types,
+                expertise=expertise,
+                context=extraction_context,
+                batch_size=extraction_batch_size,
+                max_input_tokens=None,
+            )
 
             # Process results and queue entities
             all_entities: dict[str, Entity] = {}
@@ -718,6 +721,8 @@ async def process_document(
     extraction_max_tokens: int | None = None,
     skip_embedding_entity_types: list[str] | None = None,
     skip_embedding_mention_threshold: int = 1,
+    entity_types: list[str] | None = None,
+    relationship_types: list[str] | None = None,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -832,6 +837,8 @@ async def process_document(
                     retry_wait=extraction_retry_wait,
                     extraction_batch_size=extraction_batch_size,
                     max_tokens=extraction_max_tokens,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
                 )
 
         embedded_chunks, (entities, relationships) = await asyncio.gather(
@@ -1193,6 +1200,8 @@ async def ingest_documents(
     extraction_max_tokens: int | None = None,
     skip_embedding_entity_types: list[str] | None = None,
     skip_embedding_mention_threshold: int = 1,
+    entity_types: list[str] | None = None,
+    relationship_types: list[str] | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -1321,6 +1330,8 @@ async def ingest_documents(
                 extraction_max_tokens=extraction_max_tokens,
                 skip_embedding_entity_types=skip_embedding_entity_types,
                 skip_embedding_mention_threshold=skip_embedding_mention_threshold,
+                entity_types=entity_types,
+                relationship_types=relationship_types,
             )
 
     results = await asyncio.gather(
