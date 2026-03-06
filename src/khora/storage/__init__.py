@@ -14,6 +14,7 @@ from __future__ import annotations
 from .backends.base import (
     EventStoreProtocol,
     GraphBackendProtocol,
+    PaginatedResult,
     RelationalBackendProtocol,
     VectorBackendProtocol,
 )
@@ -28,6 +29,7 @@ from .optimize import optimize_neo4j, optimize_postgresql, optimize_storage
 
 __all__ = [
     # Protocols
+    "PaginatedResult",
     "RelationalBackendProtocol",
     "VectorBackendProtocol",
     "GraphBackendProtocol",

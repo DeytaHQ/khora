@@ -1,8 +1,7 @@
 """Multi-tenancy models for Khora Memory Lake.
 
-Supports two modes:
-- Shared: namespace_id filtering with row-level security
-- Isolated: Separate database instances per tenant
+Namespace is the sole data isolation boundary. All memories, entities,
+and relationships are scoped to a namespace_id.
 """
 
 from __future__ import annotations
@@ -22,49 +21,6 @@ class TenancyMode(str, Enum):
 
 
 @dataclass
-class Organization:
-    """Top-level tenant organization.
-
-    An organization can have multiple workspaces and represents the billing
-    and administrative boundary for tenants.
-    """
-
-    id: UUID = field(default_factory=uuid4)
-    name: str = ""
-    slug: str = ""  # URL-friendly identifier
-    tenancy_mode: TenancyMode = TenancyMode.SHARED
-    metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-    def __post_init__(self) -> None:
-        if not self.slug and self.name:
-            self.slug = self.name.lower().replace(" ", "-")
-
-
-@dataclass
-class Workspace:
-    """Workspace within an organization.
-
-    Workspaces provide logical separation of projects or teams within
-    an organization. Each workspace can have multiple memory namespaces.
-    """
-
-    id: UUID = field(default_factory=uuid4)
-    organization_id: UUID = field(default_factory=uuid4)
-    name: str = ""
-    slug: str = ""
-    description: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-    def __post_init__(self) -> None:
-        if not self.slug and self.name:
-            self.slug = self.name.lower().replace(" ", "-")
-
-
-@dataclass
 class MemoryNamespace:
     """Memory namespace for isolating memories.
 
@@ -79,10 +35,10 @@ class MemoryNamespace:
     """
 
     id: UUID = field(default_factory=uuid4)
-    workspace_id: UUID = field(default_factory=uuid4)
     name: str = ""
     slug: str = ""
     description: str = ""
+    tenancy_mode: TenancyMode = TenancyMode.SHARED
 
     # Versioning fields
     version: int = 1
@@ -102,8 +58,3 @@ class MemoryNamespace:
     def __post_init__(self) -> None:
         if not self.slug and self.name:
             self.slug = self.name.lower().replace(" ", "-")
-
-    @property
-    def full_path(self) -> str:
-        """Get the full path identifier for this namespace."""
-        return f"{self.workspace_id}/{self.slug}"

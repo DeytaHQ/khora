@@ -31,9 +31,7 @@ from khora.core.models import (
     DocumentMetadata,
     Entity,
     MemoryNamespace,
-    Organization,
     Relationship,
-    Workspace,
 )
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
@@ -1350,29 +1348,11 @@ class VectorCypherEngine:
 
         storage = self._get_storage()
 
-        default_org = await storage.get_organization_by_slug("default")
-        if not default_org:
-            default_org = await storage.create_organization(Organization(name="Default", slug="default"))
-
-        workspaces = await storage.list_workspaces(default_org.id)
-        if workspaces:
-            default_workspace = workspaces[0]
-        else:
-            default_workspace = await storage.create_workspace(
-                Workspace(
-                    organization_id=default_org.id,
-                    name="Default",
-                    slug="default",
-                )
-            )
-
-        namespaces = await storage.list_namespaces(default_workspace.id)
-        if namespaces:
-            default_namespace = namespaces[0]
-        else:
+        # Try to find existing default namespace by slug
+        default_namespace = await storage.get_namespace_by_slug("default")
+        if not default_namespace:
             default_namespace = await storage.create_namespace(
                 MemoryNamespace(
-                    workspace_id=default_workspace.id,
                     name="Default",
                     slug="default",
                 )
@@ -1384,14 +1364,12 @@ class VectorCypherEngine:
     async def create_namespace(
         self,
         name: str,
-        workspace_id: UUID,
         *,
         description: str = "",
         config_overrides: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace."""
         namespace = MemoryNamespace(
-            workspace_id=workspace_id,
             name=name,
             description=description,
             config_overrides=config_overrides or {},
@@ -1411,26 +1389,14 @@ class VectorCypherEngine:
         """Get or create a namespace by name."""
         storage = self._get_storage()
 
-        await self.get_or_create_default_namespace()
-
-        default_org = await storage.get_organization_by_slug("default")
-        if not default_org:
-            raise RuntimeError("Default organization not found")
-
-        workspaces = await storage.list_workspaces(default_org.id)
-        if not workspaces:
-            raise RuntimeError("Default workspace not found")
-
-        default_workspace = workspaces[0]
-
+        # Try to find namespace by slug
         slug = name.lower().replace(" ", "-")
-        existing_ns = await storage.get_namespace_by_slug(default_workspace.id, slug)
+        existing_ns = await storage.get_namespace_by_slug(slug)
         if existing_ns:
             return existing_ns.id
 
         new_ns = await storage.create_namespace(
             MemoryNamespace(
-                workspace_id=default_workspace.id,
                 name=name,
                 slug=slug,
                 description=description,

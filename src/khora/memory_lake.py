@@ -229,8 +229,8 @@ class MemoryLake:
         """Get the storage coordinator for admin/management operations.
 
         Provides direct access to the underlying storage coordinator for
-        organizational operations like creating workspaces, managing namespaces,
-        and other administrative tasks not covered by the high-level API.
+        managing namespaces and other administrative tasks not covered
+        by the high-level API.
 
         For common operations, prefer the MemoryLake convenience methods:
         - lake.get_document() for document retrieval
@@ -250,7 +250,6 @@ class MemoryLake:
     async def create_namespace(
         self,
         name: str,
-        workspace_id: UUID,
         *,
         description: str = "",
         config_overrides: dict[str, Any] | None = None,
@@ -259,7 +258,6 @@ class MemoryLake:
 
         Args:
             name: Namespace name
-            workspace_id: Parent workspace ID
             description: Optional description
             config_overrides: Optional configuration overrides
 
@@ -268,7 +266,6 @@ class MemoryLake:
         """
         return await self._get_engine().create_namespace(
             name,
-            workspace_id,
             description=description,
             config_overrides=config_overrides,
         )
@@ -585,9 +582,8 @@ class MemoryLake:
     ) -> UUID:
         """Get or create a namespace by name.
 
-        Creates the default organization and workspace if they don't exist.
         This is a convenience method for simple usage where you just want
-        a namespace by name without managing the full hierarchy.
+        a namespace by name without managing it explicitly.
 
         Args:
             name: Namespace name (will be slugified)
@@ -616,19 +612,15 @@ class MemoryLake:
         except ValueError:
             pass
 
-        # Look up by slug in default workspace
-        # Access storage through engine for namespace lookup
+        # Look up by slug (globally unique)
         engine = self._get_engine()
         if not hasattr(engine, "_storage") or engine._storage is None:
             raise RuntimeError("Engine does not support namespace lookup by slug")
 
         storage = engine._storage
-        default_ns_id = await self.get_or_create_default_namespace()
-        default_ns = await storage.get_namespace(default_ns_id)  # type: ignore[unresolved-attribute]
-        if default_ns:
-            ns = await storage.get_namespace_by_slug(default_ns.workspace_id, namespace)  # type: ignore[unresolved-attribute]
-            if ns:
-                return ns.id
+        ns = await storage.get_namespace_by_slug(namespace)  # type: ignore[unresolved-attribute]
+        if ns:
+            return ns.id
 
         raise ValueError(f"Namespace not found: {namespace}")
 

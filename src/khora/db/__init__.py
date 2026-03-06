@@ -11,11 +11,9 @@ from .models import (
     EpisodeModel,
     MemoryEventModel,
     MemoryNamespaceModel,
-    OrganizationModel,
     PermissionModel,
     RelationshipModel,
     SyncCheckpointModel,
-    WorkspaceModel,
 )
 from .session import close_db, get_db, get_engine, init_db, run_migrations
 
@@ -23,8 +21,6 @@ __all__ = [
     # Base
     "Base",
     # Models
-    "OrganizationModel",
-    "WorkspaceModel",
     "MemoryNamespaceModel",
     "DocumentModel",
     "ChunkModel",

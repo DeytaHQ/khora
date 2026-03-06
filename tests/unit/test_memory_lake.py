@@ -303,34 +303,23 @@ class TestResolveNamespace:
 
     @pytest.mark.asyncio
     async def test_slug_lookup(self) -> None:
-        """Non-UUID string looks up namespace by slug."""
+        """Non-UUID string looks up namespace by slug (globally unique)."""
         lake = _make_lake(connected=True)
-        default_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=default_id)
-
-        mock_ns = MagicMock()
-        mock_ns.workspace_id = uuid4()
 
         found_ns = MagicMock()
         found_ns.id = uuid4()
 
-        lake._engine._storage.get_namespace = AsyncMock(return_value=mock_ns)
         lake._engine._storage.get_namespace_by_slug = AsyncMock(return_value=found_ns)
 
         result = await lake._resolve_namespace("my-namespace")
         assert result == found_ns.id
+        lake._engine._storage.get_namespace_by_slug.assert_awaited_once_with("my-namespace")
 
     @pytest.mark.asyncio
     async def test_slug_not_found_raises(self) -> None:
         """Non-UUID string that doesn't exist raises ValueError."""
         lake = _make_lake(connected=True)
-        default_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=default_id)
 
-        mock_ns = MagicMock()
-        mock_ns.workspace_id = uuid4()
-
-        lake._engine._storage.get_namespace = AsyncMock(return_value=mock_ns)
         lake._engine._storage.get_namespace_by_slug = AsyncMock(return_value=None)
 
         with pytest.raises(ValueError, match="Namespace not found"):
@@ -533,14 +522,13 @@ class TestNamespaceManagement:
 
     @pytest.mark.asyncio
     async def test_create_namespace(self) -> None:
-        """create_namespace delegates to engine."""
+        """create_namespace delegates to engine without workspace_id."""
         lake = _make_lake(connected=True)
-        ws_id = uuid4()
 
         mock_ns = MagicMock()
         lake._engine.create_namespace = AsyncMock(return_value=mock_ns)
 
-        result = await lake.create_namespace("test-ns", ws_id, description="Test")
+        result = await lake.create_namespace("test-ns", description="Test")
         assert result is mock_ns
         lake._engine.create_namespace.assert_awaited_once()
 
