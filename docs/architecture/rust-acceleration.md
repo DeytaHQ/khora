@@ -73,7 +73,7 @@ The `KHORA_ACCEL_BACKEND` environment variable overrides auto-detection:
 Backend availability is logged at import time via the `_HAS_RUST`,
 `_HAS_NUMPY`, and `_HAS_RAPIDFUZZ` flags in `_accel.py`.
 
-## Module Reference (11 Modules, 25+ Exported Functions)
+## Module Reference (11 Modules, 27+ Exported Functions)
 
 ### `cosine.rs` — Vector Similarity (5 functions)
 
@@ -127,23 +127,29 @@ Greedy Maximal Marginal Relevance for diversity-aware result selection.
 
 ---
 
-### `temporal.rs` — Temporal Filtering (2 functions)
+### `temporal.rs` — Temporal Filtering & Detection (4 functions)
 
-Batch datetime comparison and recency scoring for temporal queries.
+Batch datetime comparison, recency scoring, and temporal query detection.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `batch_temporal_filter` | `(py, timestamps: Vec<Option<f64>>, after: Option<f64>, before: Option<f64>) -> Vec<bool>` | Batch datetime range filtering. Timestamps are Unix epoch floats. Returns boolean mask. `None` timestamps pass the filter. |
-| `batch_recency_scores` | `(py, timestamps: Vec<Option<f64>>, reference: f64, half_life_days: f64) -> Vec<f64>` | Exponential decay recency scoring. Score = `exp(-lambda * age_days)` where `lambda = ln(2) / half_life_days`. `None` timestamps receive score 0.5. |
+| `batch_temporal_filter` | `(py, timestamps_secs: Vec<Option<f64>>, operator: &str, start_secs: f64, end_secs: f64) -> Vec<bool>` | Batch datetime range filtering. `operator` is one of `"before"`, `"after"`, `"between"`. Timestamps are Unix epoch floats. Returns boolean mask. |
+| `batch_recency_scores` | `(py, timestamps_secs: Vec<Option<f64>>, now_secs: f64, decay_days: f64, recency_weight: f64) -> Vec<f64>` | Weighted exponential decay recency scoring. Score = `(1 - recency_weight) + recency_weight * 0.5^(age_days / decay_days)`. |
+| `detect_temporal_category` | `(query: &str) -> u8` | Categorise a query by temporal intent. Returns a category ID: 0=NONE, 1=EXPLICIT, 2=STATE_QUERY, 3=ORDINAL, 4=AGGREGATE, 5=RECENCY, 6=CHANGE. Uses ~200 Aho-Corasick patterns with case-insensitive matching; highest-priority category wins on multiple matches. |
+| `detect_temporal_keywords` | `(query: &str) -> bool` | Fast boolean check for temporal keywords in a query string. Uses a compiled `LazyLock<Regex>`. |
 
 **Rust techniques:**
-- **Rayon parallel** — both functions use `par_iter()` for large input batches.
-- **GIL release** — `py.allow_threads(|| { ... })` during computation.
+- **Rayon parallel** — `batch_temporal_filter` and `batch_recency_scores` use `par_iter()` for large input batches.
+- **GIL release** — `py.allow_threads(|| { ... })` during batch computation.
 - **No datetime parsing** — timestamps arrive as pre-computed Unix epoch floats, avoiding chrono/datetime overhead.
+- **Aho-Corasick automaton** — `detect_temporal_category` uses a `LazyLock<(AhoCorasick, Vec<u8>)>` compiled from ~200 categorised patterns with `ascii_case_insensitive` matching. Single-pass multi-pattern search replaces sequential substring checks.
+- **LazyLock regex** — `detect_temporal_keywords` compiles its regex once via `LazyLock<Regex>` and reuses it across all calls.
 
 **Python consumers:**
 - `khora._accel.batch_temporal_filter` — used by temporal query pipeline
 - `khora._accel.batch_recency_scores` — used for recency-biased ranking
+- `khora._accel.detect_temporal_category` — used by temporal query classification to route queries to the appropriate temporal handling strategy
+- `khora._accel.detect_temporal_keywords` — fast pre-filter to check if a query has any temporal intent before full classification
 
 ---
 
@@ -353,6 +359,7 @@ pip install khora-accel
 | BM25 search | Index + score + search | **3–8x** | Inverted index, token interning, GIL release |
 | PageRank | Weighted iterative PageRank | **5–15x** | GIL release, tight loop, no Python overhead |
 | Keyword extraction | Regex tokenise + filter | **3–5x** | Compiled regex via LazyLock, rayon batch |
+| Temporal detection | Category classification, keyword check | **5–20x** | Aho-Corasick automaton, LazyLock regex |
 | RRF fusion | Reciprocal rank fusion, normalisation | **2–5x** | hashbrown, OrderedFloat sorting |
 
 ### When It Matters
@@ -390,20 +397,21 @@ All dependencies are declared in `rust/khora-accel/Cargo.toml`:
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| **pyo3** | 0.23 | Python ↔ Rust FFI, `#[pyfunction]`/`#[pyclass]` macros, `extension-module` feature for building as a Python extension |
-| **numpy** | 0.23 | Zero-copy access to NumPy arrays via `PyReadonlyArray1`/`PyReadonlyArray2` — avoids copying embedding matrices across FFI |
-| **ndarray** | 0.16 | N-dimensional array type used internally with numpy crate for row/column access (`Array2`, `ArrayView`) |
+| **pyo3** | 0.28 | Python ↔ Rust FFI, `#[pyfunction]`/`#[pyclass]` macros, `extension-module` feature for building as a Python extension |
+| **numpy** | 0.28 | Zero-copy access to NumPy arrays via `PyReadonlyArray1`/`PyReadonlyArray2` — avoids copying embedding matrices across FFI |
+| **ndarray** | 0.17 | N-dimensional array type used internally with numpy crate for row/column access (`Array2`, `ArrayView`) |
 | **rayon** | 1.10 | Work-stealing thread-pool parallelism: `par_iter()`, `into_par_iter()`, `flat_map()` for batch operations |
 | **strsim** | 0.11 | String similarity algorithms: `normalized_levenshtein`, `jaro_winkler` — pure Rust, no C dependencies |
 | **regex** | 1.10 | Compiled regular expressions for tokenisation in BM25 and keyword extraction |
-| **hashbrown** | 0.15 | High-performance `HashMap`/`HashSet` (Swiss Table algorithm) — faster than std for the access patterns here |
-| **ordered-float** | 4.0 | `OrderedFloat<f64>` wrapper providing total ordering for floats, used in RRF result sorting |
+| **aho-corasick** | 1.1 | Multi-pattern string matching automaton for `detect_temporal_category` — single-pass search over ~200 categorised patterns |
+| **hashbrown** | 0.16 | High-performance `HashMap`/`HashSet` (Swiss Table algorithm) — faster than std for the access patterns here |
+| **ordered-float** | 5.0 | `OrderedFloat<f64>` wrapper providing total ordering for floats, used in RRF result sorting |
 
 **Dev dependencies:**
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| **criterion** | 0.5 | Micro-benchmarking framework with HTML report generation |
+| **criterion** | 0.6 | Micro-benchmarking framework with HTML report generation |
 
 **Feature flags:**
 

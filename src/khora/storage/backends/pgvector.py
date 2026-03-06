@@ -330,6 +330,9 @@ class PgVectorBackend(AsyncSessionMixin):
         When halfvec is enabled, casts to float16 for faster index scans.
         """
         async with self._get_session() as session:
+            # Increase HNSW search accuracy for this transaction
+            await session.execute(text(f"SET LOCAL hnsw.ef_search = {self._hnsw_ef_search}"))
+
             similarity = self._cosine_similarity(ChunkModel.embedding, query_embedding)
 
             query = (
@@ -563,6 +566,10 @@ class PgVectorBackend(AsyncSessionMixin):
             return []
 
         from sqlalchemy.dialects.postgresql import insert
+
+        # Sort by (namespace_id, name, entity_type) to ensure consistent lock ordering
+        # across concurrent batches, preventing deadlocks
+        entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
 
         for start in range(0, len(entities), batch_size):
             batch = entities[start : start + batch_size]

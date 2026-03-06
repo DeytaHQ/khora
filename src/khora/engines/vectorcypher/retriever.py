@@ -39,6 +39,13 @@ from .fusion import (
     weighted_rrf_normalized,
 )
 from .router import QueryComplexity, QueryComplexityRouter, RouterConfig, RoutingDecision
+from .temporal_detection import (
+    RETRIEVAL_PARAMS,
+    RetrievalParams,
+    TemporalCategory,
+    TemporalSignal,
+    get_retrieval_params,
+)
 
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
@@ -107,6 +114,16 @@ class RetrieverConfig:
     max_entities: int = 30
 
 
+def _extract_occurred_at(item: Any) -> str | None:
+    """Extract occurred_at string from a Chunk or dict item."""
+    if isinstance(item, Chunk):
+        custom = item.metadata.custom if item.metadata else {}
+        return custom.get("occurred_at")
+    elif isinstance(item, dict):
+        return item.get("occurred_at")
+    return None
+
+
 class VectorCypherRetriever:
     """Hybrid retriever combining vector search with Cypher graph traversal.
 
@@ -173,6 +190,7 @@ class VectorCypherRetriever:
         namespace_id: UUID,
         *,
         temporal_filter: TemporalFilter | None = None,
+        temporal_signal: TemporalSignal | None = None,
         graph_depth: int | None = None,
         limit: int | None = None,
     ) -> VectorCypherResult:
@@ -182,6 +200,7 @@ class VectorCypherRetriever:
             query: User query
             namespace_id: Namespace to search
             temporal_filter: Optional temporal constraints
+            temporal_signal: Optional temporal detection signal (drives recency/sort behavior)
             graph_depth: Override for graph traversal depth
             limit: Maximum chunks to return
 
@@ -190,6 +209,16 @@ class VectorCypherRetriever:
         """
         with trace_span("khora.vectorcypher.retrieve", namespace_id=str(namespace_id)) as span:
             limit = limit or self._config.max_chunks
+
+            # Resolve retrieval parameters from temporal signal
+            params = (
+                get_retrieval_params(temporal_signal) if temporal_signal else RETRIEVAL_PARAMS[TemporalCategory.NONE]
+            )
+            if temporal_signal and temporal_signal.is_temporal:
+                span.set_attribute("temporal_category", temporal_signal.category.value)
+                logger.debug(
+                    f"Temporal signal: {temporal_signal.category.value} (confidence={temporal_signal.confidence:.2f})"
+                )
 
             # Cache check
             cache_key = ""
@@ -225,6 +254,8 @@ class VectorCypherRetriever:
                     temporal_filter=temporal_filter,
                     limit=limit,
                     routing=routing,
+                    effective_recency=params.recency_weight,
+                    decay_days_override=params.decay_days_override,
                 )
             else:
                 # Complex/moderate path: VectorCypher with parallel execution
@@ -238,6 +269,7 @@ class VectorCypherRetriever:
                         graph_depth=graph_depth,
                         limit=limit,
                         routing=routing,
+                        temporal_params=params,
                     )
                 except Neo4jError as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
@@ -248,6 +280,8 @@ class VectorCypherRetriever:
                         temporal_filter=temporal_filter,
                         limit=limit,
                         routing=routing,
+                        effective_recency=params.recency_weight,
+                        decay_days_override=params.decay_days_override,
                     )
 
             # Store in cache
@@ -270,6 +304,8 @@ class VectorCypherRetriever:
         graph_depth: int | None,
         limit: int,
         routing: RoutingDecision,
+        *,
+        temporal_params: RetrievalParams | None = None,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
 
@@ -280,6 +316,7 @@ class VectorCypherRetriever:
         number of entry entities found. More entities = shallower depth (to avoid
         explosion), fewer entities = deeper depth (to find more context).
         """
+        _tp = temporal_params or RETRIEVAL_PARAMS[TemporalCategory.NONE]
         base_depth = graph_depth or routing.graph_depth
         entry_limit = routing.suggested_entry_limit
 
@@ -317,6 +354,8 @@ class VectorCypherRetriever:
                 temporal_filter=temporal_filter,
                 limit=limit,
                 routing=routing,
+                effective_recency=_tp.recency_weight,
+                decay_days_override=_tp.decay_days_override,
             )
 
         # Compute adaptive depth based on entry entity count
@@ -341,6 +380,7 @@ class VectorCypherRetriever:
             namespace_id=namespace_id,
             temporal_filter=temporal_filter,
             limit=limit * 2,  # Fetch more for fusion
+            temporal_sort=_tp.temporal_sort,
         )
 
         # Step 6: Wait for parallel vector chunk search to complete
@@ -367,13 +407,17 @@ class VectorCypherRetriever:
             routing=routing,
         )
 
-        # Step 8: Apply recency boost if temporal data available
-        if self._config.recency_weight > 0:
-            recency_scores = self._calculate_recency_scores(fused_results)
+        # Step 8: Apply recency boost driven by temporal signal category
+        effective_recency = _tp.recency_weight
+        # WS4: Also boost when explicit temporal filter is active
+        if temporal_filter is not None and effective_recency > 0:
+            effective_recency = max(effective_recency, 0.4)
+        if effective_recency > 0:
+            recency_scores = self._calculate_recency_scores(fused_results, decay_days_override=_tp.decay_days_override)
             fused_results = apply_recency_boost(
                 fused_results,
                 recency_scores,
-                recency_weight=self._config.recency_weight,
+                recency_weight=effective_recency,
             )
 
         # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
@@ -424,6 +468,9 @@ class VectorCypherRetriever:
         temporal_filter: TemporalFilter | None,
         limit: int,
         routing: RoutingDecision,
+        *,
+        effective_recency: float = 0.0,
+        decay_days_override: int | None = None,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
 
@@ -440,6 +487,8 @@ class VectorCypherRetriever:
             temporal_filter=temporal_filter,
             limit=limit,
             routing=routing,
+            effective_recency=effective_recency,
+            decay_days_override=decay_days_override,
         )
 
         # Update metadata to indicate fallback was used
@@ -456,14 +505,26 @@ class VectorCypherRetriever:
         temporal_filter: TemporalFilter | None,
         limit: int,
         routing: RoutingDecision,
+        *,
+        effective_recency: float = 0.0,
+        decay_days_override: int | None = None,
     ) -> VectorCypherResult:
-        """Simple retrieval path - vector search only."""
+        """Simple retrieval path - vector search only.
+
+        For SIMPLE-routed queries, uses a lower hybrid_alpha (0.5) to give
+        BM25 equal weight — lexical overlap is stronger for factual queries.
+        """
+        # WS8: Lower alpha for SIMPLE queries to boost BM25 signal
+        effective_alpha = self._config.hybrid_alpha
+        if routing.complexity == QueryComplexity.SIMPLE:
+            effective_alpha = min(effective_alpha, 0.5)
+
         results = await self._vector_store.search(
             namespace_id=namespace_id,
             query_embedding=query_embedding,
             limit=limit,
             temporal_filter=temporal_filter,
-            hybrid_alpha=self._config.hybrid_alpha,
+            hybrid_alpha=effective_alpha,
             query_text=query,
         )
 
@@ -483,6 +544,13 @@ class VectorCypherRetriever:
                 created_at=r.chunk.created_at or r.chunk.occurred_at,
             )
             chunk_results.append((chunk, r.combined_score or r.similarity))
+
+        # Apply recency boost to simple path (was previously missing)
+        if effective_recency > 0 and chunk_results:
+            fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
+            recency_scores = self._calculate_recency_scores(fused, decay_days_override=decay_days_override)
+            fused = apply_recency_boost(fused, recency_scores, recency_weight=effective_recency)
+            chunk_results = [(r.item, r.rrf_score) for r in fused]
 
         return VectorCypherResult(
             chunks=chunk_results,
@@ -578,6 +646,8 @@ class VectorCypherRetriever:
         namespace_id: UUID,
         temporal_filter: TemporalFilter | None,
         limit: int,
+        *,
+        temporal_sort: bool = False,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Fetch chunks connected to entities via MENTIONED_IN.
 
@@ -586,6 +656,7 @@ class VectorCypherRetriever:
             namespace_id: Namespace constraint
             temporal_filter: Optional temporal constraints
             limit: Maximum chunks to return
+            temporal_sort: If True, sort by occurred_at DESC (for temporal queries)
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -594,6 +665,7 @@ class VectorCypherRetriever:
             entity_ids=entity_ids,
             namespace_id=namespace_id,
             temporal_filter=temporal_filter,
+            temporal_sort=temporal_sort,
             limit=limit,
         )
 
@@ -774,46 +846,54 @@ class VectorCypherRetriever:
     def _calculate_recency_scores(
         self,
         results: list[FusedResult],
+        *,
+        decay_days_override: int | None = None,
     ) -> dict[UUID, float]:
         """Calculate recency scores for temporal boosting.
 
+        Uses *relative* recency: the reference time is the newest occurred_at
+        in the result set (not wall-clock time).  This ensures benchmark data
+        from any era produces meaningful discrimination and that live data
+        (where max ≈ now) behaves identically to the old implementation.
+
         Args:
             results: Fused results with items containing occurred_at
+            decay_days_override: Override for decay_days (e.g. 7 for RECENCY category)
 
         Returns:
             Dict mapping item_id -> recency score (0-1)
         """
-        now = datetime.now(UTC)
-        decay_days = self._config.recency_decay_days
+        decay_days = decay_days_override or self._config.recency_decay_days
         scores: dict[UUID, float] = {}
 
+        # First pass: extract all occurred_at timestamps and find the max
+        parsed_times: dict[UUID, datetime] = {}
         for r in results:
-            item = r.item
-            occurred_at_str = None
-            if isinstance(item, Chunk):
-                custom = item.metadata.custom if item.metadata else {}
-                occurred_at_str = custom.get("occurred_at")
-            elif isinstance(item, dict):
-                occurred_at_str = item.get("occurred_at")
-
+            occurred_at_str = _extract_occurred_at(r.item)
             if occurred_at_str:
                 try:
                     occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
                     if occurred_at.tzinfo is None:
                         occurred_at = occurred_at.replace(tzinfo=UTC)
-                    days_old = (now - occurred_at).days
-                    if self._config.recency_decay_type == "exponential":
-                        # Half-life semantics: score = 0.5 at decay_days
-                        half_life_lambda = math.log(2) / decay_days
-                        recency = math.exp(-half_life_lambda * days_old)
-                    else:
-                        # Linear decay with cliff at decay_days
-                        recency = max(0.0, 1.0 - (days_old / decay_days))
-                    scores[r.item_id] = recency
+                    parsed_times[r.item_id] = occurred_at
                 except (ValueError, TypeError):
-                    scores[r.item_id] = 0.5  # Default for unparseable dates
+                    pass
+
+        # Relative reference: newest item in result set, fallback to wall-clock
+        now = max(parsed_times.values()) if parsed_times else datetime.now(UTC)
+
+        # Second pass: compute recency scores relative to reference time
+        for r in results:
+            if r.item_id in parsed_times:
+                days_old = (now - parsed_times[r.item_id]).total_seconds() / 86400.0
+                if self._config.recency_decay_type == "exponential":
+                    half_life_lambda = math.log(2) / decay_days
+                    recency = math.exp(-half_life_lambda * days_old)
+                else:
+                    recency = max(0.0, 1.0 - (days_old / decay_days))
+                scores[r.item_id] = recency
             else:
-                scores[r.item_id] = 0.5  # Default for missing dates
+                scores[r.item_id] = 0.5  # Default for missing/unparseable dates
 
         return scores
 

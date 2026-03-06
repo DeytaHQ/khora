@@ -253,6 +253,7 @@ dependencies = [
 name = "khora-accel"
 version = "0.3.8"
 dependencies = [
+ "aho-corasick",
  "criterion",
  "hashbrown",
  "ndarray",

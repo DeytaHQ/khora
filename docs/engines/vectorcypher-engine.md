@@ -11,11 +11,15 @@ Choose the VectorCypher engine when:
 - **Relationship discovery is key**: Find implicit connections across data sources
 - **Neo4j is available**: VectorCypher requires Neo4j (not optional)
 
+Choose VectorCypher especially when:
+
+- **Temporal reasoning is needed**: "What is she currently working on?", "What happened most recently?"
+- **Mixed query complexity**: Automatic routing + temporal detection adapts retrieval per query
+
 Choose Skeleton Construction instead when:
 
 - **Cost is the primary concern**: Skeleton uses 5-10x fewer LLM calls
 - **No Neo4j available**: VectorCypher requires Neo4j
-- **Time-based queries dominate**: Skeleton's bi-temporal model is more optimized
 - **Simple infrastructure preferred**: Skeleton works with PostgreSQL only
 
 Choose GraphRAG instead when:
@@ -152,12 +156,13 @@ class RetrieverConfig:
 **Retrieval Pipeline:**
 
 1. **Route Query**: Classify as SIMPLE, MODERATE, or COMPLEX
-2. **Embed Query**: Generate query embedding via LiteLLM
-3. **Vector Search**: Find entry entities via pgvector similarity
-4. **Cypher Expand**: Traverse graph to find related entities (if complex)
-5. **Fetch Chunks**: Get chunks via `MENTIONED_IN` relationships
-6. **RRF Fusion**: Combine vector and graph results
-7. **Recency Boost**: Apply temporal boosting for recent content
+2. **Detect Temporal Signal**: Classify query into a temporal category (see [Temporal Detection](#temporal-detection))
+3. **Embed Query**: Generate query embedding via LiteLLM
+4. **Vector Search**: Find entry entities via pgvector similarity (with `hnsw.ef_search = 200`)
+5. **Cypher Expand**: Traverse graph to find related entities (if complex)
+6. **Fetch Chunks**: Get chunks via `MENTIONED_IN` relationships, with optional temporal sort
+7. **RRF Fusion**: Combine vector and graph results
+8. **Recency Boost**: Apply temporal boosting with category-specific weights and decay
 
 ### QueryComplexityRouter (`src/khora/engines/vectorcypher/router.py`)
 
@@ -210,6 +215,7 @@ chunks = await dual_nodes.get_chunks_by_entities(
     entity_ids=[...],
     namespace_id=namespace_id,
     temporal_filter=temporal_filter,
+    temporal_sort=True,  # ORDER BY c.occurred_at DESC, total_mentions DESC
 )
 
 # Get entity neighborhoods (graph expansion)
@@ -219,6 +225,15 @@ neighborhoods = await dual_nodes.get_entity_neighborhoods(
     depth=2,
 )
 ```
+
+The `temporal_sort` parameter controls Cypher ordering:
+
+| `temporal_sort` | Cypher `ORDER BY` | When Used |
+|-----------------|-------------------|-----------|
+| `False` (default) | `total_mentions DESC` | Non-temporal queries — rank by relevance |
+| `True` | `c.occurred_at DESC, total_mentions DESC` | Temporal queries — most recent chunks first, tiebreak by relevance |
+
+Neo4j already has an index on `Chunk.occurred_at`, so the temporal sort adds negligible overhead.
 
 ### RRF Fusion (`src/khora/engines/vectorcypher/fusion.py`)
 
@@ -304,6 +319,48 @@ VectorCypher uses intelligent query routing to balance performance and quality:
 "Compare the deals that John and Sarah worked on"
 "What's the chain of approvals for this budget?"
 ```
+
+## Temporal Detection
+
+The VectorCypher engine includes a `TemporalDetector` (`src/khora/engines/vectorcypher/temporal_detection.py`) that classifies every query into a temporal category before retrieval begins. This replaces the previous regex-based `_detect_temporal_filter()` with a richer signal that drives multiple retrieval parameters simultaneously.
+
+### How It Works
+
+In `engine.py`'s `recall()` method:
+
+```python
+temporal_signal = TemporalDetector().detect(query)
+
+# EXPLICIT category still produces a TemporalFilter for date-range pushdown to pgvector
+if temporal_signal.temporal_filter is not None:
+    temporal_filter = temporal_signal.temporal_filter
+```
+
+The detector classifies the query, and the resulting `TemporalSignal.category` maps to a `RetrievalParams` tuple that controls recency weight, Neo4j temporal sort, and decay override:
+
+| Category | `recency_weight` | `temporal_sort` | `decay_days_override` | Example Query |
+|----------|------------------|-----------------|-----------------------|---------------|
+| `NONE` | 0.2 | No | — | "What is the capital of France?" |
+| `EXPLICIT` | 0.3 | No | — | "What happened before April 2024?" |
+| `STATE_QUERY` | 0.5 | Yes | — | "What instrument is she currently playing?" |
+| `ORDINAL` | 0.1 | Yes | — | "Which event happened first?" |
+| `AGGREGATE` | 0.0 | No | — | "How many projects in total?" |
+| `RECENCY` | 0.5 | Yes | 7 | "What's the most recent update?" |
+| `CHANGE` | 0.3 | Yes | — | "Does she still work at Google?" |
+
+### Effect on the Retrieval Pipeline
+
+- **`recency_weight`** — Passed to `apply_recency_boost()` after RRF fusion. Higher values amplify the temporal signal; `0.0` (AGGREGATE) disables recency entirely.
+- **`temporal_sort`** — When `True`, `DualNodeManager.get_chunks_by_entities()` uses `ORDER BY c.occurred_at DESC, total_mentions DESC` in its Cypher query, surfacing the most recent chunks first.
+- **`decay_days_override`** — Overrides the default `recency_decay_days` (30) for categories like RECENCY where a tighter window (7 days) is more appropriate.
+
+### Simple Path Recency
+
+The SIMPLE retrieval path (vector-only, no graph traversal) now also applies recency boosting when the temporal category calls for it. Previously, `_simple_retrieve()` returned raw pgvector scores with no recency adjustment. Now it wraps results in `FusedResult` objects, calls `_calculate_recency_scores()`, and applies `apply_recency_boost()` when the effective recency weight is greater than zero.
+
+### Relative Recency Reference
+
+`_calculate_recency_scores()` uses `max(occurred_at)` from the result set as the reference point instead of `datetime.now(UTC)`. This means benchmark data or historical data produces meaningful recency discrimination regardless of when the query is executed — a result from "2 days before the newest result" always gets the same score, whether the data is from 2024 or 2026.
 
 ## Configuration
 
@@ -540,4 +597,5 @@ uv run alembic upgrade head
 - [Skeleton Construction Engine](skeleton-engine.md) - Cost-optimized temporal engine
 - [Temporal Model](temporal-model.md) - Bi-temporal design deep dive
 - [Hybrid Search](hybrid-search.md) - Vector + BM25 fusion details
+- [Temporal Queries](../query-engine/temporal-queries.md) - Temporal detection, recency bias, and temporal filters
 - [References](../REFERENCES.md) - Research papers and inspirations (HippoRAG 2, Graph RAG 2026)

@@ -1,19 +1,129 @@
 # Temporal Queries
 
-Time matters. "What did we discuss last week?" is different from "What have we ever discussed?" Khora lets you filter results by time and optionally boost newer content.
+Time matters. "What did we discuss last week?" is different from "What have we ever discussed?" Khora handles temporal intent automatically in the VectorCypher engine, and also provides explicit API controls for precise time-based filtering.
 
-## Two Time Features
+## How It Works
 
-**Temporal Filtering** - Only return results from a specific time range:
+The VectorCypher engine uses a **three-tier cascade** to detect temporal intent in natural language queries and adapt retrieval behavior accordingly. You don't need to specify temporal parameters manually — the engine classifies your query and tunes recency weighting, sort order, and decay rate automatically.
+
+```
+"What instrument does the user currently play?"
+  → Detected: STATE_QUERY (recency_weight=0.5, temporal sort ON)
+
+"Which city did they move to first?"
+  → Detected: ORDINAL (recency_weight=0.1, temporal sort ON)
+
+"How many jobs has Alice had in total?"
+  → Detected: AGGREGATE (recency_weight=0.0, no temporal sort)
+```
+
+If you need explicit date-range filtering, you can still pass a `TemporalFilter` object — this acts as a manual override and skips automatic detection.
+
+## Automatic Temporal Detection
+
+### Temporal Categories
+
+Every query is classified into one of seven categories, each driving different retrieval behavior:
+
+| Category | Description | Example Query | Recency Weight | Temporal Sort | Notes |
+|-----------|-------------|---------------|----------------|---------------|-------|
+| `NONE` | No temporal signal | "Explain how X works" | 0.2 | No | Default behavior |
+| `EXPLICIT` | Parseable dates | "Before April 2024" | 0.3 | No | Generates a `TemporalFilter` for date-range pushdown |
+| `STATE_QUERY` | Current state | "What does Alice currently do?" | 0.5 | Yes (DESC) | High recency, favors newest facts |
+| `ORDINAL` | Ordering / sequence | "Which event happened first?" | 0.1 | Yes (DESC) | Low recency, preserves chronological order |
+| `AGGREGATE` | Totals / counts | "How many jobs in total?" | 0.0 | No | No recency — needs broad recall |
+| `RECENCY` | Latest results | "Most recent update" | 0.5 | Yes (DESC) | Short decay window (7 days) |
+| `CHANGE` | Temporal evolution | "Did they switch jobs?" | 0.3 | Yes (DESC) | Moderate recency for tracking changes |
+
+### Detection Cascade
+
+Detection runs as a three-tier cascade, stopping at the first match:
+
+**Tier 1: Aho-Corasick Dictionary (~1–10μs)**
+A dictionary of ~200 categorized keyword patterns is matched against the query using Aho-Corasick automaton (Rust via `khora-accel`, with a Python substring fallback). This catches ~85–90% of temporal queries with 0.9 confidence. Example patterns:
+
+- EXPLICIT: "before", "after", "since", "yesterday", "last week", month names
+- STATE_QUERY: "currently", "right now", "at the moment", "these days"
+- ORDINAL: "first", "earliest", "which came", "preceding"
+- AGGREGATE: "how many times", "in total", "all instances"
+- RECENCY: "most recent", "newest", "recently"
+- CHANGE: "changed", "used to", "no longer", "still", "switched"
+
+**Tier 2: Model2Vec Embedding Centroid (~40–50μs)** *(planned, not yet implemented)*
+For queries that slip past the dictionary, a pre-trained Model2Vec centroid will detect implicit temporal intent via embedding similarity. When implemented, queries above a similarity threshold will be classified as `STATE_QUERY` by default.
+
+**Tier 3: LLM-based Query Understanding** *(existing, separate path)*
+The full query understanding pipeline can extract temporal references via LLM. This tier is not invoked in the VectorCypher raw retrieval path but is available for complex query planning.
+
+### TemporalSignal
+
+The detector returns a `TemporalSignal` dataclass:
+
 ```python
-# Only content from the last 7 days
+from khora.engines.vectorcypher.temporal_detection import TemporalSignal
+
+@dataclass(frozen=True)
+class TemporalSignal:
+    is_temporal: bool               # Whether temporal intent was detected
+    category: TemporalCategory      # One of the 7 categories
+    confidence: float               # 0.0–1.0
+    source: str                     # "dictionary", "semantic", or "none"
+    temporal_filter: TemporalFilter | None  # Date-range filter (EXPLICIT only)
+```
+
+### Integration in VectorCypher
+
+The engine's `recall()` method runs detection automatically when no explicit `TemporalFilter` is provided:
+
+```python
+# Automatic — the engine classifies the query and adapts retrieval
+results = await lake.recall("What instrument does Alice currently play?")
+# → STATE_QUERY: recency_weight=0.5, temporal_sort=True
+
+# Explicit override — skips automatic detection
 results = await lake.recall(
     "product updates",
     temporal_filter=TemporalFilter.last_days(7)
 )
 ```
 
-**Recency Bias** - Rank newer content higher:
+When temporal sort is enabled, the Neo4j graph traversal orders chunks by `occurred_at DESC` (instead of the default `total_mentions DESC`), ensuring time-sensitive queries surface the most chronologically relevant results.
+
+## Recency Bias
+
+### How It Works
+
+Recency bias applies an exponential decay boost to rank newer content higher:
+
+```
+boost = 1 + recency_weight * exp(-decay * age_in_days)
+final_score = base_score * boost
+```
+
+### Relative Recency
+
+Recency is computed **relative to the result set**, not wall-clock time. The reference point is `max(occurred_at)` across all results in the current query, with a fallback to `datetime.now(UTC)` when no timestamps exist.
+
+**Why this matters:** If your data is from 2024 but you run queries in 2026, wall-clock-based recency would give every result a near-zero score (all ~2 years old). Relative recency ensures meaningful score discrimination within any time range. For live data where `max(occurred_at) ≈ now`, the behavior is equivalent to the old wall-clock approach.
+
+### Category-Specific Behavior
+
+Each temporal category maps to specific retrieval parameters:
+
+| Category | Recency Weight | Decay Override | Effect |
+|-----------|---------------|----------------|--------|
+| `NONE` | 0.2 | — | Subtle recency preference |
+| `EXPLICIT` | 0.3 | — | Moderate, combined with date-range filter |
+| `STATE_QUERY` | 0.5 | — | Strong recency, most recent fact wins |
+| `ORDINAL` | 0.1 | — | Weak recency, preserves chronological order |
+| `AGGREGATE` | 0.0 | — | No recency at all — pure relevance |
+| `RECENCY` | 0.5 | 7 days | Strong recency, sharp 7-day decay |
+| `CHANGE` | 0.3 | — | Moderate recency for evolution tracking |
+
+### Manual Recency Bias
+
+You can also set recency bias explicitly via the API:
+
 ```python
 # All content, but prefer recent
 results = await lake.recall(
@@ -22,21 +132,19 @@ results = await lake.recall(
 )
 ```
 
-You can use both together:
-```python
-# Last 30 days, newer is better
-results = await lake.recall(
-    "incident reports",
-    temporal_filter=TemporalFilter.last_days(30),
-    recency_bias=0.5
-)
-```
+| Value | Effect |
+|-------|--------|
+| `0.0` | No recency preference |
+| `0.1` | Subtle — barely noticeable |
+| `0.3` | Moderate — recent content noticeably higher |
+| `0.5` | Strong — recent content significantly favored |
+| `1.0` | Very strong — recent content dominates |
 
 ## Temporal Filters
 
-### Quick Filters
+Temporal filters restrict results to a specific time range. They can be generated automatically (from `EXPLICIT` category detection) or specified manually.
 
-The most common patterns have shortcuts:
+### Quick Filters
 
 ```python
 from khora.query.temporal import TemporalFilter
@@ -61,8 +169,6 @@ TemporalFilter.after(datetime(2024, 1, 1))
 ```
 
 ### The Full Filter Object
-
-For more control:
 
 ```python
 from khora.query.temporal import TemporalFilter, TemporalOperator
@@ -89,7 +195,7 @@ filter = TemporalFilter(
 
 ### Entity Validity Filters
 
-Entities can have validity periods - "Alice was CEO from 2020-2023". Two special operators handle this:
+Entities can have validity periods — "Alice was CEO from 2020–2023". Two special operators handle this:
 
 ```python
 # DURING: Find entities that were active throughout a period
@@ -111,55 +217,26 @@ filter = TemporalFilter(
 # "Who was CEO at any point during 2022?"
 ```
 
-## Recency Bias
+### Automatic Date Extraction
 
-Sometimes you don't want to filter - you want everything, but newer content should rank higher.
+When the dictionary detector classifies a query as `EXPLICIT`, it also attempts to extract dates from the query text and build a `TemporalFilter` automatically:
 
-### How It Works
+```python
+# Query: "What happened before April 2024?"
+# → EXPLICIT category, TemporalFilter(occurred_before=2024-04-01)
 
-Recency bias applies an exponential decay boost:
+# Query: "Updates since January 2024"
+# → EXPLICIT category, TemporalFilter(occurred_after=2024-01-01)
 
+# Query: "Events around March 15, 2024"
+# → EXPLICIT category, TemporalFilter(occurred_after=2024-02-13, occurred_before=2024-04-14)
 ```
-boost = 1 + recency_bias * exp(-decay * age_in_days)
-final_score = base_score * boost
-```
 
-A document from yesterday gets a bigger boost than one from a month ago.
-
-### Strength Settings
-
-| Value | Effect |
-|-------|--------|
-| `0.0` | No recency preference (default) |
-| `0.1` | Subtle - barely noticeable |
-| `0.3` | Moderate - recent content noticeably higher |
-| `0.5` | Strong - recent content significantly favored |
-| `1.0` | Very strong - recent content dominates |
-
-### Example
-
-With `recency_bias=0.3`:
-- 1-day-old document: ~1.29x boost
-- 7-day-old document: ~1.24x boost
-- 30-day-old document: ~1.11x boost
-
-This means a slightly less relevant document from yesterday can outrank a more relevant document from last month.
-
-### When to Use
-
-**Use recency bias for:**
-- News and updates ("What's happening?")
-- Active projects ("Current status?")
-- Evolving situations ("Latest on the merger?")
-
-**Skip recency bias for:**
-- Reference material ("How does X work?")
-- Historical research ("What happened in 2020?")
-- Timeless concepts ("Explain relativity")
+Supported date formats include `YYYY-MM-DD`, `YYYY/MM/DD`, `Month DD, YYYY`, and `DD Month YYYY`.
 
 ## Source Timestamps
 
-An important detail: temporal queries use the document's **creation timestamp**, which Khora preserves from the source system.
+Temporal queries use the document's **`occurred_at` timestamp**, which Khora preserves from the source system.
 
 ```python
 # When ingesting from Slack
@@ -172,52 +249,39 @@ document = Document(
 This means if you ingest a year's worth of Slack messages today, "last week" will correctly return messages from last week, not messages you happened to ingest today.
 
 Timestamp priority (first available wins):
-1. `sent_at` - Message sent time
-2. `created_at` - Creation time
-3. `timestamp` - Generic timestamp
-4. `date` - Date field
-5. `occurred_at` - Event time
+1. `sent_at` — Message sent time
+2. `created_at` — Creation time
+3. `timestamp` — Generic timestamp
+4. `date` — Date field
+5. `occurred_at` — Event time
 6. Current time (fallback)
-
-## Query Understanding Integration
-
-You don't have to specify temporal filters manually. Natural language time references are extracted automatically:
-
-```python
-# Query: "What updates were there last week?"
-#
-# Query understanding extracts:
-#   temporal_reference: "last week"
-#   iso_start: "2024-01-20T00:00:00Z"
-#   iso_end: "2024-01-27T00:00:00Z"
-#
-# Which becomes:
-#   TemporalFilter.between(start, end)
-```
-
-This happens during the query understanding step. Supported expressions include:
-- "last week", "last month", "last 7 days"
-- "yesterday", "today"
-- "in January", "in Q4"
-- "before March", "after 2023"
-- "between January and March"
 
 ## Usage Examples
 
-### Recent Updates
+### Automatic Detection (Recommended)
 
 ```python
-# What happened this week?
-results = await lake.recall(
-    "team updates",
-    temporal_filter=TemporalFilter.last_days(7)
-)
+# The engine detects temporal intent and adapts automatically
+results = await lake.recall("What team is Alice on currently?")
+# → STATE_QUERY: high recency, temporal sort
+
+results = await lake.recall("Which project started first?")
+# → ORDINAL: low recency, temporal sort
+
+results = await lake.recall("How many times has the team restructured?")
+# → AGGREGATE: no recency, broad recall
+
+results = await lake.recall("What's the latest deployment status?")
+# → RECENCY: high recency, 7-day decay window
+
+results = await lake.recall("Did Alice switch teams?")
+# → CHANGE: moderate recency, temporal sort
 ```
 
-### Real-Time Monitoring
+### Explicit Temporal Filter
 
 ```python
-# Last 6 hours, strongly prefer newest
+# Override automatic detection with a specific time range
 results = await lake.recall(
     "incident reports",
     temporal_filter=TemporalFilter.last_hours(6),
@@ -228,7 +292,6 @@ results = await lake.recall(
 ### Quarterly Review
 
 ```python
-# Q4 2024
 results = await lake.recall(
     "quarterly planning",
     temporal_filter=TemporalFilter.between(
@@ -241,7 +304,6 @@ results = await lake.recall(
 ### Historical Research
 
 ```python
-# What was the team structure in 2022?
 results = await lake.recall(
     "team structure",
     temporal_filter=TemporalFilter(
@@ -301,11 +363,21 @@ WHERE namespace_id = ?
 ORDER BY final_score DESC;
 ```
 
+When temporal sort is active, the Neo4j graph traversal changes ordering:
+
+```cypher
+// Default (no temporal signal):
+ORDER BY total_mentions DESC
+
+// With temporal sort (STATE_QUERY, ORDINAL, RECENCY, CHANGE):
+ORDER BY c.occurred_at DESC, total_mentions DESC
+```
+
 Entities with validity periods use similar logic on `valid_from` and `valid_until` columns.
 
 ## Combining with Event Sourcing
 
-For true time travel - reconstructing the state of the knowledge graph at a past point - use the event store:
+For true time travel — reconstructing the state of the knowledge graph at a past point — use the event store:
 
 ```python
 # What entities existed on January 1st?
@@ -323,6 +395,7 @@ See [Event Sourcing](../architecture/event-sourcing.md) for details.
 
 ## What's Next?
 
-- **[Query Understanding](query-understanding.md)** - How time expressions are extracted
-- **[Search Modes](search-modes.md)** - Combining temporal with different search types
-- **[Event Sourcing](../architecture/event-sourcing.md)** - Full historical state
+- **[Query Understanding](query-understanding.md)** — How time expressions are extracted
+- **[Search Modes](search-modes.md)** — Combining temporal with different search types
+- **[Event Sourcing](../architecture/event-sourcing.md)** — Full historical state
+- **[Temporal Model](../engines/temporal-model.md)** — Bi-temporal edge model and time hierarchy

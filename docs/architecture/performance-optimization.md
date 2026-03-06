@@ -447,6 +447,50 @@ async with self._entity_key_gate.acquire(entities):
 
 Relationship writes still use a plain semaphore (8 concurrent). Since relationships use `CREATE` (not `MERGE`), there is no lock contention between concurrent transactions — each relationship is a new edge, so no two transactions compete for the same lock.
 
+## Phase 10: VectorCypher Temporal Accuracy
+
+### HNSW `ef_search` Per-Transaction Tuning
+
+pgvector's HNSW index uses a default `ef_search` of 40, which trades recall for speed. For benchmark and production accuracy, the pgvector storage backend now sets `ef_search=200` per-transaction before executing vector searches:
+
+```sql
+SET LOCAL hnsw.ef_search = 200;
+```
+
+`SET LOCAL` scopes the change to the current transaction — it does not affect other connections or the server-wide default. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency (typically <5 ms for typical index sizes). This is a pure accuracy win with negligible performance cost.
+
+### Entity Sort Before Upsert (Deadlock Prevention)
+
+Concurrent batch entity upserts to PostgreSQL could deadlock when two transactions locked overlapping rows in different orders. The fix is to sort entities by a deterministic key before the `INSERT ... ON CONFLICT DO UPDATE` statement:
+
+```python
+# Sort by (name, entity_type) before upsert to prevent deadlocks
+sorted_entities = sorted(entities, key=lambda e: (e.name, e.entity_type))
+```
+
+This is a classic deadlock prevention technique: when all transactions acquire row-level locks in the same order, circular wait conditions become impossible. This complements Phase 9's `_EntityKeyGate` — the gate serializes *overlapping batches* (preventing Neo4j lock contention between transactions), while sorting prevents deadlocks *within individual batches* (preventing PostgreSQL row-lock ordering conflicts). Together, both backends now handle concurrent entity writes without retries.
+
+### Relative Recency Scoring
+
+Recency decay previously used `datetime.now()` (wall-clock time) as the reference point. This had two problems:
+
+1. **Non-deterministic** — the same query run seconds apart could produce different scores
+2. **Clock-dependent** — scoring behaved differently across timezones or clock-skewed environments
+
+The recency calculation now uses `max(occurred_at)` from the result set as the reference timestamp:
+
+```python
+# Before: wall-clock reference
+now = datetime.now(tz=UTC)
+age_days = (now - doc.occurred_at).total_seconds() / 86400
+
+# After: result-relative reference
+max_occurred = max(doc.occurred_at for doc in results)
+age_days = (max_occurred - doc.occurred_at).total_seconds() / 86400
+```
+
+This eliminates wall-clock dependency — historical and benchmark data produces meaningful recency discrimination regardless of when the query executes. The most recent document in the result set always gets the highest recency score (age = 0), and older documents are scored relative to it. For live systems, behavior is equivalent since `max(occurred_at) ≈ now`.
+
 ## What's Next
 
 - **[Query Engine Overview](../query-engine/overview.md)** -- How the full search pipeline works

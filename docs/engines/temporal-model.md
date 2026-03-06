@@ -1,6 +1,8 @@
 # Temporal Model
 
-> **Status (v0.2.3):** The bi-temporal edge storage (`TemporalEdgeStorage`) and time hierarchy (`TimeHierarchyBuilder`) described here exist as code but are **never called** by any engine's ingest or recall paths. The `occurred_at` column on chunks is populated and filterable via the pgvector backend, but the full bi-temporal edge model is not yet active.
+> **Status (v0.3.9):** The bi-temporal edge storage (`TemporalEdgeStorage`) and time hierarchy (`TimeHierarchyBuilder`) described here exist as code but are **never called** by any engine's ingest or recall paths. The `occurred_at` column on chunks is populated and filterable via the pgvector backend, but the full bi-temporal edge model is not yet active.
+>
+> **VectorCypher temporal detection (v0.3.9):** The VectorCypher engine now classifies queries into 7 temporal categories via `TemporalDetector` (see [temporal-queries.md](../query-engine/temporal-queries.md)) and applies category-specific retrieval parameters (recency boost, sorting, decay override). The `occurred_at` column on chunks is also used for temporal sorting during Neo4j graph traversal (`ORDER BY c.occurred_at DESC`) when the temporal signal indicates it.
 
 The Skeleton Construction engine implements a bi-temporal model inspired by [Graphiti](https://github.com/getzep/graphiti), with a hierarchical time graph inspired by [TG-RAG](https://arxiv.org/abs/2410.15149). This document explains the theory and implementation.
 
