@@ -45,6 +45,7 @@ try:
     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
     from khora_accel import cosine_similarity as _rust_cosine
     from khora_accel import detect_communities as _rust_detect_communities
+    from khora_accel import detect_temporal_category as _rust_detect_temporal_category
     from khora_accel import extract_keywords as _rust_extract_keywords
     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
     from khora_accel import levenshtein_similarity as _rust_levenshtein
@@ -975,6 +976,114 @@ def batch_recency_scores(
         decay = math.exp(decay_factor * age_days)
         scores.append(base + recency_weight * decay)
     return scores
+
+
+# ---------------------------------------------------------------------------
+# Temporal category detection
+# ---------------------------------------------------------------------------
+
+TEMPORAL_DICTIONARY: dict[int, list[str]] = {
+    1: [  # EXPLICIT
+        "when ",
+        "before ",
+        "after ",
+        "during ",
+        "since ",
+        "until ",
+        "yesterday",
+        "today",
+        " ago",
+        "january",
+        "february",
+        "march",
+        "april",
+        "may ",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "last week",
+        "last month",
+        "last year",
+        "last night",
+        "last time",
+    ],
+    2: [  # STATE_QUERY
+        "currently",
+        "right now",
+        "at present",
+        "presently",
+        "these days",
+        "nowadays",
+        "at this point",
+        "at the moment",
+    ],
+    3: [  # ORDINAL
+        "first ",
+        " earliest",
+        "which came",
+        "what came",
+        "preceding",
+        "following ",
+        "subsequent",
+    ],
+    4: [  # AGGREGATE
+        "how many times",
+        "how many total",
+        "all instances",
+        "every time",
+        "in total",
+        "count of",
+        "number of times",
+    ],
+    5: [  # RECENCY
+        "most recent",
+        "newest",
+        "just ",
+        "recently",
+    ],
+    6: [  # CHANGE
+        "changed",
+        "switched",
+        "moved to",
+        "used to",
+        "no longer",
+        "still ",
+        "anymore",
+        "former ",
+        "previous ",
+        "ex-",
+        "updated",
+        "replaced",
+        "went from",
+        "transitioned",
+    ],
+}
+
+
+def detect_temporal_category(query: str) -> int:
+    """Detect temporal category of a query.
+
+    Returns category ID: 0=NONE, 1=EXPLICIT, 2=STATE_QUERY, 3=ORDINAL,
+    4=AGGREGATE, 5=RECENCY, 6=CHANGE.
+
+    Uses Rust Aho-Corasick when available, otherwise Python substring matching.
+    """
+    if _HAS_RUST:
+        return _rust_detect_temporal_category(query)
+
+    # Python fallback: simple substring matching
+    query_lower = query.lower()
+    best_cat = 0
+    for cat, terms in TEMPORAL_DICTIONARY.items():
+        for term in terms:
+            if term in query_lower:
+                best_cat = max(best_cat, cat)
+                break
+    return best_cat
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,8 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Temporal filtering
     m.add_function(wrap_pyfunction!(temporal::batch_temporal_filter, m)?)?;
     m.add_function(wrap_pyfunction!(temporal::batch_recency_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(temporal::detect_temporal_keywords, m)?)?;
+    m.add_function(wrap_pyfunction!(temporal::detect_temporal_category, m)?)?;
 
     // MMR diversity selection
     m.add_function(wrap_pyfunction!(mmr::mmr_diversity_select, m)?)?;

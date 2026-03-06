@@ -122,6 +122,108 @@ fn matches_op(ts: f64, op: Op, start: Option<f64>, end: Option<f64>) -> bool {
     }
 }
 
+/// Fast regex-based temporal keyword detection.
+///
+/// Returns `true` if the query contains temporal keywords like "when", "before",
+/// "after", "since", "until", "yesterday", "recently", date patterns, etc.
+/// This replaces Python-side regex for zero-overhead temporal detection.
+#[pyfunction]
+pub fn detect_temporal_keywords(query: &str) -> bool {
+    use std::sync::LazyLock;
+    use regex::Regex;
+
+    static TEMPORAL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)\b(when|before|after|during|since|until|last\s+(?:week|month|year|night|time)|yesterday|today|recently|earlier|latest|newest|oldest|first|most\s+recent|in\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)|in\s+\d{4}|on\s+\d{1,2}[/\-]|ago)\b"
+        ).expect("temporal regex compilation failed")
+    });
+
+    TEMPORAL_RE.is_match(query)
+}
+
+/// Categorized temporal keyword detection using Aho-Corasick automaton.
+///
+/// Returns a category ID:
+///   0 = NONE, 1 = EXPLICIT, 2 = STATE_QUERY, 3 = ORDINAL,
+///   4 = AGGREGATE, 5 = RECENCY, 6 = CHANGE
+///
+/// Higher category IDs take priority when multiple matches exist.
+#[pyfunction]
+pub fn detect_temporal_category(query: &str) -> u8 {
+    use aho_corasick::AhoCorasick;
+    use std::sync::LazyLock;
+
+    static AC: LazyLock<(AhoCorasick, Vec<u8>)> = LazyLock::new(|| {
+        let mut patterns = Vec::new();
+        let mut categories = Vec::new();
+
+        // Helper to add patterns for a category
+        let mut add = |cat: u8, pats: &[&str]| {
+            for p in pats {
+                patterns.push(p.to_string());
+                categories.push(cat);
+            }
+        };
+
+        // Category 1: EXPLICIT (date markers, month names, etc.)
+        add(1, &[
+            "when ", "before ", "after ", "during ", "since ", "until ",
+            "yesterday", "today", " ago",
+            "january", "february", "march", "april", "may ", "june",
+            "july", "august", "september", "october", "november", "december",
+            "last week", "last month", "last year", "last night", "last time",
+        ]);
+
+        // Category 2: STATE_QUERY
+        add(2, &[
+            "currently", "right now", "at present", "presently",
+            "these days", "nowadays", "at this point", "at the moment",
+        ]);
+
+        // Category 3: ORDINAL
+        add(3, &[
+            "first ", " earliest", "which came", "what came",
+            "preceding", "following ", "subsequent",
+        ]);
+
+        // Category 4: AGGREGATE
+        add(4, &[
+            "how many times", "how many total", "all instances",
+            "every time", "in total", "count of", "number of times",
+        ]);
+
+        // Category 5: RECENCY
+        add(5, &[
+            "most recent", "newest", "just ", "recently",
+        ]);
+
+        // Category 6: CHANGE
+        add(6, &[
+            "changed", "switched", "moved to", "used to",
+            "no longer", "still ", "anymore", "former ",
+            "previous ", "ex-", "updated", "replaced",
+            "went from", "transitioned",
+        ]);
+
+        let ac = AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(&patterns)
+            .expect("Aho-Corasick build failed");
+        (ac, categories)
+    });
+
+    let (ac, cats) = &*AC;
+
+    let mut best_cat: u8 = 0;
+    for mat in ac.find_iter(query) {
+        let cat = cats[mat.pattern().as_usize()];
+        if cat > best_cat {
+            best_cat = cat;
+        }
+    }
+    best_cat
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +329,50 @@ mod tests {
         // More recent timestamps should have higher scores
         assert!(scores[0] > scores[1]);
         assert!(scores[1] > scores[2]);
+    }
+
+    #[test]
+    fn test_detect_temporal_keywords() {
+        assert!(detect_temporal_keywords("When did Alice move?"));
+        assert!(detect_temporal_keywords("What happened before 2023?"));
+        assert!(detect_temporal_keywords("Events since last month"));
+        assert!(detect_temporal_keywords("The most recent meeting"));
+        assert!(!detect_temporal_keywords("What is the capital of France?"));
+        assert!(!detect_temporal_keywords("Tell me about quantum physics"));
+    }
+
+    #[test]
+    fn test_detect_temporal_category_state_query() {
+        assert_eq!(detect_temporal_category("What instrument is the user currently playing?"), 2);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_ordinal() {
+        assert_eq!(detect_temporal_category("Which event happened first ?"), 3);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_explicit() {
+        assert_eq!(detect_temporal_category("What happened before April 2024?"), 1);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_aggregate() {
+        assert_eq!(detect_temporal_category("How many times did she visit?"), 4);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_recency() {
+        assert_eq!(detect_temporal_category("What is the most recent update?"), 5);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_change() {
+        assert_eq!(detect_temporal_category("Does she still work at Google?"), 6);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_none() {
+        assert_eq!(detect_temporal_category("What is the capital of France?"), 0);
     }
 }

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -46,6 +47,7 @@ from khora.telemetry import trace, trace_span
 from .dual_nodes import DualNodeManager, EntityChunkLink
 from .retriever import RetrieverConfig, VectorCypherRetriever
 from .router import QueryComplexityRouter, RouterConfig
+from .temporal_detection import TemporalDetector, TemporalSignal
 
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
@@ -172,6 +174,10 @@ class VectorCypherConfig:
     # Streaming pipeline (A-1: batch entity storage across documents)
     streaming_pipeline: bool = True
     enable_smart_resolution: bool = True
+
+    # Skip LLM entity extraction for short messages (conversation batches).
+    # Messages with all chunks ≤ this token count rely on BM25 + vector search instead.
+    min_extraction_tokens: int = 50
 
     # Lazy entity expansion (recovers graph signal for non-core chunks)
     lazy_entity_expansion: bool = True
@@ -785,6 +791,14 @@ class VectorCypherEngine:
         if not chunks:
             return [], [], []
 
+        # Skip LLM entity extraction for short conversation messages.
+        # Short messages (≤ min_extraction_tokens per chunk) produce low-quality
+        # extraction results. BM25 + vector search handles them better.
+        min_tokens = self._vc_config.min_extraction_tokens
+        if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in chunks):
+            logger.debug(f"Skipping entity extraction for {len(chunks)} short chunks " f"(all ≤ {min_tokens} tokens)")
+            return [], [], []
+
         # Skip skeleton overhead for small documents (≤2 chunks)
         if len(chunks) <= 2:
             core_ids = {c.id for c in chunks}
@@ -851,11 +865,17 @@ class VectorCypherEngine:
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
         occurred_at: datetime,
+        embedding_text_override: str | None = None,
     ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Process a document, returning entities for deferred batch storage.
 
         Same as _process_document but returns entities/rels/links instead of
         storing them, allowing the caller to batch across documents.
+
+        Args:
+            embedding_text_override: If provided, use this text for embedding
+                instead of the raw chunk content. The original content is still
+                stored in the chunk (preserves substring-based metrics).
 
         Returns:
             Tuple of (chunks_created, entities, relationships, entity_chunk_links)
@@ -881,8 +901,13 @@ class VectorCypherEngine:
             await storage.update_document(document)
             return 0, [], [], []
 
-        chunk_texts = [c.content for c in raw_chunks]
-        embeddings = await embedder.embed_batch(chunk_texts)
+        # WS3: Use enriched text for embedding if provided (conversation context),
+        # but store original content in the chunk for answer_accuracy matching.
+        if embedding_text_override:
+            embed_texts = [embedding_text_override]
+        else:
+            embed_texts = [c.content for c in raw_chunks]
+        embeddings = await embedder.embed_batch(embed_texts)
         doc_metadata = document.metadata.custom if document.metadata else {}
 
         temporal_chunks = []
@@ -1021,11 +1046,22 @@ class VectorCypherEngine:
         """
         retriever = self._get_retriever()
 
+        # Cascade temporal detection: Aho-Corasick dictionary → (optional) semantic
+        # Replaces the old regex + dateparser approach with categorized signals.
+        temporal_signal: TemporalSignal | None = None
+        if temporal_filter is None:
+            detector = TemporalDetector()
+            temporal_signal = detector.detect(query)
+            # EXPLICIT category produces a date-range TemporalFilter for pushdown
+            if temporal_signal.temporal_filter is not None:
+                temporal_filter = temporal_signal.temporal_filter
+
         # Use VectorCypher retriever
         result = await retriever.retrieve(
             query=query,
             namespace_id=namespace_id,
             temporal_filter=temporal_filter,
+            temporal_signal=temporal_signal,
             graph_depth=graph_depth,
             limit=limit,
         )
@@ -1086,6 +1122,43 @@ class VectorCypherEngine:
 
         # Delete from relational storage
         return await storage.delete_document(document_id)
+
+    @staticmethod
+    def _build_conversation_context(
+        sorted_docs: list[dict[str, Any]],
+    ) -> dict[int, str]:
+        """Build context-enriched embedding text for conversation messages.
+
+        For each message, creates text that includes ±2 neighboring messages
+        as context. This helps embeddings capture conversational flow.
+
+        Args:
+            sorted_docs: Documents sorted by occurred_at timestamp.
+
+        Returns:
+            Dict mapping document index → enriched text for embedding.
+        """
+        context_map: dict[int, str] = {}
+        n = len(sorted_docs)
+        for i in range(n):
+            parts: list[str] = []
+            # ±2 neighbor context window
+            for j in range(max(0, i - 2), min(n, i + 3)):
+                if j == i:
+                    continue
+                neighbor = sorted_docs[j]
+                author = neighbor.get("metadata", {}).get("author", "")
+                content = neighbor.get("content", "")[:100]
+                prefix = "prev" if j < i else "next"
+                parts.append(f"{prefix}: {author}: {content}")
+
+            current = sorted_docs[i].get("content", "")
+            if parts:
+                context_str = " | ".join(parts)
+                context_map[i] = f"[Context: {context_str}]\n{current}"
+            else:
+                context_map[i] = current
+        return context_map
 
     async def remember_batch(
         self,
@@ -1161,13 +1234,40 @@ class VectorCypherEngine:
 
         use_streaming = self._vc_config.streaming_pipeline
 
+        # WS3: Detect conversation mode and build context-enriched embedding text.
+        # Conversation mode: >50% of docs have occurred_at AND avg content < 200 chars.
+        conversation_context: dict[int, str] = {}
+        docs_with_ts = sum(1 for d in documents if "occurred_at" in d.get("metadata", {}))
+        avg_content_len = sum(len(d.get("content", "")) for d in documents) / max(len(documents), 1)
+        if docs_with_ts > len(documents) * 0.5 and avg_content_len < 200:
+            # Sort by occurred_at for context windowing
+            indexed_docs = list(enumerate(documents))
+            indexed_docs.sort(
+                key=lambda x: x[1].get("metadata", {}).get("occurred_at", ""),
+            )
+            sorted_docs = [d for _, d in indexed_docs]
+            conversation_context = self._build_conversation_context(sorted_docs)
+            # Map from original index to context text
+            orig_to_sorted = {orig_idx: sort_idx for sort_idx, (orig_idx, _) in enumerate(indexed_docs)}
+            context_by_orig: dict[int, str] = {
+                orig_idx: conversation_context[sort_idx]
+                for orig_idx, sort_idx in orig_to_sorted.items()
+                if sort_idx in conversation_context
+            }
+            logger.info(
+                f"Conversation mode detected: {docs_with_ts}/{len(documents)} docs with timestamps, "
+                f"avg content {avg_content_len:.0f} chars, enriching embeddings"
+            )
+        else:
+            context_by_orig = {}
+
         # Streaming pipeline: accumulate entities across documents for batch storage
         all_entities: list[Entity] = []
         all_relationships: list[Relationship] = []
         all_entity_chunk_links: list[EntityChunkLink] = []
         entity_lock = asyncio.Lock()
 
-        async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
+        async def process_document(doc_data: dict[str, Any], checksum: str, doc_index: int = 0) -> None:
             nonlocal progress_count
 
             # Check for intra-batch duplicate
@@ -1216,6 +1316,7 @@ class VectorCypherEngine:
                             expertise=expertise,
                             extraction_model=extraction_model,
                             occurred_at=occurred_at or datetime.now(UTC),
+                            embedding_text_override=context_by_orig.get(doc_index),
                         )
 
                         # Accumulate entities for batch storage
@@ -1268,7 +1369,9 @@ class VectorCypherEngine:
                     on_progress(progress_count, total)
 
         # Phase 2: Process all documents in parallel
-        await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
+        await asyncio.gather(
+            *[process_document(doc, checksum, idx) for idx, (doc, checksum) in enumerate(zip(documents, doc_checksums))]
+        )
 
         # Phase 3: Batch entity storage (streaming pipeline only)
         if use_streaming and all_entities:
@@ -1319,6 +1422,59 @@ class VectorCypherEngine:
             relationships=results["relationships"],
         )
 
+    # Compiled regex for lightweight temporal keyword detection
+    _TEMPORAL_KW_RE = re.compile(
+        r"\b(when|before|after|during|since|until|last\s+(?:week|month|year|night|time)"
+        r"|yesterday|today|recently|earlier|latest|newest|oldest|first|most\s+recent"
+        r"|in\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)"
+        r"|in\s+\d{4}|on\s+\d{1,2}[/\-]|ago)\b",
+        re.IGNORECASE,
+    )
+    _DATE_EXTRACT_RE = re.compile(
+        r"(\d{4}[/\-]\d{1,2}[/\-]\d{1,2})"
+        r"|(\b(?:january|february|march|april|may|june|july|august|september|october|november|december)"
+        r"\s+\d{1,2},?\s+\d{4}\b)"
+        r"|(\b\d{1,2}\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)"
+        r"\s+\d{4}\b)",
+        re.IGNORECASE,
+    )
+
+    def _detect_temporal_filter(self, query: str) -> TemporalFilter | None:
+        """Lightweight regex-based temporal detection — no LLM call.
+
+        Returns a TemporalFilter if temporal keywords and parseable dates
+        are found, otherwise None. Cost: ~0.25ms.
+        """
+        if not self._TEMPORAL_KW_RE.search(query):
+            return None
+
+        # Try to extract an explicit date from the query
+        date_match = self._DATE_EXTRACT_RE.search(query)
+        if date_match:
+            date_str = date_match.group(0)
+            try:
+                parsed_dt = self._parse_datetime(date_str)
+                # "before" / "after" / default to "around that date" (±30 days)
+                query_lower = query.lower()
+                if "before" in query_lower:
+                    return TemporalFilter(occurred_before=parsed_dt)
+                elif "after" in query_lower or "since" in query_lower:
+                    return TemporalFilter(occurred_after=parsed_dt)
+                else:
+                    # Within ±30 days of the mentioned date
+                    from datetime import timedelta
+
+                    return TemporalFilter(
+                        occurred_after=parsed_dt - timedelta(days=30),
+                        occurred_before=parsed_dt + timedelta(days=30),
+                    )
+            except ValueError:
+                pass
+
+        # Temporal keywords detected but no parseable date — signal to retriever
+        # via a marker filter that enables recency boosting
+        return None
+
     def _parse_datetime(self, value: Any) -> datetime:
         """Parse a datetime value from various formats."""
         if isinstance(value, datetime):
@@ -1336,6 +1492,26 @@ class VectorCypherEngine:
                     dt = dt.replace(tzinfo=UTC)
                 return dt
             except ValueError:
+                pass
+            # LongMemEval format: "2023/04/10 (Mon) 17:50"
+            for fmt in (
+                "%Y/%m/%d (%a) %H:%M",
+                "%Y/%m/%d %H:%M",
+                "%Y/%m/%d",
+                "%B %d, %Y",
+            ):
+                try:
+                    return datetime.strptime(value, fmt).replace(tzinfo=UTC)
+                except ValueError:
+                    continue
+            # Last-resort: dateparser (handles a wide variety of natural-language dates)
+            try:
+                import dateparser
+
+                dt = dateparser.parse(value, settings={"RETURN_AS_TIMEZONE_AWARE": True})
+                if dt is not None:
+                    return dt
+            except Exception:
                 pass
         raise ValueError(f"Cannot parse datetime: {value}")
 

@@ -371,6 +371,7 @@ class DualNodeManager:
         namespace_id: UUID,
         *,
         temporal_filter: TemporalFilter | None = None,
+        temporal_sort: bool = False,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Get chunks connected to the given entities via MENTIONED_IN.
@@ -416,6 +417,10 @@ class DualNodeManager:
         if temporal_conditions:
             where_clause = "AND " + " AND ".join(temporal_conditions)
 
+        order_clause = (
+            "ORDER BY c.occurred_at DESC, total_mentions DESC" if temporal_sort else "ORDER BY total_mentions DESC"
+        )
+
         query = f"""
         MATCH (e:Entity)-[r:MENTIONED_IN]->(c:Chunk)
         WHERE e.id IN $entity_ids
@@ -428,7 +433,7 @@ class DualNodeManager:
                c.metadata AS metadata,
                collect(DISTINCT e.id) AS entity_ids,
                sum(r.mention_count) AS total_mentions
-        ORDER BY total_mentions DESC
+        {order_clause}
         LIMIT $limit
         """
 

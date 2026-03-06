@@ -32,6 +32,7 @@ from .fusion import (
 )
 from .retriever import RetrieverConfig, VectorCypherResult, VectorCypherRetriever
 from .router import QueryComplexity, QueryComplexityRouter, RouterConfig, RoutingDecision
+from .temporal_detection import TemporalCategory, TemporalDetector, TemporalSignal
 
 __all__ = [
     # Engine
@@ -50,6 +51,10 @@ __all__ = [
     "ChunkNode",
     "DualNodeManager",
     "EntityChunkLink",
+    # Temporal detection
+    "TemporalCategory",
+    "TemporalDetector",
+    "TemporalSignal",
     # Fusion
     "FusedResult",
     "apply_recency_boost",
