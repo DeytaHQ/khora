@@ -9,11 +9,11 @@ Khora supports three pluggable engines with different strengths. This guide help
 | **Primary Focus** | Knowledge graphs | Temporal events | Hybrid retrieval |
 | **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) | Skeleton (70%) |
 | **Core Data Model** | Entities & relationships | Chunks with temporal metadata | Dual nodes (Entity + Chunk) |
-| **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Bi-temporal |
+| **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Bi-temporal + temporal detection (7 query categories) |
 | **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) |
 | **Graph Backend** | Required (Neo4j/Kuzu/Memgraph) | Not required | Required (Neo4j) |
 | **Search Modes** | Vector + Graph + Keyword | Vector + BM25 Hybrid | Vector + Cypher + RRF |
-| **Best For** | Knowledge bases | Chat history, logs, events | Complex multi-hop queries |
+| **Best For** | Knowledge bases | Chat history, logs, events | Complex multi-hop queries, temporal reasoning |
 
 ## Detailed Comparison
 
@@ -210,7 +210,7 @@ For 10,000 documents:
 
 ### Choose Skeleton Construction When...
 
-- **Time is the primary dimension**: Chat logs, event streams, meeting notes
+- **Time is the primary dimension**: Chat logs, event streams, meeting notes (note: VectorCypher also handles temporal queries well via its TemporalDetector)
 - **Cost optimization critical**: Large volumes, budget constraints
 - **Freshness matters**: Recent events more important than old
 - **Structured filtering needed**: By author, channel, tags, time ranges
@@ -231,6 +231,7 @@ For 10,000 documents:
 - **Graph traversal is essential**: Organizational hierarchies, deal chains, team structures
 - **Relationship discovery matters**: Finding implicit connections across data sources
 - **Neo4j is available**: VectorCypher requires Neo4j (not optional)
+- **Temporal reasoning needed**: Cascade temporal detection classifies queries into 7 categories with category-specific retrieval (recency boost, sorting, decay override)
 - **Balanced cost/quality**: Willing to pay more than Skeleton but less than GraphRAG
 
 **Example Use Cases:**

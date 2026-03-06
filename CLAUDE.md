@@ -36,7 +36,8 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 - `db/models.py` — SQLAlchemy ORM (all UUID columns use `as_uuid=True`)
 - `engines/` — GraphRAG (default), Skeleton Construction, VectorCypher
 - `query/engine.py` — `HybridQueryEngine` search pipeline
-- `_accel.py` — Rust/NumPy/Python acceleration facade (MMR, cosine, temporal, BM25, etc.)
+- `_accel.py` — Rust/NumPy/Python acceleration facade (MMR, cosine, `detect_temporal_category()`, BM25, etc.)
+- `engines/vectorcypher/temporal_detection.py` — `TemporalDetector`, category-specific `RetrievalParams` for VectorCypher recall
 - `pipelines/flows/ingest.py` — Document ingestion pipeline with entity ID mapping
 
 ## Engine Selection
