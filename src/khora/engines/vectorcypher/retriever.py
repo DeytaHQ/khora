@@ -245,8 +245,16 @@ class VectorCypherRetriever:
             span.set_attribute("routing_complexity", routing.complexity.value)
 
             # Step 2: Embed the query
-            with trace_span("khora.vectorcypher.embed_query"):
+            with trace_span("khora.vectorcypher.embed_query") as embed_span:
+                embed_span.set_attribute("model", self._embedder.model_name)
+                embed_span.set_attribute("dimension", self._embedder.dimension)
+                embed_span.set_attribute("text_length", len(query))
+                _stats = getattr(self._embedder, "cache_stats", None)
+                _pre_hits = _stats["hits"] if isinstance(_stats, dict) else None
                 query_embedding = await self._embedder.embed(query)
+                if _pre_hits is not None:
+                    _post_hits = self._embedder.cache_stats["hits"]  # type: ignore[attr-defined]
+                    embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
 
             # Step 3: Vector search for entry points
             if routing.complexity == QueryComplexity.SIMPLE:
