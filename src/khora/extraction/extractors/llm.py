@@ -1150,10 +1150,6 @@ class LLMEntityExtractor(EntityExtractor):
         if not texts:
             return []
 
-        # Normalize empty lists to None (use defaults)
-        entity_types = entity_types or None
-        relationship_types = relationship_types or None
-
         # Tiered extraction: separate short texts for regex-only processing
         if tiered_extraction:
             regex_results: dict[int, ExtractionResult] = {}

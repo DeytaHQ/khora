@@ -91,7 +91,8 @@ class MemoryLake:
     Usage:
         # Simplest - from env vars (KHORA_DATABASE_URL)
         async with MemoryLake() as lake:
-            await lake.remember("Important fact...", namespace="my-ns")
+            await lake.remember("Important fact...", namespace="my-ns",
+                entity_types=["PERSON", "CONCEPT"], relationship_types=["RELATES_TO"])
 
         # Common - explicit database URL
         async with MemoryLake("postgresql://localhost/mydb") as lake:

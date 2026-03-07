@@ -534,8 +534,8 @@ class VectorCypherEngine:
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
         occurred_at: datetime,
-        entity_types: list[str] | None = None,
-        relationship_types: list[str] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -656,8 +656,8 @@ class VectorCypherEngine:
         skill_name: str = "general_entities",
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
-        entity_types: list[str] | None = None,
-        relationship_types: list[str] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
     ) -> tuple[int, int]:
         """Run skeleton-based entity extraction on core chunks only.
 
@@ -787,8 +787,8 @@ class VectorCypherEngine:
         skill_name: str = "general_entities",
         expertise: ExpertiseConfig | str | None = None,
         extraction_model: str | None = None,
-        entity_types: list[str] | None = None,
-        relationship_types: list[str] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
     ) -> tuple[list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Run skeleton extraction but return results instead of storing.
 
@@ -880,8 +880,8 @@ class VectorCypherEngine:
         extraction_model: str | None = None,
         occurred_at: datetime,
         embedding_text_override: str | None = None,
-        entity_types: list[str] | None = None,
-        relationship_types: list[str] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
     ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Process a document, returning entities for deferred batch storage.
 

@@ -196,6 +196,8 @@ class TestStreamExtractAndEmbedEntities:
         entities, relationships = await stream_extract_and_embed_entities(
             chunks=[],
             embedder=embedder,
+            entity_types=["PERSON"],
+            relationship_types=["WORKS_FOR"],
         )
 
         assert entities == []
@@ -255,6 +257,8 @@ class TestStreamExtractAndEmbedEntities:
             entities, relationships = await stream_extract_and_embed_entities(
                 chunks=[chunk],
                 embedder=embedder,
+                entity_types=["PERSON"],
+                relationship_types=["WORKS_FOR"],
             )
 
         assert len(entities) == 1
@@ -331,6 +335,8 @@ class TestStreamExtractAndEmbedEntities:
             entities, relationships = await stream_extract_and_embed_entities(
                 chunks=[chunk],
                 embedder=embedder,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
             )
 
         assert len(entities) == 2
@@ -395,6 +401,8 @@ class TestStreamExtractAndEmbedEntities:
                 chunks=chunks,
                 embedder=embedder,
                 embedding_batch_size=2,  # Small batch size for testing
+                entity_types=["PERSON"],
+                relationship_types=["WORKS_FOR"],
             )
 
         assert len(entities) == 5

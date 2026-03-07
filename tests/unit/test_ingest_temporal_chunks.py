@@ -105,6 +105,8 @@ class TestIngestTemporalChunks:
                 document,
                 storage,
                 temporal_store=temporal_store,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
             )
 
         # The key assertion: temporal_store.create_chunks_batch must have been called
@@ -152,6 +154,8 @@ class TestIngestTemporalChunks:
                 document,
                 storage,
                 # No temporal_store -- default None
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
             )
 
         assert result["chunks"] == 1
@@ -189,6 +193,8 @@ class TestIngestTemporalChunks:
                 document,
                 storage,
                 temporal_store=temporal_store,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
             )
 
         temporal_store.create_chunks_batch.assert_awaited_once()
@@ -242,6 +248,8 @@ class TestIngestTemporalChunks:
                 document,
                 storage,
                 temporal_store=temporal_store,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
             )
 
         temporal_store.create_chunks_batch.assert_awaited_once()
