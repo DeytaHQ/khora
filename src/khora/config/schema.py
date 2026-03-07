@@ -184,13 +184,14 @@ class StorageSettings(BaseModel):
     # HNSW index tuning
     hnsw_m: int = Field(default=24, description="HNSW index M parameter (max connections per layer)")
     hnsw_ef_construction: int = Field(default=128, description="HNSW index ef_construction (build-time search width)")
-    hnsw_ef_search: int = Field(default=200, description="HNSW ef_search for query-time accuracy")
+    hnsw_ef_search: int = Field(default=100, description="HNSW ef_search for query-time accuracy")
 
     # Half-precision vectors (requires pgvector extension >= 0.7.0)
     use_halfvec: bool = Field(
-        default=False,
+        default=True,
         description="Use halfvec (float16) for HNSW indexes. Halves index size with minimal recall loss. "
-        "Requires pgvector extension >= 0.7.0. Column data remains full precision (vector type).",
+        "Requires pgvector extension >= 0.7.0. Column data remains full precision (vector type). "
+        "Falls back to full precision if pgvector < 0.7.0.",
     )
 
     @model_validator(mode="before")
