@@ -22,8 +22,8 @@ async def extract_entities(
     retry_wait: float = 2.0,
     extraction_batch_size: int = 10,
     max_tokens: int | None = None,
-    entity_types: list[str] | None = None,
-    relationship_types: list[str] | None = None,
+    entity_types: list[str],
+    relationship_types: list[str],
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
 
@@ -42,14 +42,13 @@ async def extract_entities(
         retry_wait: Base wait time for exponential backoff between retries
         extraction_batch_size: Maximum texts per extraction batch
         max_tokens: Maximum tokens for LLM response
-        entity_types: Optional entity types to extract (overrides expertise/skill)
-        relationship_types: Optional relationship types to extract (overrides expertise/skill)
+        entity_types: Required entity types to extract
+        relationship_types: Required relationship types to extract
 
     Returns:
         Tuple of (entities, relationships)
     """
     from khora.core.models import Entity, Relationship
-    from khora.core.models.entity import EntityType, RelationshipType
     from khora.extraction.extractors import LLMEntityExtractor
     from khora.extraction.skills import ExpertiseConfig
     from khora.extraction.skills.registry import get_default_registry
@@ -97,31 +96,17 @@ async def extract_entities(
         extractor_kwargs["max_tokens"] = max_tokens
     extractor = LLMEntityExtractor(**extractor_kwargs)
 
-    # Normalize empty lists to None
-    entity_types = entity_types or None
-    relationship_types = relationship_types or None
-
     # Extract from all chunks using adaptive token-budget-based batching
     # Groups chunks into batches that fit within the model's input token budget,
     # reducing API round-trips by up to 5x while avoiding context overflow
     texts = [chunk.content for chunk in chunks]
 
-    # Resolve types: explicit param > expertise > skill > default
-    # When explicit params are provided, pass them directly to the extractor
-    # which will use them over expertise/defaults.
-    resolved_entity_types = entity_types
-    resolved_relationship_types = relationship_types
-
-    if resolved_entity_types is None and not resolved_expertise:
-        # No explicit types and no expertise — use skill types
-        resolved_entity_types = skill.entity_types if hasattr(skill, "entity_types") and skill.entity_types else None
-
     # Use adaptive batching based on token budget (auto-calculated from max_tokens)
     # batch_size=5 is the max texts per batch; actual batching respects token limits
     results = await extractor.extract_multi(
         texts,
-        entity_types=resolved_entity_types,
-        relationship_types=resolved_relationship_types,
+        entity_types=entity_types,
+        relationship_types=relationship_types,
         expertise=resolved_expertise,
         context=context,
         batch_size=extraction_batch_size,
@@ -155,10 +140,7 @@ async def extract_entities(
                     existing.valid_from = chunk.created_at
             else:
                 # Create new entity — preserve original type string from LLM
-                try:
-                    entity_type: EntityType | str = EntityType(extracted.entity_type)
-                except ValueError:
-                    entity_type = extracted.entity_type or "CONCEPT"
+                entity_type = extracted.entity_type or "CONCEPT"
 
                 entity = Entity(
                     namespace_id=chunk.namespace_id,
@@ -185,10 +167,7 @@ async def extract_entities(
                 continue
 
             # Preserve original type string from LLM
-            try:
-                rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
-            except ValueError:
-                rel_type = extracted_rel.relationship_type or "RELATES_TO"
+            rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
             # Find source and target entities (normalize names to match dedup keys)
             source_key = entity_name_to_key.get(normalize_entity_name(extracted_rel.source_entity))

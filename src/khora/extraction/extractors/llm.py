@@ -32,23 +32,6 @@ if TYPE_CHECKING:
     from khora.config import LiteLLMConfig
     from khora.extraction.skills import ExpertiseConfig
 
-
-# Default entity types to extract
-DEFAULT_ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "CONCEPT", "EVENT", "TECHNOLOGY"]
-
-# Default relationship types to use
-DEFAULT_RELATIONSHIP_TYPES = [
-    "WORKS_FOR",
-    "KNOWS",
-    "MANAGES",
-    "PART_OF",
-    "LOCATED_IN",
-    "DEPENDS_ON",
-    "IMPLEMENTS",
-    "RELATES_TO",
-    "ASSOCIATED_WITH",
-]
-
 # Default system prompt for extraction
 DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
 
@@ -630,25 +613,13 @@ class LLMEntityExtractor(EntityExtractor):
         if not text.strip():
             return ExtractionResult()
 
-        # Normalize empty lists to None (use defaults)
-        entity_types = entity_types or None
-        relationship_types = relationship_types or None
+        # Resolve entity types: explicit param > expertise
+        if entity_types is None and expertise:
+            entity_types = expertise.get_entity_type_names() or None
 
-        # Resolve entity types: explicit param > expertise > default
-        if entity_types is not None:
-            pass  # use as-is
-        elif expertise:
-            entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
-        else:
-            entity_types = DEFAULT_ENTITY_TYPES
-
-        # Resolve relationship types: explicit param > expertise > default
-        if relationship_types is not None:
-            pass  # use as-is
-        elif expertise:
-            relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
-        else:
-            relationship_types = DEFAULT_RELATIONSHIP_TYPES
+        # Resolve relationship types: explicit param > expertise
+        if relationship_types is None and expertise:
+            relationship_types = expertise.get_relationship_type_names() or None
 
         try:
             import litellm
@@ -792,7 +763,7 @@ class LLMEntityExtractor(EntityExtractor):
             return []
 
         entity_list = "\n".join(f"- {e.name} ({e.entity_type})" for e in entities)
-        rel_types = relationship_types or DEFAULT_RELATIONSHIP_TYPES
+        rel_types = relationship_types or []
 
         prompt = RELATIONSHIP_EXTRACTION_PROMPT.format(
             entity_list=entity_list,
@@ -1038,10 +1009,6 @@ class LLMEntityExtractor(EntityExtractor):
             context: Optional context dict
             relationship_types: Resolved relationship types (defaults applied if None)
         """
-        # Ensure relationship_types is resolved
-        if not relationship_types:
-            relationship_types = DEFAULT_RELATIONSHIP_TYPES
-
         # Build tool context for SaaS-aware extraction
         tool_context = self._build_tool_context(expertise, context)
 
@@ -1228,21 +1195,13 @@ class LLMEntityExtractor(EntityExtractor):
                     llm_idx += 1
             return combined
 
-        # Resolve entity types: explicit param > expertise > default
-        if entity_types is not None:
-            pass  # use as-is
-        elif expertise:
-            entity_types = expertise.get_entity_type_names() or DEFAULT_ENTITY_TYPES
-        else:
-            entity_types = DEFAULT_ENTITY_TYPES
+        # Resolve entity types: explicit param > expertise
+        if entity_types is None and expertise:
+            entity_types = expertise.get_entity_type_names() or None
 
-        # Resolve relationship types: explicit param > expertise > default
-        if relationship_types is not None:
-            pass  # use as-is
-        elif expertise:
-            relationship_types = expertise.get_relationship_type_names() or DEFAULT_RELATIONSHIP_TYPES
-        else:
-            relationship_types = DEFAULT_RELATIONSHIP_TYPES
+        # Resolve relationship types: explicit param > expertise
+        if relationship_types is None and expertise:
+            relationship_types = expertise.get_relationship_type_names() or None
 
         try:
             import litellm
@@ -1325,9 +1284,6 @@ class LLMEntityExtractor(EntityExtractor):
         relationship_types: list[str] | None = None,
     ) -> list[ExtractionResult]:  # type: ignore[invalid-return-type]
         """Extract from a batch of texts in a single LLM call."""
-        # Ensure relationship_types is resolved
-        if not relationship_types:
-            relationship_types = DEFAULT_RELATIONSHIP_TYPES
 
         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
 

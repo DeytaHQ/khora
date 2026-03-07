@@ -291,8 +291,8 @@ class MemoryLake:
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
-        entity_types: list[str] | None = None,
-        relationship_types: list[str] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
     ) -> RememberResult:
         """Store content in the memory lake.
 
@@ -309,8 +309,8 @@ class MemoryLake:
             source: Optional source identifier
             metadata: Optional metadata
             skill_name: Extraction skill to use
-            entity_types: Optional entity types to extract (overrides defaults)
-            relationship_types: Optional relationship types to extract (overrides defaults)
+            entity_types: Required entity types to extract
+            relationship_types: Required relationship types to extract
 
         Returns:
             RememberResult with details
@@ -344,8 +344,8 @@ class MemoryLake:
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
-        entity_types: list[str] | None = None,
-        relationship_types: list[str] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -371,8 +371,8 @@ class MemoryLake:
             deduplicate: Deduplicate entities across documents (default: True)
             infer_relationships: Infer relationships after ingestion (default: True)
             on_progress: Callback(processed_count, total_count) for progress updates
-            entity_types: Optional entity types to extract (overrides defaults)
-            relationship_types: Optional relationship types to extract (overrides defaults)
+            entity_types: Required entity types to extract
+            relationship_types: Required relationship types to extract
 
         Returns:
             BatchResult with aggregated statistics

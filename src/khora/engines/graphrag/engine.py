@@ -223,8 +223,8 @@ class GraphRAGEngine:
         source: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
-        entity_types: list[str] | None = None,
-        relationship_types: list[str] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -393,8 +393,8 @@ class GraphRAGEngine:
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
-        entity_types: list[str] | None = None,
-        relationship_types: list[str] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 

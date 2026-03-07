@@ -250,19 +250,10 @@ async def stream_extract_and_embed_entities(
 
             texts = [chunk.content for chunk in chunks]
 
-            # Resolve types: explicit param > expertise > skill > default
-            resolved_entity_types = entity_types or None
-            resolved_relationship_types = relationship_types or None
-
-            if resolved_entity_types is None and not expertise:
-                resolved_entity_types = (
-                    skill.entity_types if hasattr(skill, "entity_types") and skill.entity_types else None
-                )
-
             results = await extractor.extract_multi(
                 texts,
-                entity_types=resolved_entity_types,
-                relationship_types=resolved_relationship_types,
+                entity_types=entity_types,
+                relationship_types=relationship_types,
                 expertise=expertise,
                 context=extraction_context,
                 batch_size=extraction_batch_size,
