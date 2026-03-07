@@ -8,69 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
-
-
-class EntityType(str, Enum):
-    """Standard entity types for knowledge extraction."""
-
-    PERSON = "PERSON"
-    ORGANIZATION = "ORGANIZATION"
-    LOCATION = "LOCATION"
-    CONCEPT = "CONCEPT"
-    EVENT = "EVENT"
-    PRODUCT = "PRODUCT"
-    TECHNOLOGY = "TECHNOLOGY"
-    DATE = "DATE"
-    CUSTOM = "CUSTOM"
-
-
-class RelationshipType(str, Enum):
-    """Standard relationship types for knowledge graphs."""
-
-    # Person relationships
-    WORKS_FOR = "WORKS_FOR"
-    KNOWS = "KNOWS"
-    MANAGES = "MANAGES"
-    REPORTS_TO = "REPORTS_TO"
-    COLLABORATES_WITH = "COLLABORATES_WITH"
-
-    # Organization relationships
-    OWNS = "OWNS"
-    PART_OF = "PART_OF"
-    COMPETES_WITH = "COMPETES_WITH"
-    PARTNERS_WITH = "PARTNERS_WITH"
-
-    # Location relationships
-    LOCATED_IN = "LOCATED_IN"
-    HEADQUARTERED_IN = "HEADQUARTERED_IN"
-
-    # Concept relationships
-    RELATES_TO = "RELATES_TO"
-    DEPENDS_ON = "DEPENDS_ON"
-    IMPLEMENTS = "IMPLEMENTS"
-    DERIVED_FROM = "DERIVED_FROM"
-
-    # Temporal relationships
-    PRECEDES = "PRECEDES"
-    FOLLOWS = "FOLLOWS"
-    CONCURRENT_WITH = "CONCURRENT_WITH"
-
-    # Generic
-    ASSOCIATED_WITH = "ASSOCIATED_WITH"
-    CUSTOM = "CUSTOM"
-
-
-def entity_type_str(et: EntityType | str) -> str:
-    """Get the string value of an entity type (enum or plain string)."""
-    return et.value if isinstance(et, EntityType) else str(et)
-
-
-def relationship_type_str(rt: RelationshipType | str) -> str:
-    """Get the string value of a relationship type (enum or plain string)."""
-    return rt.value if isinstance(rt, RelationshipType) else str(rt)
 
 
 @dataclass(slots=True)
@@ -85,7 +24,7 @@ class Entity:
     id: UUID = field(default_factory=uuid4)
     namespace_id: UUID = field(default_factory=uuid4)
     name: str = ""
-    entity_type: EntityType | str = EntityType.CONCEPT
+    entity_type: str = "CONCEPT"
     description: str = ""
 
     # Attributes from extraction
@@ -129,7 +68,7 @@ class Entity:
         """Validate and clean attributes using the registered schema for this entity type."""
         from khora.core.models.schemas import validate_attributes
 
-        self.attributes = validate_attributes(entity_type_str(self.entity_type), self.attributes)
+        self.attributes = validate_attributes(self.entity_type, self.attributes)
 
     def merge_with(self, other: Entity) -> None:
         """Merge another entity into this one (deduplication)."""
@@ -173,7 +112,7 @@ class Relationship:
     namespace_id: UUID = field(default_factory=uuid4)
     source_entity_id: UUID = field(default_factory=uuid4)
     target_entity_id: UUID = field(default_factory=uuid4)
-    relationship_type: RelationshipType | str = RelationshipType.RELATES_TO
+    relationship_type: str = "RELATES_TO"
     description: str = ""
 
     # Additional properties
