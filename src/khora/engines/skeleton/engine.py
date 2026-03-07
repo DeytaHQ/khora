@@ -683,6 +683,8 @@ class SkeletonConstructionEngine:
                         metadata=doc_metadata,
                         skill_name=skill_name,
                         occurred_at=occurred_at,
+                        entity_types=entity_types,
+                        relationship_types=relationship_types,
                     )
 
                     async with results_lock:

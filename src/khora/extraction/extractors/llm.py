@@ -1046,7 +1046,7 @@ class LLMEntityExtractor(EntityExtractor):
 
         prompt = EXTRACTION_PROMPT.format(
             entity_types=", ".join(entity_types),
-            relationship_types=", ".join(relationship_types),
+            relationship_types=", ".join(relationship_types or []),
             text=text[:8000],  # Truncate very long texts
             document_context=document_context,
         )
@@ -1323,7 +1323,7 @@ Each section follows the entity/relationship format from the instructions above.
             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 
 Entity types to find: {", ".join(entity_types)}
-Relationship types to use: {", ".join(relationship_types)}
+Relationship types to use: {", ".join(relationship_types or [])}
 
 {sections}
 
