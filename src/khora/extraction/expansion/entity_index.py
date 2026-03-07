@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from khora._accel import batch_dot_product, levenshtein_similarity, normalize_entity_name
-from khora.core.models.entity import entity_type_str
 
 if TYPE_CHECKING:
     from khora.core.models import Entity
@@ -77,7 +76,7 @@ class EntityIndex:
 
         Complexity: O(1) amortized.
         """
-        key = (normalize_entity_name(entity.name), entity_type_str(entity.entity_type))
+        key = (normalize_entity_name(entity.name), entity.entity_type)
 
         existing = self._exact.get(key)
         if existing is not None:
@@ -87,7 +86,7 @@ class EntityIndex:
         self._exact[key] = entity
         self._by_id[entity.id] = entity
 
-        type_str = entity_type_str(entity.entity_type)
+        type_str = entity.entity_type
         self._type.setdefault(type_str, []).append(entity)
 
         for token in _tokenize(entity.name):
@@ -138,7 +137,7 @@ class EntityIndex:
         Returns:
             List of candidate entities, prioritized by blocking level match.
         """
-        type_str = entity_type_str(entity.entity_type)
+        type_str = entity.entity_type
         normalized_name = normalize_entity_name(entity.name)
 
         # Fast path: no entities of this type
@@ -203,7 +202,7 @@ class EntityIndex:
         Returns:
             List of (candidate, similarity) pairs, highest first.
         """
-        type_str = entity_type_str(entity.entity_type)
+        type_str = entity.entity_type
         tokens = _tokenize(entity.name)
         if not tokens:
             return []
@@ -223,7 +222,7 @@ class EntityIndex:
             candidate = self._by_id.get(cid)
             if candidate is None:
                 continue
-            if entity_type_str(candidate.entity_type) != type_str:
+            if candidate.entity_type != type_str:
                 continue
             # Skip exact matches (already handled by add())
             if normalize_entity_name(candidate.name) == normalized:
@@ -255,7 +254,7 @@ class EntityIndex:
         if not entity.embedding:
             return []
 
-        type_str = entity_type_str(entity.entity_type)
+        type_str = entity.entity_type
         tokens = _tokenize(entity.name)
 
         # Gather candidate IDs via token blocking
@@ -272,7 +271,7 @@ class EntityIndex:
             candidate = self._by_id.get(cid)
             if candidate is None or not candidate.embedding:
                 continue
-            if entity_type_str(candidate.entity_type) != type_str:
+            if candidate.entity_type != type_str:
                 continue
             valid_candidates.append(candidate)
             candidate_embeddings.append(candidate.embedding)

@@ -185,8 +185,7 @@ class RelationshipTypeIndex:
     @staticmethod
     def _get_type_str(rel: Relationship) -> str:
         """Extract relationship type as string."""
-        rt = rel.relationship_type
-        return str(rt.value) if hasattr(rt, "value") else str(rt)
+        return rel.relationship_type
 
 
 class RelationshipInferrer:
@@ -256,29 +255,18 @@ class RelationshipInferrer:
         logger.debug(f"Built relationship index: {self._rel_index.stats()}")
 
         # Diagnostic logging
-        entity_types = Counter(
-            e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
-        )
+        entity_types = Counter(e.entity_type for e in entities)
         logger.debug(f"Inference input: {len(entities)} entities, types: {dict(entity_types)}")
 
-        rel_types = Counter(
-            r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
-            for r in relationships
-        )
+        rel_types = Counter(r.relationship_type for r in relationships)
         logger.debug(f"Inference input: {len(relationships)} relationships, types: {dict(rel_types)}")
 
         # Detailed pattern diagnostics (debug-only to avoid overhead)
         if logger._core.min_level <= 10:  # type: ignore[unresolved-attribute]  # DEBUG level
-            entity_type_lookup = {
-                e.id: (e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type)) for e in entities
-            }
+            entity_type_lookup = {e.id: e.entity_type for e in entities}
             rel_type_patterns: dict[str, Counter] = {}
             for r in relationships:
-                rt = (
-                    str(r.relationship_type.value)
-                    if hasattr(r.relationship_type, "value")
-                    else str(r.relationship_type)
-                )
+                rt = r.relationship_type
                 source_type = entity_type_lookup.get(r.source_entity_id, "UNKNOWN")
                 target_type = entity_type_lookup.get(r.target_entity_id, "UNKNOWN")
                 if rt not in rel_type_patterns:
@@ -301,13 +289,8 @@ class RelationshipInferrer:
                     expected_entities.add(cond.target_type)
 
         if expected_rels or expected_entities:
-            actual_rel_types = {
-                r.relationship_type.value if hasattr(r.relationship_type, "value") else str(r.relationship_type)
-                for r in relationships
-            }
-            actual_entity_types = {
-                e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type) for e in entities
-            }
+            actual_rel_types = {r.relationship_type for r in relationships}
+            actual_entity_types = {e.entity_type for e in entities}
             if not (actual_rel_types & expected_rels):
                 logger.debug(
                     f"No relationship type overlap: rules expect {sorted(expected_rels)}, "
@@ -420,8 +403,8 @@ class RelationshipInferrer:
             if not e1 or not e2:
                 continue
 
-            et1 = e1.entity_type.value if hasattr(e1.entity_type, "value") else str(e1.entity_type)
-            et2 = e2.entity_type.value if hasattr(e2.entity_type, "value") else str(e2.entity_type)
+            et1 = e1.entity_type
+            et2 = e2.entity_type
             if frozenset({et1, et2}) in INVALID_PAIRS:
                 continue
 
@@ -645,9 +628,7 @@ class RelationshipInferrer:
         existing_keys: set[tuple[UUID, UUID, str]] = set()
 
         for rel in existing_relationships:
-            rel_type = str(
-                rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-            )
+            rel_type = rel.relationship_type
             existing_keys.add((rel.source_entity_id, rel.target_entity_id, rel_type))
 
         for inf in already_inferred:
@@ -670,26 +651,19 @@ class RelationshipInferrer:
     ) -> list[Relationship]:
         """Convert inferred relationships to mock Relationship objects for next pass."""
         from khora.core.models import Relationship
-        from khora.core.models.entity import RelationshipType
 
         mock_rels = []
         # Get namespace from first entity if available
         namespace_id = entities[0].namespace_id if entities else uuid4()
 
         for inf in inferred:
-            # Preserve original type string for domain-specific types
-            try:
-                rel_type: RelationshipType | str = RelationshipType[inf.relationship_type]
-            except (KeyError, AttributeError):
-                rel_type = inf.relationship_type
-
             mock_rels.append(
                 Relationship(
                     id=uuid4(),
                     namespace_id=namespace_id,
                     source_entity_id=inf.source_entity_id,
                     target_entity_id=inf.target_entity_id,
-                    relationship_type=rel_type,
+                    relationship_type=inf.relationship_type,
                     description=inf.description,
                     properties={},
                     source_document_ids=[],
@@ -718,20 +692,13 @@ def to_relationship(
         Domain Relationship model
     """
     from khora.core.models import Relationship
-    from khora.core.models.entity import RelationshipType
-
-    # Preserve original type string for domain-specific types
-    try:
-        rel_type: RelationshipType | str = RelationshipType[inferred.relationship_type]
-    except (KeyError, AttributeError):
-        rel_type = inferred.relationship_type
 
     return Relationship(
         id=uuid4(),
         namespace_id=namespace_id,
         source_entity_id=inferred.source_entity_id,
         target_entity_id=inferred.target_entity_id,
-        relationship_type=rel_type,
+        relationship_type=inferred.relationship_type,
         description=inferred.description,
         properties={
             "inferred": True,

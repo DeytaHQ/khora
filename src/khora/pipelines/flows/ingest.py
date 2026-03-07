@@ -50,7 +50,7 @@ def _should_skip_entity_embedding(
     """
     if not skip_types:
         return False
-    entity_type = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
+    entity_type = entity.entity_type
     _skip_upper = frozenset(t.upper() for t in skip_types)
     if entity_type.upper() not in _skip_upper:
         return False
@@ -1037,7 +1037,7 @@ async def process_document(
                 # Build name+type -> stored_id mapping from upsert results
                 name_type_to_stored: dict[str, str] = {}
                 for entity, is_new in upsert_results:
-                    et = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
+                    et = entity.entity_type
                     key = f"{_store_norm[entity.name]}:{et}"
                     stored_id = str(entity.id)
                     name_type_to_stored[key] = stored_id
@@ -1047,11 +1047,7 @@ async def process_document(
 
                 # Map every original entity ID to its stored counterpart by name+type
                 for orig_entity in entities:
-                    et = (
-                        orig_entity.entity_type.value
-                        if hasattr(orig_entity.entity_type, "value")
-                        else str(orig_entity.entity_type)
-                    )
+                    et = orig_entity.entity_type
                     key = f"{_store_norm[orig_entity.name]}:{et}"
                     stored_id = name_type_to_stored.get(key)
                     if stored_id:
@@ -1493,16 +1489,11 @@ async def run_smart_resolution(
     logger.info(f"Smart resolution: loaded {len(relationships)} relationships from storage")
 
     if relationships:
-        rel_type_dist = Counter(
-            str(r.relationship_type.value if hasattr(r.relationship_type, "value") else r.relationship_type)
-            for r in relationships
-        )
+        rel_type_dist = Counter(r.relationship_type for r in relationships)
         logger.info(f"Smart resolution: relationship types: {dict(rel_type_dist.most_common(15))}")
 
     if resolved_entities:
-        ent_type_dist = Counter(
-            str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) for e in resolved_entities
-        )
+        ent_type_dist = Counter(e.entity_type for e in resolved_entities)
         logger.info(f"Smart resolution: entity types: {dict(ent_type_dist.most_common(15))}")
 
     # Check entity ID overlap between relationships and resolved_entities
