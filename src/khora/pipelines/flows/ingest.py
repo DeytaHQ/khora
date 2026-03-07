@@ -210,7 +210,6 @@ async def stream_extract_and_embed_entities(
         Tuple of (entities with embeddings, relationships)
     """
     from khora.core.models import Entity, Relationship
-    from khora.core.models.entity import EntityType, RelationshipType
     from khora.extraction.extractors import LLMEntityExtractor
     from khora.extraction.skills.registry import get_default_registry
 
@@ -302,10 +301,7 @@ async def stream_extract_and_embed_entities(
                         if _vu and (not existing.valid_until or _vu > existing.valid_until):
                             existing.valid_until = _vu
                     else:
-                        try:
-                            entity_type: EntityType | str = EntityType(extracted.entity_type)
-                        except ValueError:
-                            entity_type = extracted.entity_type or "CONCEPT"
+                        entity_type = extracted.entity_type or "CONCEPT"
 
                         # Prefer LLM-extracted temporal bounds over chunk timestamp
                         _t = extracted.temporal
@@ -335,10 +331,7 @@ async def stream_extract_and_embed_entities(
                     if extracted_rel.confidence < min_relationship_confidence:
                         continue
 
-                    try:
-                        rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
-                    except ValueError:
-                        rel_type = extracted_rel.relationship_type or "RELATES_TO"
+                    rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
                     norm_source = _norm_cache[extracted_rel.source_entity]
                     norm_target = _norm_cache[extracted_rel.target_entity]
@@ -446,10 +439,7 @@ async def stream_extract_and_embed_entities(
                         if pair in existing_pairs or (pair[1], pair[0]) in existing_pairs:
                             continue
                         existing_pairs.add(pair)
-                        try:
-                            cross_rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
-                        except ValueError:
-                            cross_rel_type = extracted_rel.relationship_type or "RELATES_TO"
+                        cross_rel_type = extracted_rel.relationship_type or "RELATES_TO"
                         all_relationships.append(
                             Relationship(
                                 namespace_id=chunks[0].namespace_id,
