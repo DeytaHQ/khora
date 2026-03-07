@@ -1,6 +1,6 @@
 """Tests for tool-schema extraction, source boosting, and type-aware linking."""
 
-from khora.core.models.entity import Entity, EntityType
+from khora.core.models.entity import Entity
 from khora.extraction.extractors.base import ExtractedEntity
 from khora.extraction.extractors.llm import LLMEntityExtractor
 from khora.extraction.skills.base import ExpertiseConfig
@@ -139,7 +139,7 @@ class TestAttributeRelevanceBoost:
 
         entity = Entity(
             name="ENG-123",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             attributes={"priority": "urgent", "assignee": "Alice"},
         )
         boost = HybridQueryEngine._attribute_relevance_boost(entity, ["urgent", "alice"])
@@ -152,7 +152,7 @@ class TestAttributeRelevanceBoost:
 
         entity = Entity(
             name="ENG-456",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             attributes={"priority": "low", "assignee": "Bob"},
         )
         boost = HybridQueryEngine._attribute_relevance_boost(entity, ["urgent", "alice"])
@@ -164,7 +164,7 @@ class TestAttributeRelevanceBoost:
 
         entity = Entity(
             name="Test",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             attributes={"a": "foo", "b": "foo", "c": "foo", "d": "foo", "e": "foo"},
         )
         boost = HybridQueryEngine._attribute_relevance_boost(entity, ["foo"])
@@ -174,6 +174,6 @@ class TestAttributeRelevanceBoost:
         """Entity with no attributes should get zero boost."""
         from khora.query.engine import HybridQueryEngine
 
-        entity = Entity(name="Test", entity_type=EntityType.CONCEPT, attributes={})
+        entity = Entity(name="Test", entity_type="CONCEPT", attributes={})
         boost = HybridQueryEngine._attribute_relevance_boost(entity, ["urgent"])
         assert boost == 0.0

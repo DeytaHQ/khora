@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 
-from khora.core.models.entity import Entity, EntityType
+from khora.core.models.entity import Entity
 from khora.core.models.schemas import (
     ATTRIBUTE_SCHEMAS,
     register_attribute_schema,
@@ -89,7 +89,7 @@ class TestEntityValidation:
         """Entity.validate() should clean attributes via schema."""
         entity = Entity(
             name="Alice",
-            entity_type=EntityType.PERSON,
+            entity_type="PERSON",
             attributes={"name": "Alice", "title": "CTO", "garbage": None},
         )
         entity.validate()
@@ -100,7 +100,7 @@ class TestEntityValidation:
         """Entity.validate() should pass through for CUSTOM type."""
         entity = Entity(
             name="Something",
-            entity_type=EntityType.CUSTOM,
+            entity_type="CUSTOM",
             attributes={"foo": "bar"},
         )
         entity.validate()

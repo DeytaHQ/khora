@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from khora._accel import cosine_similarity, levenshtein_similarity, normalize_entity_name
-from khora.core.models.entity import Entity, EntityType
+from khora.core.models.entity import Entity
 from khora.extraction.expansion.entity_index import (
     EntityIndex,
     _tokenize,
@@ -20,7 +20,7 @@ from khora.extraction.expansion.entity_index import (
 
 def _make_entity(
     name: str = "Test Entity",
-    entity_type: EntityType = EntityType.PERSON,
+    entity_type: str = "PERSON",
     namespace_id=None,
     embedding: list[float] | None = None,
     confidence: float = 1.0,
@@ -115,8 +115,8 @@ class TestEntityIndexAdd:
 
     def test_add_duplicate_returns_existing(self):
         idx = EntityIndex()
-        e1 = _make_entity("Alice", entity_type=EntityType.PERSON)
-        e2 = _make_entity("alice", entity_type=EntityType.PERSON)  # same name, diff case
+        e1 = _make_entity("Alice", entity_type="PERSON")
+        e2 = _make_entity("alice", entity_type="PERSON")  # same name, diff case
         idx.add(e1)
         result = idx.add(e2)
         assert result is e1
@@ -124,8 +124,8 @@ class TestEntityIndexAdd:
 
     def test_different_types_not_duplicate(self):
         idx = EntityIndex()
-        e1 = _make_entity("Mercury", entity_type=EntityType.PERSON)
-        e2 = _make_entity("Mercury", entity_type=EntityType.LOCATION)
+        e1 = _make_entity("Mercury", entity_type="PERSON")
+        e2 = _make_entity("Mercury", entity_type="LOCATION")
         idx.add(e1)
         result = idx.add(e2)
         assert result is None  # different type -> not a duplicate
@@ -149,7 +149,7 @@ class TestEntityIndexLookup:
 
     def test_get_by_name(self):
         idx = EntityIndex()
-        e = _make_entity("Alice", entity_type=EntityType.PERSON)
+        e = _make_entity("Alice", entity_type="PERSON")
         idx.add(e)
         assert idx.get_by_name("Alice", "PERSON") is e
         assert idx.get_by_name("alice", "PERSON") is e
@@ -160,9 +160,9 @@ class TestFuzzyCandidates:
     def test_finds_similar_names(self):
         idx = EntityIndex()
         ns = uuid4()
-        e1 = _make_entity("Microsoft Corporation", EntityType.ORGANIZATION, ns)
-        e2 = _make_entity("Microsoft Corp", EntityType.ORGANIZATION, ns)
-        e3 = _make_entity("Apple Inc", EntityType.ORGANIZATION, ns)
+        e1 = _make_entity("Microsoft Corporation", "ORGANIZATION", ns)
+        e2 = _make_entity("Microsoft Corp", "ORGANIZATION", ns)
+        e3 = _make_entity("Apple Inc", "ORGANIZATION", ns)
         idx.add(e1)
         idx.add(e2)
         idx.add(e3)
@@ -175,8 +175,8 @@ class TestFuzzyCandidates:
     def test_respects_type_filter(self):
         idx = EntityIndex()
         ns = uuid4()
-        e1 = _make_entity("John", EntityType.PERSON, ns)
-        e2 = _make_entity("Johns", EntityType.ORGANIZATION, ns)
+        e1 = _make_entity("John", "PERSON", ns)
+        e2 = _make_entity("Johns", "ORGANIZATION", ns)
         idx.add(e1)
         idx.add(e2)
 
@@ -206,9 +206,9 @@ class TestEmbeddingCandidates:
         emb2 = [0.99, 0.1, 0.0]  # very similar
         emb3 = [0.0, 0.0, 1.0]  # orthogonal
 
-        e1 = _make_entity("Entity A", EntityType.CONCEPT, ns, embedding=emb1)
-        e2 = _make_entity("Entity B", EntityType.CONCEPT, ns, embedding=emb2)
-        e3 = _make_entity("Entity C", EntityType.CONCEPT, ns, embedding=emb3)
+        e1 = _make_entity("Entity A", "CONCEPT", ns, embedding=emb1)
+        e2 = _make_entity("Entity B", "CONCEPT", ns, embedding=emb2)
+        e3 = _make_entity("Entity C", "CONCEPT", ns, embedding=emb3)
         idx.add(e1)
         idx.add(e2)
         idx.add(e3)
@@ -235,8 +235,8 @@ class TestEmbeddingCandidates:
         emb1 = [1.0, 0.0, 0.0]
         emb2 = [0.99, 0.1, 0.0]
 
-        e1 = _make_entity("Alpha Beta", EntityType.CONCEPT, ns, embedding=emb1)
-        e2 = _make_entity("Gamma Delta", EntityType.CONCEPT, ns, embedding=emb2)  # no shared tokens
+        e1 = _make_entity("Alpha Beta", "CONCEPT", ns, embedding=emb1)
+        e2 = _make_entity("Gamma Delta", "CONCEPT", ns, embedding=emb2)  # no shared tokens
         idx.add(e1)
         idx.add(e2)
 
@@ -258,9 +258,9 @@ class TestEntityIndexBulk:
     def test_get_entities_by_type(self):
         idx = EntityIndex()
         for i in range(3):
-            idx.add(_make_entity(f"Person {i}", EntityType.PERSON))
+            idx.add(_make_entity(f"Person {i}", "PERSON"))
         for i in range(2):
-            idx.add(_make_entity(f"Org {i}", EntityType.ORGANIZATION))
+            idx.add(_make_entity(f"Org {i}", "ORGANIZATION"))
 
         assert len(idx.get_entities_by_type("PERSON")) == 3
         assert len(idx.get_entities_by_type("ORGANIZATION")) == 2
@@ -268,8 +268,8 @@ class TestEntityIndexBulk:
 
     def test_stats(self):
         idx = EntityIndex()
-        idx.add(_make_entity("John Smith", EntityType.PERSON))
-        idx.add(_make_entity("Jane Doe", EntityType.PERSON))
+        idx.add(_make_entity("John Smith", "PERSON"))
+        idx.add(_make_entity("Jane Doe", "PERSON"))
 
         stats = idx.stats()
         assert stats["total_entities"] == 2

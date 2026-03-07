@@ -20,7 +20,6 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, Entity, Relationship
-from khora.core.models.entity import EntityType, RelationshipType
 from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult
 
 # ---------------------------------------------------------------------------
@@ -74,7 +73,7 @@ def _make_chunk(
 
 def _make_entity(
     name: str,
-    entity_type: EntityType | str = EntityType.PERSON,
+    entity_type: str = "PERSON",
     *,
     doc_ids: list[UUID] | None = None,
     embedding: list[float] | None = None,
@@ -96,7 +95,7 @@ def _make_entity(
 def _make_relationship(
     source: Entity,
     target: Entity,
-    rel_type: RelationshipType | str = RelationshipType.WORKS_FOR,
+    rel_type: str = "WORKS_FOR",
 ) -> Relationship:
     """Create a test relationship."""
     return Relationship(
@@ -262,15 +261,15 @@ class TestIncrementalIngestion:
         ]
         chunks = [_make_chunk(d["content"], doc_ids[i], chunk_index=0) for i, d in enumerate(BATCH_1_DOCS)]
 
-        alice = _make_entity("alice johnson", EntityType.PERSON, doc_ids=[doc_ids[0]])
-        bob = _make_entity("bob smith", EntityType.PERSON, doc_ids=[doc_ids[1]])
-        acme = _make_entity("acme corp", EntityType.ORGANIZATION, doc_ids=[doc_ids[0], doc_ids[1], doc_ids[2]])
-        sf = _make_entity("san francisco", EntityType.LOCATION, doc_ids=[doc_ids[2]])
+        alice = _make_entity("alice johnson", "PERSON", doc_ids=[doc_ids[0]])
+        bob = _make_entity("bob smith", "PERSON", doc_ids=[doc_ids[1]])
+        acme = _make_entity("acme corp", "ORGANIZATION", doc_ids=[doc_ids[0], doc_ids[1], doc_ids[2]])
+        sf = _make_entity("san francisco", "LOCATION", doc_ids=[doc_ids[2]])
 
         relationships = [
-            _make_relationship(alice, acme, RelationshipType.WORKS_FOR),
-            _make_relationship(bob, acme, RelationshipType.WORKS_FOR),
-            _make_relationship(acme, sf, RelationshipType.HEADQUARTERED_IN),
+            _make_relationship(alice, acme, "WORKS_FOR"),
+            _make_relationship(bob, acme, "WORKS_FOR"),
+            _make_relationship(acme, sf, "HEADQUARTERED_IN"),
         ]
 
         state.add_batch(documents, chunks, [alice, bob, acme, sf], relationships)
@@ -296,18 +295,18 @@ class TestIncrementalIngestion:
         ]
         chunks = [_make_chunk(d["content"], doc_ids[i], chunk_index=0) for i, d in enumerate(BATCH_2_DOCS)]
 
-        charlie = _make_entity("charlie brown", EntityType.PERSON, doc_ids=[doc_ids[0]])
-        dave = _make_entity("dave wilson", EntityType.PERSON, doc_ids=[doc_ids[1]])
+        charlie = _make_entity("charlie brown", "PERSON", doc_ids=[doc_ids[0]])
+        dave = _make_entity("dave wilson", "PERSON", doc_ids=[doc_ids[1]])
         # Alice appears again — should be merged, not duplicated
-        alice_again = _make_entity("alice johnson", EntityType.PERSON, doc_ids=[doc_ids[0]])
+        alice_again = _make_entity("alice johnson", "PERSON", doc_ids=[doc_ids[0]])
         # Acme appears again — should be merged
-        acme_again = _make_entity("acme corp", EntityType.ORGANIZATION, doc_ids=[doc_ids[0], doc_ids[1]])
+        acme_again = _make_entity("acme corp", "ORGANIZATION", doc_ids=[doc_ids[0], doc_ids[1]])
         # Bob appears again
-        bob_again = _make_entity("bob smith", EntityType.PERSON, doc_ids=[doc_ids[1]])
+        bob_again = _make_entity("bob smith", "PERSON", doc_ids=[doc_ids[1]])
 
         relationships = [
-            _make_relationship(charlie, _find_entity(state, "acme corp"), RelationshipType.WORKS_FOR),
-            _make_relationship(dave, _find_entity(state, "acme corp"), RelationshipType.WORKS_FOR),
+            _make_relationship(charlie, _find_entity(state, "acme corp"), "WORKS_FOR"),
+            _make_relationship(dave, _find_entity(state, "acme corp"), "WORKS_FOR"),
             _make_relationship(charlie, _find_entity(state, "alice johnson"), "COLLABORATES_WITH"),
             _make_relationship(dave, _find_entity(state, "bob smith"), "COLLABORATES_WITH"),
         ]
@@ -346,7 +345,7 @@ class TestIncrementalIngestion:
             r for r in batch1_data.relationships if r.source_entity_id == alice.id and r.target_entity_id == acme.id
         ]
         assert len(works_for_rels) == 1
-        assert works_for_rels[0].relationship_type == RelationshipType.WORKS_FOR
+        assert works_for_rels[0].relationship_type == "WORKS_FOR"
 
     # -----------------------------------------------------------------------
     # Test: Batch 2 ingestion preserves batch 1 data
@@ -422,7 +421,7 @@ class TestIncrementalIngestion:
         works_for_acme = [
             r
             for r in batch2_data.relationships
-            if r.target_entity_id == acme.id and str(r.relationship_type) in ("WORKS_FOR", "RelationshipType.WORKS_FOR")
+            if r.target_entity_id == acme.id and str(r.relationship_type) == "WORKS_FOR"
         ]
         # Alice, Bob, Charlie, Dave all WORKS_FOR Acme
         assert len(works_for_acme) == 4
@@ -748,15 +747,15 @@ class TestIncrementalIngestion:
         ]
         chunks = [_make_chunk(d["content"], doc_ids[i], chunk_index=0) for i, d in enumerate(batch3_docs)]
 
-        eve = _make_entity("eve martinez", EntityType.PERSON, doc_ids=[doc_ids[0]])
-        beta = _make_entity("beta inc", EntityType.ORGANIZATION, doc_ids=[doc_ids[1]])
+        eve = _make_entity("eve martinez", "PERSON", doc_ids=[doc_ids[0]])
+        beta = _make_entity("beta inc", "ORGANIZATION", doc_ids=[doc_ids[1]])
         # Alice and Acme appear again — must merge
-        alice_again = _make_entity("alice johnson", EntityType.PERSON, doc_ids=[doc_ids[1]])
-        acme_again = _make_entity("acme corp", EntityType.ORGANIZATION, doc_ids=[doc_ids[0], doc_ids[1]])
-        dave_again = _make_entity("dave wilson", EntityType.PERSON, doc_ids=[doc_ids[0]])
+        alice_again = _make_entity("alice johnson", "PERSON", doc_ids=[doc_ids[1]])
+        acme_again = _make_entity("acme corp", "ORGANIZATION", doc_ids=[doc_ids[0], doc_ids[1]])
+        dave_again = _make_entity("dave wilson", "PERSON", doc_ids=[doc_ids[0]])
 
         relationships = [
-            _make_relationship(eve, _find_entity(state, "acme corp"), RelationshipType.WORKS_FOR),
+            _make_relationship(eve, _find_entity(state, "acme corp"), "WORKS_FOR"),
             _make_relationship(eve, _find_entity(state, "dave wilson"), "COLLABORATES_WITH"),
             _make_relationship(_find_entity(state, "acme corp"), beta, "ACQUIRED"),
             _make_relationship(_find_entity(state, "alice johnson"), beta, "LEADS_INTEGRATION"),

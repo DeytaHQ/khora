@@ -217,7 +217,6 @@ class TestExtractEntities:
 
         # Collect entities across results and dedup by name:type
         from khora.core.models import Entity
-        from khora.core.models.entity import EntityType
 
         all_entities: dict[str, Entity] = {}
         for chunk, result in zip([chunk1, chunk2], results):
@@ -226,15 +225,10 @@ class TestExtractEntities:
                 if key in all_entities:
                     all_entities[key].mention_count += 1
                 else:
-                    entity_type = EntityType.CONCEPT
-                    try:
-                        entity_type = EntityType(extracted.entity_type)
-                    except ValueError:
-                        pass
                     entity = Entity(
                         namespace_id=chunk.namespace_id,
                         name=extracted.name,
-                        entity_type=entity_type,
+                        entity_type=extracted.entity_type or "CONCEPT",
                         description=extracted.description,
                         source_document_ids=[chunk.document_id],
                         source_chunk_ids=[chunk.id],

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from khora.core.models import Chunk, Document, Entity, Relationship
 from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
-from khora.core.models.entity import EntityType, Episode, RelationshipType
+from khora.core.models.entity import Episode
 from khora.core.models.event import EventType, MemoryEvent
 from khora.core.models.tenancy import MemoryNamespace, TenancyMode
 
@@ -109,15 +109,15 @@ class TestEntity:
 
     def test_create_entity(self) -> None:
         """Test basic entity creation."""
-        entity = Entity(name="John Smith", entity_type=EntityType.PERSON)
+        entity = Entity(name="John Smith", entity_type="PERSON")
         assert entity.name == "John Smith"
-        assert entity.entity_type == EntityType.PERSON
+        assert entity.entity_type == "PERSON"
 
     def test_entity_with_attributes(self) -> None:
         """Test entity with attributes."""
         entity = Entity(
             name="Acme Corp",
-            entity_type=EntityType.ORGANIZATION,
+            entity_type="ORGANIZATION",
             attributes={"industry": "Technology", "employees": 500},
         )
         assert entity.attributes["industry"] == "Technology"
@@ -127,7 +127,7 @@ class TestEntity:
         """Test entity with description."""
         entity = Entity(
             name="Python",
-            entity_type=EntityType.TECHNOLOGY,
+            entity_type="TECHNOLOGY",
             description="A programming language",
         )
         assert entity.description == "A programming language"
@@ -136,7 +136,7 @@ class TestEntity:
         """Test entity confidence score."""
         entity = Entity(
             name="Test",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             confidence=0.85,
         )
         assert entity.confidence == 0.85
@@ -147,7 +147,7 @@ class TestEntity:
         chunk_id = uuid4()
         entity = Entity(
             name="Test",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             source_document_ids=[doc_id],
             source_chunk_ids=[chunk_id],
         )
@@ -158,7 +158,7 @@ class TestEntity:
         """Test entity mention counting."""
         entity = Entity(
             name="Test",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             mention_count=5,
         )
         assert entity.mention_count == 5
@@ -168,7 +168,7 @@ class TestEntity:
         now = datetime.now(timezone.utc)
         entity = Entity(
             name="Test",
-            entity_type=EntityType.EVENT,
+            entity_type="EVENT",
             valid_from=now,
             valid_until=now,
         )
@@ -181,14 +181,14 @@ class TestEntity:
         doc_id2 = uuid4()
         entity1 = Entity(
             name="Test",
-            entity_type=EntityType.PERSON,
+            entity_type="PERSON",
             source_document_ids=[doc_id1],
             mention_count=2,
             confidence=0.8,
         )
         entity2 = Entity(
             name="Test",
-            entity_type=EntityType.PERSON,
+            entity_type="PERSON",
             source_document_ids=[doc_id2],
             mention_count=3,
             confidence=0.9,
@@ -212,18 +212,18 @@ class TestRelationship:
         rel = Relationship(
             source_entity_id=source_id,
             target_entity_id=target_id,
-            relationship_type=RelationshipType.WORKS_FOR,
+            relationship_type="WORKS_FOR",
         )
         assert rel.source_entity_id == source_id
         assert rel.target_entity_id == target_id
-        assert rel.relationship_type == RelationshipType.WORKS_FOR
+        assert rel.relationship_type == "WORKS_FOR"
 
     def test_relationship_with_properties(self) -> None:
         """Test relationship with properties."""
         rel = Relationship(
             source_entity_id=uuid4(),
             target_entity_id=uuid4(),
-            relationship_type=RelationshipType.WORKS_FOR,
+            relationship_type="WORKS_FOR",
             properties={"since": "2020", "role": "Engineer"},
         )
         assert rel.properties["since"] == "2020"
@@ -234,7 +234,7 @@ class TestRelationship:
         rel = Relationship(
             source_entity_id=uuid4(),
             target_entity_id=uuid4(),
-            relationship_type=RelationshipType.KNOWS,
+            relationship_type="KNOWS",
             confidence=0.75,
         )
         assert rel.confidence == 0.75
@@ -244,7 +244,7 @@ class TestRelationship:
         rel = Relationship(
             source_entity_id=uuid4(),
             target_entity_id=uuid4(),
-            relationship_type=RelationshipType.COLLABORATES_WITH,
+            relationship_type="COLLABORATES_WITH",
             description="Worked together on Project X",
         )
         assert rel.description == "Worked together on Project X"
@@ -254,7 +254,7 @@ class TestRelationship:
         rel = Relationship(
             source_entity_id=uuid4(),
             target_entity_id=uuid4(),
-            relationship_type=RelationshipType.RELATES_TO,
+            relationship_type="RELATES_TO",
             weight=0.5,
         )
         assert rel.weight == 0.5
