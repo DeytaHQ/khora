@@ -569,7 +569,8 @@ class VectorCypherEngine:
             chunker = create_chunker(chunker_config)
 
             # Chunk the document
-            raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
+            with trace_span("khora.vectorcypher.chunking"):
+                raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
 
             if not raw_chunks:
                 document.mark_completed(0, 0)
@@ -578,8 +579,9 @@ class VectorCypherEngine:
                 return 0, 0, 0
 
             # Embed chunks in batch
-            chunk_texts = [c.content for c in raw_chunks]
-            embeddings = await embedder.embed_batch(chunk_texts)
+            with trace_span("khora.vectorcypher.embed_batch", chunk_count=len(raw_chunks)):
+                chunk_texts = [c.content for c in raw_chunks]
+                embeddings = await embedder.embed_batch(chunk_texts)
 
             # Extract metadata
             doc_metadata = document.metadata.custom if document.metadata else {}
@@ -1030,6 +1032,11 @@ class VectorCypherEngine:
 
         return validated
 
+    @trace(
+        "khora.vectorcypher.recall",
+        include={"namespace_id", "limit", "mode"},
+        result=lambda r: {"chunk_count": len(r.chunks), "entity_count": len(r.entities)},
+    )
     async def recall(
         self,
         query: str,
@@ -1068,11 +1075,14 @@ class VectorCypherEngine:
         # Replaces the old regex + dateparser approach with categorized signals.
         temporal_signal: TemporalSignal | None = None
         if temporal_filter is None:
-            detector = TemporalDetector()
-            temporal_signal = detector.detect(query)
-            # EXPLICIT category produces a date-range TemporalFilter for pushdown
-            if temporal_signal.temporal_filter is not None:
-                temporal_filter = temporal_signal.temporal_filter
+            with trace_span("khora.vectorcypher.temporal_detect") as td_span:
+                detector = TemporalDetector()
+                temporal_signal = detector.detect(query)
+                td_span.set_attribute("category", temporal_signal.category.value)
+                td_span.set_attribute("confidence", temporal_signal.confidence)
+                # EXPLICIT category produces a date-range TemporalFilter for pushdown
+                if temporal_signal.temporal_filter is not None:
+                    temporal_filter = temporal_signal.temporal_filter
 
         # Use VectorCypher retriever
         result = await retriever.retrieve(

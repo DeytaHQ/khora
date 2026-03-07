@@ -18,6 +18,7 @@ from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait
 from khora.core.models import Chunk, ChunkMetadata
 from khora.db.models import Base, ChunkModel, EntityModel
 from khora.storage.backends.mixins import AsyncSessionMixin
+from khora.telemetry import trace
 
 if TYPE_CHECKING:
     pass
@@ -312,6 +313,11 @@ class PgVectorBackend(AsyncSessionMixin):
             return 1 - casted_col.cosine_distance(casted_query)
         return 1 - embedding_col.cosine_distance(query_embedding)
 
+    @trace(
+        "khora.pgvector.search_similar",
+        include={"namespace_id", "limit"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def search_similar(
         self,
         namespace_id: UUID,
@@ -397,6 +403,11 @@ class PgVectorBackend(AsyncSessionMixin):
     # Full-text search operations
     # =========================================================================
 
+    @trace(
+        "khora.pgvector.search_fulltext",
+        include={"namespace_id", "limit"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def search_fulltext(
         self,
         namespace_id: UUID,
@@ -682,6 +693,11 @@ class PgVectorBackend(AsyncSessionMixin):
 
         return await _retry_on_deadlock(_do_batch)
 
+    @trace(
+        "khora.pgvector.search_similar_entities",
+        include={"namespace_id", "limit"},
+        result=lambda r: {"result_count": len(r)},
+    )
     async def search_similar_entities(
         self,
         namespace_id: UUID,
