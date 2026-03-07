@@ -22,7 +22,6 @@ from khora._accel import (
     levenshtein_similarity,
     sequence_match_ratio,
 )
-from khora.core.models.entity import entity_type_str
 
 if TYPE_CHECKING:
     from khora.core.models import Entity
@@ -738,9 +737,7 @@ class EntityResolver:
             namespace_id: Namespace the entity belongs to
             entity: Entity to add to cache
         """
-        from khora.core.models.entity import entity_type_str
-
-        entity_type = entity_type_str(entity.entity_type)
+        entity_type = entity.entity_type
         cache_key = f"{namespace_id}:{entity_type}"
 
         if cache_key in self._entity_cache:
@@ -880,7 +877,7 @@ class EntityResolver:
 
                 for entity_id, score in results:
                     entity = await self._storage.get_entity(entity_id)
-                    if entity and entity_type_str(entity.entity_type) == entity_type:
+                    if entity and entity.entity_type == entity_type:
                         # Skip if already matched
                         if entity in [c.entity for c in candidates]:
                             continue
@@ -977,7 +974,7 @@ async def resolve_and_merge_entity(
         Tuple of (entity, is_new) where is_new indicates if a new entity
         should be created (False means use the returned existing entity)
     """
-    from khora.core.models import Entity, EntityType
+    from khora.core.models import Entity
 
     if resolver is None:
         resolver = EntityResolver(storage, embedder)
@@ -1041,15 +1038,10 @@ async def resolve_and_merge_entity(
         return existing, False
 
     # Create new entity
-    try:
-        etype: EntityType | str = EntityType(entity_type.upper())
-    except ValueError:
-        etype = entity_type.upper() or "CONCEPT"
-
     new_entity = Entity(
         namespace_id=namespace_id,
         name=name,
-        entity_type=etype,
+        entity_type=entity_type.upper() or "CONCEPT",
         description=description,
         attributes=attributes or {},
         source_tool=source_tool,

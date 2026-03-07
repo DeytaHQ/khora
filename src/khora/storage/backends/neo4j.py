@@ -19,7 +19,6 @@ from loguru import logger
 from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
 
 from khora.core.models import Entity, Episode, Relationship
-from khora.core.models.entity import EntityType, RelationshipType
 from khora.storage.backends.mixins import (
     GraphBackendBase,
 )
@@ -57,7 +56,7 @@ class _EntityKeyGate:
             (
                 str(e.namespace_id),
                 e.name,
-                e.entity_type.value if hasattr(e.entity_type, "value") else str(e.entity_type),
+                str(e.entity_type),
             )
             for e in entities
         }
@@ -109,7 +108,7 @@ def _entity_to_cypher_params(entity: Entity) -> dict[str, Any]:
         "id": str(entity.id),
         "namespace_id": str(entity.namespace_id),
         "name": entity.name,
-        "entity_type": (entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type),
+        "entity_type": entity.entity_type,
         "description": entity.description,
         "attributes": _serialize_dict(entity.attributes),
         "source_document_ids": [str(d) for d in entity.source_document_ids],
@@ -592,7 +591,7 @@ class Neo4jBackend(GraphBackendBase):
             key=lambda e: (
                 str(e.namespace_id),
                 e.name,
-                e.entity_type.value if isinstance(e.entity_type, EntityType) else e.entity_type,
+                e.entity_type,
             ),
         )
 
@@ -659,11 +658,7 @@ class Neo4jBackend(GraphBackendBase):
         # eliminating a second round of write transactions on overlapping nodes.
         all_rels = list(relationships)
         for rel in relationships:
-            rel_type_str = _sanitize_neo4j_label(
-                rel.relationship_type.value
-                if isinstance(rel.relationship_type, RelationshipType)
-                else rel.relationship_type
-            )
+            rel_type_str = _sanitize_neo4j_label(rel.relationship_type)
             inverse_type = BIDIRECTIONAL_TYPES.get(rel_type_str)
             if inverse_type and inverse_type != rel_type_str:
                 inv = copy(rel)
@@ -677,11 +672,7 @@ class Neo4jBackend(GraphBackendBase):
         # Group by relationship type (required for dynamic rel type in Cypher)
         type_groups: dict[str, list[Relationship]] = {}
         for rel in all_rels:
-            rel_type = _sanitize_neo4j_label(
-                rel.relationship_type.value
-                if isinstance(rel.relationship_type, RelationshipType)
-                else rel.relationship_type
-            )
+            rel_type = _sanitize_neo4j_label(rel.relationship_type)
             type_groups.setdefault(rel_type, []).append(rel)
 
         async def _create_type_group(rel_type: str, rels: list[Relationship]) -> int:
@@ -754,11 +745,7 @@ class Neo4jBackend(GraphBackendBase):
             id=UUID(node["id"]),
             namespace_id=UUID(node["namespace_id"]),
             name=node["name"],
-            entity_type=(
-                EntityType(node["entity_type"])
-                if node["entity_type"] in EntityType.__members__
-                else node["entity_type"]
-            ),
+            entity_type=node["entity_type"],
             description=node.get("description", ""),
             attributes=_deserialize_dict(node.get("attributes")),
             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
@@ -781,11 +768,7 @@ class Neo4jBackend(GraphBackendBase):
         driver = self._get_driver()
         params = _relationship_to_cypher_params(relationship)
 
-        rel_type = _sanitize_neo4j_label(
-            relationship.relationship_type.value
-            if isinstance(relationship.relationship_type, RelationshipType)
-            else relationship.relationship_type
-        )
+        rel_type = _sanitize_neo4j_label(relationship.relationship_type)
 
         async def _create(tx: AsyncManagedTransaction) -> None:
             # Use dynamic relationship type with MERGE to prevent duplicates
@@ -916,7 +899,7 @@ class Neo4jBackend(GraphBackendBase):
             namespace_id=UUID(rel["namespace_id"]),
             source_entity_id=UUID(source_id),
             target_entity_id=UUID(target_id),
-            relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
+            relationship_type=rel_type,
             description=rel.get("description", ""),
             properties=_deserialize_dict(rel.get("properties")),
             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],

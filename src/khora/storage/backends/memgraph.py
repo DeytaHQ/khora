@@ -18,7 +18,6 @@ from uuid import UUID
 from loguru import logger
 
 from khora.core.models import Entity, Episode, Relationship
-from khora.core.models.entity import EntityType, RelationshipType
 from khora.storage.backends.mixins import (
     GraphBackendBase,
     deserialize_dict,
@@ -131,11 +130,7 @@ class MemgraphBackend(GraphBackendBase):
             id=UUID(node["id"]),
             namespace_id=UUID(node["namespace_id"]),
             name=node["name"],
-            entity_type=(
-                EntityType(node["entity_type"])
-                if node["entity_type"] in EntityType.__members__
-                else node["entity_type"]
-            ),
+            entity_type=node["entity_type"],
             description=node.get("description", ""),
             attributes=deserialize_dict(node.get("attributes")),
             source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
@@ -157,7 +152,7 @@ class MemgraphBackend(GraphBackendBase):
             namespace_id=UUID(rel["namespace_id"]),
             source_entity_id=UUID(source_id),
             target_entity_id=UUID(target_id),
-            relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
+            relationship_type=rel_type,
             description=rel.get("description", ""),
             properties=deserialize_dict(rel.get("properties")),
             source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
@@ -217,9 +212,7 @@ class MemgraphBackend(GraphBackendBase):
             "id": str(entity.id),
             "namespace_id": str(entity.namespace_id),
             "name": entity.name,
-            "entity_type": (
-                entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
-            ),
+            "entity_type": entity.entity_type,
             "description": entity.description,
             "attributes": serialize_dict(entity.attributes),
             "source_document_ids": [str(d) for d in entity.source_document_ids],
@@ -387,11 +380,7 @@ class MemgraphBackend(GraphBackendBase):
     async def create_relationship(self, relationship: Relationship) -> Relationship:
         driver = self._get_driver()
 
-        rel_type = (
-            relationship.relationship_type.value
-            if isinstance(relationship.relationship_type, RelationshipType)
-            else relationship.relationship_type
-        )
+        rel_type = relationship.relationship_type
 
         # Dynamic relationship type via f-string (parameterized labels not supported in Cypher)
         query = f"""

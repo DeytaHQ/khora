@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Entity, EntityType
+from khora.core.models import Entity
 from khora.engines.vectorcypher.engine import VectorCypherConfig, VectorCypherEngine
 
 
@@ -83,7 +83,7 @@ class TestVectorCypherSearchEntities:
             id=entity_id,
             namespace_id=namespace_id,
             name="Test Entity",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             description="A test entity for search.",
         )
 

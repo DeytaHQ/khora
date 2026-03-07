@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from khora.core.models import Entity, Relationship
-from khora.core.models.entity import EntityType, RelationshipType
 from khora.storage.backends.neo4j import _entity_to_cypher_params, _relationship_to_cypher_params
 
 
@@ -21,7 +20,7 @@ class TestEntityToCypherParams:
         entity = Entity(
             namespace_id=uuid4(),
             name="Alice",
-            entity_type=EntityType.PERSON,
+            entity_type="PERSON",
             description="A person",
             attributes={"role": "engineer"},
             source_document_ids=[doc_id],
@@ -66,7 +65,7 @@ class TestEntityToCypherParams:
         entity = Entity(
             namespace_id=uuid4(),
             name="Test",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             valid_from=vf,
             valid_until=vu,
         )
@@ -79,7 +78,7 @@ class TestEntityToCypherParams:
         entity = Entity(
             namespace_id=uuid4(),
             name="Test",
-            entity_type=EntityType.CONCEPT,
+            entity_type="CONCEPT",
             attributes={"key": "value"},
         )
         params = _entity_to_cypher_params(entity)
@@ -100,7 +99,7 @@ class TestRelationshipToCypherParams:
             namespace_id=uuid4(),
             source_entity_id=src,
             target_entity_id=tgt,
-            relationship_type=RelationshipType.WORKS_FOR,
+            relationship_type="WORKS_FOR",
             description="works for",
             properties={"since": "2020"},
             confidence=0.9,
@@ -143,7 +142,7 @@ class TestRelationshipToCypherParams:
             namespace_id=uuid4(),
             source_entity_id=uuid4(),
             target_entity_id=uuid4(),
-            relationship_type=RelationshipType.RELATES_TO,
+            relationship_type="RELATES_TO",
             properties={"key": "value"},
         )
         params = _relationship_to_cypher_params(rel)

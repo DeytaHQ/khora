@@ -50,7 +50,7 @@ def _should_skip_entity_embedding(
     """
     if not skip_types:
         return False
-    entity_type = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
+    entity_type = entity.entity_type
     _skip_upper = frozenset(t.upper() for t in skip_types)
     if entity_type.upper() not in _skip_upper:
         return False
@@ -210,7 +210,6 @@ async def stream_extract_and_embed_entities(
         Tuple of (entities with embeddings, relationships)
     """
     from khora.core.models import Entity, Relationship
-    from khora.core.models.entity import EntityType, RelationshipType
     from khora.extraction.extractors import LLMEntityExtractor
     from khora.extraction.skills.registry import get_default_registry
 
@@ -302,10 +301,7 @@ async def stream_extract_and_embed_entities(
                         if _vu and (not existing.valid_until or _vu > existing.valid_until):
                             existing.valid_until = _vu
                     else:
-                        try:
-                            entity_type: EntityType | str = EntityType(extracted.entity_type)
-                        except ValueError:
-                            entity_type = extracted.entity_type or "CONCEPT"
+                        entity_type = extracted.entity_type or "CONCEPT"
 
                         # Prefer LLM-extracted temporal bounds over chunk timestamp
                         _t = extracted.temporal
@@ -335,10 +331,7 @@ async def stream_extract_and_embed_entities(
                     if extracted_rel.confidence < min_relationship_confidence:
                         continue
 
-                    try:
-                        rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
-                    except ValueError:
-                        rel_type = extracted_rel.relationship_type or "RELATES_TO"
+                    rel_type = extracted_rel.relationship_type or "RELATES_TO"
 
                     norm_source = _norm_cache[extracted_rel.source_entity]
                     norm_target = _norm_cache[extracted_rel.target_entity]
@@ -446,10 +439,7 @@ async def stream_extract_and_embed_entities(
                         if pair in existing_pairs or (pair[1], pair[0]) in existing_pairs:
                             continue
                         existing_pairs.add(pair)
-                        try:
-                            cross_rel_type: RelationshipType | str = RelationshipType(extracted_rel.relationship_type)
-                        except ValueError:
-                            cross_rel_type = extracted_rel.relationship_type or "RELATES_TO"
+                        cross_rel_type = extracted_rel.relationship_type or "RELATES_TO"
                         all_relationships.append(
                             Relationship(
                                 namespace_id=chunks[0].namespace_id,
@@ -1037,7 +1027,7 @@ async def process_document(
                 # Build name+type -> stored_id mapping from upsert results
                 name_type_to_stored: dict[str, str] = {}
                 for entity, is_new in upsert_results:
-                    et = entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
+                    et = entity.entity_type
                     key = f"{_store_norm[entity.name]}:{et}"
                     stored_id = str(entity.id)
                     name_type_to_stored[key] = stored_id
@@ -1047,11 +1037,7 @@ async def process_document(
 
                 # Map every original entity ID to its stored counterpart by name+type
                 for orig_entity in entities:
-                    et = (
-                        orig_entity.entity_type.value
-                        if hasattr(orig_entity.entity_type, "value")
-                        else str(orig_entity.entity_type)
-                    )
+                    et = orig_entity.entity_type
                     key = f"{_store_norm[orig_entity.name]}:{et}"
                     stored_id = name_type_to_stored.get(key)
                     if stored_id:
@@ -1493,16 +1479,11 @@ async def run_smart_resolution(
     logger.info(f"Smart resolution: loaded {len(relationships)} relationships from storage")
 
     if relationships:
-        rel_type_dist = Counter(
-            str(r.relationship_type.value if hasattr(r.relationship_type, "value") else r.relationship_type)
-            for r in relationships
-        )
+        rel_type_dist = Counter(r.relationship_type for r in relationships)
         logger.info(f"Smart resolution: relationship types: {dict(rel_type_dist.most_common(15))}")
 
     if resolved_entities:
-        ent_type_dist = Counter(
-            str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) for e in resolved_entities
-        )
+        ent_type_dist = Counter(e.entity_type for e in resolved_entities)
         logger.info(f"Smart resolution: entity types: {dict(ent_type_dist.most_common(15))}")
 
     # Check entity ID overlap between relationships and resolved_entities

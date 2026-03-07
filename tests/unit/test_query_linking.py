@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models.entity import Entity, EntityType
+from khora.core.models.entity import Entity
 from khora.query.linking import (
     EntityLinker,
     LinkedEntity,
@@ -17,7 +17,7 @@ from khora.query.linking import (
 from khora.query.understanding import EntityMention
 
 
-def _make_entity(name: str, entity_type: EntityType = EntityType.PERSON) -> Entity:
+def _make_entity(name: str, entity_type: str = "PERSON") -> Entity:
     """Helper to create an Entity."""
     return Entity(
         namespace_id=uuid4(),

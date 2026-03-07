@@ -64,7 +64,7 @@ class RuleEvaluationContext:
             ctx.entity_index[name_key].append(entity)
 
             # Index by type
-            type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+            type_key = str(entity.entity_type)
             if type_key not in ctx.type_index:
                 ctx.type_index[type_key] = []
             ctx.type_index[type_key].append(entity)
@@ -74,9 +74,7 @@ class RuleEvaluationContext:
 
         # Build relationship indices
         for rel in relationships:
-            rel_type = str(
-                rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-            )
+            rel_type = str(rel.relationship_type)
             if rel_type not in ctx.relationship_index:
                 ctx.relationship_index[rel_type] = []
             ctx.relationship_index[rel_type].append(rel)
@@ -113,7 +111,7 @@ class RuleEvaluationContext:
                     self.entity_index[name_key] = []
                 self.entity_index[name_key].append(entity)
 
-                type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+                type_key = str(entity.entity_type)
                 if type_key not in self.type_index:
                     self.type_index[type_key] = []
                 self.type_index[type_key].append(entity)
@@ -124,9 +122,7 @@ class RuleEvaluationContext:
             if rel not in self.relationships:
                 self.relationships.append(rel)
 
-                rel_type = str(
-                    rel.relationship_type.value if hasattr(rel.relationship_type, "value") else rel.relationship_type
-                )
+                rel_type = str(rel.relationship_type)
                 if rel_type not in self.relationship_index:
                     self.relationship_index[rel_type] = []
                 self.relationship_index[rel_type].append(rel)
@@ -456,32 +452,20 @@ class RuleEngine:
                     # Chain pattern: prev.target -> next.source
                     target_key = str(prev_rel.target_entity_id)
                     for cand in context.rels_by_source.get(target_key, []):
-                        cand_type = str(
-                            cand.relationship_type.value
-                            if hasattr(cand.relationship_type, "value")
-                            else cand.relationship_type
-                        )
+                        cand_type = str(cand.relationship_type)
                         if cand_type == cond_rel_type:
                             candidate_rels.append(cand)
 
                     # Shared source pattern: prev.source == next.source
                     source_key = str(prev_rel.source_entity_id)
                     for cand in context.rels_by_source.get(source_key, []):
-                        cand_type = str(
-                            cand.relationship_type.value
-                            if hasattr(cand.relationship_type, "value")
-                            else cand.relationship_type
-                        )
+                        cand_type = str(cand.relationship_type)
                         if cand_type == cond_rel_type and cand not in candidate_rels:
                             candidate_rels.append(cand)
 
                     # Shared target pattern: prev.target == next.target
                     for cand in context.rels_by_target.get(target_key, []):
-                        cand_type = str(
-                            cand.relationship_type.value
-                            if hasattr(cand.relationship_type, "value")
-                            else cand.relationship_type
-                        )
+                        cand_type = str(cand.relationship_type)
                         if cand_type == cond_rel_type and cand not in candidate_rels:
                             candidate_rels.append(cand)
 
@@ -569,7 +553,7 @@ class RuleEngine:
         if entity_types:
             filtered = []
             for e in candidates:
-                actual_type = str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type)
+                actual_type = str(e.entity_type)
                 # Check if actual type matches any of the expected types via hierarchy
                 if any(types_match(actual_type, expected_type) for expected_type in entity_types):
                     filtered.append(e)
@@ -648,16 +632,8 @@ class RuleEngine:
                 continue
 
             # Get actual entity types
-            actual_source_type = str(
-                source_entity.entity_type.value
-                if hasattr(source_entity.entity_type, "value")
-                else source_entity.entity_type
-            )
-            actual_target_type = str(
-                target_entity.entity_type.value
-                if hasattr(target_entity.entity_type, "value")
-                else target_entity.entity_type
-            )
+            actual_source_type = str(source_entity.entity_type)
+            actual_target_type = str(target_entity.entity_type)
 
             # Use hierarchy-aware type matching
             source_matches = not source_type or types_match(actual_source_type, source_type)

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models.entity import Entity, EntityType
+from khora.core.models.entity import Entity
 from khora.extraction.entity_resolution import (
     DEFAULT_MERGE_THRESHOLDS,
     EntityResolver,
@@ -23,7 +23,7 @@ from khora.extraction.entity_resolution import (
 )
 
 
-def _make_entity(name: str = "Test", entity_type: EntityType = EntityType.PERSON, **kwargs) -> Entity:
+def _make_entity(name: str = "Test", entity_type: str = "PERSON", **kwargs) -> Entity:
     """Helper to create an Entity with sensible defaults."""
     return Entity(
         namespace_id=kwargs.get("namespace_id", uuid4()),
@@ -249,7 +249,7 @@ class TestResolveAndMergeEntity:
         )
         assert is_new is True
         assert entity.name == "NewPerson"
-        assert entity.entity_type == EntityType.PERSON
+        assert entity.entity_type == "PERSON"
         assert entity.description == "Brand new person"
 
     @pytest.mark.asyncio
@@ -343,7 +343,7 @@ class TestEntityResolverPreloadedCache:
         """with_preloaded_cache loads entities for all default types."""
         ns_id = uuid4()
         alice = _make_entity("Alice", namespace_id=ns_id)
-        acme = _make_entity("Acme Corp", EntityType.ORGANIZATION, namespace_id=ns_id)
+        acme = _make_entity("Acme Corp", "ORGANIZATION", namespace_id=ns_id)
 
         storage = MagicMock()
 
@@ -631,7 +631,7 @@ class TestAttributeMatching:
         ns_id = uuid4()
         existing = _make_entity(
             "Acme Corporation",
-            EntityType.ORGANIZATION,
+            "ORGANIZATION",
             namespace_id=ns_id,
             attributes={"website": "https://www.acme.com"},
         )
@@ -653,7 +653,7 @@ class TestAttributeMatching:
         ns_id = uuid4()
         existing = _make_entity(
             "Times Square",
-            EntityType.LOCATION,
+            "LOCATION",
             namespace_id=ns_id,
             attributes={"coordinates": "40.7580, -73.9855"},
         )
@@ -675,7 +675,7 @@ class TestAttributeMatching:
         ns_id = uuid4()
         existing = _make_entity(
             "TensorFlow",
-            EntityType.TECHNOLOGY,
+            "TECHNOLOGY",
             namespace_id=ns_id,
             attributes={"vendor": "Google", "type": "framework"},
         )

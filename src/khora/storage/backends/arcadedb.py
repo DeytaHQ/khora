@@ -17,7 +17,6 @@ from uuid import UUID
 from loguru import logger
 
 from khora.core.models import Chunk, ChunkMetadata, Entity, Episode, Relationship
-from khora.core.models.entity import EntityType, RelationshipType
 from khora.storage.backends.mixins import (
     GraphBackendBase,
     VectorBackendBase,
@@ -266,9 +265,7 @@ class ArcadeDBBackend(GraphBackendBase, VectorBackendBase):
             id=parse_uuid(row["id"]),
             namespace_id=parse_uuid(row["namespace_id"]),
             name=row["name"],
-            entity_type=(
-                EntityType(row["entity_type"]) if row["entity_type"] in EntityType.__members__ else row["entity_type"]
-            ),
+            entity_type=row["entity_type"],
             description=row.get("description", ""),
             attributes=deserialize_dict(row.get("attributes")),
             source_document_ids=parse_uuid_list(row.get("source_document_ids")),
@@ -289,7 +286,7 @@ class ArcadeDBBackend(GraphBackendBase, VectorBackendBase):
             namespace_id=parse_uuid(row["namespace_id"]),
             source_entity_id=parse_uuid(source_id),
             target_entity_id=parse_uuid(target_id),
-            relationship_type=(RelationshipType(rel_type) if rel_type in RelationshipType.__members__ else rel_type),
+            relationship_type=rel_type,
             description=row.get("description", ""),
             properties=deserialize_dict(row.get("properties")),
             source_document_ids=parse_uuid_list(row.get("source_document_ids")),
@@ -339,7 +336,7 @@ class ArcadeDBBackend(GraphBackendBase, VectorBackendBase):
     # ==================================================================
 
     async def create_entity(self, entity: Entity) -> Entity:
-        entity_type_val = entity.entity_type.value if isinstance(entity.entity_type, EntityType) else entity.entity_type
+        entity_type_val = entity.entity_type
         await self._cypher(
             """
             CREATE (e:Entity {
@@ -500,11 +497,7 @@ class ArcadeDBBackend(GraphBackendBase, VectorBackendBase):
     # ------------------------------------------------------------------
 
     async def create_relationship(self, relationship: Relationship) -> Relationship:
-        rel_type = (
-            relationship.relationship_type.value
-            if isinstance(relationship.relationship_type, RelationshipType)
-            else relationship.relationship_type
-        )
+        rel_type = relationship.relationship_type
         # ArcadeDB: use RELATES_TO edge type, store the logical type as a property
         await self._cypher(
             """

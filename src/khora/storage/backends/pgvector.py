@@ -486,9 +486,7 @@ class PgVectorBackend(AsyncSessionMixin):
                 id=entity.id,
                 namespace_id=entity.namespace_id,
                 name=entity.name,
-                entity_type=(
-                    entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
-                ),
+                entity_type=entity.entity_type,
                 description=entity.description,
                 attributes=entity.attributes,
                 source_document_ids=entity.source_document_ids,
@@ -589,9 +587,7 @@ class PgVectorBackend(AsyncSessionMixin):
                     "id": entity.id,
                     "namespace_id": entity.namespace_id,
                     "name": entity.name,
-                    "entity_type": (
-                        entity.entity_type.value if hasattr(entity.entity_type, "value") else str(entity.entity_type)
-                    ),
+                    "entity_type": (entity.entity_type),
                     "description": entity.description,
                     "attributes": entity.attributes,
                     "source_document_ids": entity.source_document_ids,
