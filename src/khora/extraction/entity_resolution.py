@@ -301,17 +301,6 @@ class EntityResolver:
     - Merge provenance tracking
     """
 
-    # Default entity types to pre-load when using with_preloaded_cache
-    DEFAULT_ENTITY_TYPES: list[str] = [
-        "PERSON",
-        "ORGANIZATION",
-        "LOCATION",
-        "CONCEPT",
-        "EVENT",
-        "PRODUCT",
-        "TECHNOLOGY",
-    ]
-
     def __init__(
         self,
         storage: StorageCoordinator,
@@ -694,7 +683,9 @@ class EntityResolver:
         if namespace_id is None:
             return resolver
 
-        types_to_load = entity_types or cls.DEFAULT_ENTITY_TYPES
+        if not entity_types:
+            return resolver
+        types_to_load = entity_types
 
         # Load entities for all types in parallel for efficiency
         import asyncio

@@ -158,18 +158,8 @@ Return ONLY valid JSON, no other text."""
 
 ## Entity Types
 
-Default entity types:
-
-```python
-DEFAULT_ENTITY_TYPES = [
-    "PERSON",
-    "ORGANIZATION",
-    "LOCATION",
-    "CONCEPT",
-    "EVENT",
-    "TECHNOLOGY",
-]
-```
+Entity types must be provided by the caller — Khora does not define defaults.
+Pass `entity_types` and `relationship_types` explicitly to `remember()` / `remember_batch()`.
 
 Custom types can be specified via expertise configuration.
 

@@ -166,7 +166,11 @@ class TestB6SemaphoreReleaseDuringRetry:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            result = await extractor.extract("test text")
+            result = await extractor.extract(
+                "test text",
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "KNOWS"],
+            )
 
         assert semaphore_was_free, "Semaphore should be free during retry sleep"
         assert len(result.entities) == 1
@@ -204,7 +208,12 @@ class TestB6SemaphoreReleaseDuringRetry:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            results = await extractor.extract_multi(["text1"], batch_size=5)
+            results = await extractor.extract_multi(
+                ["text1"],
+                batch_size=5,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "KNOWS"],
+            )
 
         assert semaphore_was_free, "Semaphore should be free during retry sleep"
         assert len(results) == 1
@@ -619,7 +628,12 @@ class TestMultiBatchOptimizations:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            results = await extractor.extract_multi(["text about Alice"], batch_size=5)
+            results = await extractor.extract_multi(
+                ["text about Alice"],
+                batch_size=5,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "KNOWS"],
+            )
 
         assert len(results) == 1
         assert results[0].entities[0].name == "Alice"
@@ -641,7 +655,12 @@ class TestMultiBatchOptimizations:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            results = await extractor.extract_multi(["text1", "text2"], batch_size=5)
+            results = await extractor.extract_multi(
+                ["text1", "text2"],
+                batch_size=5,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "KNOWS"],
+            )
 
         assert len(results) == 2
         assert len(results[0].entities) == 0

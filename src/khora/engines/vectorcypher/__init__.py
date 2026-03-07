@@ -14,7 +14,7 @@ Usage:
     await engine.connect()
 
     # Store with temporal context
-    await engine.remember("Meeting notes...", namespace_id, occurred_at=datetime(...))
+    await engine.remember("Meeting notes...", namespace_id, occurred_at=datetime(...), entity_types=[...], relationship_types=[...])
 
     # Retrieve with hybrid search
     result = await engine.recall("What did we discuss?", namespace_id)

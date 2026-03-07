@@ -208,7 +208,12 @@ class TestExtractEntities:
 
             extractor = LLMEntityExtractor(model="test-model")
             texts = [chunk1.content, chunk2.content]
-            results = await extractor.extract_multi(texts, batch_size=3)
+            results = await extractor.extract_multi(
+                texts,
+                batch_size=3,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "KNOWS"],
+            )
 
         # Collect entities across results and dedup by name:type
         from khora.core.models import Entity
@@ -271,7 +276,12 @@ class TestExtractEntities:
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
             extractor = LLMEntityExtractor(model="test-model")
-            results = await extractor.extract_multi([chunk.content], batch_size=3)
+            results = await extractor.extract_multi(
+                [chunk.content],
+                batch_size=3,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "KNOWS"],
+            )
 
         # Filter with 0.5 threshold
         entities = [e for e in results[0].entities if e.confidence >= 0.5]
