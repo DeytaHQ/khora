@@ -314,7 +314,12 @@ class TestVectorCypherEngineRemember:
 
         connected_engine._storage.get_document_by_checksum = AsyncMock(return_value=existing_doc)
 
-        result = await connected_engine.remember("test content", namespace_id)
+        result = await connected_engine.remember(
+            "test content",
+            namespace_id,
+            entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+            relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
+        )
 
         assert result.document_id == doc_id
         assert result.metadata.get("duplicate") is True
@@ -342,6 +347,8 @@ class TestVectorCypherEngineRemember:
                 namespace_id,
                 title="Test Doc",
                 source="unit_test",
+                entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+                relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
             )
 
         assert result.document_id == doc_id

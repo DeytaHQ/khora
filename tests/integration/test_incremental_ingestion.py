@@ -469,7 +469,12 @@ class TestIncrementalIngestion:
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            await lake.remember("Test content", title="Test")
+            await lake.remember(
+                "Test content",
+                title="Test",
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
+            )
 
         engine.remember.assert_awaited_once()
 
@@ -495,7 +500,13 @@ class TestIncrementalIngestion:
 
         mock_result = {"chunks": 1, "entities": 1, "relationships": 0}
         with patch("khora.pipelines.flows.ingest.process_document", AsyncMock(return_value=mock_result)):
-            await engine.remember("Test content", NAMESPACE_ID, title="Test")
+            await engine.remember(
+                "Test content",
+                NAMESPACE_ID,
+                title="Test",
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
+            )
 
         mock_query_engine.invalidate_caches.assert_called_once_with(NAMESPACE_ID)
 
@@ -531,6 +542,8 @@ class TestIncrementalIngestion:
             await engine.remember_batch(
                 [{"content": "Doc 1"}, {"content": "Doc 2"}],
                 NAMESPACE_ID,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
             )
 
         mock_query_engine.invalidate_caches.assert_called_once_with(NAMESPACE_ID)
@@ -572,6 +585,8 @@ class TestIncrementalIngestion:
             result = await lake.remember(
                 "Alice Johnson is a senior engineer at Acme Corp.",
                 title="Alice Profile",
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
             )
             assert result.chunks_created == 3
             assert result.entities_extracted == 2
@@ -631,12 +646,20 @@ class TestIncrementalIngestion:
             patch("khora.telemetry.context.clear_trace_id"),
         ):
             # Ingest batch 1
-            r1 = await lake.remember_batch(BATCH_1_DOCS)
+            r1 = await lake.remember_batch(
+                BATCH_1_DOCS,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
+            )
             assert r1.processed == 3
             assert r1.entities == 4
 
             # Ingest batch 2
-            r2 = await lake.remember_batch(BATCH_2_DOCS)
+            r2 = await lake.remember_batch(
+                BATCH_2_DOCS,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
+            )
             assert r2.processed == 2
             assert r2.entities == 2
 
@@ -858,13 +881,25 @@ class TestIncrementalIngestion:
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            r1 = await lake.remember_batch(BATCH_1_DOCS)
+            r1 = await lake.remember_batch(
+                BATCH_1_DOCS,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
+            )
             assert r1.processed == 3
 
-            r2 = await lake.remember_batch(BATCH_2_DOCS)
+            r2 = await lake.remember_batch(
+                BATCH_2_DOCS,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
+            )
             assert r2.processed == 2
 
-            r3 = await lake.remember_batch(batch3_docs)
+            r3 = await lake.remember_batch(
+                batch3_docs,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
+            )
             assert r3.processed == 2
 
             result = await lake.recall("Acme Corp team")

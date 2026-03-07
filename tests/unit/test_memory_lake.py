@@ -354,7 +354,12 @@ class TestRemember:
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await lake.remember("test content", title="Test")
+            result = await lake.remember(
+                "test content",
+                title="Test",
+                entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+                relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
+            )
 
         assert result is mock_result
         lake._engine.remember.assert_awaited_once()
@@ -852,7 +857,11 @@ class TestEnhancedRememberBatch:
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await lake.remember_batch([])
+            result = await lake.remember_batch(
+                [],
+                entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+                relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
+            )
 
         assert isinstance(result, BatchResult)
         assert result.total == 0
@@ -885,7 +894,9 @@ class TestEnhancedRememberBatch:
                     {"content": "Doc 1"},
                     {"content": "Doc 2"},
                     {"content": "Doc 3"},
-                ]
+                ],
+                entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+                relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
             )
 
         assert isinstance(result, BatchResult)

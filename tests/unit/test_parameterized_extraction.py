@@ -13,11 +13,7 @@ from uuid import uuid4
 import pytest
 
 from khora.extraction.extractors.base import ExtractionResult
-from khora.extraction.extractors.llm import (
-    DEFAULT_ENTITY_TYPES,
-    DEFAULT_RELATIONSHIP_TYPES,
-    LLMEntityExtractor,
-)
+from khora.extraction.extractors.llm import LLMEntityExtractor
 from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
 
 # ---------------------------------------------------------------------------
@@ -118,16 +114,25 @@ def _make_lake(*, connected: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# 1. Default types when None
+# 1. No defaults injected when None — extract() errors without types
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestExtractDefaultTypes:
-    """Calling extract() without entity_types/relationship_types uses defaults."""
+class TestExtractNoDefaultsWhenNone:
+    """Calling extract() without entity_types/relationship_types no longer injects defaults."""
 
-    async def test_extract_default_types_when_none(self) -> None:
-        """Prompt contains DEFAULT_ENTITY_TYPES and DEFAULT_RELATIONSHIP_TYPES."""
+    async def test_extract_none_types_raises_without_expertise(self) -> None:
+        """When entity_types=None, relationship_types=None, and no expertise, extract errors."""
+        extractor = LLMEntityExtractor(model="gpt-4o-mini", max_retries=1)
+
+        with patch("litellm.acompletion", new_callable=AsyncMock):
+            # Without types or expertise, the prompt builder gets None and fails
+            with pytest.raises(TypeError):
+                await extractor.extract("Alice works at Acme Corp in New York.")
+
+    async def test_extract_with_explicit_types_works(self) -> None:
+        """When entity_types and relationship_types are provided, extract succeeds."""
         extractor = LLMEntityExtractor(model="gpt-4o-mini", max_retries=1)
         captured_messages: list = []
 
@@ -136,18 +141,17 @@ class TestExtractDefaultTypes:
             return _make_llm_response()
 
         with patch("litellm.acompletion", side_effect=_capture_acompletion):
-            await extractor.extract("Alice works at Acme Corp in New York.")
+            await extractor.extract(
+                "Alice works at Acme Corp in New York.",
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
+            )
 
         assert len(captured_messages) == 1
         user_prompt = captured_messages[0][1]["content"]
-
-        # All default entity types should appear
-        for et in DEFAULT_ENTITY_TYPES:
-            assert et in user_prompt, f"Default entity type {et!r} not found in prompt"
-
-        # All default relationship types should appear
-        for rt in DEFAULT_RELATIONSHIP_TYPES:
-            assert rt in user_prompt, f"Default relationship type {rt!r} not found in prompt"
+        assert "PERSON" in user_prompt
+        assert "ORGANIZATION" in user_prompt
+        assert "WORKS_FOR" in user_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +176,7 @@ class TestExtractCustomEntityTypes:
             await extractor.extract(
                 "BRCA1 gene is targeted by Olaparib.",
                 entity_types=["DRUG", "GENE"],
+                relationship_types=["TARGETS"],
             )
 
         user_prompt = captured_messages[0][1]["content"]
@@ -206,6 +211,7 @@ class TestExtractCustomRelationshipTypes:
         with patch("litellm.acompletion", side_effect=_capture_acompletion):
             await extractor.extract(
                 "BRCA1 is targeted by Olaparib which inhibits PARP.",
+                entity_types=["DRUG", "GENE", "PROTEIN"],
                 relationship_types=["TARGETS", "INHIBITS"],
             )
 
@@ -249,6 +255,7 @@ class TestExtractExplicitOverridesExpertise:
             await extractor.extract(
                 "Olaparib targets BRCA1.",
                 entity_types=["DRUG"],
+                relationship_types=["TARGETS"],
                 expertise=expertise,
             )
 
@@ -260,16 +267,16 @@ class TestExtractExplicitOverridesExpertise:
 
 
 # ---------------------------------------------------------------------------
-# 5. Empty list normalization
+# 5. Empty lists pass through as-is (no defaults injected)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestExtractEmptyListNormalization:
-    """Empty lists [] are treated as None and fall back to defaults."""
+class TestExtractEmptyListNoDefaults:
+    """Empty lists [] are NOT normalized to defaults anymore."""
 
-    async def test_extract_empty_list_uses_defaults(self) -> None:
-        """Empty entity_types=[] and relationship_types=[] use DEFAULT types."""
+    async def test_extract_empty_list_no_defaults_injected(self) -> None:
+        """Empty entity_types=[] and relationship_types=[] do not inject defaults."""
         extractor = LLMEntityExtractor(model="gpt-4o-mini", max_retries=1)
         captured_messages: list = []
 
@@ -286,12 +293,12 @@ class TestExtractEmptyListNormalization:
 
         user_prompt = captured_messages[0][1]["content"]
 
-        # Should contain defaults since empty lists are normalized to None
-        for et in DEFAULT_ENTITY_TYPES:
-            assert et in user_prompt, f"Default entity type {et!r} missing after empty-list normalization"
-
-        for rt in DEFAULT_RELATIONSHIP_TYPES:
-            assert rt in user_prompt, f"Default relationship type {rt!r} missing after empty-list normalization"
+        # Old defaults should NOT appear since empty lists are no longer
+        # normalized to defaults
+        entity_line = [line for line in user_prompt.split("\n") if "Entity types to extract:" in line]
+        if entity_line:
+            assert "PERSON" not in entity_line[0], "Old default PERSON should not be injected for empty list"
+            assert "ORGANIZATION" not in entity_line[0], "Old default ORGANIZATION should not be injected"
 
 
 # ---------------------------------------------------------------------------
@@ -451,3 +458,83 @@ class TestMemoryLakeRememberBatchThreadsTypes:
         call_kwargs = lake._engine.remember_batch.call_args
         assert call_kwargs.kwargs["entity_types"] == ["DRUG"]
         assert call_kwargs.kwargs["relationship_types"] == ["TARGETS"]
+
+
+# ---------------------------------------------------------------------------
+# 10. remember() requires ontology params
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRememberRequiresOntologyParams:
+    """Verify that calling lake.remember() without entity_types or relationship_types raises TypeError."""
+
+    async def test_remember_missing_entity_types_raises(self) -> None:
+        """remember() without entity_types raises TypeError."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+
+        with pytest.raises(TypeError):
+            await lake.remember("some text", relationship_types=["KNOWS"])
+
+    async def test_remember_missing_relationship_types_raises(self) -> None:
+        """remember() without relationship_types raises TypeError."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+
+        with pytest.raises(TypeError):
+            await lake.remember("some text", entity_types=["PERSON"])
+
+    async def test_remember_missing_both_raises(self) -> None:
+        """remember() without either ontology param raises TypeError."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+
+        with pytest.raises(TypeError):
+            await lake.remember("some text")
+
+
+# ---------------------------------------------------------------------------
+# 11. remember_batch() requires ontology params
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRememberBatchRequiresOntologyParams:
+    """Verify that calling lake.remember_batch() without entity_types or relationship_types raises TypeError."""
+
+    async def test_remember_batch_missing_entity_types_raises(self) -> None:
+        """remember_batch() without entity_types raises TypeError."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+
+        with pytest.raises(TypeError):
+            await lake.remember_batch(
+                [{"content": "text"}],
+                relationship_types=["KNOWS"],
+            )
+
+    async def test_remember_batch_missing_relationship_types_raises(self) -> None:
+        """remember_batch() without relationship_types raises TypeError."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+
+        with pytest.raises(TypeError):
+            await lake.remember_batch(
+                [{"content": "text"}],
+                entity_types=["PERSON"],
+            )
+
+    async def test_remember_batch_missing_both_raises(self) -> None:
+        """remember_batch() without either ontology param raises TypeError."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
+
+        with pytest.raises(TypeError):
+            await lake.remember_batch([{"content": "text"}])

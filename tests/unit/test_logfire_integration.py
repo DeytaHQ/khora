@@ -453,7 +453,12 @@ class TestMemoryLakeSpans:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.remember("Hello, this is test content", title="Test")
+            await lake.remember(
+                "Hello, this is test content",
+                title="Test",
+                entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+                relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
+            )
 
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
@@ -554,7 +559,11 @@ class TestMemoryLakeSpans:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.remember_batch(docs)
+            await lake.remember_batch(
+                docs,
+                entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+                relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
+            )
 
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
@@ -597,7 +606,11 @@ class TestSpanAttributeWhitelist:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.remember(secret_content)
+            await lake.remember(
+                secret_content,
+                entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+                relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
+            )
 
         call_args = mock_span_fn.call_args
         # The attributes should contain content_length (integer), not the content itself
