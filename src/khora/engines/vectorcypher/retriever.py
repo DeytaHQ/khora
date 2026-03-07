@@ -250,7 +250,7 @@ class VectorCypherRetriever:
                 embed_span.set_attribute("dimension", self._embedder.dimension)
                 embed_span.set_attribute("text_length", len(query))
                 _stats = getattr(self._embedder, "cache_stats", None)
-                _pre_hits = _stats["hits"] if _stats else None
+                _pre_hits = _stats["hits"] if isinstance(_stats, dict) else None
                 query_embedding = await self._embedder.embed(query)
                 if _pre_hits is not None:
                     _post_hits = self._embedder.cache_stats["hits"]  # type: ignore[attr-defined]
