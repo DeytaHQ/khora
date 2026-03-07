@@ -223,11 +223,7 @@ class CrossToolUnifier:
         # Filter by entity types if specified
         candidates = entities
         if entity_types:
-            candidates = [
-                e
-                for e in entities
-                if str(e.entity_type.value if hasattr(e.entity_type, "value") else e.entity_type) in entity_types
-            ]
+            candidates = [e for e in entities if str(e.entity_type) in entity_types]
 
         # Group by field values
         for field_name in match_fields:
@@ -263,7 +259,7 @@ class CrossToolUnifier:
         for entity in entities:
             key = (
                 entity.name.lower().strip(),
-                str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type),
+                str(entity.entity_type),
             )
             if key not in name_type_groups:
                 name_type_groups[key] = []
@@ -350,7 +346,7 @@ class CrossToolUnifier:
         # Fallback: O(n^2) pairwise within type groups
         type_groups: dict[str, list[Entity]] = {}
         for entity in entities:
-            type_key = str(entity.entity_type.value if hasattr(entity.entity_type, "value") else entity.entity_type)
+            type_key = str(entity.entity_type)
             if type_key not in type_groups:
                 type_groups[type_key] = []
             type_groups[type_key].append(entity)
