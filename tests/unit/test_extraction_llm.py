@@ -226,7 +226,13 @@ class TestRenderPrompts:
     def test_extraction_prompt_default(self) -> None:
         """Default extraction prompt includes entity types and text."""
         extractor = LLMEntityExtractor()
-        prompt = extractor._render_extraction_prompt("test text", ["PERSON", "ORGANIZATION"], None, None)
+        prompt = extractor._render_extraction_prompt(
+            "test text",
+            ["PERSON", "ORGANIZATION"],
+            None,
+            None,
+            relationship_types=["WORKS_FOR", "KNOWS"],
+        )
         assert "PERSON" in prompt
         assert "ORGANIZATION" in prompt
         assert "test text" in prompt
@@ -235,7 +241,13 @@ class TestRenderPrompts:
         """Long text is truncated in extraction prompt."""
         extractor = LLMEntityExtractor()
         long_text = "a" * 20000
-        prompt = extractor._render_extraction_prompt(long_text, ["PERSON"], None, None)
+        prompt = extractor._render_extraction_prompt(
+            long_text,
+            ["PERSON"],
+            None,
+            None,
+            relationship_types=["WORKS_FOR"],
+        )
         # Text should be truncated at 8000 chars
         assert len(prompt) < 20000
 
@@ -277,7 +289,11 @@ class TestExtract:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            result = await extractor.extract("Alice works at Acme Corp")
+            result = await extractor.extract(
+                "Alice works at Acme Corp",
+                entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
+                relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
+            )
 
         assert len(result.entities) == 1
         assert result.entities[0].name == "Alice"
@@ -289,7 +305,11 @@ class TestExtract:
 
         with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=Exception("API error")):
             with patch("asyncio.sleep", new_callable=AsyncMock):
-                result = await extractor.extract("test text")
+                result = await extractor.extract(
+                    "test text",
+                    entity_types=["PERSON", "ORGANIZATION"],
+                    relationship_types=["WORKS_FOR", "KNOWS"],
+                )
 
         assert "error" in result.metadata
 
@@ -336,7 +356,12 @@ class TestExtractMulti:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            results = await extractor.extract_multi(["text1", "text2"], batch_size=5)
+            results = await extractor.extract_multi(
+                ["text1", "text2"],
+                batch_size=5,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "KNOWS"],
+            )
 
         assert len(results) == 2
         assert results[0].entities[0].name == "A"
@@ -402,6 +427,8 @@ class TestTieredExtraction:
             ["Hi alice@test.com"],
             tiered_extraction=True,
             tier1_max_chars=200,
+            entity_types=["PERSON", "EMAIL"],
+            relationship_types=["KNOWS"],
         )
         assert len(results) == 1
         assert results[0].metadata.get("extraction_method") == "regex"
