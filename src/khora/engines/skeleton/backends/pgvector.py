@@ -39,6 +39,7 @@ from khora.engines.skeleton.backends import (
     TemporalSearchResult,
     TemporalVectorStore,
 )
+from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
@@ -286,6 +287,35 @@ class PgVectorTemporalStore(TemporalVectorStore):
         QUALITY FIX: When vector search returns insufficient results, automatically
         falls back to keyword search to improve recall on non-core chunks.
         """
+        with trace_span(
+            "khora.temporal_store.search",
+            namespace_id=str(namespace_id),
+            limit=limit,
+            hybrid=hybrid_alpha is not None,
+        ) as _search_span:
+            results = await self._search_inner(
+                namespace_id,
+                query_embedding,
+                limit=limit,
+                min_similarity=min_similarity,
+                temporal_filter=temporal_filter,
+                hybrid_alpha=hybrid_alpha,
+                query_text=query_text,
+            )
+            _search_span.set_attribute("result_count", len(results))
+            return results
+
+    async def _search_inner(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        *,
+        limit: int = 10,
+        min_similarity: float = 0.0,
+        temporal_filter: TemporalFilter | None = None,
+        hybrid_alpha: float | None = None,
+        query_text: str | None = None,
+    ) -> list[TemporalSearchResult]:
         async with self._get_session() as session:
             # Build base conditions
             conditions = [khora_chunks_table.c.namespace_id == namespace_id]

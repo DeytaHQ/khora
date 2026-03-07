@@ -237,12 +237,16 @@ class VectorCypherRetriever:
                         del self._cache[cache_key]
 
             # Step 1: Route query to determine strategy
-            routing = await self._router.route(query)
+            with trace_span("khora.vectorcypher.route") as route_span:
+                routing = await self._router.route(query)
+                route_span.set_attribute("complexity", routing.complexity.value)
+                route_span.set_attribute("use_graph", routing.use_graph)
             logger.debug(f"Query routing: {routing.complexity.value} (use_graph={routing.use_graph})")
             span.set_attribute("routing_complexity", routing.complexity.value)
 
             # Step 2: Embed the query
-            query_embedding = await self._embedder.embed(query)
+            with trace_span("khora.vectorcypher.embed_query"):
+                query_embedding = await self._embedder.embed(query)
 
             # Step 3: Vector search for entry points
             if routing.complexity == QueryComplexity.SIMPLE:
@@ -413,19 +417,23 @@ class VectorCypherRetriever:
         if temporal_filter is not None and effective_recency > 0:
             effective_recency = max(effective_recency, 0.4)
         if effective_recency > 0:
-            recency_scores = self._calculate_recency_scores(fused_results, decay_days_override=_tp.decay_days_override)
-            fused_results = apply_recency_boost(
-                fused_results,
-                recency_scores,
-                recency_weight=effective_recency,
-            )
+            with trace_span("khora.vectorcypher.recency_boost", chunk_count=len(fused_results)):
+                recency_scores = self._calculate_recency_scores(
+                    fused_results, decay_days_override=_tp.decay_days_override
+                )
+                fused_results = apply_recency_boost(
+                    fused_results,
+                    recency_scores,
+                    recency_weight=effective_recency,
+                )
 
         # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
         if self._config.coherence_weight > 0:
-            fused_results = apply_coherence_boost(
-                fused_results,
-                coherence_weight=self._config.coherence_weight,
-            )
+            with trace_span("khora.vectorcypher.coherence_boost", chunk_count=len(fused_results)):
+                fused_results = apply_coherence_boost(
+                    fused_results,
+                    coherence_weight=self._config.coherence_weight,
+                )
 
         # Normalize scores
         fused_results = normalize_scores(fused_results)
@@ -514,50 +522,53 @@ class VectorCypherRetriever:
         For SIMPLE-routed queries, uses a lower hybrid_alpha (0.5) to give
         BM25 equal weight — lexical overlap is stronger for factual queries.
         """
-        # WS8: Lower alpha for SIMPLE queries to boost BM25 signal
-        effective_alpha = self._config.hybrid_alpha
-        if routing.complexity == QueryComplexity.SIMPLE:
-            effective_alpha = min(effective_alpha, 0.5)
+        with trace_span("khora.vectorcypher.simple_retrieve", namespace_id=str(namespace_id)) as span:
+            # WS8: Lower alpha for SIMPLE queries to boost BM25 signal
+            effective_alpha = self._config.hybrid_alpha
+            if routing.complexity == QueryComplexity.SIMPLE:
+                effective_alpha = min(effective_alpha, 0.5)
 
-        results = await self._vector_store.search(
-            namespace_id=namespace_id,
-            query_embedding=query_embedding,
-            limit=limit,
-            temporal_filter=temporal_filter,
-            hybrid_alpha=effective_alpha,
-            query_text=query,
-        )
-
-        chunk_results: list[tuple[Chunk, float]] = []
-        for r in results:
-            chunk = Chunk(
-                id=r.chunk.id,
-                namespace_id=r.chunk.namespace_id,
-                document_id=r.chunk.document_id,
-                content=r.chunk.content,
-                metadata=ChunkMetadata(
-                    custom={
-                        "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
-                        **(r.chunk.metadata or {}),
-                    }
-                ),
-                created_at=r.chunk.created_at or r.chunk.occurred_at,
+            results = await self._vector_store.search(
+                namespace_id=namespace_id,
+                query_embedding=query_embedding,
+                limit=limit,
+                temporal_filter=temporal_filter,
+                hybrid_alpha=effective_alpha,
+                query_text=query,
             )
-            chunk_results.append((chunk, r.combined_score or r.similarity))
 
-        # Apply recency boost to simple path (was previously missing)
-        if effective_recency > 0 and chunk_results:
-            fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
-            recency_scores = self._calculate_recency_scores(fused, decay_days_override=decay_days_override)
-            fused = apply_recency_boost(fused, recency_scores, recency_weight=effective_recency)
-            chunk_results = [(r.item, r.rrf_score) for r in fused]
+            chunk_results: list[tuple[Chunk, float]] = []
+            for r in results:
+                chunk = Chunk(
+                    id=r.chunk.id,
+                    namespace_id=r.chunk.namespace_id,
+                    document_id=r.chunk.document_id,
+                    content=r.chunk.content,
+                    metadata=ChunkMetadata(
+                        custom={
+                            "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
+                            **(r.chunk.metadata or {}),
+                        }
+                    ),
+                    created_at=r.chunk.created_at or r.chunk.occurred_at,
+                )
+                chunk_results.append((chunk, r.combined_score or r.similarity))
 
-        return VectorCypherResult(
-            chunks=chunk_results,
-            entities=[],
-            routing_decision=routing,
-            metadata={"search_mode": "simple_vector"},
-        )
+            # Apply recency boost to simple path (was previously missing)
+            if effective_recency > 0 and chunk_results:
+                fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
+                with trace_span("khora.vectorcypher.recency_boost", chunk_count=len(fused)):
+                    recency_scores = self._calculate_recency_scores(fused, decay_days_override=decay_days_override)
+                    fused = apply_recency_boost(fused, recency_scores, recency_weight=effective_recency)
+                chunk_results = [(r.item, r.rrf_score) for r in fused]
+
+            span.set_attribute("chunk_count", len(chunk_results))
+            return VectorCypherResult(
+                chunks=chunk_results,
+                entities=[],
+                routing_decision=routing,
+                metadata={"search_mode": "simple_vector"},
+            )
 
     async def _vector_search_entities(
         self,
@@ -570,16 +581,19 @@ class VectorCypherRetriever:
             logger.warning("Storage coordinator not available for entity vector search")
             return []
 
-        try:
-            return await self._storage.search_similar_entities(
-                namespace_id,
-                query_embedding,
-                limit=limit,
-                min_similarity=self._config.min_entity_similarity,
-            )
-        except Exception as e:
-            logger.warning(f"Entity vector search failed: {e}")
-            return []
+        with trace_span("khora.vectorcypher.vector_search_entities", namespace_id=str(namespace_id)) as span:
+            try:
+                results = await self._storage.search_similar_entities(
+                    namespace_id,
+                    query_embedding,
+                    limit=limit,
+                    min_similarity=self._config.min_entity_similarity,
+                )
+                span.set_attribute("entity_count", len(results))
+                return results
+            except Exception as e:
+                logger.warning(f"Entity vector search failed: {e}")
+                return []
 
     async def _cypher_expand(
         self,
@@ -661,38 +675,44 @@ class VectorCypherRetriever:
         Returns:
             List of (chunk_id, score, chunk) tuples
         """
-        chunk_records = await self._dual_nodes.get_chunks_by_entities(
-            entity_ids=entity_ids,
-            namespace_id=namespace_id,
-            temporal_filter=temporal_filter,
-            temporal_sort=temporal_sort,
-            limit=limit,
-        )
-
-        results: list[tuple[UUID, float, Chunk]] = []
-        for record in chunk_records:
-            chunk_id = UUID(record["chunk_id"])
-            # Score based on mention count and entity coverage
-            score = float(record.get("total_mentions", 1))
-            entity_count = len(record.get("entity_ids", []))
-            score = score * (1 + 0.1 * entity_count)  # Boost for multiple entity connections
-
-            chunk = Chunk(
-                id=chunk_id,
+        with trace_span(
+            "khora.vectorcypher.fetch_entity_chunks",
+            entity_count=len(entity_ids),
+            namespace_id=str(namespace_id),
+        ) as span:
+            chunk_records = await self._dual_nodes.get_chunks_by_entities(
+                entity_ids=entity_ids,
                 namespace_id=namespace_id,
-                document_id=UUID(record["document_id"]),
-                content=record["content"],
-                metadata=ChunkMetadata(
-                    custom={
-                        "occurred_at": record.get("occurred_at"),
-                        "connected_entities": record.get("entity_ids", []),
-                        **(record.get("metadata") or {}),
-                    }
-                ),
+                temporal_filter=temporal_filter,
+                temporal_sort=temporal_sort,
+                limit=limit,
             )
-            results.append((chunk_id, score, chunk))
 
-        return results
+            results: list[tuple[UUID, float, Chunk]] = []
+            for record in chunk_records:
+                chunk_id = UUID(record["chunk_id"])
+                # Score based on mention count and entity coverage
+                score = float(record.get("total_mentions", 1))
+                entity_count = len(record.get("entity_ids", []))
+                score = score * (1 + 0.1 * entity_count)  # Boost for multiple entity connections
+
+                chunk = Chunk(
+                    id=chunk_id,
+                    namespace_id=namespace_id,
+                    document_id=UUID(record["document_id"]),
+                    content=record["content"],
+                    metadata=ChunkMetadata(
+                        custom={
+                            "occurred_at": record.get("occurred_at"),
+                            "connected_entities": record.get("entity_ids", []),
+                            **(record.get("metadata") or {}),
+                        }
+                    ),
+                )
+                results.append((chunk_id, score, chunk))
+
+            span.set_attribute("chunk_count", len(results))
+            return results
 
     async def _vector_search_chunks(
         self,
@@ -714,35 +734,37 @@ class VectorCypherRetriever:
         Returns:
             List of (chunk_id, score, chunk) tuples
         """
-        results = await self._vector_store.search(
-            namespace_id=namespace_id,
-            query_embedding=query_embedding,
-            limit=limit,
-            temporal_filter=temporal_filter,
-            hybrid_alpha=self._config.hybrid_alpha,
-            query_text=query_text,
-        )
-
-        return [
-            (
-                r.chunk.id,
-                r.combined_score or r.similarity,
-                Chunk(
-                    id=r.chunk.id,
-                    namespace_id=r.chunk.namespace_id,
-                    document_id=r.chunk.document_id,
-                    content=r.chunk.content,
-                    metadata=ChunkMetadata(
-                        custom={
-                            "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
-                            **(r.chunk.metadata or {}),
-                        }
-                    ),
-                    created_at=r.chunk.created_at or r.chunk.occurred_at,
-                ),
+        with trace_span("khora.vectorcypher.vector_search_chunks", namespace_id=str(namespace_id)) as span:
+            results = await self._vector_store.search(
+                namespace_id=namespace_id,
+                query_embedding=query_embedding,
+                limit=limit,
+                temporal_filter=temporal_filter,
+                hybrid_alpha=self._config.hybrid_alpha,
+                query_text=query_text,
             )
-            for r in results
-        ]
+
+            span.set_attribute("chunk_count", len(results))
+            return [
+                (
+                    r.chunk.id,
+                    r.combined_score or r.similarity,
+                    Chunk(
+                        id=r.chunk.id,
+                        namespace_id=r.chunk.namespace_id,
+                        document_id=r.chunk.document_id,
+                        content=r.chunk.content,
+                        metadata=ChunkMetadata(
+                            custom={
+                                "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
+                                **(r.chunk.metadata or {}),
+                            }
+                        ),
+                        created_at=r.chunk.created_at or r.chunk.occurred_at,
+                    ),
+                )
+                for r in results
+            ]
 
     def _lazy_expand_chunks(
         self,
@@ -816,32 +838,40 @@ class VectorCypherRetriever:
         Returns:
             Fused and sorted results
         """
-        # Dynamic fusion weights based on query complexity
-        vector_weight = self._config.vector_weight
-        graph_weight = self._config.graph_weight
-        if routing is not None:
-            if routing.complexity == QueryComplexity.SIMPLE:
-                vector_weight = self._config.simple_vector_weight
-                graph_weight = self._config.simple_graph_weight
-            elif routing.complexity == QueryComplexity.COMPLEX:
-                vector_weight = self._config.complex_vector_weight
-                graph_weight = self._config.complex_graph_weight
+        with trace_span(
+            "khora.vectorcypher.rrf_fusion",
+            vector_count=len(vector_chunks),
+            graph_count=len(graph_chunks),
+        ) as span:
+            # Dynamic fusion weights based on query complexity
+            vector_weight = self._config.vector_weight
+            graph_weight = self._config.graph_weight
+            if routing is not None:
+                if routing.complexity == QueryComplexity.SIMPLE:
+                    vector_weight = self._config.simple_vector_weight
+                    graph_weight = self._config.simple_graph_weight
+                elif routing.complexity == QueryComplexity.COMPLEX:
+                    vector_weight = self._config.complex_vector_weight
+                    graph_weight = self._config.complex_graph_weight
 
-        if use_normalization:
-            return weighted_rrf_normalized(
+            span.set_attribute("vector_weight", vector_weight)
+            span.set_attribute("graph_weight", graph_weight)
+
+            if use_normalization:
+                return weighted_rrf_normalized(
+                    vector_results=vector_chunks,
+                    graph_results=graph_chunks,
+                    k=self._config.rrf_k,
+                    vector_weight=vector_weight,
+                    graph_weight=graph_weight,
+                )
+            return weighted_rrf(
                 vector_results=vector_chunks,
                 graph_results=graph_chunks,
                 k=self._config.rrf_k,
                 vector_weight=vector_weight,
                 graph_weight=graph_weight,
             )
-        return weighted_rrf(
-            vector_results=vector_chunks,
-            graph_results=graph_chunks,
-            k=self._config.rrf_k,
-            vector_weight=vector_weight,
-            graph_weight=graph_weight,
-        )
 
     def _calculate_recency_scores(
         self,

@@ -874,7 +874,8 @@ class HybridQueryEngine:
                 elif cfg.enable_hyde == "auto" and understanding is not None:
                     should_hyde = understanding.complexity_score > 0.6 or understanding.intent == QueryIntent.TEMPORAL
                 if should_hyde:
-                    query_embedding = await self._hyde_expander.expand_query_embedding(query_text, query_embedding)
+                    with trace_span("khora.query.hyde"):
+                        query_embedding = await self._hyde_expander.expand_query_embedding(query_text, query_embedding)
                     metadata["hyde_applied"] = True
 
         # Step 3-7: Execute search pipeline (multi-stage or legacy)
@@ -2892,39 +2893,43 @@ class HybridQueryEngine:
         if len(chunks) <= k:
             return chunks
 
-        # Extract embeddings from chunks (if available)
-        chunk_embeddings: list[list[float] | None] = []
-        for chunk, _ in chunks:
-            embedding = getattr(chunk, "embedding", None)
-            if embedding is None and hasattr(chunk, "metadata"):
-                embedding = getattr(chunk.metadata, "embedding", None)
-            chunk_embeddings.append(embedding)
+        with trace_span("khora.query.mmr_diversity", candidate_count=len(chunks), k=k) as span:
+            # Extract embeddings from chunks (if available)
+            chunk_embeddings: list[list[float] | None] = []
+            for chunk, _ in chunks:
+                embedding = getattr(chunk, "embedding", None)
+                if embedding is None and hasattr(chunk, "metadata"):
+                    embedding = getattr(chunk.metadata, "embedding", None)
+                chunk_embeddings.append(embedding)
 
-        # If no embeddings available, fall back to score-based selection
-        if all(e is None for e in chunk_embeddings):
-            return chunks[:k]
+            # If no embeddings available, fall back to score-based selection
+            if all(e is None for e in chunk_embeddings):
+                return chunks[:k]
 
-        # For candidates missing embeddings, use the query embedding as a
-        # placeholder (their relevance score will dominate the MMR calc).
-        filled_embeddings: list[list[float]] = [emb if emb is not None else query_embedding for emb in chunk_embeddings]
+            # For candidates missing embeddings, use the query embedding as a
+            # placeholder (their relevance score will dominate the MMR calc).
+            filled_embeddings: list[list[float]] = [
+                emb if emb is not None else query_embedding for emb in chunk_embeddings
+            ]
 
-        # Compute relevance scores as cosine similarity to query.
-        # Pre-normalize all embeddings (including query) so dot product = cosine.
-        all_vectors = [query_embedding] + filled_embeddings
-        normalized = normalize_embeddings_batch(all_vectors)
-        norm_query = normalized[0]
-        norm_embeddings = normalized[1:]
+            # Compute relevance scores as cosine similarity to query.
+            # Pre-normalize all embeddings (including query) so dot product = cosine.
+            all_vectors = [query_embedding] + filled_embeddings
+            normalized = normalize_embeddings_batch(all_vectors)
+            norm_query = normalized[0]
+            norm_embeddings = normalized[1:]
 
-        # Relevance = batch dot product (Rust/NumPy accelerated)
-        dot_results = _bdp(norm_query, norm_embeddings, threshold=0.0)
-        scores = [0.0] * len(norm_embeddings)
-        for idx, sim in dot_results:
-            scores[idx] = sim
+            # Relevance = batch dot product (Rust/NumPy accelerated)
+            dot_results = _bdp(norm_query, norm_embeddings, threshold=0.0)
+            scores = [0.0] * len(norm_embeddings)
+            for idx, sim in dot_results:
+                scores[idx] = sim
 
-        # Run MMR selection on pre-normalized embeddings
-        selected_indices = mmr_diversity_select(norm_embeddings, scores, lambda_param, k)
+            # Run MMR selection on pre-normalized embeddings
+            selected_indices = mmr_diversity_select(norm_embeddings, scores, lambda_param, k)
 
-        return [chunks[i] for i in selected_indices]
+            span.set_attribute("selected_count", len(selected_indices))
+            return [chunks[i] for i in selected_indices]
 
     @trace(
         "khora.query.find_related_entities",
