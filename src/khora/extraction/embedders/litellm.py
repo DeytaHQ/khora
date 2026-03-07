@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 from loguru import logger
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 
+from khora.telemetry import trace_span
+
 from .base import Embedder
 
 if TYPE_CHECKING:
@@ -181,23 +183,28 @@ class LiteLLMEmbedder(Embedder):
             raise RuntimeError("litellm package not installed. Run: pip install litellm")
 
         # Separate cached vs uncached texts; compute cache keys once
-        results: list[list[float] | None] = [None] * len(texts)
-        uncached_indices: list[int] = []
-        uncached_texts: list[str] = []
-        uncached_keys: list[str] = []
+        with trace_span("khora.embedder.cache_lookup") as cache_span:
+            results: list[list[float] | None] = [None] * len(texts)
+            uncached_indices: list[int] = []
+            uncached_texts: list[str] = []
+            uncached_keys: list[str] = []
 
-        for i, text in enumerate(texts):
-            key = self._cache_key(text)
-            cached = self._cache_get(text, key=key)
-            if cached is not None:
-                results[i] = cached
-            else:
-                uncached_indices.append(i)
-                uncached_texts.append(text)
-                uncached_keys.append(key)
+            for i, text in enumerate(texts):
+                key = self._cache_key(text)
+                cached = self._cache_get(text, key=key)
+                if cached is not None:
+                    results[i] = cached
+                else:
+                    uncached_indices.append(i)
+                    uncached_texts.append(text)
+                    uncached_keys.append(key)
+
+            cache_hits = len(texts) - len(uncached_texts)
+            cache_span.set_attribute("total", len(texts))
+            cache_span.set_attribute("hits", cache_hits)
+            cache_span.set_attribute("misses", len(uncached_texts))
 
         # Record embedding cache statistics
-        cache_hits = len(texts) - len(uncached_texts)
         if cache_hits > 0:
             from khora.telemetry import get_collector
 
@@ -222,26 +229,35 @@ class LiteLLMEmbedder(Embedder):
                     unique_texts.append(text)
                 dedup_indices.append(unique_text_map[key])
 
-            if len(unique_texts) > self._batch_size:
-                sub_batches = [
-                    unique_texts[i : i + self._batch_size] for i in range(0, len(unique_texts), self._batch_size)
-                ]
-                sem = asyncio.Semaphore(self._embed_concurrency)
+            with trace_span("khora.embedder.api_call") as api_span:
+                api_span.set_attribute("model", self._model)
+                api_span.set_attribute("unique_texts", len(unique_texts))
+                api_span.set_attribute("batch_size", len(uncached_texts))
+                api_span.set_attribute("deduplicated", len(uncached_texts) - len(unique_texts))
 
-                async def _embed_sub(batch: list[str]) -> list[list[float]]:
-                    async with sem:
-                        return await self._embed_batch_internal(batch)
+                if len(unique_texts) > self._batch_size:
+                    sub_batches = [
+                        unique_texts[i : i + self._batch_size] for i in range(0, len(unique_texts), self._batch_size)
+                    ]
+                    api_span.set_attribute("sub_batches", len(sub_batches))
+                    sem = asyncio.Semaphore(self._embed_concurrency)
 
-                sub_results = await asyncio.gather(*[_embed_sub(b) for b in sub_batches])
-                unique_embeddings: list[list[float]] = [emb for result in sub_results for emb in result]
-            else:
-                unique_embeddings = await self._embed_batch_internal(unique_texts)
+                    async def _embed_sub(batch: list[str]) -> list[list[float]]:
+                        async with sem:
+                            return await self._embed_batch_internal(batch)
+
+                    sub_results = await asyncio.gather(*[_embed_sub(b) for b in sub_batches])
+                    unique_embeddings: list[list[float]] = [emb for result in sub_results for emb in result]
+                else:
+                    unique_embeddings = await self._embed_batch_internal(unique_texts)
 
             # L2-normalize all embeddings so dot product == cosine similarity
             # downstream (batch_dot_product is ~3x faster than batch_cosine).
-            from khora._accel import normalize_embeddings_batch
+            with trace_span("khora.embedder.normalize") as norm_span:
+                from khora._accel import normalize_embeddings_batch
 
-            unique_embeddings = normalize_embeddings_batch(unique_embeddings)
+                unique_embeddings = normalize_embeddings_batch(unique_embeddings)
+                norm_span.set_attribute("count", len(unique_embeddings))
 
             # Map deduplicated results back to original positions and populate cache
             for i, (idx, key) in enumerate(zip(uncached_indices, uncached_keys)):
@@ -272,27 +288,39 @@ class LiteLLMEmbedder(Embedder):
             reraise=True,
         ):
             with attempt:
-                _t0 = _time.perf_counter()
-                response = await litellm.aembedding(
-                    model=self._model,
-                    input=sanitized,
-                    timeout=self._timeout,
-                )
-                _latency = (_time.perf_counter() - _t0) * 1000
+                with trace_span("khora.embedder.litellm_request") as req_span:
+                    req_span.set_attribute("model", self._model)
+                    req_span.set_attribute("batch_size", len(texts))
+                    req_span.set_attribute("attempt", attempt.retry_state.attempt_number)
+                    req_span.set_attribute("timeout", self._timeout)
 
-                # Record telemetry
-                from khora.telemetry import get_collector
+                    _t0 = _time.perf_counter()
+                    response = await litellm.aembedding(
+                        model=self._model,
+                        input=sanitized,
+                        timeout=self._timeout,
+                    )
+                    _latency = (_time.perf_counter() - _t0) * 1000
+                    req_span.set_attribute("latency_ms", round(_latency, 2))
 
-                usage = getattr(response, "usage", None)
-                get_collector().record_llm_call(
-                    operation="embedding",
-                    model=self._model,
-                    prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                    total_tokens=getattr(usage, "total_tokens", 0) or 0,
-                    latency_ms=_latency,
-                    batch_size=len(texts),
-                    cache_hit=False,
-                )
+                    # Record telemetry
+                    from khora.telemetry import get_collector
+
+                    usage = getattr(response, "usage", None)
+                    prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                    total_tokens = getattr(usage, "total_tokens", 0) or 0
+                    req_span.set_attribute("prompt_tokens", prompt_tokens)
+                    req_span.set_attribute("total_tokens", total_tokens)
+
+                    get_collector().record_llm_call(
+                        operation="embedding",
+                        model=self._model,
+                        prompt_tokens=prompt_tokens,
+                        total_tokens=total_tokens,
+                        latency_ms=_latency,
+                        batch_size=len(texts),
+                        cache_hit=False,
+                    )
 
                 result = [item["embedding"] for item in response.data]
 
