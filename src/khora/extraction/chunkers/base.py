@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 # Module-level cached encoding to avoid repeated initialization
 _TIKTOKEN_ENCODING: _tiktoken.Encoding | None = None
 
+# Minimum characters for a valid chunk — chunks shorter than this are
+# likely tokenizer artifacts (whitespace, partial tokens) and are filtered.
+MIN_CHUNK_CHARS = 10
+
 
 def _get_tiktoken_encoding() -> _tiktoken.Encoding | None:
     """Get or create the cached tiktoken encoding."""
@@ -84,3 +88,10 @@ class Chunker(ABC):
             return len(self._encoding.encode(text))
         # Fallback: estimate ~4 chars per token
         return len(text) // 4
+
+    def filter_empty_chunks(self, chunks: list[ChunkResult]) -> list[ChunkResult]:
+        """Remove empty or extremely short chunks and re-index."""
+        filtered = [c for c in chunks if c.content.strip() and len(c.content.strip()) >= MIN_CHUNK_CHARS]
+        for i, c in enumerate(filtered):
+            c.index = i
+        return filtered
