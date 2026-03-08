@@ -39,26 +39,35 @@ pub fn resolve_entities_batch(
         .map(|aliases| aliases.iter().map(|a| a.to_lowercase()).collect())
         .collect();
 
+    // Build HashMap for O(1) exact name lookup
+    let name_index: HashMap<&str, usize> = existing_lower
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    // Build HashMap for O(1) alias lookup
+    let mut alias_index: HashMap<&str, usize> = HashMap::new();
+    for (idx, aliases) in aliases_lower.iter().enumerate() {
+        for alias in aliases {
+            alias_index.entry(alias.as_str()).or_insert(idx);
+        }
+    }
+
     py.detach(|| {
         new_names
             .par_iter()
             .map(|new_name| {
                 let query = new_name.to_lowercase();
 
-                // Step 1: Exact name match
-                for (idx, existing) in existing_lower.iter().enumerate() {
-                    if query == *existing {
-                        return Some((idx, 1.0, "exact".to_string()));
-                    }
+                // Step 1: Exact name match (O(1))
+                if let Some(&idx) = name_index.get(query.as_str()) {
+                    return Some((idx, 1.0, "exact".to_string()));
                 }
 
-                // Step 2: Alias match
-                for (idx, aliases) in aliases_lower.iter().enumerate() {
-                    for alias in aliases {
-                        if query == *alias {
-                            return Some((idx, 1.0, "alias".to_string()));
-                        }
-                    }
+                // Step 2: Alias match (O(1))
+                if let Some(&idx) = alias_index.get(query.as_str()) {
+                    return Some((idx, 1.0, "alias".to_string()));
                 }
 
                 // Step 3: Fuzzy match — find best above threshold
@@ -156,6 +165,22 @@ pub fn resolve_entities_enhanced(
     let existing_types_upper: Vec<String> =
         existing_types.iter().map(|t| t.to_uppercase()).collect();
 
+    // Build HashMap for O(1) exact name+type lookup
+    let name_type_index: HashMap<(&str, &str), usize> = existing_lower
+        .iter()
+        .zip(existing_types_upper.iter())
+        .enumerate()
+        .map(|(i, (n, t))| ((n.as_str(), t.as_str()), i))
+        .collect();
+
+    // Build HashMap for O(1) alias+type lookup
+    let mut alias_type_index: HashMap<(&str, &str), usize> = HashMap::new();
+    for (idx, (aliases, etype)) in aliases_lower.iter().zip(existing_types_upper.iter()).enumerate() {
+        for alias in aliases {
+            alias_type_index.entry((alias.as_str(), etype.as_str())).or_insert(idx);
+        }
+    }
+
     py.detach(|| {
         new_names
             .par_iter()
@@ -170,23 +195,14 @@ pub fn resolve_entities_enhanced(
                     .copied()
                     .unwrap_or(default_threshold);
 
-                // Step 1: Exact name match (same type only)
-                for (idx, existing) in existing_lower.iter().enumerate() {
-                    if query == *existing && existing_types_upper[idx] == query_type {
-                        return Some((idx, 1.0, "exact".to_string()));
-                    }
+                // Step 1: Exact name match (O(1))
+                if let Some(&idx) = name_type_index.get(&(query.as_str(), query_type.as_str())) {
+                    return Some((idx, 1.0, "exact".to_string()));
                 }
 
-                // Step 2: Alias match (same type only)
-                for (idx, aliases) in aliases_lower.iter().enumerate() {
-                    if existing_types_upper[idx] != query_type {
-                        continue;
-                    }
-                    for alias in aliases {
-                        if query == *alias {
-                            return Some((idx, 1.0, "alias".to_string()));
-                        }
-                    }
+                // Step 2: Alias match (O(1))
+                if let Some(&idx) = alias_type_index.get(&(query.as_str(), query_type.as_str())) {
+                    return Some((idx, 1.0, "alias".to_string()));
                 }
 
                 // Step 3: Enhanced fuzzy — Jaro-Winkler (0.6) + token overlap (0.4)

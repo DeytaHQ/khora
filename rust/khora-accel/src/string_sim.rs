@@ -87,27 +87,23 @@ pub fn batch_levenshtein(
     py.detach(|| {
         let q = query.to_lowercase();
 
-        let mut results: Vec<(usize, f64)> = candidates
-            .par_iter()
-            .enumerate()
-            .filter_map(|(i, candidate)| {
-                let c = candidate.to_lowercase();
+        let match_fn = |(i, candidate): (usize, &String)| -> Option<(usize, f64)> {
+            let c = candidate.to_lowercase();
+            let sim = if q == c {
+                1.0
+            } else if q.is_empty() || c.is_empty() {
+                0.0
+            } else {
+                normalized_levenshtein(&q, &c)
+            };
+            if sim >= threshold { Some((i, sim)) } else { None }
+        };
 
-                let sim = if q == c {
-                    1.0
-                } else if q.is_empty() || c.is_empty() {
-                    0.0
-                } else {
-                    normalized_levenshtein(&q, &c)
-                };
-
-                if sim >= threshold {
-                    Some((i, sim))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut results: Vec<(usize, f64)> = if candidates.len() >= 512 {
+            candidates.par_iter().enumerate().filter_map(match_fn).collect()
+        } else {
+            candidates.iter().enumerate().filter_map(match_fn).collect()
+        };
 
         results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
         results
@@ -130,7 +126,13 @@ pub fn normalize_entity_name(name: &str) -> String {
 #[pyfunction]
 #[pyo3(signature = (names))]
 pub fn normalize_entity_names_batch(py: Python<'_>, names: Vec<String>) -> Vec<String> {
-    py.detach(|| names.par_iter().map(|n| normalize_single(n)).collect())
+    py.detach(|| {
+        if names.len() >= 512 {
+            names.par_iter().map(|n| normalize_single(n)).collect()
+        } else {
+            names.iter().map(|n| normalize_single(n)).collect()
+        }
+    })
 }
 
 /// Batch sequence match ratio: one query against N candidates.
@@ -148,27 +150,23 @@ pub fn batch_sequence_match(
     py.detach(|| {
         let q = query.to_lowercase();
 
-        let mut results: Vec<(usize, f64)> = candidates
-            .par_iter()
-            .enumerate()
-            .filter_map(|(i, candidate)| {
-                let c = candidate.to_lowercase();
+        let match_fn = |(i, candidate): (usize, &String)| -> Option<(usize, f64)> {
+            let c = candidate.to_lowercase();
+            let sim = if q == c {
+                1.0
+            } else if q.is_empty() || c.is_empty() {
+                0.0
+            } else {
+                jaro_winkler(&q, &c)
+            };
+            if sim >= threshold { Some((i, sim)) } else { None }
+        };
 
-                let sim = if q == c {
-                    1.0
-                } else if q.is_empty() || c.is_empty() {
-                    0.0
-                } else {
-                    jaro_winkler(&q, &c)
-                };
-
-                if sim >= threshold {
-                    Some((i, sim))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut results: Vec<(usize, f64)> = if candidates.len() >= 512 {
+            candidates.par_iter().enumerate().filter_map(match_fn).collect()
+        } else {
+            candidates.iter().enumerate().filter_map(match_fn).collect()
+        };
 
         results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
         results
