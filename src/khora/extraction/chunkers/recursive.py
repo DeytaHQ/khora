@@ -58,7 +58,7 @@ class RecursiveChunker(Chunker):
         # Merge small splits and create final chunks
         chunks = self._merge_splits(splits, text)
 
-        return chunks
+        return self.filter_empty_chunks(chunks)
 
     def _split_text(self, text: str, separators: list[str]) -> list[str]:
         """Recursively split text using the separator list."""

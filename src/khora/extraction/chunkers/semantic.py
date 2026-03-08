@@ -107,7 +107,7 @@ class SemanticChunker(Chunker):
         if current_chunk:
             chunks.append(self._create_chunk_result(current_chunk, chunk_index, current_start, text))
 
-        return chunks
+        return self.filter_empty_chunks(chunks)
 
     def _split_paragraphs(self, text: str) -> list[str]:
         """Split text into paragraphs."""
@@ -180,7 +180,9 @@ class SemanticChunker(Chunker):
             while start < len(tokens):
                 end = min(start + self.chunk_size, len(tokens))
                 chunk_tokens = tokens[start:end]
-                chunks.append(self._encoding.decode(chunk_tokens))
+                chunk_text = self._encoding.decode(chunk_tokens).strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
                 start = end - self.chunk_overlap if end < len(tokens) else end
 
             return chunks
