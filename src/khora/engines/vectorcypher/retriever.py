@@ -90,6 +90,10 @@ class RetrieverConfig:
     complex_vector_weight: float = 0.4
     complex_graph_weight: float = 0.6
 
+    # Temporal fusion overrides (used when temporal signal is detected)
+    temporal_vector_weight: float = 0.3
+    temporal_graph_weight: float = 0.7
+
     # Temporal settings
     recency_weight: float = 0.2
     recency_decay_days: int = 30
@@ -417,6 +421,7 @@ class VectorCypherRetriever:
             graph_chunks=graph_chunks,
             use_normalization=True,
             routing=routing,
+            is_temporal=_tp.recency_weight > 0.2,
         )
 
         # Step 8: Apply recency boost driven by temporal signal category
@@ -834,6 +839,7 @@ class VectorCypherRetriever:
         *,
         use_normalization: bool = False,
         routing: RoutingDecision | None = None,
+        is_temporal: bool = False,
     ) -> list[FusedResult]:
         """Fuse vector and graph results using weighted RRF.
 
@@ -842,6 +848,7 @@ class VectorCypherRetriever:
             graph_chunks: Results from graph traversal
             use_normalization: If True, normalize scores before fusion for better ranking
             routing: If provided, adjust weights based on query complexity
+            is_temporal: If True, use temporal fusion weights (graph-heavy)
 
         Returns:
             Fused and sorted results
@@ -854,7 +861,12 @@ class VectorCypherRetriever:
             # Dynamic fusion weights based on query complexity
             vector_weight = self._config.vector_weight
             graph_weight = self._config.graph_weight
-            if routing is not None:
+            if is_temporal:
+                # Temporal queries benefit from graph-heavy fusion:
+                # graph traversal surfaces temporally-related entities and their chunks
+                vector_weight = self._config.temporal_vector_weight
+                graph_weight = self._config.temporal_graph_weight
+            elif routing is not None:
                 if routing.complexity == QueryComplexity.SIMPLE:
                     vector_weight = self._config.simple_vector_weight
                     graph_weight = self._config.simple_graph_weight
