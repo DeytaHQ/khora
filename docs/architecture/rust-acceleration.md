@@ -114,7 +114,7 @@ Greedy Maximal Marginal Relevance for diversity-aware result selection.
 **Algorithm:**
 - **Incremental max-similarity tracking** — maintains a running `max_sim[i]` for each unselected candidate, updated as new items are selected. Complexity is O(k*n) instead of O(k*n*k).
 - **Cache-friendly layout** — embeddings stored in a flat contiguous buffer for vectorized access.
-- **SIMD-friendly dot product** — inner `dot_f32` function uses `unsafe get_unchecked` for auto-vectorization.
+- **Safe iterator dot product** — inner `dot_f32` function uses `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`, a safe iterator chain that the compiler auto-vectorizes on x86-64 with SSE/AVX. Replaced a previous `unsafe get_unchecked` implementation (DYT-299) to eliminate undefined-behavior risk while preserving equivalent codegen.
 
 **Rust techniques:**
 - **GIL release** — `py.allow_threads(|| { ... })` during the entire selection loop.
@@ -166,7 +166,7 @@ Levenshtein and sequence-match similarity with batch variants.
 
 **Rust techniques:**
 - **strsim crate** — Provides optimised `normalized_levenshtein` and `jaro_winkler` implementations in pure Rust.
-- **Rayon batch** — `candidates.par_iter().enumerate().filter_map(...)` parallelises scoring across all candidates.
+- **Conditional Rayon batch** — batch functions use `par_iter()` when `candidates.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead that dominates at small scale.
 - **GIL release** — `py.allow_threads(|| { ... })` for both batch functions.
 - **Early exit** — Short-circuit returns for equal strings (→ 1.0) and empty strings (→ 0.0).
 
@@ -264,13 +264,15 @@ Batch entity matching with a 3-stage cascade.
 | `resolve_entities_batch` | `(py, new_names: Vec<String>, existing_names: Vec<String>, existing_aliases: Vec<Vec<String>>, threshold: f64) -> Vec<Option<(usize, f64, String)>>` | For each new name, attempts matching in order: (1) exact case-insensitive name match, (2) alias match, (3) fuzzy Levenshtein above threshold. Returns parallel vec of `Some((index, score, match_type))` or `None`. |
 
 **3-stage matching pipeline:**
-1. **Exact match** — Case-insensitive comparison against existing entity names → score `1.0`, type `"exact"`
-2. **Alias match** — Case-insensitive comparison against each entity's alias list → score `1.0`, type `"alias"`
+1. **Exact match** — `HashMap<String, usize>` lookup of lowercased existing names → O(1) per new name, score `1.0`, type `"exact"`
+2. **Alias match** — `HashMap<String, usize>` lookup of lowercased aliases → O(1) per alias, score `1.0`, type `"alias"`
 3. **Fuzzy match** — `strsim::normalized_levenshtein` against all existing names, best score above threshold → type `"fuzzy"`
 
 **Rust techniques:**
+- **HashMap O(1) lookups** — Exact and alias stages build `HashMap<String, usize>` indexes from the existing names/aliases during pre-processing, replacing the previous O(n) linear scans. This reduces stages 1 and 2 from O(new × existing) to O(new + existing).
 - **Pre-lowercasing** — All existing names and aliases are lowercased once before the hot loop, outside `allow_threads`.
 - **Rayon parallel** — `new_names.par_iter().map(...)` parallelises resolution across all new names.
+- **Rayon threshold** — Parallelism is only engaged when `new_names.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead.
 - **GIL release** — `py.allow_threads()` wraps the entire parallel resolution.
 - **Early exit** — Each name short-circuits at the first matching stage.
 
@@ -354,8 +356,8 @@ pip install khora-accel
 | Category | Operations | Estimated Speedup | Key Technique |
 |----------|-----------|-------------------|---------------|
 | Vector math | cosine, batch cosine, pairwise cosine | **5–10x** | NumPy zero-copy, rayon, fused dot+norm |
-| String similarity | Levenshtein, Jaro-Winkler, batch variants | **10–40x** | strsim crate, rayon parallel batch |
-| Entity resolution | 3-stage batch matching | **10–30x** | Pre-lowercasing, rayon, early exit |
+| String similarity | Levenshtein, Jaro-Winkler, batch variants | **10–40x** | strsim crate, rayon parallel batch (≥512 threshold) |
+| Entity resolution | 3-stage batch matching | **10–30x** | HashMap O(1) lookups, rayon (≥512), early exit |
 | BM25 search | Index + score + search | **3–8x** | Inverted index, token interning, GIL release |
 | PageRank | Weighted iterative PageRank | **5–15x** | GIL release, tight loop, no Python overhead |
 | Keyword extraction | Regex tokenise + filter | **3–5x** | Compiled regex via LazyLock, rayon batch |

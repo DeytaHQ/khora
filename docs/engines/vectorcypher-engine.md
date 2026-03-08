@@ -143,10 +143,20 @@ class RetrieverConfig:
     # Temporal settings
     recency_weight: float = 0.2
     recency_decay_days: int = 30
+    recency_decay_type: str = "exponential"  # "exponential" or "linear"
 
     # Search thresholds
     min_entity_similarity: float = 0.3
     hybrid_alpha: float = 0.7
+    coherence_weight: float = 0.0  # Weight for cross-chunk coherence scoring
+
+    # Entity expansion
+    lazy_entity_expansion: bool = False  # Defer entity expansion until needed
+
+    # Query cache
+    query_cache_enabled: bool = True
+    query_cache_ttl: int = 300  # seconds
+    query_cache_max_size: int = 1000
 
     # Limits
     max_chunks: int = 50

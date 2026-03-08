@@ -2,6 +2,41 @@
 
 All notable changes to Khora are documented here.
 
+## [0.3.10] — Chunker Safety & Rust Performance
+
+### Empty chunk filtering
+
+All three chunkers (Fixed, Recursive, Semantic) now filter out empty or
+near-empty chunks before returning results. Root cause: `tokenizer.decode()`
+output was not stripped, producing whitespace-only chunks that polluted the
+vector index. Previously ~17% of retrieval queries encountered sub-10-character
+chunks filtered at query time.
+
+- `MIN_CHUNK_CHARS = 10` constant and `filter_empty_chunks()` method added to
+  `Chunker` base class (`extraction/chunkers/base.py`)
+- `.strip()` added to tokenizer decode in `FixedChunker` and
+  `SemanticChunker._fixed_split()`
+- All three chunkers call `self.filter_empty_chunks()` before returning
+
+### Rust entity resolution: HashMap O(1) lookups
+
+`resolve_entities_batch` in `entity_resolution.rs` now builds
+`HashMap<String, usize>` indexes for exact name and alias matching stages,
+replacing O(n) linear scans with O(1) lookups. This reduces stages 1 and 2
+from O(new × existing) to O(new + existing).
+
+### Rust parallelism threshold
+
+Rayon parallel iteration in `entity_resolution.rs` and `string_sim.rs` now
+only engages when batch size ≥ 512 elements. Smaller batches use sequential
+iteration to avoid thread-pool overhead that dominated at small scale.
+
+### Safe MMR iterator
+
+`mmr.rs` iterator updated to avoid potential panics on empty input.
+
+---
+
 ## [0.3.9] — Key-Aware Neo4j Write Coordination
 
 ### Why: overlapping MERGE batches caused Neo4j lock contention
