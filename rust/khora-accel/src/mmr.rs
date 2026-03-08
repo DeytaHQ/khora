@@ -123,11 +123,7 @@ pub fn mmr_diversity_select(
 #[inline(always)]
 fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    let mut sum = 0.0f32;
-    for i in 0..a.len() {
-        sum += unsafe { *a.get_unchecked(i) * *b.get_unchecked(i) };
-    }
-    sum
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 #[cfg(test)]
