@@ -120,17 +120,21 @@ CREATE TABLE chunks (
     namespace_id UUID NOT NULL,
     document_id UUID NOT NULL,
     content TEXT,
-    embedding vector(1536),  -- The magic: 1536 floats
+    embedding vector(1536),  -- The magic: 1536 floats (or halfvec for float16)
     index INTEGER,           -- Position in document
     token_count INTEGER,
     created_at TIMESTAMPTZ
 );
 
--- IVFFlat index for fast approximate search
-CREATE INDEX ON chunks
-USING ivfflat (embedding vector_cosine_ops)
-WITH (lists = 100);
+-- HNSW index for fast approximate search (replaced IVFFlat)
+CREATE INDEX ix_khora_chunks_embedding_hnsw ON chunks
+USING hnsw (embedding vector_cosine_ops)
+WITH (ef_construction = 128);
 ```
+
+> **Note:** The HNSW index replaced the earlier IVFFlat index. HNSW provides better recall and doesn't require retraining when data grows. The `ef_construction=128` parameter (up from the default 64) improves index quality at build time. Query-time recall can be tuned separately with `SET hnsw.ef_search = N` (default 200 at query time).
+>
+> **halfvec support:** pgvector's `halfvec` type stores embeddings as float16 instead of float32, halving storage and memory usage with minimal quality loss. Khora supports halfvec via the `embedding_type` storage configuration.
 
 **Entity Embeddings** - For finding similar entities:
 ```sql
@@ -402,6 +406,8 @@ ON MATCH SET n.description = e.description, n.updated_at = e.updated_at, ...
 ```
 
 **Concurrent batch coordination**: Non-overlapping entity batches run concurrently (up to `entity_write_concurrency`, default 12), but batches that share entity keys are automatically serialized by `_EntityKeyGate` to avoid Neo4j lock contention. A key is the `(namespace_id, name, entity_type)` triple — the same triple used in the `MERGE` clause. This means two batches touching completely different entities proceed in parallel, while two batches that both contain "Microsoft/ORGANIZATION" are queued so only one MERGE transaction runs at a time for that key.
+
+**How `_EntityKeyGate` works**: The gate maintains a `dict[tuple, asyncio.Lock]` mapping entity keys to locks. Before a batch write, the coordinator extracts all entity keys from the batch, acquires the lock for each key (in sorted order to prevent deadlocks), and releases them after the write completes. Locks for keys that are no longer in use are pruned periodically to prevent unbounded memory growth.
 
 **PostgreSQL implementation** uses a single multi-row `INSERT ... ON CONFLICT DO UPDATE` — all entities in one SQL statement rather than individual inserts.
 

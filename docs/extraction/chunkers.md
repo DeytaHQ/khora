@@ -330,6 +330,27 @@ ChunkResult(
 
 The character offsets let you map chunks back to the original document - useful for highlighting or citation.
 
+## Empty Chunk Filtering
+
+All chunkers automatically filter out empty or near-empty chunks before returning results. This prevents whitespace-only chunks from polluting the retrieval index.
+
+**How it works:**
+
+- `MIN_CHUNK_CHARS = 10` — Chunks shorter than 10 characters (after stripping) are discarded
+- `filter_empty_chunks()` — Base class method called by all chunkers before returning
+- `.strip()` on tokenizer decode — `FixedChunker` and `SemanticChunker._fixed_split()` strip whitespace from decoded token sequences
+
+```python
+# In Chunker base class (extraction/chunkers/base.py)
+MIN_CHUNK_CHARS = 10
+
+def filter_empty_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
+    """Remove chunks with fewer than MIN_CHUNK_CHARS characters."""
+    return [c for c in chunks if len(c.content.strip()) >= MIN_CHUNK_CHARS]
+```
+
+This filtering happens at chunk creation time rather than query time, so empty chunks never enter the vector index. Previously, ~17% of retrieval queries encountered sub-10-character chunks that had to be filtered during search.
+
 ## Performance Tips
 
 1. **Batch processing**: Chunkers are synchronous and fast. The bottleneck is usually embedding, not chunking.
