@@ -301,6 +301,13 @@ class TestResolveNamespace:
         result = await lake._resolve_namespace(None)
         assert result == default_id
 
+    @pytest.mark.asyncio
+    async def test_invalid_string_raises_value_error(self) -> None:
+        """Non-UUID string raises ValueError."""
+        lake = _make_lake(connected=True)
+        with pytest.raises(ValueError, match="Invalid namespace"):
+            await lake._resolve_namespace("not-a-uuid")
+
 
 # ---------------------------------------------------------------------------
 # remember

@@ -63,6 +63,10 @@ class MemoryNamespaceModel(Base):
     """
 
     __tablename__ = "memory_namespaces"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_namespace_name_version"),
+        Index("idx_namespace_name_active", "name", postgresql_where="is_active = true"),
+    )
 
     id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
