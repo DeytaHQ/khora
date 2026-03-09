@@ -76,7 +76,6 @@ def _mock_engine() -> MagicMock:
     mock_eng = MagicMock()
     mock_eng._storage = MagicMock()
     mock_eng._embedder = MagicMock()
-    mock_eng._default_namespace_id = None
     mock_eng.connect = AsyncMock()
     mock_eng.disconnect = AsyncMock()
     mock_eng.health_check = AsyncMock(return_value={"status": "healthy"})
@@ -84,10 +83,8 @@ def _mock_engine() -> MagicMock:
     mock_eng.recall = AsyncMock()
     mock_eng.forget = AsyncMock()
     mock_eng.remember_batch = AsyncMock()
-    mock_eng.get_or_create_default_namespace = AsyncMock(return_value=uuid4())
     mock_eng.create_namespace = AsyncMock()
     mock_eng.get_namespace = AsyncMock()
-    mock_eng.ensure_namespace = AsyncMock()
     mock_eng.get_entity = AsyncMock()
     mock_eng.list_entities = AsyncMock(return_value=[])
     mock_eng.find_related_entities = AsyncMock(return_value=[])
@@ -424,7 +421,6 @@ class TestMemoryLakeSpans:
         """remember() creates a logfire span with namespace_id and content_length."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         lake._engine.remember = AsyncMock(
             return_value=RememberResult(
                 document_id=uuid4(),
@@ -455,6 +451,7 @@ class TestMemoryLakeSpans:
 
             await lake.remember(
                 "Hello, this is test content",
+                namespace=ns_id,
                 title="Test",
                 entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
                 relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
@@ -471,7 +468,6 @@ class TestMemoryLakeSpans:
         """recall() creates a logfire span with namespace_id and query_length."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         lake._engine.recall = AsyncMock(
             return_value=RecallResult(
                 query="test query",
@@ -495,7 +491,7 @@ class TestMemoryLakeSpans:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.recall("test query")
+            await lake.recall("test query", namespace=ns_id)
 
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
@@ -508,6 +504,7 @@ class TestMemoryLakeSpans:
         """forget() creates a logfire span with document_id."""
         lake = _make_lake(connected=True)
         doc_id = uuid4()
+        ns_id = uuid4()
         lake._engine.forget = AsyncMock(return_value=True)
 
         with patch("khora.memory_lake.trace_span") as mock_span_fn:
@@ -519,7 +516,7 @@ class TestMemoryLakeSpans:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.forget(doc_id)
+            await lake.forget(doc_id, namespace=ns_id)
 
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
@@ -531,7 +528,6 @@ class TestMemoryLakeSpans:
         """remember_batch() creates a logfire span with namespace_id and batch_size."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         lake._engine.remember_batch = AsyncMock(
             return_value=BatchResult(
                 total=3,
@@ -561,6 +557,7 @@ class TestMemoryLakeSpans:
 
             await lake.remember_batch(
                 docs,
+                namespace=ns_id,
                 entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
                 relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
             )
@@ -580,7 +577,6 @@ class TestSpanAttributeWhitelist:
         """remember() span attributes contain content_length, not the content itself."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         lake._engine.remember = AsyncMock(
             return_value=RememberResult(
                 document_id=uuid4(),
@@ -608,6 +604,7 @@ class TestSpanAttributeWhitelist:
 
             await lake.remember(
                 secret_content,
+                namespace=ns_id,
                 entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
                 relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
             )
@@ -624,7 +621,6 @@ class TestSpanAttributeWhitelist:
         """recall() span attributes contain the query text."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
         lake._engine.recall = AsyncMock(
             return_value=RecallResult(
                 query="test query",
@@ -648,7 +644,7 @@ class TestSpanAttributeWhitelist:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.recall("test query")
+            await lake.recall("test query", namespace=ns_id)
 
         call_args = mock_span_fn.call_args
         assert call_args[1]["query"] == "test query"

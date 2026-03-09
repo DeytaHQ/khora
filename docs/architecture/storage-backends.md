@@ -47,30 +47,19 @@ CREATE TABLE documents (
 );
 ```
 
-**Tenant Hierarchy** - Who owns what:
+**Namespaces** - The sole isolation boundary:
 ```sql
--- Organization (top level, e.g., your company)
--- └── Workspace (team or project)
---     └── Namespace (isolated data container)
-
-CREATE TABLE organizations (
+CREATE TABLE memory_namespaces (
     id UUID PRIMARY KEY,
-    name VARCHAR(255),
-    tenancy_mode VARCHAR(20)  -- shared or isolated
-);
-
-CREATE TABLE workspaces (
-    id UUID PRIMARY KEY,
-    organization_id UUID REFERENCES organizations(id),
-    name VARCHAR(255)
-);
-
-CREATE TABLE namespaces (
-    id UUID PRIMARY KEY,
-    workspace_id UUID REFERENCES workspaces(id),
-    name VARCHAR(255),
+    tenancy_mode VARCHAR(20),  -- shared or isolated
     version INTEGER DEFAULT 1,
-    is_active BOOLEAN DEFAULT TRUE
+    is_active BOOLEAN DEFAULT TRUE,
+    previous_version_id UUID REFERENCES memory_namespaces(id),
+    config_overrides JSONB DEFAULT '{}',
+    sync_checkpoints JSONB DEFAULT '{}',
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
 );
 ```
 
@@ -578,6 +567,6 @@ pip install khora[all-backends]
 
 ## What's Next?
 
-- **[Multi-Tenancy](multi-tenancy.md)** - Organizations, workspaces, namespaces
+- **[Multi-Tenancy](multi-tenancy.md)** - Namespace isolation
 - **[Event Sourcing](event-sourcing.md)** - The immutable event log
 - **[Overview](overview.md)** - High-level architecture

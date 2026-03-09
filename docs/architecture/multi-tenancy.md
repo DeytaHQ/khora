@@ -6,26 +6,26 @@ Khora isolates data through **namespaces**. Every document, chunk, entity, and r
 
 ## Namespaces: Where Data Lives
 
-All your data is scoped to namespaces. When you call `remember()` or `recall()`, you're always operating within a namespace:
+All your data is scoped to namespaces. When you call `remember()` or `recall()`, you must always specify a namespace:
 
 ```python
 from khora import MemoryLake
 
 async with MemoryLake() as lake:
-    # Store in a specific namespace
+    # Store in a specific namespace (required)
     await lake.remember(
         "Important document content...",
-        namespace=namespace_id
+        namespace_id=namespace_id
     )
 
-    # Search within that namespace
+    # Search within that namespace (required)
     results = await lake.recall(
         "What's in those documents?",
-        namespace=namespace_id
+        namespace_id=namespace_id
     )
 ```
 
-If you omit the `namespace` parameter, khora uses a default namespace (created automatically on first use).
+The `namespace_id` parameter is **required** — there is no default namespace. Omitting it raises a `ValueError`.
 
 This isolation is enforced at the database level:
 
@@ -46,24 +46,21 @@ from khora import MemoryLake
 from khora.core.models import MemoryNamespace
 
 async with MemoryLake() as lake:
-    # Create a namespace
+    # Create a namespace (UUID-identified, no name/description)
     namespace = await lake.storage.create_namespace(
-        MemoryNamespace(name="Production")
+        MemoryNamespace()
     )
 
     # Now store data
     await lake.remember(
         "Important content...",
-        namespace=namespace.id
+        namespace_id=namespace.id
     )
 ```
 
 ## Finding Namespaces
 
 ```python
-# By name
-ns = await lake.storage.get_namespace_by_name("production")
-
 # By UUID
 ns = await lake.storage.get_namespace(namespace_id)
 
@@ -101,12 +98,11 @@ The swap is atomic. One moment users see v1, the next they see v2. No downtime, 
 
 ```python
 async with MemoryLake() as lake:
-    # 1. Get current namespace
-    current = await lake.storage.get_namespace_by_name("production")
+    # 1. Get current namespace by UUID
+    current = await lake.storage.get_namespace(current_namespace_id)
 
     # 2. Create new version
     new_version = await lake.storage.create_namespace_version(
-        name="production",
         previous_version=current
     )
     # new_version.version = 2
@@ -149,7 +145,6 @@ Each namespace can override global settings. Maybe one namespace needs a differe
 
 ```python
 namespace = MemoryNamespace(
-    name="High-Precision Research",
     config_overrides={
         "embedding_model": "text-embedding-3-large",
         "embedding_dimension": 3072,

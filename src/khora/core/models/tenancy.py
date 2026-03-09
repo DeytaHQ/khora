@@ -35,8 +35,6 @@ class MemoryNamespace:
     """
 
     id: UUID = field(default_factory=uuid4)
-    name: str = ""
-    description: str = ""
     tenancy_mode: TenancyMode = TenancyMode.SHARED
 
     # Versioning fields

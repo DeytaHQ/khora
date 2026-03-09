@@ -1,6 +1,6 @@
-# PRD-001: Remove Namespace Slugs
+# PRD-001: Flatten Namespace Model
 
-**Status:** Draft
+**Status:** Implemented
 **Author:** Filip
 **Date:** 2026-03-08
 **Linear:** DYT-315
@@ -9,35 +9,38 @@
 
 ### Problem Statement
 
-Khora's public API accepts both UUIDs and slug strings for namespace identification (`_resolve_namespace()` in `memory_lake.py`). This dual-lookup path adds complexity: slug auto-generation logic, a dedicated `get_namespace_by_slug()` method through every storage layer, a DB column with unique constraints and partial indexes, and branching resolution code. Slug-based lookup is unused by downstream consumers (genesis, khora-benchmarks) and the human-readable slug functionality belongs in the peras service layer, not in the storage library.
+Khora's namespace model carries unnecessary complexity: dual UUID/slug identification, optional namespace parameters with implicit default provisioning, and `name`/`description` metadata fields that belong in the service layer. Slug-based lookup is unused by downstream consumers (genesis, khora-benchmarks), default namespace auto-creation masks missing configuration errors, and human-readable metadata belongs in peras — not in the storage library. The namespace should be a lean, required UUID isolation boundary.
 
 ### Goals
 
-- All public API functions (`remember`, `recall`, `forget`, `remember_batch`) accept `UUID` or `str` (converted to UUID) for namespace identification — no slug lookup path
+- All public API functions (`remember`, `recall`, `forget`, `remember_batch`) require a `namespace_id: UUID` parameter — no optional namespace, no slug lookup path
 - Remove the `slug` column from `memory_namespaces` table and all associated constraints/indexes
-- Remove `get_namespace_by_slug()` from storage backends, coordinator, and engine layers
-- Remove slug field from `MemoryNamespace` domain model and auto-generation logic
-- Reduce code surface area (estimated ~15 files, ~100+ lines removed)
+- Remove `name` and `description` columns from `memory_namespaces` table and domain model
+- Remove `get_namespace_by_slug()` and `get_or_create_default_namespace()` from all layers
+- Remove `get_namespace_by_name()` (no longer needed without name field)
+- Namespace becomes a pure UUID isolation boundary: `id`, `version`, `is_active`, `config_overrides`, timestamps
+- Reduce code surface area (estimated ~15 files, ~150+ lines removed)
 
 ### Non-Goals
 
-- **Database migration** — no new Alembic migration file to drop the DB column. The ORM model removes the `slug` mapped column, so SQLAlchemy ignores it, but the physical column remains in the database until a migration is added separately
 - **Backward compatibility** — no deprecation period or shim; clean break
-- **Adding slug functionality to peras** — that's a peras concern
-- **Changing namespace creation API** — `create_namespace()` still takes a name; it just no longer generates or stores a slug
-- **Making namespace_id required** — `namespace` parameter stays optional in public API; `get_or_create_default_namespace()` convenience is preserved
+- **Adding slug/name functionality to peras** — that's a peras concern
+- **Changing namespace table structure beyond stated columns** — `version`, `is_active`, `config_overrides`, and timestamp columns are preserved
 
 ### Requirements
 
 #### Functional Requirements
 
-1. **FR-1:** `MemoryNamespace` domain model (`core/models/tenancy.py`) must not contain a `slug` field
-2. **FR-2:** `MemoryNamespaceModel` ORM (`db/models.py`) must not contain a `slug` column, its unique constraint (`uq_namespace_slug_version`), or its partial index (`idx_namespace_slug_active`)
-3. **FR-3:** `_resolve_namespace()` in `memory_lake.py` must accept `UUID` or `str` (converted to `UUID`), raising `ValueError` for non-UUID-parseable strings. The slug lookup branch is removed
-4. **FR-4:** `get_namespace_by_slug()` must be removed from `RelationalBackend` protocol, `PostgreSQLBackend`, and `StorageCoordinator`
-5. **FR-5:** All three engines (GraphRAG, Skeleton, VectorCypher) must replace the `get_namespace_by_slug("default")` call inside `get_or_create_default_namespace()` with a name-based lookup (e.g., `get_namespace_by_name("default")`). The `get_or_create_default_namespace()` method and optional `namespace` parameter in the public API are preserved
-6. **FR-6:** `create_namespace_version()` in coordinator must not accept a `slug` parameter
-7. **FR-7:** All tests referencing slug behavior must be removed or rewritten to use UUID-only paths
+1. **FR-1:** `MemoryNamespace` domain model (`core/models/tenancy.py`) must not contain `slug`, `name`, or `description` fields. Remove `__post_init__` auto-generation logic
+2. **FR-2:** `MemoryNamespaceModel` ORM (`db/models.py`) must not contain `slug`, `name`, or `description` columns, nor the `uq_namespace_slug_version` constraint or `idx_namespace_slug_active` index
+3. **FR-3:** `namespace_id` parameter must be **required** (not optional) in all public API methods (`remember`, `recall`, `forget`, `remember_batch`). Accept `UUID` or `str` (converted to `UUID`), raising `ValueError` for non-UUID-parseable strings
+4. **FR-4:** `_resolve_namespace()` in `memory_lake.py` must not have a fallback to default namespace. Remove the `get_or_create_default_namespace()` call path
+5. **FR-5:** `get_or_create_default_namespace()` must be removed from `MemoryLake`, all three engines (GraphRAG, Skeleton, VectorCypher), and the `MemoryEngineProtocol`
+6. **FR-6:** `get_namespace_by_slug()` must be removed from `RelationalBackend` protocol, `PostgreSQLBackend`, and `StorageCoordinator`
+7. **FR-7:** `get_namespace_by_name()` must be removed from `RelationalBackend` protocol, `PostgreSQLBackend`, and `StorageCoordinator`
+8. **FR-8:** `create_namespace()` and `create_namespace_version()` must not accept `slug`, `name`, or `description` parameters
+9. **FR-9:** Alembic migration to drop `slug`, `name`, and `description` columns and add a unique constraint on `(namespace_id)` or equivalent as needed
+10. **FR-10:** All tests referencing slug, name, description, or default namespace behavior must be removed or rewritten
 
 #### Non-Functional Requirements
 
@@ -48,7 +51,8 @@ Khora's public API accepts both UUIDs and slug strings for namespace identificat
 ### User Stories
 
 - As a **library consumer**, I want namespace identification to use only UUIDs so that there is one unambiguous way to reference a namespace.
-- As a **khora maintainer**, I want to remove the slug abstraction so that the storage layer has less code to maintain and fewer edge cases.
+- As a **library consumer**, I want namespace to be a required parameter so that missing tenant context fails loudly rather than silently creating a default.
+- As a **khora maintainer**, I want to remove slug, name, description, and default provisioning so that the namespace model is a minimal isolation boundary with less code to maintain.
 
 ### Technical Approach
 
@@ -56,46 +60,51 @@ Khora's public API accepts both UUIDs and slug strings for namespace identificat
 
 | File | Change |
 |------|--------|
-| `src/khora/core/models/tenancy.py` | Remove `slug` field and `__post_init__` auto-generation |
-| `src/khora/db/models.py` | Remove `slug` column, `uq_namespace_slug_version` constraint, `idx_namespace_slug_active` index |
-| `src/khora/memory_lake.py` | Simplify `_resolve_namespace()` to UUID-only; remove slug branch |
-| `src/khora/storage/backends/base.py` | Remove `get_namespace_by_slug()` from protocol |
-| `src/khora/storage/backends/postgresql.py` | Remove `get_namespace_by_slug()` impl; remove `slug=` mappings in create/update |
-| `src/khora/storage/coordinator.py` | Remove `get_namespace_by_slug()` and `slug` param from `create_namespace_version()` |
-| `src/khora/engines/graphrag/engine.py` | Replace `get_namespace_by_slug("default")` with `get_or_create_default_namespace()`; remove `slug` param from `create_namespace()` calls |
+| `src/khora/core/models/tenancy.py` | Remove `slug`, `name`, `description` fields and `__post_init__` auto-generation |
+| `src/khora/db/models.py` | Remove `slug`, `name`, `description` columns, `uq_namespace_slug_version` constraint, `idx_namespace_slug_active` index |
+| `src/khora/memory_lake.py` | Make `namespace_id` required in public API; simplify `_resolve_namespace()` to UUID-only; remove `get_or_create_default_namespace()` and its fallback |
+| `src/khora/storage/backends/base.py` | Remove `get_namespace_by_slug()` and `get_namespace_by_name()` from protocol; remove `name`/`description` from `create_namespace()` signature |
+| `src/khora/storage/backends/postgresql.py` | Remove `get_namespace_by_slug()`, `get_namespace_by_name()` impls; remove `slug=`/`name=`/`description=` mappings in create/update |
+| `src/khora/storage/coordinator.py` | Remove `get_namespace_by_slug()`, `get_namespace_by_name()`; remove `slug`/`name`/`description` params from `create_namespace_version()` |
+| `src/khora/engines/graphrag/engine.py` | Remove `get_or_create_default_namespace()`, `_default_namespace_id` cache; remove `name=` from `create_namespace()` calls |
 | `src/khora/engines/skeleton/engine.py` | Same as above |
 | `src/khora/engines/vectorcypher/engine.py` | Same as above |
+| `src/khora/engines/protocol.py` | Remove `get_or_create_default_namespace()` from `MemoryEngineProtocol` |
 
 **Files to modify (tests):**
 
 | File | Change |
 |------|--------|
-| `tests/unit/test_models.py` | Remove `test_namespace_auto_slug` and slug references in namespace creation |
-| `tests/unit/test_memory_lake.py` | Remove `test_slug_lookup`, `test_slug_not_found_raises`; update any namespace fixtures |
-
+| `tests/unit/test_models.py` | Remove `test_namespace_auto_slug`, slug/name/description references in namespace creation |
+| `tests/unit/test_memory_lake.py` | Remove `test_slug_lookup`, `test_slug_not_found_raises`, default namespace tests; update fixtures to always pass `namespace_id` |
 
 **Files to modify (docs):**
 
 | File | Change |
 |------|--------|
-| `docs/architecture/multi-tenancy.md` | Remove slug-based examples |
-| `docs/architecture/storage-backends.md` | Remove `slug VARCHAR` from schema docs |
+| `docs/architecture/multi-tenancy.md` | Remove slug-based examples; document required namespace_id; remove name/description references |
+| `docs/architecture/storage-backends.md` | Remove `slug VARCHAR`, `name VARCHAR`, `description TEXT` from schema docs |
 
-**Default namespace strategy:** Engines currently do `get_namespace_by_slug("default")`. After removal, add a `get_or_create_default_namespace()` method on the coordinator that looks up by `name="default"` and creates if missing. All three engines call this instead of the slug-based path.
+**Files to add (migrations):**
+
+| File | Change |
+|------|--------|
+| `src/khora/db/migrations/versions/XXX_drop_namespace_slug_name_desc.py` | Drop `slug`, `name`, `description` columns; drop old constraints/indexes; add new constraints as needed |
 
 ### Success Metrics
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
-| Lines of slug-related code removed | ~100+ | Diff stats |
-| Files modified | ~13 | Diff stats |
+| Lines of namespace-related code removed | ~150+ | Diff stats |
+| Files modified | ~15 | Diff stats |
 | Tests passing | 100% | `make test` |
 | Lint/typecheck clean | 0 errors | `make lint` |
 
 ### Open Questions
 
-- [x] **Default namespace resolution:** ~~(a) well-known UUID constant, (b) name lookup, (c) `get_or_create_default_namespace()`.~~ Decision: (c) — new coordinator method that looks up by name and creates if missing
-- [x] **Engine `create_namespace()` methods:** ~~Slug param needed?~~ Decision: `name` alone suffices; `slug` param removed
+- [x] **Default namespace resolution:** ~~(a) well-known UUID constant, (b) name lookup, (c) `get_or_create_default_namespace()`.~~ Decision: none — namespace is always required, no default provisioning
+- [x] **Engine `create_namespace()` methods:** ~~Slug param needed?~~ Decision: only `id` and optional `config_overrides`; `slug`, `name`, `description` removed
+- [x] **Database migration:** ~~Separate or included?~~ Decision: included in this PR — Alembic migration drops `slug`, `name`, `description` columns
 
 ### Timeline
 

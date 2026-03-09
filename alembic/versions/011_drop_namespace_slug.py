@@ -1,19 +1,18 @@
-"""Drop slug column from memory_namespaces (DYT-315).
+"""Drop slug, name, description columns from memory_namespaces (DYT-315).
 
 Revision ID: 011_drop_namespace_slug
 Revises: 010_flatten_namespace_hierarchy
 Create Date: 2026-03-09
 
-The ORM model no longer has a slug field — namespaces are identified by
-UUID and looked up by name.  The physical slug column is NOT NULL, so
-INSERTs will fail unless the column is removed.
+The ORM model no longer has slug, name, or description fields — namespaces
+are identified by UUID only.  These physical columns must be removed so
+INSERTs don't fail on NOT NULL constraints for removed fields.
 
 Steps:
 1. Drop uq_namespace_slug_version unique constraint (from migration 010)
 2. Drop idx_namespace_slug_active partial index (from migration 010)
 3. Drop slug column
-4. Add uq_namespace_name_version unique constraint on (name, version)
-5. Add idx_namespace_name_active partial index on name WHERE is_active
+4. Drop name and description columns (no longer in domain model)
 """
 
 from collections.abc import Sequence
@@ -43,33 +42,29 @@ def upgrade() -> None:
     # =========================================================================
     # Step 3: Drop the slug column
     # =========================================================================
-    # The name column already exists (created in migration 000).
     # Drop the auto-created index on slug first, then the column.
     op.drop_index("ix_memory_namespaces_slug", table_name="memory_namespaces")
     op.drop_column("memory_namespaces", "slug")
 
     # =========================================================================
-    # Step 4: Add unique constraint on (name, version)
+    # Step 4: Drop name and description columns
     # =========================================================================
-    op.create_unique_constraint("uq_namespace_name_version", "memory_namespaces", ["name", "version"])
-
-    # =========================================================================
-    # Step 5: Add partial index on name for active namespaces
-    # =========================================================================
-    op.create_index(
-        "idx_namespace_name_active",
-        "memory_namespaces",
-        ["name"],
-        postgresql_where=sa.text("is_active = true"),
-    )
+    op.drop_column("memory_namespaces", "name")
+    op.drop_column("memory_namespaces", "description")
 
 
 def downgrade() -> None:
-    # Reverse step 5: Drop name partial index
-    op.drop_index("idx_namespace_name_active", table_name="memory_namespaces")
-
-    # Reverse step 4: Drop name unique constraint
-    op.drop_constraint("uq_namespace_name_version", "memory_namespaces", type_="unique")
+    # Reverse step 4: Re-add name and description columns
+    op.add_column(
+        "memory_namespaces",
+        sa.Column("name", sa.String(255), nullable=True),
+    )
+    op.add_column(
+        "memory_namespaces",
+        sa.Column("description", sa.Text(), server_default="", nullable=True),
+    )
+    # Backfill name from id (best effort — cannot reconstruct original values)
+    op.execute(text("UPDATE memory_namespaces SET name = id::text WHERE name IS NULL"))
 
     # Reverse step 3: Re-add slug column as NULLABLE (cannot reconstruct values)
     op.add_column(

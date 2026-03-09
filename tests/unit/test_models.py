@@ -378,15 +378,13 @@ class TestTenancyModels:
     """Tests for tenancy models (MemoryNamespace)."""
 
     def test_create_namespace(self) -> None:
-        """Test namespace creation without workspace_id."""
-        ns = MemoryNamespace(name="Project Alpha")
-        assert ns.name == "Project Alpha"
+        """Test namespace creation with UUID."""
+        ns = MemoryNamespace()
         assert ns.id is not None
 
     def test_namespace_with_config(self) -> None:
         """Test namespace with configuration overrides."""
         ns = MemoryNamespace(
-            name="Test",
             config_overrides={"extraction_skill": "technical_docs"},
         )
         assert ns.config_overrides["extraction_skill"] == "technical_docs"
@@ -394,27 +392,36 @@ class TestTenancyModels:
     def test_namespace_sync_checkpoints(self) -> None:
         """Test namespace sync checkpoints."""
         ns = MemoryNamespace(
-            name="Test",
             sync_checkpoints={"source1": "checkpoint123"},
         )
         assert ns.sync_checkpoints["source1"] == "checkpoint123"
 
     def test_namespace_tenancy_mode_defaults_to_shared(self) -> None:
         """Test that MemoryNamespace.tenancy_mode defaults to SHARED."""
-        ns = MemoryNamespace(name="Test")
+        ns = MemoryNamespace()
         assert ns.tenancy_mode == TenancyMode.SHARED
 
     def test_namespace_tenancy_mode_isolated(self) -> None:
         """Test that MemoryNamespace.tenancy_mode can be set to ISOLATED."""
-        ns = MemoryNamespace(name="Test", tenancy_mode=TenancyMode.ISOLATED)
+        ns = MemoryNamespace(tenancy_mode=TenancyMode.ISOLATED)
         assert ns.tenancy_mode == TenancyMode.ISOLATED
 
     def test_namespace_no_workspace_id_attribute(self) -> None:
         """Test that MemoryNamespace no longer has workspace_id."""
-        ns = MemoryNamespace(name="Test")
+        ns = MemoryNamespace()
         assert not hasattr(ns, "workspace_id")
 
     def test_namespace_no_full_path_attribute(self) -> None:
         """Test that MemoryNamespace no longer has full_path."""
-        ns = MemoryNamespace(name="Test")
+        ns = MemoryNamespace()
         assert not hasattr(ns, "full_path")
+
+    def test_namespace_no_name_attribute(self) -> None:
+        """Test that MemoryNamespace no longer has name."""
+        ns = MemoryNamespace()
+        assert not hasattr(ns, "name")
+
+    def test_namespace_no_description_attribute(self) -> None:
+        """Test that MemoryNamespace no longer has description."""
+        ns = MemoryNamespace()
+        assert not hasattr(ns, "description")
