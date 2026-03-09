@@ -15,17 +15,17 @@ async with MemoryLake() as lake:
     # Store in a specific namespace (required)
     await lake.remember(
         "Important document content...",
-        namespace_id=namespace_id
+        namespace=namespace_id
     )
 
     # Search within that namespace (required)
     results = await lake.recall(
         "What's in those documents?",
-        namespace_id=namespace_id
+        namespace=namespace_id
     )
 ```
 
-The `namespace_id` parameter is **required** — there is no default namespace. Omitting it raises a `ValueError`.
+The `namespace` parameter is **required** — there is no default namespace. Omitting it raises a `ValueError`.
 
 This isolation is enforced at the database level:
 
@@ -54,7 +54,7 @@ async with MemoryLake() as lake:
     # Now store data
     await lake.remember(
         "Important content...",
-        namespace_id=namespace.id
+        namespace=namespace.id
     )
 ```
 

@@ -96,7 +96,7 @@ class MemoryLake:
 
         # Common - explicit database URL
         async with MemoryLake("postgresql://localhost/mydb") as lake:
-            results = await lake.recall("What do I know about...", namespace="my-ns")
+            results = await lake.recall("What do I know about...", namespace=namespace_id)
 
         # With graph backend
         async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
