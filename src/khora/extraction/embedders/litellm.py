@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time as _time_mod
 from collections import OrderedDict
 from hashlib import sha256
@@ -273,9 +274,10 @@ class LiteLLMEmbedder(Embedder):
 
         import litellm
 
-        # Sanitize inputs: replace None/empty strings with a placeholder to avoid
-        # OpenAI '$.input' is invalid errors
-        sanitized = [t if t and t.strip() else " " for t in texts]
+        # Sanitize inputs: strip control characters that break JSON serialization
+        # (preserving \t, \n, \r) and replace empty strings with a placeholder.
+        _ctrl_re = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+        sanitized = [_ctrl_re.sub("", t) if t and t.strip() else " " for t in texts]
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self._max_retries),
