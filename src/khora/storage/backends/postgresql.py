@@ -127,7 +127,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
             model = MemoryNamespaceModel(
                 id=namespace.id,
                 name=namespace.name,
-                slug=namespace.slug,
                 description=namespace.description,
                 tenancy_mode=namespace.tenancy_mode,
                 version=namespace.version,
@@ -151,11 +150,11 @@ class PostgreSQLBackend(AsyncSessionMixin):
             model = result.scalar_one_or_none()
             return self._namespace_model_to_domain(model) if model else None
 
-    async def get_namespace_by_slug(self, slug: str, *, active_only: bool = True) -> MemoryNamespace | None:
-        """Get a namespace by slug (globally unique).
+    async def get_namespace_by_name(self, name: str, *, active_only: bool = True) -> MemoryNamespace | None:
+        """Get a namespace by name.
 
         Args:
-            slug: Namespace slug
+            name: Namespace name
             active_only: If True, only return active namespace (default)
 
         Returns:
@@ -163,7 +162,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """
         async with self._get_session() as session:
             query = select(MemoryNamespaceModel).where(
-                MemoryNamespaceModel.slug == slug,
+                MemoryNamespaceModel.name == name,
             )
             if active_only:
                 query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
@@ -208,7 +207,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 .where(MemoryNamespaceModel.id == namespace.id)
                 .values(
                     name=namespace.name,
-                    slug=namespace.slug,
                     description=namespace.description,
                     version=namespace.version,
                     is_active=namespace.is_active,
@@ -227,7 +225,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
         return MemoryNamespace(
             id=model.id,
             name=model.name,
-            slug=model.slug,
             description=model.description,
             tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
             version=model.version,
@@ -242,7 +239,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
     async def create_namespace_version(
         self,
-        slug: str,
+        name: str,
         *,
         previous_version: MemoryNamespace | None = None,
     ) -> MemoryNamespace:
@@ -252,7 +249,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         The previous version is marked as inactive.
 
         Args:
-            slug: Namespace slug
+            name: Namespace name
             previous_version: The previous version to supersede (if any)
 
         Returns:
@@ -272,8 +269,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         # Create new namespace with incremented version
         namespace = MemoryNamespace(
             id=uuid4(),
-            name=previous_version.name if previous_version else f"Namespace {slug}",
-            slug=slug,
+            name=previous_version.name if previous_version else name,
             description=previous_version.description if previous_version else "",
             version=new_version,
             is_active=True,

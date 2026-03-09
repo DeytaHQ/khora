@@ -70,8 +70,16 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_namespace_by_slug(self, slug: str, *, active_only: bool = True) -> MemoryNamespace | None:
-        """Get a namespace by slug (globally unique)."""
+    async def get_namespace_by_name(self, name: str, *, active_only: bool = True) -> MemoryNamespace | None:
+        """Get a namespace by name.
+
+        Args:
+            name: Namespace name
+            active_only: If True, only return active namespace (default)
+
+        Returns:
+            MemoryNamespace or None if not found
+        """
         ...
 
     @abstractmethod
@@ -89,14 +97,14 @@ class RelationalBackendProtocol(Protocol):
     @abstractmethod
     async def create_namespace_version(
         self,
-        slug: str,
+        name: str,
         *,
         previous_version: MemoryNamespace | None = None,
     ) -> MemoryNamespace:
         """Create a new version of a namespace.
 
         Args:
-            slug: Namespace slug
+            name: Namespace name
             previous_version: The previous version to supersede (if any)
 
         Returns:

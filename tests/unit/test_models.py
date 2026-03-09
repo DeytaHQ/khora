@@ -379,21 +379,14 @@ class TestTenancyModels:
 
     def test_create_namespace(self) -> None:
         """Test namespace creation without workspace_id."""
-        ns = MemoryNamespace(name="Project Alpha", slug="project-alpha")
+        ns = MemoryNamespace(name="Project Alpha")
         assert ns.name == "Project Alpha"
-        assert ns.slug == "project-alpha"
         assert ns.id is not None
-
-    def test_namespace_auto_slug(self) -> None:
-        """Test namespace auto-generates slug from name."""
-        ns = MemoryNamespace(name="My Project")
-        assert ns.slug == "my-project"
 
     def test_namespace_with_config(self) -> None:
         """Test namespace with configuration overrides."""
         ns = MemoryNamespace(
             name="Test",
-            slug="test",
             config_overrides={"extraction_skill": "technical_docs"},
         )
         assert ns.config_overrides["extraction_skill"] == "technical_docs"

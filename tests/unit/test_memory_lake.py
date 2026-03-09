@@ -301,30 +301,6 @@ class TestResolveNamespace:
         result = await lake._resolve_namespace(None)
         assert result == default_id
 
-    @pytest.mark.asyncio
-    async def test_slug_lookup(self) -> None:
-        """Non-UUID string looks up namespace by slug (globally unique)."""
-        lake = _make_lake(connected=True)
-
-        found_ns = MagicMock()
-        found_ns.id = uuid4()
-
-        lake._engine._storage.get_namespace_by_slug = AsyncMock(return_value=found_ns)
-
-        result = await lake._resolve_namespace("my-namespace")
-        assert result == found_ns.id
-        lake._engine._storage.get_namespace_by_slug.assert_awaited_once_with("my-namespace")
-
-    @pytest.mark.asyncio
-    async def test_slug_not_found_raises(self) -> None:
-        """Non-UUID string that doesn't exist raises ValueError."""
-        lake = _make_lake(connected=True)
-
-        lake._engine._storage.get_namespace_by_slug = AsyncMock(return_value=None)
-
-        with pytest.raises(ValueError, match="Namespace not found"):
-            await lake._resolve_namespace("nonexistent")
-
 
 # ---------------------------------------------------------------------------
 # remember

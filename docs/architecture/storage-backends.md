@@ -56,7 +56,6 @@ CREATE TABLE documents (
 CREATE TABLE organizations (
     id UUID PRIMARY KEY,
     name VARCHAR(255),
-    slug VARCHAR(100) UNIQUE,
     tenancy_mode VARCHAR(20)  -- shared or isolated
 );
 

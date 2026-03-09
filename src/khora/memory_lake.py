@@ -599,7 +599,7 @@ class MemoryLake:
         a namespace by name without managing it explicitly.
 
         Args:
-            name: Namespace name (will be slugified)
+            name: Namespace name
             description: Optional description
 
         Returns:
@@ -623,19 +623,7 @@ class MemoryLake:
         try:
             return UUID(namespace)
         except ValueError:
-            pass
-
-        # Look up by slug (globally unique)
-        engine = self._get_engine()
-        if not hasattr(engine, "_storage") or engine._storage is None:
-            raise RuntimeError("Engine does not support namespace lookup by slug")
-
-        storage = engine._storage
-        ns = await storage.get_namespace_by_slug(namespace)  # type: ignore[unresolved-attribute]
-        if ns:
-            return ns.id
-
-        raise ValueError(f"Namespace not found: {namespace}")
+            raise ValueError(f"Invalid namespace: {namespace!r}. Must be a UUID or None for default.")
 
     async def health_check(self) -> dict[str, Any]:
         """Check health of all components."""

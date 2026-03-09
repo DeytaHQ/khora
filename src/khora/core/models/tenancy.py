@@ -36,7 +36,6 @@ class MemoryNamespace:
 
     id: UUID = field(default_factory=uuid4)
     name: str = ""
-    slug: str = ""
     description: str = ""
     tenancy_mode: TenancyMode = TenancyMode.SHARED
 
@@ -54,7 +53,3 @@ class MemoryNamespace:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-    def __post_init__(self) -> None:
-        if not self.slug and self.name:
-            self.slug = self.name.lower().replace(" ", "-")

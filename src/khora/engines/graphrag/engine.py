@@ -517,13 +517,12 @@ class GraphRAGEngine:
 
         storage = self._get_storage()
 
-        # Try to find existing default namespace by slug
-        default_namespace = await storage.get_namespace_by_slug("default")
+        # Try to find existing default namespace by name
+        default_namespace = await storage.get_namespace_by_name("default")
         if not default_namespace:
             default_namespace = await storage.create_namespace(
                 MemoryNamespace(
                     name="Default",
-                    slug="default",
                 )
             )
 
@@ -558,9 +557,8 @@ class GraphRAGEngine:
         """Get or create a namespace by name."""
         storage = self._get_storage()
 
-        # Try to find namespace by slug
-        slug = name.lower().replace(" ", "-")
-        existing_ns = await storage.get_namespace_by_slug(slug)
+        # Try to find namespace by name
+        existing_ns = await storage.get_namespace_by_name(name)
         if existing_ns:
             return existing_ns.id
 
@@ -568,7 +566,6 @@ class GraphRAGEngine:
         new_ns = await storage.create_namespace(
             MemoryNamespace(
                 name=name,
-                slug=slug,
                 description=description,
             )
         )

@@ -197,7 +197,7 @@ class MemoryEngineProtocol(Protocol):
         Creates the namespace if it doesn't exist.
 
         Args:
-            name: Namespace name (will be slugified)
+            name: Namespace name
             description: Optional description
 
         Returns:

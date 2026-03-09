@@ -90,14 +90,14 @@ The swap is atomic. One moment users see v1, the next they see v2. No downtime, 
 ```python
 async with MemoryLake() as lake:
     # 1. Get current namespace
-    current = await lake.storage.get_namespace_by_slug(
+    current = await lake.storage.get_namespace_by_name(
         workspace_id, "production"
     )
 
     # 2. Create new version
     new_version = await lake.storage.create_namespace_version(
         workspace_id,
-        slug="production",
+        name="production",
         previous_version=current
     )
     # new_version.version = 2
@@ -193,7 +193,6 @@ Each namespace can override global settings. Maybe one namespace needs a differe
 namespace = MemoryNamespace(
     workspace_id=workspace_id,
     name="High-Precision Research",
-    slug="research",
     config_overrides={
         "embedding_model": "text-embedding-3-large",
         "embedding_dimension": 3072,
@@ -284,15 +283,14 @@ from khora.core.models import Organization, Workspace, MemoryNamespace
 async with MemoryLake() as lake:
     # Organization
     org = await lake.storage.create_organization(
-        Organization(name="Acme Corp", slug="acme")
+        Organization(name="Acme Corp")
     )
 
     # Workspace
     workspace = await lake.storage.create_workspace(
         Workspace(
             organization_id=org.id,
-            name="Engineering",
-            slug="engineering"
+            name="Engineering"
         )
     )
 
@@ -300,8 +298,7 @@ async with MemoryLake() as lake:
     namespace = await lake.storage.create_namespace(
         MemoryNamespace(
             workspace_id=workspace.id,
-            name="Production",
-            slug="production"
+            name="Production"
         )
     )
 
@@ -315,8 +312,8 @@ async with MemoryLake() as lake:
 ### Find Existing Namespaces
 
 ```python
-# By slug
-ns = await lake.storage.get_namespace_by_slug(workspace_id, "production")
+# By name
+ns = await lake.storage.get_namespace_by_name(workspace_id, "production")
 
 # List all in a workspace
 namespaces = await lake.storage.list_namespaces(workspace_id)
