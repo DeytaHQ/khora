@@ -1561,7 +1561,7 @@ class VectorCypherEngine:
         storage = self._get_storage()
 
         # Try to find existing default namespace by name
-        default_namespace = await storage.get_namespace_by_name("default")
+        default_namespace = await storage.get_namespace_by_name("Default")
         if not default_namespace:
             default_namespace = await storage.create_namespace(
                 MemoryNamespace(
