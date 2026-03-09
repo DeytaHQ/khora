@@ -1074,7 +1074,7 @@ class VectorCypherEngine:
         # Cascade temporal detection: Aho-Corasick dictionary → (optional) semantic
         # Replaces the old regex + dateparser approach with categorized signals.
         temporal_signal: TemporalSignal | None = None
-        if temporal_filter is None:
+        if not raw and temporal_filter is None:
             with trace_span("khora.vectorcypher.temporal_detect") as td_span:
                 detector = TemporalDetector()
                 temporal_signal = detector.detect(query)
@@ -1117,6 +1117,10 @@ class VectorCypherEngine:
                 "graph_depth": result.routing_decision.graph_depth,
                 "raw_chunk_count": len(result.chunks),
                 "validated_chunk_count": len(validated_chunks),
+                # Temporal telemetry
+                "temporal_category": temporal_signal.category.value if temporal_signal else None,
+                "temporal_confidence": temporal_signal.confidence if temporal_signal else None,
+                "is_temporal": temporal_signal.is_temporal if temporal_signal else False,
                 **result.metadata,
             },
         )

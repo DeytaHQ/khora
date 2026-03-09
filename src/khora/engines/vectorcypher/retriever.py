@@ -478,6 +478,12 @@ class VectorCypherRetriever:
                 "adaptive_depth_applied": depth != base_depth,
                 "total_chunks_before_fusion": len(graph_chunks) + len(vector_chunks),
                 "routing_confidence": routing.confidence,
+                # Fusion telemetry
+                "vector_chunk_count": len(vector_chunks),
+                "graph_chunk_count": len(graph_chunks),
+                "is_temporal": _tp.recency_weight > 0.2,
+                "recency_weight": _tp.recency_weight,
+                "effective_recency": effective_recency,
             },
         )
 
@@ -580,7 +586,13 @@ class VectorCypherRetriever:
                 chunks=chunk_results,
                 entities=[],
                 routing_decision=routing,
-                metadata={"search_mode": "simple_vector"},
+                metadata={
+                    "search_mode": "simple_vector",
+                    "routing_confidence": routing.confidence,
+                    "vector_chunk_count": len(chunk_results),
+                    "graph_chunk_count": 0,
+                    "effective_recency": effective_recency,
+                },
             )
 
     async def _vector_search_entities(
