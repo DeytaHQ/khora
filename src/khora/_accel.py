@@ -62,6 +62,7 @@ try:
     from khora_accel import sequence_match_ratio as _rust_sequence_match
     from khora_accel import weighted_rrf as _rust_weighted_rrf
     from khora_accel import weighted_rrf_normalized as _rust_weighted_rrf_normalized
+    from khora_accel import weighted_rrf_normalized_with_provenance as _rust_weighted_rrf_normalized_with_provenance
 
     _HAS_RUST = True
 except ImportError:  # pragma: no cover
@@ -677,6 +678,50 @@ def weighted_rrf_normalized(
             contributions[item_id] = contributions.get(item_id, 0.0) + graph_weight * norm * 0.01
 
     results = [(id, scores[id] + contributions.get(id, 0.0)) for id in scores]
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
+
+def weighted_rrf_normalized_with_provenance(
+    vector_results: list[tuple[str, float]],
+    graph_results: list[tuple[str, float]],
+    k: int = 60,
+    vector_weight: float = 0.6,
+    graph_weight: float = 0.4,
+) -> list[tuple[str, float, int]]:
+    """Weighted RRF with score normalization and source provenance.
+
+    Returns ``(id, combined_score, source_bitmap)`` tuples where
+    *source_bitmap* is a ``u8`` flag: 1 = vector only, 2 = graph only,
+    3 = both.  Rust > Python fallback.
+    """
+    if _HAS_RUST:
+        return _rust_weighted_rrf_normalized_with_provenance(
+            vector_results, graph_results, k, vector_weight, graph_weight
+        )
+
+    # Python fallback — same logic as Rust
+    scores: dict[str, float] = {}
+    contributions: dict[str, float] = {}
+    sources: dict[str, int] = {}
+
+    if vector_results:
+        raw = [s for _, s in vector_results]
+        normalized = normalize_scores(raw)
+        for rank_0, ((item_id, _), norm) in enumerate(zip(vector_results, normalized)):
+            scores[item_id] = scores.get(item_id, 0.0) + vector_weight / (k + rank_0 + 1)
+            contributions[item_id] = contributions.get(item_id, 0.0) + vector_weight * norm * 0.01
+            sources[item_id] = sources.get(item_id, 0) | 0x01
+
+    if graph_results:
+        raw = [s for _, s in graph_results]
+        normalized = normalize_scores(raw)
+        for rank_0, ((item_id, _), norm) in enumerate(zip(graph_results, normalized)):
+            scores[item_id] = scores.get(item_id, 0.0) + graph_weight / (k + rank_0 + 1)
+            contributions[item_id] = contributions.get(item_id, 0.0) + graph_weight * norm * 0.01
+            sources[item_id] = sources.get(item_id, 0) | 0x02
+
+    results = [(id_, scores[id_] + contributions.get(id_, 0.0), sources.get(id_, 0)) for id_ in scores]
     results.sort(key=lambda x: x[1], reverse=True)
     return results
 
