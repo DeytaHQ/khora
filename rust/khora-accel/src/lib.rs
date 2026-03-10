@@ -58,6 +58,10 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rrf::weighted_rrf, m)?)?;
     m.add_function(wrap_pyfunction!(rrf::normalize_scores, m)?)?;
     m.add_function(wrap_pyfunction!(rrf::weighted_rrf_normalized, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        rrf::weighted_rrf_normalized_with_provenance,
+        m
+    )?)?;
 
     // Entity resolution
     m.add_function(wrap_pyfunction!(

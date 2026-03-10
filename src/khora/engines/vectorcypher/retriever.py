@@ -457,17 +457,93 @@ class VectorCypherRetriever:
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
 
-        # Build entity results with name/type from graph neighborhoods
+        # Classify each chunk by which search method(s) found it
+        vector_only_ids: list[UUID] = []
+        graph_only_ids: list[UUID] = []
+        both_ids: list[UUID] = []
+        for r in fused_results[:limit]:
+            has_vector = r.vector_rank is not None
+            has_graph = r.graph_rank is not None
+            if has_vector and has_graph:
+                both_ids.append(r.item_id)
+            elif has_vector:
+                vector_only_ids.append(r.item_id)
+            elif has_graph:
+                graph_only_ids.append(r.item_id)
+
+        vector_ids = vector_only_ids + both_ids
+        graph_ids = graph_only_ids + both_ids
+
+        # Entity IDs are discovered via vector similarity then expanded via graph,
+        # so they are attributed to "graph" (the graph expansion is what surfaces them)
+        entity_ids_str = [str(eid) for eid, _ in entry_entities[: self._config.max_entities]]
+
+        search_methods = {
+            "chunk_overlap": {
+                "vector_only": {"ids": [str(id) for id in vector_only_ids], "count": len(vector_only_ids)},
+                "graph_only": {"ids": [str(id) for id in graph_only_ids], "count": len(graph_only_ids)},
+                "vector_and_graph": {"ids": [str(id) for id in both_ids], "count": len(both_ids)},
+            },
+            "entity_overlap": {
+                "vector_and_graph": {"ids": entity_ids_str, "count": len(entity_ids_str)},
+                "vector_only": {"ids": [], "count": 0},
+                "graph_only": {"ids": [], "count": 0},
+            },
+            "by_method": {
+                "vector": {"chunk_ids": [str(id) for id in vector_ids], "count": len(vector_ids)},
+                "graph": {"chunk_ids": [str(id) for id in graph_ids], "count": len(graph_ids)},
+            },
+        }
+
+        # Batch-fetch full entities from storage instead of constructing stubs
+        entity_ids_to_fetch = [eid for eid, _ in entry_entities[: self._config.max_entities]]
         entity_results: list[tuple[Entity, float]] = []
-        for eid, score in entry_entities[: self._config.max_entities]:
-            info = entity_info_map.get(str(eid), {})
-            entity = Entity(
-                id=eid,
-                namespace_id=namespace_id,
-                name=info.get("name", ""),
-                entity_type=info.get("entity_type", ""),
-            )
-            entity_results.append((entity, score))
+
+        if entity_ids_to_fetch and self._storage:
+            try:
+                entities_map = await self._storage.get_entities_batch(entity_ids_to_fetch)
+                for eid, score in entry_entities[: self._config.max_entities]:
+                    if eid in entities_map:
+                        entity_results.append((entities_map[eid], score))
+                    else:
+                        # Fallback: use info from graph expansion
+                        info = entity_info_map.get(str(eid), {})
+                        entity = Entity(
+                            id=eid,
+                            namespace_id=namespace_id,
+                            name=info.get("name", ""),
+                            entity_type=info.get("entity_type", ""),
+                            description=info.get("description", ""),
+                            source_tool=info.get("source_tool", ""),
+                        )
+                        entity_results.append((entity, score))
+            except Exception as e:
+                logger.warning(f"Failed to batch-fetch entities, using stubs: {e}")
+                # Fall back to stub construction
+                for eid, score in entry_entities[: self._config.max_entities]:
+                    info = entity_info_map.get(str(eid), {})
+                    entity = Entity(
+                        id=eid,
+                        namespace_id=namespace_id,
+                        name=info.get("name", ""),
+                        entity_type=info.get("entity_type", ""),
+                        description=info.get("description", ""),
+                        source_tool=info.get("source_tool", ""),
+                    )
+                    entity_results.append((entity, score))
+        else:
+            # No storage available or no entities to fetch
+            for eid, score in entry_entities[: self._config.max_entities]:
+                info = entity_info_map.get(str(eid), {})
+                entity = Entity(
+                    id=eid,
+                    namespace_id=namespace_id,
+                    name=info.get("name", ""),
+                    entity_type=info.get("entity_type", ""),
+                    description=info.get("description", ""),
+                    source_tool=info.get("source_tool", ""),
+                )
+                entity_results.append((entity, score))
 
         return VectorCypherResult(
             chunks=chunk_results,
@@ -487,6 +563,8 @@ class VectorCypherRetriever:
                 "is_temporal": _tp.recency_weight > 0.2,
                 "recency_weight": _tp.recency_weight,
                 "effective_recency": effective_recency,
+                # Search provenance: which method(s) found each chunk
+                "search_methods": search_methods,
             },
         )
 
@@ -609,6 +687,21 @@ class VectorCypherRetriever:
                 chunk_results.sort(key=_ts, reverse=True)
 
             span.set_attribute("chunk_count", len(chunk_results))
+
+            # All chunks come from vector search in simple mode
+            all_ids = [str(c.id) for c, _ in chunk_results]
+            search_methods = {
+                "chunk_overlap": {
+                    "vector_only": {"ids": all_ids, "count": len(all_ids)},
+                    "graph_only": {"ids": [], "count": 0},
+                    "vector_and_graph": {"ids": [], "count": 0},
+                },
+                "by_method": {
+                    "vector": {"chunk_ids": all_ids, "count": len(all_ids)},
+                    "graph": {"chunk_ids": [], "count": 0},
+                },
+            }
+
             return VectorCypherResult(
                 chunks=chunk_results,
                 entities=[],
@@ -620,6 +713,8 @@ class VectorCypherRetriever:
                     "graph_chunk_count": 0,
                     "effective_recency": effective_recency,
                     "temporal_sort": temporal_sort,
+                    # Search provenance: all chunks from vector in simple mode
+                    "search_methods": search_methods,
                 },
             )
 
@@ -697,11 +792,13 @@ class VectorCypherRetriever:
                     else:
                         entity_scores[entity_id] = score
 
-                    # Capture name and type (zero-cost, data already fetched)
+                    # Capture name, type, description, source_tool (zero-cost, data already fetched)
                     if entity_info["id"] not in entity_info_map:
                         entity_info_map[entity_info["id"]] = {
                             "name": entity_info.get("name", ""),
                             "entity_type": entity_info.get("entity_type", ""),
+                            "description": entity_info.get("description", ""),
+                            "source_tool": entity_info.get("source_tool", ""),
                         }
 
             span.set_attribute("expanded_entity_count", len(entity_scores))

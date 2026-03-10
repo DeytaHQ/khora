@@ -19,9 +19,10 @@ class PromptGenerator:
 {{ persona.background }}
 
 When answering questions:
-1. Draw from the provided search results and company context
+1. Draw from the provided search results and entity knowledge to form comprehensive answers
 2. Be direct and actionable
 3. Acknowledge when you don't have specific information
+4. Consider both the direct text excerpts and the knowledge graph entities for context
 
 {% if history_summary %}
 Previous conversation context:
@@ -58,6 +59,8 @@ Previous conversation context:
         search_results: list[dict],
         history_summary: str,
         recent_messages: list[ChatMessage],
+        *,
+        entity_context: list[dict] | None = None,
     ) -> list[dict]:
         """Build the complete message list for LLM.
 
@@ -66,6 +69,7 @@ Previous conversation context:
             search_results: Relevant search results
             history_summary: Compressed history summary
             recent_messages: Recent conversation messages
+            entity_context: Optional entity knowledge from the knowledge graph
 
         Returns:
             List of message dicts for LLM
@@ -90,7 +94,7 @@ Previous conversation context:
             )
 
         # Build user message with search context
-        user_content = self._format_user_message(user_query, search_results)
+        user_content = self._format_user_message(user_query, search_results, entity_context=entity_context)
         messages.append(
             {
                 "role": "user",
@@ -104,24 +108,46 @@ Previous conversation context:
         self,
         query: str,
         search_results: list[dict],
+        *,
+        entity_context: list[dict] | None = None,
     ) -> str:
         """Format user query with search context.
 
         Args:
             query: User's question
             search_results: Relevant search results
+            entity_context: Optional entity knowledge from the knowledge graph
 
         Returns:
             Formatted user message
         """
         parts = []
 
+        # Entity context section (before chunk results)
+        if entity_context:
+            parts.append("Relevant entities from knowledge graph:\n")
+            for ent in entity_context:
+                name = ent.get("name", "")
+                etype = ent.get("type", "")
+                desc = ent.get("description", "")
+                attrs = ent.get("attributes", {})
+                line = f"- {name} ({etype}): {desc}"
+                if attrs:
+                    attr_parts = [f"{k}={v}" for k, v in attrs.items()]
+                    line += f" [{', '.join(attr_parts)}]"
+                parts.append(f"{line}\n")
+            parts.append("\n")
+
         if search_results:
             parts.append("Relevant context from company knowledge base:\n")
             for i, result in enumerate(search_results[:5], 1):
                 content = result.get("content", "")[:500]
                 source = result.get("source", "unknown")
-                parts.append(f"[{i}] ({source}): {content}\n")
+                found_via = result.get("found_via", "")
+                if found_via:
+                    parts.append(f"[{i}] ({source}, via {found_via}): {content}\n")
+                else:
+                    parts.append(f"[{i}] ({source}): {content}\n")
             parts.append("\n---\n")
 
         parts.append(f"Question: {query}")

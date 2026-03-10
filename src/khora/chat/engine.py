@@ -99,6 +99,17 @@ class ChatEngine:
         # Resolve source_system from parent documents (chunks don't store it directly)
         search_results = []
         doc_cache: dict[str, str] = {}
+
+        # Build chunk provenance map from recall metadata
+        chunk_provenance_map: dict[str, str] = {}
+        search_methods = recall_result.metadata.get("search_methods", {})
+        chunk_overlap = search_methods.get("chunk_overlap", {})
+        for method_key, method_data in chunk_overlap.items():
+            # method_key is like "vector_only", "graph_only", "vector_and_graph"
+            method_label = method_key.replace("_only", "").replace("_and_", "+")
+            for chunk_id in method_data.get("ids", []):
+                chunk_provenance_map[chunk_id] = method_label
+
         for chunk, score in recall_result.chunks[:5]:
             source = "unknown"
             if chunk.document_id:
@@ -116,15 +127,36 @@ class ChatEngine:
                     except Exception:
                         pass
 
-            search_results.append(
-                {
-                    "content": chunk.content,
-                    "source": source,
-                    "score": score,
-                }
-            )
+            # Look up search provenance from recall metadata
+            source_method = chunk_provenance_map.get(str(chunk.id), "")
 
-        logger.debug(f"Found {len(search_results)} relevant search results")
+            result_entry: dict[str, Any] = {
+                "content": chunk.content,
+                "source": source,
+                "score": score,
+            }
+            if source_method:
+                result_entry["found_via"] = source_method
+
+            search_results.append(result_entry)
+
+        # Build entity context from recall entities (top 10 with descriptions)
+        entity_context: list[dict[str, Any]] = []
+        if recall_result.entities:
+            for entity, score in recall_result.entities[:10]:
+                if not entity.description:
+                    continue
+                entry: dict[str, Any] = {
+                    "name": entity.name,
+                    "type": entity.entity_type,
+                    "description": entity.description,
+                    "attributes": {k: v for k, v in (entity.attributes or {}).items() if v},
+                }
+                entity_context.append(entry)
+
+        logger.debug(
+            f"Found {len(search_results)} relevant search results" f" and {len(entity_context)} entity context entries"
+        )
 
         # 2. Get conversation context
         history_summary, recent_messages = self.history_manager.get_context_messages(conv_id)
@@ -135,6 +167,7 @@ class ChatEngine:
             search_results,
             history_summary,
             recent_messages,
+            entity_context=entity_context,
         )
 
         # 4. Generate response

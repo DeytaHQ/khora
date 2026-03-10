@@ -505,11 +505,17 @@ class DualNodeManager:
                 id: related.id,
                 name: related.name,
                 entity_type: related.entity_type,
+                description: related.description,
+                source_tool: related.source_tool,
                 distance: distance
             }}
             ELSE null
         END)[0..$limit] AS related_raw
         RETURN e.id AS source_id,
+               e.name AS source_name,
+               e.entity_type AS source_entity_type,
+               e.description AS source_description,
+               e.source_tool AS source_source_tool,
                [x IN related_raw WHERE x IS NOT NULL] AS related_entities
         """
 
