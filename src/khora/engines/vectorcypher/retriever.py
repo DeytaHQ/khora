@@ -385,10 +385,13 @@ class VectorCypherRetriever:
         )
 
         # Step 4: Cypher expand to find related entities
+        # For temporal queries (STATE_QUERY/RECENCY/CHANGE), prefer currently-valid
+        # entities by filtering out those whose valid_until has passed.
         expanded_entities, entity_info_map = await self._cypher_expand(
             entry_entity_ids=[e[0] for e in entry_entities],
             namespace_id=namespace_id,
             depth=depth,
+            prefer_current=_tp.temporal_sort,
         )
 
         # Step 5: Fetch chunks from all entities
@@ -400,6 +403,7 @@ class VectorCypherRetriever:
             temporal_filter=temporal_filter,
             limit=limit * 2,  # Fetch more for fusion
             temporal_sort=_tp.temporal_sort,
+            prefer_current=_tp.temporal_sort,
         )
 
         # Step 6: Wait for parallel vector chunk search to complete
@@ -748,6 +752,8 @@ class VectorCypherRetriever:
         entry_entity_ids: list[UUID],
         namespace_id: UUID,
         depth: int,
+        *,
+        prefer_current: bool = False,
     ) -> tuple[dict[UUID, float], dict[str, dict[str, str]]]:
         """Expand entry entities to find related entities via graph traversal.
 
@@ -755,6 +761,7 @@ class VectorCypherRetriever:
             entry_entity_ids: Starting entity IDs
             namespace_id: Namespace constraint
             depth: Maximum traversal depth
+            prefer_current: When True, filter out expired entities (for temporal queries)
 
         Returns:
             Tuple of:
@@ -773,6 +780,7 @@ class VectorCypherRetriever:
                 namespace_id=namespace_id,
                 depth=depth,
                 limit_per_entity=20,
+                prefer_current=prefer_current,
             )
 
             # Score entities by distance from entry points and collect entity info
@@ -812,6 +820,7 @@ class VectorCypherRetriever:
         limit: int,
         *,
         temporal_sort: bool = False,
+        prefer_current: bool = False,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Fetch chunks connected to entities via MENTIONED_IN.
 
@@ -821,6 +830,7 @@ class VectorCypherRetriever:
             temporal_filter: Optional temporal constraints
             limit: Maximum chunks to return
             temporal_sort: If True, sort by occurred_at DESC (for temporal queries)
+            prefer_current: When True, filter out expired entities
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -835,6 +845,7 @@ class VectorCypherRetriever:
                 namespace_id=namespace_id,
                 temporal_filter=temporal_filter,
                 temporal_sort=temporal_sort,
+                prefer_current=prefer_current,
                 limit=limit,
             )
 

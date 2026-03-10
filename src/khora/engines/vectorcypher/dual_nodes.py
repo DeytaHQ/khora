@@ -372,6 +372,7 @@ class DualNodeManager:
         *,
         temporal_filter: TemporalFilter | None = None,
         temporal_sort: bool = False,
+        prefer_current: bool = False,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Get chunks connected to the given entities via MENTIONED_IN.
@@ -380,6 +381,9 @@ class DualNodeManager:
             entity_ids: List of entity IDs to find chunks for
             namespace_id: Namespace to search within
             temporal_filter: Optional temporal constraints
+            prefer_current: When True, prefer entities whose valid_until
+                has not passed (for temporal queries). Entities without
+                valid_until are kept (NULL = still valid).
             limit: Maximum chunks to return
 
         Returns:
@@ -412,6 +416,10 @@ class DualNodeManager:
             if temporal_filter.channel:
                 temporal_conditions.append("c.channel = $channel")
                 params["channel"] = temporal_filter.channel
+
+        # For temporal queries, prefer entities whose validity hasn't expired
+        if prefer_current:
+            temporal_conditions.append("(e.valid_until IS NULL OR e.valid_until > datetime())")
 
         where_clause = ""
         if temporal_conditions:
@@ -464,6 +472,7 @@ class DualNodeManager:
         *,
         depth: int = 2,
         limit_per_entity: int = 20,
+        prefer_current: bool = False,
     ) -> dict[str, list[dict[str, Any]]]:
         """Get neighborhood of entities via relationship traversal.
 
@@ -479,6 +488,9 @@ class DualNodeManager:
             namespace_id: Namespace constraint
             depth: Maximum traversal depth (1-4)
             limit_per_entity: Max related entities per starting entity
+            prefer_current: When True, filter out entities whose valid_until
+                has passed (for STATE_QUERY/RECENCY/CHANGE temporal categories).
+                Entities without valid_until are kept (NULL = still valid).
 
         Returns:
             Dict mapping entity_id -> list of related entity info
@@ -487,6 +499,12 @@ class DualNodeManager:
             return {}
 
         depth = min(max(1, depth), 4)  # Clamp to 1-4
+
+        # When prefer_current is set, exclude entities whose validity has expired.
+        # Entities with NULL valid_until are kept (NULL = no known end = still valid).
+        temporal_clause = ""
+        if prefer_current:
+            temporal_clause = "AND (related.valid_until IS NULL OR related.valid_until > datetime())"
 
         # OPTIMIZATION: Single query fetches all neighborhoods in batch
         # Uses UNWIND internally via IN clause + collect() aggregation
@@ -497,10 +515,11 @@ class DualNodeManager:
         OPTIONAL MATCH path = (e)-[*1..{depth}]-(related:Entity)
         WHERE related.namespace_id = $namespace_id
           AND related.id <> e.id
+          {temporal_clause}
         WITH e, related,
              CASE WHEN related IS NOT NULL THEN length(path) ELSE null END AS distance
         ORDER BY e.id, distance
-        WITH e, collect(DISTINCT CASE
+        With e, collect(DISTINCT CASE
             WHEN related IS NOT NULL THEN {{
                 id: related.id,
                 name: related.name,
