@@ -190,11 +190,13 @@ pub fn detect_temporal_category(query: &str) -> u8 {
         add(4, &[
             "how many times", "how many total", "all instances",
             "every time", "in total", "count of", "number of times",
+            "how often ",
         ]);
 
         // Category 5: RECENCY
         add(5, &[
             "most recent", "newest", "just ", "recently",
+            "latest ",
         ]);
 
         // Category 6: CHANGE
@@ -203,6 +205,8 @@ pub fn detect_temporal_category(query: &str) -> u8 {
             "no longer", "still ", "anymore", "former ",
             "previous ", "ex-", "updated", "replaced",
             "went from", "transitioned",
+            "turned into ", "switched to ", "became ",
+            "converted to ", "went back to ",
         ]);
 
         let ac = AhoCorasick::builder()
@@ -374,5 +378,25 @@ mod tests {
     #[test]
     fn test_detect_temporal_category_none() {
         assert_eq!(detect_temporal_category("What is the capital of France?"), 0);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_latest() {
+        assert_eq!(detect_temporal_category("What is the latest news?"), 5);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_became() {
+        assert_eq!(detect_temporal_category("She became a doctor"), 6);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_how_often() {
+        assert_eq!(detect_temporal_category("How often does she visit?"), 4);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_switched_to() {
+        assert_eq!(detect_temporal_category("He switched to piano"), 6);
     }
 }

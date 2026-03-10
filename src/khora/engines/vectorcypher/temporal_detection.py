@@ -57,17 +57,18 @@ class RetrievalParams:
 
 
 # Category → retrieval behavior mapping
-# Weights tuned for conversational memory datasets (LoCoMo, LongMemEval).
-# STATE_QUERY/RECENCY/CHANGE boosted to suppress stale chunks; decay shortened
-# for conversational timescales.  NONE left at 0.2 to protect implicit_inference.
+# Weights control the *multiplicative* recency exponent applied to RRF scores.
+# Higher weight = stronger penalty for stale chunks (score *= recency^(exp*w)).
+# Conservative values protect non-temporal categories (implicit_inference,
+# abstention) while still discriminating temporal ones.
 RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
-    TemporalCategory.NONE: RetrievalParams(recency_weight=0.2, temporal_sort=False),
+    TemporalCategory.NONE: RetrievalParams(recency_weight=0.1, temporal_sort=False),
     TemporalCategory.EXPLICIT: RetrievalParams(recency_weight=0.3, temporal_sort=False),
-    TemporalCategory.STATE_QUERY: RetrievalParams(recency_weight=0.8, temporal_sort=True),
+    TemporalCategory.STATE_QUERY: RetrievalParams(recency_weight=0.6, temporal_sort=True),
     TemporalCategory.ORDINAL: RetrievalParams(recency_weight=0.3, temporal_sort=True, decay_days_override=7),
     TemporalCategory.AGGREGATE: RetrievalParams(recency_weight=0.0, temporal_sort=False),
-    TemporalCategory.RECENCY: RetrievalParams(recency_weight=0.75, temporal_sort=True, decay_days_override=3),
-    TemporalCategory.CHANGE: RetrievalParams(recency_weight=0.7, temporal_sort=True, decay_days_override=14),
+    TemporalCategory.RECENCY: RetrievalParams(recency_weight=0.6, temporal_sort=True, decay_days_override=3),
+    TemporalCategory.CHANGE: RetrievalParams(recency_weight=0.5, temporal_sort=True, decay_days_override=14),
 }
 
 

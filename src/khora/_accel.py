@@ -1083,12 +1083,14 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "in total",
         "count of",
         "number of times",
+        "how often ",
     ],
     5: [  # RECENCY
         "most recent",
         "newest",
         "just ",
         "recently",
+        "latest ",
     ],
     6: [  # CHANGE
         "changed",
@@ -1105,6 +1107,11 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "replaced",
         "went from",
         "transitioned",
+        "turned into ",
+        "switched to ",
+        "became ",
+        "converted to ",
+        "went back to ",
     ],
 }
 
