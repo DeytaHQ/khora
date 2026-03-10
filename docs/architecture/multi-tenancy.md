@@ -1,52 +1,31 @@
 # Multi-Tenancy
 
-> **Status (v0.2.3):** The `TenancyMode` enum and ACL enforcement code described below exist in the codebase but are **not wired at runtime**. Currently only namespace-level row filtering is active. See `docs/design/namespace-optimization-plan.md` for the implementation roadmap.
+> **Status:** The `TenancyMode` enum exists in the codebase but is **not wired at runtime**. Currently only namespace-level row filtering is active.
 
-Different teams need different data. Different projects shouldn't mix. Sometimes you need complete isolation for compliance. Khora's multi-tenancy model handles all of this through a simple hierarchy: Organizations contain Workspaces contain Namespaces.
-
-## The Hierarchy
-
-```
-Acme Corporation (Organization)
-│
-├── Engineering (Workspace)
-│   ├── production (Namespace)    ← Live data
-│   ├── production-v2 (Namespace) ← New version being staged
-│   └── sandbox (Namespace)       ← Experiments
-│
-└── Product (Workspace)
-    ├── research (Namespace)
-    └── competitor-analysis (Namespace)
-```
-
-Each level serves a purpose:
-
-**Organization** - Your company. Handles billing, sets global policies, defines whether data is shared or isolated at the infrastructure level.
-
-**Workspace** - A team or project. Groups related namespaces, provides a boundary for access control.
-
-**Namespace** - Where data actually lives. Every document, chunk, entity, and relationship belongs to exactly one namespace. This is your unit of isolation.
+Khora isolates data through **namespaces**. Every document, chunk, entity, and relationship belongs to exactly one namespace. This is the sole unit of isolation — there is no organization or workspace hierarchy within khora. Higher-level grouping (organizations, teams, etc.) is the responsibility of the consuming service.
 
 ## Namespaces: Where Data Lives
 
-All your data is scoped to namespaces. When you call `remember()` or `recall()`, you're always operating within a namespace:
+All your data is scoped to namespaces. When you call `remember()` or `recall()`, you must always specify a namespace:
 
 ```python
 from khora import MemoryLake
 
 async with MemoryLake() as lake:
-    # Store in a specific namespace
+    # Store in a specific namespace (required)
     await lake.remember(
         "Important document content...",
         namespace=namespace_id
     )
 
-    # Search within that namespace
+    # Search within that namespace (required)
     results = await lake.recall(
         "What's in those documents?",
         namespace=namespace_id
     )
 ```
+
+The `namespace` parameter is **required** — there is no default namespace. Omitting it raises a `ValueError`.
 
 This isolation is enforced at the database level:
 
@@ -60,9 +39,39 @@ ORDER BY similarity DESC;
 
 You can't accidentally see another namespace's data.
 
+## Creating Namespaces
+
+```python
+from khora import MemoryLake
+from khora.core.models import MemoryNamespace
+
+async with MemoryLake() as lake:
+    # Create a namespace (UUID-identified, no name/description)
+    namespace = await lake.storage.create_namespace(
+        MemoryNamespace()
+    )
+
+    # Now store data
+    await lake.remember(
+        "Important content...",
+        namespace=namespace.id
+    )
+```
+
+## Finding Namespaces
+
+```python
+# By UUID
+ns = await lake.storage.get_namespace(namespace_id)
+
+# List all (active only by default)
+result = await lake.storage.list_namespaces()
+namespaces = result.items
+```
+
 ## Namespace Versioning
 
-Here's a powerful feature: namespaces can be versioned. This solves a common problem - how do you replace all your data without downtime?
+Namespaces can be versioned. This solves a common problem - how do you replace all your data without downtime?
 
 ### The Problem
 
@@ -72,15 +81,15 @@ Say you have a "production" namespace with 100,000 documents. You want to rebuil
 
 ```
 Before:
-  production (v1) ← active, serving queries
+  production (v1) <- active, serving queries
 
 During rebuild:
-  production (v1) ← still active, serving queries
-  production (v2) ← inactive, being populated
+  production (v1) <- still active, serving queries
+  production (v2) <- inactive, being populated
 
 After:
-  production (v1) ← now inactive
-  production (v2) ← now active, serving queries
+  production (v1) <- now inactive
+  production (v2) <- now active, serving queries
 ```
 
 The swap is atomic. One moment users see v1, the next they see v2. No downtime, no partial data.
@@ -89,15 +98,11 @@ The swap is atomic. One moment users see v1, the next they see v2. No downtime, 
 
 ```python
 async with MemoryLake() as lake:
-    # 1. Get current namespace
-    current = await lake.storage.get_namespace_by_slug(
-        workspace_id, "production"
-    )
+    # 1. Get current namespace by UUID
+    current = await lake.storage.get_namespace(current_namespace_id)
 
     # 2. Create new version
     new_version = await lake.storage.create_namespace_version(
-        workspace_id,
-        slug="production",
         previous_version=current
     )
     # new_version.version = 2
@@ -134,66 +139,12 @@ await lake.storage.deactivate_namespace(new_version.id)
 
 Keep old versions around until you're confident the new one is working.
 
-## Tenancy Modes
-
-### Shared Mode (Default)
-
-All organizations share the same database infrastructure. Isolation is achieved through row-level filtering on `namespace_id`.
-
-```python
-Organization(
-    name="Acme Corp",
-    tenancy_mode=TenancyMode.SHARED
-)
-```
-
-**Pros:**
-- Lower cost (shared infrastructure)
-- Simpler operations
-- Good enough for most use cases
-
-**Cons:**
-- Data is logically separate but physically together
-- May not satisfy strict compliance requirements
-
-### Isolated Mode
-
-Each organization gets its own database instances. Complete physical separation.
-
-```python
-Organization(
-    name="SecureCorp",
-    tenancy_mode=TenancyMode.ISOLATED
-)
-```
-
-**Pros:**
-- Complete data isolation
-- Meets HIPAA, SOC2, and similar requirements
-- Independent scaling and maintenance
-
-**Cons:**
-- Higher cost (dedicated infrastructure)
-- More operational complexity
-
-**Configuration:**
-```python
-# Each isolated org needs its own connection strings
-org_config = {
-    "postgresql_url": "postgresql://securecorp:pass@securecorp-db:5432/khora",
-    "neo4j_url": "bolt://securecorp-graph:7687"
-}
-```
-
 ## Configuration Overrides
 
 Each namespace can override global settings. Maybe one namespace needs a different embedding model, or stricter similarity thresholds:
 
 ```python
 namespace = MemoryNamespace(
-    workspace_id=workspace_id,
-    name="High-Precision Research",
-    slug="research",
     config_overrides={
         "embedding_model": "text-embedding-3-large",
         "embedding_dimension": 3072,
@@ -203,11 +154,9 @@ namespace = MemoryNamespace(
 )
 ```
 
-Configuration resolves top-down:
+Configuration resolves:
 1. Namespace overrides (highest priority)
-2. Workspace defaults
-3. Organization defaults
-4. Global config (lowest priority)
+2. Global config (lowest priority)
 
 ## Sync Checkpoints
 
@@ -241,97 +190,14 @@ await lake.storage.set_sync_checkpoint(
 )
 ```
 
-## Access Control
-
-Permissions flow down the hierarchy:
-
-```
-Organization (admin role)
-    │
-    └── Workspace (member role)
-            │
-            └── Namespace (read/write permissions)
-```
-
-If you can access an organization, you can access its workspaces (subject to workspace permissions). If you can access a workspace, you can access its namespaces (subject to namespace permissions).
-
-```python
-from khora.acl import ACLEnforcer, ACLContext
-
-enforcer = ACLEnforcer(storage)
-
-# Check before accessing
-context = ACLContext(
-    user_id="user-123",
-    namespace_id=namespace_id,
-    operation="read"
-)
-
-if await enforcer.check_permission(context):
-    results = await lake.recall(query, namespace=namespace_id)
-else:
-    raise PermissionDenied()
-```
-
-## Setting Up the Hierarchy
-
-### Create Everything
-
-```python
-from khora import MemoryLake
-from khora.core.models import Organization, Workspace, MemoryNamespace
-
-async with MemoryLake() as lake:
-    # Organization
-    org = await lake.storage.create_organization(
-        Organization(name="Acme Corp", slug="acme")
-    )
-
-    # Workspace
-    workspace = await lake.storage.create_workspace(
-        Workspace(
-            organization_id=org.id,
-            name="Engineering",
-            slug="engineering"
-        )
-    )
-
-    # Namespace
-    namespace = await lake.storage.create_namespace(
-        MemoryNamespace(
-            workspace_id=workspace.id,
-            name="Production",
-            slug="production"
-        )
-    )
-
-    # Now store data
-    await lake.remember(
-        "Important content...",
-        namespace=namespace.id
-    )
-```
-
-### Find Existing Namespaces
-
-```python
-# By slug
-ns = await lake.storage.get_namespace_by_slug(workspace_id, "production")
-
-# List all in a workspace
-namespaces = await lake.storage.list_namespaces(workspace_id)
-
-# Filter to active only
-active = [ns for ns in namespaces if ns.is_active]
-```
-
-### Cross-Namespace Queries
+## Cross-Namespace Queries
 
 Need to search multiple namespaces? (Note: this bypasses isolation - make sure you have permission)
 
 ```python
 all_results = []
-for namespace in await lake.storage.list_namespaces(workspace_id):
+result = await lake.storage.list_namespaces()
+for namespace in result.items:
     if namespace.is_active and user_can_access(namespace):
         results = await lake.recall(query, namespace=namespace.id)
         all_results.extend(results.chunks)

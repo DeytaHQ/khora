@@ -286,12 +286,6 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.get_namespace(namespace_id)
 
-    async def get_namespace_by_slug(self, slug: str) -> MemoryNamespace | None:
-        """Get a namespace by slug (globally unique)."""
-        if not self.relational:
-            raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_namespace_by_slug(slug)
-
     async def list_namespaces(
         self, *, active_only: bool = True, limit: int = 100, offset: int = 0
     ) -> PaginatedResult[MemoryNamespace]:
@@ -308,14 +302,12 @@ class StorageCoordinator:
 
     async def create_namespace_version(
         self,
-        slug: str,
         *,
         previous_version: MemoryNamespace | None = None,
     ) -> MemoryNamespace:
         """Create a new version of a namespace.
 
         Args:
-            slug: Namespace slug
             previous_version: The previous version to supersede (if any)
 
         Returns:
@@ -323,7 +315,7 @@ class StorageCoordinator:
         """
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.create_namespace_version(slug, previous_version=previous_version)
+        return await self.relational.create_namespace_version(previous_version=previous_version)
 
     async def deactivate_namespace(self, namespace_id: UUID) -> None:
         """Mark a namespace version as inactive.

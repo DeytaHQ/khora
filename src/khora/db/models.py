@@ -65,9 +65,6 @@ class MemoryNamespaceModel(Base):
     __tablename__ = "memory_namespaces"
 
     id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    description: Mapped[str] = mapped_column(Text, default="")
     tenancy_mode: Mapped[str] = mapped_column(
         Enum(TenancyMode, name="tenancy_mode", create_constraint=True, values_callable=lambda e: [m.value for m in e]),
         default=TenancyMode.SHARED,
@@ -99,15 +96,8 @@ class MemoryNamespaceModel(Base):
         "ExpertiseDefinitionModel", back_populates="namespace"
     )
 
-    __table_args__ = (
-        # Slugs are globally unique per version
-        UniqueConstraint("slug", "version", name="uq_namespace_slug_version"),
-        # Partial index for efficient active namespace queries
-        Index("idx_namespace_slug_active", "slug", "version", postgresql_where="is_active = true"),
-    )
-
     def __repr__(self) -> str:
-        return f"<MemoryNamespace(id={self.id!r}, name={self.name!r})>"
+        return f"<MemoryNamespace(id={self.id!r})>"
 
 
 # =============================================================================
