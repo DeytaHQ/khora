@@ -142,6 +142,7 @@ class VectorCypherConfig:
 
     # Skeleton indexing
     skeleton_core_ratio: float = 0.70  # 70% get full KG extraction (increased for denser graphs)
+    conversation_skeleton_ratio: float = 0.90  # Higher ratio for conversation batches
 
     # Graph traversal
     graph_default_depth: int = 2
@@ -788,6 +789,7 @@ class VectorCypherEngine:
         extraction_model: str | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        skeleton_ratio_override: float | None = None,
     ) -> tuple[list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Run skeleton extraction but return results instead of storing.
 
@@ -814,7 +816,8 @@ class VectorCypherEngine:
         if len(chunks) <= 2:
             core_ids = {c.id for c in chunks}
         else:
-            skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+            effective_ratio = skeleton_ratio_override or self._vc_config.skeleton_core_ratio
+            skeleton = SkeletonIndexer(core_ratio=effective_ratio)
             skeleton.add_chunks_batch(chunks)
             core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
@@ -881,6 +884,7 @@ class VectorCypherEngine:
         embedding_text_override: str | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        skeleton_ratio_override: float | None = None,
     ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Process a document, returning entities for deferred batch storage.
 
@@ -971,6 +975,7 @@ class VectorCypherEngine:
                 extraction_model=extraction_model,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
+                skeleton_ratio_override=skeleton_ratio_override,
             )
 
         return len(stored_chunks), entities, relationships, entity_chunk_links
@@ -1295,6 +1300,8 @@ class VectorCypherEngine:
         else:
             context_by_orig = {}
 
+        is_conversation_mode = bool(context_by_orig)
+
         # Streaming pipeline: accumulate entities across documents for batch storage
         all_entities: list[Entity] = []
         all_relationships: list[Relationship] = []
@@ -1353,6 +1360,9 @@ class VectorCypherEngine:
                             embedding_text_override=context_by_orig.get(doc_index),
                             entity_types=entity_types,
                             relationship_types=relationship_types,
+                            skeleton_ratio_override=(
+                                self._vc_config.conversation_skeleton_ratio if is_conversation_mode else None
+                            ),
                         )
 
                         # Accumulate entities for batch storage

@@ -54,6 +54,7 @@ class RetrievalParams:
     recency_weight: float
     temporal_sort: bool
     decay_days_override: int | None = None
+    recency_floor: float = 0.5  # Default floor for multiplicative recency
 
 
 # Category → retrieval behavior mapping
@@ -62,13 +63,19 @@ class RetrievalParams:
 # Conservative values protect non-temporal categories (implicit_inference,
 # abstention) while still discriminating temporal ones.
 RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
-    TemporalCategory.NONE: RetrievalParams(recency_weight=0.1, temporal_sort=False),
-    TemporalCategory.EXPLICIT: RetrievalParams(recency_weight=0.3, temporal_sort=False),
-    TemporalCategory.STATE_QUERY: RetrievalParams(recency_weight=0.6, temporal_sort=True),
-    TemporalCategory.ORDINAL: RetrievalParams(recency_weight=0.3, temporal_sort=True, decay_days_override=7),
-    TemporalCategory.AGGREGATE: RetrievalParams(recency_weight=0.0, temporal_sort=False),
-    TemporalCategory.RECENCY: RetrievalParams(recency_weight=0.6, temporal_sort=True, decay_days_override=3),
-    TemporalCategory.CHANGE: RetrievalParams(recency_weight=0.5, temporal_sort=True, decay_days_override=14),
+    TemporalCategory.NONE: RetrievalParams(recency_weight=0.1, temporal_sort=False, recency_floor=0.5),
+    TemporalCategory.EXPLICIT: RetrievalParams(recency_weight=0.3, temporal_sort=False, recency_floor=0.4),
+    TemporalCategory.STATE_QUERY: RetrievalParams(recency_weight=0.6, temporal_sort=True, recency_floor=0.3),
+    TemporalCategory.ORDINAL: RetrievalParams(
+        recency_weight=0.3, temporal_sort=True, decay_days_override=7, recency_floor=0.4
+    ),
+    TemporalCategory.AGGREGATE: RetrievalParams(recency_weight=0.0, temporal_sort=False, recency_floor=0.5),
+    TemporalCategory.RECENCY: RetrievalParams(
+        recency_weight=0.6, temporal_sort=True, decay_days_override=3, recency_floor=0.3
+    ),
+    TemporalCategory.CHANGE: RetrievalParams(
+        recency_weight=0.5, temporal_sort=True, decay_days_override=14, recency_floor=0.4
+    ),
 }
 
 

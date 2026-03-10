@@ -32,7 +32,7 @@ from khora.telemetry import trace
 _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
 
 # Default concurrency limits for Neo4j write transactions.
-_DEFAULT_ENTITY_WRITE_CONCURRENCY = 12
+_DEFAULT_ENTITY_WRITE_CONCURRENCY = 16
 _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY = 8
 
 
@@ -541,7 +541,7 @@ class Neo4jBackend(GraphBackendBase):
         namespace_id: UUID,
         entities: list[Entity],
         *,
-        batch_size: int = 50,
+        batch_size: int = 100,
     ) -> list[tuple[Entity, bool]]:
         """Batch upsert entities using UNWIND + MERGE.
 
@@ -573,8 +573,8 @@ class Neo4jBackend(GraphBackendBase):
                 e.description = CASE WHEN size(row.description) > size(coalesce(e.description, ''))
                     THEN row.description ELSE e.description END,
                 e.attributes = row.attributes,
-                e.source_document_ids = (e.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN e.source_document_ids])[-100..],
-                e.source_chunk_ids = (e.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN e.source_chunk_ids])[-250..],
+                e.source_document_ids = (e.source_document_ids + row.source_document_ids)[-100..],
+                e.source_chunk_ids = (e.source_chunk_ids + row.source_chunk_ids)[-250..],
                 e.mention_count = e.mention_count + row.mention_count,
                 e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
                 e.updated_at = row.updated_at
@@ -705,8 +705,8 @@ class Neo4jBackend(GraphBackendBase):
                 ON MATCH SET
                     r.description = CASE WHEN size(row.description) > size(coalesce(r.description, ''))
                         THEN row.description ELSE r.description END,
-                    r.source_document_ids = (r.source_document_ids + [x IN row.source_document_ids WHERE NOT x IN r.source_document_ids])[-100..],
-                    r.source_chunk_ids = (r.source_chunk_ids + [x IN row.source_chunk_ids WHERE NOT x IN r.source_chunk_ids])[-250..],
+                    r.source_document_ids = (r.source_document_ids + row.source_document_ids)[-100..],
+                    r.source_chunk_ids = (r.source_chunk_ids + row.source_chunk_ids)[-250..],
                     r.confidence = CASE WHEN row.confidence > r.confidence THEN row.confidence ELSE r.confidence END,
                     r.weight = CASE WHEN row.weight > r.weight THEN row.weight ELSE r.weight END,
                     r.updated_at = row.updated_at
@@ -737,7 +737,37 @@ class Neo4jBackend(GraphBackendBase):
             logger.debug(f"Included {inverse_count} inverse relationships")
 
         logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
+
+        # Dynamically create indexes for observed relationship types
+        await self._ensure_relationship_type_indexes(set(type_groups.keys()))
+
         return total_created
+
+    _indexed_rel_types: set[str] = set()  # Per-process cache of already-indexed types
+
+    async def _ensure_relationship_type_indexes(self, relationship_types: set[str]) -> None:
+        """Dynamically create namespace_id indexes for observed relationship types.
+
+        Uses a per-process cache to avoid repeated CREATE INDEX calls for types
+        that have already been indexed in this process lifetime.
+        """
+        if not self._driver or not relationship_types:
+            return
+        new_types = relationship_types - self._indexed_rel_types
+        if not new_types:
+            return
+        async with self._driver.session(database=self._database) as session:
+            for rel_type in new_types:
+                sanitized = _NEO4J_LABEL_RE.sub("_", rel_type).upper()
+                if not sanitized:
+                    continue
+                index_name = f"rel_{sanitized.lower()}_ns_dyn"
+                query = f"CREATE INDEX {index_name} IF NOT EXISTS FOR ()-[r:{sanitized}]-() ON (r.namespace_id)"
+                try:
+                    await session.run(query)
+                    self._indexed_rel_types.add(rel_type)
+                except Exception as e:
+                    logger.debug(f"Dynamic index creation for {sanitized}: {e}")
 
     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
         """Convert a Neo4j node to a domain Entity."""

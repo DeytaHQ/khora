@@ -273,6 +273,7 @@ class VectorCypherRetriever:
                     effective_recency=params.recency_weight,
                     decay_days_override=params.decay_days_override,
                     temporal_sort=params.temporal_sort,
+                    recency_floor=params.recency_floor,
                 )
             else:
                 # Complex/moderate path: VectorCypher with parallel execution
@@ -300,6 +301,7 @@ class VectorCypherRetriever:
                         effective_recency=params.recency_weight,
                         decay_days_override=params.decay_days_override,
                         temporal_sort=params.temporal_sort,
+                        recency_floor=params.recency_floor,
                     )
 
             # Store in cache
@@ -375,6 +377,7 @@ class VectorCypherRetriever:
                 effective_recency=_tp.recency_weight,
                 decay_days_override=_tp.decay_days_override,
                 temporal_sort=_tp.temporal_sort,
+                recency_floor=_tp.recency_floor,
             )
 
         # Compute adaptive depth based on entry entity count
@@ -445,6 +448,7 @@ class VectorCypherRetriever:
                     fused_results,
                     recency_scores,
                     recency_weight=effective_recency,
+                    recency_floor=_tp.recency_floor,
                 )
 
         # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
@@ -584,6 +588,7 @@ class VectorCypherRetriever:
         effective_recency: float = 0.0,
         decay_days_override: int | None = None,
         temporal_sort: bool = False,
+        recency_floor: float = 0.5,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
 
@@ -603,6 +608,7 @@ class VectorCypherRetriever:
             effective_recency=effective_recency,
             decay_days_override=decay_days_override,
             temporal_sort=temporal_sort,
+            recency_floor=recency_floor,
         )
 
         # Update metadata to indicate fallback was used
@@ -623,6 +629,7 @@ class VectorCypherRetriever:
         effective_recency: float = 0.0,
         decay_days_override: int | None = None,
         temporal_sort: bool = False,
+        recency_floor: float = 0.5,
     ) -> VectorCypherResult:
         """Simple retrieval path - vector search only.
 
@@ -670,7 +677,9 @@ class VectorCypherRetriever:
                 fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
                 with trace_span("khora.vectorcypher.recency_boost", chunk_count=len(fused)):
                     recency_scores = self._calculate_recency_scores(fused, decay_days_override=decay_days_override)
-                    fused = apply_recency_boost(fused, recency_scores, recency_weight=effective_recency)
+                    fused = apply_recency_boost(
+                        fused, recency_scores, recency_weight=effective_recency, recency_floor=recency_floor
+                    )
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # Apply temporal sort: re-order by occurred_at DESC so the most

@@ -295,6 +295,7 @@ def apply_recency_boost(
     recency_scores: dict[UUID, float],
     *,
     recency_weight: float = 0.2,
+    recency_floor: float = 0.5,
 ) -> list[FusedResult]:
     """Apply multiplicative recency boost to fused results.
 
@@ -303,9 +304,11 @@ def apply_recency_boost(
     regression where high recency weights pushed irrelevant-but-recent chunks
     above score thresholds.
 
-    Formula: ``rrf_score *= max(recency, FLOOR) ** (exponent * recency_weight)``
+    Formula: ``rrf_score *= max(recency, floor) ** (exponent * recency_weight)``
 
-    - FLOOR (0.5) prevents zeroing-out chunks that lack timestamps.
+    - recency_floor prevents zeroing-out chunks that lack timestamps.
+      Per-category floors allow stronger discrimination for temporal queries
+      (e.g. 0.3 for STATE_QUERY/RECENCY) while protecting non-temporal ones (0.5).
     - The exponent (2.0) controls decay steepness.
     - recency_weight scales influence: NONE (0.2) barely changes ranking,
       STATE_QUERY (0.6) penalises stale chunks significantly.
@@ -314,16 +317,16 @@ def apply_recency_boost(
         results: List of FusedResult
         recency_scores: Map of item_id -> recency score (0-1, higher = more recent)
         recency_weight: Weight for recency (default: 0.2)
+        recency_floor: Minimum recency to prevent zero-multiplication (default: 0.5)
 
     Returns:
         Results with adjusted scores, re-sorted
     """
-    _FLOOR = 0.5  # minimum recency to prevent zero-multiplication
     _EXPONENT = 2.0  # steepness of decay curve
 
     for r in results:
-        recency = recency_scores.get(r.item_id, _FLOOR)
-        clamped = max(recency, _FLOOR)
+        recency = recency_scores.get(r.item_id, recency_floor)
+        clamped = max(recency, recency_floor)
         # Multiplicative: old chunks get attenuated, recent chunks stay near 1.0
         r.rrf_score *= clamped ** (_EXPONENT * recency_weight)
 
