@@ -296,9 +296,19 @@ def apply_recency_boost(
     *,
     recency_weight: float = 0.2,
 ) -> list[FusedResult]:
-    """Apply recency boost to fused results.
+    """Apply multiplicative recency boost to fused results.
 
-    Combines RRF score with a recency score to boost more recent results.
+    Uses a multiplicative formula so recency attenuates stale results without
+    inflating scores above the original RRF value.  This prevents the abstention
+    regression where high recency weights pushed irrelevant-but-recent chunks
+    above score thresholds.
+
+    Formula: ``rrf_score *= max(recency, FLOOR) ** (exponent * recency_weight)``
+
+    - FLOOR (0.5) prevents zeroing-out chunks that lack timestamps.
+    - The exponent (2.0) controls decay steepness.
+    - recency_weight scales influence: NONE (0.2) barely changes ranking,
+      STATE_QUERY (0.6) penalises stale chunks significantly.
 
     Args:
         results: List of FusedResult
@@ -308,10 +318,14 @@ def apply_recency_boost(
     Returns:
         Results with adjusted scores, re-sorted
     """
+    _FLOOR = 0.5  # minimum recency to prevent zero-multiplication
+    _EXPONENT = 2.0  # steepness of decay curve
+
     for r in results:
-        recency = recency_scores.get(r.item_id, 0.0)
-        # Blend RRF score with recency
-        r.rrf_score = (1 - recency_weight) * r.rrf_score + recency_weight * recency
+        recency = recency_scores.get(r.item_id, _FLOOR)
+        clamped = max(recency, _FLOOR)
+        # Multiplicative: old chunks get attenuated, recent chunks stay near 1.0
+        r.rrf_score *= clamped ** (_EXPONENT * recency_weight)
 
     # Re-sort by adjusted score
     results.sort(key=lambda x: x.rrf_score, reverse=True)
