@@ -145,14 +145,14 @@ class TestRetrievalParams:
 
     def test_state_query_params(self) -> None:
         params = RETRIEVAL_PARAMS[TemporalCategory.STATE_QUERY]
-        assert params.recency_weight == 0.6
+        assert params.recency_weight == 0.8
         assert params.temporal_sort is True
 
     def test_ordinal_params(self) -> None:
         params = RETRIEVAL_PARAMS[TemporalCategory.ORDINAL]
         assert params.recency_weight == 0.3
         assert params.temporal_sort is True
-        assert params.decay_days_override == 14
+        assert params.decay_days_override == 7
 
     def test_aggregate_params(self) -> None:
         params = RETRIEVAL_PARAMS[TemporalCategory.AGGREGATE]
@@ -161,15 +161,15 @@ class TestRetrievalParams:
 
     def test_recency_params(self) -> None:
         params = RETRIEVAL_PARAMS[TemporalCategory.RECENCY]
-        assert params.recency_weight == 0.5
+        assert params.recency_weight == 0.75
         assert params.temporal_sort is True
-        assert params.decay_days_override == 7
+        assert params.decay_days_override == 3
 
     def test_change_params(self) -> None:
         params = RETRIEVAL_PARAMS[TemporalCategory.CHANGE]
-        assert params.recency_weight == 0.5
+        assert params.recency_weight == 0.7
         assert params.temporal_sort is True
-        assert params.decay_days_override == 21
+        assert params.decay_days_override == 14
 
     def test_get_retrieval_params_helper(self) -> None:
         signal = TemporalSignal(
@@ -179,8 +179,8 @@ class TestRetrievalParams:
             source="dictionary",
         )
         params = get_retrieval_params(signal)
-        assert params.recency_weight == 0.5
-        assert params.decay_days_override == 7
+        assert params.recency_weight == 0.75
+        assert params.decay_days_override == 3
 
     def test_all_categories_have_params(self) -> None:
         for cat in TemporalCategory:

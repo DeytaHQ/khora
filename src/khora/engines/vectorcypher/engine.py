@@ -1073,8 +1073,11 @@ class VectorCypherEngine:
 
         # Cascade temporal detection: Aho-Corasick dictionary → (optional) semantic
         # Replaces the old regex + dateparser approach with categorized signals.
+        # Always run temporal detection (dictionary-based, <10μs, deterministic)
+        # even in raw mode — raw skips LLM enrichment but temporal category
+        # detection is critical for recency weighting and sort order.
         temporal_signal: TemporalSignal | None = None
-        if not raw and temporal_filter is None:
+        if temporal_filter is None:
             with trace_span("khora.vectorcypher.temporal_detect") as td_span:
                 detector = TemporalDetector()
                 temporal_signal = detector.detect(query)

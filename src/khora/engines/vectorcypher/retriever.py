@@ -257,7 +257,7 @@ class VectorCypherRetriever:
                 _pre_hits = _stats["hits"] if isinstance(_stats, dict) else None
                 query_embedding = await self._embedder.embed(query)
                 if _pre_hits is not None:
-                    _post_hits = self._embedder.cache_stats["hits"]  # type: ignore[attr-defined]
+                    _post_hits = self._embedder.cache_stats["hits"]
                     embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
 
             # Step 3: Vector search for entry points
@@ -272,6 +272,7 @@ class VectorCypherRetriever:
                     routing=routing,
                     effective_recency=params.recency_weight,
                     decay_days_override=params.decay_days_override,
+                    temporal_sort=params.temporal_sort,
                 )
             else:
                 # Complex/moderate path: VectorCypher with parallel execution
@@ -298,6 +299,7 @@ class VectorCypherRetriever:
                         routing=routing,
                         effective_recency=params.recency_weight,
                         decay_days_override=params.decay_days_override,
+                        temporal_sort=params.temporal_sort,
                     )
 
             # Store in cache
@@ -372,6 +374,7 @@ class VectorCypherRetriever:
                 routing=routing,
                 effective_recency=_tp.recency_weight,
                 decay_days_override=_tp.decay_days_override,
+                temporal_sort=_tp.temporal_sort,
             )
 
         # Compute adaptive depth based on entry entity count
@@ -498,6 +501,7 @@ class VectorCypherRetriever:
         *,
         effective_recency: float = 0.0,
         decay_days_override: int | None = None,
+        temporal_sort: bool = False,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
 
@@ -516,6 +520,7 @@ class VectorCypherRetriever:
             routing=routing,
             effective_recency=effective_recency,
             decay_days_override=decay_days_override,
+            temporal_sort=temporal_sort,
         )
 
         # Update metadata to indicate fallback was used
@@ -535,11 +540,16 @@ class VectorCypherRetriever:
         *,
         effective_recency: float = 0.0,
         decay_days_override: int | None = None,
+        temporal_sort: bool = False,
     ) -> VectorCypherResult:
         """Simple retrieval path - vector search only.
 
         For SIMPLE-routed queries, uses a lower hybrid_alpha (0.5) to give
         BM25 equal weight — lexical overlap is stronger for factual queries.
+
+        When temporal_sort is True, results are re-sorted by occurred_at DESC
+        after recency boosting so that the most recent chunks surface first
+        (matches the graph-path behaviour for temporal categories).
         """
         with trace_span("khora.vectorcypher.simple_retrieve", namespace_id=str(namespace_id)) as span:
             # WS8: Lower alpha for SIMPLE queries to boost BM25 signal
@@ -581,6 +591,23 @@ class VectorCypherRetriever:
                     fused = apply_recency_boost(fused, recency_scores, recency_weight=effective_recency)
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
+            # Apply temporal sort: re-order by occurred_at DESC so the most
+            # recent chunks rank first. This mirrors the graph path's
+            # temporal_sort and is critical for STATE_QUERY/RECENCY/CHANGE.
+            if temporal_sort and chunk_results:
+                from datetime import datetime as _dt
+
+                def _ts(pair: tuple[Chunk, float]) -> _dt:
+                    occ = (pair[0].metadata.custom or {}).get("occurred_at") if pair[0].metadata else None
+                    if occ:
+                        try:
+                            return _dt.fromisoformat(occ)
+                        except (ValueError, TypeError):
+                            pass
+                    return pair[0].created_at or _dt.min
+
+                chunk_results.sort(key=_ts, reverse=True)
+
             span.set_attribute("chunk_count", len(chunk_results))
             return VectorCypherResult(
                 chunks=chunk_results,
@@ -592,6 +619,7 @@ class VectorCypherRetriever:
                     "vector_chunk_count": len(chunk_results),
                     "graph_chunk_count": 0,
                     "effective_recency": effective_recency,
+                    "temporal_sort": temporal_sort,
                 },
             )
 
