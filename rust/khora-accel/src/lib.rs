@@ -39,6 +39,7 @@ fn configure_thread_pool(num_threads: usize) -> PyResult<()> {
 mod bm25;
 mod community;
 mod cosine;
+mod dedup;
 mod entity_resolution;
 mod keyword_extract;
 mod mmr;
@@ -122,6 +123,9 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Community detection
     m.add_function(wrap_pyfunction!(community::detect_communities, m)?)?;
+
+    // Chunk deduplication
+    m.add_function(wrap_pyfunction!(dedup::deduplicate_chunks, m)?)?;
 
     // Thread pool configuration
     m.add_function(wrap_pyfunction!(configure_thread_pool, m)?)?;

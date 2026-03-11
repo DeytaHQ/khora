@@ -166,8 +166,8 @@ class StorageSettings(BaseModel):
 
     # PostgreSQL (relational)
     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
-    postgresql_pool_size: int = Field(default=10, description="PostgreSQL connection pool size")
-    postgresql_max_overflow: int = Field(default=20, description="PostgreSQL max overflow connections")
+    postgresql_pool_size: int = Field(default=50, description="PostgreSQL connection pool size")
+    postgresql_max_overflow: int = Field(default=30, description="PostgreSQL max overflow connections")
 
     # New-style backend configs
     graph: GraphConfig | None = Field(default=None, description="Graph backend configuration (optional)")

@@ -45,6 +45,7 @@ try:
     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
     from khora_accel import configure_thread_pool as _rust_configure_thread_pool
     from khora_accel import cosine_similarity as _rust_cosine
+    from khora_accel import deduplicate_chunks as _rust_deduplicate_chunks
     from khora_accel import detect_communities as _rust_detect_communities
     from khora_accel import detect_temporal_category as _rust_detect_temporal_category
     from khora_accel import extract_keywords as _rust_extract_keywords
@@ -1452,3 +1453,83 @@ def configure_thread_pool(num_threads: int = 0) -> None:
         _rust_configure_thread_pool(num_threads)
     else:
         logger.debug("configure_thread_pool: Rust accel unavailable, skipping")
+
+
+# ---------------------------------------------------------------------------
+# Chunk deduplication (MinHash-based near-duplicate detection)
+# ---------------------------------------------------------------------------
+
+
+def _py_deduplicate_chunks(
+    chunks: list[str],
+    threshold: float = 0.85,
+    num_perm: int = 128,
+) -> list[tuple[int, int | None]]:
+    """Pure-Python fallback for chunk deduplication.
+
+    Uses character-level n-gram Jaccard similarity (slower but functional).
+    """
+    import hashlib
+
+    n = len(chunks)
+    if n == 0:
+        return []
+
+    def _char_ngrams(text: str, ng: int = 5) -> set[str]:
+        t = text.lower()
+        if len(t) < ng:
+            return {t} if t else set()
+        return {t[i : i + ng] for i in range(len(t) - ng + 1)}
+
+    def _minhash(shingles: set[str], num_perm: int) -> list[int]:
+        if not shingles:
+            return [2**63 - 1] * num_perm
+        sig = []
+        for seed in range(num_perm):
+            min_h = min(int(hashlib.md5(f"{seed}:{s}".encode()).hexdigest()[:16], 16) for s in shingles)
+            sig.append(min_h)
+        return sig
+
+    # Compute signatures
+    shingle_sets = [_char_ngrams(c) for c in chunks]
+    signatures = [_minhash(s, num_perm) for s in shingle_sets]
+
+    duplicate_of: list[int | None] = [None] * n
+
+    for i in range(n):
+        if duplicate_of[i] is not None:
+            continue
+        for j in range(i + 1, n):
+            if duplicate_of[j] is not None:
+                continue
+            # Estimate similarity from signatures
+            matching = sum(1 for a, b in zip(signatures[i], signatures[j]) if a == b)
+            sim = matching / num_perm
+            if sim >= threshold:
+                duplicate_of[j] = i
+
+    return [(i, duplicate_of[i]) for i in range(n)]
+
+
+def deduplicate_chunks(
+    chunks: list[str],
+    threshold: float = 0.85,
+    num_perm: int = 128,
+) -> list[tuple[int, int | None]]:
+    """Detect near-duplicate text chunks using MinHash similarity.
+
+    Returns a list of ``(chunk_index, duplicate_of_index)`` tuples.
+    ``duplicate_of_index`` is ``None`` for unique (canonical) chunks, or the
+    index of the earlier chunk this one duplicates.
+
+    Uses Rust MinHash + LSH banding when available, falling back to a pure-Python
+    character n-gram implementation.
+
+    Args:
+        chunks: Text chunks to deduplicate.
+        threshold: Jaccard similarity threshold (0.0–1.0). Default 0.85.
+        num_perm: Number of MinHash permutations. Default 128.
+    """
+    if _HAS_RUST:
+        return _rust_deduplicate_chunks(chunks, threshold, num_perm)
+    return _py_deduplicate_chunks(chunks, threshold, num_perm)
