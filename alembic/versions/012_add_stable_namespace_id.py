@@ -80,6 +80,18 @@ def upgrade() -> None:
               AND mn.namespace_id IS NULL
         """))
 
+    # Verify backfill completeness before enforcing NOT NULL
+    conn = op.get_bind()
+    orphans = conn.execute(
+        text("SELECT id, version FROM memory_namespaces WHERE namespace_id IS NULL LIMIT 5")
+    ).fetchall()
+    if orphans:
+        ids = ", ".join(str(row[0]) for row in orphans)
+        raise RuntimeError(
+            f"Backfill incomplete: {len(orphans)}+ rows still have NULL namespace_id "
+            f"(likely due to broken previous_version_id chain). Sample IDs: {ids}"
+        )
+
     # =========================================================================
     # Step 3: ALTER COLUMN to NOT NULL
     # =========================================================================

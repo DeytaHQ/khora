@@ -108,7 +108,6 @@ async with MemoryLake() as lake:
     # new_version.version = 2
     # new_version.is_active = False
 
-
     # 3. Populate the new version
     for doc in all_your_documents:
         await lake.remember(

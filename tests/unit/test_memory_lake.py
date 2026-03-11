@@ -37,13 +37,16 @@ def _mock_config() -> MagicMock:
     return mock_config
 
 
+_RESOLVE_ROW_ID = uuid4()
+
+
 def _mock_engine() -> MagicMock:
     """Create a mock engine with all required methods."""
     mock_eng = MagicMock()
 
-    # Storage and embedder
+    # Storage and embedder — resolve_namespace returns a distinct row-level ID
     mock_eng._storage = MagicMock()
-    mock_eng._storage.resolve_namespace = AsyncMock(side_effect=lambda ns_id: ns_id)
+    mock_eng._storage.resolve_namespace = AsyncMock(return_value=_RESOLVE_ROW_ID)
     mock_eng._embedder = MagicMock()
 
     # Lifecycle
@@ -434,7 +437,7 @@ class TestForget:
 
     @pytest.mark.asyncio
     async def test_forget_delegates_to_engine(self) -> None:
-        """forget() delegates to engine.forget() with required namespace."""
+        """forget() delegates to engine.forget() with resolved namespace."""
         lake = _make_lake(connected=True)
         doc_id = uuid4()
         ns_id = uuid4()
@@ -443,7 +446,7 @@ class TestForget:
 
         result = await lake.forget(doc_id, namespace=ns_id)
         assert result is True
-        lake._engine.forget.assert_awaited_once_with(doc_id, ns_id)
+        lake._engine.forget.assert_awaited_once_with(doc_id, _RESOLVE_ROW_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +472,7 @@ class TestEntityOperations:
 
     @pytest.mark.asyncio
     async def test_list_entities(self) -> None:
-        """list_entities delegates to engine with filters."""
+        """list_entities delegates to engine with resolved namespace."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
 
@@ -478,7 +481,7 @@ class TestEntityOperations:
 
         result = await lake.list_entities(namespace=ns_id, entity_type="PERSON", limit=50)
         assert result == mock_entities
-        lake._engine.list_entities.assert_awaited_once_with(ns_id, entity_type="PERSON", limit=50)
+        lake._engine.list_entities.assert_awaited_once_with(_RESOLVE_ROW_ID, entity_type="PERSON", limit=50)
 
     @pytest.mark.asyncio
     async def test_find_related_entities(self) -> None:
@@ -770,7 +773,7 @@ class TestConvenienceMethods:
 
     @pytest.mark.asyncio
     async def test_list_documents(self) -> None:
-        """list_documents delegates to engine with namespace."""
+        """list_documents delegates to engine with resolved namespace."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
 
@@ -779,7 +782,7 @@ class TestConvenienceMethods:
 
         result = await lake.list_documents(namespace=ns_id, limit=50)
         assert result == mock_docs
-        lake._engine.list_documents.assert_awaited_once_with(ns_id, limit=50)
+        lake._engine.list_documents.assert_awaited_once_with(_RESOLVE_ROW_ID, limit=50)
 
     @pytest.mark.asyncio
     async def test_search_entities(self) -> None:

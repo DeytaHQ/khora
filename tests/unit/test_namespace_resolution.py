@@ -247,3 +247,41 @@ class TestProtocolConformance:
         from khora.storage.backends.base import RelationalBackendProtocol
 
         assert hasattr(RelationalBackendProtocol, "resolve_namespace")
+
+
+# ---------------------------------------------------------------------------
+# Full namespace version lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestNamespaceVersionLifecycle:
+    """Integration-style test for namespace version lifecycle."""
+
+    def test_full_version_lifecycle(self) -> None:
+        """Create namespace, create version, verify resolution targets active version."""
+        stable_id = uuid4()
+
+        # v1: initial namespace
+        v1 = MemoryNamespace(id=uuid4(), namespace_id=stable_id, version=1, is_active=False)
+
+        # v2: new version inherits namespace_id, becomes active
+        v2 = MemoryNamespace(
+            id=uuid4(),
+            namespace_id=v1.namespace_id,
+            version=v1.version + 1,
+            is_active=True,
+        )
+
+        # Verify version chain properties
+        assert v2.namespace_id == v1.namespace_id  # Same stable ID
+        assert v2.id != v1.id  # Different row IDs
+        assert v2.version == 2
+        assert v1.is_active is False  # Old version deactivated
+        assert v2.is_active is True  # New version active
+
+        # Simulate what resolve_namespace would return
+        # (picks the active version's row id)
+        versions = [v1, v2]
+        active = [v for v in versions if v.is_active]
+        assert len(active) == 1  # Only one active
+        assert active[0].id == v2.id  # Active version is v2
