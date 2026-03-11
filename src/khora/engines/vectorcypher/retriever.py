@@ -288,6 +288,7 @@ class VectorCypherRetriever:
                         limit=limit,
                         routing=routing,
                         temporal_params=params,
+                        temporal_signal=temporal_signal,
                     )
                 except Neo4jError as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
@@ -326,6 +327,7 @@ class VectorCypherRetriever:
         routing: RoutingDecision,
         *,
         temporal_params: RetrievalParams | None = None,
+        temporal_signal: TemporalSignal | None = None,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
 
@@ -335,6 +337,12 @@ class VectorCypherRetriever:
         Implements adaptive depth: adjusts graph traversal depth based on the
         number of entry entities found. More entities = shallower depth (to avoid
         explosion), fewer entities = deeper depth (to find more context).
+
+        Bi-temporal versioning:
+        - EXPLICIT temporal queries with a date filter narrow entities to those
+          valid at the target date via ``version_valid_from``/``version_valid_to``.
+        - CHANGE temporal queries traverse ``[:SUPERSEDES]`` edges to surface
+          entity version history for comparison.
         """
         _tp = temporal_params or RETRIEVAL_PARAMS[TemporalCategory.NONE]
         base_depth = graph_depth or routing.graph_depth
@@ -397,9 +405,34 @@ class VectorCypherRetriever:
             prefer_current=_tp.temporal_sort,
         )
 
-        # Step 5: Fetch chunks from all entities
+        # Step 4b: Bi-temporal version filtering
+        # For EXPLICIT temporal queries with a parsed date, narrow entities to
+        # those whose version was valid at the target date.
+        version_history: list[dict[str, Any]] | None = None
         all_entity_ids = list({e[0] for e in entry_entities} | expanded_entities.keys())
 
+        if temporal_signal and temporal_signal.is_temporal:
+            if temporal_signal.category == TemporalCategory.EXPLICIT and temporal_signal.temporal_filter is not None:
+                # Derive a target date from the temporal filter
+                tf = temporal_signal.temporal_filter
+                target_date = getattr(tf, "occurred_before", None) or getattr(tf, "occurred_after", None)
+                if target_date is not None:
+                    with trace_span("khora.vectorcypher.version_filter", target_date=target_date.isoformat()):
+                        all_entity_ids = await self._version_filter_entities(
+                            entity_ids=all_entity_ids,
+                            namespace_id=namespace_id,
+                            target_date=target_date,
+                        )
+
+            elif temporal_signal.category == TemporalCategory.CHANGE:
+                # For CHANGE queries, fetch version history via SUPERSEDES edges
+                with trace_span("khora.vectorcypher.version_history", entity_count=len(all_entity_ids)):
+                    version_history = await self._fetch_version_history(
+                        entity_ids=all_entity_ids,
+                        namespace_id=namespace_id,
+                    )
+
+        # Step 5: Fetch chunks from all entities
         graph_chunks = await self._fetch_chunks_from_entities(
             entity_ids=all_entity_ids,
             namespace_id=namespace_id,
@@ -571,6 +604,8 @@ class VectorCypherRetriever:
                 "is_temporal": _tp.recency_weight > 0.2,
                 "recency_weight": _tp.recency_weight,
                 "effective_recency": effective_recency,
+                # Bi-temporal entity version history (populated for CHANGE queries)
+                "version_history": version_history,
                 # Search provenance: which method(s) found each chunk
                 "search_methods": search_methods,
             },
@@ -820,6 +855,133 @@ class VectorCypherRetriever:
 
             span.set_attribute("expanded_entity_count", len(entity_scores))
             return entity_scores, entity_info_map
+
+    async def _version_filter_entities(
+        self,
+        entity_ids: list[UUID],
+        namespace_id: UUID,
+        target_date: datetime,
+    ) -> list[UUID]:
+        """Filter entities to those valid at a specific point in time (bi-temporal).
+
+        Uses ``version_valid_from`` / ``version_valid_to`` properties on
+        Entity nodes.  Entities without version properties are treated as
+        always-valid (backward-compatible).
+
+        Also checks :EntityVersion snapshot nodes reachable via SUPERSEDES
+        edges, returning the snapshot ID when the current entity was not
+        yet valid at the target date but a prior version was.
+
+        Args:
+            entity_ids: Candidate entity IDs
+            namespace_id: Namespace constraint
+            target_date: The point-in-time to query for
+
+        Returns:
+            Filtered list of entity IDs (may include EntityVersion IDs)
+            that were valid at ``target_date``
+        """
+        if not entity_ids:
+            return []
+
+        # First: keep current Entity nodes that are valid at target_date,
+        # OR that have no version properties (backward-compatible).
+        # Second: for entities not valid at target_date, check if a prior
+        # EntityVersion was valid via SUPERSEDES edges.
+        query = """
+        UNWIND $entity_ids AS eid
+        MATCH (e:Entity {id: eid, namespace_id: $namespace_id})
+        OPTIONAL MATCH (e)-[:SUPERSEDES*1..10]->(ev:EntityVersion)
+        WHERE ev.namespace_id = $namespace_id
+          AND (ev.version_valid_from IS NULL OR ev.version_valid_from <= $target_date)
+          AND (ev.version_valid_to IS NULL OR ev.version_valid_to > $target_date)
+        WITH e, collect(ev.id) AS version_ids
+        WITH e, version_ids,
+             CASE
+               WHEN e.version_valid_from IS NULL THEN true
+               WHEN e.version_valid_from <= $target_date
+                    AND (e.version_valid_to IS NULL OR e.version_valid_to > $target_date)
+               THEN true
+               ELSE false
+             END AS current_valid
+        WHERE current_valid OR size(version_ids) > 0
+        RETURN CASE WHEN current_valid THEN e.id
+                    ELSE version_ids[0]
+               END AS id
+        """
+
+        async with self._neo4j_driver.session(database=self._database) as session:
+
+            async def _work(tx):
+                result = await tx.run(
+                    query,
+                    entity_ids=[str(eid) for eid in entity_ids],
+                    namespace_id=str(namespace_id),
+                    target_date=target_date.isoformat(),
+                )
+                return [record.data() async for record in result]
+
+            records = await session.execute_read(_work)
+
+        filtered = [UUID(r["id"]) for r in records if r["id"]]
+        logger.debug(
+            f"Version filter at {target_date.isoformat()}: " f"{len(entity_ids)} candidates -> {len(filtered)} valid"
+        )
+        return filtered
+
+    async def _fetch_version_history(
+        self,
+        entity_ids: list[UUID],
+        namespace_id: UUID,
+    ) -> list[dict[str, Any]]:
+        """Traverse SUPERSEDES edges to retrieve version history for entities.
+
+        Used for CHANGE-category temporal queries ("what did X used to be?",
+        "how has Y changed?").
+
+        Args:
+            entity_ids: Entity IDs to get version history for
+            namespace_id: Namespace constraint
+
+        Returns:
+            List of dicts with ``current_*`` and ``previous_*`` fields
+            representing the version transition chain.
+        """
+        if not entity_ids:
+            return []
+
+        query = """
+        UNWIND $entity_ids AS eid
+        MATCH (current:Entity {id: eid, namespace_id: $namespace_id})
+        OPTIONAL MATCH (current)-[s:SUPERSEDES]->(prev:EntityVersion)
+        RETURN current.id AS current_id,
+               current.name AS name,
+               current.entity_type AS entity_type,
+               current.attributes AS current_attributes,
+               current.version_valid_from AS current_valid_from,
+               current.version_valid_to AS current_valid_to,
+               prev.id AS previous_id,
+               prev.attributes AS previous_attributes,
+               prev.version_valid_from AS previous_valid_from,
+               prev.version_valid_to AS previous_valid_to,
+               s.superseded_at AS superseded_at
+        ORDER BY current.name, s.superseded_at DESC
+        """
+
+        async with self._neo4j_driver.session(database=self._database) as session:
+
+            async def _work(tx):
+                result = await tx.run(
+                    query,
+                    entity_ids=[str(eid) for eid in entity_ids],
+                    namespace_id=str(namespace_id),
+                )
+                return [record.data() async for record in result]
+
+            records = await session.execute_read(_work)
+
+        logger.debug(f"Version history: {len(records)} version records for {len(entity_ids)} entities")
+        return records
 
     async def _fetch_chunks_from_entities(
         self,

@@ -5,9 +5,41 @@
 
 use pyo3::prelude::*;
 
+/// Configure the global rayon thread pool.
+///
+/// Must be called before any parallel work is spawned.
+/// `num_threads = 0` defaults to `num_cpus / 2` (minimum 1).
+/// Returns `Ok(())` on success. Logs a warning if the pool was already initialised
+/// (rayon only allows one global pool per process).
+#[pyfunction]
+fn configure_thread_pool(num_threads: usize) -> PyResult<()> {
+    let threads = if num_threads == 0 {
+        std::cmp::max(1, num_cpus::get() / 2)
+    } else {
+        num_threads
+    };
+
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+    {
+        Ok(()) => {
+            eprintln!("[khora-accel] rayon global thread pool configured with {threads} threads");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!(
+                "[khora-accel] warning: rayon global pool already initialised, ignoring configure_thread_pool: {e}"
+            );
+            Ok(())
+        }
+    }
+}
+
 mod bm25;
 mod community;
 mod cosine;
+mod dedup;
 mod entity_resolution;
 mod keyword_extract;
 mod mmr;
@@ -91,6 +123,12 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Community detection
     m.add_function(wrap_pyfunction!(community::detect_communities, m)?)?;
+
+    // Chunk deduplication
+    m.add_function(wrap_pyfunction!(dedup::deduplicate_chunks, m)?)?;
+
+    // Thread pool configuration
+    m.add_function(wrap_pyfunction!(configure_thread_pool, m)?)?;
 
     Ok(())
 }

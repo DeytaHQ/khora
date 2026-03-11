@@ -166,8 +166,8 @@ class StorageSettings(BaseModel):
 
     # PostgreSQL (relational)
     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
-    postgresql_pool_size: int = Field(default=10, description="PostgreSQL connection pool size")
-    postgresql_max_overflow: int = Field(default=20, description="PostgreSQL max overflow connections")
+    postgresql_pool_size: int = Field(default=50, description="PostgreSQL connection pool size")
+    postgresql_max_overflow: int = Field(default=30, description="PostgreSQL max overflow connections")
 
     # New-style backend configs
     graph: GraphConfig | None = Field(default=None, description="Graph backend configuration (optional)")
@@ -278,6 +278,30 @@ class PipelineSettings(BaseModel):
     entity_types: list[str] = Field(
         default=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
         description="Entity types to extract",
+    )
+
+    # Selective extraction (KET-RAG style importance scoring)
+    # When enabled, chunks are scored by importance and only the top fraction
+    # are sent to LLM extraction. The rest get lightweight rule-based edges.
+    selective_extraction: bool = Field(
+        default=False,
+        description="Enable importance-based selective extraction to reduce LLM cost. "
+        "When True, only the most important chunks are sent to LLM extraction; "
+        "the rest get lightweight co-occurrence edges.",
+    )
+    extraction_importance_ratio: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of chunks to send to full LLM extraction (top-K by importance score). "
+        "Lower values save more cost but may miss entities in low-importance chunks.",
+    )
+    extraction_min_importance: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Minimum importance score threshold. Chunks scoring above this are always "
+        "sent to LLM extraction regardless of the ratio cutoff.",
     )
 
     # Entity embedding skip rules — skip embedding generation for low-value entity types
