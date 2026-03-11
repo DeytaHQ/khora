@@ -159,7 +159,7 @@ class TestRetrievalParams:
 
     def test_none_defaults(self) -> None:
         params = RETRIEVAL_PARAMS[TemporalCategory.NONE]
-        assert params.recency_weight == 0.1
+        assert params.recency_weight == 0.0
         assert params.temporal_sort is False
         assert params.decay_days_override is None
 

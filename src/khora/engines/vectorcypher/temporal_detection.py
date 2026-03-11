@@ -63,7 +63,7 @@ class RetrievalParams:
 # Conservative values protect non-temporal categories (implicit_inference,
 # abstention) while still discriminating temporal ones.
 RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
-    TemporalCategory.NONE: RetrievalParams(recency_weight=0.1, temporal_sort=False, recency_floor=0.5),
+    TemporalCategory.NONE: RetrievalParams(recency_weight=0.0, temporal_sort=False, recency_floor=0.5),
     TemporalCategory.EXPLICIT: RetrievalParams(recency_weight=0.3, temporal_sort=False, recency_floor=0.5),
     TemporalCategory.STATE_QUERY: RetrievalParams(recency_weight=0.5, temporal_sort=True, recency_floor=0.4),
     TemporalCategory.ORDINAL: RetrievalParams(
