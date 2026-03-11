@@ -11,7 +11,7 @@ import re as _re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import copy
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -102,6 +102,28 @@ def _sanitize_neo4j_label(label: str) -> str:
     return sanitized.upper() if sanitized else "RELATES_TO"
 
 
+def _derive_version_valid_from(entity: Entity) -> str:
+    """Derive the bi-temporal version_valid_from timestamp for an entity.
+
+    Resolution order:
+    1. ``occurred_at`` from entity metadata (chunk-level event time)
+    2. ``created_at`` from entity metadata (document creation time)
+    3. The entity's own ``created_at`` field
+    4. ``datetime.now(UTC)`` as last resort
+    """
+    meta = entity.metadata or {}
+    for key in ("occurred_at", "created_at"):
+        val = meta.get(key)
+        if val is not None:
+            if isinstance(val, datetime):
+                return val.isoformat()
+            if isinstance(val, str):
+                return val  # Already ISO-formatted
+    if entity.created_at:
+        return entity.created_at.isoformat()
+    return datetime.now(UTC).isoformat()
+
+
 def _entity_to_cypher_params(entity: Entity) -> dict[str, Any]:
     """Convert Entity to Cypher-compatible parameter dict."""
     return {
@@ -120,6 +142,8 @@ def _entity_to_cypher_params(entity: Entity) -> dict[str, Any]:
         "metadata": _serialize_dict(entity.metadata),
         "created_at": entity.created_at.isoformat(),
         "updated_at": entity.updated_at.isoformat(),
+        "version_valid_from": _derive_version_valid_from(entity),
+        "version_valid_to": None,  # Current version by default
     }
 
 
@@ -309,6 +333,19 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX entity_source_tool IF NOT EXISTS FOR (e:Entity) ON (e.source_tool)",
             # Entity confidence (for threshold filtering: min_entity_confidence)
             "CREATE INDEX entity_confidence IF NOT EXISTS FOR (e:Entity) ON (e.confidence)",
+            # Bi-temporal entity versioning indexes (on :Entity)
+            "CREATE INDEX entity_version_valid_from IF NOT EXISTS FOR (e:Entity) ON (e.version_valid_from)",
+            "CREATE INDEX entity_version_valid_to IF NOT EXISTS FOR (e:Entity) ON (e.version_valid_to)",
+            "CREATE INDEX entity_ns_version IF NOT EXISTS "
+            "FOR (e:Entity) ON (e.namespace_id, e.version_valid_from, e.version_valid_to)",
+            # Bi-temporal entity versioning indexes (on :EntityVersion snapshot nodes)
+            "CREATE INDEX ev_id IF NOT EXISTS FOR (ev:EntityVersion) ON (ev.id)",
+            "CREATE INDEX ev_namespace IF NOT EXISTS FOR (ev:EntityVersion) ON (ev.namespace_id)",
+            "CREATE INDEX ev_name IF NOT EXISTS FOR (ev:EntityVersion) ON (ev.name)",
+            "CREATE INDEX ev_version_valid_from IF NOT EXISTS FOR (ev:EntityVersion) ON (ev.version_valid_from)",
+            "CREATE INDEX ev_version_valid_to IF NOT EXISTS FOR (ev:EntityVersion) ON (ev.version_valid_to)",
+            "CREATE INDEX ev_ns_version IF NOT EXISTS "
+            "FOR (ev:EntityVersion) ON (ev.namespace_id, ev.version_valid_from, ev.version_valid_to)",
             # Episode indexes
             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
@@ -365,6 +402,8 @@ class Neo4jBackend(GraphBackendBase):
             # Expansion-generated types
             "CREATE INDEX rel_co_occurs_with_ns IF NOT EXISTS FOR ()-[r:CO_OCCURS_WITH]-() ON (r.namespace_id)",
             "CREATE INDEX rel_cross_referenced_ns IF NOT EXISTS FOR ()-[r:CROSS_REFERENCED]-() ON (r.namespace_id)",
+            # Bi-temporal entity versioning: SUPERSEDES edges
+            "CREATE INDEX rel_supersedes_at IF NOT EXISTS FOR ()-[r:SUPERSEDES]-() ON (r.superseded_at)",
             # confidence on highest-volume relationship types
             "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
             "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",
@@ -430,7 +469,9 @@ class Neo4jBackend(GraphBackendBase):
                 confidence: $confidence,
                 metadata: $metadata,
                 created_at: $created_at,
-                updated_at: $updated_at
+                updated_at: $updated_at,
+                version_valid_from: $version_valid_from,
+                version_valid_to: $version_valid_to
             })
             """
             await tx.run(query, **params)
@@ -586,12 +627,20 @@ class Neo4jBackend(GraphBackendBase):
 
         Matches on (namespace_id, name, entity_type).  Creates if new,
         updates if existing.  Returns (entity, is_new) tuples.
+
+        **Bi-temporal versioning**: When an existing entity's attributes
+        change, the old node is closed (``version_valid_to`` set) and a new
+        versioned node is created with a ``[:SUPERSEDES]`` edge pointing
+        from the new version to the old one.  When attributes are unchanged,
+        the entity is updated in-place as before.
         """
         if not entities:
             return []
 
         driver = self._get_driver()
 
+        # Phase 1: MERGE to create-or-detect existing entities.
+        # Returns whether the entity already existed and if attributes changed.
         _UPSERT_CYPHER = """
             UNWIND $rows AS row
             MERGE (e:Entity {namespace_id: row.namespace_id, name: row.name, entity_type: row.entity_type})
@@ -607,18 +656,71 @@ class Neo4jBackend(GraphBackendBase):
                 e.confidence = row.confidence,
                 e.metadata = row.metadata,
                 e.created_at = row.created_at,
-                e.updated_at = row.updated_at
+                e.updated_at = row.updated_at,
+                e.version_valid_from = row.version_valid_from,
+                e.version_valid_to = null
             ON MATCH SET
                 e.description = CASE WHEN size(row.description) > size(coalesce(e.description, ''))
                     THEN row.description ELSE e.description END,
-                e.attributes = row.attributes,
                 e.source_document_ids = (e.source_document_ids + row.source_document_ids)[-100..],
                 e.source_chunk_ids = (e.source_chunk_ids + row.source_chunk_ids)[-250..],
                 e.mention_count = e.mention_count + row.mention_count,
                 e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
-                e.updated_at = row.updated_at
+                e.updated_at = row.updated_at,
+                e.version_valid_from = coalesce(e.version_valid_from, row.version_valid_from),
+                e.attributes = row.attributes
             RETURN e.id AS id, e.name AS name, row.id AS input_id,
                    CASE WHEN e.id = row.id THEN true ELSE false END AS is_new
+        """
+
+        # Phase 2: For entities that existed AND had attribute changes,
+        # create a versioned snapshot and SUPERSEDES edge.
+        # This runs as a separate pass after the main MERGE.
+        #
+        # Snapshot nodes use the :EntityVersion label (not :Entity) to avoid
+        # violating the unique constraint on (namespace_id, name, entity_type).
+        # They retain the same properties for bi-temporal point-in-time queries.
+        _VERSION_CYPHER = """
+            UNWIND $version_rows AS vr
+            MATCH (current:Entity {id: vr.current_id})
+            WITH current, vr
+            CREATE (old:EntityVersion {
+                id: vr.old_version_id,
+                namespace_id: current.namespace_id,
+                name: current.name,
+                entity_type: current.entity_type,
+                description: vr.old_description,
+                attributes: vr.old_attributes,
+                source_document_ids: vr.old_source_document_ids,
+                source_chunk_ids: vr.old_source_chunk_ids,
+                mention_count: vr.old_mention_count,
+                valid_from: current.valid_from,
+                valid_until: current.valid_until,
+                confidence: vr.old_confidence,
+                metadata: vr.old_metadata,
+                created_at: current.created_at,
+                updated_at: vr.superseded_at,
+                version_valid_from: vr.old_version_valid_from,
+                version_valid_to: vr.superseded_at
+            })
+            CREATE (current)-[:SUPERSEDES {superseded_at: vr.superseded_at}]->(old)
+            SET current.version_valid_from = vr.new_version_valid_from
+            RETURN current.id AS id
+        """
+
+        # Pre-fetch query: capture attributes of existing entities before MERGE
+        # so we can detect attribute changes and create versioned snapshots.
+        _PREFETCH_CYPHER = """
+            UNWIND $keys AS key
+            MATCH (e:Entity {namespace_id: key.namespace_id, name: key.name, entity_type: key.entity_type})
+            RETURN e.id AS id, e.name AS name, e.entity_type AS entity_type,
+                   e.namespace_id AS namespace_id,
+                   e.attributes AS attributes, e.description AS description,
+                   e.source_document_ids AS source_document_ids,
+                   e.source_chunk_ids AS source_chunk_ids,
+                   e.mention_count AS mention_count,
+                   e.confidence AS confidence, e.metadata AS metadata,
+                   e.version_valid_from AS version_valid_from
         """
 
         results: list[tuple[Entity, bool]] = []
@@ -638,13 +740,91 @@ class Neo4jBackend(GraphBackendBase):
             batch = sorted_entities[start : start + batch_size]
             rows = [_entity_to_cypher_params(e) for e in batch]
 
+            # Phase 0: Snapshot existing entities before MERGE
+            prefetch_keys = [
+                {
+                    "namespace_id": str(e.namespace_id),
+                    "name": e.name,
+                    "entity_type": e.entity_type,
+                }
+                for e in batch
+            ]
+
+            async def _prefetch_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+                result = await tx.run(_PREFETCH_CYPHER, keys=prefetch_keys)
+                return await result.data()
+
+            # Phase 1: MERGE (create or update)
             async def _upsert_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
                 result = await tx.run(_UPSERT_CYPHER, rows=rows)
                 return await result.data()
 
             async with self._entity_key_gate.acquire(batch):
                 async with driver.session(database=self._database) as session:
+                    pre_existing = await session.execute_read(_prefetch_tx)
+                async with driver.session(database=self._database) as session:
                     records = await session.execute_write(_upsert_tx)
+
+            # Index pre-existing entities by (namespace_id, name, entity_type)
+            pre_map: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for rec in pre_existing:
+                key = (rec["namespace_id"], rec["name"], rec["entity_type"])
+                pre_map[key] = rec
+
+            # Phase 2: Create versioned snapshots for entities with changed attributes
+            now_iso = datetime.now(UTC).isoformat()
+            version_rows: list[dict[str, Any]] = []
+            input_id_to_row = {r["id"]: r for r in rows}
+
+            for record in records:
+                if record["is_new"]:
+                    continue
+                # This was a MATCH (existing entity) — check if attributes changed
+                neo4j_id = record["id"]
+                # Find the corresponding input row
+                input_id = record["input_id"]
+                input_row = input_id_to_row.get(input_id)
+                if not input_row:
+                    continue
+
+                pre_key = (input_row["namespace_id"], input_row["name"], input_row["entity_type"])
+                pre = pre_map.get(pre_key)
+                if not pre:
+                    continue
+
+                # Compare serialized attributes to detect real changes
+                if pre["attributes"] == input_row["attributes"]:
+                    continue
+
+                version_rows.append(
+                    {
+                        "current_id": neo4j_id,
+                        "old_version_id": str(uuid4()),
+                        "old_attributes": pre["attributes"],
+                        "old_description": pre.get("description", ""),
+                        "old_source_document_ids": pre.get("source_document_ids", []),
+                        "old_source_chunk_ids": pre.get("source_chunk_ids", []),
+                        "old_mention_count": pre.get("mention_count", 1),
+                        "old_confidence": pre.get("confidence", 1.0),
+                        "old_metadata": pre.get("metadata"),
+                        "old_version_valid_from": pre.get("version_valid_from") or now_iso,
+                        "superseded_at": now_iso,
+                        "new_version_valid_from": input_row["version_valid_from"],
+                    }
+                )
+
+            if version_rows:
+
+                async def _version_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+                    result = await tx.run(_VERSION_CYPHER, version_rows=version_rows)
+                    return await result.data()
+
+                async with driver.session(database=self._database) as session:
+                    version_records = await session.execute_write(_version_tx)
+                logger.debug(
+                    f"Bi-temporal versioning: created {len(version_records)} "
+                    f"SUPERSEDES snapshots for {len(version_rows)} changed entities"
+                )
 
             # Build result mapping - each input entity should get exactly one result
             input_id_to_entity = {str(e.id): e for e in batch}
@@ -809,7 +989,20 @@ class Neo4jBackend(GraphBackendBase):
                     logger.debug(f"Dynamic index creation for {sanitized}: {e}")
 
     def _record_to_entity(self, node: dict[str, Any]) -> Entity:
-        """Convert a Neo4j node to a domain Entity."""
+        """Convert a Neo4j node to a domain Entity.
+
+        Bi-temporal version properties (``version_valid_from``,
+        ``version_valid_to``) are stored in ``entity.metadata`` under the
+        keys ``"version_valid_from"`` and ``"version_valid_to"`` so that
+        callers can inspect version boundaries without a model change.
+        """
+        meta = _deserialize_dict(node.get("metadata"))
+        # Propagate bi-temporal version properties into metadata
+        if node.get("version_valid_from"):
+            meta["version_valid_from"] = node["version_valid_from"]
+        if node.get("version_valid_to"):
+            meta["version_valid_to"] = node["version_valid_to"]
+
         return Entity(
             id=UUID(node["id"]),
             namespace_id=UUID(node["namespace_id"]),
@@ -823,7 +1016,7 @@ class Neo4jBackend(GraphBackendBase):
             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
             confidence=node.get("confidence", 1.0),
-            metadata=_deserialize_dict(node.get("metadata")),
+            metadata=meta,
             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
         )

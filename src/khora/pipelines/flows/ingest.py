@@ -715,6 +715,9 @@ async def process_document(
     skip_embedding_mention_threshold: int = 1,
     entity_types: list[str],
     relationship_types: list[str],
+    selective_extraction: bool = False,
+    extraction_importance_ratio: float = 0.7,
+    extraction_min_importance: float = 0.2,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -744,6 +747,9 @@ async def process_document(
         extraction_context: Context dict for prompt template rendering
         entity_index: Shared EntityIndex for smart mode (skip per-doc DB loads)
         extraction_batch_size: Max texts per LLM extraction call
+        selective_extraction: Enable importance-based selective extraction
+        extraction_importance_ratio: Fraction of chunks to send to LLM
+        extraction_min_importance: Minimum importance score threshold
     """
     from ..tasks import chunk_document, embed_chunks, extract_entities
 
@@ -831,6 +837,9 @@ async def process_document(
                     max_tokens=extraction_max_tokens,
                     entity_types=entity_types,
                     relationship_types=relationship_types,
+                    selective_extraction=selective_extraction,
+                    extraction_importance_ratio=extraction_importance_ratio,
+                    extraction_min_importance=extraction_min_importance,
                 )
 
         embedded_chunks, (entities, relationships) = await asyncio.gather(
@@ -1190,6 +1199,9 @@ async def ingest_documents(
     skip_embedding_mention_threshold: int = 1,
     entity_types: list[str],
     relationship_types: list[str],
+    selective_extraction: bool = False,
+    extraction_importance_ratio: float = 0.7,
+    extraction_min_importance: float = 0.2,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -1216,6 +1228,9 @@ async def ingest_documents(
             caller runs resolution separately after all batches are processed.
         extraction_batch_size: Max texts per LLM extraction call (default 10)
         extraction_max_tokens: Max tokens for LLM extraction response. If None, uses extractor default.
+        selective_extraction: Enable importance-based selective extraction
+        extraction_importance_ratio: Fraction of chunks to send to LLM
+        extraction_min_importance: Minimum importance score threshold
 
     Returns:
         Summary of ingestion results
@@ -1320,6 +1335,9 @@ async def ingest_documents(
                 skip_embedding_mention_threshold=skip_embedding_mention_threshold,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
+                selective_extraction=selective_extraction,
+                extraction_importance_ratio=extraction_importance_ratio,
+                extraction_min_importance=extraction_min_importance,
             )
 
     results = await asyncio.gather(

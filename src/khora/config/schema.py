@@ -280,6 +280,30 @@ class PipelineSettings(BaseModel):
         description="Entity types to extract",
     )
 
+    # Selective extraction (KET-RAG style importance scoring)
+    # When enabled, chunks are scored by importance and only the top fraction
+    # are sent to LLM extraction. The rest get lightweight rule-based edges.
+    selective_extraction: bool = Field(
+        default=False,
+        description="Enable importance-based selective extraction to reduce LLM cost. "
+        "When True, only the most important chunks are sent to LLM extraction; "
+        "the rest get lightweight co-occurrence edges.",
+    )
+    extraction_importance_ratio: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of chunks to send to full LLM extraction (top-K by importance score). "
+        "Lower values save more cost but may miss entities in low-importance chunks.",
+    )
+    extraction_min_importance: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Minimum importance score threshold. Chunks scoring above this are always "
+        "sent to LLM extraction regardless of the ratio cutoff.",
+    )
+
     # Entity embedding skip rules — skip embedding generation for low-value entity types
     skip_embedding_entity_types: list[str] = Field(
         default=["DATE", "URL", "EMAIL"],

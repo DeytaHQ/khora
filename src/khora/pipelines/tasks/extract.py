@@ -25,11 +25,19 @@ async def extract_entities(
     entity_types: list[str],
     relationship_types: list[str],
     store_events: bool = True,
+    selective_extraction: bool = False,
+    extraction_importance_ratio: float = 0.7,
+    extraction_min_importance: float = 0.2,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
 
     Uses batch extraction for parallel processing of multiple chunks.
     Supports both legacy skills and new expertise configurations.
+
+    When ``selective_extraction`` is enabled, chunks are scored by importance
+    and only the top fraction (controlled by ``extraction_importance_ratio``)
+    are sent to LLM extraction.  The remaining chunks get lightweight
+    rule-based co-occurrence edges, reducing LLM cost significantly.
 
     Args:
         chunks: Chunks to extract from
@@ -46,6 +54,9 @@ async def extract_entities(
         entity_types: Required entity types to extract
         relationship_types: Required relationship types to extract
         store_events: Convert extracted events to EVENT entities with PARTICIPATED_IN relationships
+        selective_extraction: Enable importance-based selective extraction
+        extraction_importance_ratio: Fraction of chunks to send to LLM (top-K by score)
+        extraction_min_importance: Minimum importance score threshold
 
     Returns:
         Tuple of (entities, relationships)
@@ -57,6 +68,29 @@ async def extract_entities(
 
     if not chunks:
         return [], []
+
+    from loguru import logger
+
+    from khora._accel import normalize_entity_name
+
+    # --- Selective extraction: split chunks by importance ---
+    lightweight_chunks: list[Chunk] = []
+    llm_chunks = chunks
+
+    if selective_extraction and len(chunks) > 1:
+        from khora.extraction.importance import ChunkImportanceScorer
+
+        scorer = ChunkImportanceScorer()
+        llm_chunks, lightweight_chunks = scorer.select_for_extraction(
+            chunks,
+            ratio=extraction_importance_ratio,
+            min_score=extraction_min_importance,
+        )
+        logger.debug(
+            f"Selective extraction: {len(llm_chunks)} chunks to LLM, "
+            f"{len(lightweight_chunks)} chunks to lightweight edges "
+            f"(ratio={extraction_importance_ratio}, min_score={extraction_min_importance})"
+        )
 
     # Resolve expertise configuration
     resolved_expertise: ExpertiseConfig | None = None
@@ -98,10 +132,10 @@ async def extract_entities(
         extractor_kwargs["max_tokens"] = max_tokens
     extractor = LLMEntityExtractor(**extractor_kwargs)
 
-    # Extract from all chunks using adaptive token-budget-based batching
+    # Extract from LLM-selected chunks using adaptive token-budget-based batching
     # Groups chunks into batches that fit within the model's input token budget,
     # reducing API round-trips by up to 5x while avoiding context overflow
-    texts = [chunk.content for chunk in chunks]
+    texts = [chunk.content for chunk in llm_chunks]
 
     # Use adaptive batching based on token budget (auto-calculated from max_tokens)
     # batch_size=5 is the max texts per batch; actual batching respects token limits
@@ -115,16 +149,12 @@ async def extract_entities(
         max_input_tokens=None,  # Auto-calculate from model
     )
 
-    from loguru import logger
-
-    from khora._accel import normalize_entity_name
-
     # Process results
     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
     all_relationships: list[Relationship] = []
     events_converted = 0
 
-    for chunk, result in zip(chunks, results):
+    for chunk, result in zip(llm_chunks, results):
         # Process entities
         for extracted in result.entities:
             if extracted.confidence < min_entity_confidence:
@@ -260,5 +290,63 @@ async def extract_entities(
 
     if events_converted > 0:
         logger.debug(f"Converted {events_converted} extracted events to EVENT entities")
+
+    # --- Process lightweight chunks (selective extraction) ---
+    if lightweight_chunks:
+        from khora.extraction.importance import extract_lightweight_edges
+
+        lightweight_edge_count = 0
+        for chunk in lightweight_chunks:
+            edges = extract_lightweight_edges(chunk)
+            for entity1_name, rel_type, entity2_name in edges:
+                # Create or reuse entities for co-occurrence edges
+                norm1 = normalize_entity_name(entity1_name)
+                norm2 = normalize_entity_name(entity2_name)
+                key1 = f"{norm1}:CONCEPT"
+                key2 = f"{norm2}:CONCEPT"
+
+                for norm_name, key, original_name in [(norm1, key1, entity1_name), (norm2, key2, entity2_name)]:
+                    if key in all_entities:
+                        existing = all_entities[key]
+                        existing.mention_count += 1
+                        if chunk.document_id not in existing.source_document_ids:
+                            existing.source_document_ids.append(chunk.document_id)
+                        if chunk.id not in existing.source_chunk_ids:
+                            existing.source_chunk_ids.append(chunk.id)
+                    else:
+                        entity = Entity(
+                            namespace_id=chunk.namespace_id,
+                            name=norm_name,
+                            entity_type="CONCEPT",
+                            description="",
+                            source_document_ids=[chunk.document_id],
+                            source_chunk_ids=[chunk.id],
+                            confidence=0.5,  # Lower confidence for rule-based extraction
+                            valid_from=chunk.created_at,
+                        )
+                        all_entities[key] = entity
+
+                # Create CO_OCCURS_WITH relationship
+                if key1 != key2:
+                    relationship = Relationship(
+                        namespace_id=chunk.namespace_id,
+                        source_entity_id=all_entities[key1].id,
+                        target_entity_id=all_entities[key2].id,
+                        relationship_type=rel_type,
+                        description="Co-occurs in chunk",
+                        properties={"extraction_method": "lightweight"},
+                        source_document_ids=[chunk.document_id],
+                        source_chunk_ids=[chunk.id],
+                        confidence=0.4,  # Lower confidence for rule-based edges
+                        valid_from=chunk.created_at,
+                    )
+                    all_relationships.append(relationship)
+                    lightweight_edge_count += 1
+
+        if lightweight_edge_count > 0:
+            logger.debug(
+                f"Created {lightweight_edge_count} lightweight co-occurrence edges "
+                f"from {len(lightweight_chunks)} skipped chunks"
+            )
 
     return list(all_entities.values()), all_relationships
