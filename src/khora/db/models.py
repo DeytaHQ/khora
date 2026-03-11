@@ -65,6 +65,7 @@ class MemoryNamespaceModel(Base):
     __tablename__ = "memory_namespaces"
 
     id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     tenancy_mode: Mapped[str] = mapped_column(
         Enum(TenancyMode, name="tenancy_mode", create_constraint=True, values_callable=lambda e: [m.value for m in e]),
         default=TenancyMode.SHARED,
@@ -95,6 +96,8 @@ class MemoryNamespaceModel(Base):
     expertise_definitions: Mapped[list[ExpertiseDefinitionModel]] = relationship(
         "ExpertiseDefinitionModel", back_populates="namespace"
     )
+
+    __table_args__ = (UniqueConstraint("namespace_id", "version", name="uq_namespace_stable_id_version"),)
 
     def __repr__(self) -> str:
         return f"<MemoryNamespace(id={self.id!r})>"
