@@ -8,15 +8,22 @@ use pyo3::prelude::*;
 /// Configure the global rayon thread pool.
 ///
 /// Must be called before any parallel work is spawned.
-/// `num_threads = 0` defaults to `num_cpus / 2` (minimum 1).
+/// `num_threads = 0` uses mode-based defaults:
+///   - "query" (default): `num_cpus / 2` — lower latency for concurrent queries
+///   - "ingest": `num_cpus * 3 / 4` — higher throughput for batch ingestion
 /// Returns `Ok(())` on success. Logs a warning if the pool was already initialised
 /// (rayon only allows one global pool per process).
 #[pyfunction]
-fn configure_thread_pool(num_threads: usize) -> PyResult<()> {
-    let threads = if num_threads == 0 {
-        std::cmp::max(1, num_cpus::get() / 2)
-    } else {
+#[pyo3(signature = (num_threads=0, mode="query"))]
+fn configure_thread_pool(num_threads: usize, mode: &str) -> PyResult<()> {
+    let cpus = num_cpus::get();
+    let threads = if num_threads > 0 {
         num_threads
+    } else {
+        match mode {
+            "ingest" => std::cmp::max(1, cpus * 3 / 4),
+            _ => std::cmp::max(1, cpus / 2), // "query" default
+        }
     };
 
     match rayon::ThreadPoolBuilder::new()

@@ -1437,20 +1437,23 @@ def mmr_diversity_select(
 # ---------------------------------------------------------------------------
 
 
-def configure_thread_pool(num_threads: int = 0) -> None:
+def configure_thread_pool(num_threads: int = 0, *, mode: str = "query") -> None:
     """Configure the Rust rayon global thread pool.
 
     Call once during initialization to control parallelism in Rust-accelerated
-    operations.  ``0`` means auto, which defaults to ``num_cpus / 2``.
+    operations.  ``0`` means auto with mode-based defaults:
+      - ``"query"`` (default): ``num_cpus / 2`` — lower latency for concurrent queries
+      - ``"ingest"``: ``num_cpus * 3 / 4`` — higher throughput for batch ingestion
     Subsequent calls are no-ops (rayon only allows one global pool).
 
     Falls back to a no-op when the Rust accelerator is unavailable.
 
     Args:
-        num_threads: Number of threads for the rayon pool.  0 = auto (num_cpus/2).
+        num_threads: Number of threads for the rayon pool.  0 = auto.
+        mode: Workload mode — ``"query"`` or ``"ingest"``.
     """
     if _HAS_RUST:
-        _rust_configure_thread_pool(num_threads)
+        _rust_configure_thread_pool(num_threads, mode)
     else:
         logger.debug("configure_thread_pool: Rust accel unavailable, skipping")
 
@@ -1514,7 +1517,7 @@ def _py_deduplicate_chunks(
 def deduplicate_chunks(
     chunks: list[str],
     threshold: float = 0.85,
-    num_perm: int = 128,
+    num_perm: int = 64,
 ) -> list[tuple[int, int | None]]:
     """Detect near-duplicate text chunks using MinHash similarity.
 
@@ -1528,7 +1531,7 @@ def deduplicate_chunks(
     Args:
         chunks: Text chunks to deduplicate.
         threshold: Jaccard similarity threshold (0.0–1.0). Default 0.85.
-        num_perm: Number of MinHash permutations. Default 128.
+        num_perm: Number of MinHash permutations. Default 64.
     """
     if _HAS_RUST:
         return _rust_deduplicate_chunks(chunks, threshold, num_perm)

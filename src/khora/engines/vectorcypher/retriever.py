@@ -112,6 +112,7 @@ class RetrieverConfig:
 
     # Lazy entity expansion
     lazy_entity_expansion: bool = False
+    skeleton_core_ratio: float = 0.70  # Skip lazy expansion when > 0.6
 
     # Limits
     max_chunks: int = 50
@@ -449,7 +450,7 @@ class VectorCypherRetriever:
         # Step 6b: Lazy entity expansion for vector-only chunks
         # Recovers graph coverage lost from low skeleton_core_ratio by doing
         # lightweight keyword matching (no LLM) on chunks without MENTIONED_IN edges
-        if self._config.lazy_entity_expansion and vector_chunks:
+        if self._config.lazy_entity_expansion and vector_chunks and self._config.skeleton_core_ratio <= 0.6:
             graph_chunk_ids = {c[0] for c in graph_chunks}
             vector_only = [c for c in vector_chunks if c[0] not in graph_chunk_ids]
             if vector_only:

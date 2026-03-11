@@ -361,6 +361,7 @@ class VectorCypherEngine:
             query_cache_ttl_seconds=self._vc_config.query_cache_ttl_seconds,
             query_cache_max_size=self._vc_config.query_cache_max_size,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
+            skeleton_core_ratio=self._vc_config.skeleton_core_ratio,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
