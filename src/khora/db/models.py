@@ -65,6 +65,7 @@ class MemoryNamespaceModel(Base):
     __tablename__ = "memory_namespaces"
 
     id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # Stable ID shared across all versions of a namespace (for external references)
     namespace_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     tenancy_mode: Mapped[str] = mapped_column(
         Enum(TenancyMode, name="tenancy_mode", create_constraint=True, values_callable=lambda e: [m.value for m in e]),

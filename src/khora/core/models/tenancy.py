@@ -28,6 +28,13 @@ class MemoryNamespace:
     entities, and relationships are scoped to a namespace.
     Every query is filtered by namespace_id for multi-tenancy.
 
+    Two ID fields serve different purposes:
+    - id: Row-level identifier for this specific version (changes per version)
+    - namespace_id: Stable identifier shared across all versions of a namespace
+
+    Use ``namespace_id`` for external references and API calls.
+    Use ``id`` for internal versioning logic and child-table FK lookups.
+
     Supports versioning for data replacement workflows:
     - version: Incremental version number (starts at 1)
     - is_active: Whether this is the current active version
