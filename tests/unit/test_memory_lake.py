@@ -528,17 +528,19 @@ class TestNamespaceManagement:
 
     @pytest.mark.asyncio
     async def test_create_namespace_returns_namespace_id(self) -> None:
-        """create_namespace returns object with namespace_id field."""
+        """create_namespace returns object with distinct namespace_id."""
         from khora.core.models.tenancy import MemoryNamespace
 
         lake = _make_lake(connected=True)
-        ns_id = uuid4()
-        mock_ns = MemoryNamespace(id=ns_id, namespace_id=ns_id)
+        row_id = uuid4()
+        stable_id = uuid4()
+        mock_ns = MemoryNamespace(id=row_id, namespace_id=stable_id)
         lake._engine.create_namespace = AsyncMock(return_value=mock_ns)
 
         result = await lake.create_namespace()
-        assert result.namespace_id == ns_id
-        assert result.namespace_id == result.id  # version 1: namespace_id == id
+        assert result.namespace_id == stable_id
+        assert result.id == row_id
+        assert result.namespace_id != result.id  # namespace_id is independently generated
 
 
 # ---------------------------------------------------------------------------

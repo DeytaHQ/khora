@@ -94,15 +94,15 @@ class TestNamespaceModelToDomain:
         assert domain.namespace_id == stable_id
         assert domain.version == 2
 
-    def test_conversion_v1_namespace_id_equals_id(self) -> None:
-        """For version 1, namespace_id should equal id when set that way."""
+    def test_conversion_preserves_backfilled_namespace_id(self) -> None:
+        """For migrated v1 rows, namespace_id == id (set by backfill)."""
         from khora.storage.backends.postgresql import PostgreSQLBackend
 
         row_id = uuid4()
 
         model = MagicMock()
         model.id = row_id
-        model.namespace_id = row_id  # v1: namespace_id == id
+        model.namespace_id = row_id  # Backfill sets namespace_id = id
         model.tenancy_mode = "shared"
         model.version = 1
         model.is_active = True
@@ -120,41 +120,29 @@ class TestNamespaceModelToDomain:
 
 
 # ---------------------------------------------------------------------------
-# create_namespace — sets namespace_id = id for version 1
+# create_namespace — namespace_id is independently generated
 # ---------------------------------------------------------------------------
 
 
 class TestCreateNamespaceStableId:
-    """Tests for create_namespace setting namespace_id correctly."""
+    """Tests for create_namespace namespace_id handling."""
 
-    def test_v1_namespace_id_set_to_id_in_create(self) -> None:
-        """For version 1, create_namespace should set namespace_id = id."""
-        # Verify the logic in PostgreSQLBackend.create_namespace
-        # where namespace.version == 1 triggers namespace_id = namespace.id
-        row_id = uuid4()
-        ns = MemoryNamespace(id=row_id, version=1)
+    def test_new_namespace_has_independent_namespace_id(self) -> None:
+        """New namespace gets independently generated namespace_id != id."""
+        ns = MemoryNamespace(version=1)
 
-        # The logic: if version == 1 then namespace_id = id
-        if ns.version == 1:
-            resolved_namespace_id = ns.id
-        else:
-            resolved_namespace_id = ns.namespace_id
+        # Both are UUIDs but independently generated
+        assert ns.namespace_id != ns.id
 
-        assert resolved_namespace_id == row_id
-
-    def test_v2_namespace_id_preserved(self) -> None:
-        """For version > 1, create_namespace uses the existing namespace_id."""
+    def test_explicit_namespace_id_preserved(self) -> None:
+        """Explicitly set namespace_id is preserved through creation."""
         stable_id = uuid4()
         row_id = uuid4()
         ns = MemoryNamespace(id=row_id, namespace_id=stable_id, version=2)
 
-        if ns.version == 1:
-            resolved_namespace_id = ns.id
-        else:
-            resolved_namespace_id = ns.namespace_id
-
-        assert resolved_namespace_id == stable_id
-        assert resolved_namespace_id != row_id
+        assert ns.namespace_id == stable_id
+        assert ns.id == row_id
+        assert ns.namespace_id != ns.id
 
 
 # ---------------------------------------------------------------------------

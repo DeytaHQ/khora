@@ -146,15 +146,10 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""
-        # For initial creation (version 1), stable namespace_id = row id
-        if namespace.version == 1:
-            namespace_id = namespace.id
-        else:
-            namespace_id = namespace.namespace_id
         async with self._get_session() as session:
             model = MemoryNamespaceModel(
                 id=namespace.id,
-                namespace_id=namespace_id,
+                namespace_id=namespace.namespace_id,
                 tenancy_mode=namespace.tenancy_mode,
                 version=namespace.version,
                 is_active=namespace.is_active,
