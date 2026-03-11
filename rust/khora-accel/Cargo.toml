@@ -19,6 +19,7 @@ strsim = "0.11"
 regex = "1.10"
 aho-corasick = "1.1"
 hashbrown = "0.16"
+num_cpus = "1.16"
 ordered-float = "5.0"
 
 [features]

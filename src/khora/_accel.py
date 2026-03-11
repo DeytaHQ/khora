@@ -43,6 +43,7 @@ try:
     from khora_accel import batch_sequence_match as _rust_batch_sequence_match
     from khora_accel import batch_temporal_filter as _rust_batch_temporal_filter
     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
+    from khora_accel import configure_thread_pool as _rust_configure_thread_pool
     from khora_accel import cosine_similarity as _rust_cosine
     from khora_accel import detect_communities as _rust_detect_communities
     from khora_accel import detect_temporal_category as _rust_detect_temporal_category
@@ -1428,3 +1429,26 @@ def mmr_diversity_select(
                     max_sim[i] = d
 
     return selected
+
+
+# ---------------------------------------------------------------------------
+# Thread pool configuration
+# ---------------------------------------------------------------------------
+
+
+def configure_thread_pool(num_threads: int = 0) -> None:
+    """Configure the Rust rayon global thread pool.
+
+    Call once during initialization to control parallelism in Rust-accelerated
+    operations.  ``0`` means auto, which defaults to ``num_cpus / 2``.
+    Subsequent calls are no-ops (rayon only allows one global pool).
+
+    Falls back to a no-op when the Rust accelerator is unavailable.
+
+    Args:
+        num_threads: Number of threads for the rayon pool.  0 = auto (num_cpus/2).
+    """
+    if _HAS_RUST:
+        _rust_configure_thread_pool(num_threads)
+    else:
+        logger.debug("configure_thread_pool: Rust accel unavailable, skipping")

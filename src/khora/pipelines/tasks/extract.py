@@ -24,6 +24,7 @@ async def extract_entities(
     max_tokens: int | None = None,
     entity_types: list[str],
     relationship_types: list[str],
+    store_events: bool = True,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
 
@@ -44,6 +45,7 @@ async def extract_entities(
         max_tokens: Maximum tokens for LLM response
         entity_types: Required entity types to extract
         relationship_types: Required relationship types to extract
+        store_events: Convert extracted events to EVENT entities with PARTICIPATED_IN relationships
 
     Returns:
         Tuple of (entities, relationships)
@@ -113,11 +115,14 @@ async def extract_entities(
         max_input_tokens=None,  # Auto-calculate from model
     )
 
+    from loguru import logger
+
     from khora._accel import normalize_entity_name
 
     # Process results
     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
     all_relationships: list[Relationship] = []
+    events_converted = 0
 
     for chunk, result in zip(chunks, results):
         # Process entities
@@ -187,5 +192,73 @@ async def extract_entities(
                     valid_from=chunk.created_at,  # Inherit source timestamp
                 )
                 all_relationships.append(relationship)
+
+        # Convert extracted events to EVENT entities + PARTICIPATED_IN relationships
+        if store_events and result.events:
+            for event in result.events:
+                if event.confidence < min_entity_confidence:
+                    continue
+
+                # Build a deterministic name from description (truncated for readability)
+                event_name = event.description[:120].strip()
+                if not event_name:
+                    continue
+                normalized_name = normalize_entity_name(event_name)
+                event_key = f"{normalized_name}:EVENT"
+
+                # Build attributes from event fields
+                event_attrs: dict[str, Any] = {}
+                if event.event_type:
+                    event_attrs["event_type"] = event.event_type
+                if event.occurred_at:
+                    event_attrs["occurred_at"] = event.occurred_at
+                if event.participants:
+                    event_attrs["participants"] = event.participants
+
+                if event_key in all_entities:
+                    # Merge into existing event entity
+                    existing_event = all_entities[event_key]
+                    existing_event.mention_count += 1
+                    if chunk.document_id not in existing_event.source_document_ids:
+                        existing_event.source_document_ids.append(chunk.document_id)
+                    if chunk.id not in existing_event.source_chunk_ids:
+                        existing_event.source_chunk_ids.append(chunk.id)
+                else:
+                    event_entity = Entity(
+                        namespace_id=chunk.namespace_id,
+                        name=normalized_name,
+                        entity_type="EVENT",
+                        description=event.description,
+                        attributes=event_attrs,
+                        source_document_ids=[chunk.document_id],
+                        source_chunk_ids=[chunk.id],
+                        confidence=event.confidence,
+                        valid_from=chunk.created_at,
+                    )
+                    all_entities[event_key] = event_entity
+                    events_converted += 1
+
+                # Rebuild name→key lookup after adding event entity
+                entity_name_to_key[normalized_name] = event_key
+
+                # Create PARTICIPATED_IN relationships from participant entities to the event
+                for participant_name in event.participants:
+                    participant_key = entity_name_to_key.get(normalize_entity_name(participant_name))
+                    if participant_key:
+                        rel = Relationship(
+                            namespace_id=chunk.namespace_id,
+                            source_entity_id=all_entities[participant_key].id,
+                            target_entity_id=all_entities[event_key].id,
+                            relationship_type="PARTICIPATED_IN",
+                            description=f"Participated in: {event.description[:80]}",
+                            source_document_ids=[chunk.document_id],
+                            source_chunk_ids=[chunk.id],
+                            confidence=event.confidence,
+                            valid_from=chunk.created_at,
+                        )
+                        all_relationships.append(rel)
+
+    if events_converted > 0:
+        logger.debug(f"Converted {events_converted} extracted events to EVENT entities")
 
     return list(all_entities.values()), all_relationships

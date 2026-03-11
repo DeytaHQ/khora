@@ -316,9 +316,19 @@ class Neo4jBackend(GraphBackendBase):
         ]
 
         # Relationship property indexes require Neo4j ≥5.7 or Enterprise Edition
+        #
+        # Pre-build namespace_id indexes for all known relationship types so that
+        # queries don't hit full-scan penalties on the first encounter.  The
+        # dynamic _ensure_relationship_type_indexes() remains as a fallback for
+        # any LLM-generated types not listed here.
+        #
+        # Sources: general.yaml, slack.yaml, extraction skills (base.py),
+        #          LLM prompt examples, expansion modules (relationship_inferrer,
+        #          cross_tool_unifier).
         rel_indexes = [
+            # --- namespace_id on all known relationship types ---
+            # Core / general
             "CREATE INDEX rel_namespace IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.namespace_id)",
-            # namespace_id on high-volume relationship types
             "CREATE INDEX rel_collaborates_ns IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.namespace_id)",
             "CREATE INDEX rel_associated_ns IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.namespace_id)",
             "CREATE INDEX rel_depends_ns IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.namespace_id)",
@@ -326,6 +336,35 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX rel_works_for_ns IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.namespace_id)",
             "CREATE INDEX rel_implements_ns IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.namespace_id)",
             "CREATE INDEX rel_part_of_ns IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.namespace_id)",
+            # People & org relationships
+            "CREATE INDEX rel_knows_ns IF NOT EXISTS FOR ()-[r:KNOWS]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_manages_ns IF NOT EXISTS FOR ()-[r:MANAGES]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_reports_to_ns IF NOT EXISTS FOR ()-[r:REPORTS_TO]-() ON (r.namespace_id)",
+            # Location
+            "CREATE INDEX rel_located_in_ns IF NOT EXISTS FOR ()-[r:LOCATED_IN]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_headquartered_in_ns IF NOT EXISTS FOR ()-[r:HEADQUARTERED_IN]-() ON (r.namespace_id)",
+            # Temporal ordering
+            "CREATE INDEX rel_precedes_ns IF NOT EXISTS FOR ()-[r:PRECEDES]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_follows_ns IF NOT EXISTS FOR ()-[r:FOLLOWS]-() ON (r.namespace_id)",
+            # Business
+            "CREATE INDEX rel_competes_with_ns IF NOT EXISTS FOR ()-[r:COMPETES_WITH]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_partners_with_ns IF NOT EXISTS FOR ()-[r:PARTNERS_WITH]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_uses_ns IF NOT EXISTS FOR ()-[r:USES]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_created_by_ns IF NOT EXISTS FOR ()-[r:CREATED_BY]-() ON (r.namespace_id)",
+            # Slack / messaging
+            "CREATE INDEX rel_messaged_ns IF NOT EXISTS FOR ()-[r:MESSAGED]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_sent_message_to_ns IF NOT EXISTS FOR ()-[r:SENT_MESSAGE_TO]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_mentioned_ns IF NOT EXISTS FOR ()-[r:MENTIONED]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_posted_in_ns IF NOT EXISTS FOR ()-[r:POSTED_IN]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_member_of_ns IF NOT EXISTS FOR ()-[r:MEMBER_OF]-() ON (r.namespace_id)",
+            # Project / task
+            "CREATE INDEX rel_works_on_ns IF NOT EXISTS FOR ()-[r:WORKS_ON]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_assigned_to_ns IF NOT EXISTS FOR ()-[r:ASSIGNED_TO]-() ON (r.namespace_id)",
+            # Research / derivation
+            "CREATE INDEX rel_derived_from_ns IF NOT EXISTS FOR ()-[r:DERIVED_FROM]-() ON (r.namespace_id)",
+            # Expansion-generated types
+            "CREATE INDEX rel_co_occurs_with_ns IF NOT EXISTS FOR ()-[r:CO_OCCURS_WITH]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_cross_referenced_ns IF NOT EXISTS FOR ()-[r:CROSS_REFERENCED]-() ON (r.namespace_id)",
             # confidence on highest-volume relationship types
             "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",
             "CREATE INDEX rel_associated_conf IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.confidence)",

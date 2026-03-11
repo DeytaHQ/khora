@@ -181,6 +181,9 @@ class VectorCypherConfig:
     # Lazy entity expansion (recovers graph signal for non-core chunks)
     lazy_entity_expansion: bool = True
 
+    # Store extracted events as EVENT entities with PARTICIPATED_IN relationships
+    store_events: bool = True
+
     # Search thresholds
     fusion_hybrid_alpha: float = 0.7
     retriever_min_entity_similarity: float = 0.3
@@ -725,6 +728,7 @@ class VectorCypherEngine:
                 max_concurrent=self._vc_config.max_concurrent_extractions,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
+                store_events=self._vc_config.store_events,
             )
 
             if not entities:
@@ -847,6 +851,7 @@ class VectorCypherEngine:
             max_concurrent=self._vc_config.max_concurrent_extractions,
             entity_types=entity_types,
             relationship_types=relationship_types,
+            store_events=self._vc_config.store_events,
         )
 
         if not entities:
