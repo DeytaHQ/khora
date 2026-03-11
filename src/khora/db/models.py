@@ -28,6 +28,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -98,7 +99,14 @@ class MemoryNamespaceModel(Base):
         "ExpertiseDefinitionModel", back_populates="namespace"
     )
 
-    __table_args__ = (UniqueConstraint("namespace_id", "version", name="uq_namespace_stable_id_version"),)
+    __table_args__ = (
+        UniqueConstraint("namespace_id", "version", name="uq_namespace_stable_id_version"),
+        Index(
+            "idx_namespace_stable_active",
+            "namespace_id",
+            postgresql_where=text("is_active = true"),
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<MemoryNamespace(id={self.id!r})>"

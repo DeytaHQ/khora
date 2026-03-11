@@ -229,6 +229,14 @@ class TestNamespaceModelSchema:
         col = MemoryNamespaceModel.__table__.columns["namespace_id"]
         assert col.index is True
 
+    def test_namespace_id_has_partial_index(self) -> None:
+        """namespace_id should have a partial index for active-version lookups."""
+        from khora.db.models import MemoryNamespaceModel
+
+        table = MemoryNamespaceModel.__table__
+        index_names = [idx.name for idx in table.indexes]
+        assert "idx_namespace_stable_active" in index_names
+
 
 # ---------------------------------------------------------------------------
 # Protocol conformance — resolve_namespace in base protocol
