@@ -129,7 +129,7 @@ fn hash_band(band: &[u64]) -> u64 {
 /// Args:
 ///   chunks: text chunks to deduplicate.
 ///   threshold: Jaccard similarity threshold (default 0.85).
-///   num_perm: number of MinHash permutations (default 128).
+///   num_perm: number of MinHash permutations (default 64).
 ///
 /// The algorithm:
 /// 1. Compute MinHash signature for each chunk.
@@ -137,7 +137,7 @@ fn hash_band(band: &[u64]) -> u64 {
 /// 3. For each candidate pair, verify with exact MinHash similarity.
 /// 4. Mark later chunks as duplicates of earlier ones.
 #[pyfunction]
-#[pyo3(signature = (chunks, threshold=0.85, num_perm=128))]
+#[pyo3(signature = (chunks, threshold=0.85, num_perm=64))]
 pub fn deduplicate_chunks(
     py: Python<'_>,
     chunks: Vec<String>,

@@ -361,6 +361,7 @@ class VectorCypherEngine:
             query_cache_ttl_seconds=self._vc_config.query_cache_ttl_seconds,
             query_cache_max_size=self._vc_config.query_cache_max_size,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
+            skeleton_core_ratio=self._vc_config.skeleton_core_ratio,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
@@ -1114,6 +1115,21 @@ class VectorCypherEngine:
 
         context_text = "\n\n---\n\n".join(context_parts[:limit])
 
+        # Compute retrieval confidence signals for abstention calibration
+        scores = [s for _, s in validated_chunks]
+        if len(scores) >= 2:
+            mean_score = sum(scores) / len(scores)
+            score_variance = sum((s - mean_score) ** 2 for s in scores) / len(scores)
+            top_score_gap = scores[0] - scores[1]  # chunks are sorted by score
+        elif len(scores) == 1:
+            mean_score = scores[0]
+            score_variance = 0.0
+            top_score_gap = 0.0
+        else:
+            mean_score = 0.0
+            score_variance = 0.0
+            top_score_gap = 0.0
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -1131,6 +1147,10 @@ class VectorCypherEngine:
                 "temporal_category": temporal_signal.category.value if temporal_signal else None,
                 "temporal_confidence": temporal_signal.confidence if temporal_signal else None,
                 "is_temporal": temporal_signal.is_temporal if temporal_signal else False,
+                # Retrieval confidence signals (for abstention calibration)
+                "retrieval_mean_score": round(mean_score, 4),
+                "retrieval_score_variance": round(score_variance, 6),
+                "retrieval_top_score_gap": round(top_score_gap, 4),
                 **result.metadata,
             },
         )

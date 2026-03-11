@@ -112,6 +112,7 @@ class RetrieverConfig:
 
     # Lazy entity expansion
     lazy_entity_expansion: bool = False
+    skeleton_core_ratio: float = 0.70  # Skip lazy expansion when > 0.6
 
     # Limits
     max_chunks: int = 50
@@ -446,10 +447,37 @@ class VectorCypherRetriever:
         # This was started at the beginning and may already be done
         vector_chunks = await vector_chunks_task
 
+        # Step 6a: Temporal query decomposition for CHANGE queries
+        # Runs a second vector search focused on the "current state" sub-query
+        # to ensure both past and present evidence are retrieved. The original
+        # query naturally retrieves past-state chunks ("used to", "previously"),
+        # while the decomposed sub-query targets current-state chunks.
+        if temporal_signal and temporal_signal.category == TemporalCategory.CHANGE and version_history:
+            current_state_query = self._decompose_change_query(query)
+            if current_state_query and current_state_query != query:
+                with trace_span("khora.vectorcypher.change_decomposition", sub_query=current_state_query):
+                    sub_embedding = await self._embedder.embed(current_state_query)
+                    sub_vector_chunks = await self._vector_search_chunks(
+                        query_embedding=sub_embedding,
+                        namespace_id=namespace_id,
+                        temporal_filter=None,  # No temporal filter — want current state
+                        query_text=current_state_query,
+                        limit=limit,
+                    )
+                    # Merge sub-query results, deduplicating by chunk ID
+                    existing_ids = {c[0] for c in vector_chunks}
+                    new_chunks = [c for c in sub_vector_chunks if c[0] not in existing_ids]
+                    if new_chunks:
+                        vector_chunks = vector_chunks + new_chunks
+                        logger.debug(
+                            f"CHANGE decomposition added {len(new_chunks)} chunks "
+                            f"from sub-query: {current_state_query[:60]}"
+                        )
+
         # Step 6b: Lazy entity expansion for vector-only chunks
         # Recovers graph coverage lost from low skeleton_core_ratio by doing
         # lightweight keyword matching (no LLM) on chunks without MENTIONED_IN edges
-        if self._config.lazy_entity_expansion and vector_chunks:
+        if self._config.lazy_entity_expansion and vector_chunks and self._config.skeleton_core_ratio <= 0.6:
             graph_chunk_ids = {c[0] for c in graph_chunks}
             vector_only = [c for c in vector_chunks if c[0] not in graph_chunk_ids]
             if vector_only:
@@ -856,6 +884,66 @@ class VectorCypherRetriever:
             span.set_attribute("expanded_entity_count", len(entity_scores))
             return entity_scores, entity_info_map
 
+    @staticmethod
+    def _decompose_change_query(query: str) -> str | None:
+        """Decompose a CHANGE query into a current-state sub-query.
+
+        Rewrites temporal-change phrasing into a present-tense question about
+        the entity's current state, so a second vector search retrieves
+        up-to-date evidence alongside the historical evidence from the
+        original query.
+
+        Examples:
+            "What did Alice used to play?" → "What does Alice play now?"
+            "Does she still work at Google?" → "Where does she work now?"
+            "He switched from piano to guitar" → "What instrument does he play now?"
+        """
+        import re
+
+        q = query.strip()
+        ql = q.lower()
+
+        # Pattern: "used to <verb>" → "currently <verb>"
+        m = re.search(r"(\w+)\s+used\s+to\s+(.+?)(?:\?|$)", ql)
+        if m:
+            subject = m.group(1)
+            rest = m.group(2).rstrip("? .")
+            return f"What does {subject} {rest} now?"
+
+        # Pattern: "still <verb>" → current state question
+        m = re.search(r"(?:does|do|is)\s+(\w+)\s+still\s+(.+?)(?:\?|$)", ql)
+        if m:
+            subject = m.group(1)
+            rest = m.group(2).rstrip("? .")
+            return f"What does {subject} {rest} now?"
+
+        # Pattern: "switched from X to Y" / "changed from X to Y"
+        m = re.search(r"(\w+)\s+(?:switched|changed|moved|transitioned)\s+(?:from\s+.+?\s+)?to\s+(.+?)(?:\?|$)", ql)
+        if m:
+            subject = m.group(1)
+            new_state = m.group(2).rstrip("? .")
+            return f"What is {subject} {new_state} now?"
+
+        # Pattern: "no longer" → ask about current state
+        m = re.search(r"(\w+)\s+(?:is|was)\s+no\s+longer\s+(.+?)(?:\?|$)", ql)
+        if m:
+            subject = m.group(1)
+            old_state = m.group(2).rstrip("? .")
+            return f"What is {subject} doing instead of {old_state}?"
+
+        # Fallback: prepend "currently" to make it present-focused
+        if any(kw in ql for kw in ("used to", "still", "previously", "before", "changed", "switched")):
+            # Strip common change keywords and add "currently"
+            cleaned = re.sub(
+                r"\b(used to|still|previously|formerly|no longer)\b",
+                "currently",
+                ql,
+                count=1,
+            )
+            return cleaned.strip()
+
+        return None
+
     async def _version_filter_entities(
         self,
         entity_ids: list[UUID],
@@ -891,7 +979,7 @@ class VectorCypherRetriever:
         query = """
         UNWIND $entity_ids AS eid
         MATCH (e:Entity {id: eid, namespace_id: $namespace_id})
-        OPTIONAL MATCH (e)-[:SUPERSEDES*1..10]->(ev:EntityVersion)
+        OPTIONAL MATCH (e)-[:SUPERSEDES]->(ev:EntityVersion)
         WHERE ev.namespace_id = $namespace_id
           AND (ev.version_valid_from IS NULL OR ev.version_valid_from <= $target_date)
           AND (ev.version_valid_to IS NULL OR ev.version_valid_to > $target_date)

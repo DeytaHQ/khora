@@ -291,6 +291,60 @@ async def extract_entities(
     if events_converted > 0:
         logger.debug(f"Converted {events_converted} extracted events to EVENT entities")
 
+    # --- Apply STATE_CHANGE entities to affected entities ---
+    # When a STATE_CHANGE entity is extracted (e.g. "Alice switched from piano to guitar"),
+    # propagate the new_state to the affected entity's attributes.  This triggers
+    # bi-temporal version creation during Neo4j upsert (SUPERSEDES edge + EntityVersion),
+    # which is required for counterfactual reasoning to work.
+    state_changes_applied = 0
+    for key, entity in list(all_entities.items()):
+        if entity.entity_type != "STATE_CHANGE":
+            continue
+        attrs = entity.attributes
+        affected_name = attrs.get("entity_affected", "")
+        new_state = attrs.get("new_state", "")
+        attr_changed = attrs.get("attribute_changed", "")
+        if not affected_name or not new_state:
+            continue
+
+        # Find the affected entity
+        affected_norm = normalize_entity_name(affected_name)
+        affected_key = entity_name_to_key.get(affected_norm)
+        if not affected_key or affected_key not in all_entities:
+            continue
+
+        affected_entity = all_entities[affected_key]
+        if attr_changed:
+            affected_entity.attributes[attr_changed] = new_state
+        # Set valid_from on the STATE_CHANGE to the transition date if available
+        transition_date = attrs.get("transition_date")
+        if transition_date:
+            try:
+                from datetime import datetime as _dt
+
+                parsed = _dt.fromisoformat(transition_date.replace("Z", "+00:00"))
+                entity.valid_from = parsed
+            except (ValueError, TypeError):
+                pass
+
+        # Create INVOLVES relationship from affected entity to the STATE_CHANGE
+        rel = Relationship(
+            namespace_id=entity.namespace_id,
+            source_entity_id=affected_entity.id,
+            target_entity_id=entity.id,
+            relationship_type="INVOLVES",
+            description=f"State changed: {attrs.get('previous_state', '?')} → {new_state}",
+            source_document_ids=entity.source_document_ids[:],
+            source_chunk_ids=entity.source_chunk_ids[:],
+            confidence=entity.confidence,
+            valid_from=entity.valid_from,
+        )
+        all_relationships.append(rel)
+        state_changes_applied += 1
+
+    if state_changes_applied > 0:
+        logger.debug(f"Applied {state_changes_applied} STATE_CHANGE entities to affected entities")
+
     # --- Process lightweight chunks (selective extraction) ---
     if lightweight_chunks:
         from khora.extraction.importance import extract_lightweight_edges

@@ -402,7 +402,11 @@ class Neo4jBackend(GraphBackendBase):
             # Expansion-generated types
             "CREATE INDEX rel_co_occurs_with_ns IF NOT EXISTS FOR ()-[r:CO_OCCURS_WITH]-() ON (r.namespace_id)",
             "CREATE INDEX rel_cross_referenced_ns IF NOT EXISTS FOR ()-[r:CROSS_REFERENCED]-() ON (r.namespace_id)",
+            # Entity-to-chunk / event participation
+            "CREATE INDEX rel_mentioned_in_ns IF NOT EXISTS FOR ()-[r:MENTIONED_IN]-() ON (r.namespace_id)",
+            "CREATE INDEX rel_participated_in_ns IF NOT EXISTS FOR ()-[r:PARTICIPATED_IN]-() ON (r.namespace_id)",
             # Bi-temporal entity versioning: SUPERSEDES edges
+            "CREATE INDEX rel_supersedes_ns IF NOT EXISTS FOR ()-[r:SUPERSEDES]-() ON (r.namespace_id)",
             "CREATE INDEX rel_supersedes_at IF NOT EXISTS FOR ()-[r:SUPERSEDES]-() ON (r.superseded_at)",
             # confidence on highest-volume relationship types
             "CREATE INDEX rel_collaborates_conf IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.confidence)",

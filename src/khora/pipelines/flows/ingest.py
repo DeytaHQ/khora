@@ -1162,6 +1162,8 @@ async def process_document(
             "relationships": stored_count,
             "extracted_relationships": len(relationships),
             "inferred_relationships": len(inferred_relationships),
+            "entity_ids": [e.id for e in entities],
+            "chunk_ids": [c.id for c in chunks],
         }
 
     except Exception as e:
@@ -1381,6 +1383,22 @@ async def ingest_documents(
 
     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
 
+    # Phase 4: Session-level episode creation
+    # Groups ingested documents by thread_id (session), creates Episode nodes
+    # linking sessions to their entities. This enables session-aware retrieval
+    # and entity state tracking across conversations.
+    episodes_created = 0
+    try:
+        episodes_created = await _create_session_episodes(
+            namespace_id=namespace_id,
+            documents=documents,
+            staged_docs=staged_docs,
+            successful_results=successful_results,
+            storage=storage,
+        )
+    except Exception as e:
+        logger.warning(f"Session episode creation failed (non-fatal): {e}")
+
     return {
         "total_documents": len(documents),
         "processed_documents": len(successful_results),
@@ -1390,9 +1408,100 @@ async def ingest_documents(
         "total_entities": total_entities,
         "total_relationships": total_relationships,
         "total_inferred_relationships": total_inferred,
+        "episodes_created": episodes_created,
         "per_document_results": successful_results,
         **({"smart_resolution": smart_resolution_result} if smart_resolution_result else {}),
     }
+
+
+async def _create_session_episodes(
+    namespace_id: UUID,
+    documents: list[dict[str, Any]],
+    staged_docs: list[Any],
+    successful_results: list[dict[str, Any]],
+    storage: Any,
+) -> int:
+    """Group ingested documents by session (thread_id) and create Episode nodes.
+
+    Each session becomes an Episode node linked to the entities extracted from
+    documents in that session.  This enables session-aware retrieval: when
+    querying about events in a conversation, the retriever can traverse
+    Episode→Entity edges to surface all relevant context from that session.
+
+    Returns the number of episodes created.
+    """
+    from collections import defaultdict
+
+    from khora.core.models import Episode
+
+    # Build thread_id → list of (doc, result) mapping
+    sessions: dict[str, list[tuple[Any, dict[str, Any]]]] = defaultdict(list)
+    for doc, result in zip(staged_docs, successful_results):
+        if isinstance(result, Exception):
+            continue
+        # Get thread_id from original doc metadata
+        meta = getattr(doc, "metadata", None)
+        custom = getattr(meta, "custom", {}) if meta else {}
+        thread_id = custom.get("thread_id")
+        if not thread_id:
+            continue
+        sessions[thread_id].append((doc, result))
+
+    if not sessions:
+        return 0
+
+    episodes_created = 0
+    for thread_id, doc_results in sessions.items():
+        # Collect all entity IDs and document IDs from this session
+        entity_ids: list[UUID] = []
+        doc_ids: list[UUID] = []
+        chunk_ids: list[UUID] = []
+        timestamps: list[datetime] = []
+
+        for doc, result in doc_results:
+            doc_ids.append(doc.id)
+            if doc.source_timestamp:
+                timestamps.append(doc.source_timestamp)
+            elif doc.created_at:
+                timestamps.append(doc.created_at)
+            # Collect entity IDs from result
+            for eid in result.get("entity_ids", []):
+                if eid not in entity_ids:
+                    entity_ids.append(eid)
+            for cid in result.get("chunk_ids", []):
+                if cid not in chunk_ids:
+                    chunk_ids.append(cid)
+
+        if not timestamps:
+            continue
+
+        # Episode spans from earliest to latest message in session
+        occurred_at = min(timestamps)
+        end_time = max(timestamps)
+        duration = int((end_time - occurred_at).total_seconds()) if end_time > occurred_at else None
+
+        episode = Episode(
+            namespace_id=namespace_id,
+            name=f"session:{thread_id}",
+            description=f"Conversation session {thread_id} with {len(doc_results)} messages",
+            occurred_at=occurred_at,
+            duration_seconds=duration,
+            entity_ids=entity_ids[:100],  # Cap to avoid overly large episodes
+            source_document_ids=doc_ids,
+            source_chunk_ids=chunk_ids[:200],
+            metadata={"thread_id": thread_id, "message_count": len(doc_results)},
+        )
+
+        try:
+            await storage.create_episode(episode)
+            episodes_created += 1
+        except Exception as e:
+            logger.debug(f"Failed to create episode for session {thread_id}: {e}")
+
+    if episodes_created > 0:
+        logger.info(f"Created {episodes_created} session episodes from {len(sessions)} sessions")
+
+    return episodes_created
 
 
 async def run_smart_resolution(
