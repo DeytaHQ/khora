@@ -95,6 +95,23 @@ class DateAttributes(BaseModel):
     precision: str | None = None
 
 
+class StateChangeAttributes(BaseModel):
+    """Validated attributes for STATE_CHANGE entities.
+
+    Captures entity state transitions with explicit pre/post states and
+    transition dates.  Used by bi-temporal versioning to create SUPERSEDES
+    edges and by counterfactual reasoning to verify state validity at a
+    given point in time.
+    """
+
+    entity_affected: str
+    previous_state: str
+    new_state: str
+    transition_date: str | None = None
+    attribute_changed: str | None = None  # e.g. "job_title", "location", "instrument"
+    reason: str | None = None
+
+
 # Registry mapping entity type names to Pydantic models.
 # Extensible via register_attribute_schema().
 ATTRIBUTE_SCHEMAS: dict[str, type[BaseModel]] = {
@@ -106,6 +123,7 @@ ATTRIBUTE_SCHEMAS: dict[str, type[BaseModel]] = {
     "TECHNOLOGY": TechnologyAttributes,
     "PRODUCT": ProductAttributes,
     "DATE": DateAttributes,
+    "STATE_CHANGE": StateChangeAttributes,
 }
 
 

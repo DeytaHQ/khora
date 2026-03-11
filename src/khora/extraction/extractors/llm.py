@@ -88,7 +88,7 @@ Guidelines:
 - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
 - Include aliases for entities that have multiple names/abbreviations
 - Extract temporal information when dates, times, or relative time references appear
-- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with previous_state and new_state attributes, and use INVOLVES to link it to affected entities
+- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with these required attributes: {{"entity_affected": "name of entity whose state changed", "previous_state": "old value", "new_state": "new value", "attribute_changed": "what changed (e.g. job_title, location, instrument)", "transition_date": "ISO date or null"}}. Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
 - For EVENT detection: when text describes specific occurrences, extract the event with date, participants, and location when available
 - Use temporal relationships (PRECEDES, FOLLOWS, INVOLVES) to connect events and state changes to other entities
 - Ensure relationship source/target names match extracted entity names exactly
