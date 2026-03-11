@@ -107,7 +107,7 @@ async with MemoryLake() as lake:
     )
     # new_version.version = 2
     # new_version.is_active = False
-    # new_version.previous_version_id = current.id
+
 
     # 3. Populate the new version
     for doc in all_your_documents:

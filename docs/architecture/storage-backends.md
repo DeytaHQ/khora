@@ -54,7 +54,7 @@ CREATE TABLE memory_namespaces (
     tenancy_mode VARCHAR(20),  -- shared or isolated
     version INTEGER DEFAULT 1,
     is_active BOOLEAN DEFAULT TRUE,
-    previous_version_id UUID REFERENCES memory_namespaces(id),
+    namespace_id UUID NOT NULL,
     config_overrides JSONB DEFAULT '{}',
     sync_checkpoints JSONB DEFAULT '{}',
     metadata JSONB DEFAULT '{}',

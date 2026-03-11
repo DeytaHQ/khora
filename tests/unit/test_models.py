@@ -452,7 +452,6 @@ class TestTenancyModels:
             id=uuid4(),
             namespace_id=v1.namespace_id,
             version=2,
-            previous_version_id=v1.id,
         )
         assert v2.namespace_id == v1.namespace_id
         assert v2.id != v1.id

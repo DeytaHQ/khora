@@ -80,7 +80,6 @@ class TestNamespaceModelToDomain:
         model.tenancy_mode = "shared"
         model.version = 2
         model.is_active = True
-        model.previous_version_id = uuid4()
         model.config_overrides = {}
         model.sync_checkpoints = {}
         model.metadata_ = {}
@@ -106,7 +105,6 @@ class TestNamespaceModelToDomain:
         model.tenancy_mode = "shared"
         model.version = 1
         model.is_active = True
-        model.previous_version_id = None
         model.config_overrides = {}
         model.sync_checkpoints = {}
         model.metadata_ = {}
@@ -171,13 +169,11 @@ class TestCreateNamespaceVersionInheritance:
             namespace_id=parent.namespace_id,
             version=parent.version + 1,
             is_active=True,
-            previous_version_id=parent.id,
         )
 
         assert child.namespace_id == parent_namespace_id
         assert child.id != parent_row_id
         assert child.version == 2
-        assert child.previous_version_id == parent_row_id
 
     def test_version_without_parent_gets_new_namespace_id(self) -> None:
         """Version without parent (fresh namespace) gets a new namespace_id."""

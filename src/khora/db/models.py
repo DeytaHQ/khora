@@ -60,7 +60,6 @@ class MemoryNamespaceModel(Base):
     Supports versioning for data replacement workflows:
     - version: Incremental version number (starts at 1)
     - is_active: Whether this is the current active version
-    - previous_version_id: Reference to the previous version (if any)
     """
 
     __tablename__ = "memory_namespaces"
@@ -76,10 +75,6 @@ class MemoryNamespaceModel(Base):
     # Versioning fields
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    previous_version_id: Mapped[UUIDType | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="SET NULL"), nullable=True
-    )
-
     config_overrides: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     sync_checkpoints: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)

@@ -153,7 +153,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 tenancy_mode=namespace.tenancy_mode,
                 version=namespace.version,
                 is_active=namespace.is_active,
-                previous_version_id=namespace.previous_version_id,
                 config_overrides=namespace.config_overrides,
                 sync_checkpoints=namespace.sync_checkpoints,
                 metadata_=namespace.metadata,
@@ -210,7 +209,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 .values(
                     version=namespace.version,
                     is_active=namespace.is_active,
-                    previous_version_id=namespace.previous_version_id,
                     config_overrides=namespace.config_overrides,
                     sync_checkpoints=namespace.sync_checkpoints,
                     metadata_=namespace.metadata,
@@ -228,7 +226,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
             tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
             version=model.version,
             is_active=model.is_active,
-            previous_version_id=model.previous_version_id,
             config_overrides=model.config_overrides,
             sync_checkpoints=model.sync_checkpoints,
             metadata=model.metadata_,
@@ -255,11 +252,9 @@ class PostgreSQLBackend(AsyncSessionMixin):
         from uuid import uuid4
 
         new_version = 1
-        previous_id = None
 
         if previous_version:
             new_version = previous_version.version + 1
-            previous_id = previous_version.id
             # Deactivate the old version
             await self.deactivate_namespace(previous_version.id)
 
@@ -270,7 +265,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
             namespace_id=previous_version.namespace_id if previous_version else uuid4(),
             version=new_version,
             is_active=True,
-            previous_version_id=previous_id,
             config_overrides=previous_version.config_overrides if previous_version else {},
             metadata=previous_version.metadata if previous_version else {},
         )
