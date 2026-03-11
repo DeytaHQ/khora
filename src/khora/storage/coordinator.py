@@ -274,6 +274,22 @@ class StorageCoordinator:
     # Tenancy operations (delegated to relational)
     # =========================================================================
 
+    async def resolve_namespace(self, namespace_id: UUID) -> UUID:
+        """Resolve a stable namespace_id to the active version's row id.
+
+        Args:
+            namespace_id: The stable namespace identifier (shared across versions)
+
+        Returns:
+            The row-level id of the active version
+
+        Raises:
+            ValueError: If no active version exists for the given namespace_id
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.resolve_namespace(namespace_id)
+
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""
         if not self.relational:

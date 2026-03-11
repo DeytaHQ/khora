@@ -580,15 +580,18 @@ class MemoryLake:
     # =========================================================================
 
     async def _resolve_namespace(self, namespace: str | UUID) -> UUID:
-        """Resolve a namespace reference to a UUID."""
-        if isinstance(namespace, UUID):
-            return namespace
+        """Resolve a namespace_id to the active version's row-level id.
 
-        # Try to parse as UUID
-        try:
-            return UUID(namespace)
-        except ValueError:
-            raise ValueError(f"Invalid namespace: {namespace!r}. Must be a valid UUID.")
+        Accepts a stable namespace_id (UUID or string) and resolves it to
+        the row-level id of the currently active version via DB lookup.
+        """
+        if isinstance(namespace, str):
+            try:
+                namespace = UUID(namespace)
+            except ValueError:
+                raise ValueError(f"Invalid namespace: {namespace!r}. Must be a valid UUID.")
+
+        return await self.storage.resolve_namespace(namespace)
 
     async def health_check(self) -> dict[str, Any]:
         """Check health of all components."""

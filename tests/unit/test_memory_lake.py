@@ -43,6 +43,7 @@ def _mock_engine() -> MagicMock:
 
     # Storage and embedder
     mock_eng._storage = MagicMock()
+    mock_eng._storage.resolve_namespace = AsyncMock(side_effect=lambda ns_id: ns_id)
     mock_eng._embedder = MagicMock()
 
     # Lifecycle
@@ -268,30 +269,54 @@ class TestConnectDisconnect:
 
 
 class TestResolveNamespace:
-    """Tests for _resolve_namespace helper."""
+    """Tests for _resolve_namespace helper.
+
+    _resolve_namespace now performs a DB lookup via storage.resolve_namespace()
+    to map a stable namespace_id to the active version's row-level id.
+    """
 
     @pytest.mark.asyncio
-    async def test_uuid_passthrough(self) -> None:
-        """UUID passes through directly."""
+    async def test_uuid_calls_resolve(self) -> None:
+        """UUID is forwarded to storage.resolve_namespace()."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
+        row_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=row_id)
+
         result = await lake._resolve_namespace(ns_id)
-        assert result == ns_id
+        assert result == row_id
+        lake._engine._storage.resolve_namespace.assert_awaited_once_with(ns_id)
 
     @pytest.mark.asyncio
-    async def test_uuid_string_passthrough(self) -> None:
-        """UUID string is parsed and returned."""
+    async def test_uuid_string_parsed_and_resolved(self) -> None:
+        """UUID string is parsed then forwarded to storage.resolve_namespace()."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
+        row_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=row_id)
+
         result = await lake._resolve_namespace(str(ns_id))
-        assert result == ns_id
+        assert result == row_id
+        lake._engine._storage.resolve_namespace.assert_awaited_once_with(ns_id)
 
     @pytest.mark.asyncio
     async def test_invalid_string_raises_value_error(self) -> None:
-        """Non-UUID string raises ValueError."""
+        """Non-UUID string raises ValueError before DB lookup."""
         lake = _make_lake(connected=True)
         with pytest.raises(ValueError, match="Invalid namespace"):
             await lake._resolve_namespace("not-a-uuid")
+
+    @pytest.mark.asyncio
+    async def test_no_active_version_raises(self) -> None:
+        """ValueError from storage.resolve_namespace propagates."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(
+            side_effect=ValueError(f"No active namespace version found for namespace_id={ns_id}")
+        )
+
+        with pytest.raises(ValueError, match="No active namespace version"):
+            await lake._resolve_namespace(ns_id)
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +525,20 @@ class TestNamespaceManagement:
 
         result = await lake.get_namespace(ns_id)
         assert result is mock_ns
+
+    @pytest.mark.asyncio
+    async def test_create_namespace_returns_namespace_id(self) -> None:
+        """create_namespace returns object with namespace_id field."""
+        from khora.core.models.tenancy import MemoryNamespace
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        mock_ns = MemoryNamespace(id=ns_id, namespace_id=ns_id)
+        lake._engine.create_namespace = AsyncMock(return_value=mock_ns)
+
+        result = await lake.create_namespace()
+        assert result.namespace_id == ns_id
+        assert result.namespace_id == result.id  # version 1: namespace_id == id
 
 
 # ---------------------------------------------------------------------------

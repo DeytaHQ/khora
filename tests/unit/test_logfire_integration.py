@@ -75,6 +75,7 @@ def _mock_config() -> MagicMock:
 def _mock_engine() -> MagicMock:
     mock_eng = MagicMock()
     mock_eng._storage = MagicMock()
+    mock_eng._storage.resolve_namespace = AsyncMock(side_effect=lambda ns_id: ns_id)
     mock_eng._embedder = MagicMock()
     mock_eng.connect = AsyncMock()
     mock_eng.disconnect = AsyncMock()
