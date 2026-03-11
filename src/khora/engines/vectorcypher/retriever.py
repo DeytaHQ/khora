@@ -891,7 +891,7 @@ class VectorCypherRetriever:
         query = """
         UNWIND $entity_ids AS eid
         MATCH (e:Entity {id: eid, namespace_id: $namespace_id})
-        OPTIONAL MATCH (e)-[:SUPERSEDES*1..10]->(ev:EntityVersion)
+        OPTIONAL MATCH (e)-[:SUPERSEDES]->(ev:EntityVersion)
         WHERE ev.namespace_id = $namespace_id
           AND (ev.version_valid_from IS NULL OR ev.version_valid_from <= $target_date)
           AND (ev.version_valid_to IS NULL OR ev.version_valid_to > $target_date)
