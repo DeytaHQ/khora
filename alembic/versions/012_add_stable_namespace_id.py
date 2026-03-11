@@ -101,7 +101,7 @@ def upgrade() -> None:
         "idx_namespace_stable_active",
         "memory_namespaces",
         ["namespace_id"],
-        unique=False,
+        unique=True,
         postgresql_where=sa.text("is_active = true"),
     )
 

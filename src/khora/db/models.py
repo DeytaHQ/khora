@@ -99,6 +99,7 @@ class MemoryNamespaceModel(Base):
         Index(
             "idx_namespace_stable_active",
             "namespace_id",
+            unique=True,
             postgresql_where=text("is_active = true"),
         ),
     )
