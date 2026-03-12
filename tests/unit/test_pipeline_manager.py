@@ -52,3 +52,22 @@ class TestPipelineManagerErrorContext:
 
         runs = manager.list_runs()
         assert runs[0].error == "RuntimeError: connection lost"
+
+
+class TestPipelineRegistryAutoPopulation:
+    """Importing khora.pipelines must trigger @pipeline() decorator registration."""
+
+    def test_registry_contains_ingest_after_import(self) -> None:
+        """The 'ingest' pipeline is registered when khora.pipelines is imported."""
+        from khora.pipelines.registry import get_registry
+
+        registry = get_registry()
+        assert registry.get("ingest") is not None
+
+    def test_registry_contains_all_builtin_pipelines(self) -> None:
+        """All builtin pipelines are registered after import."""
+        from khora.pipelines.registry import get_registry
+
+        registry = get_registry()
+        for name in ("ingest", "sync_source", "sync_all", "expand_knowledge", "unify_entities"):
+            assert registry.get(name) is not None, f"Pipeline '{name}' not registered"
