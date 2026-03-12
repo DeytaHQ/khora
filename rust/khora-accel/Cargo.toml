@@ -1,6 +1,6 @@
 [package]
 name = "khora-accel"
-version = "0.3.8"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.83"
 description = "Rust-accelerated operations for Khora memory lake"
@@ -19,6 +19,7 @@ strsim = "0.11"
 regex = "1.10"
 aho-corasick = "1.1"
 hashbrown = "0.16"
+num_cpus = "1.16"
 ordered-float = "5.0"
 
 [features]

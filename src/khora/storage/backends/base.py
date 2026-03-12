@@ -60,6 +60,11 @@ class RelationalBackendProtocol(Protocol):
 
     # Namespace operations
     @abstractmethod
+    async def resolve_namespace(self, namespace_id: UUID) -> UUID:
+        """Resolve a stable namespace_id to the active version's row id."""
+        ...
+
+    @abstractmethod
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""
         ...
@@ -67,11 +72,6 @@ class RelationalBackendProtocol(Protocol):
     @abstractmethod
     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
         """Get a namespace by ID."""
-        ...
-
-    @abstractmethod
-    async def get_namespace_by_slug(self, slug: str, *, active_only: bool = True) -> MemoryNamespace | None:
-        """Get a namespace by slug (globally unique)."""
         ...
 
     @abstractmethod
@@ -89,14 +89,12 @@ class RelationalBackendProtocol(Protocol):
     @abstractmethod
     async def create_namespace_version(
         self,
-        slug: str,
         *,
         previous_version: MemoryNamespace | None = None,
     ) -> MemoryNamespace:
         """Create a new version of a namespace.
 
         Args:
-            slug: Namespace slug
             previous_version: The previous version to supersede (if any)
 
         Returns:

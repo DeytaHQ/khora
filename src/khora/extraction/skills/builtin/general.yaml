@@ -73,6 +73,14 @@ entity_types:
     identifiers: [name, vendor]
     aliases: [SERVICE, OFFERING]
 
+  - name: STATE_CHANGE
+    description: "A transition from one state to another - status change, role change, preference shift"
+    attributes:
+      required: [name]
+      optional: [previous_state, new_state, date, entity]
+    identifiers: [name, entity]
+    aliases: [TRANSITION, CHANGE, UPDATE]
+
   - name: DATE
     description: "A specific date, time period, or temporal reference"
     attributes:
@@ -153,6 +161,11 @@ relationship_types:
     description: "Temporal ordering - comes after"
     source_types: [EVENT]
     target_types: [EVENT]
+
+  - name: INVOLVES
+    description: "Participation in an event or state change"
+    source_types: [EVENT, STATE_CHANGE]
+    target_types: [PERSON, ORGANIZATION, TECHNOLOGY, PRODUCT]
 
   - name: ASSOCIATED_WITH
     description: "General association without specific semantics"

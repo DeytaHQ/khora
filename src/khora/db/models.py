@@ -28,6 +28,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -59,15 +60,13 @@ class MemoryNamespaceModel(Base):
     Supports versioning for data replacement workflows:
     - version: Incremental version number (starts at 1)
     - is_active: Whether this is the current active version
-    - previous_version_id: Reference to the previous version (if any)
     """
 
     __tablename__ = "memory_namespaces"
 
     id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    description: Mapped[str] = mapped_column(Text, default="")
+    # Stable ID shared across all versions of a namespace (for external references)
+    namespace_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     tenancy_mode: Mapped[str] = mapped_column(
         Enum(TenancyMode, name="tenancy_mode", create_constraint=True, values_callable=lambda e: [m.value for m in e]),
         default=TenancyMode.SHARED,
@@ -76,10 +75,6 @@ class MemoryNamespaceModel(Base):
     # Versioning fields
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    previous_version_id: Mapped[UUIDType | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="SET NULL"), nullable=True
-    )
-
     config_overrides: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     sync_checkpoints: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
@@ -100,14 +95,17 @@ class MemoryNamespaceModel(Base):
     )
 
     __table_args__ = (
-        # Slugs are globally unique per version
-        UniqueConstraint("slug", "version", name="uq_namespace_slug_version"),
-        # Partial index for efficient active namespace queries
-        Index("idx_namespace_slug_active", "slug", "version", postgresql_where="is_active = true"),
+        UniqueConstraint("namespace_id", "version", name="uq_namespace_stable_id_version"),
+        Index(
+            "idx_namespace_stable_active",
+            "namespace_id",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+        ),
     )
 
     def __repr__(self) -> str:
-        return f"<MemoryNamespace(id={self.id!r}, name={self.name!r})>"
+        return f"<MemoryNamespace(id={self.id!r})>"
 
 
 # =============================================================================

@@ -133,9 +133,6 @@ class GraphRAGEngine:
         self._query_engine: HybridQueryEngine | None = None
         self._connected = False
 
-        # Default namespace for simple usage
-        self._default_namespace_id: UUID | None = None
-
     async def connect(self) -> None:
         """Connect to all storage backends."""
         if self._connected:
@@ -510,37 +507,13 @@ class GraphRAGEngine:
     # Namespace Management
     # =========================================================================
 
-    async def get_or_create_default_namespace(self) -> UUID:
-        """Get or create a default namespace for simple usage."""
-        if self._default_namespace_id:
-            return self._default_namespace_id
-
-        storage = self._get_storage()
-
-        # Try to find existing default namespace by slug
-        default_namespace = await storage.get_namespace_by_slug("default")
-        if not default_namespace:
-            default_namespace = await storage.create_namespace(
-                MemoryNamespace(
-                    name="Default",
-                    slug="default",
-                )
-            )
-
-        self._default_namespace_id = default_namespace.id
-        return self._default_namespace_id
-
     async def create_namespace(
         self,
-        name: str,
         *,
-        description: str = "",
         config_overrides: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace."""
         namespace = MemoryNamespace(
-            name=name,
-            description=description,
             config_overrides=config_overrides or {},
         )
         return await self._get_storage().create_namespace(namespace)
@@ -548,31 +521,6 @@ class GraphRAGEngine:
     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
         """Get a namespace by ID."""
         return await self._get_storage().get_namespace(namespace_id)
-
-    async def ensure_namespace(
-        self,
-        name: str,
-        *,
-        description: str = "",
-    ) -> UUID:
-        """Get or create a namespace by name."""
-        storage = self._get_storage()
-
-        # Try to find namespace by slug
-        slug = name.lower().replace(" ", "-")
-        existing_ns = await storage.get_namespace_by_slug(slug)
-        if existing_ns:
-            return existing_ns.id
-
-        # Create new namespace
-        new_ns = await storage.create_namespace(
-            MemoryNamespace(
-                name=name,
-                slug=slug,
-                description=description,
-            )
-        )
-        return new_ns.id
 
     # =========================================================================
     # Entity Operations

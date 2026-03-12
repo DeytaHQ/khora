@@ -69,7 +69,7 @@ class StorageConfig:
     # pgvector configuration (can share PostgreSQL URL) — legacy
     pgvector_url: str | None = None
     pgvector_embedding_dimension: int = 1536
-    pgvector_use_halfvec: bool = False
+    pgvector_use_halfvec: bool = True
 
     # Neo4j configuration — legacy
     neo4j_url: str | None = None

@@ -39,7 +39,7 @@ class FixedChunker(Chunker):
 
             # Get the chunk tokens
             chunk_tokens = tokens[start:end]
-            chunk_text = self._encoding.decode(chunk_tokens)
+            chunk_text = self._encoding.decode(chunk_tokens).strip()
 
             # Calculate character positions
             # This is approximate for token-based chunking
@@ -66,7 +66,7 @@ class FixedChunker(Chunker):
             start = end - self.chunk_overlap if end < len(tokens) else end
             chunk_index += 1
 
-        return chunks
+        return self.filter_empty_chunks(chunks)
 
     def _chunk_by_chars(self, text: str) -> list[ChunkResult]:
         """Fallback character-based chunking."""

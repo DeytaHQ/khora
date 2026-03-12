@@ -70,6 +70,13 @@ def weighted_rrf_normalized(
     vector_weight: float = 0.6,
     graph_weight: float = 0.4,
 ) -> list[tuple[str, float]]: ...
+def weighted_rrf_normalized_with_provenance(
+    vector_results: list[tuple[str, float]],
+    graph_results: list[tuple[str, float]],
+    k: int = 60,
+    vector_weight: float = 0.6,
+    graph_weight: float = 0.4,
+) -> list[tuple[str, float, int]]: ...
 
 # -- Temporal -----------------------------------------------------------------
 

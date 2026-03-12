@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time as _time_mod
 from collections import OrderedDict
 from hashlib import sha256
@@ -45,7 +46,7 @@ class LiteLLMEmbedder(Embedder):
         timeout: int = 30,
         max_retries: int = 3,
         batch_size: int = 200,
-        cache_max_size: int = 10000,
+        cache_max_size: int = 50000,
         embed_concurrency: int = 20,
         retry_wait: float = 1.0,
         cache_ttl_hours: int | None = None,
@@ -273,9 +274,10 @@ class LiteLLMEmbedder(Embedder):
 
         import litellm
 
-        # Sanitize inputs: replace None/empty strings with a placeholder to avoid
-        # OpenAI '$.input' is invalid errors
-        sanitized = [t if t and t.strip() else " " for t in texts]
+        # Sanitize inputs: strip control characters that break JSON serialization
+        # (preserving \t, \n, \r) and replace empty strings with a placeholder.
+        _ctrl_re = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+        sanitized = [_ctrl_re.sub("", t) if t and t.strip() else " " for t in texts]
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self._max_retries),
@@ -337,3 +339,24 @@ class LiteLLMEmbedder(Embedder):
                     self._dimension_validated = True
 
                 return result
+
+    async def close(self) -> None:
+        """Close underlying litellm HTTP sessions to avoid 'Unclosed client session' warnings."""
+        try:
+            import litellm as _litellm
+
+            for attr in ("acache", "client_session"):
+                session = getattr(_litellm, attr, None)
+                if session is not None:
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+        except ImportError:
+            pass
+
+    async def __aenter__(self) -> LiteLLMEmbedder:
+        return self
+
+    async def __aexit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> None:
+        await self.close()

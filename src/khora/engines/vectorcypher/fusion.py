@@ -295,23 +295,40 @@ def apply_recency_boost(
     recency_scores: dict[UUID, float],
     *,
     recency_weight: float = 0.2,
+    recency_floor: float = 0.5,
 ) -> list[FusedResult]:
-    """Apply recency boost to fused results.
+    """Apply multiplicative recency boost to fused results.
 
-    Combines RRF score with a recency score to boost more recent results.
+    Uses a multiplicative formula so recency attenuates stale results without
+    inflating scores above the original RRF value.  This prevents the abstention
+    regression where high recency weights pushed irrelevant-but-recent chunks
+    above score thresholds.
+
+    Formula: ``rrf_score *= max(recency, floor) ** (exponent * recency_weight)``
+
+    - recency_floor prevents zeroing-out chunks that lack timestamps.
+      Per-category floors allow stronger discrimination for temporal queries
+      (e.g. 0.3 for STATE_QUERY/RECENCY) while protecting non-temporal ones (0.5).
+    - The exponent (2.0) controls decay steepness.
+    - recency_weight scales influence: NONE (0.2) barely changes ranking,
+      STATE_QUERY (0.6) penalises stale chunks significantly.
 
     Args:
         results: List of FusedResult
         recency_scores: Map of item_id -> recency score (0-1, higher = more recent)
         recency_weight: Weight for recency (default: 0.2)
+        recency_floor: Minimum recency to prevent zero-multiplication (default: 0.5)
 
     Returns:
         Results with adjusted scores, re-sorted
     """
+    _EXPONENT = 2.0  # steepness of decay curve
+
     for r in results:
-        recency = recency_scores.get(r.item_id, 0.0)
-        # Blend RRF score with recency
-        r.rrf_score = (1 - recency_weight) * r.rrf_score + recency_weight * recency
+        recency = recency_scores.get(r.item_id, recency_floor)
+        clamped = max(recency, recency_floor)
+        # Multiplicative: old chunks get attenuated, recent chunks stay near 1.0
+        r.rrf_score *= clamped ** (_EXPONENT * recency_weight)
 
     # Re-sort by adjusted score
     results.sort(key=lambda x: x.rrf_score, reverse=True)

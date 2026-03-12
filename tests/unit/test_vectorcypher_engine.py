@@ -40,7 +40,6 @@ def _make_engine_with_mocks(
     engine._dual_nodes = None
     engine._router = None
     engine._connected = True
-    engine._default_namespace_id = None
 
     return engine
 

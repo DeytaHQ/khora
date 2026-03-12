@@ -24,7 +24,7 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 - **Library-First Design**: Use as a Python library with a simple `remember()`/`recall()`/`forget()` API
 - **Pluggable Engines**: Choose GraphRAG, VectorCypher, or Skeleton
 - **Hybrid Search**: Vector + graph + keyword search with Reciprocal Rank Fusion
-- **Multi-Tenancy**: Namespace-level isolation (shared mode with ACLs designed but not yet active — see `docs/design/namespace-optimization-plan.md`)
+- **Multi-Tenancy**: Namespace-level isolation (shared mode with ACLs designed but not yet active)
 - **Event Sourcing**: Immutable event log for temporal queries and audit trails
 - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
 - **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
@@ -168,10 +168,8 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 | [Temporal Queries](docs/query-engine/temporal-queries.md) | Time filtering and recency bias |
 | [Agentic Search](docs/query-engine/agentic-search.md) | Multi-step exploration |
 | **Performance** | |
-| [Rust Acceleration](docs/architecture/performance-optimization.md) | Native Rust extensions for CPU-bound operations |
+| [Rust Acceleration](docs/architecture/rust-acceleration.md) | Native Rust extensions for CPU-bound operations |
 | [Performance Optimization](docs/architecture/performance-optimization.md) | Query caching, batch operations, entity resolution |
-| **Planning** | |
-| [Roadmap](docs/roadmap.md) | Future improvements and features |
 | **References** | |
 | [References](docs/REFERENCES.md) | Research papers and inspirations |
 | [Changelog](CHANGELOG.md) | Release history and migration notes |

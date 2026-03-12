@@ -148,26 +148,14 @@ class MemoryEngineProtocol(Protocol):
     # Namespace Operations
     # =========================================================================
 
-    async def get_or_create_default_namespace(self) -> UUID:
-        """Get or create a default namespace for simple usage.
-
-        Returns:
-            Default namespace UUID
-        """
-        ...
-
     async def create_namespace(
         self,
-        name: str,
         *,
-        description: str = "",
         config_overrides: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace.
 
         Args:
-            name: Namespace name
-            description: Optional description
             config_overrides: Optional configuration overrides
 
         Returns:
@@ -183,25 +171,6 @@ class MemoryEngineProtocol(Protocol):
 
         Returns:
             MemoryNamespace or None if not found
-        """
-        ...
-
-    async def ensure_namespace(
-        self,
-        name: str,
-        *,
-        description: str = "",
-    ) -> UUID:
-        """Get or create a namespace by name.
-
-        Creates the namespace if it doesn't exist.
-
-        Args:
-            name: Namespace name (will be slugified)
-            description: Optional description
-
-        Returns:
-            Namespace UUID
         """
         ...
 

@@ -166,8 +166,8 @@ class StorageSettings(BaseModel):
 
     # PostgreSQL (relational)
     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
-    postgresql_pool_size: int = Field(default=10, description="PostgreSQL connection pool size")
-    postgresql_max_overflow: int = Field(default=20, description="PostgreSQL max overflow connections")
+    postgresql_pool_size: int = Field(default=50, description="PostgreSQL connection pool size")
+    postgresql_max_overflow: int = Field(default=30, description="PostgreSQL max overflow connections")
 
     # New-style backend configs
     graph: GraphConfig | None = Field(default=None, description="Graph backend configuration (optional)")
@@ -184,13 +184,14 @@ class StorageSettings(BaseModel):
     # HNSW index tuning
     hnsw_m: int = Field(default=24, description="HNSW index M parameter (max connections per layer)")
     hnsw_ef_construction: int = Field(default=128, description="HNSW index ef_construction (build-time search width)")
-    hnsw_ef_search: int = Field(default=200, description="HNSW ef_search for query-time accuracy")
+    hnsw_ef_search: int = Field(default=100, description="HNSW ef_search for query-time accuracy")
 
     # Half-precision vectors (requires pgvector extension >= 0.7.0)
     use_halfvec: bool = Field(
-        default=False,
+        default=True,
         description="Use halfvec (float16) for HNSW indexes. Halves index size with minimal recall loss. "
-        "Requires pgvector extension >= 0.7.0. Column data remains full precision (vector type).",
+        "Requires pgvector extension >= 0.7.0. Column data remains full precision (vector type). "
+        "Falls back to full precision if pgvector < 0.7.0.",
     )
 
     @model_validator(mode="before")
@@ -277,6 +278,30 @@ class PipelineSettings(BaseModel):
     entity_types: list[str] = Field(
         default=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
         description="Entity types to extract",
+    )
+
+    # Selective extraction (KET-RAG style importance scoring)
+    # When enabled, chunks are scored by importance and only the top fraction
+    # are sent to LLM extraction. The rest get lightweight rule-based edges.
+    selective_extraction: bool = Field(
+        default=True,
+        description="Enable importance-based selective extraction to reduce LLM cost. "
+        "When True, only the most important chunks are sent to LLM extraction; "
+        "the rest get lightweight co-occurrence edges.",
+    )
+    extraction_importance_ratio: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of chunks to send to full LLM extraction (top-K by importance score). "
+        "Lower values save more cost but may miss entities in low-importance chunks.",
+    )
+    extraction_min_importance: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Minimum importance score threshold. Chunks scoring above this are always "
+        "sent to LLM extraction regardless of the ratio cutoff.",
     )
 
     # Entity embedding skip rules — skip embedding generation for low-value entity types

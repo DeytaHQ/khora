@@ -49,7 +49,7 @@ Return a JSON object with the following structure:
     "entities": [
         {{
             "name": "entity name (canonical form, properly capitalized)",
-            "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|TECHNOLOGY|PRODUCT|DATE|etc",
+            "entity_type": "PERSON|ORGANIZATION|LOCATION|CONCEPT|EVENT|STATE_CHANGE|TECHNOLOGY|PRODUCT|DATE|etc",
             "description": "brief description of the entity",
             "attributes": {{"key": "value"}},
             "aliases": ["alternative names", "nicknames", "abbreviations"],
@@ -88,7 +88,9 @@ Guidelines:
 - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
 - Include aliases for entities that have multiple names/abbreviations
 - Extract temporal information when dates, times, or relative time references appear
-- For events, capture the when, who, and what
+- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with these required attributes: {{"entity_affected": "name of entity whose state changed", "previous_state": "old value", "new_state": "new value", "attribute_changed": "what changed (e.g. job_title, location, instrument)", "transition_date": "ISO date or null"}}. Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
+- For EVENT detection: when text describes specific occurrences, extract the event with date, participants, and location when available
+- Use temporal relationships (PRECEDES, FOLLOWS, INVOLVES) to connect events and state changes to other entities
 - Ensure relationship source/target names match extracted entity names exactly
 - RELATIONSHIP DENSITY: For N extracted entities, aim to identify N to 2N relationships between them. Include both explicit relationships (stated directly) and implicit ones (inferred from context, co-occurrence, or logical connection)
 - For every pair of extracted entities that have any direct or implied connection, create a relationship. It is better to have a weak relationship than no relationship
@@ -1121,7 +1123,7 @@ class LLMEntityExtractor(EntityExtractor):
         context: dict[str, Any] | None = None,
         batch_size: int = 5,
         max_input_tokens: int | None = None,
-        tiered_extraction: bool = False,
+        tiered_extraction: bool = True,
         tier1_max_chars: int = 200,
     ) -> list[ExtractionResult]:
         """Extract entities from multiple texts in grouped LLM calls.

@@ -101,7 +101,6 @@ async with MemoryLake("postgresql://...", engine="skeleton") as lake:
 | `recall()` | Retrieve memories with temporal filtering and hybrid search |
 | `forget()` | Remove a memory from the engine |
 | `remember_batch()` | Batch ingestion with parallel processing |
-| `ensure_namespace()` | Get or create namespace by name |
 | `stats()` | Get document/chunk/entity counts |
 
 ### TemporalEdgeStorage (`src/khora/engines/skeleton/temporal_edges.py`)

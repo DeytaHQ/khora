@@ -329,7 +329,7 @@ class TestApplyRecencyBoost:
     """Tests for apply_recency_boost function."""
 
     def test_basic_recency_boost(self) -> None:
-        """Test that recency boosts reorder results."""
+        """Test that multiplicative recency boosts reorder results."""
         old_id = uuid4()
         new_id = uuid4()
 
@@ -342,9 +342,9 @@ class TestApplyRecencyBoost:
 
         boosted = apply_recency_boost(results, recency_scores, recency_weight=0.5)
 
-        # With 50% recency weight, the new item should rank first
-        # old: 0.5*0.9 + 0.5*0.1 = 0.5
-        # new: 0.5*0.8 + 0.5*1.0 = 0.9
+        # Multiplicative: score *= max(recency, 0.5) ** (2.0 * weight)
+        # old: 0.9 * max(0.1, 0.5)^(2.0*0.5) = 0.9 * 0.5^1.0 = 0.45
+        # new: 0.8 * max(1.0, 0.5)^(2.0*0.5) = 0.8 * 1.0^1.0 = 0.80
         assert boosted[0].item_id == new_id
 
     def test_zero_recency_weight(self) -> None:
@@ -357,21 +357,36 @@ class TestApplyRecencyBoost:
 
         boosted = apply_recency_boost(results, {}, recency_weight=0.0)
         assert boosted[0].item_id == id1
+        # With weight=0, exponent is 0 so multiplier is 1.0
+        assert abs(boosted[0].rrf_score - 0.9) < 1e-10
 
-    def test_missing_recency_score(self) -> None:
-        """Test items with missing recency scores get 0."""
+    def test_missing_recency_score_uses_floor(self) -> None:
+        """Test items with missing recency scores get the floor (0.5)."""
         id1 = uuid4()
         results = [FusedResult(item_id=id1, item="test", rrf_score=0.9)]
 
         boosted = apply_recency_boost(results, {}, recency_weight=0.2)
 
-        # (1-0.2)*0.9 + 0.2*0.0 = 0.72
-        assert abs(boosted[0].rrf_score - 0.72) < 1e-10
+        # Multiplicative: 0.9 * 0.5^(2.0*0.2) = 0.9 * 0.5^0.4
+        expected = 0.9 * (0.5**0.4)
+        assert abs(boosted[0].rrf_score - expected) < 1e-10
 
     def test_empty_results(self) -> None:
         """Test recency boost on empty results."""
         boosted = apply_recency_boost([], {}, recency_weight=0.2)
         assert boosted == []
+
+    def test_recency_never_inflates_above_rrf(self) -> None:
+        """Multiplicative recency should never increase a score above its original RRF."""
+        id1 = uuid4()
+        original_rrf = 0.5
+        results = [FusedResult(item_id=id1, item="test", rrf_score=original_rrf)]
+        recency_scores = {id1: 1.0}  # maximum recency
+
+        boosted = apply_recency_boost(results, recency_scores, recency_weight=0.8)
+
+        # max(1.0, 0.5)^(2.0*0.8) = 1.0^1.6 = 1.0, so score stays at 0.5
+        assert boosted[0].rrf_score <= original_rrf + 1e-10
 
 
 class TestBigramCoherenceScore:

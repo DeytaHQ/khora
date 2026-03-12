@@ -121,18 +121,38 @@ class PostgreSQLBackend(AsyncSessionMixin):
     # Namespace operations
     # =========================================================================
 
+    async def resolve_namespace(self, namespace_id: UUID) -> UUID:
+        """Resolve a stable namespace_id to the active version's row id.
+
+        Args:
+            namespace_id: The stable namespace identifier (shared across versions)
+
+        Returns:
+            The row-level id of the active version
+
+        Raises:
+            ValueError: If no active version exists for the given namespace_id
+        """
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(MemoryNamespaceModel.id)
+                .where(MemoryNamespaceModel.namespace_id == namespace_id)
+                .where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+            )
+            row_id = result.scalar_one_or_none()
+            if row_id is None:
+                raise ValueError(f"No active namespace version found for namespace_id={namespace_id}")
+            return row_id
+
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""
         async with self._get_session() as session:
             model = MemoryNamespaceModel(
                 id=namespace.id,
-                name=namespace.name,
-                slug=namespace.slug,
-                description=namespace.description,
+                namespace_id=namespace.namespace_id,
                 tenancy_mode=namespace.tenancy_mode,
                 version=namespace.version,
                 is_active=namespace.is_active,
-                previous_version_id=namespace.previous_version_id,
                 config_overrides=namespace.config_overrides,
                 sync_checkpoints=namespace.sync_checkpoints,
                 metadata_=namespace.metadata,
@@ -148,26 +168,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Get a namespace by ID."""
         async with self._get_session() as session:
             result = await session.execute(select(MemoryNamespaceModel).where(MemoryNamespaceModel.id == namespace_id))
-            model = result.scalar_one_or_none()
-            return self._namespace_model_to_domain(model) if model else None
-
-    async def get_namespace_by_slug(self, slug: str, *, active_only: bool = True) -> MemoryNamespace | None:
-        """Get a namespace by slug (globally unique).
-
-        Args:
-            slug: Namespace slug
-            active_only: If True, only return active namespace (default)
-
-        Returns:
-            MemoryNamespace or None if not found
-        """
-        async with self._get_session() as session:
-            query = select(MemoryNamespaceModel).where(
-                MemoryNamespaceModel.slug == slug,
-            )
-            if active_only:
-                query = query.where(MemoryNamespaceModel.is_active == True)  # noqa: E712
-            result = await session.execute(query)
             model = result.scalar_one_or_none()
             return self._namespace_model_to_domain(model) if model else None
 
@@ -207,12 +207,8 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 update(MemoryNamespaceModel)
                 .where(MemoryNamespaceModel.id == namespace.id)
                 .values(
-                    name=namespace.name,
-                    slug=namespace.slug,
-                    description=namespace.description,
                     version=namespace.version,
                     is_active=namespace.is_active,
-                    previous_version_id=namespace.previous_version_id,
                     config_overrides=namespace.config_overrides,
                     sync_checkpoints=namespace.sync_checkpoints,
                     metadata_=namespace.metadata,
@@ -226,13 +222,10 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Convert MemoryNamespaceModel to domain MemoryNamespace."""
         return MemoryNamespace(
             id=model.id,
-            name=model.name,
-            slug=model.slug,
-            description=model.description,
+            namespace_id=model.namespace_id,
             tenancy_mode=TenancyMode(model.tenancy_mode) if isinstance(model.tenancy_mode, str) else model.tenancy_mode,
             version=model.version,
             is_active=model.is_active,
-            previous_version_id=model.previous_version_id,
             config_overrides=model.config_overrides,
             sync_checkpoints=model.sync_checkpoints,
             metadata=model.metadata_,
@@ -242,7 +235,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
     async def create_namespace_version(
         self,
-        slug: str,
         *,
         previous_version: MemoryNamespace | None = None,
     ) -> MemoryNamespace:
@@ -252,7 +244,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
         The previous version is marked as inactive.
 
         Args:
-            slug: Namespace slug
             previous_version: The previous version to supersede (if any)
 
         Returns:
@@ -261,23 +252,19 @@ class PostgreSQLBackend(AsyncSessionMixin):
         from uuid import uuid4
 
         new_version = 1
-        previous_id = None
 
         if previous_version:
             new_version = previous_version.version + 1
-            previous_id = previous_version.id
             # Deactivate the old version
             await self.deactivate_namespace(previous_version.id)
 
         # Create new namespace with incremented version
+        # New versions inherit the parent's namespace_id (stable identifier across versions)
         namespace = MemoryNamespace(
             id=uuid4(),
-            name=previous_version.name if previous_version else f"Namespace {slug}",
-            slug=slug,
-            description=previous_version.description if previous_version else "",
+            namespace_id=previous_version.namespace_id if previous_version else uuid4(),
             version=new_version,
             is_active=True,
-            previous_version_id=previous_id,
             config_overrides=previous_version.config_overrides if previous_version else {},
             metadata=previous_version.metadata if previous_version else {},
         )

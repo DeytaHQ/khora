@@ -651,12 +651,13 @@ async def stage_documents_batch(
     # Single batch query for existing documents (replaces N individual queries)
     existing = await storage.get_documents_by_checksums(namespace_id, checksums)
 
-    results: list[Document | None] = []
-    for doc_input, checksum in zip(doc_inputs, checksums):
+    results: list[Document | None] = [None] * len(doc_inputs)
+    stage_sem = asyncio.Semaphore(10)
+
+    async def _create_one(idx: int, doc_input: dict[str, Any], checksum: str) -> None:
         if checksum in existing:
             logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing[checksum].status})")
-            results.append(None)
-            continue
+            return
 
         content = doc_input.get("content", "")
         custom_metadata = doc_input.get("metadata", {})
@@ -684,8 +685,13 @@ async def stage_documents_batch(
             source_timestamp=source_timestamp,
         )
 
-        doc = await storage.create_document(document)
-        results.append(doc)
+        async with stage_sem:
+            doc = await storage.create_document(document)
+        results[idx] = doc
+
+    await asyncio.gather(
+        *[_create_one(i, doc_input, checksum) for i, (doc_input, checksum) in enumerate(zip(doc_inputs, checksums))]
+    )
 
     return results
 
@@ -715,6 +721,9 @@ async def process_document(
     skip_embedding_mention_threshold: int = 1,
     entity_types: list[str],
     relationship_types: list[str],
+    selective_extraction: bool = True,
+    extraction_importance_ratio: float = 0.7,
+    extraction_min_importance: float = 0.2,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -744,6 +753,9 @@ async def process_document(
         extraction_context: Context dict for prompt template rendering
         entity_index: Shared EntityIndex for smart mode (skip per-doc DB loads)
         extraction_batch_size: Max texts per LLM extraction call
+        selective_extraction: Enable importance-based selective extraction
+        extraction_importance_ratio: Fraction of chunks to send to LLM
+        extraction_min_importance: Minimum importance score threshold
     """
     from ..tasks import chunk_document, embed_chunks, extract_entities
 
@@ -831,6 +843,9 @@ async def process_document(
                     max_tokens=extraction_max_tokens,
                     entity_types=entity_types,
                     relationship_types=relationship_types,
+                    selective_extraction=selective_extraction,
+                    extraction_importance_ratio=extraction_importance_ratio,
+                    extraction_min_importance=extraction_min_importance,
                 )
 
         embedded_chunks, (entities, relationships) = await asyncio.gather(
@@ -1153,6 +1168,8 @@ async def process_document(
             "relationships": stored_count,
             "extracted_relationships": len(relationships),
             "inferred_relationships": len(inferred_relationships),
+            "entity_ids": [e.id for e in entities],
+            "chunk_ids": [c.id for c in chunks],
         }
 
     except Exception as e:
@@ -1190,6 +1207,9 @@ async def ingest_documents(
     skip_embedding_mention_threshold: int = 1,
     entity_types: list[str],
     relationship_types: list[str],
+    selective_extraction: bool = True,
+    extraction_importance_ratio: float = 0.7,
+    extraction_min_importance: float = 0.2,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
@@ -1216,6 +1236,9 @@ async def ingest_documents(
             caller runs resolution separately after all batches are processed.
         extraction_batch_size: Max texts per LLM extraction call (default 10)
         extraction_max_tokens: Max tokens for LLM extraction response. If None, uses extractor default.
+        selective_extraction: Enable importance-based selective extraction
+        extraction_importance_ratio: Fraction of chunks to send to LLM
+        extraction_min_importance: Minimum importance score threshold
 
     Returns:
         Summary of ingestion results
@@ -1320,6 +1343,9 @@ async def ingest_documents(
                 skip_embedding_mention_threshold=skip_embedding_mention_threshold,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
+                selective_extraction=selective_extraction,
+                extraction_importance_ratio=extraction_importance_ratio,
+                extraction_min_importance=extraction_min_importance,
             )
 
     results = await asyncio.gather(
@@ -1363,6 +1389,22 @@ async def ingest_documents(
 
     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
 
+    # Phase 4: Session-level episode creation
+    # Groups ingested documents by thread_id (session), creates Episode nodes
+    # linking sessions to their entities. This enables session-aware retrieval
+    # and entity state tracking across conversations.
+    episodes_created = 0
+    try:
+        episodes_created = await _create_session_episodes(
+            namespace_id=namespace_id,
+            documents=documents,
+            staged_docs=staged_docs,
+            successful_results=successful_results,
+            storage=storage,
+        )
+    except Exception as e:
+        logger.warning(f"Session episode creation failed (non-fatal): {e}")
+
     return {
         "total_documents": len(documents),
         "processed_documents": len(successful_results),
@@ -1372,9 +1414,100 @@ async def ingest_documents(
         "total_entities": total_entities,
         "total_relationships": total_relationships,
         "total_inferred_relationships": total_inferred,
+        "episodes_created": episodes_created,
         "per_document_results": successful_results,
         **({"smart_resolution": smart_resolution_result} if smart_resolution_result else {}),
     }
+
+
+async def _create_session_episodes(
+    namespace_id: UUID,
+    documents: list[dict[str, Any]],
+    staged_docs: list[Any],
+    successful_results: list[dict[str, Any]],
+    storage: Any,
+) -> int:
+    """Group ingested documents by session (thread_id) and create Episode nodes.
+
+    Each session becomes an Episode node linked to the entities extracted from
+    documents in that session.  This enables session-aware retrieval: when
+    querying about events in a conversation, the retriever can traverse
+    Episode→Entity edges to surface all relevant context from that session.
+
+    Returns the number of episodes created.
+    """
+    from collections import defaultdict
+
+    from khora.core.models import Episode
+
+    # Build thread_id → list of (doc, result) mapping
+    sessions: dict[str, list[tuple[Any, dict[str, Any]]]] = defaultdict(list)
+    for doc, result in zip(staged_docs, successful_results):
+        if isinstance(result, Exception):
+            continue
+        # Get thread_id from original doc metadata
+        meta = getattr(doc, "metadata", None)
+        custom = getattr(meta, "custom", {}) if meta else {}
+        thread_id = custom.get("thread_id")
+        if not thread_id:
+            continue
+        sessions[thread_id].append((doc, result))
+
+    if not sessions:
+        return 0
+
+    episodes_created = 0
+    for thread_id, doc_results in sessions.items():
+        # Collect all entity IDs and document IDs from this session
+        entity_ids: list[UUID] = []
+        doc_ids: list[UUID] = []
+        chunk_ids: list[UUID] = []
+        timestamps: list[datetime] = []
+
+        for doc, result in doc_results:
+            doc_ids.append(doc.id)
+            if doc.source_timestamp:
+                timestamps.append(doc.source_timestamp)
+            elif doc.created_at:
+                timestamps.append(doc.created_at)
+            # Collect entity IDs from result
+            for eid in result.get("entity_ids", []):
+                if eid not in entity_ids:
+                    entity_ids.append(eid)
+            for cid in result.get("chunk_ids", []):
+                if cid not in chunk_ids:
+                    chunk_ids.append(cid)
+
+        if not timestamps:
+            continue
+
+        # Episode spans from earliest to latest message in session
+        occurred_at = min(timestamps)
+        end_time = max(timestamps)
+        duration = int((end_time - occurred_at).total_seconds()) if end_time > occurred_at else None
+
+        episode = Episode(
+            namespace_id=namespace_id,
+            name=f"session:{thread_id}",
+            description=f"Conversation session {thread_id} with {len(doc_results)} messages",
+            occurred_at=occurred_at,
+            duration_seconds=duration,
+            entity_ids=entity_ids[:100],  # Cap to avoid overly large episodes
+            source_document_ids=doc_ids,
+            source_chunk_ids=chunk_ids[:200],
+            metadata={"thread_id": thread_id, "message_count": len(doc_results)},
+        )
+
+        try:
+            await storage.create_episode(episode)
+            episodes_created += 1
+        except Exception as e:
+            logger.debug(f"Failed to create episode for session {thread_id}: {e}")
+
+    if episodes_created > 0:
+        logger.info(f"Created {episodes_created} session episodes from {len(sessions)} sessions")
+
+    return episodes_created
 
 
 async def run_smart_resolution(
@@ -1509,26 +1642,20 @@ async def run_smart_resolution(
 
     # Phase 4: Relationship inference on full resolved graph (single pass)
     from khora.extraction.expansion.relationship_inferrer import RelationshipInferrer
-    from khora.extraction.expansion.rule_engine import RuleEvaluationContext
 
     inferrer = RelationshipInferrer(
         expertise=expertise,
         min_confidence=expertise.confidence.min_inferred,
     )
 
-    # Pre-check: count rule engine matches (for diagnostics)
-    rule_engine_matches = 0
-    if expertise.inference_rules:
-        context = RuleEvaluationContext.from_data(resolved_entities, relationships)
-        matches = inferrer._rule_engine.evaluate_inference_rules(context)
-        rule_engine_matches = len(matches)
-        logger.info(f"Smart resolution: rule engine produced {rule_engine_matches} raw matches")
-
     inferred = inferrer.infer(
         resolved_entities,
         relationships,
         depth=expertise.expansion.depth,
     )
+    # Read raw match count from inferrer (captured during infer())
+    rule_engine_matches = inferrer._last_raw_match_count
+    logger.info(f"Smart resolution: rule engine produced {rule_engine_matches} raw matches")
 
     # Phase 5: Store inferred relationships (batch)
     inferred_count = 0

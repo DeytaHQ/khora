@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from khora.core.models import Chunk, Document, Entity, Relationship
 from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
@@ -378,22 +378,13 @@ class TestTenancyModels:
     """Tests for tenancy models (MemoryNamespace)."""
 
     def test_create_namespace(self) -> None:
-        """Test namespace creation without workspace_id."""
-        ns = MemoryNamespace(name="Project Alpha", slug="project-alpha")
-        assert ns.name == "Project Alpha"
-        assert ns.slug == "project-alpha"
+        """Test namespace creation with UUID."""
+        ns = MemoryNamespace()
         assert ns.id is not None
-
-    def test_namespace_auto_slug(self) -> None:
-        """Test namespace auto-generates slug from name."""
-        ns = MemoryNamespace(name="My Project")
-        assert ns.slug == "my-project"
 
     def test_namespace_with_config(self) -> None:
         """Test namespace with configuration overrides."""
         ns = MemoryNamespace(
-            name="Test",
-            slug="test",
             config_overrides={"extraction_skill": "technical_docs"},
         )
         assert ns.config_overrides["extraction_skill"] == "technical_docs"
@@ -401,27 +392,67 @@ class TestTenancyModels:
     def test_namespace_sync_checkpoints(self) -> None:
         """Test namespace sync checkpoints."""
         ns = MemoryNamespace(
-            name="Test",
             sync_checkpoints={"source1": "checkpoint123"},
         )
         assert ns.sync_checkpoints["source1"] == "checkpoint123"
 
     def test_namespace_tenancy_mode_defaults_to_shared(self) -> None:
         """Test that MemoryNamespace.tenancy_mode defaults to SHARED."""
-        ns = MemoryNamespace(name="Test")
+        ns = MemoryNamespace()
         assert ns.tenancy_mode == TenancyMode.SHARED
 
     def test_namespace_tenancy_mode_isolated(self) -> None:
         """Test that MemoryNamespace.tenancy_mode can be set to ISOLATED."""
-        ns = MemoryNamespace(name="Test", tenancy_mode=TenancyMode.ISOLATED)
+        ns = MemoryNamespace(tenancy_mode=TenancyMode.ISOLATED)
         assert ns.tenancy_mode == TenancyMode.ISOLATED
 
     def test_namespace_no_workspace_id_attribute(self) -> None:
         """Test that MemoryNamespace no longer has workspace_id."""
-        ns = MemoryNamespace(name="Test")
+        ns = MemoryNamespace()
         assert not hasattr(ns, "workspace_id")
 
     def test_namespace_no_full_path_attribute(self) -> None:
         """Test that MemoryNamespace no longer has full_path."""
-        ns = MemoryNamespace(name="Test")
+        ns = MemoryNamespace()
         assert not hasattr(ns, "full_path")
+
+    def test_namespace_no_name_attribute(self) -> None:
+        """Test that MemoryNamespace no longer has name."""
+        ns = MemoryNamespace()
+        assert not hasattr(ns, "name")
+
+    def test_namespace_no_description_attribute(self) -> None:
+        """Test that MemoryNamespace no longer has description."""
+        ns = MemoryNamespace()
+        assert not hasattr(ns, "description")
+
+    def test_namespace_has_namespace_id(self) -> None:
+        """Test that MemoryNamespace has namespace_id field."""
+        ns = MemoryNamespace()
+        assert hasattr(ns, "namespace_id")
+        assert isinstance(ns.namespace_id, UUID)
+
+    def test_namespace_id_defaults_to_uuid4(self) -> None:
+        """Test that namespace_id defaults to a new UUID."""
+        ns = MemoryNamespace()
+        assert isinstance(ns.namespace_id, UUID)
+        assert isinstance(ns.id, UUID)
+
+    def test_namespace_id_can_be_set_explicitly(self) -> None:
+        """Test that namespace_id can be set to a specific value."""
+        stable_id = uuid4()
+        ns = MemoryNamespace(namespace_id=stable_id)
+        assert ns.namespace_id == stable_id
+
+    def test_namespace_version_inherits_namespace_id(self) -> None:
+        """Test that a new version can share the parent's namespace_id."""
+        stable_id = uuid4()
+        v1 = MemoryNamespace(id=uuid4(), namespace_id=stable_id, version=1)
+        v2 = MemoryNamespace(
+            id=uuid4(),
+            namespace_id=v1.namespace_id,
+            version=2,
+        )
+        assert v2.namespace_id == v1.namespace_id
+        assert v2.id != v1.id
+        assert v2.version == 2

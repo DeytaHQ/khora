@@ -82,6 +82,8 @@ class MemoryLake:
     - remember(): Store content in the memory lake
     - recall(): Retrieve relevant memories for a query
     - forget(): Remove memories
+    - create_namespace(): Create a new memory namespace
+    - get_namespace_by_stable_id(): Get a namespace by its stable ID
 
     Can be used as a context manager for automatic connection handling.
 
@@ -91,12 +93,12 @@ class MemoryLake:
     Usage:
         # Simplest - from env vars (KHORA_DATABASE_URL)
         async with MemoryLake() as lake:
-            await lake.remember("Important fact...", namespace="my-ns",
+            await lake.remember("Important fact...", namespace=namespace_id,
                 entity_types=["PERSON", "CONCEPT"], relationship_types=["RELATES_TO"])
 
         # Common - explicit database URL
         async with MemoryLake("postgresql://localhost/mydb") as lake:
-            results = await lake.recall("What do I know about...", namespace="my-ns")
+            results = await lake.recall("What do I know about...", namespace=namespace_id)
 
         # With graph backend
         async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
@@ -250,24 +252,18 @@ class MemoryLake:
 
     async def create_namespace(
         self,
-        name: str,
         *,
-        description: str = "",
         config_overrides: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace.
 
         Args:
-            name: Namespace name
-            description: Optional description
             config_overrides: Optional configuration overrides
 
         Returns:
             Created MemoryNamespace
         """
         return await self._get_engine().create_namespace(
-            name,
-            description=description,
             config_overrides=config_overrides,
         )
 
@@ -275,9 +271,24 @@ class MemoryLake:
         """Get a namespace by ID."""
         return await self._get_engine().get_namespace(namespace_id)
 
-    async def get_or_create_default_namespace(self) -> UUID:
-        """Get or create a default namespace for simple usage."""
-        return await self._get_engine().get_or_create_default_namespace()
+    async def get_namespace_by_stable_id(self, namespace_id: str | UUID) -> MemoryNamespace | None:
+        """Get a namespace by its stable namespace_id.
+
+        Unlike get_namespace() which takes a row-level id, this accepts
+        the stable namespace_id (shared across versions) and resolves it
+        to the active version before fetching.
+
+        Args:
+            namespace_id: The stable namespace identifier (UUID or string)
+
+        Returns:
+            MemoryNamespace, or None if the resolved namespace row is not found
+
+        Raises:
+            ValueError: If no active namespace version exists for the given namespace_id
+        """
+        resolved_id = await self._resolve_namespace(namespace_id)
+        return await self._get_engine().get_namespace(resolved_id)
 
     # =========================================================================
     # Core API: remember, recall, forget
@@ -287,7 +298,7 @@ class MemoryLake:
         self,
         content: str,
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         title: str = "",
         source: str = "",
         metadata: dict[str, Any] | None = None,
@@ -305,7 +316,7 @@ class MemoryLake:
 
         Args:
             content: Content to remember
-            namespace: Namespace name, ID, or None for default
+            namespace: Namespace UUID (as UUID or string)
             title: Optional title for the content
             source: Optional source identifier
             metadata: Optional metadata
@@ -339,7 +350,7 @@ class MemoryLake:
         self,
         documents: list[dict[str, Any]],
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         skill_name: str = "general_entities",
         max_concurrent: int = 10,
         deduplicate: bool = True,
@@ -366,7 +377,7 @@ class MemoryLake:
                 - title: str (optional)
                 - source: str (optional)
                 - metadata: dict (optional)
-            namespace: Namespace name, ID, or None for default
+            namespace: Namespace UUID (as UUID or string)
             skill_name: Extraction skill to use
             max_concurrent: Maximum concurrent document processing
             deduplicate: Deduplicate entities across documents (default: True)
@@ -402,7 +413,7 @@ class MemoryLake:
         self,
         query: str,
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
         min_similarity: float = 0.0,
@@ -432,7 +443,7 @@ class MemoryLake:
 
         Args:
             query: Query text
-            namespace: Namespace name, ID, or None for default
+            namespace: Namespace UUID (as UUID or string)
             limit: Maximum results to return
             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
             min_similarity: Minimum similarity threshold
@@ -464,24 +475,22 @@ class MemoryLake:
         self,
         document_id: UUID,
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
     ) -> bool:
         """Remove a memory from the lake.
 
         Args:
             document_id: ID of the document to remove
-            namespace: Namespace for verification (optional)
+            namespace: Namespace UUID (as UUID or string)
 
         Returns:
             True if deleted, False if not found
         """
-        namespace_id = None
-        if namespace:
-            namespace_id = await self._resolve_namespace(namespace)
+        namespace_id = await self._resolve_namespace(namespace)
 
         with trace_span(
             "khora.forget",
-            namespace_id=str(namespace_id) if namespace_id else "",
+            namespace_id=str(namespace_id),
             document_id=str(document_id),
         ):
             return await self._get_engine().forget(document_id, namespace_id)
@@ -497,7 +506,7 @@ class MemoryLake:
     async def list_entities(
         self,
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         entity_type: str | None = None,
         limit: int = 100,
     ) -> list[Entity]:
@@ -509,7 +518,7 @@ class MemoryLake:
         self,
         entity_id: UUID,
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         max_depth: int = 2,
         limit: int = 20,
     ) -> list[tuple[Entity, float]]:
@@ -540,13 +549,13 @@ class MemoryLake:
     async def list_documents(
         self,
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         limit: int = 100,
     ) -> list[Document]:
         """List documents in a namespace.
 
         Args:
-            namespace: Namespace name, ID, or None for default
+            namespace: Namespace UUID (as UUID or string)
             limit: Maximum documents to return
 
         Returns:
@@ -559,14 +568,14 @@ class MemoryLake:
         self,
         query: str,
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         limit: int = 10,
     ) -> list[Entity]:
         """Search entities by query text using embedding similarity.
 
         Args:
             query: Search query text
-            namespace: Namespace name, ID, or None for default
+            namespace: Namespace UUID (as UUID or string)
             limit: Maximum entities to return
 
         Returns:
@@ -575,11 +584,11 @@ class MemoryLake:
         namespace_id = await self._resolve_namespace(namespace)
         return await self._get_engine().search_entities(query, namespace_id, limit=limit)
 
-    async def stats(self, *, namespace: str | UUID | None = None) -> Stats:
+    async def stats(self, *, namespace: str | UUID) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace.
 
         Args:
-            namespace: Namespace name, ID, or None for default
+            namespace: Namespace UUID (as UUID or string)
 
         Returns:
             Stats with document/chunk/entity/relationship counts
@@ -587,55 +596,23 @@ class MemoryLake:
         namespace_id = await self._resolve_namespace(namespace)
         return await self._get_engine().stats(namespace_id)
 
-    async def ensure_namespace(
-        self,
-        name: str,
-        *,
-        description: str = "",
-    ) -> UUID:
-        """Get or create a namespace by name.
-
-        This is a convenience method for simple usage where you just want
-        a namespace by name without managing it explicitly.
-
-        Args:
-            name: Namespace name (will be slugified)
-            description: Optional description
-
-        Returns:
-            Namespace UUID
-        """
-        return await self._get_engine().ensure_namespace(name, description=description)
-
     # =========================================================================
     # Helpers
     # =========================================================================
 
-    async def _resolve_namespace(self, namespace: str | UUID | None) -> UUID:
-        """Resolve a namespace reference to a UUID."""
-        if namespace is None:
-            return await self.get_or_create_default_namespace()
+    async def _resolve_namespace(self, namespace: str | UUID) -> UUID:
+        """Resolve a namespace_id to the active version's row-level id.
 
-        if isinstance(namespace, UUID):
-            return namespace
+        Accepts a stable namespace_id (UUID or string) and resolves it to
+        the row-level id of the currently active version via DB lookup.
+        """
+        if isinstance(namespace, str):
+            try:
+                namespace = UUID(namespace)
+            except ValueError:
+                raise ValueError(f"Invalid namespace: {namespace!r}. Must be a valid UUID.")
 
-        # Try to parse as UUID
-        try:
-            return UUID(namespace)
-        except ValueError:
-            pass
-
-        # Look up by slug (globally unique)
-        engine = self._get_engine()
-        if not hasattr(engine, "_storage") or engine._storage is None:
-            raise RuntimeError("Engine does not support namespace lookup by slug")
-
-        storage = engine._storage
-        ns = await storage.get_namespace_by_slug(namespace)  # type: ignore[unresolved-attribute]
-        if ns:
-            return ns.id
-
-        raise ValueError(f"Namespace not found: {namespace}")
+        return await self.storage.resolve_namespace(namespace)
 
     async def health_check(self) -> dict[str, Any]:
         """Check health of all components."""

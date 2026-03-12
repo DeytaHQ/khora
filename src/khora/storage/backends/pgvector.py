@@ -66,8 +66,8 @@ class PgVectorBackend(AsyncSessionMixin):
         echo: bool = False,
         pool_size: int = 10,
         max_overflow: int = 20,
-        hnsw_ef_search: int = 200,
-        use_halfvec: bool = False,
+        hnsw_ef_search: int = 100,
+        use_halfvec: bool = True,
         engine: AsyncEngine | None = None,
     ) -> None:
         """Initialize the pgvector backend.

@@ -5,9 +5,48 @@
 
 use pyo3::prelude::*;
 
+/// Configure the global rayon thread pool.
+///
+/// Must be called before any parallel work is spawned.
+/// `num_threads = 0` uses mode-based defaults:
+///   - "query" (default): `num_cpus / 2` — lower latency for concurrent queries
+///   - "ingest": `num_cpus * 3 / 4` — higher throughput for batch ingestion
+/// Returns `Ok(())` on success. Logs a warning if the pool was already initialised
+/// (rayon only allows one global pool per process).
+#[pyfunction]
+#[pyo3(signature = (num_threads=0, mode="query"))]
+fn configure_thread_pool(num_threads: usize, mode: &str) -> PyResult<()> {
+    let cpus = num_cpus::get();
+    let threads = if num_threads > 0 {
+        num_threads
+    } else {
+        match mode {
+            "ingest" => std::cmp::max(1, cpus * 3 / 4),
+            _ => std::cmp::max(1, cpus / 2), // "query" default
+        }
+    };
+
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+    {
+        Ok(()) => {
+            eprintln!("[khora-accel] rayon global thread pool configured with {threads} threads");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!(
+                "[khora-accel] warning: rayon global pool already initialised, ignoring configure_thread_pool: {e}"
+            );
+            Ok(())
+        }
+    }
+}
+
 mod bm25;
 mod community;
 mod cosine;
+mod dedup;
 mod entity_resolution;
 mod keyword_extract;
 mod mmr;
@@ -58,6 +97,10 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rrf::weighted_rrf, m)?)?;
     m.add_function(wrap_pyfunction!(rrf::normalize_scores, m)?)?;
     m.add_function(wrap_pyfunction!(rrf::weighted_rrf_normalized, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        rrf::weighted_rrf_normalized_with_provenance,
+        m
+    )?)?;
 
     // Entity resolution
     m.add_function(wrap_pyfunction!(
@@ -87,6 +130,12 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Community detection
     m.add_function(wrap_pyfunction!(community::detect_communities, m)?)?;
+
+    // Chunk deduplication
+    m.add_function(wrap_pyfunction!(dedup::deduplicate_chunks, m)?)?;
+
+    // Thread pool configuration
+    m.add_function(wrap_pyfunction!(configure_thread_pool, m)?)?;
 
     Ok(())
 }

@@ -72,12 +72,15 @@ def _mock_config() -> MagicMock:
     return mock_config
 
 
+_RESOLVE_ROW_ID = uuid4()
+
+
 def _mock_engine() -> MagicMock:
     """Create a mock engine with all required methods."""
     mock_eng = MagicMock()
     mock_eng._storage = MagicMock()
+    mock_eng._storage.resolve_namespace = AsyncMock(return_value=_RESOLVE_ROW_ID)
     mock_eng._embedder = MagicMock()
-    mock_eng._default_namespace_id = None
     mock_eng.connect = AsyncMock()
     mock_eng.disconnect = AsyncMock()
     mock_eng.health_check = AsyncMock(return_value={"status": "healthy"})
@@ -85,10 +88,8 @@ def _mock_engine() -> MagicMock:
     mock_eng.recall = AsyncMock()
     mock_eng.forget = AsyncMock()
     mock_eng.remember_batch = AsyncMock()
-    mock_eng.get_or_create_default_namespace = AsyncMock(return_value=uuid4())
     mock_eng.create_namespace = AsyncMock()
     mock_eng.get_namespace = AsyncMock()
-    mock_eng.ensure_namespace = AsyncMock()
     mock_eng.get_entity = AsyncMock()
     mock_eng.list_entities = AsyncMock(return_value=[])
     mock_eng.find_related_entities = AsyncMock(return_value=[])
@@ -324,6 +325,7 @@ class TestExtractMultiCustomTypes:
                 ["Text one about drugs.", "Text two about genes."],
                 entity_types=["DRUG"],
                 relationship_types=["TARGETS"],
+                tiered_extraction=False,
             )
 
         assert len(results) == 2
@@ -389,7 +391,6 @@ class TestMemoryLakeRememberThreadsTypes:
 
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         mock_result = RememberResult(
             document_id=uuid4(),
@@ -406,6 +407,7 @@ class TestMemoryLakeRememberThreadsTypes:
         ):
             await lake.remember(
                 "Olaparib targets BRCA1.",
+                namespace=ns_id,
                 entity_types=["DRUG", "GENE"],
                 relationship_types=["TARGETS"],
             )
@@ -431,7 +433,6 @@ class TestMemoryLakeRememberBatchThreadsTypes:
 
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         mock_result = BatchResult(
             total=1,
@@ -450,6 +451,7 @@ class TestMemoryLakeRememberBatchThreadsTypes:
         ):
             await lake.remember_batch(
                 [{"content": "Olaparib targets BRCA1."}],
+                namespace=ns_id,
                 entity_types=["DRUG"],
                 relationship_types=["TARGETS"],
             )
@@ -473,28 +475,25 @@ class TestRememberRequiresOntologyParams:
         """remember() without entity_types raises TypeError."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         with pytest.raises(TypeError):
-            await lake.remember("some text", relationship_types=["KNOWS"])
+            await lake.remember("some text", namespace=ns_id, relationship_types=["KNOWS"])
 
     async def test_remember_missing_relationship_types_raises(self) -> None:
         """remember() without relationship_types raises TypeError."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         with pytest.raises(TypeError):
-            await lake.remember("some text", entity_types=["PERSON"])
+            await lake.remember("some text", namespace=ns_id, entity_types=["PERSON"])
 
     async def test_remember_missing_both_raises(self) -> None:
         """remember() without either ontology param raises TypeError."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         with pytest.raises(TypeError):
-            await lake.remember("some text")
+            await lake.remember("some text", namespace=ns_id)
 
 
 # ---------------------------------------------------------------------------
@@ -510,11 +509,11 @@ class TestRememberBatchRequiresOntologyParams:
         """remember_batch() without entity_types raises TypeError."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         with pytest.raises(TypeError):
             await lake.remember_batch(
                 [{"content": "text"}],
+                namespace=ns_id,
                 relationship_types=["KNOWS"],
             )
 
@@ -522,11 +521,11 @@ class TestRememberBatchRequiresOntologyParams:
         """remember_batch() without relationship_types raises TypeError."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         with pytest.raises(TypeError):
             await lake.remember_batch(
                 [{"content": "text"}],
+                namespace=ns_id,
                 entity_types=["PERSON"],
             )
 
@@ -534,7 +533,6 @@ class TestRememberBatchRequiresOntologyParams:
         """remember_batch() without either ontology param raises TypeError."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
-        lake._engine.get_or_create_default_namespace = AsyncMock(return_value=ns_id)
 
         with pytest.raises(TypeError):
-            await lake.remember_batch([{"content": "text"}])
+            await lake.remember_batch([{"content": "text"}], namespace=ns_id)

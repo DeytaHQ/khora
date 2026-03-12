@@ -213,6 +213,7 @@ class TestB6SemaphoreReleaseDuringRetry:
                 batch_size=5,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "KNOWS"],
+                tiered_extraction=False,
             )
 
         assert semaphore_was_free, "Semaphore should be free during retry sleep"
@@ -633,6 +634,7 @@ class TestMultiBatchOptimizations:
                 batch_size=5,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "KNOWS"],
+                tiered_extraction=False,
             )
 
         assert len(results) == 1
@@ -660,6 +662,7 @@ class TestMultiBatchOptimizations:
                 batch_size=5,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "KNOWS"],
+                tiered_extraction=False,
             )
 
         assert len(results) == 2

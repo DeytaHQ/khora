@@ -90,6 +90,10 @@ class RetrieverConfig:
     complex_vector_weight: float = 0.4
     complex_graph_weight: float = 0.6
 
+    # Temporal fusion overrides (used when temporal signal is detected)
+    temporal_vector_weight: float = 0.3
+    temporal_graph_weight: float = 0.7
+
     # Temporal settings
     recency_weight: float = 0.2
     recency_decay_days: int = 30
@@ -108,6 +112,7 @@ class RetrieverConfig:
 
     # Lazy entity expansion
     lazy_entity_expansion: bool = False
+    skeleton_core_ratio: float = 0.70  # Skip lazy expansion when > 0.6
 
     # Limits
     max_chunks: int = 50
@@ -253,7 +258,7 @@ class VectorCypherRetriever:
                 _pre_hits = _stats["hits"] if isinstance(_stats, dict) else None
                 query_embedding = await self._embedder.embed(query)
                 if _pre_hits is not None:
-                    _post_hits = self._embedder.cache_stats["hits"]  # type: ignore[attr-defined]
+                    _post_hits = self._embedder.cache_stats["hits"]
                     embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
 
             # Step 3: Vector search for entry points
@@ -268,6 +273,8 @@ class VectorCypherRetriever:
                     routing=routing,
                     effective_recency=params.recency_weight,
                     decay_days_override=params.decay_days_override,
+                    temporal_sort=params.temporal_sort,
+                    recency_floor=params.recency_floor,
                 )
             else:
                 # Complex/moderate path: VectorCypher with parallel execution
@@ -282,6 +289,7 @@ class VectorCypherRetriever:
                         limit=limit,
                         routing=routing,
                         temporal_params=params,
+                        temporal_signal=temporal_signal,
                     )
                 except Neo4jError as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
@@ -294,6 +302,8 @@ class VectorCypherRetriever:
                         routing=routing,
                         effective_recency=params.recency_weight,
                         decay_days_override=params.decay_days_override,
+                        temporal_sort=params.temporal_sort,
+                        recency_floor=params.recency_floor,
                     )
 
             # Store in cache
@@ -318,6 +328,7 @@ class VectorCypherRetriever:
         routing: RoutingDecision,
         *,
         temporal_params: RetrievalParams | None = None,
+        temporal_signal: TemporalSignal | None = None,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
 
@@ -327,6 +338,12 @@ class VectorCypherRetriever:
         Implements adaptive depth: adjusts graph traversal depth based on the
         number of entry entities found. More entities = shallower depth (to avoid
         explosion), fewer entities = deeper depth (to find more context).
+
+        Bi-temporal versioning:
+        - EXPLICIT temporal queries with a date filter narrow entities to those
+          valid at the target date via ``version_valid_from``/``version_valid_to``.
+        - CHANGE temporal queries traverse ``[:SUPERSEDES]`` edges to surface
+          entity version history for comparison.
         """
         _tp = temporal_params or RETRIEVAL_PARAMS[TemporalCategory.NONE]
         base_depth = graph_depth or routing.graph_depth
@@ -368,6 +385,8 @@ class VectorCypherRetriever:
                 routing=routing,
                 effective_recency=_tp.recency_weight,
                 decay_days_override=_tp.decay_days_override,
+                temporal_sort=_tp.temporal_sort,
+                recency_floor=_tp.recency_floor,
             )
 
         # Compute adaptive depth based on entry entity count
@@ -378,31 +397,87 @@ class VectorCypherRetriever:
         )
 
         # Step 4: Cypher expand to find related entities
+        # For temporal queries (STATE_QUERY/RECENCY/CHANGE), prefer currently-valid
+        # entities by filtering out those whose valid_until has passed.
         expanded_entities, entity_info_map = await self._cypher_expand(
             entry_entity_ids=[e[0] for e in entry_entities],
             namespace_id=namespace_id,
             depth=depth,
+            prefer_current=_tp.temporal_sort,
         )
 
-        # Step 5: Fetch chunks from all entities
+        # Step 4b: Bi-temporal version filtering
+        # For EXPLICIT temporal queries with a parsed date, narrow entities to
+        # those whose version was valid at the target date.
+        version_history: list[dict[str, Any]] | None = None
         all_entity_ids = list({e[0] for e in entry_entities} | expanded_entities.keys())
 
+        if temporal_signal and temporal_signal.is_temporal:
+            if temporal_signal.category == TemporalCategory.EXPLICIT and temporal_signal.temporal_filter is not None:
+                # Derive a target date from the temporal filter
+                tf = temporal_signal.temporal_filter
+                target_date = getattr(tf, "occurred_before", None) or getattr(tf, "occurred_after", None)
+                if target_date is not None:
+                    with trace_span("khora.vectorcypher.version_filter", target_date=target_date.isoformat()):
+                        all_entity_ids = await self._version_filter_entities(
+                            entity_ids=all_entity_ids,
+                            namespace_id=namespace_id,
+                            target_date=target_date,
+                        )
+
+            elif temporal_signal.category == TemporalCategory.CHANGE:
+                # For CHANGE queries, fetch version history via SUPERSEDES edges
+                with trace_span("khora.vectorcypher.version_history", entity_count=len(all_entity_ids)):
+                    version_history = await self._fetch_version_history(
+                        entity_ids=all_entity_ids,
+                        namespace_id=namespace_id,
+                    )
+
+        # Step 5: Fetch chunks from all entities
         graph_chunks = await self._fetch_chunks_from_entities(
             entity_ids=all_entity_ids,
             namespace_id=namespace_id,
             temporal_filter=temporal_filter,
             limit=limit * 2,  # Fetch more for fusion
             temporal_sort=_tp.temporal_sort,
+            prefer_current=_tp.temporal_sort,
         )
 
         # Step 6: Wait for parallel vector chunk search to complete
         # This was started at the beginning and may already be done
         vector_chunks = await vector_chunks_task
 
+        # Step 6a: Temporal query decomposition for CHANGE queries
+        # Runs a second vector search focused on the "current state" sub-query
+        # to ensure both past and present evidence are retrieved. The original
+        # query naturally retrieves past-state chunks ("used to", "previously"),
+        # while the decomposed sub-query targets current-state chunks.
+        if temporal_signal and temporal_signal.category == TemporalCategory.CHANGE and version_history:
+            current_state_query = self._decompose_change_query(query)
+            if current_state_query and current_state_query != query:
+                with trace_span("khora.vectorcypher.change_decomposition", sub_query=current_state_query):
+                    sub_embedding = await self._embedder.embed(current_state_query)
+                    sub_vector_chunks = await self._vector_search_chunks(
+                        query_embedding=sub_embedding,
+                        namespace_id=namespace_id,
+                        temporal_filter=None,  # No temporal filter — want current state
+                        query_text=current_state_query,
+                        limit=limit,
+                    )
+                    # Merge sub-query results, deduplicating by chunk ID
+                    existing_ids = {c[0] for c in vector_chunks}
+                    new_chunks = [c for c in sub_vector_chunks if c[0] not in existing_ids]
+                    if new_chunks:
+                        vector_chunks = vector_chunks + new_chunks
+                        logger.debug(
+                            f"CHANGE decomposition added {len(new_chunks)} chunks "
+                            f"from sub-query: {current_state_query[:60]}"
+                        )
+
         # Step 6b: Lazy entity expansion for vector-only chunks
         # Recovers graph coverage lost from low skeleton_core_ratio by doing
         # lightweight keyword matching (no LLM) on chunks without MENTIONED_IN edges
-        if self._config.lazy_entity_expansion and vector_chunks:
+        if self._config.lazy_entity_expansion and vector_chunks and self._config.skeleton_core_ratio <= 0.6:
             graph_chunk_ids = {c[0] for c in graph_chunks}
             vector_only = [c for c in vector_chunks if c[0] not in graph_chunk_ids]
             if vector_only:
@@ -417,6 +492,7 @@ class VectorCypherRetriever:
             graph_chunks=graph_chunks,
             use_normalization=True,
             routing=routing,
+            is_temporal=_tp.recency_weight > 0.2,
         )
 
         # Step 8: Apply recency boost driven by temporal signal category
@@ -433,6 +509,7 @@ class VectorCypherRetriever:
                     fused_results,
                     recency_scores,
                     recency_weight=effective_recency,
+                    recency_floor=_tp.recency_floor,
                 )
 
         # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
@@ -449,17 +526,93 @@ class VectorCypherRetriever:
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
 
-        # Build entity results with name/type from graph neighborhoods
+        # Classify each chunk by which search method(s) found it
+        vector_only_ids: list[UUID] = []
+        graph_only_ids: list[UUID] = []
+        both_ids: list[UUID] = []
+        for r in fused_results[:limit]:
+            has_vector = r.vector_rank is not None
+            has_graph = r.graph_rank is not None
+            if has_vector and has_graph:
+                both_ids.append(r.item_id)
+            elif has_vector:
+                vector_only_ids.append(r.item_id)
+            elif has_graph:
+                graph_only_ids.append(r.item_id)
+
+        vector_ids = vector_only_ids + both_ids
+        graph_ids = graph_only_ids + both_ids
+
+        # Entity IDs are discovered via vector similarity then expanded via graph,
+        # so they are attributed to "graph" (the graph expansion is what surfaces them)
+        entity_ids_str = [str(eid) for eid, _ in entry_entities[: self._config.max_entities]]
+
+        search_methods = {
+            "chunk_overlap": {
+                "vector_only": {"ids": [str(id) for id in vector_only_ids], "count": len(vector_only_ids)},
+                "graph_only": {"ids": [str(id) for id in graph_only_ids], "count": len(graph_only_ids)},
+                "vector_and_graph": {"ids": [str(id) for id in both_ids], "count": len(both_ids)},
+            },
+            "entity_overlap": {
+                "vector_and_graph": {"ids": entity_ids_str, "count": len(entity_ids_str)},
+                "vector_only": {"ids": [], "count": 0},
+                "graph_only": {"ids": [], "count": 0},
+            },
+            "by_method": {
+                "vector": {"chunk_ids": [str(id) for id in vector_ids], "count": len(vector_ids)},
+                "graph": {"chunk_ids": [str(id) for id in graph_ids], "count": len(graph_ids)},
+            },
+        }
+
+        # Batch-fetch full entities from storage instead of constructing stubs
+        entity_ids_to_fetch = [eid for eid, _ in entry_entities[: self._config.max_entities]]
         entity_results: list[tuple[Entity, float]] = []
-        for eid, score in entry_entities[: self._config.max_entities]:
-            info = entity_info_map.get(str(eid), {})
-            entity = Entity(
-                id=eid,
-                namespace_id=namespace_id,
-                name=info.get("name", ""),
-                entity_type=info.get("entity_type", ""),
-            )
-            entity_results.append((entity, score))
+
+        if entity_ids_to_fetch and self._storage:
+            try:
+                entities_map = await self._storage.get_entities_batch(entity_ids_to_fetch)
+                for eid, score in entry_entities[: self._config.max_entities]:
+                    if eid in entities_map:
+                        entity_results.append((entities_map[eid], score))
+                    else:
+                        # Fallback: use info from graph expansion
+                        info = entity_info_map.get(str(eid), {})
+                        entity = Entity(
+                            id=eid,
+                            namespace_id=namespace_id,
+                            name=info.get("name", ""),
+                            entity_type=info.get("entity_type", ""),
+                            description=info.get("description", ""),
+                            source_tool=info.get("source_tool", ""),
+                        )
+                        entity_results.append((entity, score))
+            except Exception as e:
+                logger.warning(f"Failed to batch-fetch entities, using stubs: {e}")
+                # Fall back to stub construction
+                for eid, score in entry_entities[: self._config.max_entities]:
+                    info = entity_info_map.get(str(eid), {})
+                    entity = Entity(
+                        id=eid,
+                        namespace_id=namespace_id,
+                        name=info.get("name", ""),
+                        entity_type=info.get("entity_type", ""),
+                        description=info.get("description", ""),
+                        source_tool=info.get("source_tool", ""),
+                    )
+                    entity_results.append((entity, score))
+        else:
+            # No storage available or no entities to fetch
+            for eid, score in entry_entities[: self._config.max_entities]:
+                info = entity_info_map.get(str(eid), {})
+                entity = Entity(
+                    id=eid,
+                    namespace_id=namespace_id,
+                    name=info.get("name", ""),
+                    entity_type=info.get("entity_type", ""),
+                    description=info.get("description", ""),
+                    source_tool=info.get("source_tool", ""),
+                )
+                entity_results.append((entity, score))
 
         return VectorCypherResult(
             chunks=chunk_results,
@@ -473,6 +626,16 @@ class VectorCypherRetriever:
                 "adaptive_depth_applied": depth != base_depth,
                 "total_chunks_before_fusion": len(graph_chunks) + len(vector_chunks),
                 "routing_confidence": routing.confidence,
+                # Fusion telemetry
+                "vector_chunk_count": len(vector_chunks),
+                "graph_chunk_count": len(graph_chunks),
+                "is_temporal": _tp.recency_weight > 0.2,
+                "recency_weight": _tp.recency_weight,
+                "effective_recency": effective_recency,
+                # Bi-temporal entity version history (populated for CHANGE queries)
+                "version_history": version_history,
+                # Search provenance: which method(s) found each chunk
+                "search_methods": search_methods,
             },
         )
 
@@ -487,6 +650,8 @@ class VectorCypherRetriever:
         *,
         effective_recency: float = 0.0,
         decay_days_override: int | None = None,
+        temporal_sort: bool = False,
+        recency_floor: float = 0.5,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
 
@@ -505,6 +670,8 @@ class VectorCypherRetriever:
             routing=routing,
             effective_recency=effective_recency,
             decay_days_override=decay_days_override,
+            temporal_sort=temporal_sort,
+            recency_floor=recency_floor,
         )
 
         # Update metadata to indicate fallback was used
@@ -524,11 +691,17 @@ class VectorCypherRetriever:
         *,
         effective_recency: float = 0.0,
         decay_days_override: int | None = None,
+        temporal_sort: bool = False,
+        recency_floor: float = 0.5,
     ) -> VectorCypherResult:
         """Simple retrieval path - vector search only.
 
         For SIMPLE-routed queries, uses a lower hybrid_alpha (0.5) to give
         BM25 equal weight — lexical overlap is stronger for factual queries.
+
+        When temporal_sort is True, results are re-sorted by occurred_at DESC
+        after recency boosting so that the most recent chunks surface first
+        (matches the graph-path behaviour for temporal categories).
         """
         with trace_span("khora.vectorcypher.simple_retrieve", namespace_id=str(namespace_id)) as span:
             # WS8: Lower alpha for SIMPLE queries to boost BM25 signal
@@ -567,15 +740,58 @@ class VectorCypherRetriever:
                 fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
                 with trace_span("khora.vectorcypher.recency_boost", chunk_count=len(fused)):
                     recency_scores = self._calculate_recency_scores(fused, decay_days_override=decay_days_override)
-                    fused = apply_recency_boost(fused, recency_scores, recency_weight=effective_recency)
+                    fused = apply_recency_boost(
+                        fused, recency_scores, recency_weight=effective_recency, recency_floor=recency_floor
+                    )
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
+            # Apply temporal sort: re-order by occurred_at DESC so the most
+            # recent chunks rank first. This mirrors the graph path's
+            # temporal_sort and is critical for STATE_QUERY/RECENCY/CHANGE.
+            if temporal_sort and chunk_results:
+                from datetime import datetime as _dt
+
+                def _ts(pair: tuple[Chunk, float]) -> _dt:
+                    occ = (pair[0].metadata.custom or {}).get("occurred_at") if pair[0].metadata else None
+                    if occ:
+                        try:
+                            return _dt.fromisoformat(occ)
+                        except (ValueError, TypeError):
+                            pass
+                    return pair[0].created_at or _dt.min
+
+                chunk_results.sort(key=_ts, reverse=True)
+
             span.set_attribute("chunk_count", len(chunk_results))
+
+            # All chunks come from vector search in simple mode
+            all_ids = [str(c.id) for c, _ in chunk_results]
+            search_methods = {
+                "chunk_overlap": {
+                    "vector_only": {"ids": all_ids, "count": len(all_ids)},
+                    "graph_only": {"ids": [], "count": 0},
+                    "vector_and_graph": {"ids": [], "count": 0},
+                },
+                "by_method": {
+                    "vector": {"chunk_ids": all_ids, "count": len(all_ids)},
+                    "graph": {"chunk_ids": [], "count": 0},
+                },
+            }
+
             return VectorCypherResult(
                 chunks=chunk_results,
                 entities=[],
                 routing_decision=routing,
-                metadata={"search_mode": "simple_vector"},
+                metadata={
+                    "search_mode": "simple_vector",
+                    "routing_confidence": routing.confidence,
+                    "vector_chunk_count": len(chunk_results),
+                    "graph_chunk_count": 0,
+                    "effective_recency": effective_recency,
+                    "temporal_sort": temporal_sort,
+                    # Search provenance: all chunks from vector in simple mode
+                    "search_methods": search_methods,
+                },
             )
 
     async def _vector_search_entities(
@@ -608,6 +824,8 @@ class VectorCypherRetriever:
         entry_entity_ids: list[UUID],
         namespace_id: UUID,
         depth: int,
+        *,
+        prefer_current: bool = False,
     ) -> tuple[dict[UUID, float], dict[str, dict[str, str]]]:
         """Expand entry entities to find related entities via graph traversal.
 
@@ -615,6 +833,7 @@ class VectorCypherRetriever:
             entry_entity_ids: Starting entity IDs
             namespace_id: Namespace constraint
             depth: Maximum traversal depth
+            prefer_current: When True, filter out expired entities (for temporal queries)
 
         Returns:
             Tuple of:
@@ -633,6 +852,7 @@ class VectorCypherRetriever:
                 namespace_id=namespace_id,
                 depth=depth,
                 limit_per_entity=20,
+                prefer_current=prefer_current,
             )
 
             # Score entities by distance from entry points and collect entity info
@@ -652,15 +872,204 @@ class VectorCypherRetriever:
                     else:
                         entity_scores[entity_id] = score
 
-                    # Capture name and type (zero-cost, data already fetched)
+                    # Capture name, type, description, source_tool (zero-cost, data already fetched)
                     if entity_info["id"] not in entity_info_map:
                         entity_info_map[entity_info["id"]] = {
                             "name": entity_info.get("name", ""),
                             "entity_type": entity_info.get("entity_type", ""),
+                            "description": entity_info.get("description", ""),
+                            "source_tool": entity_info.get("source_tool", ""),
                         }
 
             span.set_attribute("expanded_entity_count", len(entity_scores))
             return entity_scores, entity_info_map
+
+    @staticmethod
+    def _decompose_change_query(query: str) -> str | None:
+        """Decompose a CHANGE query into a current-state sub-query.
+
+        Rewrites temporal-change phrasing into a present-tense question about
+        the entity's current state, so a second vector search retrieves
+        up-to-date evidence alongside the historical evidence from the
+        original query.
+
+        Examples:
+            "What did Alice used to play?" → "What does Alice play now?"
+            "Does she still work at Google?" → "Where does she work now?"
+            "He switched from piano to guitar" → "What instrument does he play now?"
+        """
+        import re
+
+        q = query.strip()
+        ql = q.lower()
+
+        # Pattern: "used to <verb>" → "currently <verb>"
+        m = re.search(r"(\w+)\s+used\s+to\s+(.+?)(?:\?|$)", ql)
+        if m:
+            subject = m.group(1)
+            rest = m.group(2).rstrip("? .")
+            return f"What does {subject} {rest} now?"
+
+        # Pattern: "still <verb>" → current state question
+        m = re.search(r"(?:does|do|is)\s+(\w+)\s+still\s+(.+?)(?:\?|$)", ql)
+        if m:
+            subject = m.group(1)
+            rest = m.group(2).rstrip("? .")
+            return f"What does {subject} {rest} now?"
+
+        # Pattern: "switched from X to Y" / "changed from X to Y"
+        m = re.search(r"(\w+)\s+(?:switched|changed|moved|transitioned)\s+(?:from\s+.+?\s+)?to\s+(.+?)(?:\?|$)", ql)
+        if m:
+            subject = m.group(1)
+            new_state = m.group(2).rstrip("? .")
+            return f"What is {subject} {new_state} now?"
+
+        # Pattern: "no longer" → ask about current state
+        m = re.search(r"(\w+)\s+(?:is|was)\s+no\s+longer\s+(.+?)(?:\?|$)", ql)
+        if m:
+            subject = m.group(1)
+            old_state = m.group(2).rstrip("? .")
+            return f"What is {subject} doing instead of {old_state}?"
+
+        # Fallback: prepend "currently" to make it present-focused
+        if any(kw in ql for kw in ("used to", "still", "previously", "before", "changed", "switched")):
+            # Strip common change keywords and add "currently"
+            cleaned = re.sub(
+                r"\b(used to|still|previously|formerly|no longer)\b",
+                "currently",
+                ql,
+                count=1,
+            )
+            return cleaned.strip()
+
+        return None
+
+    async def _version_filter_entities(
+        self,
+        entity_ids: list[UUID],
+        namespace_id: UUID,
+        target_date: datetime,
+    ) -> list[UUID]:
+        """Filter entities to those valid at a specific point in time (bi-temporal).
+
+        Uses ``version_valid_from`` / ``version_valid_to`` properties on
+        Entity nodes.  Entities without version properties are treated as
+        always-valid (backward-compatible).
+
+        Also checks :EntityVersion snapshot nodes reachable via SUPERSEDES
+        edges, returning the snapshot ID when the current entity was not
+        yet valid at the target date but a prior version was.
+
+        Args:
+            entity_ids: Candidate entity IDs
+            namespace_id: Namespace constraint
+            target_date: The point-in-time to query for
+
+        Returns:
+            Filtered list of entity IDs (may include EntityVersion IDs)
+            that were valid at ``target_date``
+        """
+        if not entity_ids:
+            return []
+
+        # First: keep current Entity nodes that are valid at target_date,
+        # OR that have no version properties (backward-compatible).
+        # Second: for entities not valid at target_date, check if a prior
+        # EntityVersion was valid via SUPERSEDES edges.
+        query = """
+        UNWIND $entity_ids AS eid
+        MATCH (e:Entity {id: eid, namespace_id: $namespace_id})
+        OPTIONAL MATCH (e)-[:SUPERSEDES]->(ev:EntityVersion)
+        WHERE ev.namespace_id = $namespace_id
+          AND (ev.version_valid_from IS NULL OR ev.version_valid_from <= $target_date)
+          AND (ev.version_valid_to IS NULL OR ev.version_valid_to > $target_date)
+        WITH e, collect(ev.id) AS version_ids
+        WITH e, version_ids,
+             CASE
+               WHEN e.version_valid_from IS NULL THEN true
+               WHEN e.version_valid_from <= $target_date
+                    AND (e.version_valid_to IS NULL OR e.version_valid_to > $target_date)
+               THEN true
+               ELSE false
+             END AS current_valid
+        WHERE current_valid OR size(version_ids) > 0
+        RETURN CASE WHEN current_valid THEN e.id
+                    ELSE version_ids[0]
+               END AS id
+        """
+
+        async with self._neo4j_driver.session(database=self._database) as session:
+
+            async def _work(tx):
+                result = await tx.run(
+                    query,
+                    entity_ids=[str(eid) for eid in entity_ids],
+                    namespace_id=str(namespace_id),
+                    target_date=target_date.isoformat(),
+                )
+                return [record.data() async for record in result]
+
+            records = await session.execute_read(_work)
+
+        filtered = [UUID(r["id"]) for r in records if r["id"]]
+        logger.debug(
+            f"Version filter at {target_date.isoformat()}: " f"{len(entity_ids)} candidates -> {len(filtered)} valid"
+        )
+        return filtered
+
+    async def _fetch_version_history(
+        self,
+        entity_ids: list[UUID],
+        namespace_id: UUID,
+    ) -> list[dict[str, Any]]:
+        """Traverse SUPERSEDES edges to retrieve version history for entities.
+
+        Used for CHANGE-category temporal queries ("what did X used to be?",
+        "how has Y changed?").
+
+        Args:
+            entity_ids: Entity IDs to get version history for
+            namespace_id: Namespace constraint
+
+        Returns:
+            List of dicts with ``current_*`` and ``previous_*`` fields
+            representing the version transition chain.
+        """
+        if not entity_ids:
+            return []
+
+        query = """
+        UNWIND $entity_ids AS eid
+        MATCH (current:Entity {id: eid, namespace_id: $namespace_id})
+        OPTIONAL MATCH (current)-[s:SUPERSEDES]->(prev:EntityVersion)
+        RETURN current.id AS current_id,
+               current.name AS name,
+               current.entity_type AS entity_type,
+               current.attributes AS current_attributes,
+               current.version_valid_from AS current_valid_from,
+               current.version_valid_to AS current_valid_to,
+               prev.id AS previous_id,
+               prev.attributes AS previous_attributes,
+               prev.version_valid_from AS previous_valid_from,
+               prev.version_valid_to AS previous_valid_to,
+               s.superseded_at AS superseded_at
+        ORDER BY current.name, s.superseded_at DESC
+        """
+
+        async with self._neo4j_driver.session(database=self._database) as session:
+
+            async def _work(tx):
+                result = await tx.run(
+                    query,
+                    entity_ids=[str(eid) for eid in entity_ids],
+                    namespace_id=str(namespace_id),
+                )
+                return [record.data() async for record in result]
+
+            records = await session.execute_read(_work)
+
+        logger.debug(f"Version history: {len(records)} version records for {len(entity_ids)} entities")
+        return records
 
     async def _fetch_chunks_from_entities(
         self,
@@ -670,6 +1079,7 @@ class VectorCypherRetriever:
         limit: int,
         *,
         temporal_sort: bool = False,
+        prefer_current: bool = False,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Fetch chunks connected to entities via MENTIONED_IN.
 
@@ -679,6 +1089,7 @@ class VectorCypherRetriever:
             temporal_filter: Optional temporal constraints
             limit: Maximum chunks to return
             temporal_sort: If True, sort by occurred_at DESC (for temporal queries)
+            prefer_current: When True, filter out expired entities
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -693,6 +1104,7 @@ class VectorCypherRetriever:
                 namespace_id=namespace_id,
                 temporal_filter=temporal_filter,
                 temporal_sort=temporal_sort,
+                prefer_current=prefer_current,
                 limit=limit,
             )
 
@@ -834,6 +1246,7 @@ class VectorCypherRetriever:
         *,
         use_normalization: bool = False,
         routing: RoutingDecision | None = None,
+        is_temporal: bool = False,
     ) -> list[FusedResult]:
         """Fuse vector and graph results using weighted RRF.
 
@@ -842,6 +1255,7 @@ class VectorCypherRetriever:
             graph_chunks: Results from graph traversal
             use_normalization: If True, normalize scores before fusion for better ranking
             routing: If provided, adjust weights based on query complexity
+            is_temporal: If True, use temporal fusion weights (graph-heavy)
 
         Returns:
             Fused and sorted results
@@ -854,7 +1268,12 @@ class VectorCypherRetriever:
             # Dynamic fusion weights based on query complexity
             vector_weight = self._config.vector_weight
             graph_weight = self._config.graph_weight
-            if routing is not None:
+            if is_temporal:
+                # Temporal queries benefit from graph-heavy fusion:
+                # graph traversal surfaces temporally-related entities and their chunks
+                vector_weight = self._config.temporal_vector_weight
+                graph_weight = self._config.temporal_graph_weight
+            elif routing is not None:
                 if routing.complexity == QueryComplexity.SIMPLE:
                     vector_weight = self._config.simple_vector_weight
                     graph_weight = self._config.simple_graph_weight

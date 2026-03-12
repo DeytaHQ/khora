@@ -28,22 +28,25 @@ class MemoryNamespace:
     entities, and relationships are scoped to a namespace.
     Every query is filtered by namespace_id for multi-tenancy.
 
+    Two ID fields serve different purposes:
+    - id: Row-level identifier for this specific version (changes per version)
+    - namespace_id: Stable identifier shared across all versions of a namespace
+
+    Use ``namespace_id`` for external references and API calls.
+    Use ``id`` for internal versioning logic and child-table FK lookups.
+
     Supports versioning for data replacement workflows:
     - version: Incremental version number (starts at 1)
     - is_active: Whether this is the current active version
-    - previous_version_id: Reference to the previous version (if any)
     """
 
     id: UUID = field(default_factory=uuid4)
-    name: str = ""
-    slug: str = ""
-    description: str = ""
+    namespace_id: UUID = field(default_factory=uuid4)
     tenancy_mode: TenancyMode = TenancyMode.SHARED
 
     # Versioning fields
     version: int = 1
     is_active: bool = True
-    previous_version_id: UUID | None = None
 
     # Configuration overrides for this namespace
     config_overrides: dict[str, Any] = field(default_factory=dict)
@@ -54,7 +57,3 @@ class MemoryNamespace:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-    def __post_init__(self) -> None:
-        if not self.slug and self.name:
-            self.slug = self.name.lower().replace(" ", "-")

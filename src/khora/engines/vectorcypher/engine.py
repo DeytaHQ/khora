@@ -142,6 +142,7 @@ class VectorCypherConfig:
 
     # Skeleton indexing
     skeleton_core_ratio: float = 0.70  # 70% get full KG extraction (increased for denser graphs)
+    conversation_skeleton_ratio: float = 0.90  # Higher ratio for conversation batches
 
     # Graph traversal
     graph_default_depth: int = 2
@@ -179,6 +180,9 @@ class VectorCypherConfig:
 
     # Lazy entity expansion (recovers graph signal for non-core chunks)
     lazy_entity_expansion: bool = True
+
+    # Store extracted events as EVENT entities with PARTICIPATED_IN relationships
+    store_events: bool = True
 
     # Search thresholds
     fusion_hybrid_alpha: float = 0.7
@@ -270,9 +274,6 @@ class VectorCypherEngine:
         self._router: QueryComplexityRouter | None = None
         self._connected = False
 
-        # Default namespace cache
-        self._default_namespace_id: UUID | None = None
-
     async def connect(self) -> None:
         """Connect to all storage backends."""
         if self._connected:
@@ -360,6 +361,7 @@ class VectorCypherEngine:
             query_cache_ttl_seconds=self._vc_config.query_cache_ttl_seconds,
             query_cache_max_size=self._vc_config.query_cache_max_size,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
+            skeleton_core_ratio=self._vc_config.skeleton_core_ratio,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
@@ -727,6 +729,7 @@ class VectorCypherEngine:
                 max_concurrent=self._vc_config.max_concurrent_extractions,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
+                store_events=self._vc_config.store_events,
             )
 
             if not entities:
@@ -791,6 +794,7 @@ class VectorCypherEngine:
         extraction_model: str | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        skeleton_ratio_override: float | None = None,
     ) -> tuple[list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Run skeleton extraction but return results instead of storing.
 
@@ -817,7 +821,8 @@ class VectorCypherEngine:
         if len(chunks) <= 2:
             core_ids = {c.id for c in chunks}
         else:
-            skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+            effective_ratio = skeleton_ratio_override or self._vc_config.skeleton_core_ratio
+            skeleton = SkeletonIndexer(core_ratio=effective_ratio)
             skeleton.add_chunks_batch(chunks)
             core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
@@ -847,6 +852,7 @@ class VectorCypherEngine:
             max_concurrent=self._vc_config.max_concurrent_extractions,
             entity_types=entity_types,
             relationship_types=relationship_types,
+            store_events=self._vc_config.store_events,
         )
 
         if not entities:
@@ -884,6 +890,7 @@ class VectorCypherEngine:
         embedding_text_override: str | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        skeleton_ratio_override: float | None = None,
     ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Process a document, returning entities for deferred batch storage.
 
@@ -974,6 +981,7 @@ class VectorCypherEngine:
                 extraction_model=extraction_model,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
+                skeleton_ratio_override=skeleton_ratio_override,
             )
 
         return len(stored_chunks), entities, relationships, entity_chunk_links
@@ -1073,6 +1081,9 @@ class VectorCypherEngine:
 
         # Cascade temporal detection: Aho-Corasick dictionary → (optional) semantic
         # Replaces the old regex + dateparser approach with categorized signals.
+        # Always run temporal detection (dictionary-based, <10μs, deterministic)
+        # even in raw mode — raw skips LLM enrichment but temporal category
+        # detection is critical for recency weighting and sort order.
         temporal_signal: TemporalSignal | None = None
         if temporal_filter is None:
             with trace_span("khora.vectorcypher.temporal_detect") as td_span:
@@ -1104,6 +1115,21 @@ class VectorCypherEngine:
 
         context_text = "\n\n---\n\n".join(context_parts[:limit])
 
+        # Compute retrieval confidence signals for abstention calibration
+        scores = [s for _, s in validated_chunks]
+        if len(scores) >= 2:
+            mean_score = sum(scores) / len(scores)
+            score_variance = sum((s - mean_score) ** 2 for s in scores) / len(scores)
+            top_score_gap = scores[0] - scores[1]  # chunks are sorted by score
+        elif len(scores) == 1:
+            mean_score = scores[0]
+            score_variance = 0.0
+            top_score_gap = 0.0
+        else:
+            mean_score = 0.0
+            score_variance = 0.0
+            top_score_gap = 0.0
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -1117,6 +1143,14 @@ class VectorCypherEngine:
                 "graph_depth": result.routing_decision.graph_depth,
                 "raw_chunk_count": len(result.chunks),
                 "validated_chunk_count": len(validated_chunks),
+                # Temporal telemetry
+                "temporal_category": temporal_signal.category.value if temporal_signal else None,
+                "temporal_confidence": temporal_signal.confidence if temporal_signal else None,
+                "is_temporal": temporal_signal.is_temporal if temporal_signal else False,
+                # Retrieval confidence signals (for abstention calibration)
+                "retrieval_mean_score": round(mean_score, 4),
+                "retrieval_score_variance": round(score_variance, 6),
+                "retrieval_top_score_gap": round(top_score_gap, 4),
                 **result.metadata,
             },
         )
@@ -1291,6 +1325,8 @@ class VectorCypherEngine:
         else:
             context_by_orig = {}
 
+        is_conversation_mode = bool(context_by_orig)
+
         # Streaming pipeline: accumulate entities across documents for batch storage
         all_entities: list[Entity] = []
         all_relationships: list[Relationship] = []
@@ -1349,6 +1385,9 @@ class VectorCypherEngine:
                             embedding_text_override=context_by_orig.get(doc_index),
                             entity_types=entity_types,
                             relationship_types=relationship_types,
+                            skeleton_ratio_override=(
+                                self._vc_config.conversation_skeleton_ratio if is_conversation_mode else None
+                            ),
                         )
 
                         # Accumulate entities for batch storage
@@ -1553,37 +1592,13 @@ class VectorCypherEngine:
     # Namespace Management
     # =========================================================================
 
-    async def get_or_create_default_namespace(self) -> UUID:
-        """Get or create a default namespace for simple usage."""
-        if self._default_namespace_id:
-            return self._default_namespace_id
-
-        storage = self._get_storage()
-
-        # Try to find existing default namespace by slug
-        default_namespace = await storage.get_namespace_by_slug("default")
-        if not default_namespace:
-            default_namespace = await storage.create_namespace(
-                MemoryNamespace(
-                    name="Default",
-                    slug="default",
-                )
-            )
-
-        self._default_namespace_id = default_namespace.id
-        return self._default_namespace_id
-
     async def create_namespace(
         self,
-        name: str,
         *,
-        description: str = "",
         config_overrides: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace."""
         namespace = MemoryNamespace(
-            name=name,
-            description=description,
             config_overrides=config_overrides or {},
         )
         return await self._get_storage().create_namespace(namespace)
@@ -1591,30 +1606,6 @@ class VectorCypherEngine:
     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
         """Get a namespace by ID."""
         return await self._get_storage().get_namespace(namespace_id)
-
-    async def ensure_namespace(
-        self,
-        name: str,
-        *,
-        description: str = "",
-    ) -> UUID:
-        """Get or create a namespace by name."""
-        storage = self._get_storage()
-
-        # Try to find namespace by slug
-        slug = name.lower().replace(" ", "-")
-        existing_ns = await storage.get_namespace_by_slug(slug)
-        if existing_ns:
-            return existing_ns.id
-
-        new_ns = await storage.create_namespace(
-            MemoryNamespace(
-                name=name,
-                slug=slug,
-                description=description,
-            )
-        )
-        return new_ns.id
 
     # =========================================================================
     # Entity Operations

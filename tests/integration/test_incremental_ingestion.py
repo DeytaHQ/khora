@@ -470,6 +470,7 @@ class TestIncrementalIngestion:
         ):
             await lake.remember(
                 "Test content",
+                namespace=NAMESPACE_ID,
                 title="Test",
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR"],
@@ -583,6 +584,7 @@ class TestIncrementalIngestion:
             # Remember
             result = await lake.remember(
                 "Alice Johnson is a senior engineer at Acme Corp.",
+                namespace=NAMESPACE_ID,
                 title="Alice Profile",
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR"],
@@ -591,7 +593,7 @@ class TestIncrementalIngestion:
             assert result.entities_extracted == 2
 
             # Recall
-            recall_result = await lake.recall("Alice Acme Corp")
+            recall_result = await lake.recall("Alice Acme Corp", namespace=NAMESPACE_ID)
             assert len(recall_result.chunks) == 1
             assert "Alice" in recall_result.context_text
 
@@ -647,6 +649,7 @@ class TestIncrementalIngestion:
             # Ingest batch 1
             r1 = await lake.remember_batch(
                 BATCH_1_DOCS,
+                namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
             )
@@ -656,6 +659,7 @@ class TestIncrementalIngestion:
             # Ingest batch 2
             r2 = await lake.remember_batch(
                 BATCH_2_DOCS,
+                namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
             )
@@ -663,7 +667,7 @@ class TestIncrementalIngestion:
             assert r2.entities == 2
 
             # Recall — should find content from both batches
-            result = await lake.recall("Acme Corp employees")
+            result = await lake.recall("Acme Corp employees", namespace=NAMESPACE_ID)
             assert len(result.chunks) == 4  # All 4 employee docs
             assert len(result.entities) == 5  # All entities including Acme Corp
 
@@ -882,6 +886,7 @@ class TestIncrementalIngestion:
         ):
             r1 = await lake.remember_batch(
                 BATCH_1_DOCS,
+                namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
             )
@@ -889,6 +894,7 @@ class TestIncrementalIngestion:
 
             r2 = await lake.remember_batch(
                 BATCH_2_DOCS,
+                namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
             )
@@ -896,12 +902,13 @@ class TestIncrementalIngestion:
 
             r3 = await lake.remember_batch(
                 batch3_docs,
+                namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "MANAGES", "COLLABORATES_WITH"],
             )
             assert r3.processed == 2
 
-            result = await lake.recall("Acme Corp team")
+            result = await lake.recall("Acme Corp team", namespace=NAMESPACE_ID)
             assert len(result.chunks) == 5
             chunk_texts = [c[0] for c in result.chunks]
             assert any("Alice" in t for t in chunk_texts), "Batch 1 content missing"
@@ -931,11 +938,10 @@ def _make_connected_lake() -> MemoryLake:
 
     mock_engine = MagicMock()
     mock_engine._storage = MagicMock()
+    mock_engine._storage.resolve_namespace = AsyncMock(return_value=uuid4())
     mock_engine._embedder = MagicMock()
-    mock_engine._default_namespace_id = None
     mock_engine.connect = AsyncMock()
     mock_engine.disconnect = AsyncMock()
-    mock_engine.get_or_create_default_namespace = AsyncMock(return_value=NAMESPACE_ID)
     mock_engine.remember = AsyncMock()
     mock_engine.recall = AsyncMock()
     mock_engine.remember_batch = AsyncMock()
