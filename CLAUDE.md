@@ -29,7 +29,7 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 
 ## Key Entry Points
 
-- `memory_lake.py` — Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`
+- `memory_lake.py` — Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`, `create_namespace()`, `get_namespace_by_stable_id()`
 - `storage/coordinator.py` — Backend orchestration, `TransactionContext`, `transaction()`
 - `storage/factory.py` — Backend creation with shared engine pools
 - `db/session.py` — `DatabaseManager` class for session/engine lifecycle

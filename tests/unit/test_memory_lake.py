@@ -546,6 +546,31 @@ class TestNamespaceManagement:
         lake._engine.get_namespace.assert_awaited_once_with(_RESOLVE_ROW_ID)
 
     @pytest.mark.asyncio
+    async def test_get_namespace_by_stable_id_not_found(self) -> None:
+        """get_namespace_by_stable_id raises ValueError when no active version exists."""
+        lake = _make_lake(connected=True)
+        stable_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(
+            side_effect=ValueError(f"No active namespace version found for namespace_id={stable_id}")
+        )
+
+        with pytest.raises(ValueError, match="No active namespace version"):
+            await lake.get_namespace_by_stable_id(stable_id)
+
+    @pytest.mark.asyncio
+    async def test_get_namespace_by_stable_id_resolved_but_none(self) -> None:
+        """get_namespace_by_stable_id returns None when resolved namespace not in engine."""
+        lake = _make_lake(connected=True)
+        stable_id = uuid4()
+
+        lake._engine.get_namespace = AsyncMock(return_value=None)
+
+        result = await lake.get_namespace_by_stable_id(stable_id)
+        assert result is None
+        lake._engine._storage.resolve_namespace.assert_awaited_once_with(stable_id)
+        lake._engine.get_namespace.assert_awaited_once_with(_RESOLVE_ROW_ID)
+
+    @pytest.mark.asyncio
     async def test_create_namespace_returns_namespace_id(self) -> None:
         """create_namespace returns object with distinct namespace_id."""
         from khora.core.models.tenancy import MemoryNamespace

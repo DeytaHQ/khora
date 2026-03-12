@@ -82,6 +82,8 @@ class MemoryLake:
     - remember(): Store content in the memory lake
     - recall(): Retrieve relevant memories for a query
     - forget(): Remove memories
+    - create_namespace(): Create a new memory namespace
+    - get_namespace_by_stable_id(): Get a namespace by its stable ID
 
     Can be used as a context manager for automatic connection handling.
 
@@ -277,10 +279,13 @@ class MemoryLake:
         to the active version before fetching.
 
         Args:
-            namespace_id: The stable namespace identifier
+            namespace_id: The stable namespace identifier (UUID or string)
 
         Returns:
-            MemoryNamespace or None if not found
+            MemoryNamespace, or None if the resolved namespace row is not found
+
+        Raises:
+            ValueError: If no active namespace version exists for the given namespace_id
         """
         resolved_id = await self._resolve_namespace(namespace_id)
         return await self._get_engine().get_namespace(resolved_id)
