@@ -269,6 +269,22 @@ class MemoryLake:
         """Get a namespace by ID."""
         return await self._get_engine().get_namespace(namespace_id)
 
+    async def get_namespace_by_stable_id(self, namespace_id: UUID) -> MemoryNamespace | None:
+        """Get a namespace by its stable namespace_id.
+
+        Unlike get_namespace() which takes a row-level id, this accepts
+        the stable namespace_id (shared across versions) and resolves it
+        to the active version before fetching.
+
+        Args:
+            namespace_id: The stable namespace identifier
+
+        Returns:
+            MemoryNamespace or None if not found
+        """
+        resolved_id = await self._resolve_namespace(namespace_id)
+        return await self._get_engine().get_namespace(resolved_id)
+
     # =========================================================================
     # Core API: remember, recall, forget
     # =========================================================================

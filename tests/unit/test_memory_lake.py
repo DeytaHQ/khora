@@ -530,6 +530,22 @@ class TestNamespaceManagement:
         assert result is mock_ns
 
     @pytest.mark.asyncio
+    async def test_get_namespace_by_stable_id(self) -> None:
+        """get_namespace_by_stable_id resolves stable id then delegates to engine."""
+        lake = _make_lake(connected=True)
+        stable_id = uuid4()
+        mock_ns = MagicMock()
+
+        lake._engine.get_namespace = AsyncMock(return_value=mock_ns)
+
+        result = await lake.get_namespace_by_stable_id(stable_id)
+        assert result is mock_ns
+        # Should have resolved the stable id first
+        lake._engine._storage.resolve_namespace.assert_awaited_once_with(stable_id)
+        # Should pass the resolved row-level id to get_namespace
+        lake._engine.get_namespace.assert_awaited_once_with(_RESOLVE_ROW_ID)
+
+    @pytest.mark.asyncio
     async def test_create_namespace_returns_namespace_id(self) -> None:
         """create_namespace returns object with distinct namespace_id."""
         from khora.core.models.tenancy import MemoryNamespace
