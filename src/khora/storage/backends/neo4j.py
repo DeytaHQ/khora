@@ -733,7 +733,11 @@ class Neo4jBackend(GraphBackendBase):
         # across concurrent transactions, preventing deadlocks.
         sorted_entities = sorted(
             entities,
-            key=lambda e: (e.entity_type, e.name),
+            key=lambda e: (
+                str(e.namespace_id),
+                e.name,
+                e.entity_type,
+            ),
         )
 
         for start in range(0, len(sorted_entities), batch_size):

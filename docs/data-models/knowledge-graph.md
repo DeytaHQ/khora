@@ -26,7 +26,7 @@ class Entity:
     id: UUID
     namespace_id: UUID
     name: str
-    entity_type: EntityType
+    entity_type: str = "CONCEPT"
     description: str = ""
 
     # Attributes and aliases
@@ -56,19 +56,14 @@ class Entity:
 
 ### Entity Types
 
-```python
-class EntityType(str, Enum):
-    PERSON = "PERSON"              # Individual people
-    ORGANIZATION = "ORGANIZATION"   # Companies, institutions
-    LOCATION = "LOCATION"           # Places, addresses
-    CONCEPT = "CONCEPT"             # Abstract ideas, theories
-    EVENT = "EVENT"                 # Occurrences, incidents
-    TECHNOLOGY = "TECHNOLOGY"       # Tools, platforms, languages
-    PRODUCT = "PRODUCT"             # Goods, services
-    DOCUMENT = "DOCUMENT"           # Referenced documents
-    DATE = "DATE"                   # Temporal references
-    OTHER = "OTHER"                 # Uncategorized
-```
+Entity types are plain strings. Callers define their own ontology — Khora does not prescribe a fixed set. Common examples:
+
+- `"PERSON"` — Individual people
+- `"ORGANIZATION"` — Companies, institutions
+- `"LOCATION"` — Places, addresses
+- `"CONCEPT"` — Abstract ideas, theories
+- `"EVENT"` — Occurrences, incidents
+- `"TECHNOLOGY"` — Tools, platforms, languages
 
 ### Entity Attributes
 
@@ -77,7 +72,7 @@ Entities store arbitrary attributes as key-value pairs:
 ```python
 entity = Entity(
     name="Albert Einstein",
-    entity_type=EntityType.PERSON,
+    entity_type="PERSON",
     attributes={
         "role": "Physicist",
         "email": "einstein@princeton.edu",
@@ -135,7 +130,7 @@ Entities can have temporal bounds indicating when they were valid:
 # Entity valid from 2020 to 2023
 entity = Entity(
     name="Acme CEO",
-    entity_type=EntityType.PERSON,
+    entity_type="PERSON",
     valid_from=datetime(2020, 1, 1),
     valid_until=datetime(2023, 12, 31),
 )
@@ -150,7 +145,7 @@ Entities have vector embeddings for similarity search:
 ```python
 entity = Entity(
     name="Albert Einstein",
-    entity_type=EntityType.PERSON,
+    entity_type="PERSON",
     description="Theoretical physicist known for relativity",
     embedding=[0.1, 0.2, ...],  # Generated from name + description
     embedding_model="text-embedding-3-small",
@@ -183,7 +178,7 @@ class Relationship:
     namespace_id: UUID
     source_entity_id: UUID
     target_entity_id: UUID
-    relationship_type: RelationshipType
+    relationship_type: str = "RELATES_TO"
 
     # Relationship metadata
     description: str = ""
@@ -206,40 +201,14 @@ class Relationship:
 
 ### Relationship Types
 
-```python
-class RelationshipType(str, Enum):
-    # Organizational
-    WORKS_FOR = "WORKS_FOR"
-    MANAGES = "MANAGES"
-    REPORTS_TO = "REPORTS_TO"
-    MEMBER_OF = "MEMBER_OF"
+Relationship types are plain strings. Callers define their own ontology. Common examples:
 
-    # Social
-    KNOWS = "KNOWS"
-    COLLABORATES_WITH = "COLLABORATES_WITH"
-
-    # Ownership & Composition
-    OWNS = "OWNS"
-    PART_OF = "PART_OF"
-    CONTAINS = "CONTAINS"
-
-    # Location
-    LOCATED_IN = "LOCATED_IN"
-    HEADQUARTERED_IN = "HEADQUARTERED_IN"
-
-    # Technical
-    DEPENDS_ON = "DEPENDS_ON"
-    IMPLEMENTS = "IMPLEMENTS"
-    USES = "USES"
-
-    # Temporal
-    PRECEDES = "PRECEDES"
-    FOLLOWS = "FOLLOWS"
-
-    # Generic
-    RELATES_TO = "RELATES_TO"
-    ASSOCIATED_WITH = "ASSOCIATED_WITH"
-```
+- `"WORKS_FOR"`, `"MANAGES"`, `"REPORTS_TO"` — Organizational
+- `"KNOWS"`, `"COLLABORATES_WITH"` — Social
+- `"PART_OF"`, `"CONTAINS"` — Composition
+- `"LOCATED_IN"` — Location
+- `"DEPENDS_ON"`, `"IMPLEMENTS"` — Technical
+- `"RELATES_TO"`, `"ASSOCIATED_WITH"` — Generic
 
 ### Relationship Properties
 
@@ -247,7 +216,7 @@ class RelationshipType(str, Enum):
 relationship = Relationship(
     source_entity_id=person_id,
     target_entity_id=company_id,
-    relationship_type=RelationshipType.WORKS_FOR,
+    relationship_type="WORKS_FOR",
     properties={
         "start_date": "2020-01-15",
         "title": "Senior Engineer",
@@ -357,7 +326,7 @@ entity = Entity(
 relationship = Relationship(
     source_entity_id=einstein_id,
     target_entity_id=princeton_id,
-    relationship_type=RelationshipType.WORKS_FOR,
+    relationship_type="WORKS_FOR",
     source_document_ids=[doc1_id],
     source_chunk_ids=[chunk3_id],
 )
@@ -423,12 +392,12 @@ neighborhood = await lake.storage.get_neighborhood(
 ### Creating Entities Manually
 
 ```python
-from khora.core.models import Entity, EntityType
+from khora.core.models import Entity
 
 entity = Entity(
     namespace_id=namespace_id,
     name="Acme Corporation",
-    entity_type=EntityType.ORGANIZATION,
+    entity_type="ORGANIZATION",
     attributes={"industry": "Technology"},
 )
 
@@ -445,7 +414,7 @@ Entities are deduplicated during ingestion. The approach depends on the inferenc
 existing = await storage.get_entity_by_name(
     namespace_id,
     entity.name,
-    entity.entity_type.value,
+    entity.entity_type,
 )
 
 if existing:
