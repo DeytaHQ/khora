@@ -269,7 +269,7 @@ class MemoryLake:
         """Get a namespace by ID."""
         return await self._get_engine().get_namespace(namespace_id)
 
-    async def get_namespace_by_stable_id(self, namespace_id: UUID) -> MemoryNamespace | None:
+    async def get_namespace_by_stable_id(self, namespace_id: str | UUID) -> MemoryNamespace | None:
         """Get a namespace by its stable namespace_id.
 
         Unlike get_namespace() which takes a row-level id, this accepts
