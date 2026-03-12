@@ -72,9 +72,13 @@ def _mock_config() -> MagicMock:
     return mock_config
 
 
+_RESOLVE_ROW_ID = uuid4()
+
+
 def _mock_engine() -> MagicMock:
     mock_eng = MagicMock()
     mock_eng._storage = MagicMock()
+    mock_eng._storage.resolve_namespace = AsyncMock(return_value=_RESOLVE_ROW_ID)
     mock_eng._embedder = MagicMock()
     mock_eng.connect = AsyncMock()
     mock_eng.disconnect = AsyncMock()
@@ -460,7 +464,7 @@ class TestMemoryLakeSpans:
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
         assert call_args[0][0] == "khora.remember"
-        assert call_args[1]["namespace_id"] == str(ns_id)
+        assert call_args[1]["namespace_id"] == str(_RESOLVE_ROW_ID)
         assert call_args[1]["content_length"] == len("Hello, this is test content")
 
     @pytest.mark.asyncio
@@ -496,7 +500,7 @@ class TestMemoryLakeSpans:
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
         assert call_args[0][0] == "khora.recall"
-        assert call_args[1]["namespace_id"] == str(ns_id)
+        assert call_args[1]["namespace_id"] == str(_RESOLVE_ROW_ID)
         assert call_args[1]["query"] == "test query"
 
     @pytest.mark.asyncio
@@ -565,7 +569,7 @@ class TestMemoryLakeSpans:
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
         assert call_args[0][0] == "khora.remember_batch"
-        assert call_args[1]["namespace_id"] == str(ns_id)
+        assert call_args[1]["namespace_id"] == str(_RESOLVE_ROW_ID)
         assert call_args[1]["batch_size"] == 3
 
 

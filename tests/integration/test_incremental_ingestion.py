@@ -938,6 +938,7 @@ def _make_connected_lake() -> MemoryLake:
 
     mock_engine = MagicMock()
     mock_engine._storage = MagicMock()
+    mock_engine._storage.resolve_namespace = AsyncMock(return_value=uuid4())
     mock_engine._embedder = MagicMock()
     mock_engine.connect = AsyncMock()
     mock_engine.disconnect = AsyncMock()

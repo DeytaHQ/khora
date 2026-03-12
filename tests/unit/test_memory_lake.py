@@ -37,12 +37,16 @@ def _mock_config() -> MagicMock:
     return mock_config
 
 
+_RESOLVE_ROW_ID = uuid4()
+
+
 def _mock_engine() -> MagicMock:
     """Create a mock engine with all required methods."""
     mock_eng = MagicMock()
 
-    # Storage and embedder
+    # Storage and embedder — resolve_namespace returns a distinct row-level ID
     mock_eng._storage = MagicMock()
+    mock_eng._storage.resolve_namespace = AsyncMock(return_value=_RESOLVE_ROW_ID)
     mock_eng._embedder = MagicMock()
 
     # Lifecycle
@@ -268,30 +272,54 @@ class TestConnectDisconnect:
 
 
 class TestResolveNamespace:
-    """Tests for _resolve_namespace helper."""
+    """Tests for _resolve_namespace helper.
+
+    _resolve_namespace now performs a DB lookup via storage.resolve_namespace()
+    to map a stable namespace_id to the active version's row-level id.
+    """
 
     @pytest.mark.asyncio
-    async def test_uuid_passthrough(self) -> None:
-        """UUID passes through directly."""
+    async def test_uuid_calls_resolve(self) -> None:
+        """UUID is forwarded to storage.resolve_namespace()."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
+        row_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=row_id)
+
         result = await lake._resolve_namespace(ns_id)
-        assert result == ns_id
+        assert result == row_id
+        lake._engine._storage.resolve_namespace.assert_awaited_once_with(ns_id)
 
     @pytest.mark.asyncio
-    async def test_uuid_string_passthrough(self) -> None:
-        """UUID string is parsed and returned."""
+    async def test_uuid_string_parsed_and_resolved(self) -> None:
+        """UUID string is parsed then forwarded to storage.resolve_namespace()."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
+        row_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=row_id)
+
         result = await lake._resolve_namespace(str(ns_id))
-        assert result == ns_id
+        assert result == row_id
+        lake._engine._storage.resolve_namespace.assert_awaited_once_with(ns_id)
 
     @pytest.mark.asyncio
     async def test_invalid_string_raises_value_error(self) -> None:
-        """Non-UUID string raises ValueError."""
+        """Non-UUID string raises ValueError before DB lookup."""
         lake = _make_lake(connected=True)
         with pytest.raises(ValueError, match="Invalid namespace"):
             await lake._resolve_namespace("not-a-uuid")
+
+    @pytest.mark.asyncio
+    async def test_no_active_version_raises(self) -> None:
+        """ValueError from storage.resolve_namespace propagates."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(
+            side_effect=ValueError(f"No active namespace version found for namespace_id={ns_id}")
+        )
+
+        with pytest.raises(ValueError, match="No active namespace version"):
+            await lake._resolve_namespace(ns_id)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +437,7 @@ class TestForget:
 
     @pytest.mark.asyncio
     async def test_forget_delegates_to_engine(self) -> None:
-        """forget() delegates to engine.forget() with required namespace."""
+        """forget() delegates to engine.forget() with resolved namespace."""
         lake = _make_lake(connected=True)
         doc_id = uuid4()
         ns_id = uuid4()
@@ -418,7 +446,7 @@ class TestForget:
 
         result = await lake.forget(doc_id, namespace=ns_id)
         assert result is True
-        lake._engine.forget.assert_awaited_once_with(doc_id, ns_id)
+        lake._engine.forget.assert_awaited_once_with(doc_id, _RESOLVE_ROW_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +472,7 @@ class TestEntityOperations:
 
     @pytest.mark.asyncio
     async def test_list_entities(self) -> None:
-        """list_entities delegates to engine with filters."""
+        """list_entities delegates to engine with resolved namespace."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
 
@@ -453,7 +481,7 @@ class TestEntityOperations:
 
         result = await lake.list_entities(namespace=ns_id, entity_type="PERSON", limit=50)
         assert result == mock_entities
-        lake._engine.list_entities.assert_awaited_once_with(ns_id, entity_type="PERSON", limit=50)
+        lake._engine.list_entities.assert_awaited_once_with(_RESOLVE_ROW_ID, entity_type="PERSON", limit=50)
 
     @pytest.mark.asyncio
     async def test_find_related_entities(self) -> None:
@@ -500,6 +528,22 @@ class TestNamespaceManagement:
 
         result = await lake.get_namespace(ns_id)
         assert result is mock_ns
+
+    @pytest.mark.asyncio
+    async def test_create_namespace_returns_namespace_id(self) -> None:
+        """create_namespace returns object with distinct namespace_id."""
+        from khora.core.models.tenancy import MemoryNamespace
+
+        lake = _make_lake(connected=True)
+        row_id = uuid4()
+        stable_id = uuid4()
+        mock_ns = MemoryNamespace(id=row_id, namespace_id=stable_id)
+        lake._engine.create_namespace = AsyncMock(return_value=mock_ns)
+
+        result = await lake.create_namespace()
+        assert result.namespace_id == stable_id
+        assert result.id == row_id
+        assert result.namespace_id != result.id  # namespace_id is independently generated
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +773,7 @@ class TestConvenienceMethods:
 
     @pytest.mark.asyncio
     async def test_list_documents(self) -> None:
-        """list_documents delegates to engine with namespace."""
+        """list_documents delegates to engine with resolved namespace."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
 
@@ -738,7 +782,7 @@ class TestConvenienceMethods:
 
         result = await lake.list_documents(namespace=ns_id, limit=50)
         assert result == mock_docs
-        lake._engine.list_documents.assert_awaited_once_with(ns_id, limit=50)
+        lake._engine.list_documents.assert_awaited_once_with(_RESOLVE_ROW_ID, limit=50)
 
     @pytest.mark.asyncio
     async def test_search_entities(self) -> None:

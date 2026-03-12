@@ -72,10 +72,14 @@ def _mock_config() -> MagicMock:
     return mock_config
 
 
+_RESOLVE_ROW_ID = uuid4()
+
+
 def _mock_engine() -> MagicMock:
     """Create a mock engine with all required methods."""
     mock_eng = MagicMock()
     mock_eng._storage = MagicMock()
+    mock_eng._storage.resolve_namespace = AsyncMock(return_value=_RESOLVE_ROW_ID)
     mock_eng._embedder = MagicMock()
     mock_eng.connect = AsyncMock()
     mock_eng.disconnect = AsyncMock()

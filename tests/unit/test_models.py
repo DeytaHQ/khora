@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from khora.core.models import Chunk, Document, Entity, Relationship
 from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
@@ -425,3 +425,34 @@ class TestTenancyModels:
         """Test that MemoryNamespace no longer has description."""
         ns = MemoryNamespace()
         assert not hasattr(ns, "description")
+
+    def test_namespace_has_namespace_id(self) -> None:
+        """Test that MemoryNamespace has namespace_id field."""
+        ns = MemoryNamespace()
+        assert hasattr(ns, "namespace_id")
+        assert isinstance(ns.namespace_id, UUID)
+
+    def test_namespace_id_defaults_to_uuid4(self) -> None:
+        """Test that namespace_id defaults to a new UUID."""
+        ns = MemoryNamespace()
+        assert isinstance(ns.namespace_id, UUID)
+        assert isinstance(ns.id, UUID)
+
+    def test_namespace_id_can_be_set_explicitly(self) -> None:
+        """Test that namespace_id can be set to a specific value."""
+        stable_id = uuid4()
+        ns = MemoryNamespace(namespace_id=stable_id)
+        assert ns.namespace_id == stable_id
+
+    def test_namespace_version_inherits_namespace_id(self) -> None:
+        """Test that a new version can share the parent's namespace_id."""
+        stable_id = uuid4()
+        v1 = MemoryNamespace(id=uuid4(), namespace_id=stable_id, version=1)
+        v2 = MemoryNamespace(
+            id=uuid4(),
+            namespace_id=v1.namespace_id,
+            version=2,
+        )
+        assert v2.namespace_id == v1.namespace_id
+        assert v2.id != v1.id
+        assert v2.version == 2

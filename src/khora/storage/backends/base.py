@@ -60,6 +60,11 @@ class RelationalBackendProtocol(Protocol):
 
     # Namespace operations
     @abstractmethod
+    async def resolve_namespace(self, namespace_id: UUID) -> UUID:
+        """Resolve a stable namespace_id to the active version's row id."""
+        ...
+
+    @abstractmethod
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""
         ...

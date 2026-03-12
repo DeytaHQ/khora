@@ -51,10 +51,10 @@ CREATE TABLE documents (
 ```sql
 CREATE TABLE memory_namespaces (
     id UUID PRIMARY KEY,
+    namespace_id UUID NOT NULL,
     tenancy_mode VARCHAR(20),  -- shared or isolated
     version INTEGER DEFAULT 1,
     is_active BOOLEAN DEFAULT TRUE,
-    previous_version_id UUID REFERENCES memory_namespaces(id),
     config_overrides JSONB DEFAULT '{}',
     sync_checkpoints JSONB DEFAULT '{}',
     metadata JSONB DEFAULT '{}',
