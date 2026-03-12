@@ -361,6 +361,7 @@ class TestExtractMulti:
                 batch_size=5,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "KNOWS"],
+                tiered_extraction=False,
             )
 
         assert len(results) == 2

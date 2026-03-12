@@ -25,7 +25,7 @@ async def extract_entities(
     entity_types: list[str],
     relationship_types: list[str],
     store_events: bool = True,
-    selective_extraction: bool = False,
+    selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
 ) -> tuple[list[Entity], list[Relationship]]:

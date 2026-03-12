@@ -651,12 +651,13 @@ async def stage_documents_batch(
     # Single batch query for existing documents (replaces N individual queries)
     existing = await storage.get_documents_by_checksums(namespace_id, checksums)
 
-    results: list[Document | None] = []
-    for doc_input, checksum in zip(doc_inputs, checksums):
+    results: list[Document | None] = [None] * len(doc_inputs)
+    stage_sem = asyncio.Semaphore(10)
+
+    async def _create_one(idx: int, doc_input: dict[str, Any], checksum: str) -> None:
         if checksum in existing:
             logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing[checksum].status})")
-            results.append(None)
-            continue
+            return
 
         content = doc_input.get("content", "")
         custom_metadata = doc_input.get("metadata", {})
@@ -684,8 +685,13 @@ async def stage_documents_batch(
             source_timestamp=source_timestamp,
         )
 
-        doc = await storage.create_document(document)
-        results.append(doc)
+        async with stage_sem:
+            doc = await storage.create_document(document)
+        results[idx] = doc
+
+    await asyncio.gather(
+        *[_create_one(i, doc_input, checksum) for i, (doc_input, checksum) in enumerate(zip(doc_inputs, checksums))]
+    )
 
     return results
 
@@ -715,7 +721,7 @@ async def process_document(
     skip_embedding_mention_threshold: int = 1,
     entity_types: list[str],
     relationship_types: list[str],
-    selective_extraction: bool = False,
+    selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
 ) -> dict[str, Any]:
@@ -1201,7 +1207,7 @@ async def ingest_documents(
     skip_embedding_mention_threshold: int = 1,
     entity_types: list[str],
     relationship_types: list[str],
-    selective_extraction: bool = False,
+    selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
     **kwargs,
@@ -1636,26 +1642,20 @@ async def run_smart_resolution(
 
     # Phase 4: Relationship inference on full resolved graph (single pass)
     from khora.extraction.expansion.relationship_inferrer import RelationshipInferrer
-    from khora.extraction.expansion.rule_engine import RuleEvaluationContext
 
     inferrer = RelationshipInferrer(
         expertise=expertise,
         min_confidence=expertise.confidence.min_inferred,
     )
 
-    # Pre-check: count rule engine matches (for diagnostics)
-    rule_engine_matches = 0
-    if expertise.inference_rules:
-        context = RuleEvaluationContext.from_data(resolved_entities, relationships)
-        matches = inferrer._rule_engine.evaluate_inference_rules(context)
-        rule_engine_matches = len(matches)
-        logger.info(f"Smart resolution: rule engine produced {rule_engine_matches} raw matches")
-
     inferred = inferrer.infer(
         resolved_entities,
         relationships,
         depth=expertise.expansion.depth,
     )
+    # Read raw match count from inferrer (captured during infer())
+    rule_engine_matches = inferrer._last_raw_match_count
+    logger.info(f"Smart resolution: rule engine produced {rule_engine_matches} raw matches")
 
     # Phase 5: Store inferred relationships (batch)
     inferred_count = 0

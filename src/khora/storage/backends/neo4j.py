@@ -733,11 +733,7 @@ class Neo4jBackend(GraphBackendBase):
         # across concurrent transactions, preventing deadlocks.
         sorted_entities = sorted(
             entities,
-            key=lambda e: (
-                str(e.namespace_id),
-                e.name,
-                e.entity_type,
-            ),
+            key=lambda e: (e.entity_type, e.name),
         )
 
         for start in range(0, len(sorted_entities), batch_size):
@@ -900,9 +896,12 @@ class Neo4jBackend(GraphBackendBase):
 
         async def _create_type_group(rel_type: str, rels: list[Relationship]) -> int:
             """Create all batches for a single relationship type sequentially."""
-            # Sort by (source_entity_id, target_entity_id) to ensure deterministic
-            # lock ordering across concurrent transactions.
-            sorted_rels = sorted(rels, key=lambda r: (str(r.source_entity_id), str(r.target_entity_id)))
+            # Sort by (source_entity_id, target_entity_id, relationship_type) to ensure
+            # deterministic lock ordering across concurrent transactions.
+            sorted_rels = sorted(
+                rels,
+                key=lambda r: (str(r.source_entity_id), str(r.target_entity_id), r.relationship_type),
+            )
             type_total = 0
             for start in range(0, len(sorted_rels), batch_size):
                 batch = sorted_rels[start : start + batch_size]
