@@ -1123,7 +1123,7 @@ class LLMEntityExtractor(EntityExtractor):
         context: dict[str, Any] | None = None,
         batch_size: int = 5,
         max_input_tokens: int | None = None,
-        tiered_extraction: bool = False,
+        tiered_extraction: bool = True,
         tier1_max_chars: int = 200,
     ) -> list[ExtractionResult]:
         """Extract entities from multiple texts in grouped LLM calls.

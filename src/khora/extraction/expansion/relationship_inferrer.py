@@ -224,6 +224,7 @@ class RelationshipInferrer:
         self._max_inferences_per_rule = max_inferences_per_rule
         self._rule_engine = RuleEngine(expertise)
         self._rel_index: RelationshipTypeIndex | None = None
+        self._last_raw_match_count: int = 0
 
     def infer(
         self,
@@ -304,6 +305,7 @@ class RelationshipInferrer:
 
         all_inferred: list[InferredRelationship] = []
         current_relationships = list(relationships)
+        self._last_raw_match_count = 0
 
         for pass_num in range(depth):
             # Build context with current state
@@ -311,6 +313,7 @@ class RelationshipInferrer:
 
             # Evaluate inference rules
             matches = self._rule_engine.evaluate_inference_rules(context)
+            self._last_raw_match_count += len(matches)
             logger.debug(f"Pass {pass_num + 1}: Rule engine returned {len(matches)} matches")
 
             # Log details of first few matches (debug only, avoids list() overhead)

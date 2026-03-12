@@ -284,7 +284,7 @@ class PipelineSettings(BaseModel):
     # When enabled, chunks are scored by importance and only the top fraction
     # are sent to LLM extraction. The rest get lightweight rule-based edges.
     selective_extraction: bool = Field(
-        default=False,
+        default=True,
         description="Enable importance-based selective extraction to reduce LLM cost. "
         "When True, only the most important chunks are sent to LLM extraction; "
         "the rest get lightweight co-occurrence edges.",

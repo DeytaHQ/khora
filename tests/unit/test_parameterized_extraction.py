@@ -325,6 +325,7 @@ class TestExtractMultiCustomTypes:
                 ["Text one about drugs.", "Text two about genes."],
                 entity_types=["DRUG"],
                 relationship_types=["TARGETS"],
+                tiered_extraction=False,
             )
 
         assert len(results) == 2

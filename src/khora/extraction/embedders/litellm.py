@@ -46,7 +46,7 @@ class LiteLLMEmbedder(Embedder):
         timeout: int = 30,
         max_retries: int = 3,
         batch_size: int = 200,
-        cache_max_size: int = 10000,
+        cache_max_size: int = 50000,
         embed_concurrency: int = 20,
         retry_wait: float = 1.0,
         cache_ttl_hours: int | None = None,
@@ -339,3 +339,24 @@ class LiteLLMEmbedder(Embedder):
                     self._dimension_validated = True
 
                 return result
+
+    async def close(self) -> None:
+        """Close underlying litellm HTTP sessions to avoid 'Unclosed client session' warnings."""
+        try:
+            import litellm as _litellm
+
+            for attr in ("acache", "client_session"):
+                session = getattr(_litellm, attr, None)
+                if session is not None:
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+        except ImportError:
+            pass
+
+    async def __aenter__(self) -> LiteLLMEmbedder:
+        return self
+
+    async def __aexit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> None:
+        await self.close()

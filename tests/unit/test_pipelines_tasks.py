@@ -213,6 +213,7 @@ class TestExtractEntities:
                 batch_size=3,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "KNOWS"],
+                tiered_extraction=False,
             )
 
         # Collect entities across results and dedup by name:type
@@ -275,6 +276,7 @@ class TestExtractEntities:
                 batch_size=3,
                 entity_types=["PERSON", "ORGANIZATION"],
                 relationship_types=["WORKS_FOR", "KNOWS"],
+                tiered_extraction=False,
             )
 
         # Filter with 0.5 threshold
