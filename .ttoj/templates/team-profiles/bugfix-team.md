@@ -1,1 +1,0 @@
-/mnt/data/Devel/ttoj/content/templates/team-profiles/bugfix-team.md
