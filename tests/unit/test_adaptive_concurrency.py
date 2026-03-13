@@ -17,6 +17,7 @@ from khora.storage.backends.neo4j import (
     _AdaptiveRelationshipSemaphore,
     _ContentionTracker,
     _EntityKeyGate,
+    _LatencyTracker,
 )
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,48 @@ class TestContentionTracker:
 
 
 # ---------------------------------------------------------------------------
+# _LatencyTracker (EWMA)
+# ---------------------------------------------------------------------------
+
+
+class TestLatencyTracker:
+    def test_first_update_never_signals_contention(self) -> None:
+        tracker = _LatencyTracker()
+        assert tracker.update(1.0) is False
+        assert tracker.mean == 1.0
+
+    def test_stable_latencies_no_contention(self) -> None:
+        tracker = _LatencyTracker()
+        # Feed stable latencies — none should trigger contention
+        for _ in range(20):
+            assert tracker.update(0.2) is False
+
+    def test_spike_triggers_contention(self) -> None:
+        tracker = _LatencyTracker()
+        # Build up a baseline of 0.2s
+        for _ in range(20):
+            tracker.update(0.2)
+        # A 5x spike should trigger contention
+        assert tracker.update(1.0) is True
+
+    def test_gradual_increase_no_contention(self) -> None:
+        tracker = _LatencyTracker()
+        # Gradually increasing latencies — EWMA adapts, no spike
+        for i in range(50):
+            latency = 0.1 + i * 0.01
+            tracker.update(latency)
+        # After gradual ramp, a slightly higher value should NOT trigger
+        assert tracker.update(0.62) is False
+
+    def test_mean_tracks_input(self) -> None:
+        tracker = _LatencyTracker(alpha=1.0)  # alpha=1.0 means instant tracking
+        tracker.update(5.0)
+        assert tracker.mean == 5.0
+        tracker.update(10.0)
+        assert tracker.mean == 10.0
+
+
+# ---------------------------------------------------------------------------
 # _AdaptiveConcurrencyController
 # ---------------------------------------------------------------------------
 
@@ -57,9 +100,9 @@ class TestAdaptiveConcurrencyController:
     @pytest.mark.asyncio
     async def test_multiplicative_decrease_on_entity_contention(self) -> None:
         ctrl = _AdaptiveConcurrencyController(entity_ceiling=16, relationship_ceiling=8)
-        # Record enough contention events to trigger decrease
+        # Directly record contention events (simulating EWMA spike detection)
         for _ in range(_CONTENTION_THRESHOLD):
-            ctrl.record_entity_contention()
+            ctrl._entity_contention.record()
         await ctrl.maybe_adjust()
         assert ctrl.entity_limit == max(_MIN_ENTITY_CONCURRENCY, int(16 * _AIMD_DECREASE_FACTOR))
         assert ctrl.relationship_limit == max(_MIN_RELATIONSHIP_CONCURRENCY, int(8 * _AIMD_DECREASE_FACTOR))
@@ -68,11 +111,23 @@ class TestAdaptiveConcurrencyController:
     async def test_multiplicative_decrease_on_relationship_contention(self) -> None:
         ctrl = _AdaptiveConcurrencyController(entity_ceiling=16, relationship_ceiling=8)
         for _ in range(_CONTENTION_THRESHOLD):
-            ctrl.record_relationship_contention()
+            ctrl._relationship_contention.record()
         await ctrl.maybe_adjust()
         # Both limits decrease when either category has contention
         assert ctrl.entity_limit == max(_MIN_ENTITY_CONCURRENCY, int(16 * _AIMD_DECREASE_FACTOR))
         assert ctrl.relationship_limit == max(_MIN_RELATIONSHIP_CONCURRENCY, int(8 * _AIMD_DECREASE_FACTOR))
+
+    @pytest.mark.asyncio
+    async def test_ewma_signals_contention(self) -> None:
+        """record_entity_write with a latency spike should produce contention events."""
+        ctrl = _AdaptiveConcurrencyController(entity_ceiling=16, relationship_ceiling=8)
+        # Build baseline
+        for _ in range(20):
+            ctrl.record_entity_write(0.2)
+        assert ctrl._entity_contention.count() == 0
+        # Spike — should record contention
+        ctrl.record_entity_write(2.0)
+        assert ctrl._entity_contention.count() >= 1
 
     @pytest.mark.asyncio
     async def test_floor_is_respected(self) -> None:
@@ -80,7 +135,7 @@ class TestAdaptiveConcurrencyController:
         # Force many decreases
         for _ in range(10):
             for _ in range(_CONTENTION_THRESHOLD):
-                ctrl.record_entity_contention()
+                ctrl._entity_contention.record()
             # Reset the last_decrease time to allow another decrease
             ctrl._last_decrease = 0.0
             await ctrl.maybe_adjust()
@@ -92,7 +147,7 @@ class TestAdaptiveConcurrencyController:
         ctrl = _AdaptiveConcurrencyController(entity_ceiling=16, relationship_ceiling=8)
         # First decrease
         for _ in range(_CONTENTION_THRESHOLD):
-            ctrl.record_entity_contention()
+            ctrl._entity_contention.record()
         await ctrl.maybe_adjust()
         decreased_entity = ctrl.entity_limit
         decreased_rel = ctrl.relationship_limit
@@ -120,12 +175,12 @@ class TestAdaptiveConcurrencyController:
     async def test_decrease_is_rate_limited(self) -> None:
         ctrl = _AdaptiveConcurrencyController(entity_ceiling=16, relationship_ceiling=8)
         for _ in range(_CONTENTION_THRESHOLD):
-            ctrl.record_entity_contention()
+            ctrl._entity_contention.record()
         await ctrl.maybe_adjust()
         first_limit = ctrl.entity_limit
         # Immediately try again — should NOT decrease further (rate-limited)
         for _ in range(_CONTENTION_THRESHOLD):
-            ctrl.record_entity_contention()
+            ctrl._entity_contention.record()
         await ctrl.maybe_adjust()
         assert ctrl.entity_limit == first_limit
 
@@ -148,9 +203,9 @@ class TestEntityKeyGateAdaptive:
         ctrl = _AdaptiveConcurrencyController(entity_ceiling=16, relationship_ceiling=8)
         gate = _EntityKeyGate(max_concurrent=16, controller=ctrl)
         assert gate._effective_limit == 16
-        # Trigger decrease
+        # Trigger decrease via direct contention recording
         for _ in range(_CONTENTION_THRESHOLD):
-            ctrl.record_entity_contention()
+            ctrl._entity_contention.record()
         await ctrl.maybe_adjust()
         assert gate._effective_limit == max(_MIN_ENTITY_CONCURRENCY, int(16 * _AIMD_DECREASE_FACTOR))
 
@@ -191,6 +246,6 @@ class TestAdaptiveRelationshipSemaphore:
         sem = _AdaptiveRelationshipSemaphore(max_concurrent=8, controller=ctrl)
         assert sem._effective_limit == 8
         for _ in range(_CONTENTION_THRESHOLD):
-            ctrl.record_relationship_contention()
+            ctrl._relationship_contention.record()
         await ctrl.maybe_adjust()
         assert sem._effective_limit == max(_MIN_RELATIONSHIP_CONCURRENCY, int(8 * _AIMD_DECREASE_FACTOR))

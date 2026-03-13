@@ -51,14 +51,21 @@ _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY = 8
 # ---------------------------------------------------------------------------
 
 # Tuning knobs — exposed as module-level constants for testability.
-_AIMD_DECREASE_FACTOR = 0.5  # Multiplicative decrease on contention
+# Values informed by Vector.dev ARC (Adaptive Request Concurrency) defaults
+# and Netflix concurrency-limits Gradient2 algorithm.
+_AIMD_DECREASE_FACTOR = 0.9  # Gentle multiplicative decrease (Vector.dev default)
 _AIMD_INCREASE_STEP = 1  # Additive increase per calm window
 _CONTENTION_WINDOW_SEC = 2.0  # Sliding window for contention detection
 _CONTENTION_THRESHOLD = 2  # Retries in window before reducing concurrency
-_SLOW_WRITE_THRESHOLD_SEC = 5.0  # Write duration that signals a retry storm
-_CALM_WINDOW_SEC = 10.0  # Seconds without contention before additive increase
+_CALM_WINDOW_SEC = 5.0  # Seconds without contention before additive increase
 _MIN_ENTITY_CONCURRENCY = 2  # Floor — never lower than this
 _MIN_RELATIONSHIP_CONCURRENCY = 2  # Floor for relationship writes
+
+# EWMA latency tracking — detects contention via relative latency spikes
+# rather than absolute thresholds. A write that normally takes 200ms but
+# suddenly takes 2s is under contention, even though 2s < 5s absolute.
+_EWMA_ALPHA = 0.4  # Weight of new measurements vs history
+_RTT_THRESHOLD_RATIO = 2.5  # Latency spike must exceed mean + 2.5*deviation
 
 
 class _ContentionTracker:
@@ -88,6 +95,54 @@ class _ContentionTracker:
         return len(self._events)
 
 
+class _LatencyTracker:
+    """EWMA-based latency tracker for contention detection.
+
+    Uses Exponentially Weighted Moving Average to track write latency and
+    detect spikes relative to baseline — not absolute thresholds.  A write
+    that normally takes 200ms but suddenly takes 2s is under contention,
+    even though 2s is below any reasonable absolute threshold.
+
+    Inspired by Vector.dev ARC and Netflix concurrency-limits Gradient2.
+    """
+
+    __slots__ = ("_ewma", "_deviation", "_alpha", "_threshold_ratio")
+
+    def __init__(
+        self,
+        alpha: float = _EWMA_ALPHA,
+        threshold_ratio: float = _RTT_THRESHOLD_RATIO,
+    ) -> None:
+        self._ewma: float | None = None
+        self._deviation: float | None = None
+        self._alpha = alpha
+        self._threshold_ratio = threshold_ratio
+
+    def update(self, latency_sec: float) -> bool:
+        """Update EWMA and return True if latency indicates contention.
+
+        The threshold is computed from the PRIOR mean and deviation,
+        then the EWMA is updated.  This ensures a sudden spike is
+        compared against the stable baseline, not against itself.
+        """
+        if self._ewma is None:
+            self._ewma = latency_sec
+            self._deviation = 0.0
+            return False
+        # Compute threshold from prior state
+        threshold = self._ewma + self._threshold_ratio * self._deviation
+        is_spike = latency_sec > threshold
+        # Now update EWMA/deviation with this observation
+        self._deviation = (1 - self._alpha) * self._deviation + self._alpha * abs(latency_sec - self._ewma)
+        self._ewma = (1 - self._alpha) * self._ewma + self._alpha * latency_sec
+        return is_spike
+
+    @property
+    def mean(self) -> float:
+        """Current EWMA mean latency (seconds)."""
+        return self._ewma if self._ewma is not None else 0.0
+
+
 class _AdaptiveConcurrencyController:
     """AIMD-based concurrency controller shared by entity and relationship gates.
 
@@ -111,9 +166,13 @@ class _AdaptiveConcurrencyController:
         self._entity_limit: float = float(entity_ceiling)
         self._relationship_limit: float = float(relationship_ceiling)
 
-        # Contention trackers per category
+        # Contention trackers per category (sliding window event count)
         self._entity_contention = _ContentionTracker()
         self._relationship_contention = _ContentionTracker()
+
+        # EWMA latency trackers — detect relative spikes, not absolute thresholds
+        self._entity_latency = _LatencyTracker()
+        self._relationship_latency = _LatencyTracker()
 
         # Timestamp of last AIMD decrease (to pace recovery)
         self._last_decrease: float = 0.0
@@ -132,13 +191,20 @@ class _AdaptiveConcurrencyController:
         """Current effective relationship concurrency limit (integer, >= floor)."""
         return max(_MIN_RELATIONSHIP_CONCURRENCY, int(self._relationship_limit))
 
-    def record_entity_contention(self) -> None:
-        """Signal that an entity write experienced contention."""
-        self._entity_contention.record()
+    def record_entity_write(self, duration_sec: float) -> None:
+        """Record an entity write duration; signal contention if latency spikes."""
+        if self._entity_latency.update(duration_sec):
+            self._entity_contention.record()
+            logger.debug(f"Entity write latency spike: {duration_sec:.2f}s " f"(mean={self._entity_latency.mean:.2f}s)")
 
-    def record_relationship_contention(self) -> None:
-        """Signal that a relationship write experienced contention."""
-        self._relationship_contention.record()
+    def record_relationship_write(self, duration_sec: float) -> None:
+        """Record a relationship write duration; signal contention if latency spikes."""
+        if self._relationship_latency.update(duration_sec):
+            self._relationship_contention.record()
+            logger.debug(
+                f"Relationship write latency spike: {duration_sec:.2f}s "
+                f"(mean={self._relationship_latency.mean:.2f}s)"
+            )
 
     async def maybe_adjust(self) -> None:
         """Check contention metrics and adjust limits (called after each write).
@@ -1003,12 +1069,7 @@ class Neo4jBackend(GraphBackendBase):
                 async with driver.session(database=self._database) as session:
                     records = await session.execute_write(_upsert_tx)
                 elapsed = time.monotonic() - t0
-                if elapsed > _SLOW_WRITE_THRESHOLD_SEC:
-                    self._concurrency_controller.record_entity_contention()
-                    logger.debug(
-                        f"Entity upsert slow write detected: {elapsed:.1f}s "
-                        f"({len(batch)} entities) — signalling contention"
-                    )
+                self._concurrency_controller.record_entity_write(elapsed)
                 await self._concurrency_controller.maybe_adjust()
 
             # Index pre-existing entities by (namespace_id, name, entity_type)
@@ -1069,13 +1130,8 @@ class Neo4jBackend(GraphBackendBase):
                 async with driver.session(database=self._database) as session:
                     version_records = await session.execute_write(_version_tx)
                 elapsed_ver = time.monotonic() - t0_ver
-                if elapsed_ver > _SLOW_WRITE_THRESHOLD_SEC:
-                    self._concurrency_controller.record_entity_contention()
-                    logger.debug(
-                        f"Versioning slow write: {elapsed_ver:.1f}s "
-                        f"({len(version_rows)} rows) — signalling contention"
-                    )
-                    await self._concurrency_controller.maybe_adjust()
+                self._concurrency_controller.record_entity_write(elapsed_ver)
+                await self._concurrency_controller.maybe_adjust()
                 logger.debug(
                     f"Bi-temporal versioning: created {len(version_records)} "
                     f"SUPERSEDES snapshots for {len(version_rows)} changed entities"
@@ -1199,13 +1255,8 @@ class Neo4jBackend(GraphBackendBase):
                 async with driver.session(database=self._database) as session:
                     type_total += await session.execute_write(_tx)
                 elapsed = time.monotonic() - t0
-                if elapsed > _SLOW_WRITE_THRESHOLD_SEC:
-                    self._concurrency_controller.record_relationship_contention()
-                    logger.debug(
-                        f"Relationship write slow ({rel_type}): {elapsed:.1f}s "
-                        f"({len(batch)} rels) — signalling contention"
-                    )
-                    await self._concurrency_controller.maybe_adjust()
+                self._concurrency_controller.record_relationship_write(elapsed)
+                await self._concurrency_controller.maybe_adjust()
             return type_total
 
         # ---------------------------------------------------------------
