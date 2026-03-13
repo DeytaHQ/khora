@@ -839,20 +839,24 @@ async def process_document(
     await storage.update_document(document)
 
     try:
+        import time as _time
         from uuid import uuid4 as _uuid4
 
         from khora.telemetry.instrument import pipeline_stage
 
         _run_id = _uuid4()
         _ns_id = document.namespace_id
+        _phase_times: dict[str, float] = {}
 
         # Step 1: Chunk
+        _t0 = _time.perf_counter()
         async with pipeline_stage("ingestion", "chunking", _run_id, namespace_id=_ns_id):
             chunks = await chunk_document(
                 document,
                 strategy=chunk_strategy,
                 chunk_size=chunk_size,
             )
+        _phase_times["chunking"] = _time.perf_counter() - _t0
         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
 
         # T-2: Propagate document source timestamp to chunks
@@ -905,9 +909,11 @@ async def process_document(
                     extraction_min_importance=extraction_min_importance,
                 )
 
+        _t0 = _time.perf_counter()
         embedded_chunks, (entities, relationships) = await asyncio.gather(
             _embed_with_telemetry(), _extract_with_telemetry()
         )
+        _phase_times["embed+extract"] = _time.perf_counter() - _t0
         chunks = embedded_chunks
 
         # R-2: Restore original content after embedding
@@ -1120,10 +1126,12 @@ async def process_document(
                 return store_results, entity_id_mapping, entities_needing
 
         # Run chunk and entity storage in parallel
+        _t0 = _time.perf_counter()
         _, (store_results, entity_id_mapping, entities_needing_embeddings) = await asyncio.gather(
             _store_chunks(),
             _store_entities(),
         )
+        _phase_times["chunk+entity_storage"] = _time.perf_counter() - _t0
 
         # Step 5b + Step 6: Entity embeddings and relationship storage run in parallel
         # since relationships don't depend on entity embeddings
@@ -1209,10 +1217,12 @@ async def process_document(
             return count, skipped
 
         # Run embedding and relationship storage concurrently
+        _t0 = _time.perf_counter()
         _, (stored_count, _skipped) = await asyncio.gather(
             _embed_entities(),
             _store_relationships(),
         )
+        _phase_times["entity_embed+rel_storage"] = _time.perf_counter() - _t0
 
         # Mark as completed
         document.mark_completed(len(chunks), len(entities))
@@ -1227,6 +1237,7 @@ async def process_document(
             "inferred_relationships": len(inferred_relationships),
             "entity_ids": [e.id for e in entities],
             "chunk_ids": [c.id for c in chunks],
+            "phase_times": _phase_times,
         }
 
     except Exception as e:
@@ -1338,11 +1349,15 @@ async def ingest_documents(
                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
 
     # Phase 1: Stage documents (with optional checksum dedup bypass)
+    import time as _batch_time
+
+    _staging_t0 = _batch_time.perf_counter()
     if skip_checksum_dedup:
         staged_results = await _stage_all_documents(documents, namespace_id, storage)
     else:
         staged_results = await stage_documents_batch(documents, namespace_id, storage)
     staged_docs = [doc for doc in staged_results if doc is not None]
+    _staging_elapsed = _batch_time.perf_counter() - _staging_t0
 
     # Build mapping from staged doc ID to original dict for per-doc overrides
     # (e.g. _skill_name, _extraction_context set by callers like Genesis)
@@ -1371,6 +1386,7 @@ async def ingest_documents(
         shared_embedder = LiteLLMEmbedder(model=embedding_model)
 
     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+    _processing_t0 = _batch_time.perf_counter()
 
     async def process_with_limit(doc):
         async with doc_semaphore:
@@ -1447,6 +1463,7 @@ async def ingest_documents(
         total_entities = smart_resolution_result.get("entities_resolved", total_entities)
         total_inferred = smart_resolution_result.get("inferred_relationships", total_inferred)
 
+    _processing_elapsed = _batch_time.perf_counter() - _processing_t0
     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
 
     # Phase 4: Session-level episode creation
@@ -1465,6 +1482,12 @@ async def ingest_documents(
     except Exception as e:
         logger.warning(f"Session episode creation failed (non-fatal): {e}")
 
+    # Aggregate per-document phase timing into batch-level summary
+    _phase_aggregates: dict[str, float] = {}
+    for r in successful_results:
+        for phase, elapsed in r.get("phase_times", {}).items():
+            _phase_aggregates[phase] = _phase_aggregates.get(phase, 0.0) + elapsed
+
     return {
         "total_documents": len(documents),
         "processed_documents": len(successful_results),
@@ -1476,6 +1499,11 @@ async def ingest_documents(
         "total_inferred_relationships": total_inferred,
         "episodes_created": episodes_created,
         "per_document_results": successful_results,
+        "timing": {
+            "staging_s": round(_staging_elapsed, 3),
+            "processing_s": round(_processing_elapsed, 3),
+            "phase_totals": {k: round(v, 3) for k, v in _phase_aggregates.items()},
+        },
         **({"smart_resolution": smart_resolution_result} if smart_resolution_result else {}),
     }
 
