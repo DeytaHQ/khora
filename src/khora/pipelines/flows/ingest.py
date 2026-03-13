@@ -1224,14 +1224,6 @@ async def process_document(
         )
         _phase_times["entity_embed+rel_storage"] = _time.perf_counter() - _t0
 
-        # Log per-document phase timing summary
-        _total = sum(_phase_times.values())
-        _phases_str = ", ".join(f"{k}={v:.2f}s" for k, v in _phase_times.items())
-        logger.info(
-            f"Doc {document.id} timing ({_total:.2f}s): {_phases_str} "
-            f"| {len(chunks)} chunks, {len(entities)} entities, {stored_count} rels"
-        )
-
         # Mark as completed
         document.mark_completed(len(chunks), len(entities))
         await storage.update_document(document)
@@ -1245,6 +1237,7 @@ async def process_document(
             "inferred_relationships": len(inferred_relationships),
             "entity_ids": [e.id for e in entities],
             "chunk_ids": [c.id for c in chunks],
+            "phase_times": _phase_times,
         }
 
     except Exception as e:
@@ -1365,11 +1358,6 @@ async def ingest_documents(
         staged_results = await stage_documents_batch(documents, namespace_id, storage)
     staged_docs = [doc for doc in staged_results if doc is not None]
     _staging_elapsed = _batch_time.perf_counter() - _staging_t0
-    _deduped_count = sum(1 for d in staged_results if d is None)
-    logger.info(
-        f"Phase 1 staging: {len(documents)} docs in {_staging_elapsed:.2f}s "
-        f"({len(staged_docs)} new, {_deduped_count} deduped)"
-    )
 
     # Build mapping from staged doc ID to original dict for per-doc overrides
     # (e.g. _skill_name, _extraction_context set by callers like Genesis)
@@ -1398,6 +1386,7 @@ async def ingest_documents(
         shared_embedder = LiteLLMEmbedder(model=embedding_model)
 
     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
+    _processing_t0 = _batch_time.perf_counter()
 
     async def process_with_limit(doc):
         async with doc_semaphore:
@@ -1474,6 +1463,7 @@ async def ingest_documents(
         total_entities = smart_resolution_result.get("entities_resolved", total_entities)
         total_inferred = smart_resolution_result.get("inferred_relationships", total_inferred)
 
+    _processing_elapsed = _batch_time.perf_counter() - _processing_t0
     logger.info(f"Ingestion complete: {len(successful_results)} documents processed, {error_count} errors")
 
     # Phase 4: Session-level episode creation
@@ -1492,6 +1482,12 @@ async def ingest_documents(
     except Exception as e:
         logger.warning(f"Session episode creation failed (non-fatal): {e}")
 
+    # Aggregate per-document phase timing into batch-level summary
+    _phase_aggregates: dict[str, float] = {}
+    for r in successful_results:
+        for phase, elapsed in r.get("phase_times", {}).items():
+            _phase_aggregates[phase] = _phase_aggregates.get(phase, 0.0) + elapsed
+
     return {
         "total_documents": len(documents),
         "processed_documents": len(successful_results),
@@ -1503,6 +1499,11 @@ async def ingest_documents(
         "total_inferred_relationships": total_inferred,
         "episodes_created": episodes_created,
         "per_document_results": successful_results,
+        "timing": {
+            "staging_s": round(_staging_elapsed, 3),
+            "processing_s": round(_processing_elapsed, 3),
+            "phase_totals": {k: round(v, 3) for k, v in _phase_aggregates.items()},
+        },
         **({"smart_resolution": smart_resolution_result} if smart_resolution_result else {}),
     }
 
