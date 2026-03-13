@@ -35,6 +35,20 @@ _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
 _DEFAULT_ENTITY_WRITE_CONCURRENCY = 16
 _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY = 8
 
+# Density thresholds for automatic batch-size reduction.
+# High-density batches hold Neo4j locks longer, causing deadlock retries.
+# Reducing sub-batch size for dense data shortens lock windows without
+# touching concurrency — low-density sources are completely unaffected.
+_HIGH_DENSITY_ENTITY_THRESHOLD = 80  # entities per upsert call
+_HIGH_DENSITY_ENTITY_BATCH_SIZE = 25  # smaller sub-batches for dense data
+_HIGH_DENSITY_REL_THRESHOLD = 400  # relationships per call
+_HIGH_DENSITY_REL_BATCH_SIZE = 50  # smaller sub-batches for dense data
+
+# Hub-entity overlap threshold for relationship type grouping.
+# Relationship types sharing >30% of source/target entities are serialized
+# to prevent concurrent MERGE deadlocks on shared hub nodes.
+_HUB_OVERLAP_THRESHOLD = 0.3  # Jaccard similarity
+
 
 class _EntityKeyGate:
     """Key-aware concurrency gate for Neo4j MERGE transactions.
@@ -632,6 +646,10 @@ class Neo4jBackend(GraphBackendBase):
         Matches on (namespace_id, name, entity_type).  Creates if new,
         updates if existing.  Returns (entity, is_new) tuples.
 
+        For high-density batches (>{threshold} entities), automatically
+        reduces sub-batch size to shorten Neo4j lock windows and reduce
+        deadlock retries.  Low-density batches are unaffected.
+
         **Bi-temporal versioning**: When an existing entity's attributes
         change, the old node is closed (``version_valid_to`` set) and a new
         versioned node is created with a ``[:SUPERSEDES]`` edge pointing
@@ -640,6 +658,15 @@ class Neo4jBackend(GraphBackendBase):
         """
         if not entities:
             return []
+
+        # Density-based batch size: reduce sub-batch size for high-density
+        # data to shorten Neo4j lock windows.  Low-density data is unaffected.
+        if len(entities) >= _HIGH_DENSITY_ENTITY_THRESHOLD and batch_size > _HIGH_DENSITY_ENTITY_BATCH_SIZE:
+            logger.debug(
+                f"High-density entity batch ({len(entities)} entities): "
+                f"reducing sub-batch size {batch_size} -> {_HIGH_DENSITY_ENTITY_BATCH_SIZE}"
+            )
+            batch_size = _HIGH_DENSITY_ENTITY_BATCH_SIZE
 
         driver = self._get_driver()
 
@@ -875,6 +902,14 @@ class Neo4jBackend(GraphBackendBase):
         if not relationships:
             return 0
 
+        # Density-based batch size for relationships
+        if len(relationships) >= _HIGH_DENSITY_REL_THRESHOLD and batch_size > _HIGH_DENSITY_REL_BATCH_SIZE:
+            logger.debug(
+                f"High-density relationship batch ({len(relationships)} rels): "
+                f"reducing sub-batch size {batch_size} -> {_HIGH_DENSITY_REL_BATCH_SIZE}"
+            )
+            batch_size = _HIGH_DENSITY_REL_BATCH_SIZE
+
         driver = self._get_driver()
 
         # Build inverse relationships upfront so they share the same pass,
@@ -948,14 +983,67 @@ class Neo4jBackend(GraphBackendBase):
                     type_total += await session.execute_write(_tx)
             return type_total
 
-        # Bounded parallelism — up to 4 concurrent type groups to restore
-        # throughput while limiting deadlock surface. The driver's built-in
-        # retry (retry_delay_jitter_factor=0.5) handles any remaining contention.
-        async def _limited_create(rel_type: str, rels: list[Relationship]) -> int:
-            async with self._relationship_write_sem:
-                return await _create_type_group(rel_type, rels)
+        # ---------------------------------------------------------------
+        # Hub-entity grouping: When multiple relationship types share
+        # the same source/target entities, concurrent MERGE operations
+        # deadlock on those hub nodes.  For high-density batches, we
+        # detect shared hub entities via Jaccard overlap and serialize
+        # overlapping type groups.  Low-density batches skip this
+        # (the overhead isn't worth it for a few relationship types).
+        # ---------------------------------------------------------------
+        if len(all_rels) >= _HIGH_DENSITY_REL_THRESHOLD and len(type_groups) > 1:
+            # Build entity reference sets per type group
+            type_entity_sets: dict[str, set[str]] = {}
+            for rt, rels_list in type_groups.items():
+                entity_ids: set[str] = set()
+                for r in rels_list:
+                    entity_ids.add(str(r.source_entity_id))
+                    entity_ids.add(str(r.target_entity_id))
+                type_entity_sets[rt] = entity_ids
 
-        results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
+            # Group overlapping types into serial execution groups
+            execution_groups: list[list[str]] = []
+            assigned: set[str] = set()
+            for rt in sorted(type_groups):
+                if rt in assigned:
+                    continue
+                group = [rt]
+                assigned.add(rt)
+                group_entities = set(type_entity_sets[rt])
+                for other_rt in sorted(type_groups):
+                    if other_rt in assigned:
+                        continue
+                    other_entities = type_entity_sets[other_rt]
+                    if not group_entities or not other_entities:
+                        continue
+                    intersection = len(group_entities & other_entities)
+                    union = len(group_entities | other_entities)
+                    jaccard = intersection / union if union else 0.0
+                    if jaccard >= _HUB_OVERLAP_THRESHOLD:
+                        group.append(other_rt)
+                        assigned.add(other_rt)
+                        group_entities |= other_entities
+                execution_groups.append(group)
+
+            async def _run_hub_group(group: list[str]) -> int:
+                total = 0
+                for rt in group:
+                    total += await _create_type_group(rt, type_groups[rt])
+                return total
+
+            async def _limited_hub_run(group: list[str]) -> int:
+                async with self._relationship_write_sem:
+                    return await _run_hub_group(group)
+
+            logger.debug(f"Hub grouping: {len(type_groups)} types -> {len(execution_groups)} execution groups")
+            results = await asyncio.gather(*[_limited_hub_run(g) for g in execution_groups])
+        else:
+            # Low-density: simple bounded parallelism (original behavior)
+            async def _limited_create(rel_type: str, rels: list[Relationship]) -> int:
+                async with self._relationship_write_sem:
+                    return await _create_type_group(rel_type, rels)
+
+            results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
         total_created = sum(results)
 
         inverse_count = len(all_rels) - len(relationships)
