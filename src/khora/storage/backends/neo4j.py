@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re as _re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import copy
@@ -35,6 +36,163 @@ _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
 _DEFAULT_ENTITY_WRITE_CONCURRENCY = 16
 _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY = 8
 
+# ---------------------------------------------------------------------------
+# Adaptive concurrency controller — AIMD (Additive Increase / Multiplicative
+# Decrease) algorithm inspired by TCP congestion control.
+#
+# Starts at full concurrency (fast for low-density sources like Slack/Linear).
+# When contention is detected (Neo4j TransientError retries manifest as slow
+# write transactions), the controller halves the effective concurrency limit.
+# During calm periods it additively restores concurrency toward the ceiling.
+#
+# This is a *shared* controller: both entity and relationship gates consult
+# it, so contention in one gate propagates back-pressure to the other,
+# addressing cross-gate deadlocks (contention vector B).
+# ---------------------------------------------------------------------------
+
+# Tuning knobs — exposed as module-level constants for testability.
+_AIMD_DECREASE_FACTOR = 0.5  # Multiplicative decrease on contention
+_AIMD_INCREASE_STEP = 1  # Additive increase per calm window
+_CONTENTION_WINDOW_SEC = 2.0  # Sliding window for contention detection
+_CONTENTION_THRESHOLD = 2  # Retries in window before reducing concurrency
+_SLOW_WRITE_THRESHOLD_SEC = 5.0  # Write duration that signals a retry storm
+_CALM_WINDOW_SEC = 10.0  # Seconds without contention before additive increase
+_MIN_ENTITY_CONCURRENCY = 2  # Floor — never lower than this
+_MIN_RELATIONSHIP_CONCURRENCY = 2  # Floor for relationship writes
+
+
+class _ContentionTracker:
+    """Lock-free contention metrics for one write category.
+
+    Records contention events (detected via slow writes or explicit signals)
+    in a sliding time window.  The AIMD controller reads the event count to
+    decide whether to reduce concurrency.
+    """
+
+    __slots__ = ("_events", "_window")
+
+    def __init__(self, window: float = _CONTENTION_WINDOW_SEC) -> None:
+        self._events: list[float] = []
+        self._window = window
+
+    def record(self) -> None:
+        """Record a contention event at the current time."""
+        self._events.append(time.monotonic())
+
+    def count(self) -> int:
+        """Count events within the sliding window."""
+        cutoff = time.monotonic() - self._window
+        # Prune old events (list is append-only, so trim from the front)
+        while self._events and self._events[0] < cutoff:
+            self._events.pop(0)
+        return len(self._events)
+
+
+class _AdaptiveConcurrencyController:
+    """AIMD-based concurrency controller shared by entity and relationship gates.
+
+    Maintains effective concurrency limits that start at the configured ceiling
+    and adapt downward when contention is detected, then recover during calm
+    periods.
+
+    Thread-safety: all mutations happen inside an asyncio.Lock (single event
+    loop) so there are no data races.
+    """
+
+    def __init__(
+        self,
+        entity_ceiling: int,
+        relationship_ceiling: int,
+    ) -> None:
+        self._entity_ceiling = entity_ceiling
+        self._relationship_ceiling = relationship_ceiling
+
+        # Effective limits — start at ceiling (full throughput for low-density)
+        self._entity_limit: float = float(entity_ceiling)
+        self._relationship_limit: float = float(relationship_ceiling)
+
+        # Contention trackers per category
+        self._entity_contention = _ContentionTracker()
+        self._relationship_contention = _ContentionTracker()
+
+        # Timestamp of last AIMD decrease (to pace recovery)
+        self._last_decrease: float = 0.0
+        # Timestamp of last increase attempt
+        self._last_increase: float = 0.0
+
+        self._lock = asyncio.Lock()
+
+    @property
+    def entity_limit(self) -> int:
+        """Current effective entity concurrency limit (integer, >= floor)."""
+        return max(_MIN_ENTITY_CONCURRENCY, int(self._entity_limit))
+
+    @property
+    def relationship_limit(self) -> int:
+        """Current effective relationship concurrency limit (integer, >= floor)."""
+        return max(_MIN_RELATIONSHIP_CONCURRENCY, int(self._relationship_limit))
+
+    def record_entity_contention(self) -> None:
+        """Signal that an entity write experienced contention."""
+        self._entity_contention.record()
+
+    def record_relationship_contention(self) -> None:
+        """Signal that a relationship write experienced contention."""
+        self._relationship_contention.record()
+
+    async def maybe_adjust(self) -> None:
+        """Check contention metrics and adjust limits (called after each write).
+
+        AIMD rules:
+        - If contention events in either category exceed the threshold,
+          multiplicatively decrease BOTH limits (cross-gate back-pressure).
+        - If no contention for _CALM_WINDOW_SEC, additively increase both
+          limits toward their ceilings.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            entity_events = self._entity_contention.count()
+            rel_events = self._relationship_contention.count()
+
+            if entity_events >= _CONTENTION_THRESHOLD or rel_events >= _CONTENTION_THRESHOLD:
+                # Multiplicative decrease — cut both limits
+                if now - self._last_decrease > _CONTENTION_WINDOW_SEC:
+                    old_e = self._entity_limit
+                    old_r = self._relationship_limit
+                    self._entity_limit = max(
+                        _MIN_ENTITY_CONCURRENCY,
+                        self._entity_limit * _AIMD_DECREASE_FACTOR,
+                    )
+                    self._relationship_limit = max(
+                        _MIN_RELATIONSHIP_CONCURRENCY,
+                        self._relationship_limit * _AIMD_DECREASE_FACTOR,
+                    )
+                    self._last_decrease = now
+                    self._last_increase = now  # Reset increase timer
+                    logger.info(
+                        f"AIMD decrease: entity {old_e:.0f}->{self._entity_limit:.0f}, "
+                        f"rel {old_r:.0f}->{self._relationship_limit:.0f} "
+                        f"(contention: entity={entity_events}, rel={rel_events})"
+                    )
+            elif now - max(self._last_decrease, self._last_increase) > _CALM_WINDOW_SEC:
+                # Additive increase — restore toward ceilings
+                if self._entity_limit < self._entity_ceiling or self._relationship_limit < self._relationship_ceiling:
+                    old_e = self._entity_limit
+                    old_r = self._relationship_limit
+                    self._entity_limit = min(
+                        self._entity_ceiling,
+                        self._entity_limit + _AIMD_INCREASE_STEP,
+                    )
+                    self._relationship_limit = min(
+                        self._relationship_ceiling,
+                        self._relationship_limit + _AIMD_INCREASE_STEP,
+                    )
+                    self._last_increase = now
+                    logger.debug(
+                        f"AIMD increase: entity {old_e:.0f}->{self._entity_limit:.0f}, "
+                        f"rel {old_r:.0f}->{self._relationship_limit:.0f}"
+                    )
+
 
 class _EntityKeyGate:
     """Key-aware concurrency gate for Neo4j MERGE transactions.
@@ -42,13 +200,28 @@ class _EntityKeyGate:
     Tracks in-flight entity keys (namespace_id, name, entity_type).
     Allows non-overlapping batches to proceed concurrently.
     Serializes overlapping batches to prevent Neo4j lock contention.
+
+    When paired with an _AdaptiveConcurrencyController, the effective
+    concurrency limit is dynamically adjusted based on observed contention.
     """
 
-    def __init__(self, max_concurrent: int) -> None:
+    def __init__(
+        self,
+        max_concurrent: int,
+        controller: _AdaptiveConcurrencyController | None = None,
+    ) -> None:
         self._condition = asyncio.Condition()
         self._in_flight: set[tuple[str, str, str]] = set()
         self._active = 0
         self._max_concurrent = max_concurrent
+        self._controller = controller
+
+    @property
+    def _effective_limit(self) -> int:
+        """Dynamic limit: use controller if available, else static ceiling."""
+        if self._controller is not None:
+            return self._controller.entity_limit
+        return self._max_concurrent
 
     @asynccontextmanager
     async def acquire(self, entities: list) -> AsyncIterator[None]:
@@ -61,7 +234,7 @@ class _EntityKeyGate:
             for e in entities
         }
         async with self._condition:
-            while (keys & self._in_flight) or self._active >= self._max_concurrent:
+            while (keys & self._in_flight) or self._active >= self._effective_limit:
                 await self._condition.wait()
             self._in_flight |= keys
             self._active += 1
@@ -70,6 +243,44 @@ class _EntityKeyGate:
         finally:
             async with self._condition:
                 self._in_flight -= keys
+                self._active -= 1
+                self._condition.notify_all()
+
+
+class _AdaptiveRelationshipSemaphore:
+    """Drop-in replacement for asyncio.Semaphore that consults the AIMD controller.
+
+    Unlike a fixed semaphore, the effective limit changes dynamically.
+    Implemented as a condition-variable gate (similar to _EntityKeyGate)
+    so the limit can shrink below the number of already-acquired slots.
+    """
+
+    def __init__(
+        self,
+        max_concurrent: int,
+        controller: _AdaptiveConcurrencyController | None = None,
+    ) -> None:
+        self._condition = asyncio.Condition()
+        self._active = 0
+        self._max_concurrent = max_concurrent
+        self._controller = controller
+
+    @property
+    def _effective_limit(self) -> int:
+        if self._controller is not None:
+            return self._controller.relationship_limit
+        return self._max_concurrent
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[None]:
+        async with self._condition:
+            while self._active >= self._effective_limit:
+                await self._condition.wait()
+            self._active += 1
+        try:
+            yield
+        finally:
+            async with self._condition:
                 self._active -= 1
                 self._condition.notify_all()
 
@@ -210,8 +421,19 @@ class Neo4jBackend(GraphBackendBase):
         self._retry_delay_jitter_factor = retry_delay_jitter_factor
         self._driver: AsyncDriver | None = None
         self._owns_driver: bool = True
-        self._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
-        self._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
+        # Shared adaptive concurrency controller (AIMD)
+        self._concurrency_controller = _AdaptiveConcurrencyController(
+            entity_ceiling=entity_write_concurrency,
+            relationship_ceiling=relationship_write_concurrency,
+        )
+        self._entity_key_gate = _EntityKeyGate(
+            max_concurrent=entity_write_concurrency,
+            controller=self._concurrency_controller,
+        )
+        self._relationship_write_sem = _AdaptiveRelationshipSemaphore(
+            max_concurrent=relationship_write_concurrency,
+            controller=self._concurrency_controller,
+        )
 
     @classmethod
     def from_config(cls, config: Any) -> Neo4jBackend:
@@ -263,8 +485,19 @@ class Neo4jBackend(GraphBackendBase):
         instance._retry_delay_jitter_factor = 0.5
         instance._driver = driver
         instance._owns_driver = False
-        instance._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
-        instance._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
+        controller = _AdaptiveConcurrencyController(
+            entity_ceiling=entity_write_concurrency,
+            relationship_ceiling=relationship_write_concurrency,
+        )
+        instance._concurrency_controller = controller
+        instance._entity_key_gate = _EntityKeyGate(
+            max_concurrent=entity_write_concurrency,
+            controller=controller,
+        )
+        instance._relationship_write_sem = _AdaptiveRelationshipSemaphore(
+            max_concurrent=relationship_write_concurrency,
+            controller=controller,
+        )
         return instance
 
     async def connect(self) -> None:
@@ -766,8 +999,17 @@ class Neo4jBackend(GraphBackendBase):
             async with self._entity_key_gate.acquire(batch):
                 async with driver.session(database=self._database) as session:
                     pre_existing = await session.execute_read(_prefetch_tx)
+                t0 = time.monotonic()
                 async with driver.session(database=self._database) as session:
                     records = await session.execute_write(_upsert_tx)
+                elapsed = time.monotonic() - t0
+                if elapsed > _SLOW_WRITE_THRESHOLD_SEC:
+                    self._concurrency_controller.record_entity_contention()
+                    logger.debug(
+                        f"Entity upsert slow write detected: {elapsed:.1f}s "
+                        f"({len(batch)} entities) — signalling contention"
+                    )
+                await self._concurrency_controller.maybe_adjust()
 
             # Index pre-existing entities by (namespace_id, name, entity_type)
             pre_map: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -823,8 +1065,17 @@ class Neo4jBackend(GraphBackendBase):
                     result = await tx.run(_VERSION_CYPHER, version_rows=version_rows)
                     return await result.data()
 
+                t0_ver = time.monotonic()
                 async with driver.session(database=self._database) as session:
                     version_records = await session.execute_write(_version_tx)
+                elapsed_ver = time.monotonic() - t0_ver
+                if elapsed_ver > _SLOW_WRITE_THRESHOLD_SEC:
+                    self._concurrency_controller.record_entity_contention()
+                    logger.debug(
+                        f"Versioning slow write: {elapsed_ver:.1f}s "
+                        f"({len(version_rows)} rows) — signalling contention"
+                    )
+                    await self._concurrency_controller.maybe_adjust()
                 logger.debug(
                     f"Bi-temporal versioning: created {len(version_records)} "
                     f"SUPERSEDES snapshots for {len(version_rows)} changed entities"
@@ -944,18 +1195,81 @@ class Neo4jBackend(GraphBackendBase):
                     record = await result.single()
                     return record["created"] if record else 0
 
+                t0 = time.monotonic()
                 async with driver.session(database=self._database) as session:
                     type_total += await session.execute_write(_tx)
+                elapsed = time.monotonic() - t0
+                if elapsed > _SLOW_WRITE_THRESHOLD_SEC:
+                    self._concurrency_controller.record_relationship_contention()
+                    logger.debug(
+                        f"Relationship write slow ({rel_type}): {elapsed:.1f}s "
+                        f"({len(batch)} rels) — signalling contention"
+                    )
+                    await self._concurrency_controller.maybe_adjust()
             return type_total
 
-        # Bounded parallelism — up to 4 concurrent type groups to restore
-        # throughput while limiting deadlock surface. The driver's built-in
-        # retry (retry_delay_jitter_factor=0.5) handles any remaining contention.
-        async def _limited_create(rel_type: str, rels: list[Relationship]) -> int:
-            async with self._relationship_write_sem:
-                return await _create_type_group(rel_type, rels)
+        # ---------------------------------------------------------------
+        # Hub-entity grouping (contention vector E): When multiple
+        # relationship types share the same source or target entity nodes,
+        # concurrent MERGE operations cause Neo4j index-level locking on
+        # those hub nodes.  We detect hub contention by counting entity
+        # references across type groups: types that share high-degree nodes
+        # are serialized into the same concurrency slot.
+        # ---------------------------------------------------------------
 
-        results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
+        # Count entity references per type group
+        type_entity_sets: dict[str, set[str]] = {}
+        for rt, rels_list in type_groups.items():
+            entity_ids_in_group: set[str] = set()
+            for r in rels_list:
+                entity_ids_in_group.add(str(r.source_entity_id))
+                entity_ids_in_group.add(str(r.target_entity_id))
+            type_entity_sets[rt] = entity_ids_in_group
+
+        # Build hub-aware execution groups: type groups sharing >50% entity
+        # overlap with any already-grouped type go into the same serial group.
+        # This prevents concurrent MERGE on shared hub nodes.
+        _HUB_OVERLAP_THRESHOLD = 0.3  # 30% Jaccard overlap triggers grouping
+        execution_groups: list[list[str]] = []  # Each inner list runs serially
+        assigned: set[str] = set()
+
+        for rt in sorted(type_groups):
+            if rt in assigned:
+                continue
+            group = [rt]
+            assigned.add(rt)
+            group_entities = set(type_entity_sets[rt])
+            # Check unassigned types for overlap
+            for other_rt in sorted(type_groups):
+                if other_rt in assigned:
+                    continue
+                other_entities = type_entity_sets[other_rt]
+                if not group_entities or not other_entities:
+                    continue
+                intersection = len(group_entities & other_entities)
+                union = len(group_entities | other_entities)
+                jaccard = intersection / union if union else 0.0
+                if jaccard >= _HUB_OVERLAP_THRESHOLD:
+                    group.append(other_rt)
+                    assigned.add(other_rt)
+                    group_entities |= other_entities
+            execution_groups.append(group)
+
+        async def _run_execution_group(group: list[str]) -> int:
+            """Run type groups that share hub entities serially within
+            one concurrency slot to avoid hub-node lock contention."""
+            total = 0
+            for rt in group:
+                total += await _create_type_group(rt, type_groups[rt])
+            return total
+
+        # Bounded parallelism via adaptive semaphore — execution groups
+        # that do NOT share hub entities run concurrently.
+        async def _limited_run(group: list[str]) -> int:
+            async with self._relationship_write_sem.acquire():
+                return await _run_execution_group(group)
+
+        results = await asyncio.gather(*[_limited_run(g) for g in execution_groups])
         total_created = sum(results)
 
         inverse_count = len(all_rels) - len(relationships)
