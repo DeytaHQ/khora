@@ -696,6 +696,63 @@ async def stage_documents_batch(
     return results
 
 
+async def _stage_all_documents(
+    doc_inputs: list[dict[str, Any]],
+    namespace_id: UUID,
+    storage: StorageCoordinator,
+) -> list[Document | None]:
+    """Stage all documents unconditionally (no checksum dedup).
+
+    Used in rewrite mode where documents should be re-processed even
+    if their content hasn't changed.
+    """
+    from datetime import UTC, datetime
+
+    from khora.core.models import Document, DocumentMetadata
+
+    if not doc_inputs:
+        return []
+
+    results: list[Document | None] = [None] * len(doc_inputs)
+    stage_sem = asyncio.Semaphore(10)
+
+    async def _create_one(idx: int, doc_input: dict[str, Any]) -> None:
+        content = doc_input.get("content", "")
+        custom_metadata = doc_input.get("metadata", {})
+        checksum = compute_checksum(content)
+        metadata = DocumentMetadata(
+            source=doc_input.get("source", ""),
+            source_type=doc_input.get("source_type", "manual"),
+            content_type=doc_input.get("content_type", "text/plain"),
+            title=doc_input.get("title", ""),
+            author=doc_input.get("author", ""),
+            language=doc_input.get("language", "en"),
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            custom=custom_metadata,
+        )
+
+        source_timestamp = _extract_source_timestamp(custom_metadata)
+        created_at = source_timestamp or datetime.now(UTC)
+
+        document = Document(
+            namespace_id=namespace_id,
+            content=content,
+            metadata=metadata,
+            created_at=created_at,
+            updated_at=created_at,
+            source_timestamp=source_timestamp,
+        )
+
+        async with stage_sem:
+            doc = await storage.create_document(document)
+        results[idx] = doc
+
+    await asyncio.gather(*[_create_one(i, doc_input) for i, doc_input in enumerate(doc_inputs)])
+
+    return results
+
+
 async def process_document(
     document: Document,
     storage: StorageCoordinator,
@@ -1210,11 +1267,12 @@ async def ingest_documents(
     selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
+    skip_checksum_dedup: bool = False,
     **kwargs,
 ) -> dict[str, Any]:
     """Two-phase document ingestion flow with parallel processing.
 
-    Phase 1: Stage documents (checksum-based change detection)
+    Phase 1: Stage documents (checksum-based change detection, skippable)
     Phase 2: Process changed documents in parallel (chunk, embed, extract)
     Phase 3 (Optional): Semantic expansion (entity unification, relationship inference)
 
@@ -1279,9 +1337,11 @@ async def ingest_documents(
             if existing_entities:
                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
 
-    # Phase 1: Batch checksum dedup + stage new documents
-    # Single batch query replaces N individual get_document_by_checksum calls.
-    staged_results = await stage_documents_batch(documents, namespace_id, storage)
+    # Phase 1: Stage documents (with optional checksum dedup bypass)
+    if skip_checksum_dedup:
+        staged_results = await _stage_all_documents(documents, namespace_id, storage)
+    else:
+        staged_results = await stage_documents_batch(documents, namespace_id, storage)
     staged_docs = [doc for doc in staged_results if doc is not None]
 
     # Build mapping from staged doc ID to original dict for per-doc overrides
