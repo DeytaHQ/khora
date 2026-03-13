@@ -839,20 +839,24 @@ async def process_document(
     await storage.update_document(document)
 
     try:
+        import time as _time
         from uuid import uuid4 as _uuid4
 
         from khora.telemetry.instrument import pipeline_stage
 
         _run_id = _uuid4()
         _ns_id = document.namespace_id
+        _phase_times: dict[str, float] = {}
 
         # Step 1: Chunk
+        _t0 = _time.perf_counter()
         async with pipeline_stage("ingestion", "chunking", _run_id, namespace_id=_ns_id):
             chunks = await chunk_document(
                 document,
                 strategy=chunk_strategy,
                 chunk_size=chunk_size,
             )
+        _phase_times["chunking"] = _time.perf_counter() - _t0
         logger.debug(f"Document {document.id}: created {len(chunks)} chunks")
 
         # T-2: Propagate document source timestamp to chunks
@@ -905,9 +909,11 @@ async def process_document(
                     extraction_min_importance=extraction_min_importance,
                 )
 
+        _t0 = _time.perf_counter()
         embedded_chunks, (entities, relationships) = await asyncio.gather(
             _embed_with_telemetry(), _extract_with_telemetry()
         )
+        _phase_times["embed+extract"] = _time.perf_counter() - _t0
         chunks = embedded_chunks
 
         # R-2: Restore original content after embedding
@@ -1120,10 +1126,12 @@ async def process_document(
                 return store_results, entity_id_mapping, entities_needing
 
         # Run chunk and entity storage in parallel
+        _t0 = _time.perf_counter()
         _, (store_results, entity_id_mapping, entities_needing_embeddings) = await asyncio.gather(
             _store_chunks(),
             _store_entities(),
         )
+        _phase_times["chunk+entity_storage"] = _time.perf_counter() - _t0
 
         # Step 5b + Step 6: Entity embeddings and relationship storage run in parallel
         # since relationships don't depend on entity embeddings
@@ -1209,9 +1217,19 @@ async def process_document(
             return count, skipped
 
         # Run embedding and relationship storage concurrently
+        _t0 = _time.perf_counter()
         _, (stored_count, _skipped) = await asyncio.gather(
             _embed_entities(),
             _store_relationships(),
+        )
+        _phase_times["entity_embed+rel_storage"] = _time.perf_counter() - _t0
+
+        # Log per-document phase timing summary
+        _total = sum(_phase_times.values())
+        _phases_str = ", ".join(f"{k}={v:.2f}s" for k, v in _phase_times.items())
+        logger.info(
+            f"Doc {document.id} timing ({_total:.2f}s): {_phases_str} "
+            f"| {len(chunks)} chunks, {len(entities)} entities, {stored_count} rels"
         )
 
         # Mark as completed
@@ -1338,11 +1356,20 @@ async def ingest_documents(
                 logger.info(f"Smart mode: pre-loaded {len(existing_entities)} existing entities into index")
 
     # Phase 1: Stage documents (with optional checksum dedup bypass)
+    import time as _batch_time
+
+    _staging_t0 = _batch_time.perf_counter()
     if skip_checksum_dedup:
         staged_results = await _stage_all_documents(documents, namespace_id, storage)
     else:
         staged_results = await stage_documents_batch(documents, namespace_id, storage)
     staged_docs = [doc for doc in staged_results if doc is not None]
+    _staging_elapsed = _batch_time.perf_counter() - _staging_t0
+    _deduped_count = sum(1 for d in staged_results if d is None)
+    logger.info(
+        f"Phase 1 staging: {len(documents)} docs in {_staging_elapsed:.2f}s "
+        f"({len(staged_docs)} new, {_deduped_count} deduped)"
+    )
 
     # Build mapping from staged doc ID to original dict for per-doc overrides
     # (e.g. _skill_name, _extraction_context set by callers like Genesis)
