@@ -32,46 +32,81 @@ from khora.telemetry import trace
 _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
 
 # Default concurrency limits for Neo4j write transactions.
-_DEFAULT_ENTITY_WRITE_CONCURRENCY = 16
-_DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY = 8
+# Unified write gate: total concurrent write transactions (entities + relationships).
+# Lower values reduce deadlock probability at the cost of write throughput.
+_DEFAULT_WRITE_CONCURRENCY = 4
+# Legacy defaults kept for API compat (mapped to unified gate internally).
+_DEFAULT_ENTITY_WRITE_CONCURRENCY = _DEFAULT_WRITE_CONCURRENCY
+_DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY = _DEFAULT_WRITE_CONCURRENCY
 
 
-class _EntityKeyGate:
-    """Key-aware concurrency gate for Neo4j MERGE transactions.
+class _WriteGate:
+    """Unified write gate for ALL Neo4j write transactions.
 
-    Tracks in-flight entity keys (namespace_id, name, entity_type).
-    Allows non-overlapping batches to proceed concurrently.
-    Serializes overlapping batches to prevent Neo4j lock contention.
+    Replaces the separate _EntityKeyGate + _relationship_write_sem with a single
+    semaphore that limits total concurrent write transactions (entity upserts,
+    relationship creates, versioning) to prevent Neo4j deadlocks.
+
+    Entity upserts and relationship creates both lock entity nodes (MERGEs on
+    Entity nodes).  The old approach had separate gates (16 entity + 8 relationship
+    = up to 24 concurrent writers), causing deadlocks when entity density was high.
+
+    Additionally tracks in-flight entity keys to serialize batches that touch
+    overlapping entities (preventing the same MERGE key from being written
+    concurrently).
     """
 
     def __init__(self, max_concurrent: int) -> None:
+        self._semaphore = asyncio.Semaphore(max_concurrent)
         self._condition = asyncio.Condition()
         self._in_flight: set[tuple[str, str, str]] = set()
-        self._active = 0
         self._max_concurrent = max_concurrent
+        # Telemetry: track contention for diagnostics
+        self._total_acquires = 0
+        self._total_waits = 0
 
     @asynccontextmanager
-    async def acquire(self, entities: list) -> AsyncIterator[None]:
-        keys = {
-            (
-                str(e.namespace_id),
-                e.name,
-                str(e.entity_type),
-            )
-            for e in entities
-        }
+    async def acquire_entity_write(self, entities: list) -> AsyncIterator[None]:
+        """Acquire write slot with entity-key overlap protection."""
+        keys = {(str(e.namespace_id), e.name, str(e.entity_type)) for e in entities}
+        # Wait for overlapping keys to drain AND a semaphore slot
         async with self._condition:
-            while (keys & self._in_flight) or self._active >= self._max_concurrent:
+            self._total_acquires += 1
+            waited = False
+            while keys & self._in_flight:
+                if not waited:
+                    self._total_waits += 1
+                    waited = True
                 await self._condition.wait()
             self._in_flight |= keys
-            self._active += 1
+        await self._semaphore.acquire()
         try:
             yield
         finally:
+            self._semaphore.release()
             async with self._condition:
                 self._in_flight -= keys
-                self._active -= 1
                 self._condition.notify_all()
+
+    @asynccontextmanager
+    async def acquire_write(self) -> AsyncIterator[None]:
+        """Acquire a write slot (no key overlap tracking)."""
+        self._total_acquires += 1
+        await self._semaphore.acquire()
+        try:
+            yield
+        finally:
+            self._semaphore.release()
+
+    @property
+    def stats(self) -> dict[str, int]:
+        """Return contention statistics."""
+        return {
+            "total_acquires": self._total_acquires,
+            "total_key_waits": self._total_waits,
+            "in_flight_keys": len(self._in_flight),
+            "available_slots": self._semaphore._value,
+        }
 
 
 # Bidirectional relationship types and their inverses
@@ -187,6 +222,7 @@ class Neo4jBackend(GraphBackendBase):
         retry_delay_jitter_factor: float = 0.5,
         entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
+        write_concurrency: int | None = None,
     ) -> None:
         """Initialize the Neo4j backend.
 
@@ -198,8 +234,10 @@ class Neo4jBackend(GraphBackendBase):
             max_connection_pool_size: Maximum connection pool size
             connection_acquisition_timeout: Timeout waiting for a connection from the pool
             retry_delay_jitter_factor: Jitter factor for transaction retry delays (0.0-1.0)
-            entity_write_concurrency: Max concurrent entity write transactions
-            relationship_write_concurrency: Max concurrent relationship write transactions
+            entity_write_concurrency: Legacy — mapped to write_concurrency
+            relationship_write_concurrency: Legacy — mapped to write_concurrency
+            write_concurrency: Max total concurrent write transactions (entities + relationships).
+                Defaults to _DEFAULT_WRITE_CONCURRENCY if not specified.
         """
         self._url = url
         self._user = user
@@ -210,8 +248,12 @@ class Neo4jBackend(GraphBackendBase):
         self._retry_delay_jitter_factor = retry_delay_jitter_factor
         self._driver: AsyncDriver | None = None
         self._owns_driver: bool = True
-        self._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
-        self._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
+        # Unified write gate: caps total concurrent Neo4j write transactions
+        _wc = write_concurrency if write_concurrency is not None else _DEFAULT_WRITE_CONCURRENCY
+        self._write_gate = _WriteGate(max_concurrent=_wc)
+        # Keep legacy attributes for API compat (point to same gate)
+        self._entity_key_gate = self._write_gate
+        self._relationship_write_sem = self._write_gate
 
     @classmethod
     def from_config(cls, config: Any) -> Neo4jBackend:
@@ -224,10 +266,7 @@ class Neo4jBackend(GraphBackendBase):
             max_connection_pool_size=getattr(config, "max_connection_pool_size", 100),
             connection_acquisition_timeout=getattr(config, "connection_acquisition_timeout", 60.0),
             retry_delay_jitter_factor=getattr(config, "retry_delay_jitter_factor", 0.5),
-            entity_write_concurrency=getattr(config, "entity_write_concurrency", _DEFAULT_ENTITY_WRITE_CONCURRENCY),
-            relationship_write_concurrency=getattr(
-                config, "relationship_write_concurrency", _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY
-            ),
+            write_concurrency=getattr(config, "write_concurrency", _DEFAULT_WRITE_CONCURRENCY),
         )
 
     @classmethod
@@ -238,6 +277,7 @@ class Neo4jBackend(GraphBackendBase):
         database: str = "neo4j",
         entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
+        write_concurrency: int | None = None,
     ) -> Neo4jBackend:
         """Create a Neo4jBackend from an existing AsyncDriver.
 
@@ -247,8 +287,7 @@ class Neo4jBackend(GraphBackendBase):
         Args:
             driver: An existing Neo4j async driver
             database: Database name
-            entity_write_concurrency: Max concurrent entity write transactions
-            relationship_write_concurrency: Max concurrent relationship write transactions
+            write_concurrency: Max total concurrent write transactions
 
         Returns:
             Neo4jBackend wrapping the shared driver
@@ -263,8 +302,10 @@ class Neo4jBackend(GraphBackendBase):
         instance._retry_delay_jitter_factor = 0.5
         instance._driver = driver
         instance._owns_driver = False
-        instance._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
-        instance._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
+        _wc = write_concurrency if write_concurrency is not None else _DEFAULT_WRITE_CONCURRENCY
+        instance._write_gate = _WriteGate(max_concurrent=_wc)
+        instance._entity_key_gate = instance._write_gate
+        instance._relationship_write_sem = instance._write_gate
         return instance
 
     async def connect(self) -> None:
@@ -297,6 +338,11 @@ class Neo4jBackend(GraphBackendBase):
                 await self._driver.close()
                 logger.info("Disconnected from Neo4j")
             self._driver = None
+
+    @property
+    def write_gate_stats(self) -> dict[str, int]:
+        """Return write gate contention statistics."""
+        return self._write_gate.stats
 
     async def is_healthy(self) -> bool:
         """Check if the backend is healthy and connected."""
@@ -763,7 +809,7 @@ class Neo4jBackend(GraphBackendBase):
                 result = await tx.run(_UPSERT_CYPHER, rows=rows)
                 return await result.data()
 
-            async with self._entity_key_gate.acquire(batch):
+            async with self._write_gate.acquire_entity_write(batch):
                 async with driver.session(database=self._database) as session:
                     pre_existing = await session.execute_read(_prefetch_tx)
                 async with driver.session(database=self._database) as session:
@@ -948,11 +994,11 @@ class Neo4jBackend(GraphBackendBase):
                     type_total += await session.execute_write(_tx)
             return type_total
 
-        # Bounded parallelism — up to 4 concurrent type groups to restore
-        # throughput while limiting deadlock surface. The driver's built-in
-        # retry (retry_delay_jitter_factor=0.5) handles any remaining contention.
+        # Bounded parallelism via unified write gate — relationship writes share
+        # the same concurrency budget as entity upserts to prevent cross-path
+        # deadlocks (both lock entity nodes via MATCH/MERGE).
         async def _limited_create(rel_type: str, rels: list[Relationship]) -> int:
-            async with self._relationship_write_sem:
+            async with self._write_gate.acquire_write():
                 return await _create_type_group(rel_type, rels)
 
         results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
