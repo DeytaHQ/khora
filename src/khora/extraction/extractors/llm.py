@@ -162,6 +162,7 @@ class LLMEntityExtractor(EntityExtractor):
         "o1-mini",
         "o1-preview",
         "o3-mini",
+        "gpt-5-nano",
     }
 
     # Model input token multipliers for adaptive batching
@@ -176,6 +177,7 @@ class LLMEntityExtractor(EntityExtractor):
         "gpt-4.1": 8,  # 1M context
         "gpt-4.1-mini": 5,  # 1M context
         "gpt-4.1-nano": 5,  # 1M context
+        "gpt-5-nano": 5,  # 1M context
         "gpt-4o-mini": 5,
         "gpt-4o-mini-2024-07-18": 5,
         "o1": 8,
@@ -323,9 +325,13 @@ class LLMEntityExtractor(EntityExtractor):
             # Match truncation in _extract_multi_batch (4000 chars)
             text_tokens = self._estimate_tokens(text[:4000])
 
-            # Density-based limit: shorter texts can be batched more aggressively
+            # Density-based limit: shorter texts can be batched more aggressively.
+            # Short messages (e.g. Slack) are packed 30 per call to minimize
+            # API round-trips while staying within context limits.
             text_len = len(text)
-            if text_len < 500:
+            if text_len < 300:
+                density_limit = 30
+            elif text_len < 800:
                 density_limit = 15
             elif text_len < 2000:
                 density_limit = 8
@@ -1124,7 +1130,7 @@ class LLMEntityExtractor(EntityExtractor):
         batch_size: int = 5,
         max_input_tokens: int | None = None,
         tiered_extraction: bool = True,
-        tier1_max_chars: int = 200,
+        tier1_max_chars: int = 20,
     ) -> list[ExtractionResult]:
         """Extract entities from multiple texts in grouped LLM calls.
 
@@ -1132,7 +1138,10 @@ class LLMEntityExtractor(EntityExtractor):
         reducing API round-trips while avoiding context overflow.
 
         When tiered_extraction=True, texts shorter than tier1_max_chars are
-        processed via fast regex extraction instead of LLM (A-4 optimization).
+        processed via fast regex extraction instead of LLM. The default
+        threshold (20 chars) only skips truly trivial texts — all substantive
+        content goes through LLM extraction for proper entity/relationship
+        discovery. Short texts are packed together in batched LLM calls.
 
         Args:
             texts: List of texts to extract from
@@ -1144,7 +1153,7 @@ class LLMEntityExtractor(EntityExtractor):
             max_input_tokens: Token budget for input. If None, auto-calculated
                 from max_tokens using model-aware multipliers.
             tiered_extraction: If True, use regex for short texts (<tier1_max_chars)
-            tier1_max_chars: Character threshold for regex-only extraction
+            tier1_max_chars: Character threshold for regex-only extraction (default 20)
 
         Returns:
             List of ExtractionResult objects (one per input text)
