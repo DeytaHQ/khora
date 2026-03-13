@@ -421,9 +421,59 @@ class TestTieredExtraction:
     """Tests for tiered extraction in extract_multi."""
 
     @pytest.mark.asyncio
-    async def test_short_texts_use_regex(self) -> None:
+    async def test_trivial_texts_use_regex(self) -> None:
+        """Only truly trivial texts (<20 chars) use regex extraction."""
         extractor = LLMEntityExtractor(model="test-model")
-        # Very short text should use regex, not LLM
+        # Very short text (under default 20 chars) should use regex, not LLM
+        results = await extractor.extract_multi(
+            ["Hi"],
+            tiered_extraction=True,
+            entity_types=["PERSON", "EMAIL"],
+            relationship_types=["KNOWS"],
+        )
+        assert len(results) == 1
+        assert results[0].metadata.get("extraction_method") == "regex"
+
+    @pytest.mark.asyncio
+    async def test_short_messages_go_to_llm(self) -> None:
+        """Short but substantive texts (>20 chars) go through LLM, not regex."""
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        # A typical Slack message (~50 chars) should go to LLM
+        section_data = {
+            "sections": [
+                {
+                    "entities": [{"name": "Alice", "entity_type": "PERSON", "description": "A person"}],
+                    "relationships": [],
+                    "events": [],
+                },
+            ]
+        }
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(section_data)
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=200, completion_tokens=100, total_tokens=300)
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor.extract_multi(
+                ["Hi alice@test.com, can we chat about the project?"],
+                tiered_extraction=True,
+                entity_types=["PERSON", "EMAIL"],
+                relationship_types=["KNOWS"],
+            )
+        assert len(results) == 1
+        # Should NOT be regex — should be LLM extraction
+        assert results[0].metadata.get("extraction_method") != "regex"
+
+    @pytest.mark.asyncio
+    async def test_explicit_high_threshold_uses_regex(self) -> None:
+        """Callers can still opt into regex for short texts with explicit threshold."""
+        extractor = LLMEntityExtractor(model="test-model")
         results = await extractor.extract_multi(
             ["Hi alice@test.com"],
             tiered_extraction=True,
@@ -435,3 +485,122 @@ class TestTieredExtraction:
         assert results[0].metadata.get("extraction_method") == "regex"
         emails = [e for e in results[0].entities if e.entity_type == "EMAIL"]
         assert len(emails) == 1
+
+
+# ---------------------------------------------------------------------------
+# Adaptive batching density limits
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveBatching:
+    """Tests for _create_adaptive_batches density limits."""
+
+    def test_short_texts_packed_aggressively(self) -> None:
+        """Short texts (<300 chars) can be packed up to 30 per batch."""
+        extractor = LLMEntityExtractor(model="gpt-4o-mini")
+        texts = ["Hello from Slack" * 5] * 25  # 25 texts, each ~80 chars
+        batches = extractor._create_adaptive_batches(texts, max_batch_size=30, max_input_tokens=100_000)
+        # All 25 short texts should fit in a single batch (density_limit=30)
+        assert len(batches) == 1
+        assert len(batches[0]) == 25
+
+    def test_medium_texts_moderate_batching(self) -> None:
+        """Medium texts (300-800 chars) get density_limit=15."""
+        extractor = LLMEntityExtractor(model="gpt-4o-mini")
+        texts = ["x" * 500] * 20  # 20 texts, each 500 chars
+        batches = extractor._create_adaptive_batches(texts, max_batch_size=30, max_input_tokens=100_000)
+        # density_limit=15 for 500-char texts, so 20 texts -> 2 batches
+        assert len(batches) == 2
+        assert len(batches[0]) == 15
+        assert len(batches[1]) == 5
+
+    def test_long_texts_conservative_batching(self) -> None:
+        """Long texts (>2000 chars) get density_limit=3."""
+        extractor = LLMEntityExtractor(model="gpt-4o-mini")
+        texts = ["x" * 3000] * 6
+        batches = extractor._create_adaptive_batches(texts, max_batch_size=30, max_input_tokens=100_000)
+        # density_limit=3 for 3000-char texts
+        assert len(batches) == 2
+        assert len(batches[0]) == 3
+        assert len(batches[1]) == 3
+
+    def test_token_budget_respected(self) -> None:
+        """Token budget takes priority over density limit."""
+        extractor = LLMEntityExtractor(model="gpt-4o-mini")
+        # 10 texts of 200 chars each = ~67 tokens each
+        texts = ["x" * 200] * 10
+        # Set very low token budget: 500 overhead + ~67 per text = fits ~7 texts
+        batches = extractor._create_adaptive_batches(texts, max_batch_size=30, max_input_tokens=1000)
+        # Should split based on token budget, not density limit
+        assert len(batches) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Shared extractor pattern
+# ---------------------------------------------------------------------------
+
+
+class TestSharedExtractor:
+    """Tests for shared extractor in extract_entities task."""
+
+    @pytest.mark.asyncio
+    async def test_shared_extractor_reused(self) -> None:
+        """When shared_extractor is provided, it should be used instead of creating a new one."""
+        from khora.pipelines.tasks.extract import extract_entities
+
+        # Create a mock shared extractor
+        mock_extractor = MagicMock()
+        mock_result = ExtractionResult(
+            entities=[ExtractedEntity(name="Test", entity_type="PERSON", confidence=0.9)],
+            relationships=[],
+        )
+        mock_extractor.extract_multi = AsyncMock(return_value=[mock_result])
+
+        # Create a mock chunk
+        mock_chunk = MagicMock()
+        mock_chunk.content = "Alice works at Acme"
+        mock_chunk.id = "chunk-1"
+        mock_chunk.document_id = "doc-1"
+        mock_chunk.namespace_id = "ns-1"
+        mock_chunk.created_at = None
+
+        entities, relationships = await extract_entities(
+            [mock_chunk],
+            entity_types=["PERSON"],
+            relationship_types=["WORKS_FOR"],
+            shared_extractor=mock_extractor,
+        )
+
+        # Verify the shared extractor was called
+        mock_extractor.extract_multi.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_shared_extractor_creates_new(self) -> None:
+        """Without shared_extractor, a new LLMEntityExtractor is created."""
+        from khora.pipelines.tasks.extract import extract_entities
+
+        mock_result = ExtractionResult(
+            entities=[],
+            relationships=[],
+        )
+
+        with patch("khora.extraction.extractors.LLMEntityExtractor") as MockExtractorClass:
+            mock_instance = MagicMock()
+            mock_instance.extract_multi = AsyncMock(return_value=[mock_result])
+            MockExtractorClass.return_value = mock_instance
+
+            mock_chunk = MagicMock()
+            mock_chunk.content = "Test text"
+            mock_chunk.id = "chunk-1"
+            mock_chunk.document_id = "doc-1"
+            mock_chunk.namespace_id = "ns-1"
+            mock_chunk.created_at = None
+
+            await extract_entities(
+                [mock_chunk],
+                entity_types=["PERSON"],
+                relationship_types=["WORKS_FOR"],
+            )
+
+            # Verify a new extractor was created
+            MockExtractorClass.assert_called_once()

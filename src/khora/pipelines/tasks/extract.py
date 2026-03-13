@@ -28,6 +28,7 @@ async def extract_entities(
     selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
+    shared_extractor: Any | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
 
@@ -57,6 +58,8 @@ async def extract_entities(
         selective_extraction: Enable importance-based selective extraction
         extraction_importance_ratio: Fraction of chunks to send to LLM (top-K by score)
         extraction_min_importance: Minimum importance score threshold
+        shared_extractor: Optional pre-initialized LLMEntityExtractor to reuse
+            across documents (shares semaphore for cross-document concurrency control)
 
     Returns:
         Tuple of (entities, relationships)
@@ -120,17 +123,21 @@ async def extract_entities(
         min_entity_confidence = skill.min_entity_confidence
         min_relationship_confidence = skill.min_relationship_confidence
 
-    # Create extractor with concurrency limit and timeout settings
-    extractor_kwargs = dict(
-        model=model,
-        max_concurrent=max_concurrent,
-        timeout=timeout,
-        max_retries=max_retries,
-        retry_wait=retry_wait,
-    )
-    if max_tokens is not None:
-        extractor_kwargs["max_tokens"] = max_tokens
-    extractor = LLMEntityExtractor(**extractor_kwargs)
+    # Reuse shared extractor if provided (shares semaphore across documents),
+    # otherwise create a new one per call.
+    if shared_extractor is not None:
+        extractor = shared_extractor
+    else:
+        extractor_kwargs = dict(
+            model=model,
+            max_concurrent=max_concurrent,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_wait=retry_wait,
+        )
+        if max_tokens is not None:
+            extractor_kwargs["max_tokens"] = max_tokens
+        extractor = LLMEntityExtractor(**extractor_kwargs)
 
     # Extract from LLM-selected chunks using adaptive token-budget-based batching
     # Groups chunks into batches that fit within the model's input token budget,

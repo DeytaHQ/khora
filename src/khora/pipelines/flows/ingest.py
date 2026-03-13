@@ -768,6 +768,7 @@ async def process_document(
     extraction_context: dict[str, Any] | None = None,
     entity_index: EntityIndex | None = None,
     shared_embedder: Any | None = None,
+    shared_extractor: Any | None = None,
     temporal_store: TemporalVectorStore | None = None,
     extraction_timeout: int = 120,
     extraction_max_retries: int = 3,
@@ -809,6 +810,7 @@ async def process_document(
         enable_expansion: Whether to run semantic expansion
         extraction_context: Context dict for prompt template rendering
         entity_index: Shared EntityIndex for smart mode (skip per-doc DB loads)
+        shared_extractor: Shared LLMEntityExtractor across documents (shares semaphore)
         extraction_batch_size: Max texts per LLM extraction call
         selective_extraction: Enable importance-based selective extraction
         extraction_importance_ratio: Fraction of chunks to send to LLM
@@ -907,6 +909,7 @@ async def process_document(
                     selective_extraction=selective_extraction,
                     extraction_importance_ratio=extraction_importance_ratio,
                     extraction_min_importance=extraction_min_importance,
+                    shared_extractor=shared_extractor,
                 )
 
         _t0 = _time.perf_counter()
@@ -1264,6 +1267,7 @@ async def ingest_documents(
     extraction_context: dict[str, Any] | None = None,
     skip_resolution: bool = False,
     shared_embedder: Any | None = None,
+    shared_extractor: Any | None = None,
     shared_entity_index: Any | None = None,
     temporal_store: TemporalVectorStore | None = None,
     extraction_timeout: int = 120,
@@ -1385,6 +1389,22 @@ async def ingest_documents(
 
         shared_embedder = LiteLLMEmbedder(model=embedding_model)
 
+    # Share a single extractor across all documents so the semaphore controls
+    # cross-document LLM concurrency (prevents thundering herd on the API)
+    if shared_extractor is None:
+        from khora.extraction.extractors import LLMEntityExtractor
+
+        extractor_kwargs = dict(
+            model=extraction_model,
+            max_concurrent=max_concurrent_extractions,
+            timeout=extraction_timeout,
+            max_retries=extraction_max_retries,
+            retry_wait=extraction_retry_wait,
+        )
+        if extraction_max_tokens is not None:
+            extractor_kwargs["max_tokens"] = extraction_max_tokens
+        shared_extractor = LLMEntityExtractor(**extractor_kwargs)
+
     doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
     _processing_t0 = _batch_time.perf_counter()
 
@@ -1409,6 +1429,7 @@ async def ingest_documents(
                 extraction_context=doc_context,
                 entity_index=shared_entity_index,
                 shared_embedder=shared_embedder,
+                shared_extractor=shared_extractor,
                 temporal_store=temporal_store,
                 extraction_timeout=extraction_timeout,
                 extraction_max_retries=extraction_max_retries,
