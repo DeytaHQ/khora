@@ -781,20 +781,21 @@ class Neo4jBackend(GraphBackendBase):
                 for e in batch
             ]
 
-            async def _prefetch_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
-                result = await tx.run(_PREFETCH_CYPHER, keys=prefetch_keys)
-                return await result.data()
-
-            # Phase 1: MERGE (create or update)
-            async def _upsert_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
-                result = await tx.run(_UPSERT_CYPHER, rows=rows)
-                return await result.data()
+            # Combined prefetch + MERGE in a single write transaction.
+            # The prefetch read runs first (seeing pre-merge state), then
+            # the MERGE runs — one round trip instead of two separate sessions.
+            async def _prefetch_and_upsert_tx(
+                tx: AsyncManagedTransaction,
+            ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                pre_result = await tx.run(_PREFETCH_CYPHER, keys=prefetch_keys)
+                pre_data = await pre_result.data()
+                merge_result = await tx.run(_UPSERT_CYPHER, rows=rows)
+                merge_data = await merge_result.data()
+                return pre_data, merge_data
 
             async with self._entity_key_gate.acquire(batch):
                 async with driver.session(database=self._database) as session:
-                    pre_existing = await session.execute_read(_prefetch_tx)
-                async with driver.session(database=self._database) as session:
-                    records = await session.execute_write(_upsert_tx)
+                    pre_existing, records = await session.execute_write(_prefetch_and_upsert_tx)
 
             # Index pre-existing entities by (namespace_id, name, entity_type)
             pre_map: dict[tuple[str, str, str], dict[str, Any]] = {}
