@@ -8,7 +8,8 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 
 const SECONDS_PER_DAY: f64 = 86400.0;
-const LN_HALF: f64 = -0.693_147_180_559_945_3; // ln(0.5)
+#[allow(clippy::approx_constant)]
+const LN_HALF: f64 = -0.693_147_180_559_945_3; // -ln(2), negated for decay
 
 /// Batch temporal filter: test each timestamp against a temporal range.
 ///
@@ -228,6 +229,120 @@ pub fn detect_temporal_category(query: &str) -> u8 {
     best_cat
 }
 
+/// Categorized temporal detection with confidence score and matched terms.
+///
+/// Returns `(category_id, confidence, matched_terms)` where:
+///   - `category_id`: 0=NONE through 6=CHANGE (same as `detect_temporal_category`)
+///   - `confidence`: 0.0–1.0 based on number and strength of matches
+///   - `matched_terms`: list of matched keyword strings
+///
+/// Confidence heuristic:
+///   - Single match: 0.6
+///   - Two matches in same category: 0.8
+///   - Three+ matches or matches across multiple categories: 0.95
+///   - Explicit date patterns (regex): +0.1 bonus, capped at 1.0
+#[pyfunction]
+pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<String>) {
+    use aho_corasick::AhoCorasick;
+    use std::sync::LazyLock;
+
+    static AC: LazyLock<(AhoCorasick, Vec<u8>, Vec<String>)> = LazyLock::new(|| {
+        let mut patterns: Vec<String> = Vec::new();
+        let mut categories: Vec<u8> = Vec::new();
+
+        let mut add = |cat: u8, pats: &[&str]| {
+            for p in pats {
+                patterns.push(p.to_string());
+                categories.push(cat);
+            }
+        };
+
+        add(1, &[
+            "when ", "before ", "after ", "during ", "since ", "until ",
+            "yesterday", "today", " ago",
+            "january", "february", "march", "april", "may ", "june",
+            "july", "august", "september", "october", "november", "december",
+            "last week", "last month", "last year", "last night", "last time",
+        ]);
+        add(2, &[
+            "currently", "right now", "at present", "presently",
+            "these days", "nowadays", "at this point", "at the moment",
+        ]);
+        add(3, &[
+            "first ", " earliest", "which came", "what came",
+            "preceding", "following ", "subsequent",
+        ]);
+        add(4, &[
+            "how many times", "how many total", "all instances",
+            "every time", "in total", "count of", "number of times",
+            "how often ",
+        ]);
+        add(5, &[
+            "most recent", "newest", "just ", "recently",
+            "latest ",
+        ]);
+        add(6, &[
+            "changed", "switched", "moved to", "used to",
+            "no longer", "still ", "anymore", "former ",
+            "previous ", "ex-", "updated", "replaced",
+            "went from", "transitioned",
+            "turned into ", "switched to ", "became ",
+            "converted to ", "went back to ",
+        ]);
+
+        let ac = AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(&patterns)
+            .expect("Aho-Corasick build failed");
+        (ac, categories, patterns)
+    });
+
+    static DATE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\b\d{4}[-/]\d{1,2}|\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b")
+            .expect("date regex failed")
+    });
+
+    let (ac, cats, patterns) = &*AC;
+
+    let mut best_cat: u8 = 0;
+    let mut matched_terms: Vec<String> = Vec::new();
+    let mut matched_cats: std::collections::HashSet<u8> = std::collections::HashSet::new();
+
+    for mat in ac.find_iter(query) {
+        let cat = cats[mat.pattern().as_usize()];
+        let term = &patterns[mat.pattern().as_usize()];
+        if cat > best_cat {
+            best_cat = cat;
+        }
+        matched_cats.insert(cat);
+        if !matched_terms.contains(term) {
+            matched_terms.push(term.clone());
+        }
+    }
+
+    if best_cat == 0 {
+        return (0, 0.0, vec![]);
+    }
+
+    // Compute confidence
+    let n_matches = matched_terms.len();
+    let n_cats = matched_cats.len();
+    let mut confidence = match n_matches {
+        1 => 0.6,
+        2 => {
+            if n_cats > 1 { 0.85 } else { 0.8 }
+        }
+        _ => 0.95,
+    };
+
+    // Bonus for explicit date pattern
+    if DATE_RE.is_match(query) {
+        confidence = (confidence + 0.1_f64).min(1.0);
+    }
+
+    (best_cat, confidence, matched_terms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +513,41 @@ mod tests {
     #[test]
     fn test_detect_temporal_category_switched_to() {
         assert_eq!(detect_temporal_category("He switched to piano"), 6);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_with_confidence_none() {
+        let (cat, conf, terms) = detect_temporal_category_with_confidence("What is the capital of France?");
+        assert_eq!(cat, 0);
+        assert!((conf - 0.0).abs() < 1e-10);
+        assert!(terms.is_empty());
+    }
+
+    #[test]
+    fn test_detect_temporal_category_with_confidence_single() {
+        let (cat, conf, terms) = detect_temporal_category_with_confidence("What happened yesterday?");
+        assert_eq!(cat, 1);
+        assert!((conf - 0.6).abs() < 1e-10);
+        assert_eq!(terms.len(), 1);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_with_confidence_multi() {
+        let (cat, conf, terms) = detect_temporal_category_with_confidence(
+            "When did she switch to piano after leaving the band?"
+        );
+        assert!(cat >= 1);
+        assert!(conf >= 0.8);
+        assert!(terms.len() >= 2);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_with_confidence_date_bonus() {
+        let (cat, conf, _) = detect_temporal_category_with_confidence(
+            "What happened before 2024-01-15?"
+        );
+        assert_eq!(cat, 1);
+        // Should get date bonus: 0.6 + 0.1 = 0.7
+        assert!(conf >= 0.7);
     }
 }

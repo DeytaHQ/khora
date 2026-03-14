@@ -101,6 +101,12 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         rrf::weighted_rrf_normalized_with_provenance,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        rrf::weighted_rrf_normalized_with_diagnostics,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(rrf::batch_score_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(rrf::score_entropy, m)?)?;
 
     // Entity resolution
     m.add_function(wrap_pyfunction!(
@@ -124,6 +130,10 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(temporal::batch_recency_scores, m)?)?;
     m.add_function(wrap_pyfunction!(temporal::detect_temporal_keywords, m)?)?;
     m.add_function(wrap_pyfunction!(temporal::detect_temporal_category, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        temporal::detect_temporal_category_with_confidence,
+        m
+    )?)?;
 
     // MMR diversity selection
     m.add_function(wrap_pyfunction!(mmr::mmr_diversity_select, m)?)?;
