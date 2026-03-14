@@ -586,3 +586,123 @@ class TestNormalizeEntityNamesBatch:
     def test_python_fallback(self, force_python):
         result = accel.normalize_entity_names_batch(["Alice", "BOB"])
         assert result == ["alice", "bob"]
+
+
+# ---------------------------------------------------------------------------
+# Fusion diagnostics (DYT-454)
+# ---------------------------------------------------------------------------
+
+
+class TestWeightedRrfNormalizedWithDiagnostics:
+    def test_basic(self):
+        vector = [("a", 0.9), ("b", 0.7), ("c", 0.5)]
+        graph = [("b", 0.8), ("d", 0.6)]
+        results = accel.weighted_rrf_normalized_with_diagnostics(vector, graph)
+        # Should return tuples with 9 elements each
+        assert len(results) == 4  # a, b, c, d
+        assert all(len(r) == 9 for r in results)
+        # Results should be sorted descending by score
+        scores = [r[1] for r in results]
+        assert scores == sorted(scores, reverse=True)
+        # "b" should be source=3 (both)
+        b_result = next(r for r in results if r[0] == "b")
+        assert b_result[2] == 3  # source bitmap = both
+        assert b_result[3] > 0  # vector_rank
+        assert b_result[4] > 0  # graph_rank
+
+    def test_empty_inputs(self):
+        results = accel.weighted_rrf_normalized_with_diagnostics([], [])
+        assert results == []
+
+    def test_vector_only(self):
+        vector = [("a", 0.9)]
+        results = accel.weighted_rrf_normalized_with_diagnostics(vector, [])
+        assert len(results) == 1
+        assert results[0][0] == "a"
+        assert results[0][2] == 1  # vector only
+
+    def test_python_fallback(self, force_python):
+        vector = [("a", 0.9), ("b", 0.7)]
+        graph = [("b", 0.8), ("c", 0.6)]
+        results = accel.weighted_rrf_normalized_with_diagnostics(vector, graph)
+        assert len(results) == 3
+        b_result = next(r for r in results if r[0] == "b")
+        assert b_result[2] == 3  # both sources
+
+
+class TestBatchScoreStats:
+    def test_basic(self):
+        mean, std, mn, mx, med = accel.batch_score_stats([1.0, 2.0, 3.0, 4.0, 5.0])
+        assert abs(mean - 3.0) < 1e-10
+        assert abs(mn - 1.0) < 1e-10
+        assert abs(mx - 5.0) < 1e-10
+        assert abs(med - 3.0) < 1e-10
+        assert std > 0
+
+    def test_empty(self):
+        result = accel.batch_score_stats([])
+        assert result == (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    def test_single(self):
+        mean, std, mn, mx, med = accel.batch_score_stats([42.0])
+        assert abs(mean - 42.0) < 1e-10
+        assert abs(std - 0.0) < 1e-10
+        assert abs(med - 42.0) < 1e-10
+
+    def test_python_fallback(self, force_python):
+        mean, std, mn, mx, med = accel.batch_score_stats([1.0, 3.0])
+        assert abs(mean - 2.0) < 1e-10
+        assert abs(med - 2.0) < 1e-10
+
+
+class TestScoreEntropy:
+    def test_uniform(self):
+        import math
+
+        entropy = accel.score_entropy([1.0, 1.0, 1.0, 1.0])
+        assert abs(entropy - math.log(4)) < 1e-10
+
+    def test_peaked(self):
+        uniform = accel.score_entropy([1.0, 1.0, 1.0, 1.0])
+        peaked = accel.score_entropy([100.0, 1.0, 1.0, 1.0])
+        assert peaked < uniform
+
+    def test_empty(self):
+        assert accel.score_entropy([]) == 0.0
+
+    def test_all_zeros(self):
+        assert accel.score_entropy([0.0, 0.0, 0.0]) == 0.0
+
+    def test_python_fallback(self, force_python):
+        import math
+
+        entropy = accel.score_entropy([1.0, 1.0])
+        assert abs(entropy - math.log(2)) < 1e-10
+
+
+class TestDetectTemporalCategoryWithConfidence:
+    def test_no_temporal(self):
+        cat, conf, terms = accel.detect_temporal_category_with_confidence("What is the capital of France?")
+        assert cat == 0
+        assert conf == 0.0
+        assert terms == []
+
+    def test_single_match(self):
+        cat, conf, terms = accel.detect_temporal_category_with_confidence("What happened yesterday?")
+        assert cat == 1
+        assert conf == 0.6
+        assert len(terms) == 1
+
+    def test_multi_match(self):
+        cat, conf, terms = accel.detect_temporal_category_with_confidence(
+            "When did she switch to piano after the concert?"
+        )
+        assert cat >= 1
+        assert conf >= 0.8
+        assert len(terms) >= 2
+
+    def test_python_fallback(self, force_python):
+        cat, conf, terms = accel.detect_temporal_category_with_confidence("What happened yesterday?")
+        assert cat == 1
+        assert conf == 0.6
+        assert len(terms) >= 1

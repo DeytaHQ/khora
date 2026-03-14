@@ -40,6 +40,7 @@ try:
     from khora_accel import batch_dot_product as _rust_batch_dot_product
     from khora_accel import batch_levenshtein as _rust_batch_levenshtein
     from khora_accel import batch_recency_scores as _rust_batch_recency_scores
+    from khora_accel import batch_score_stats as _rust_batch_score_stats
     from khora_accel import batch_sequence_match as _rust_batch_sequence_match
     from khora_accel import batch_temporal_filter as _rust_batch_temporal_filter
     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
@@ -48,6 +49,7 @@ try:
     from khora_accel import deduplicate_chunks as _rust_deduplicate_chunks
     from khora_accel import detect_communities as _rust_detect_communities
     from khora_accel import detect_temporal_category as _rust_detect_temporal_category
+    from khora_accel import detect_temporal_category_with_confidence as _rust_detect_temporal_category_with_confidence
     from khora_accel import extract_keywords as _rust_extract_keywords
     from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
     from khora_accel import levenshtein_similarity as _rust_levenshtein
@@ -61,9 +63,11 @@ try:
     from khora_accel import reciprocal_rank_fusion as _rust_rrf
     from khora_accel import resolve_entities_batch as _rust_resolve_entities_batch
     from khora_accel import resolve_entities_enhanced as _rust_resolve_entities_enhanced
+    from khora_accel import score_entropy as _rust_score_entropy
     from khora_accel import sequence_match_ratio as _rust_sequence_match
     from khora_accel import weighted_rrf as _rust_weighted_rrf
     from khora_accel import weighted_rrf_normalized as _rust_weighted_rrf_normalized
+    from khora_accel import weighted_rrf_normalized_with_diagnostics as _rust_weighted_rrf_normalized_with_diagnostics
     from khora_accel import weighted_rrf_normalized_with_provenance as _rust_weighted_rrf_normalized_with_provenance
 
     _HAS_RUST = True
@@ -728,6 +732,129 @@ def weighted_rrf_normalized_with_provenance(
     return results
 
 
+def weighted_rrf_normalized_with_diagnostics(
+    vector_results: list[tuple[str, float]],
+    graph_results: list[tuple[str, float]],
+    k: int = 60,
+    vector_weight: float = 0.6,
+    graph_weight: float = 0.4,
+) -> list[tuple[str, float, int, int, int, float, float, float, float]]:
+    """Weighted RRF with full per-result diagnostics.
+
+    Returns ``(id, score, source, vector_rank, graph_rank,
+    vector_norm_score, graph_norm_score, vector_rrf_contrib,
+    graph_rrf_contrib)`` tuples sorted descending by score.
+    Rust > Python fallback.
+    """
+    if _HAS_RUST:
+        return _rust_weighted_rrf_normalized_with_diagnostics(
+            vector_results, graph_results, k, vector_weight, graph_weight
+        )
+
+    # Python fallback
+    scores: dict[str, float] = {}
+    sources: dict[str, int] = {}
+    v_ranks: dict[str, int] = {}
+    g_ranks: dict[str, int] = {}
+    v_norms: dict[str, float] = {}
+    g_norms: dict[str, float] = {}
+    v_contribs: dict[str, float] = {}
+    g_contribs: dict[str, float] = {}
+
+    if vector_results:
+        raw = [s for _, s in vector_results]
+        normalized = normalize_scores(raw)
+        for rank_0, ((item_id, _), norm) in enumerate(zip(vector_results, normalized)):
+            rank = rank_0 + 1
+            rrf_c = vector_weight / (k + rank)
+            scores[item_id] = scores.get(item_id, 0.0) + rrf_c + vector_weight * norm * 0.01
+            sources[item_id] = sources.get(item_id, 0) | 0x01
+            v_ranks[item_id] = rank
+            v_norms[item_id] = norm
+            v_contribs[item_id] = rrf_c
+
+    if graph_results:
+        raw = [s for _, s in graph_results]
+        normalized = normalize_scores(raw)
+        for rank_0, ((item_id, _), norm) in enumerate(zip(graph_results, normalized)):
+            rank = rank_0 + 1
+            rrf_c = graph_weight / (k + rank)
+            scores[item_id] = scores.get(item_id, 0.0) + rrf_c + graph_weight * norm * 0.01
+            sources[item_id] = sources.get(item_id, 0) | 0x02
+            g_ranks[item_id] = rank
+            g_norms[item_id] = norm
+            g_contribs[item_id] = rrf_c
+
+    results = [
+        (
+            id_,
+            scores[id_],
+            sources.get(id_, 0),
+            v_ranks.get(id_, 0),
+            g_ranks.get(id_, 0),
+            v_norms.get(id_, 0.0),
+            g_norms.get(id_, 0.0),
+            v_contribs.get(id_, 0.0),
+            g_contribs.get(id_, 0.0),
+        )
+        for id_ in scores
+    ]
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
+
+def batch_score_stats(
+    scores: list[float],
+) -> tuple[float, float, float, float, float]:
+    """Compute score statistics: (mean, std_dev, min, max, median).
+
+    Rust > Python fallback. Empty input returns all zeros.
+    """
+    if _HAS_RUST:
+        return _rust_batch_score_stats(scores)
+
+    if not scores:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    n = len(scores)
+    mean = sum(scores) / n
+    variance = sum((s - mean) ** 2 for s in scores) / n
+    std_dev = math.sqrt(variance)
+    min_s = min(scores)
+    max_s = max(scores)
+    sorted_s = sorted(scores)
+    if n % 2 == 0:
+        median = (sorted_s[n // 2 - 1] + sorted_s[n // 2]) / 2.0
+    else:
+        median = sorted_s[n // 2]
+    return (mean, std_dev, min_s, max_s, median)
+
+
+def score_entropy(scores: list[float]) -> float:
+    """Compute Shannon entropy of a score distribution.
+
+    Normalizes scores to a probability distribution and returns
+    ``-sum(p * ln(p))``. Higher entropy = more uniform = less confident.
+    Rust > Python fallback. Returns 0.0 for empty or all-zero inputs.
+    """
+    if _HAS_RUST:
+        return _rust_score_entropy(scores)
+
+    if not scores:
+        return 0.0
+
+    total = sum(s for s in scores if s > 0)
+    if total <= 0:
+        return 0.0
+
+    entropy = 0.0
+    for s in scores:
+        if s > 0:
+            p = s / total
+            entropy -= p * math.log(p)
+    return entropy
+
+
 # ---------------------------------------------------------------------------
 # Entity name normalization
 # ---------------------------------------------------------------------------
@@ -1138,6 +1265,57 @@ def detect_temporal_category(query: str) -> int:
                 best_cat = max(best_cat, cat)
                 break
     return best_cat
+
+
+_DATE_PATTERN = re.compile(r"\b\d{4}[-/]\d{1,2}|\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b")
+
+
+def detect_temporal_category_with_confidence(
+    query: str,
+) -> tuple[int, float, list[str]]:
+    """Detect temporal category with confidence score and matched terms.
+
+    Returns ``(category_id, confidence, matched_terms)`` where:
+    - ``category_id``: 0=NONE through 6=CHANGE
+    - ``confidence``: 0.0–1.0 based on match count and strength
+    - ``matched_terms``: list of matched keyword strings
+
+    Uses Rust Aho-Corasick when available, otherwise Python substring matching.
+    """
+    if _HAS_RUST:
+        return _rust_detect_temporal_category_with_confidence(query)
+
+    # Python fallback
+    query_lower = query.lower()
+    best_cat = 0
+    matched_terms: list[str] = []
+    matched_cats: set[int] = set()
+
+    for cat, terms in TEMPORAL_DICTIONARY.items():
+        for term in terms:
+            if term in query_lower:
+                if cat > best_cat:
+                    best_cat = cat
+                matched_cats.add(cat)
+                if term not in matched_terms:
+                    matched_terms.append(term)
+
+    if best_cat == 0:
+        return (0, 0.0, [])
+
+    n_matches = len(matched_terms)
+    n_cats = len(matched_cats)
+    if n_matches == 1:
+        confidence = 0.6
+    elif n_matches == 2:
+        confidence = 0.85 if n_cats > 1 else 0.8
+    else:
+        confidence = 0.95
+
+    if _DATE_PATTERN.search(query):
+        confidence = min(confidence + 0.1, 1.0)
+
+    return (best_cat, confidence, matched_terms)
 
 
 # ---------------------------------------------------------------------------
