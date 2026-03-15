@@ -795,11 +795,18 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         skeleton_ratio_override: float | None = None,
+        is_conversation: bool = False,
     ) -> tuple[list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Run skeleton extraction but return results instead of storing.
 
         Same as _run_skeleton_extraction but defers storage so the caller
         can accumulate entities across multiple documents for batch storage.
+
+        Args:
+            is_conversation: When True, use a lower min_extraction_tokens threshold
+                (15 instead of 50) so short conversational messages still get entity
+                extraction. This enables graph retrieval for LoCoMo-style benchmarks
+                where messages are typically 10-50 words. (DYT-469)
 
         Returns:
             Tuple of (entities_with_embeddings, relationships, entity_chunk_links)
@@ -809,10 +816,13 @@ class VectorCypherEngine:
         if not chunks:
             return [], [], []
 
-        # Skip LLM entity extraction for short conversation messages.
-        # Short messages (≤ min_extraction_tokens per chunk) produce low-quality
-        # extraction results. BM25 + vector search handles them better.
+        # DYT-469: Use lower threshold for conversation batches.
+        # Short conversational messages (10-50 words) contain critical entities
+        # (people, places, activities) that must be extracted for graph retrieval.
+        # Without extraction, these chunks are invisible to graph search.
         min_tokens = self._vc_config.min_extraction_tokens
+        if is_conversation:
+            min_tokens = min(min_tokens, 15)
         if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in chunks):
             logger.debug(f"Skipping entity extraction for {len(chunks)} short chunks " f"(all ≤ {min_tokens} tokens)")
             return [], [], []
@@ -982,6 +992,7 @@ class VectorCypherEngine:
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 skeleton_ratio_override=skeleton_ratio_override,
+                is_conversation=skeleton_ratio_override is not None,
             )
 
         return len(stored_chunks), entities, relationships, entity_chunk_links

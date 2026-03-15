@@ -1273,6 +1273,29 @@ class VectorCypherRetriever:
                 # graph traversal surfaces temporally-related entities and their chunks
                 vector_weight = self._config.temporal_vector_weight
                 graph_weight = self._config.temporal_graph_weight
+
+                # DYT-470: Adapt fusion weights when graph returns zero/few results.
+                # When graph retrieval yields nothing (common for short conversational
+                # messages without entity extraction), using graph-heavy weights (0.3/0.7)
+                # dilutes good vector results and hurts ranking.
+                graph_count = len(graph_chunks)
+                if graph_count == 0:
+                    vector_weight = 0.85
+                    graph_weight = 0.15
+                    logger.debug(
+                        "Adaptive fusion: graph empty, using vector-heavy weights (%.2f/%.2f)",
+                        vector_weight,
+                        graph_weight,
+                    )
+                elif graph_count < 3:
+                    vector_weight = self._config.vector_weight  # default 0.6
+                    graph_weight = self._config.graph_weight  # default 0.4
+                    logger.debug(
+                        "Adaptive fusion: sparse graph (%d chunks), using moderate weights (%.2f/%.2f)",
+                        graph_count,
+                        vector_weight,
+                        graph_weight,
+                    )
             elif routing is not None:
                 if routing.complexity == QueryComplexity.SIMPLE:
                     vector_weight = self._config.simple_vector_weight
