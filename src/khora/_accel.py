@@ -1194,6 +1194,23 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "nowadays",
         "at this point",
         "at the moment",
+        # DYT-471: Implicit temporal patterns for conversational memory.
+        # These catch questions about current state that lack explicit temporal keywords.
+        " does he still",
+        " does she still",
+        " do they still",
+        " is he still",
+        " is she still",
+        " are they still",
+        "'s current ",
+        " current job",
+        " current role",
+        " current position",
+        " live now",
+        " work now",
+        " working now",
+        " living now",
+        " doing now",
     ],
     3: [  # ORDINAL
         "first ",
