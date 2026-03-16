@@ -1137,3 +1137,63 @@ class TestIncludeSources:
         assert result.entities == []
         # No doc IDs to fetch, so get_document_sources_batch should not be called
         lake._engine._storage.get_document_sources_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_get_entity_include_sources(self) -> None:
+        """get_entity with include_sources=True populates source_documents."""
+        from khora.core.models.document import DocumentSource
+        from khora.core.models.entity import Entity
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        doc_id = uuid4()
+
+        entity = Entity(
+            namespace_id=ns_id,
+            name="Alice",
+            entity_type="PERSON",
+            source_document_ids=[doc_id],
+        )
+        lake._engine.get_entity = AsyncMock(return_value=entity)
+
+        src = DocumentSource(id=doc_id, namespace_id=ns_id, title="Source Doc")
+        lake._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
+
+        result = await lake.get_entity(entity.id, include_sources=True)
+
+        assert result is not None
+        assert result.source_documents == {doc_id: src}
+        lake._engine._storage.get_document_sources_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_get_entity_include_sources_false(self) -> None:
+        """Default include_sources=False does not call get_document_sources_batch."""
+        from khora.core.models.entity import Entity
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        entity = Entity(
+            namespace_id=ns_id,
+            name="Bob",
+            entity_type="PERSON",
+        )
+        lake._engine.get_entity = AsyncMock(return_value=entity)
+        lake._engine._storage.get_document_sources_batch = AsyncMock()
+
+        result = await lake.get_entity(entity.id)
+
+        assert result is not None
+        lake._engine._storage.get_document_sources_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_get_entity_include_sources_not_found(self) -> None:
+        """get_entity returns None when entity not found, even with include_sources=True."""
+        lake = _make_lake(connected=True)
+        lake._engine.get_entity = AsyncMock(return_value=None)
+        lake._engine._storage.get_document_sources_batch = AsyncMock()
+
+        result = await lake.get_entity(uuid4(), include_sources=True)
+
+        assert result is None
+        lake._engine._storage.get_document_sources_batch.assert_not_awaited()

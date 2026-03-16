@@ -505,9 +505,26 @@ class MemoryLake:
     # Entity Operations
     # =========================================================================
 
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        """Get an entity by ID."""
-        return await self._get_engine().get_entity(entity_id)
+    async def get_entity(
+        self,
+        entity_id: UUID,
+        *,
+        include_sources: bool = False,
+    ) -> Entity | None:
+        """Get an entity by ID.
+
+        Args:
+            entity_id: Entity UUID to retrieve
+            include_sources: If True, populate source document metadata on
+                the returned entity (default: False)
+
+        Returns:
+            Entity if found, else None
+        """
+        entity = await self._get_engine().get_entity(entity_id)
+        if entity is not None and include_sources:
+            await self._populate_sources([], [entity])
+        return entity
 
     async def list_entities(
         self,
