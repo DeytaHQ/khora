@@ -36,6 +36,7 @@ Example usage:
 
 from .cli import main
 from .config import KhoraConfig
+from .core.models.document import DocumentSource
 from .engines import create_engine, list_engines, register_engine
 from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
 from .query import SearchMode
@@ -51,6 +52,7 @@ __all__ = [
     "Stats",
     "SearchMode",
     "KhoraConfig",
+    "DocumentSource",
     # Engine functions
     "create_engine",
     "list_engines",

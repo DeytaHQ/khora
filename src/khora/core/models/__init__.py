@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .document import Chunk, ChunkMetadata, Document, DocumentMetadata
+from .document import Chunk, ChunkMetadata, Document, DocumentMetadata, DocumentSource
 from .entity import Entity, Episode, Relationship
 from .event import EventType, MemoryEvent
 from .tenancy import MemoryNamespace, TenancyMode
@@ -14,6 +14,7 @@ __all__ = [
     # Document
     "Document",
     "DocumentMetadata",
+    "DocumentSource",
     "Chunk",
     "ChunkMetadata",
     # Entity
