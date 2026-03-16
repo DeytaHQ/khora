@@ -1128,11 +1128,24 @@ async def process_document(
                 _es_ctx["output_count"] = len(store_results)
                 return store_results, entity_id_mapping, entities_needing
 
-        # Run chunk and entity storage in parallel
+        # Run chunk and entity storage in parallel, timing each branch
         _t0 = _time.perf_counter()
+
+        async def _timed_store_chunks():
+            _b = _time.perf_counter()
+            result = await _store_chunks()
+            _phase_times["_branch.pgvector_chunks"] = _time.perf_counter() - _b
+            return result
+
+        async def _timed_store_entities():
+            _b = _time.perf_counter()
+            result = await _store_entities()
+            _phase_times["_branch.neo4j_entities"] = _time.perf_counter() - _b
+            return result
+
         _, (store_results, entity_id_mapping, entities_needing_embeddings) = await asyncio.gather(
-            _store_chunks(),
-            _store_entities(),
+            _timed_store_chunks(),
+            _timed_store_entities(),
         )
         _phase_times["chunk+entity_storage"] = _time.perf_counter() - _t0
 
@@ -1219,11 +1232,24 @@ async def process_document(
                 )
             return count, skipped
 
-        # Run embedding and relationship storage concurrently
+        # Run embedding and relationship storage concurrently, timing each branch
         _t0 = _time.perf_counter()
+
+        async def _timed_embed_entities():
+            _b = _time.perf_counter()
+            result = await _embed_entities()
+            _phase_times["_branch.entity_embed"] = _time.perf_counter() - _b
+            return result
+
+        async def _timed_store_relationships():
+            _b = _time.perf_counter()
+            result = await _store_relationships()
+            _phase_times["_branch.neo4j_rels"] = _time.perf_counter() - _b
+            return result
+
         _, (stored_count, _skipped) = await asyncio.gather(
-            _embed_entities(),
-            _store_relationships(),
+            _timed_embed_entities(),
+            _timed_store_relationships(),
         )
         _phase_times["entity_embed+rel_storage"] = _time.perf_counter() - _t0
 

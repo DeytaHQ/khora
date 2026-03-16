@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re as _re
+import time as _time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import copy
@@ -25,7 +26,7 @@ from khora.storage.backends.mixins import (
 from khora.storage.backends.mixins import deserialize_dict as _deserialize_dict
 from khora.storage.backends.mixins import element_to_dict as _element_to_dict
 from khora.storage.backends.mixins import serialize_dict as _serialize_dict
-from khora.telemetry import trace
+from khora.telemetry import trace, trace_span
 
 # Neo4j relationship labels must be valid identifiers: letters, digits, underscores.
 # LLM-generated types like "at-risk" or "works for" need sanitizing.
@@ -661,14 +662,21 @@ class Neo4jBackend(GraphBackendBase):
 
         # Density-based batch size: reduce sub-batch size for high-density
         # data to shorten Neo4j lock windows.  Low-density data is unaffected.
+        density_reduced = False
         if len(entities) >= _HIGH_DENSITY_ENTITY_THRESHOLD and batch_size > _HIGH_DENSITY_ENTITY_BATCH_SIZE:
             logger.debug(
                 f"High-density entity batch ({len(entities)} entities): "
                 f"reducing sub-batch size {batch_size} -> {_HIGH_DENSITY_ENTITY_BATCH_SIZE}"
             )
             batch_size = _HIGH_DENSITY_ENTITY_BATCH_SIZE
+            density_reduced = True
 
         driver = self._get_driver()
+        _total_gate_wait_ms = 0.0
+        _total_prefetch_merge_ms = 0.0
+        _total_versioning_ms = 0.0
+        _entities_new = 0
+        _entities_updated = 0
 
         # Phase 1: MERGE to create-or-detect existing entities.
         # Returns whether the entity already existed and if attributes changed.
@@ -793,9 +801,14 @@ class Neo4jBackend(GraphBackendBase):
                 merge_data = await merge_result.data()
                 return pre_data, merge_data
 
+            _gate_t0 = _time.perf_counter()
             async with self._entity_key_gate.acquire(batch):
+                _total_gate_wait_ms += (_time.perf_counter() - _gate_t0) * 1000
+
+                _merge_t0 = _time.perf_counter()
                 async with driver.session(database=self._database) as session:
                     pre_existing, records = await session.execute_write(_prefetch_and_upsert_tx)
+                _total_prefetch_merge_ms += (_time.perf_counter() - _merge_t0) * 1000
 
             # Index pre-existing entities by (namespace_id, name, entity_type)
             pre_map: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -851,8 +864,10 @@ class Neo4jBackend(GraphBackendBase):
                     result = await tx.run(_VERSION_CYPHER, version_rows=version_rows)
                     return await result.data()
 
+                _ver_t0 = _time.perf_counter()
                 async with driver.session(database=self._database) as session:
                     version_records = await session.execute_write(_version_tx)
+                _total_versioning_ms += (_time.perf_counter() - _ver_t0) * 1000
                 logger.debug(
                     f"Bi-temporal versioning: created {len(version_records)} "
                     f"SUPERSEDES snapshots for {len(version_rows)} changed entities"
@@ -861,6 +876,13 @@ class Neo4jBackend(GraphBackendBase):
             # Build result mapping - each input entity should get exactly one result
             input_id_to_entity = {str(e.id): e for e in batch}
             logger.debug(f"Neo4j batch: {len(batch)} entities, {len(records)} records returned")
+
+            # Count new vs updated for telemetry
+            for record in records:
+                if record["is_new"]:
+                    _entities_new += 1
+                else:
+                    _entities_updated += 1
 
             # De-duplicate: MERGE can match multiple nodes if duplicates exist
             # in the DB (no unique constraint on the MERGE key). Keep only the
@@ -884,7 +906,27 @@ class Neo4jBackend(GraphBackendBase):
                         f"Batch IDs: {list(input_id_to_entity.keys())[:5]}..."
                     )
 
-        logger.debug(f"Batch upserted {len(results)} entities ({sum(1 for _, n in results if n)} new)")
+        _sub_batch_count = (len(entities) + batch_size - 1) // batch_size
+        with trace_span(
+            "khora.neo4j.upsert_entities_batch",
+            entity_count=len(entities),
+            batch_size=batch_size,
+            sub_batch_count=_sub_batch_count,
+            density_reduced=density_reduced,
+            entities_new=_entities_new,
+            entities_updated=_entities_updated,
+            gate_wait_ms=round(_total_gate_wait_ms, 2),
+            prefetch_merge_ms=round(_total_prefetch_merge_ms, 2),
+            versioning_ms=round(_total_versioning_ms, 2),
+        ):
+            pass  # span records the accumulated timing as attributes
+        logger.debug(
+            f"Batch upserted {len(results)} entities "
+            f"({_entities_new} new, {_entities_updated} updated, "
+            f"gate_wait={_total_gate_wait_ms:.0f}ms, "
+            f"merge={_total_prefetch_merge_ms:.0f}ms, "
+            f"versioning={_total_versioning_ms:.0f}ms)"
+        )
         return results
 
     async def create_relationships_batch(
@@ -903,15 +945,20 @@ class Neo4jBackend(GraphBackendBase):
         if not relationships:
             return 0
 
+        _method_t0 = _time.perf_counter()
+
         # Density-based batch size for relationships
+        rel_density_reduced = False
         if len(relationships) >= _HIGH_DENSITY_REL_THRESHOLD and batch_size > _HIGH_DENSITY_REL_BATCH_SIZE:
             logger.debug(
                 f"High-density relationship batch ({len(relationships)} rels): "
                 f"reducing sub-batch size {batch_size} -> {_HIGH_DENSITY_REL_BATCH_SIZE}"
             )
             batch_size = _HIGH_DENSITY_REL_BATCH_SIZE
+            rel_density_reduced = True
 
         driver = self._get_driver()
+        _per_type_ms: dict[str, float] = {}
 
         # Build inverse relationships upfront so they share the same pass,
         # eliminating a second round of write transactions on overlapping nodes.
@@ -942,6 +989,7 @@ class Neo4jBackend(GraphBackendBase):
                 rels,
                 key=lambda r: (str(r.source_entity_id), str(r.target_entity_id), r.relationship_type),
             )
+            _type_t0 = _time.perf_counter()
             type_total = 0
             for start in range(0, len(sorted_rels), batch_size):
                 batch = sorted_rels[start : start + batch_size]
@@ -982,6 +1030,7 @@ class Neo4jBackend(GraphBackendBase):
 
                 async with driver.session(database=self._database) as session:
                     type_total += await session.execute_write(_tx)
+            _per_type_ms[rel_type] = (_time.perf_counter() - _type_t0) * 1000
             return type_total
 
         # ---------------------------------------------------------------
@@ -992,8 +1041,11 @@ class Neo4jBackend(GraphBackendBase):
         # overlapping type groups.  Low-density batches skip this
         # (the overhead isn't worth it for a few relationship types).
         # ---------------------------------------------------------------
+        _hub_grouping_ms = 0.0
+        _execution_group_count = 0
         if len(all_rels) >= _HIGH_DENSITY_REL_THRESHOLD and len(type_groups) > 1:
             # Build entity reference sets per type group
+            _hub_t0 = _time.perf_counter()
             type_entity_sets: dict[str, set[str]] = {}
             for rt, rels_list in type_groups.items():
                 entity_ids: set[str] = set()
@@ -1036,7 +1088,9 @@ class Neo4jBackend(GraphBackendBase):
                 async with self._relationship_write_sem:
                     return await _run_hub_group(group)
 
-            logger.debug(f"Hub grouping: {len(type_groups)} types -> {len(execution_groups)} execution groups")
+            _hub_grouping_ms = (_time.perf_counter() - _hub_t0) * 1000
+            _execution_group_count = len(execution_groups)
+            logger.debug(f"Hub grouping: {len(type_groups)} types -> {_execution_group_count} execution groups")
             results = await asyncio.gather(*[_limited_hub_run(g) for g in execution_groups])
         else:
             # Low-density: simple bounded parallelism (original behavior)
@@ -1047,11 +1101,36 @@ class Neo4jBackend(GraphBackendBase):
             results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
         total_created = sum(results)
 
+        _method_elapsed_ms = (_time.perf_counter() - _method_t0) * 1000
         inverse_count = len(all_rels) - len(relationships)
         if inverse_count > 0:
             logger.debug(f"Included {inverse_count} inverse relationships")
 
-        logger.debug(f"Batch created {total_created} relationships ({len(type_groups)} types in parallel)")
+        # Find slowest type group for quick diagnosis
+        _slowest_type = max(_per_type_ms, key=_per_type_ms.get, default="") if _per_type_ms else ""  # type: ignore[arg-type]
+        _slowest_ms = _per_type_ms.get(_slowest_type, 0.0)
+
+        with trace_span(
+            "khora.neo4j.create_relationships_batch",
+            relationship_count=len(relationships),
+            total_with_inverses=len(all_rels),
+            type_group_count=len(type_groups),
+            execution_group_count=_execution_group_count,
+            density_reduced=rel_density_reduced,
+            total_created=total_created,
+            total_ms=round(_method_elapsed_ms, 2),
+            hub_grouping_ms=round(_hub_grouping_ms, 2),
+            slowest_type=_slowest_type,
+            slowest_type_ms=round(_slowest_ms, 2),
+        ):
+            pass
+
+        logger.debug(
+            f"Batch created {total_created} relationships "
+            f"({len(type_groups)} types, "
+            f"total={_method_elapsed_ms:.0f}ms, "
+            f"slowest={_slowest_type}@{_slowest_ms:.0f}ms)"
+        )
 
         # Dynamically create indexes for observed relationship types
         await self._ensure_relationship_type_indexes(set(type_groups.keys()))
