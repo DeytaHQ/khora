@@ -128,6 +128,12 @@ class PostgreSQLBackend(AsyncSessionMixin):
         returns it as-is. This allows callers to safely pass either
         the stable namespace_id or the internal id.
 
+        Called on every public API entry (remember, recall, forget, etc.).
+        Hits the indexed ``namespace_id`` column so it's sub-millisecond,
+        but still one extra query per call. If namespace versioning is
+        removed in the future this resolution layer can be dropped entirely,
+        collapsing to a single UUID used everywhere.
+
         Args:
             namespace_id: The stable namespace identifier (shared across versions)
                 or an internal row-level id
