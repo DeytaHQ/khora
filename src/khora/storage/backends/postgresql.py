@@ -124,8 +124,13 @@ class PostgreSQLBackend(AsyncSessionMixin):
     async def resolve_namespace(self, namespace_id: UUID) -> UUID:
         """Resolve a stable namespace_id to the active version's row id.
 
+        Idempotent: if the input is already an internal row-level id,
+        returns it as-is. This allows callers to safely pass either
+        the stable namespace_id or the internal id.
+
         Args:
             namespace_id: The stable namespace identifier (shared across versions)
+                or an internal row-level id
 
         Returns:
             The row-level id of the active version
@@ -140,9 +145,20 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 .where(MemoryNamespaceModel.is_active == True)  # noqa: E712
             )
             row_id = result.scalar_one_or_none()
-            if row_id is None:
-                raise ValueError(f"No active namespace version found for namespace_id={namespace_id}")
-            return row_id
+            if row_id is not None:
+                return row_id
+
+            # Fallback: check if input is already an internal row-level id
+            result = await session.execute(
+                select(MemoryNamespaceModel.id)
+                .where(MemoryNamespaceModel.id == namespace_id)
+                .where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+            )
+            row_id = result.scalar_one_or_none()
+            if row_id is not None:
+                return row_id
+
+            raise ValueError(f"No active namespace found for id={namespace_id}")
 
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""

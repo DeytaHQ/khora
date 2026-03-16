@@ -1319,6 +1319,9 @@ async def ingest_documents(
     if storage is None:
         raise ValueError("storage is required")
 
+    # Resolve namespace_id to internal row-level id (idempotent)
+    namespace_id = await storage.resolve_namespace(namespace_id)
+
     logger.info(f"Starting ingestion of {len(documents)} documents into namespace {namespace_id}")
 
     # Resolve expertise early to determine inference mode

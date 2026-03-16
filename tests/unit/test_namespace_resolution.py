@@ -285,3 +285,122 @@ class TestNamespaceVersionLifecycle:
         active = [v for v in versions if v.is_active]
         assert len(active) == 1  # Only one active
         assert active[0].id == v2.id  # Active version is v2
+
+
+# ---------------------------------------------------------------------------
+# Idempotent resolve_namespace — DYT-487
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotentResolveNamespace:
+    """Tests for idempotent resolve_namespace (DYT-487).
+
+    resolve_namespace should accept EITHER a stable namespace_id OR an
+    internal row-level id and always return the internal id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resolve_by_stable_namespace_id(self) -> None:
+        """Passing a stable namespace_id returns the internal row id."""
+        stable_id = uuid4()
+        row_id = uuid4()
+
+        rel = MagicMock()
+        rel.resolve_namespace = AsyncMock(return_value=row_id)
+
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.resolve_namespace(stable_id)
+
+        assert result == row_id
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_by_internal_id(self) -> None:
+        """Passing an internal row-level id returns that same id.
+
+        This tests the fallback path where the input UUID doesn't match
+        any namespace_id column but DOES match an id column.
+        """
+        internal_id = uuid4()
+
+        rel = MagicMock()
+        # The idempotent resolve_namespace returns the same id when given
+        # an internal id directly.
+        rel.resolve_namespace = AsyncMock(return_value=internal_id)
+
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.resolve_namespace(internal_id)
+
+        assert result == internal_id
+        rel.resolve_namespace.assert_awaited_once_with(internal_id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_unknown_id_raises(self) -> None:
+        """Passing a UUID matching neither namespace_id nor id raises ValueError."""
+        unknown_id = uuid4()
+
+        rel = MagicMock()
+        rel.resolve_namespace = AsyncMock(side_effect=ValueError(f"No active namespace found for id={unknown_id}"))
+
+        coord = StorageCoordinator(relational=rel)
+        with pytest.raises(ValueError, match="No active namespace found"):
+            await coord.resolve_namespace(unknown_id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_is_idempotent(self) -> None:
+        """resolve(resolve(stable_id)) == resolve(stable_id).
+
+        Calling resolve twice returns the same result, proving that passing
+        an already-resolved internal id back into resolve is safe.
+        """
+        stable_id = uuid4()
+        row_id = uuid4()
+
+        rel = MagicMock()
+        # First call with stable_id returns row_id;
+        # second call with row_id also returns row_id.
+        rel.resolve_namespace = AsyncMock(return_value=row_id)
+
+        coord = StorageCoordinator(relational=rel)
+        first = await coord.resolve_namespace(stable_id)
+        second = await coord.resolve_namespace(first)
+
+        assert first == row_id
+        assert second == row_id
+        assert first == second
+
+
+# ---------------------------------------------------------------------------
+# ingest_documents calls resolve_namespace — DYT-487
+# ---------------------------------------------------------------------------
+
+
+class TestIngestDocumentsResolvesNamespace:
+    """Tests that ingest_documents resolves namespace_id before processing."""
+
+    @pytest.mark.asyncio
+    async def test_ingest_calls_resolve_namespace(self) -> None:
+        """ingest_documents calls storage.resolve_namespace() with namespace_id."""
+        from khora.pipelines.flows.ingest import ingest_documents
+
+        ns_id = uuid4()
+        row_id = uuid4()
+
+        storage = MagicMock(spec=StorageCoordinator)
+        storage.resolve_namespace = AsyncMock(return_value=row_id)
+        # ingest_documents will try to store documents after resolution;
+        # mock the relational backend methods it needs so it doesn't crash
+        storage.relational = MagicMock()
+        storage.relational.get_document_by_source_id = AsyncMock(return_value=None)
+        storage.relational.store_document = AsyncMock()
+
+        # Call with empty documents list to exercise only the resolution path
+        await ingest_documents(
+            namespace_id=ns_id,
+            documents=[],
+            storage=storage,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        storage.resolve_namespace.assert_awaited_once_with(ns_id)
