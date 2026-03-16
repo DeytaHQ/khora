@@ -409,7 +409,9 @@ class TestIdempotentResolveNamespace:
         unknown_id = uuid4()
 
         rel = MagicMock()
-        rel.resolve_namespace = AsyncMock(side_effect=ValueError(f"No active namespace found for namespace_id or id={unknown_id}"))
+        rel.resolve_namespace = AsyncMock(
+            side_effect=ValueError(f"No active namespace found for namespace_id or id={unknown_id}")
+        )
 
         coord = StorageCoordinator(relational=rel)
         with pytest.raises(ValueError, match="No active namespace found"):
