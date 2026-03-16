@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time as _time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -146,6 +147,7 @@ async def extract_entities(
 
     # Use adaptive batching based on token budget (auto-calculated from max_tokens)
     # batch_size=5 is the max texts per batch; actual batching respects token limits
+    _llm_t0 = _time.perf_counter()
     results = await extractor.extract_multi(
         texts,
         entity_types=entity_types,
@@ -155,6 +157,7 @@ async def extract_entities(
         batch_size=extraction_batch_size,
         max_input_tokens=None,  # Auto-calculate from model
     )
+    _llm_extraction_ms = (_time.perf_counter() - _llm_t0) * 1000
 
     # Process results
     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
@@ -409,5 +412,22 @@ async def extract_entities(
                 f"Created {lightweight_edge_count} lightweight co-occurrence edges "
                 f"from {len(lightweight_chunks)} skipped chunks"
             )
+
+    from khora.telemetry import trace_span
+
+    with trace_span(
+        "khora.extraction.extract_entities",
+        total_chunks=len(chunks),
+        llm_chunks=len(llm_chunks),
+        lightweight_chunks=len(lightweight_chunks),
+        selective_extraction=selective_extraction,
+        extraction_importance_ratio=extraction_importance_ratio,
+        llm_extraction_ms=round(_llm_extraction_ms, 2),
+        entities_extracted=len(all_entities),
+        relationships_extracted=len(all_relationships),
+        events_converted=events_converted,
+        state_changes_applied=state_changes_applied,
+    ):
+        pass
 
     return list(all_entities.values()), all_relationships
