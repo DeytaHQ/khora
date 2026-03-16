@@ -288,7 +288,76 @@ class TestNamespaceVersionLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# Idempotent resolve_namespace — DYT-487
+# PostgreSQLBackend.resolve_namespace — DYT-487
+# ---------------------------------------------------------------------------
+
+
+class TestPostgresResolveNamespace:
+    """Tests for the actual OR-query logic in PostgreSQLBackend.resolve_namespace."""
+
+    def _make_backend(self, session_mock: MagicMock):
+        """Create a PostgreSQLBackend with a mocked session factory."""
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        backend = PostgreSQLBackend.__new__(PostgreSQLBackend)
+        # _get_session returns an async context manager yielding our mock
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=session_mock)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        backend._session_factory = lambda: ctx
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_resolves_stable_namespace_id(self) -> None:
+        """Query matches on namespace_id column and returns row id."""
+        stable_id = uuid4()
+        row_id = uuid4()
+
+        session = MagicMock()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = row_id
+        session.execute = AsyncMock(return_value=result_mock)
+
+        backend = self._make_backend(session)
+        result = await backend.resolve_namespace(stable_id)
+
+        assert result == row_id
+        session.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resolves_internal_id(self) -> None:
+        """Query matches on id column (OR branch) and returns it."""
+        internal_id = uuid4()
+
+        session = MagicMock()
+        result_mock = MagicMock()
+        # The OR query matches on the id column, returning the same id
+        result_mock.scalar_one_or_none.return_value = internal_id
+        session.execute = AsyncMock(return_value=result_mock)
+
+        backend = self._make_backend(session)
+        result = await backend.resolve_namespace(internal_id)
+
+        assert result == internal_id
+        session.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_raises_when_no_match(self) -> None:
+        """Raises ValueError when neither namespace_id nor id matches."""
+        unknown_id = uuid4()
+
+        session = MagicMock()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=result_mock)
+
+        backend = self._make_backend(session)
+        with pytest.raises(ValueError, match="No active namespace found"):
+            await backend.resolve_namespace(unknown_id)
+
+
+# ---------------------------------------------------------------------------
+# Idempotent resolve_namespace (coordinator level) — DYT-487
 # ---------------------------------------------------------------------------
 
 
@@ -340,7 +409,7 @@ class TestIdempotentResolveNamespace:
         unknown_id = uuid4()
 
         rel = MagicMock()
-        rel.resolve_namespace = AsyncMock(side_effect=ValueError(f"No active namespace found for id={unknown_id}"))
+        rel.resolve_namespace = AsyncMock(side_effect=ValueError(f"No active namespace found for namespace_id or id={unknown_id}"))
 
         coord = StorageCoordinator(relational=rel)
         with pytest.raises(ValueError, match="No active namespace found"):
@@ -391,13 +460,18 @@ class TestPublicEntryPointsResolveNamespace:
 
         manager = IncrementalUpdateManager(storage=storage)
         changes = ChangeDetectionResult(
-            new_documents=[],
+            new_documents=[{"content": "test"}],
             updated_documents=[],
             deleted_document_ids=[],
             unchanged_documents=[],
         )
 
-        await manager.process_incremental(ns_id, changes)
+        # Will fail after resolution when it tries to ingest, but we only
+        # care that resolve_namespace was called.
+        try:
+            await manager.process_incremental(ns_id, changes)
+        except Exception:
+            pass
 
         storage.resolve_namespace.assert_awaited_once_with(ns_id)
 

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from loguru import logger
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
@@ -146,25 +146,19 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """
         async with self._get_session() as session:
             result = await session.execute(
-                select(MemoryNamespaceModel.id)
-                .where(MemoryNamespaceModel.namespace_id == namespace_id)
-                .where(MemoryNamespaceModel.is_active == True)  # noqa: E712
+                select(MemoryNamespaceModel.id).where(
+                    or_(
+                        MemoryNamespaceModel.namespace_id == namespace_id,
+                        MemoryNamespaceModel.id == namespace_id,
+                    ),
+                    MemoryNamespaceModel.is_active == True,  # noqa: E712
+                )
             )
             row_id = result.scalar_one_or_none()
             if row_id is not None:
                 return row_id
 
-            # Fallback: check if input is already an internal row-level id
-            result = await session.execute(
-                select(MemoryNamespaceModel.id)
-                .where(MemoryNamespaceModel.id == namespace_id)
-                .where(MemoryNamespaceModel.is_active == True)  # noqa: E712
-            )
-            row_id = result.scalar_one_or_none()
-            if row_id is not None:
-                return row_id
-
-            raise ValueError(f"No active namespace found for id={namespace_id}")
+            raise ValueError(f"No active namespace found for namespace_id or id={namespace_id}")
 
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""

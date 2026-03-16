@@ -138,14 +138,14 @@ class IncrementalUpdateManager:
         """
         from khora.pipelines.flows.ingest import ingest_documents
 
-        # Resolve namespace_id to internal row-level id at the public API boundary
-        namespace_id = await self._storage.resolve_namespace(namespace_id)
-
         if not changes.has_changes:
             return {
                 "processed": 0,
                 "skipped": len(changes.unchanged_documents),
             }
+
+        # Resolve namespace_id to internal row-level id at the public API boundary
+        namespace_id = await self._storage.resolve_namespace(namespace_id)
 
         # Process new and updated documents
         documents_to_process = changes.new_documents + changes.updated_documents
