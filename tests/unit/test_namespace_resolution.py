@@ -5,7 +5,7 @@ Tests DYT-396 (schema/model changes) and DYT-397 (resolution logic).
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -371,36 +371,52 @@ class TestIdempotentResolveNamespace:
 
 
 # ---------------------------------------------------------------------------
-# ingest_documents calls resolve_namespace — DYT-487
+# Public API entry points resolve namespace — DYT-487
 # ---------------------------------------------------------------------------
 
 
-class TestIngestDocumentsResolvesNamespace:
-    """Tests that ingest_documents resolves namespace_id before processing."""
+class TestPublicEntryPointsResolveNamespace:
+    """Tests that public API entry points resolve namespace_id at the boundary."""
 
     @pytest.mark.asyncio
-    async def test_ingest_calls_resolve_namespace(self) -> None:
-        """ingest_documents calls storage.resolve_namespace() with namespace_id."""
-        from khora.pipelines.flows.ingest import ingest_documents
+    async def test_incremental_pipeline_resolves_namespace(self) -> None:
+        """IncrementalUpdateManager.process_incremental resolves namespace_id."""
+        from khora.pipelines.incremental import ChangeDetectionResult, IncrementalUpdateManager
 
         ns_id = uuid4()
         row_id = uuid4()
 
         storage = MagicMock(spec=StorageCoordinator)
         storage.resolve_namespace = AsyncMock(return_value=row_id)
-        # ingest_documents will try to store documents after resolution;
-        # mock the relational backend methods it needs so it doesn't crash
-        storage.relational = MagicMock()
-        storage.relational.get_document_by_source_id = AsyncMock(return_value=None)
-        storage.relational.store_document = AsyncMock()
 
-        # Call with empty documents list to exercise only the resolution path
-        await ingest_documents(
-            namespace_id=ns_id,
-            documents=[],
-            storage=storage,
-            entity_types=["PERSON"],
-            relationship_types=["KNOWS"],
+        manager = IncrementalUpdateManager(storage=storage)
+        changes = ChangeDetectionResult(
+            new_documents=[],
+            updated_documents=[],
+            deleted_document_ids=[],
+            unchanged_documents=[],
         )
+
+        await manager.process_incremental(ns_id, changes)
+
+        storage.resolve_namespace.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_sync_source_resolves_namespace(self) -> None:
+        """sync_source resolves namespace_id."""
+        from khora.pipelines.flows.sync import sync_source
+
+        ns_id = uuid4()
+        row_id = uuid4()
+
+        storage = MagicMock(spec=StorageCoordinator)
+        storage.resolve_namespace = AsyncMock(return_value=row_id)
+
+        # sync_source will try to fetch checkpoint; mock it
+        import khora.pipelines.flows.sync as sync_mod
+
+        with patch.object(sync_mod, "get_sync_checkpoint", new_callable=AsyncMock, return_value=None), \
+             patch.object(sync_mod, "fetch_from_source", new_callable=AsyncMock, return_value=([], None)):
+            await sync_source(ns_id, "test-source", storage)
 
         storage.resolve_namespace.assert_awaited_once_with(ns_id)

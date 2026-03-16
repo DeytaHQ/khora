@@ -83,6 +83,9 @@ async def sync_source(
     if storage is None:
         raise ValueError("storage is required")
 
+    # Resolve namespace_id to internal row-level id at the public API boundary
+    namespace_id = await storage.resolve_namespace(namespace_id)
+
     connector_config = connector_config or {}
 
     logger.info(f"Starting sync from {source} into namespace {namespace_id}")
