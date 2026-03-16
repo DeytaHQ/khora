@@ -414,3 +414,37 @@ class TestBatchOps:
         coord = StorageCoordinator()
         count = await coord.update_entity_embeddings_batch([])
         assert count == 0
+
+
+class TestDocumentSourcesBatch:
+    """Tests for get_document_sources_batch (DYT-506)."""
+
+    @pytest.mark.asyncio
+    async def test_get_document_sources_batch(self) -> None:
+        """get_document_sources_batch delegates to relational backend."""
+        from khora.core.models.document import DocumentSource
+
+        doc_id = uuid4()
+        ns_id = uuid4()
+        src = DocumentSource(id=doc_id, namespace_id=ns_id, title="Test Doc")
+
+        rel = MagicMock()
+        rel.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
+
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.get_document_sources_batch([doc_id])
+
+        assert result == {doc_id: src}
+        rel.get_document_sources_batch.assert_awaited_once_with([doc_id])
+
+    @pytest.mark.asyncio
+    async def test_get_document_sources_batch_empty(self) -> None:
+        """Empty list returns empty dict without hitting backend."""
+        rel = MagicMock()
+        rel.get_document_sources_batch = AsyncMock()
+
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.get_document_sources_batch([])
+
+        assert result == {}
+        rel.get_document_sources_batch.assert_not_awaited()

@@ -948,3 +948,192 @@ class TestEngineRegistry:
 
         with pytest.raises(ValueError, match="Unknown engine"):
             create_engine("nonexistent", _mock_config())
+
+
+# ---------------------------------------------------------------------------
+# include_sources feature (DYT-506)
+# ---------------------------------------------------------------------------
+
+
+class TestIncludeSources:
+    """Tests for include_sources parameter on read methods."""
+
+    @pytest.mark.asyncio
+    async def test_recall_include_sources_false(self) -> None:
+        """Default include_sources=False does not call get_document_sources_batch."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        mock_result = RecallResult(
+            query="test",
+            namespace_id=ns_id,
+            chunks=[],
+            entities=[],
+            context_text="",
+        )
+        lake._engine.recall = AsyncMock(return_value=mock_result)
+        lake._engine._storage.get_document_sources_batch = AsyncMock()
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            result = await lake.recall("test", namespace=ns_id)
+
+        assert isinstance(result, RecallResult)
+        lake._engine._storage.get_document_sources_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recall_include_sources_true(self) -> None:
+        """include_sources=True populates source_document on chunks and source_documents on entities."""
+        from khora.core.models.document import Chunk, DocumentSource
+        from khora.core.models.entity import Entity
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        doc_id_1 = uuid4()
+        doc_id_2 = uuid4()
+
+        chunk = Chunk(namespace_id=ns_id, document_id=doc_id_1, content="hello")
+        entity = Entity(
+            namespace_id=ns_id,
+            name="Alice",
+            entity_type="PERSON",
+            source_document_ids=[doc_id_1, doc_id_2],
+        )
+
+        mock_result = RecallResult(
+            query="test",
+            namespace_id=ns_id,
+            chunks=[(chunk, 0.9)],
+            entities=[(entity, 0.8)],
+            context_text="hello",
+        )
+        lake._engine.recall = AsyncMock(return_value=mock_result)
+
+        src_1 = DocumentSource(id=doc_id_1, namespace_id=ns_id, title="Doc 1")
+        src_2 = DocumentSource(id=doc_id_2, namespace_id=ns_id, title="Doc 2")
+        lake._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id_1: src_1, doc_id_2: src_2})
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            result = await lake.recall("test", namespace=ns_id, include_sources=True)
+
+        # Chunk should have source_document populated
+        assert result.chunks[0][0].source_document is src_1
+
+        # Entity should have source_documents populated
+        assert result.entities[0][0].source_documents == {doc_id_1: src_1, doc_id_2: src_2}
+
+        lake._engine._storage.get_document_sources_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_list_entities_include_sources(self) -> None:
+        """list_entities with include_sources=True populates source_documents on entities."""
+        from khora.core.models.document import DocumentSource
+        from khora.core.models.entity import Entity
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        doc_id = uuid4()
+
+        entity = Entity(
+            namespace_id=ns_id,
+            name="Bob",
+            entity_type="PERSON",
+            source_document_ids=[doc_id],
+        )
+        lake._engine.list_entities = AsyncMock(return_value=[entity])
+
+        src = DocumentSource(id=doc_id, namespace_id=ns_id, title="Source Doc")
+        lake._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
+
+        result = await lake.list_entities(namespace=ns_id, include_sources=True)
+
+        assert len(result) == 1
+        assert result[0].source_documents == {doc_id: src}
+        lake._engine._storage.get_document_sources_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_search_entities_include_sources(self) -> None:
+        """search_entities with include_sources=True populates source_documents."""
+        from khora.core.models.document import DocumentSource
+        from khora.core.models.entity import Entity
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        doc_id = uuid4()
+
+        entity = Entity(
+            namespace_id=ns_id,
+            name="Acme Corp",
+            entity_type="ORGANIZATION",
+            source_document_ids=[doc_id],
+        )
+        lake._engine.search_entities = AsyncMock(return_value=[entity])
+
+        src = DocumentSource(id=doc_id, namespace_id=ns_id, title="Report")
+        lake._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
+
+        result = await lake.search_entities("acme", namespace=ns_id, include_sources=True)
+
+        assert len(result) == 1
+        assert result[0].source_documents == {doc_id: src}
+        lake._engine._storage.get_document_sources_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_find_related_entities_include_sources(self) -> None:
+        """find_related_entities with include_sources=True populates source_documents."""
+        from khora.core.models.document import DocumentSource
+        from khora.core.models.entity import Entity
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        entity_id = uuid4()
+        doc_id = uuid4()
+
+        related = Entity(
+            namespace_id=ns_id,
+            name="Related Entity",
+            entity_type="CONCEPT",
+            source_document_ids=[doc_id],
+        )
+        lake._engine.find_related_entities = AsyncMock(return_value=[(related, 0.75)])
+
+        src = DocumentSource(id=doc_id, namespace_id=ns_id, title="Origin")
+        lake._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
+
+        result = await lake.find_related_entities(entity_id, namespace=ns_id, include_sources=True)
+
+        assert len(result) == 1
+        assert result[0][0].source_documents == {doc_id: src}
+        lake._engine._storage.get_document_sources_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_include_sources_empty_results(self) -> None:
+        """Empty chunks/entities with include_sources=True does not crash or fetch."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        mock_result = RecallResult(
+            query="nothing",
+            namespace_id=ns_id,
+            chunks=[],
+            entities=[],
+            context_text="",
+        )
+        lake._engine.recall = AsyncMock(return_value=mock_result)
+        lake._engine._storage.get_document_sources_batch = AsyncMock()
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            result = await lake.recall("nothing", namespace=ns_id, include_sources=True)
+
+        assert result.chunks == []
+        assert result.entities == []
+        # No doc IDs to fetch, so get_document_sources_batch should not be called
+        lake._engine._storage.get_document_sources_batch.assert_not_awaited()
