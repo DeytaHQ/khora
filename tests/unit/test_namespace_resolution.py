@@ -415,8 +415,10 @@ class TestPublicEntryPointsResolveNamespace:
         # sync_source will try to fetch checkpoint; mock it
         import khora.pipelines.flows.sync as sync_mod
 
-        with patch.object(sync_mod, "get_sync_checkpoint", new_callable=AsyncMock, return_value=None), \
-             patch.object(sync_mod, "fetch_from_source", new_callable=AsyncMock, return_value=([], None)):
+        with (
+            patch.object(sync_mod, "get_sync_checkpoint", new_callable=AsyncMock, return_value=None),
+            patch.object(sync_mod, "fetch_from_source", new_callable=AsyncMock, return_value=([], None)),
+        ):
             await sync_source(ns_id, "test-source", storage)
 
         storage.resolve_namespace.assert_awaited_once_with(ns_id)
