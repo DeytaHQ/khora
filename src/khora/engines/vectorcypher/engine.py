@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1453,11 +1454,16 @@ class VectorCypherEngine:
                     on_progress(progress_count, total)
 
         # Phase 2: Process all documents in parallel
+        _phase2_t0 = _time.perf_counter()
         await asyncio.gather(
             *[process_document(doc, checksum, idx) for idx, (doc, checksum) in enumerate(zip(documents, doc_checksums))]
         )
+        _phase2_ms = (_time.perf_counter() - _phase2_t0) * 1000
 
         # Phase 3: Batch entity storage (streaming pipeline only)
+        _phase3_upsert_ms = 0.0
+        _phase3_rels_ms = 0.0
+        _phase3_links_ms = 0.0
         if use_streaming and all_entities:
             dual_nodes = self._get_dual_nodes()
 
@@ -1483,18 +1489,42 @@ class VectorCypherEngine:
                 logger.debug(f"Cross-document dedup: {len(deduped)} unique entities")
 
             # Single batch upsert to Neo4j + pgvector
+            _t0 = _time.perf_counter()
             await storage.upsert_entities_batch(namespace_id, all_entities)
+            _phase3_upsert_ms = (_time.perf_counter() - _t0) * 1000
 
             if all_relationships:
+                _t0 = _time.perf_counter()
                 await storage.create_relationships_batch(all_relationships)
+                _phase3_rels_ms = (_time.perf_counter() - _t0) * 1000
 
             if all_entity_chunk_links:
+                _t0 = _time.perf_counter()
                 await dual_nodes.link_entities_to_chunks_batch(all_entity_chunk_links)
+                _phase3_links_ms = (_time.perf_counter() - _t0) * 1000
 
             logger.info(
                 f"Streaming pipeline batch store: {len(all_entities)} entities, "
                 f"{len(all_relationships)} relationships, {len(all_entity_chunk_links)} links"
             )
+
+        _phase3_total_ms = _phase3_upsert_ms + _phase3_rels_ms + _phase3_links_ms
+        with trace_span(
+            "khora.vectorcypher.remember_batch",
+            document_count=total,
+            processed=results["processed"],
+            skipped=results["skipped"],
+            failed=results["failed"],
+            chunks=results["chunks"],
+            entities=results["entities"],
+            relationships=results["relationships"],
+            phase2_processing_ms=round(_phase2_ms, 2),
+            phase3_entity_upsert_ms=round(_phase3_upsert_ms, 2),
+            phase3_relationships_ms=round(_phase3_rels_ms, 2),
+            phase3_entity_chunk_links_ms=round(_phase3_links_ms, 2),
+            phase3_total_ms=round(_phase3_total_ms, 2),
+        ):
+            pass
 
         return BatchResult(
             total=total,
