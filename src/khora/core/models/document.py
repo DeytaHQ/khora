@@ -49,12 +49,9 @@ class DocumentSource:
     """
 
     id: UUID
-    namespace_id: UUID
     title: str = ""
     source: str = ""
     source_type: str = ""
-    content_type: str = ""
-    author: str = ""
     created_at: datetime | None = None
     source_timestamp: datetime | None = None
 

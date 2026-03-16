@@ -494,12 +494,9 @@ class PostgreSQLBackend(AsyncSessionMixin):
             result = await session.execute(
                 select(
                     DocumentModel.id,
-                    DocumentModel.namespace_id,
                     DocumentModel.title,
                     DocumentModel.source,
                     DocumentModel.source_type,
-                    DocumentModel.content_type,
-                    DocumentModel.author,
                     DocumentModel.created_at,
                     DocumentModel.source_timestamp,
                 ).where(DocumentModel.id.in_(document_ids))
@@ -508,12 +505,9 @@ class PostgreSQLBackend(AsyncSessionMixin):
             return {
                 row.id: DocumentSource(
                     id=row.id,
-                    namespace_id=row.namespace_id,
                     title=row.title,
                     source=row.source,
                     source_type=row.source_type,
-                    content_type=row.content_type,
-                    author=row.author,
                     created_at=row.created_at,
                     source_timestamp=row.source_timestamp,
                 )

@@ -425,8 +425,7 @@ class TestDocumentSourcesBatch:
         from khora.core.models.document import DocumentSource
 
         doc_id = uuid4()
-        ns_id = uuid4()
-        src = DocumentSource(id=doc_id, namespace_id=ns_id, title="Test Doc")
+        src = DocumentSource(id=doc_id, title="Test Doc")
 
         rel = MagicMock()
         rel.get_document_sources_batch = AsyncMock(return_value={doc_id: src})

@@ -665,11 +665,17 @@ class MemoryLake:
         chunks: list[tuple[Chunk, float]],
         entities: list[tuple[Entity, float]] | list[Entity],
     ) -> None:
-        """Batch-fetch document sources and populate entity/chunk fields in-place.
+        """Batch-fetch document sources and populate entity/chunk fields **in-place**.
 
-        Collects unique document IDs from chunks and entities, fetches
-        lightweight metadata via a single SELECT, then sets
-        ``chunk.source_document`` and ``entity.source_documents``.
+        ``entities`` accepts either ``list[Entity]`` or
+        ``list[tuple[Entity, float]]`` (entity, score pairs).  The method
+        unwraps tuples transparently.
+
+        Collects unique document IDs from both *chunks* and *entities*, fetches
+        lightweight metadata via batched SELECTs (chunked at 1 000 IDs), then
+        populates ``chunk.source_document`` and ``entity.source_documents`` on
+        the provided objects.  No value is returned; callers observe changes
+        through the mutated inputs.
         """
         # Collect unique doc IDs
         doc_ids: set[UUID] = set()
@@ -682,7 +688,11 @@ class MemoryLake:
         if not doc_ids:
             return
 
-        sources = await self.storage.get_document_sources_batch(list(doc_ids))
+        sorted_ids = sorted(doc_ids)
+        sources: dict = {}
+        for i in range(0, len(sorted_ids), 1000):
+            batch = sorted_ids[i : i + 1000]
+            sources.update(await self.storage.get_document_sources_batch(batch))
 
         # Populate chunks
         for chunk, _score in chunks:
@@ -692,6 +702,9 @@ class MemoryLake:
         for item in entities:
             entity = item[0] if isinstance(item, tuple) else item
             entity_sources = {did: sources[did] for did in entity.source_document_ids if did in sources}
+            # None means either "sources not fetched" (include_sources=False) or
+            # "all source documents deleted".  Callers distinguish via the
+            # include_sources flag they passed.
             entity.source_documents = entity_sources if entity_sources else None
 
     async def _resolve_namespace(self, namespace: str | UUID) -> UUID:
