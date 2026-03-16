@@ -659,23 +659,24 @@ class LLMEntityExtractor(EntityExtractor):
                     async with self._semaphore:
                         import time as _time
 
+                        from khora.telemetry import get_collector, trace_span
+
                         _t0 = _time.perf_counter()
-                        response = await litellm.acompletion(
-                            model=self._model,
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": extraction_prompt},
-                            ],
-                            temperature=self._temperature,
-                            max_tokens=self._max_tokens,
-                            timeout=self._timeout,
-                            response_format=self._get_response_format(),
-                        )
+                        with trace_span("khora.extraction.llm_call", model=self._model, call_type="single"):
+                            response = await litellm.acompletion(
+                                model=self._model,
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": extraction_prompt},
+                                ],
+                                temperature=self._temperature,
+                                max_tokens=self._max_tokens,
+                                timeout=self._timeout,
+                                response_format=self._get_response_format(),
+                            )
                         _latency = (_time.perf_counter() - _t0) * 1000
 
                         # Record telemetry
-                        from khora.telemetry import get_collector
-
                         usage = getattr(response, "usage", None)
                         get_collector().record_llm_call(
                             operation="entity_extraction",
@@ -783,21 +784,22 @@ class LLMEntityExtractor(EntityExtractor):
             async with self._semaphore:
                 import time as _time
 
-                _t0 = _time.perf_counter()
-                response = await litellm.acompletion(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=self._temperature,
-                    max_tokens=self._max_tokens,
-                    timeout=self._timeout,
-                    response_format=self._get_response_format(),
-                )
-                _latency = (_time.perf_counter() - _t0) * 1000
+                from khora.telemetry import get_collector, trace_span
 
-                from khora.telemetry import get_collector
+                _t0 = _time.perf_counter()
+                with trace_span("khora.extraction.llm_call", model=self._model, call_type="relationship_second_pass"):
+                    response = await litellm.acompletion(
+                        model=self._model,
+                        messages=[
+                            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=self._temperature,
+                        max_tokens=self._max_tokens,
+                        timeout=self._timeout,
+                        response_format=self._get_response_format(),
+                    )
+                _latency = (_time.perf_counter() - _t0) * 1000
 
                 usage = getattr(response, "usage", None)
                 get_collector().record_llm_call(
@@ -1366,23 +1368,29 @@ Return ONLY valid JSON, no other text."""
                     async with self._semaphore:
                         import time as _time
 
+                        from khora.telemetry import get_collector, trace_span
+
                         _t0 = _time.perf_counter()
-                        response = await litellm.acompletion(
+                        with trace_span(
+                            "khora.extraction.llm_call",
                             model=self._model,
-                            messages=[
-                                {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
-                                {"role": "user", "content": prompt},
-                            ],
-                            temperature=self._temperature,
-                            max_tokens=self._max_tokens,
-                            timeout=self._timeout,
-                            response_format=self._get_multi_response_format(),
-                        )
+                            call_type="multi_batch",
+                            batch_size=len(texts),
+                        ):
+                            response = await litellm.acompletion(
+                                model=self._model,
+                                messages=[
+                                    {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+                                    {"role": "user", "content": prompt},
+                                ],
+                                temperature=self._temperature,
+                                max_tokens=self._max_tokens,
+                                timeout=self._timeout,
+                                response_format=self._get_multi_response_format(),
+                            )
                         _latency = (_time.perf_counter() - _t0) * 1000
 
                         # Record telemetry
-                        from khora.telemetry import get_collector
-
                         usage = getattr(response, "usage", None)
                         get_collector().record_llm_call(
                             operation="entity_extraction_multi",

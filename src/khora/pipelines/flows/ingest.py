@@ -937,16 +937,21 @@ async def process_document(
         if entity_index is not None and inference_mode == "smart":
             # Smart mode: within-doc exact dedup via shared EntityIndex.
             # Cross-document resolution + inference deferred to run_smart_resolution().
-            deduped_entities = []
-            for entity in entities:
-                existing = entity_index.add(entity)
-                if existing is not None:
-                    # Merge into existing (already in index)
-                    existing.merge_with(entity)
-                    # Map the dropped entity's ID to the surviving entity's ID
-                    dedup_id_mapping[str(entity.id)] = str(existing.id)
-                else:
-                    deduped_entities.append(entity)
+            from khora.telemetry import trace_span
+
+            with trace_span("khora.ingestion.entity_dedup", input_count=len(entities), mode="smart") as _dedup_span:
+                deduped_entities = []
+                for entity in entities:
+                    existing = entity_index.add(entity)
+                    if existing is not None:
+                        # Merge into existing (already in index)
+                        existing.merge_with(entity)
+                        # Map the dropped entity's ID to the surviving entity's ID
+                        dedup_id_mapping[str(entity.id)] = str(existing.id)
+                    else:
+                        deduped_entities.append(entity)
+                _dedup_span.set_attribute("output_count", len(deduped_entities))
+                _dedup_span.set_attribute("duplicates_found", len(dedup_id_mapping))
             if len(entities) != len(deduped_entities):
                 logger.debug(
                     f"Document {document.id}: smart dedup {len(entities)} -> {len(deduped_entities)} entities "
@@ -956,39 +961,46 @@ async def process_document(
 
         elif enable_expansion and resolved_expertise:
             from khora.extraction.expansion import SemanticExpander
+            from khora.telemetry import trace_span
 
-            # For incremental mode, fetch existing entities/relationships from storage
-            # to enable cross-document inference
-            expansion_entities = list(entities)
-            expansion_relationships = list(relationships)
+            with trace_span(
+                "khora.ingestion.expansion",
+                mode=inference_mode,
+                input_entities=len(entities),
+                input_relationships=len(relationships),
+            ):
+                # For incremental mode, fetch existing entities/relationships from storage
+                # to enable cross-document inference
+                expansion_entities = list(entities)
+                expansion_relationships = list(relationships)
 
-            if inference_mode == "incremental":
-                # Query existing entities and relationships from the namespace
-                existing_entities = await storage.list_entities(document.namespace_id, limit=1000)
-                existing_relationships = await storage.list_relationships(document.namespace_id, limit=5000)
+                if inference_mode == "incremental":
+                    # Query existing entities and relationships from the namespace
+                    existing_entities = await storage.list_entities(document.namespace_id, limit=1000)
+                    existing_relationships = await storage.list_relationships(document.namespace_id, limit=5000)
 
-                # Add existing data to expansion context
-                expansion_entities.extend(existing_entities)
-                expansion_relationships.extend(existing_relationships)
+                    # Add existing data to expansion context
+                    expansion_entities.extend(existing_entities)
+                    expansion_relationships.extend(existing_relationships)
 
-                logger.debug(
-                    f"Document {document.id}: incremental mode - added {len(existing_entities)} existing entities, "
-                    f"{len(existing_relationships)} existing relationships to expansion context"
+                    logger.debug(
+                        f"Document {document.id}: incremental mode - added {len(existing_entities)} existing entities, "
+                        f"{len(existing_relationships)} existing relationships to expansion context"
+                    )
+
+                # For batch mode, skip inference (only do unification on current doc)
+                # Inference will be run separately after all documents are processed
+                enable_inference = inference_mode != "batch" and inference_mode != "none"
+
+                expander = SemanticExpander(
+                    expertise=resolved_expertise,
+                    enable_inference=enable_inference,
                 )
-
-            # For batch mode, skip inference (only do unification on current doc)
-            # Inference will be run separately after all documents are processed
-            enable_inference = inference_mode != "batch" and inference_mode != "none"
-
-            expander = SemanticExpander(
-                expertise=resolved_expertise,
-                enable_inference=enable_inference,
-            )
-            expansion_result = await expander.expand(
-                entities=expansion_entities,
-                relationships=expansion_relationships,
-                namespace_id=document.namespace_id,
-            )
+                expansion_result = await expander.expand(
+                    entities=expansion_entities,
+                    relationships=expansion_relationships,
+                    namespace_id=document.namespace_id,
+                )
 
             # Only keep entities from current document (not the existing ones we added)
             # The existing entities are already stored

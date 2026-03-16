@@ -696,7 +696,12 @@ class VectorCypherEngine:
             else:
                 skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
                 skeleton.add_chunks_batch(chunks)
-                core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+                with trace_span(
+                    "khora.vectorcypher.skeleton_build",
+                    chunk_count=len(chunks),
+                    core_ratio=self._vc_config.skeleton_core_ratio,
+                ):
+                    core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
             logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
             span.set_attribute("core_chunks", len(core_ids))
@@ -835,7 +840,12 @@ class VectorCypherEngine:
             effective_ratio = skeleton_ratio_override or self._vc_config.skeleton_core_ratio
             skeleton = SkeletonIndexer(core_ratio=effective_ratio)
             skeleton.add_chunks_batch(chunks)
-            core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+            with trace_span(
+                "khora.vectorcypher.skeleton_build",
+                chunk_count=len(chunks),
+                core_ratio=effective_ratio,
+            ):
+                core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
         logger.debug(f"Skeleton indexing (deferred): {len(core_ids)}/{len(chunks)} core chunks")
 
