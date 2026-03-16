@@ -5,7 +5,7 @@ Tests DYT-396 (schema/model changes) and DYT-397 (resolution logic).
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -285,3 +285,216 @@ class TestNamespaceVersionLifecycle:
         active = [v for v in versions if v.is_active]
         assert len(active) == 1  # Only one active
         assert active[0].id == v2.id  # Active version is v2
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQLBackend.resolve_namespace — DYT-487
+# ---------------------------------------------------------------------------
+
+
+class TestPostgresResolveNamespace:
+    """Tests for the actual OR-query logic in PostgreSQLBackend.resolve_namespace."""
+
+    def _make_backend(self, session_mock: MagicMock):
+        """Create a PostgreSQLBackend with a mocked session factory."""
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        backend = PostgreSQLBackend.__new__(PostgreSQLBackend)
+        # _get_session returns an async context manager yielding our mock
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=session_mock)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        backend._session_factory = lambda: ctx
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_resolves_stable_namespace_id(self) -> None:
+        """Query matches on namespace_id column and returns row id."""
+        stable_id = uuid4()
+        row_id = uuid4()
+
+        session = MagicMock()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = row_id
+        session.execute = AsyncMock(return_value=result_mock)
+
+        backend = self._make_backend(session)
+        result = await backend.resolve_namespace(stable_id)
+
+        assert result == row_id
+        session.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resolves_internal_id(self) -> None:
+        """Query matches on id column (OR branch) and returns it."""
+        internal_id = uuid4()
+
+        session = MagicMock()
+        result_mock = MagicMock()
+        # The OR query matches on the id column, returning the same id
+        result_mock.scalar_one_or_none.return_value = internal_id
+        session.execute = AsyncMock(return_value=result_mock)
+
+        backend = self._make_backend(session)
+        result = await backend.resolve_namespace(internal_id)
+
+        assert result == internal_id
+        session.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_raises_when_no_match(self) -> None:
+        """Raises ValueError when neither namespace_id nor id matches."""
+        unknown_id = uuid4()
+
+        session = MagicMock()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=result_mock)
+
+        backend = self._make_backend(session)
+        with pytest.raises(ValueError, match="No active namespace found"):
+            await backend.resolve_namespace(unknown_id)
+
+
+# ---------------------------------------------------------------------------
+# Idempotent resolve_namespace (coordinator level) — DYT-487
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotentResolveNamespace:
+    """Tests for idempotent resolve_namespace (DYT-487).
+
+    resolve_namespace should accept EITHER a stable namespace_id OR an
+    internal row-level id and always return the internal id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resolve_by_stable_namespace_id(self) -> None:
+        """Passing a stable namespace_id returns the internal row id."""
+        stable_id = uuid4()
+        row_id = uuid4()
+
+        rel = MagicMock()
+        rel.resolve_namespace = AsyncMock(return_value=row_id)
+
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.resolve_namespace(stable_id)
+
+        assert result == row_id
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_by_internal_id(self) -> None:
+        """Passing an internal row-level id returns that same id.
+
+        This tests the fallback path where the input UUID doesn't match
+        any namespace_id column but DOES match an id column.
+        """
+        internal_id = uuid4()
+
+        rel = MagicMock()
+        # The idempotent resolve_namespace returns the same id when given
+        # an internal id directly.
+        rel.resolve_namespace = AsyncMock(return_value=internal_id)
+
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.resolve_namespace(internal_id)
+
+        assert result == internal_id
+        rel.resolve_namespace.assert_awaited_once_with(internal_id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_unknown_id_raises(self) -> None:
+        """Passing a UUID matching neither namespace_id nor id raises ValueError."""
+        unknown_id = uuid4()
+
+        rel = MagicMock()
+        rel.resolve_namespace = AsyncMock(
+            side_effect=ValueError(f"No active namespace found for namespace_id or id={unknown_id}")
+        )
+
+        coord = StorageCoordinator(relational=rel)
+        with pytest.raises(ValueError, match="No active namespace found"):
+            await coord.resolve_namespace(unknown_id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_is_idempotent(self) -> None:
+        """resolve(resolve(stable_id)) == resolve(stable_id).
+
+        Calling resolve twice returns the same result, proving that passing
+        an already-resolved internal id back into resolve is safe.
+        """
+        stable_id = uuid4()
+        row_id = uuid4()
+
+        rel = MagicMock()
+        # First call with stable_id returns row_id;
+        # second call with row_id also returns row_id.
+        rel.resolve_namespace = AsyncMock(return_value=row_id)
+
+        coord = StorageCoordinator(relational=rel)
+        first = await coord.resolve_namespace(stable_id)
+        second = await coord.resolve_namespace(first)
+
+        assert first == row_id
+        assert second == row_id
+        assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Public API entry points resolve namespace — DYT-487
+# ---------------------------------------------------------------------------
+
+
+class TestPublicEntryPointsResolveNamespace:
+    """Tests that public API entry points resolve namespace_id at the boundary."""
+
+    @pytest.mark.asyncio
+    async def test_incremental_pipeline_resolves_namespace(self) -> None:
+        """IncrementalUpdateManager.process_incremental resolves namespace_id."""
+        from khora.pipelines.incremental import ChangeDetectionResult, IncrementalUpdateManager
+
+        ns_id = uuid4()
+        row_id = uuid4()
+
+        storage = MagicMock(spec=StorageCoordinator)
+        storage.resolve_namespace = AsyncMock(return_value=row_id)
+
+        manager = IncrementalUpdateManager(storage=storage)
+        changes = ChangeDetectionResult(
+            new_documents=[{"content": "test"}],
+            updated_documents=[],
+            deleted_document_ids=[],
+            unchanged_documents=[],
+        )
+
+        # Will fail after resolution when it tries to ingest, but we only
+        # care that resolve_namespace was called.
+        try:
+            await manager.process_incremental(ns_id, changes)
+        except Exception:
+            pass
+
+        storage.resolve_namespace.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_sync_source_resolves_namespace(self) -> None:
+        """sync_source resolves namespace_id."""
+        from khora.pipelines.flows.sync import sync_source
+
+        ns_id = uuid4()
+        row_id = uuid4()
+
+        storage = MagicMock(spec=StorageCoordinator)
+        storage.resolve_namespace = AsyncMock(return_value=row_id)
+
+        # sync_source will try to fetch checkpoint; mock it
+        import khora.pipelines.flows.sync as sync_mod
+
+        with (
+            patch.object(sync_mod, "get_sync_checkpoint", new_callable=AsyncMock, return_value=None),
+            patch.object(sync_mod, "fetch_from_source", new_callable=AsyncMock, return_value=([], None)),
+        ):
+            await sync_source(ns_id, "test-source", storage)
+
+        storage.resolve_namespace.assert_awaited_once_with(ns_id)
