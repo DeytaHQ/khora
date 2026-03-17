@@ -550,8 +550,7 @@ class VectorCypherEngine:
         5. Store chunks in pgvector and create Chunk nodes in Neo4j
         6. Link entities to chunks via MENTIONED_IN
         """
-        from khora.pipelines.chunking import create_chunker  # type: ignore[unresolved-import]
-        from khora.pipelines.chunking.config import ChunkerConfig  # type: ignore[unresolved-import]
+        from khora.extraction.chunkers import create_chunker
 
         with trace_span(
             "khora.vectorcypher.process_document",
@@ -564,12 +563,11 @@ class VectorCypherEngine:
             dual_nodes = self._get_dual_nodes()
 
             # Create chunker
-            chunker_config = ChunkerConfig(
+            chunker = create_chunker(
                 strategy=self._config.pipeline.chunking_strategy,
                 chunk_size=self._config.pipeline.chunk_size,
                 chunk_overlap=self._config.pipeline.chunk_overlap,
             )
-            chunker = create_chunker(chunker_config)
 
             # Chunk the document
             with trace_span("khora.vectorcypher.chunking"):
@@ -926,20 +924,18 @@ class VectorCypherEngine:
         Returns:
             Tuple of (chunks_created, entities, relationships, entity_chunk_links)
         """
-        from khora.pipelines.chunking import create_chunker  # type: ignore[unresolved-import]
-        from khora.pipelines.chunking.config import ChunkerConfig  # type: ignore[unresolved-import]
+        from khora.extraction.chunkers import create_chunker
 
         storage = self._get_storage()
         embedder = self._get_embedder()
         temporal_store = self._get_temporal_store()
         dual_nodes = self._get_dual_nodes()
 
-        chunker_config = ChunkerConfig(
+        chunker = create_chunker(
             strategy=self._config.pipeline.chunking_strategy,
             chunk_size=self._config.pipeline.chunk_size,
             chunk_overlap=self._config.pipeline.chunk_overlap,
         )
-        chunker = create_chunker(chunker_config)
         raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
 
         if not raw_chunks:
