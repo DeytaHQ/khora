@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         MemoryNamespace,
         Relationship,
     )
+    from khora.core.models.document import DocumentSource
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,20 @@ class RelationalBackendProtocol(Protocol):
         """Fetch multiple documents in a single query.
 
         Returns dictionary mapping document ID to Document object.
+        """
+        ...
+
+    async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
+        """Fetch lightweight document metadata for source attribution.
+
+        Returns a column-limited projection (no content, processing stats,
+        or mutable state) for display and linking purposes.
+
+        Args:
+            document_ids: List of document IDs to fetch
+
+        Returns:
+            Dictionary mapping document ID to DocumentSource
         """
         ...
 

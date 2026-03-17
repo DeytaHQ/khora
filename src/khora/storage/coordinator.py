@@ -29,6 +29,7 @@ from khora.core.models import (
     MemoryNamespace,
     Relationship,
 )
+from khora.core.models.document import DocumentSource
 from khora.storage.backends.base import PaginatedResult
 from khora.telemetry import get_collector, trace_span
 
@@ -859,6 +860,21 @@ class StorageCoordinator:
             return {}
         if self.relational:
             return await self.relational.get_documents_batch(document_ids)
+        return {}
+
+    async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
+        """Fetch lightweight document metadata for source attribution.
+
+        Args:
+            document_ids: List of document IDs to fetch
+
+        Returns:
+            Dictionary mapping document ID to DocumentSource
+        """
+        if not document_ids:
+            return {}
+        if self.relational:
+            return await self.relational.get_document_sources_batch(document_ids)
         return {}
 
     @_record_storage_op("get_neighborhoods_batch", "graph")

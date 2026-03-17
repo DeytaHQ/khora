@@ -15,7 +15,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
-from khora.core.models.document import DocumentStatus
+from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.db.models import (
     Base,
     DocumentModel,
@@ -474,6 +474,45 @@ class PostgreSQLBackend(AsyncSessionMixin):
             )
             models = result.scalars().all()
             return {m.checksum: self._document_model_to_domain(m) for m in models}
+
+    async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
+        """Fetch lightweight document metadata for source attribution.
+
+        Uses a column-limited SELECT to avoid reading content, processing
+        stats, and other heavy/mutable columns.
+
+        Args:
+            document_ids: List of document IDs to fetch
+
+        Returns:
+            Dictionary mapping document ID to DocumentSource
+        """
+        if not document_ids:
+            return {}
+
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(
+                    DocumentModel.id,
+                    DocumentModel.title,
+                    DocumentModel.source,
+                    DocumentModel.source_type,
+                    DocumentModel.created_at,
+                    DocumentModel.source_timestamp,
+                ).where(DocumentModel.id.in_(document_ids))
+            )
+            rows = result.all()
+            return {
+                row.id: DocumentSource(
+                    id=row.id,
+                    title=row.title,
+                    source=row.source,
+                    source_type=row.source_type,
+                    created_at=row.created_at,
+                    source_timestamp=row.source_timestamp,
+                )
+                for row in rows
+            }
 
     def _document_model_to_domain(self, model: DocumentModel) -> Document:
         """Convert DocumentModel to domain Document."""

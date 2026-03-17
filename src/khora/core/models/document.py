@@ -39,6 +39,23 @@ class DocumentMetadata:
     custom: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True, frozen=True)
+class DocumentSource:
+    """Lightweight document metadata projection for source attribution.
+
+    Returned by read methods when ``include_sources=True``.
+    Contains only the fields needed for display/linking — no content,
+    processing stats, or mutable state.
+    """
+
+    id: UUID
+    title: str = ""
+    source: str = ""
+    source_type: str = ""
+    created_at: datetime | None = None
+    source_timestamp: datetime | None = None
+
+
 @dataclass
 class Document:
     """A document to be processed and stored in the memory lake.
@@ -124,6 +141,9 @@ class Chunk:
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     source_timestamp: datetime | None = None
+
+    # Populated by MemoryLake when include_sources=True
+    source_document: DocumentSource | None = None
 
     @property
     def has_embedding(self) -> bool:

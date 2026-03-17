@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from khora.core.models.document import DocumentSource
 
 
 @dataclass(slots=True)
@@ -36,6 +39,10 @@ class Entity:
     # Source tracking
     source_document_ids: list[UUID] = field(default_factory=list)
     source_chunk_ids: list[UUID] = field(default_factory=list)
+
+    # Populated by MemoryLake when include_sources=True
+    source_documents: dict[UUID, DocumentSource] | None = None
+
     mention_count: int = 1
 
     # Embedding for entity similarity search

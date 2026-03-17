@@ -419,6 +419,7 @@ class MemoryLake:
         min_similarity: float = 0.0,
         agentic: bool = False,
         raw: bool = False,
+        include_sources: bool = False,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
@@ -449,6 +450,8 @@ class MemoryLake:
             min_similarity: Minimum similarity threshold
             agentic: If True, use multi-step agentic search (default: False)
             raw: If True, skip all LLM features (default: False)
+            include_sources: If True, populate source document metadata on
+                returned chunks and entities (default: False)
 
         Returns:
             RecallResult with matched memories
@@ -459,7 +462,7 @@ class MemoryLake:
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.recall", namespace_id=str(namespace_id), query=query):
-                return await self._get_engine().recall(
+                result = await self._get_engine().recall(
                     query,
                     namespace_id,
                     limit=limit,
@@ -468,6 +471,9 @@ class MemoryLake:
                     agentic=agentic,
                     raw=raw,
                 )
+                if include_sources:
+                    await self._populate_sources(result.chunks, result.entities)
+                return result
         finally:
             clear_trace_id()
 
@@ -499,9 +505,26 @@ class MemoryLake:
     # Entity Operations
     # =========================================================================
 
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        """Get an entity by ID."""
-        return await self._get_engine().get_entity(entity_id)
+    async def get_entity(
+        self,
+        entity_id: UUID,
+        *,
+        include_sources: bool = False,
+    ) -> Entity | None:
+        """Get an entity by ID.
+
+        Args:
+            entity_id: Entity UUID to retrieve
+            include_sources: If True, populate source document metadata on
+                the returned entity (default: False)
+
+        Returns:
+            Entity if found, else None
+        """
+        entity = await self._get_engine().get_entity(entity_id)
+        if entity is not None and include_sources:
+            await self._populate_sources([], [entity])
+        return entity
 
     async def list_entities(
         self,
@@ -509,10 +532,25 @@ class MemoryLake:
         namespace: str | UUID,
         entity_type: str | None = None,
         limit: int = 100,
+        include_sources: bool = False,
     ) -> list[Entity]:
-        """List entities in a namespace."""
+        """List entities in a namespace.
+
+        Args:
+            namespace: Namespace UUID (as UUID or string)
+            entity_type: Optional entity type filter
+            limit: Maximum entities to return
+            include_sources: If True, populate source document metadata on
+                returned entities (default: False)
+
+        Returns:
+            List of Entity objects
+        """
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+        entities = await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
+        if include_sources:
+            await self._populate_sources([], entities)
+        return entities
 
     async def find_related_entities(
         self,
@@ -521,15 +559,31 @@ class MemoryLake:
         namespace: str | UUID,
         max_depth: int = 2,
         limit: int = 20,
+        include_sources: bool = False,
     ) -> list[tuple[Entity, float]]:
-        """Find entities related to a given entity."""
+        """Find entities related to a given entity.
+
+        Args:
+            entity_id: Entity UUID to find related entities for
+            namespace: Namespace UUID (as UUID or string)
+            max_depth: Maximum graph traversal depth
+            limit: Maximum entities to return
+            include_sources: If True, populate source document metadata on
+                returned entities (default: False)
+
+        Returns:
+            List of (Entity, score) tuples
+        """
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_engine().find_related_entities(
+        results = await self._get_engine().find_related_entities(
             entity_id,
             namespace_id,
             max_depth=max_depth,
             limit=limit,
         )
+        if include_sources:
+            await self._populate_sources([], results)
+        return results
 
     # =========================================================================
     # Document Operations (Convenience Methods)
@@ -570,6 +624,7 @@ class MemoryLake:
         *,
         namespace: str | UUID,
         limit: int = 10,
+        include_sources: bool = False,
     ) -> list[Entity]:
         """Search entities by query text using embedding similarity.
 
@@ -577,12 +632,17 @@ class MemoryLake:
             query: Search query text
             namespace: Namespace UUID (as UUID or string)
             limit: Maximum entities to return
+            include_sources: If True, populate source document metadata on
+                returned entities (default: False)
 
         Returns:
             List of matching Entities (most similar first)
         """
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_engine().search_entities(query, namespace_id, limit=limit)
+        entities = await self._get_engine().search_entities(query, namespace_id, limit=limit)
+        if include_sources:
+            await self._populate_sources([], entities)
+        return entities
 
     async def stats(self, *, namespace: str | UUID) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace.
@@ -599,6 +659,53 @@ class MemoryLake:
     # =========================================================================
     # Helpers
     # =========================================================================
+
+    async def _populate_sources(
+        self,
+        chunks: list[tuple[Chunk, float]],
+        entities: list[tuple[Entity, float]] | list[Entity],
+    ) -> None:
+        """Batch-fetch document sources and populate entity/chunk fields **in-place**.
+
+        ``entities`` accepts either ``list[Entity]`` or
+        ``list[tuple[Entity, float]]`` (entity, score pairs).  The method
+        unwraps tuples transparently.
+
+        Collects unique document IDs from both *chunks* and *entities*, fetches
+        lightweight metadata via batched SELECTs (chunked at 1 000 IDs), then
+        populates ``chunk.source_document`` and ``entity.source_documents`` on
+        the provided objects.  No value is returned; callers observe changes
+        through the mutated inputs.
+        """
+        # Collect unique doc IDs
+        doc_ids: set[UUID] = set()
+        for chunk, _score in chunks:
+            doc_ids.add(chunk.document_id)
+        for item in entities:
+            entity = item[0] if isinstance(item, tuple) else item
+            doc_ids.update(entity.source_document_ids)
+
+        if not doc_ids:
+            return
+
+        sorted_ids = sorted(doc_ids)
+        sources: dict = {}
+        for i in range(0, len(sorted_ids), 1000):
+            batch = sorted_ids[i : i + 1000]
+            sources.update(await self.storage.get_document_sources_batch(batch))
+
+        # Populate chunks
+        for chunk, _score in chunks:
+            chunk.source_document = sources.get(chunk.document_id)
+
+        # Populate entities
+        for item in entities:
+            entity = item[0] if isinstance(item, tuple) else item
+            entity_sources = {did: sources[did] for did in entity.source_document_ids if did in sources}
+            # None means either "sources not fetched" (include_sources=False) or
+            # "all source documents deleted".  Callers distinguish via the
+            # include_sources flag they passed.
+            entity.source_documents = entity_sources if entity_sources else None
 
     async def _resolve_namespace(self, namespace: str | UUID) -> UUID:
         """Resolve a namespace_id to the active version's row-level id.
