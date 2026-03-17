@@ -66,6 +66,7 @@ class PgVectorBackend(AsyncSessionMixin):
         echo: bool = False,
         pool_size: int = 10,
         max_overflow: int = 20,
+        pool_pre_ping: bool = False,
         hnsw_ef_search: int = 100,
         use_halfvec: bool = True,
         engine: AsyncEngine | None = None,
@@ -78,6 +79,7 @@ class PgVectorBackend(AsyncSessionMixin):
             echo: Enable SQL echo logging
             pool_size: Connection pool size
             max_overflow: Maximum overflow connections
+            pool_pre_ping: Enable pool pre-ping to detect stale connections
             hnsw_ef_search: HNSW ef_search for query-time accuracy
             use_halfvec: Use halfvec (float16) for similarity search.
                 Requires pgvector extension >= 0.7.0.
@@ -94,6 +96,7 @@ class PgVectorBackend(AsyncSessionMixin):
         self._echo = echo
         self._pool_size = pool_size
         self._max_overflow = max_overflow
+        self._pool_pre_ping = pool_pre_ping
         self._hnsw_ef_search = hnsw_ef_search
         self._use_halfvec = use_halfvec
         self._halfvec_available: bool | None = None  # Detected at connect time
@@ -113,6 +116,7 @@ class PgVectorBackend(AsyncSessionMixin):
                 echo=self._echo,
                 pool_size=self._pool_size,
                 max_overflow=self._max_overflow,
+                pool_pre_ping=self._pool_pre_ping,
             )
 
         self._session_factory = async_sessionmaker(
