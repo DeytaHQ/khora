@@ -65,6 +65,7 @@ class StorageConfig:
     postgresql_echo: bool = False
     postgresql_pool_size: int = 10
     postgresql_max_overflow: int = 20
+    postgresql_pool_pre_ping: bool = False
 
     # pgvector configuration (can share PostgreSQL URL) — legacy
     pgvector_url: str | None = None
@@ -154,6 +155,7 @@ class StorageFactory:
         echo: bool = False,
         pool_size: int = 10,
         max_overflow: int = 20,
+        pool_pre_ping: bool = False,
     ) -> AsyncEngine:
         """Get a cached engine or create a new one for the given URL.
 
@@ -174,6 +176,7 @@ class StorageFactory:
                 echo=echo,
                 pool_size=pool_size,
                 max_overflow=max_overflow,
+                pool_pre_ping=pool_pre_ping,
             )
             logger.debug(f"Created shared engine for {key}")
         return self._engine_cache[key]
@@ -196,12 +199,14 @@ class StorageFactory:
             echo=self.config.postgresql_echo,
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
+            pool_pre_ping=self.config.postgresql_pool_pre_ping,
         )
         return PostgreSQLBackend(
             self.config.postgresql_url,
             echo=self.config.postgresql_echo,
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
+            pool_pre_ping=self.config.postgresql_pool_pre_ping,
             engine=engine,
         )
 
@@ -224,6 +229,7 @@ class StorageFactory:
                     echo=self.config.postgresql_echo,
                     pool_size=self.config.postgresql_pool_size,
                     max_overflow=self.config.postgresql_max_overflow,
+                    pool_pre_ping=self.config.postgresql_pool_pre_ping,
                 )
                 return PgVectorBackend(
                     url,
@@ -231,6 +237,7 @@ class StorageFactory:
                     echo=self.config.postgresql_echo,
                     pool_size=self.config.postgresql_pool_size,
                     max_overflow=self.config.postgresql_max_overflow,
+                    pool_pre_ping=self.config.postgresql_pool_pre_ping,
                     use_halfvec=self.config.pgvector_use_halfvec,
                     engine=engine,
                 )
@@ -247,6 +254,7 @@ class StorageFactory:
             echo=self.config.postgresql_echo,
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
+            pool_pre_ping=self.config.postgresql_pool_pre_ping,
         )
         return PgVectorBackend(
             self.config.pgvector_url,
@@ -254,6 +262,7 @@ class StorageFactory:
             echo=self.config.postgresql_echo,
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
+            pool_pre_ping=self.config.postgresql_pool_pre_ping,
             use_halfvec=self.config.pgvector_use_halfvec,
             engine=engine,
         )
@@ -338,6 +347,7 @@ class StorageFactory:
                 echo=self.config.postgresql_echo,
                 pool_size=self.config.postgresql_pool_size,
                 max_overflow=self.config.postgresql_max_overflow,
+                pool_pre_ping=self.config.postgresql_pool_pre_ping,
             )
             return PostgreSQLEventStore(
                 self.config.event_store_url,

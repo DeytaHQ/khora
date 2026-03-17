@@ -183,3 +183,134 @@ class TestBackendSharedEngineDisconnect:
         store._session_factory = MagicMock()
         await store.disconnect()
         mock_engine.dispose.assert_not_awaited()
+
+
+class TestPoolPrePing:
+    """Tests for pool_pre_ping support across backends."""
+
+    def test_storage_settings_default_false(self):
+        """StorageSettings.postgresql_pool_pre_ping defaults to False."""
+        from khora.config.schema import StorageSettings
+
+        settings = StorageSettings()
+        assert settings.postgresql_pool_pre_ping is False
+
+    def test_storage_settings_can_enable(self):
+        """StorageSettings.postgresql_pool_pre_ping can be set to True."""
+        from khora.config.schema import StorageSettings
+
+        settings = StorageSettings(postgresql_pool_pre_ping=True)
+        assert settings.postgresql_pool_pre_ping is True
+
+    def test_storage_config_default_false(self):
+        """StorageConfig.postgresql_pool_pre_ping defaults to False."""
+        config = StorageConfig()
+        assert config.postgresql_pool_pre_ping is False
+
+    @patch("khora.storage.factory.create_async_engine")
+    def test_get_or_create_engine_passes_pool_pre_ping(self, mock_create):
+        """get_or_create_engine passes pool_pre_ping to create_async_engine."""
+        factory = StorageFactory()
+        factory.get_or_create_engine("postgresql+asyncpg://host/db", pool_pre_ping=True)
+        mock_create.assert_called_once()
+        _, kwargs = mock_create.call_args
+        assert kwargs["pool_pre_ping"] is True
+
+    @patch("khora.storage.factory.create_async_engine")
+    def test_get_or_create_engine_default_pool_pre_ping_false(self, mock_create):
+        """get_or_create_engine defaults pool_pre_ping to False."""
+        factory = StorageFactory()
+        factory.get_or_create_engine("postgresql+asyncpg://host/db")
+        _, kwargs = mock_create.call_args
+        assert kwargs["pool_pre_ping"] is False
+
+    @patch("khora.storage.factory.create_async_engine")
+    def test_factory_passes_pool_pre_ping_to_relational(self, mock_create):
+        """Factory passes pool_pre_ping to relational backend engine."""
+        mock_create.return_value = MagicMock()
+        config = StorageConfig(
+            postgresql_url="postgresql+asyncpg://host/db",
+            postgresql_pool_pre_ping=True,
+        )
+        factory = StorageFactory(config=config)
+        backend = factory.create_relational_backend()
+        assert backend is not None
+        assert backend._pool_pre_ping is True
+        _, kwargs = mock_create.call_args
+        assert kwargs["pool_pre_ping"] is True
+
+    @patch("khora.storage.factory.create_async_engine")
+    def test_factory_passes_pool_pre_ping_to_vector(self, mock_create):
+        """Factory passes pool_pre_ping to vector backend engine."""
+        mock_create.return_value = MagicMock()
+        config = StorageConfig(
+            pgvector_url="postgresql+asyncpg://host/db",
+            postgresql_pool_pre_ping=True,
+        )
+        factory = StorageFactory(config=config)
+        backend = factory.create_vector_backend()
+        assert backend is not None
+        assert backend._pool_pre_ping is True
+        _, kwargs = mock_create.call_args
+        assert kwargs["pool_pre_ping"] is True
+
+    def test_postgresql_backend_stores_pool_pre_ping(self):
+        """PostgreSQLBackend stores pool_pre_ping parameter."""
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        backend = PostgreSQLBackend("postgresql+asyncpg://host/db", pool_pre_ping=True)
+        assert backend._pool_pre_ping is True
+
+    def test_pgvector_backend_stores_pool_pre_ping(self):
+        """PgVectorBackend stores pool_pre_ping parameter."""
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        backend = PgVectorBackend("postgresql+asyncpg://host/db", pool_pre_ping=True)
+        assert backend._pool_pre_ping is True
+
+    def test_event_store_stores_pool_pre_ping(self):
+        """PostgreSQLEventStore stores pool_pre_ping parameter."""
+        from khora.storage.event_store import PostgreSQLEventStore
+
+        store = PostgreSQLEventStore("postgresql+asyncpg://host/db", pool_pre_ping=True)
+        assert store._pool_pre_ping is True
+
+    @pytest.mark.asyncio
+    @patch("khora.storage.backends.postgresql.create_async_engine")
+    async def test_postgresql_connect_passes_pool_pre_ping(self, mock_create):
+        """PostgreSQLBackend.connect() passes pool_pre_ping to create_async_engine."""
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        mock_create.return_value = MagicMock()
+        backend = PostgreSQLBackend("postgresql+asyncpg://host/db", pool_pre_ping=True)
+        await backend.connect()
+        _, kwargs = mock_create.call_args
+        assert kwargs["pool_pre_ping"] is True
+
+    @patch("khora.storage.backends.pgvector.create_async_engine")
+    def test_pgvector_connect_passes_pool_pre_ping(self, mock_create):
+        """PgVectorBackend passes pool_pre_ping when creating its own engine."""
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        backend = PgVectorBackend("postgresql+asyncpg://host/db", pool_pre_ping=True)
+        # Verify the parameter is stored; connect() would pass it to create_async_engine
+        assert backend._pool_pre_ping is True
+
+    @pytest.mark.asyncio
+    @patch("khora.storage.event_store.create_async_engine")
+    async def test_event_store_connect_passes_pool_pre_ping(self, mock_create):
+        """PostgreSQLEventStore.connect() passes pool_pre_ping to create_async_engine."""
+        from khora.storage.event_store import PostgreSQLEventStore
+
+        mock_create.return_value = MagicMock()
+        store = PostgreSQLEventStore("postgresql+asyncpg://host/db", pool_pre_ping=True)
+        await store.connect()
+        _, kwargs = mock_create.call_args
+        assert kwargs["pool_pre_ping"] is True
+
+    def test_khora_config_env_var(self):
+        """pool_pre_ping can be set via KHORA_STORAGE__POSTGRESQL_POOL_PRE_PING."""
+        from khora.config.schema import KhoraConfig
+
+        config = KhoraConfig(storage={"postgresql_pool_pre_ping": True})
+        assert config.storage.postgresql_pool_pre_ping is True

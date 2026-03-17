@@ -168,6 +168,12 @@ class StorageSettings(BaseModel):
     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
     postgresql_pool_size: int = Field(default=50, description="PostgreSQL connection pool size")
     postgresql_max_overflow: int = Field(default=30, description="PostgreSQL max overflow connections")
+    postgresql_pool_pre_ping: bool = Field(
+        default=False,
+        description="Enable pool pre-ping to detect stale connections before checkout. "
+        "Adds a small latency overhead per checkout but prevents errors from idle connections "
+        "dropped by the server or network infrastructure.",
+    )
 
     # New-style backend configs
     graph: GraphConfig | None = Field(default=None, description="Graph backend configuration (optional)")

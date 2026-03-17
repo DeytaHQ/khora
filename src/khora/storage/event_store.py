@@ -32,6 +32,7 @@ class PostgreSQLEventStore(AsyncSessionMixin):
         echo: bool = False,
         pool_size: int = 5,
         max_overflow: int = 10,
+        pool_pre_ping: bool = False,
         engine: AsyncEngine | None = None,
     ) -> None:
         """Initialize the event store.
@@ -41,6 +42,7 @@ class PostgreSQLEventStore(AsyncSessionMixin):
             echo: Enable SQL echo logging
             pool_size: Connection pool size
             max_overflow: Maximum overflow connections
+            pool_pre_ping: Enable pool pre-ping to detect stale connections
             engine: Optional shared engine (skip dispose on disconnect)
         """
         # Convert to async URL if needed
@@ -53,6 +55,7 @@ class PostgreSQLEventStore(AsyncSessionMixin):
         self._echo = echo
         self._pool_size = pool_size
         self._max_overflow = max_overflow
+        self._pool_pre_ping = pool_pre_ping
         self._engine: AsyncEngine | None = engine
         self._engine_shared: bool = engine is not None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -69,6 +72,7 @@ class PostgreSQLEventStore(AsyncSessionMixin):
                 echo=self._echo,
                 pool_size=self._pool_size,
                 max_overflow=self._max_overflow,
+                pool_pre_ping=self._pool_pre_ping,
             )
         self._session_factory = async_sessionmaker(
             self._engine,
