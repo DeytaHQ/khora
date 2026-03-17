@@ -239,6 +239,31 @@ class TemporalInfo:
         }
 
 
+def format_entity_section(entities: list[tuple[Entity, float]]) -> str:
+    """Format entities into a text section for context_text.
+
+    Returns an empty string if no entities, otherwise returns a section like:
+        \\n\\n--- Entities ---\\n\\n- Name (TYPE): description
+    Deduplicates by entity ID (falls back to name+type when ID is None).
+    """
+    if not entities:
+        return ""
+    seen: set[Any] = set()
+    lines: list[str] = []
+    for entity, _ in entities:
+        dedup_key = entity.id if entity.id is not None else (entity.name, entity.entity_type)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        if entity.description:
+            lines.append(f"- {entity.name} ({entity.entity_type}): {entity.description}")
+        else:
+            lines.append(f"- {entity.name} ({entity.entity_type})")
+    if not lines:
+        return ""
+    return "\n\n--- Entities ---\n\n" + "\n".join(lines)
+
+
 @dataclass
 class QueryResult:
     """Result from a query with enhanced metadata."""
@@ -267,6 +292,7 @@ class QueryResult:
         """Get concatenated text from top chunks for LLM context.
 
         Groups chunks by document title/source for better readability.
+        Appends entity information when entities are present.
         """
         # Group chunks by title
         groups: dict[str, list[str]] = {}
@@ -280,7 +306,12 @@ class QueryResult:
                 sections.append(f"--- From: {title} ---\n" + "\n\n".join(contents))
             else:
                 sections.extend(contents)
-        return "\n\n---\n\n".join(sections)
+        text = "\n\n---\n\n".join(sections)
+
+        entity_section = format_entity_section(self.entities)
+        if entity_section:
+            text = text + entity_section if text else entity_section
+        return text
 
     @staticmethod
     def _extract_chunk_title(chunk: Any) -> str:
