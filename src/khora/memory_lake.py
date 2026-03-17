@@ -23,6 +23,7 @@ from khora.query import SearchMode
 from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
+    from khora.core.models import Relationship
     from khora.engines.protocol import MemoryEngineProtocol
     from khora.storage import StorageConfig, StorageCoordinator
 
@@ -73,6 +74,7 @@ class RecallResult:
     entities: list[tuple[Entity, float]]
     context_text: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    relationships: list[tuple[Relationship, float]] = field(default_factory=list)
 
 
 class MemoryLake:

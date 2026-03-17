@@ -42,7 +42,7 @@ _TEMPORAL_PATTERN = re.compile(
 if TYPE_CHECKING:
     from khora.acl import ACLContext
     from khora.config.llm import LiteLLMConfig
-    from khora.core.models import Chunk, Entity
+    from khora.core.models import Chunk, Entity, Relationship
     from khora.extraction.embedders import Embedder
     from khora.storage import StorageCoordinator
 
@@ -262,6 +262,42 @@ def format_entity_section(entities: list[tuple[Entity, float]]) -> str:
     if not lines:
         return ""
     return "\n\n--- Entities ---\n\n" + "\n".join(lines)
+
+
+def format_relationship_section(
+    relationships: list[tuple[Relationship, float]],
+    entity_names: dict[UUID, str] | None = None,
+) -> str:
+    """Format relationships into a text section for context_text.
+
+    Returns an empty string if no relationships, otherwise returns a section like:
+        \\n\\n--- Relationships ---\\n\\n- Alice --FOUNDED--> Acme Corp: description
+    Deduplicates by relationship ID (falls back to source+target+type when ID is None).
+    """
+    if not relationships:
+        return ""
+    seen: set[Any] = set()
+    lines: list[str] = []
+    for rel, _ in relationships:
+        dedup_key = (
+            rel.id if rel.id is not None else (rel.source_entity_id, rel.target_entity_id, rel.relationship_type)
+        )
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        if entity_names:
+            source_name = entity_names.get(rel.source_entity_id, str(rel.source_entity_id))
+            target_name = entity_names.get(rel.target_entity_id, str(rel.target_entity_id))
+        else:
+            source_name = str(rel.source_entity_id)
+            target_name = str(rel.target_entity_id)
+        line = f"- {source_name} --{rel.relationship_type}--> {target_name}"
+        if rel.description:
+            line += f": {rel.description}"
+        lines.append(line)
+    if not lines:
+        return ""
+    return "\n\n--- Relationships ---\n\n" + "\n".join(lines)
 
 
 @dataclass

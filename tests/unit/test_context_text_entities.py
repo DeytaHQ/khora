@@ -13,8 +13,9 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models.document import Chunk, ChunkMetadata
-from khora.core.models.entity import Entity
-from khora.query.engine import QueryResult, format_entity_section
+from khora.core.models.entity import Entity, Relationship
+from khora.memory_lake import RecallResult
+from khora.query.engine import QueryResult, format_entity_section, format_relationship_section
 
 
 @pytest.mark.unit
@@ -350,3 +351,194 @@ class TestContextTextEntityRegressions:
         # Chunks should be before entities
         assert "First paragraph." in parts[0]
         assert "TestEntity" in parts[1]
+
+
+@pytest.mark.unit
+class TestRelationshipFormatting:
+    """DYT-563: format_relationship_section and RecallResult relationship support."""
+
+    def test_format_relationship_section_basic(self) -> None:
+        """Arrow format with description: '- Alice --FOUNDED--> Acme Corp: Founded the company'."""
+        ns_id = uuid4()
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = Relationship(
+            namespace_id=ns_id,
+            source_entity_id=alice_id,
+            target_entity_id=acme_id,
+            relationship_type="FOUNDED",
+            description="Founded the company",
+        )
+        entity_names = {alice_id: "Alice", acme_id: "Acme Corp"}
+
+        section = format_relationship_section([(rel, 0.9)], entity_names=entity_names)
+
+        assert section.startswith("\n\n--- Relationships ---\n\n")
+        assert "- Alice --FOUNDED--> Acme Corp: Founded the company" in section
+
+    def test_format_relationship_section_no_description(self) -> None:
+        """No trailing colon when description is empty."""
+        ns_id = uuid4()
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = Relationship(
+            namespace_id=ns_id,
+            source_entity_id=alice_id,
+            target_entity_id=acme_id,
+            relationship_type="WORKS_AT",
+            description="",
+        )
+        entity_names = {alice_id: "Alice", acme_id: "Acme Corp"}
+
+        section = format_relationship_section([(rel, 0.8)], entity_names=entity_names)
+
+        assert "- Alice --WORKS_AT--> Acme Corp" in section
+        # No trailing colon
+        assert "- Alice --WORKS_AT--> Acme Corp:" not in section
+
+    def test_format_relationship_section_empty(self) -> None:
+        """Returns empty string for empty list."""
+        assert format_relationship_section([]) == ""
+
+    def test_format_relationship_section_dedup(self) -> None:
+        """Duplicate IDs collapsed (same relationship twice should appear once)."""
+        ns_id = uuid4()
+        rel_id = uuid4()
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = Relationship(
+            id=rel_id,
+            namespace_id=ns_id,
+            source_entity_id=alice_id,
+            target_entity_id=acme_id,
+            relationship_type="FOUNDED",
+            description="Founded it",
+        )
+        entity_names = {alice_id: "Alice", acme_id: "Acme Corp"}
+
+        section = format_relationship_section([(rel, 0.9), (rel, 0.5)], entity_names=entity_names)
+
+        rel_lines = [line.strip() for line in section.strip().splitlines() if line.strip().startswith("- ")]
+        assert len(rel_lines) == 1
+
+    def test_format_relationship_section_entity_name_lookup(self) -> None:
+        """UUID fallback when entity_names dict is None or missing entries."""
+        ns_id = uuid4()
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = Relationship(
+            namespace_id=ns_id,
+            source_entity_id=alice_id,
+            target_entity_id=acme_id,
+            relationship_type="KNOWS",
+            description="",
+        )
+
+        # entity_names=None -> both fall back to str(UUID)
+        section_no_names = format_relationship_section([(rel, 0.7)], entity_names=None)
+        assert str(alice_id) in section_no_names
+        assert str(acme_id) in section_no_names
+
+        # entity_names with only one entry -> missing one falls back to str(UUID)
+        section_partial = format_relationship_section([(rel, 0.7)], entity_names={alice_id: "Alice"})
+        assert "Alice" in section_partial
+        assert str(acme_id) in section_partial
+
+    def test_context_text_with_entities_and_relationships(self) -> None:
+        """Full context_text has chunk content + Entities + Relationships sections."""
+        ns_id = uuid4()
+        alice_id = uuid4()
+        acme_id = uuid4()
+
+        chunk = Chunk(
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="Alice founded Acme Corp.",
+            metadata=ChunkMetadata(),
+        )
+        entity_alice = Entity(
+            id=alice_id,
+            namespace_id=ns_id,
+            name="Alice",
+            entity_type="PERSON",
+            description="Founder",
+        )
+        entity_acme = Entity(
+            id=acme_id,
+            namespace_id=ns_id,
+            name="Acme Corp",
+            entity_type="ORGANIZATION",
+            description="A company",
+        )
+        rel = Relationship(
+            namespace_id=ns_id,
+            source_entity_id=alice_id,
+            target_entity_id=acme_id,
+            relationship_type="FOUNDED",
+            description="Founded the company",
+        )
+
+        # Build context_text manually (matching how VectorCypher would build it)
+        from khora.query.engine import format_entity_section, format_relationship_section
+
+        entity_names = {alice_id: "Alice", acme_id: "Acme Corp"}
+        text = chunk.content
+        text += format_entity_section([(entity_alice, 0.85), (entity_acme, 0.7)])
+        text += format_relationship_section([(rel, 0.9)], entity_names=entity_names)
+
+        assert "Alice founded Acme Corp." in text
+        assert "--- Entities ---" in text
+        assert "--- Relationships ---" in text
+
+        # Verify ordering: chunk content, then entities, then relationships
+        ent_pos = text.index("--- Entities ---")
+        rel_pos = text.index("--- Relationships ---")
+        assert ent_pos < rel_pos
+
+        # Verify relationship content
+        rel_section = text.split("--- Relationships ---")[1]
+        assert "- Alice --FOUNDED--> Acme Corp: Founded the company" in rel_section
+
+    def test_context_text_relationships_only(self) -> None:
+        """Relationships without entities still works."""
+        ns_id = uuid4()
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = Relationship(
+            namespace_id=ns_id,
+            source_entity_id=alice_id,
+            target_entity_id=acme_id,
+            relationship_type="WORKS_AT",
+            description="Employee",
+        )
+        entity_names = {alice_id: "Alice", acme_id: "Acme Corp"}
+
+        # No entities, just relationships
+        text = format_entity_section([])
+        text += format_relationship_section([(rel, 0.8)], entity_names=entity_names)
+
+        assert "--- Entities ---" not in text
+        assert "--- Relationships ---" in text
+        assert "- Alice --WORKS_AT--> Acme Corp: Employee" in text
+
+    def test_backward_compat_no_relationships(self) -> None:
+        """RecallResult without relationships kwarg works (default empty list)."""
+        ns_id = uuid4()
+        chunk = Chunk(
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="Some content.",
+            metadata=ChunkMetadata(),
+        )
+
+        # Construct without passing relationships — should default to []
+        result = RecallResult(
+            query="test query",
+            namespace_id=ns_id,
+            chunks=[(chunk, 0.9)],
+            entities=[],
+            context_text="Some content.",
+        )
+
+        assert result.relationships == []
+        assert result.context_text == "Some content."

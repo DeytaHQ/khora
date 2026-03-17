@@ -553,6 +553,55 @@ class DualNodeManager:
 
         return {record["source_id"]: record["related_entities"] for record in records}
 
+    @trace(
+        "khora.neo4j.get_relationships_between",
+        include={"entity_ids", "namespace_id"},
+        result=lambda r: {"relationship_count": len(r)},
+    )
+    async def get_relationships_between(
+        self,
+        entity_ids: list[str],
+        namespace_id: str,
+    ) -> list[dict[str, Any]]:
+        """Get relationships between a set of entities.
+
+        Finds all directed relationships where both source and target
+        are in the given entity_ids set, within the same namespace.
+
+        Args:
+            entity_ids: Entity IDs (strings) to find relationships between
+            namespace_id: Namespace constraint (string)
+
+        Returns:
+            List of relationship dicts with id, source_entity_id,
+            target_entity_id, relationship_type, description, confidence, weight
+        """
+        if len(entity_ids) < 2:
+            return []
+
+        query = """
+        UNWIND $entity_ids AS sid
+        MATCH (source:Entity {id: sid, namespace_id: $namespace_id})-[r]->(target:Entity)
+        WHERE target.namespace_id = $namespace_id
+          AND target.id IN $entity_ids
+          AND source.id <> target.id
+        RETURN DISTINCT r.id AS id, source.id AS source_entity_id, target.id AS target_entity_id,
+               type(r) AS relationship_type, r.description AS description,
+               r.confidence AS confidence, r.weight AS weight
+        """
+
+        async with self._driver.session(database=self._database) as session:
+
+            async def _work(tx):
+                result = await tx.run(
+                    query,
+                    entity_ids=entity_ids,
+                    namespace_id=namespace_id,
+                )
+                return [record.data() async for record in result]
+
+            return await session.execute_read(_work)
+
     async def get_temporal_chunks(
         self,
         namespace_id: UUID,
