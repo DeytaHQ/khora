@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from loguru import logger
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from khora.core.models.document import DocumentStatus
@@ -29,10 +30,10 @@ async def sync_enum_values(engine: AsyncEngine) -> None:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
         for type_name, values in _ENUM_SYNC.items():
             for value in values:
-                stmt = text(f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS :val")
+                stmt = text(f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{value}'")
                 try:
-                    await conn.execute(stmt, {"val": value})
-                except Exception:
+                    await conn.execute(stmt)
+                except ProgrammingError:
                     # Type may not exist yet (first run) — create_all will
                     # create it with all values.  Log and continue.
                     logger.debug(f"Skipping enum sync for {type_name}.{value}")

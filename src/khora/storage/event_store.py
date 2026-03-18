@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from khora.core.models import MemoryEvent
 from khora.core.models.event import EventType
 from khora.db.models import Base, MemoryEventModel
-from khora.db.schema import sync_enum_values
 from khora.storage.backends.mixins import AsyncSessionMixin
 
 
@@ -110,7 +109,6 @@ class PostgreSQLEventStore(AsyncSessionMixin):
             raise RuntimeError("Event store not connected. Call connect() first.")
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        await sync_enum_values(self._engine)
 
     async def append_event(self, event: MemoryEvent, *, session: AsyncSession | None = None) -> MemoryEvent:
         """Append an event to the log."""
