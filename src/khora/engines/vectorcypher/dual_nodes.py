@@ -562,6 +562,8 @@ class DualNodeManager:
         self,
         entity_ids: list[str],
         namespace_id: str,
+        *,
+        limit: int = 90,
     ) -> list[dict[str, Any]]:
         """Get relationships between a set of entities.
 
@@ -571,6 +573,7 @@ class DualNodeManager:
         Args:
             entity_ids: Entity IDs (strings) to find relationships between
             namespace_id: Namespace constraint (string)
+            limit: Maximum number of relationships to return
 
         Returns:
             List of relationship dicts with id, source_entity_id,
@@ -591,6 +594,7 @@ class DualNodeManager:
                r.confidence AS confidence, r.weight AS weight,
                r.source_document_ids AS source_document_ids,
                r.source_chunk_ids AS source_chunk_ids
+        LIMIT $limit
         """
 
         async with self._driver.session(database=self._database) as session:
@@ -600,6 +604,7 @@ class DualNodeManager:
                     query,
                     entity_ids=entity_ids,
                     namespace_id=namespace_id,
+                    limit=limit,
                 )
                 return [record.data() async for record in result]
 

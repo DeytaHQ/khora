@@ -118,6 +118,7 @@ class RetrieverConfig:
     # Limits
     max_chunks: int = 50
     max_entities: int = 30
+    max_relationships: int = 90  # ~3x max_entities
 
 
 def _extract_occurred_at(item: Any) -> str | None:
@@ -637,6 +638,7 @@ class VectorCypherRetriever:
         raw_rels = await self._dual_nodes.get_relationships_between(
             result_entity_ids_str,
             str(namespace_id),
+            limit=self._config.max_relationships,
         )
         entity_scores_by_id: dict[UUID, float] = {entity.id: score for entity, score in entity_results}
         entity_names_by_id: dict[UUID, str] = {entity.id: entity.name for entity, _ in entity_results}
