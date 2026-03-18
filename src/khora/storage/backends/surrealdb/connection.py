@@ -61,7 +61,7 @@ class SurrealDBConnection:
     async def connect(self) -> None:
         if self._connected:
             return
-        from surrealdb import AsyncSurreal
+        from surrealdb import AsyncSurreal  # ty: ignore[unresolved-import]
 
         endpoint = self._build_endpoint()
         logger.info(f"Connecting to SurrealDB ({self._mode}): {endpoint}")

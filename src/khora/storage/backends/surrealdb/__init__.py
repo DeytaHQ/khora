@@ -9,11 +9,11 @@ Install: pip install khora[surrealdb]
 from __future__ import annotations
 
 try:
-    from surrealdb import AsyncSurreal as _AsyncSurreal
+    from surrealdb import AsyncSurreal as _AsyncSurreal  # ty: ignore[unresolved-import]
 
     _HAS_SURREALDB = True
 except ImportError:
-    _AsyncSurreal = None  # type: ignore[assignment,misc]
+    _AsyncSurreal = None
     _HAS_SURREALDB = False
 
 __all__ = ["_HAS_SURREALDB"]
