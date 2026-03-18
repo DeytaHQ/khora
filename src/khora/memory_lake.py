@@ -66,7 +66,20 @@ class Stats:
 
 @dataclass(slots=True, frozen=True)
 class RecallResult:
-    """Result of a recall operation."""
+    """Result of a recall operation.
+
+    Attributes:
+        query: The original query string.
+        namespace_id: Namespace the recall was executed against.
+        chunks: Scored chunk tuples ``(Chunk, score)``.
+        entities: Scored entity tuples ``(Entity, score)``.
+        context_text: Pre-formatted text for LLM context.  When relationships
+            are present, includes a ``--- Relationships ---`` section.
+        metadata: Engine-specific metadata dict.
+        relationships: Scored relationship tuples ``(Relationship, score)``.
+            Populated only by the VectorCypher engine; empty list for other
+            engines.
+    """
 
     query: str
     namespace_id: UUID
@@ -456,7 +469,9 @@ class MemoryLake:
                 returned chunks and entities (default: False)
 
         Returns:
-            RecallResult with matched memories
+            RecallResult with matched memories.  When using the VectorCypher
+            engine, ``relationships`` contains scored relationship tuples and
+            ``context_text`` includes a ``--- Relationships ---`` section.
         """
         from khora.telemetry.context import clear_trace_id, ensure_trace_id
 

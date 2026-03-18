@@ -271,7 +271,8 @@ def format_relationship_section(
 
     Returns an empty string if no relationships, otherwise returns a section like:
         \\n\\n--- Relationships ---\\n\\n- Alice --FOUNDED--> Acme Corp: description
-    Deduplicates by relationship ID (falls back to source+target+type when ID is None).
+    Deduplicates by (source_entity_id, target_entity_id, relationship_type) tuple
+    to handle cases where Neo4j IDs are null and replaced with generated UUIDs.
 
     Relies on denormalized ``source_entity_name`` / ``target_entity_name``
     fields populated at retrieval time.
@@ -281,9 +282,7 @@ def format_relationship_section(
     seen: set[Any] = set()
     lines: list[str] = []
     for rel, _ in relationships:
-        dedup_key = (
-            rel.id if rel.id is not None else (rel.source_entity_id, rel.target_entity_id, rel.relationship_type)
-        )
+        dedup_key = (rel.source_entity_id, rel.target_entity_id, rel.relationship_type)
         if dedup_key in seen:
             continue
         seen.add(dedup_key)

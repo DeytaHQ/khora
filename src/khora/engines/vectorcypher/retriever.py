@@ -647,7 +647,11 @@ class VectorCypherRetriever:
                 entity_results.append((entity, score))
 
         # Await the parallel relationship fetch
-        raw_rels = await rels_task
+        try:
+            raw_rels = await rels_task
+        except Exception:
+            logger.warning("Relationship fetch failed, continuing without relationships", exc_info=True)
+            raw_rels = []
         entity_scores_by_id: dict[UUID, float] = {entity.id: score for entity, score in entity_results}
         entity_names_by_id: dict[UUID, str] = {entity.id: entity.name for entity, _ in entity_results}
         relationships: list[tuple[Relationship, float]] = []
