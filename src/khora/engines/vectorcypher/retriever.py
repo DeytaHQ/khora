@@ -400,7 +400,7 @@ class VectorCypherRetriever:
         # Step 4: Cypher expand to find related entities
         # For temporal queries (STATE_QUERY/RECENCY/CHANGE), prefer currently-valid
         # entities by filtering out those whose valid_until has passed.
-        expanded_entities, entity_info_map, relationships = await self._cypher_expand(
+        expanded_entities, entity_info_map = await self._cypher_expand(
             entry_entity_ids=[e[0] for e in entry_entities],
             namespace_id=namespace_id,
             depth=depth,
@@ -615,6 +615,32 @@ class VectorCypherRetriever:
                 )
                 entity_results.append((entity, score))
 
+        # Closed-world relationship fetch: query Neo4j with only the final
+        # entity IDs so the DB never returns relationships we'd discard.
+        result_entity_ids_str = [str(entity.id) for entity, _ in entity_results]
+        raw_rels = await self._dual_nodes.get_relationships_between(
+            result_entity_ids_str,
+            str(namespace_id),
+        )
+        entity_scores_by_id: dict[UUID, float] = {entity.id: score for entity, score in entity_results}
+        relationships: list[tuple[Relationship, float]] = []
+        for raw in raw_rels:
+            src_id = UUID(raw["source_entity_id"])
+            tgt_id = UUID(raw["target_entity_id"])
+            rel_score = (entity_scores_by_id.get(src_id, 0.0) + entity_scores_by_id.get(tgt_id, 0.0)) / 2
+            rel = Relationship(
+                id=UUID(raw["id"]) if raw.get("id") else uuid4(),
+                namespace_id=namespace_id,
+                source_entity_id=src_id,
+                target_entity_id=tgt_id,
+                relationship_type=raw.get("relationship_type", "RELATES_TO"),
+                description=raw.get("description", "") or "",
+                confidence=raw.get("confidence") if raw.get("confidence") is not None else 1.0,
+                weight=raw.get("weight") if raw.get("weight") is not None else 1.0,
+            )
+            relationships.append((rel, rel_score))
+        relationships.sort(key=lambda x: x[1], reverse=True)
+
         return VectorCypherResult(
             chunks=chunk_results,
             entities=entity_results,
@@ -828,7 +854,7 @@ class VectorCypherRetriever:
         depth: int,
         *,
         prefer_current: bool = False,
-    ) -> tuple[dict[UUID, float], dict[str, dict[str, str]], list[tuple[Relationship, float]]]:
+    ) -> tuple[dict[UUID, float], dict[str, dict[str, str]]]:
         """Expand entry entities to find related entities via graph traversal.
 
         Args:
@@ -841,10 +867,9 @@ class VectorCypherRetriever:
             Tuple of:
             - Dict mapping entity_id -> relevance score
             - Dict mapping entity_id_str -> {name, entity_type} for all discovered entities
-            - List of (Relationship, score) tuples for relationships between entities
         """
         if not entry_entity_ids:
-            return {}, {}, []
+            return {}, {}
 
         with trace_span("khora.vectorcypher.cypher_expand", entry_count=len(entry_entity_ids), depth=depth) as span:
             depth = min(max(1, depth), self._config.max_depth)
@@ -884,38 +909,8 @@ class VectorCypherRetriever:
                             "source_tool": entity_info.get("source_tool", ""),
                         }
 
-            # Fetch relationships between all discovered entities
-            # full_scores includes entry entities at 1.0 plus expanded entity scores
-            full_scores: dict[UUID, float] = {eid: 1.0 for eid in entry_entity_ids}
-            full_scores.update(entity_scores)
-            all_entity_ids = list(set(entry_entity_ids) | entity_scores.keys())
-            all_entity_ids_str = [str(eid) for eid in all_entity_ids]
-
-            raw_rels = await self._dual_nodes.get_relationships_between(all_entity_ids_str, str(namespace_id))
-
-            relationships: list[tuple[Relationship, float]] = []
-            for raw in raw_rels:
-                src_id = UUID(raw["source_entity_id"])
-                tgt_id = UUID(raw["target_entity_id"])
-                rel_score = (full_scores.get(src_id, 0.0) + full_scores.get(tgt_id, 0.0)) / 2
-                rel = Relationship(
-                    id=UUID(raw["id"]) if raw.get("id") else uuid4(),
-                    namespace_id=namespace_id,
-                    source_entity_id=src_id,
-                    target_entity_id=tgt_id,
-                    relationship_type=raw.get("relationship_type", "RELATES_TO"),
-                    description=raw.get("description", "") or "",
-                    confidence=raw.get("confidence") if raw.get("confidence") is not None else 1.0,
-                    weight=raw.get("weight") if raw.get("weight") is not None else 1.0,
-                )
-                relationships.append((rel, rel_score))
-
-            # Sort by score descending
-            relationships.sort(key=lambda x: x[1], reverse=True)
-
             span.set_attribute("expanded_entity_count", len(entity_scores))
-            span.set_attribute("relationship_count", len(relationships))
-            return entity_scores, entity_info_map, relationships
+            return entity_scores, entity_info_map
 
     @staticmethod
     def _decompose_change_query(query: str) -> str | None:
