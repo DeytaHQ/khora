@@ -17,6 +17,7 @@ from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait
 
 from khora.core.models import Chunk, ChunkMetadata
 from khora.db.models import Base, ChunkModel, EntityModel
+from khora.db.schema import sync_enum_values
 from khora.storage.backends.mixins import AsyncSessionMixin
 from khora.telemetry import trace
 
@@ -190,6 +191,7 @@ class PgVectorBackend(AsyncSessionMixin):
             raise RuntimeError("Backend not connected. Call connect() first.")
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await sync_enum_values(self._engine)
 
     # =========================================================================
     # Chunk operations
