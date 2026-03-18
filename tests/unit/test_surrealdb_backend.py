@@ -1,0 +1,1739 @@
+"""Unit tests for the SurrealDB unified backend."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID, uuid4
+
+import pytest
+
+from khora.core.models import Document, DocumentMetadata, MemoryNamespace
+from khora.core.models.document import DocumentSource, DocumentStatus
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_conn(**query_returns: object) -> MagicMock:
+    """Create a mock SurrealDBConnection with sensible defaults."""
+    conn = MagicMock()
+    conn.connected = True
+    conn.connect = AsyncMock()
+    conn.disconnect = AsyncMock()
+    conn.is_healthy = AsyncMock(return_value=True)
+    conn.query = AsyncMock(return_value=query_returns.get("query", []))
+    conn.query_one = AsyncMock(return_value=query_returns.get("query_one", None))
+    conn.execute = AsyncMock(return_value=query_returns.get("execute", None))
+    return conn
+
+
+def _namespace_row(
+    row_id: UUID | None = None,
+    ns_id: UUID | None = None,
+    *,
+    version: int = 1,
+    is_active: bool = True,
+) -> dict[str, object]:
+    """Build a SurrealDB result dict that looks like a memory_namespace row."""
+    row_id = row_id or uuid4()
+    ns_id = ns_id or uuid4()
+    now = datetime.now(UTC).isoformat()
+    return {
+        "id": f"memory_namespace:⟨{row_id!s}⟩",
+        "namespace_id": str(ns_id),
+        "tenancy_mode": "shared",
+        "version": version,
+        "is_active": is_active,
+        "config_overrides": {},
+        "sync_checkpoints": {},
+        "metadata_": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _document_row(
+    doc_id: UUID | None = None,
+    ns_id: UUID | None = None,
+) -> dict[str, object]:
+    """Build a SurrealDB result dict that looks like a document row."""
+    doc_id = doc_id or uuid4()
+    ns_id = ns_id or uuid4()
+    now = datetime.now(UTC).isoformat()
+    return {
+        "id": f"document:⟨{doc_id!s}⟩",
+        "namespace_id": str(ns_id),
+        "content": "test content",
+        "status": "pending",
+        "source": "test-source",
+        "source_type": "file",
+        "content_type": "text/plain",
+        "title": "Test Doc",
+        "author": "tester",
+        "language": "en",
+        "checksum": "abc123",
+        "size_bytes": 42,
+        "metadata_": {"key": "value"},
+        "chunk_count": 0,
+        "entity_count": 0,
+        "error_message": None,
+        "created_at": now,
+        "updated_at": now,
+        "processed_at": None,
+        "source_timestamp": None,
+    }
+
+
+# ── Feature flag ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBFeatureFlag:
+    def test_has_surrealdb_is_bool(self) -> None:
+        from khora.storage.backends.surrealdb import _HAS_SURREALDB
+
+        assert isinstance(_HAS_SURREALDB, bool)
+
+    def test_has_surrealdb_false_without_package(self) -> None:
+        """In the test environment surrealdb is not installed."""
+        from khora.storage.backends.surrealdb import _HAS_SURREALDB
+
+        assert _HAS_SURREALDB is False
+
+
+# ── Config ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBConfig:
+    def test_default_config(self) -> None:
+        from khora.config.schema import SurrealDBConfig
+
+        cfg = SurrealDBConfig()
+        assert cfg.backend == "surrealdb"
+        assert cfg.mode == "memory"
+        assert cfg.namespace == "khora"
+        assert cfg.database == "default"
+        assert cfg.embedding_dimension == 1536
+
+    def test_embedded_config(self) -> None:
+        from khora.config.schema import SurrealDBConfig
+
+        cfg = SurrealDBConfig(mode="embedded", path="/tmp/test.db")
+        assert cfg.mode == "embedded"
+        assert cfg.path == "/tmp/test.db"
+
+    def test_remote_config(self) -> None:
+        from khora.config.schema import SurrealDBConfig
+
+        cfg = SurrealDBConfig(mode="remote", url="ws://localhost:8000")
+        assert cfg.mode == "remote"
+        assert cfg.url == "ws://localhost:8000"
+
+    def test_config_in_graph_union(self) -> None:
+        from khora.config.schema import StorageSettings
+
+        settings = StorageSettings(graph={"backend": "surrealdb", "mode": "memory"})
+        assert settings.graph is not None
+        assert settings.graph.backend == "surrealdb"
+
+    def test_config_default_user_password(self) -> None:
+        from khora.config.schema import SurrealDBConfig
+
+        cfg = SurrealDBConfig()
+        assert cfg.user == "root"
+        assert cfg.password == "root"
+
+    def test_storage_backend_field(self) -> None:
+        from khora.config.schema import StorageSettings
+
+        settings = StorageSettings(backend="surrealdb")
+        assert settings.backend == "surrealdb"
+
+    def test_storage_backend_default_postgres(self) -> None:
+        from khora.config.schema import StorageSettings
+
+        settings = StorageSettings()
+        assert settings.backend == "postgres"
+
+    def test_storage_settings_surrealdb_field(self) -> None:
+        from khora.config.schema import StorageSettings, SurrealDBConfig
+
+        cfg = SurrealDBConfig(mode="remote", url="ws://localhost:8000")
+        settings = StorageSettings(backend="surrealdb", surrealdb=cfg)
+        assert settings.surrealdb is not None
+        assert settings.surrealdb.url == "ws://localhost:8000"
+
+    def test_vector_config_union(self) -> None:
+        from khora.config.schema import SurrealDBVectorConfig
+
+        cfg = SurrealDBVectorConfig()
+        assert cfg.backend == "surrealdb"
+        assert cfg.mode == "memory"
+        assert cfg.embedding_dimension == 1536
+
+
+# ── Connection ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBConnection:
+    def test_endpoint_memory(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection(mode="memory")
+        assert conn._build_endpoint() == "memory"
+
+    def test_endpoint_embedded(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection(mode="embedded", path="/tmp/test.db")
+        assert conn._build_endpoint() == "file:///tmp/test.db"
+
+    def test_endpoint_remote(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection(mode="remote", url="ws://localhost:8000")
+        assert conn._build_endpoint() == "ws://localhost:8000"
+
+    def test_endpoint_embedded_requires_path(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection(mode="embedded")
+        with pytest.raises(ValueError, match="path"):
+            conn._build_endpoint()
+
+    def test_endpoint_remote_requires_url(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection(mode="remote")
+        with pytest.raises(ValueError, match="url"):
+            conn._build_endpoint()
+
+    def test_endpoint_unknown_mode(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection(mode="bogus")
+        with pytest.raises(ValueError, match="Unknown"):
+            conn._build_endpoint()
+
+    def test_not_connected_initially(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        assert not conn.connected
+
+    def test_client_initially_none(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        assert conn.client is None
+
+    def test_default_params(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        assert conn._mode == "memory"
+        assert conn._namespace == "khora"
+        assert conn._database == "default"
+        assert conn._user == "root"
+        assert conn._password == "root"
+
+    async def test_disconnect_when_not_connected(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        # Should be a no-op, no errors
+        await conn.disconnect()
+        assert not conn.connected
+
+    async def test_is_healthy_when_not_connected(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        assert await conn.is_healthy() is False
+
+    async def test_query_raises_when_not_connected(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        with pytest.raises(RuntimeError, match="not connected"):
+            await conn.query("SELECT 1")
+
+    async def test_execute_raises_when_not_connected(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        with pytest.raises(RuntimeError, match="not connected"):
+            await conn.execute("SELECT 1")
+
+
+# ── Schema ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBSchema:
+    def test_schema_module_importable(self) -> None:
+        from khora.storage.backends.surrealdb import schema
+
+        assert hasattr(schema, "initialize_schema")
+
+    def test_table_definitions_contain_required_tables(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+        for table in [
+            "memory_namespace",
+            "document",
+            "chunk",
+            "entity",
+            "relates_to",
+            "episode",
+            "memory_event",
+            "sync_checkpoint",
+        ]:
+            assert table in _TABLE_DEFINITIONS, f"Missing table: {table}"
+
+    def test_schema_has_hnsw_index(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+        assert "HNSW" in _TABLE_DEFINITIONS
+        assert "DIMENSION 1536" in _TABLE_DEFINITIONS
+
+    def test_schema_has_bm25(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+        assert "BM25" in _TABLE_DEFINITIONS
+
+    def test_schema_has_analyzer(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _ANALYZER_DEFINITIONS
+
+        assert "khora_fulltext" in _ANALYZER_DEFINITIONS
+        assert "snowball" in _ANALYZER_DEFINITIONS
+
+    def test_schema_has_entity_unique_index(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+        assert "UNIQUE" in _TABLE_DEFINITIONS
+        assert "idx_entity_unique" in _TABLE_DEFINITIONS
+
+    def test_schema_has_relation_tables(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+        assert "TYPE RELATION" in _TABLE_DEFINITIONS
+        # relates_to and temporal_edge are relation tables
+        assert "relates_to" in _TABLE_DEFINITIONS
+        assert "temporal_edge" in _TABLE_DEFINITIONS
+
+    def test_schema_has_temporal_tables(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+        assert "time_node" in _TABLE_DEFINITIONS
+        assert "temporal_edge" in _TABLE_DEFINITIONS
+        assert "time_edge_link" in _TABLE_DEFINITIONS
+
+    async def test_initialize_schema_calls_execute(self) -> None:
+        from khora.storage.backends.surrealdb.schema import initialize_schema
+
+        conn = _make_mock_conn()
+        await initialize_schema(conn)
+        # Should call execute at least twice (analyzer + tables)
+        assert conn.execute.await_count >= 2
+
+
+# ── Factory ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBFactory:
+    def test_surrealdb_in_graph_registry(self) -> None:
+        from khora.storage.factory import _GRAPH_REGISTRY
+
+        assert "surrealdb" in _GRAPH_REGISTRY
+        module_path, class_name = _GRAPH_REGISTRY["surrealdb"]
+        assert "surrealdb" in module_path
+        assert class_name == "SurrealDBBackend"
+
+    def test_surrealdb_in_vector_registry(self) -> None:
+        from khora.storage.factory import _VECTOR_REGISTRY
+
+        assert "surrealdb" in _VECTOR_REGISTRY
+        module_path, class_name = _VECTOR_REGISTRY["surrealdb"]
+        assert "surrealdb" in module_path
+        assert class_name == "SurrealDBBackend"
+
+    def test_storage_config_default_backend(self) -> None:
+        from khora.storage.factory import StorageConfig
+
+        cfg = StorageConfig()
+        assert cfg.backend == "postgres"
+
+    def test_storage_config_surrealdb_backend(self) -> None:
+        from khora.storage.factory import StorageConfig
+
+        cfg = StorageConfig(backend="surrealdb")
+        assert cfg.backend == "surrealdb"
+
+
+# ── Relational Adapter — helpers ──────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestRelationalHelpers:
+    def test_record_id(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _record_id
+
+        uid = UUID("12345678-1234-5678-1234-567812345678")
+        result = _record_id("document", uid)
+        assert result == "document:⟨12345678-1234-5678-1234-567812345678⟩"
+
+    def test_parse_uuid_bare(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _parse_uuid
+
+        uid = _parse_uuid("12345678-1234-5678-1234-567812345678")
+        assert uid == UUID("12345678-1234-5678-1234-567812345678")
+
+    def test_parse_uuid_with_table_prefix(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _parse_uuid
+
+        uid = _parse_uuid("document:12345678-1234-5678-1234-567812345678")
+        assert uid == UUID("12345678-1234-5678-1234-567812345678")
+
+    def test_parse_uuid_with_angle_brackets(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _parse_uuid
+
+        uid = _parse_uuid("document:⟨12345678-1234-5678-1234-567812345678⟩")
+        assert uid == UUID("12345678-1234-5678-1234-567812345678")
+
+    def test_dt_to_iso(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _dt_to_iso
+
+        dt = datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC)
+        result = _dt_to_iso(dt)
+        assert result is not None
+        assert "2025-01-15" in result
+
+    def test_dt_to_iso_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _dt_to_iso
+
+        assert _dt_to_iso(None) is None
+
+    def test_iso_to_dt(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _iso_to_dt
+
+        result = _iso_to_dt("2025-01-15T12:00:00+00:00")
+        assert result is not None
+        assert result.year == 2025
+
+    def test_iso_to_dt_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _iso_to_dt
+
+        assert _iso_to_dt(None) is None
+
+    def test_iso_to_dt_passthrough_datetime(self) -> None:
+        from khora.storage.backends.surrealdb.relational import _iso_to_dt
+
+        dt = datetime(2025, 1, 15, tzinfo=UTC)
+        assert _iso_to_dt(dt) is dt
+
+
+# ── Relational Adapter — lifecycle ────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestRelationalAdapterLifecycle:
+    async def test_connect_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+        await adapter.connect()
+        conn.connect.assert_awaited_once()
+
+    async def test_disconnect_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+        await adapter.disconnect()
+        conn.disconnect.assert_awaited_once()
+
+    async def test_is_healthy_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+        result = await adapter.is_healthy()
+        assert result is True
+
+    def test_get_session_returns_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+        assert adapter._get_session() is None
+
+    def test_from_config_defaults(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        adapter = SurrealDBRelationalAdapter.from_config({})
+        assert adapter._conn._mode == "memory"
+        assert adapter._conn._namespace == "khora"
+
+    def test_from_config_custom(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        adapter = SurrealDBRelationalAdapter.from_config(
+            {
+                "mode": "remote",
+                "url": "ws://db:8000",
+                "namespace": "myns",
+                "database": "mydb",
+                "user": "admin",
+                "password": "secret",
+            }
+        )
+        assert adapter._conn._mode == "remote"
+        assert adapter._conn._url == "ws://db:8000"
+        assert adapter._conn._namespace == "myns"
+        assert adapter._conn._database == "mydb"
+
+
+# ── Relational Adapter — namespace operations ─────────────────────────────
+
+
+@pytest.mark.unit
+class TestRelationalAdapterNamespace:
+    async def test_create_namespace(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        ns_id = uuid4()
+        row_id = uuid4()
+        row = _namespace_row(row_id, ns_id)
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        ns = MemoryNamespace(id=row_id, namespace_id=ns_id)
+        result = await adapter.create_namespace(ns)
+
+        conn.query_one.assert_awaited_once()
+        assert result.id == row_id
+        assert result.namespace_id == ns_id
+        assert result.is_active is True
+
+    async def test_create_namespace_raises_on_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        ns = MemoryNamespace()
+        with pytest.raises(RuntimeError, match="Failed to create namespace"):
+            await adapter.create_namespace(ns)
+
+    async def test_resolve_namespace(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        ns_id = uuid4()
+        row_id = uuid4()
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"id": f"memory_namespace:⟨{row_id!s}⟩"})
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.resolve_namespace(ns_id)
+        assert result == row_id
+
+    async def test_resolve_namespace_raises_on_missing(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        with pytest.raises(ValueError, match="No active namespace"):
+            await adapter.resolve_namespace(uuid4())
+
+    async def test_get_namespace(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        row_id = uuid4()
+        ns_id = uuid4()
+        row = _namespace_row(row_id, ns_id)
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_namespace(row_id)
+        assert result is not None
+        assert result.id == row_id
+
+    async def test_get_namespace_returns_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_namespace(uuid4())
+        assert result is None
+
+    async def test_deactivate_namespace(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+        await adapter.deactivate_namespace(uuid4())
+        conn.execute.assert_awaited_once()
+
+    async def test_update_namespace(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+        ns = MemoryNamespace()
+        result = await adapter.update_namespace(ns)
+        conn.execute.assert_awaited_once()
+        assert result is ns
+
+    async def test_list_namespaces(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        row1 = _namespace_row()
+        row2 = _namespace_row()
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"total": 2})
+        conn.query = AsyncMock(return_value=[row1, row2])
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.list_namespaces()
+        assert result.total == 2
+        assert len(result.items) == 2
+        assert result.limit == 100
+        assert result.offset == 0
+
+    async def test_create_namespace_version_without_previous(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        # create_namespace calls query_one internally
+        conn.query_one = AsyncMock(return_value=_namespace_row(version=1))
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.create_namespace_version()
+        assert result.version == 1  # first version
+
+    async def test_create_namespace_version_with_previous(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=_namespace_row(version=2))
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        prev = MemoryNamespace(version=1, config_overrides={"key": "val"})
+        await adapter.create_namespace_version(previous_version=prev)
+        # Deactivate should have been called
+        conn.execute.assert_awaited()
+
+
+# ── Relational Adapter — document operations ──────────────────────────────
+
+
+@pytest.mark.unit
+class TestRelationalAdapterDocument:
+    async def test_create_document(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        doc_id = uuid4()
+        ns_id = uuid4()
+        row = _document_row(doc_id, ns_id)
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        doc = Document(
+            id=doc_id,
+            namespace_id=ns_id,
+            content="test content",
+            metadata=DocumentMetadata(title="Test Doc"),
+        )
+        result = await adapter.create_document(doc)
+
+        assert result.id == doc_id
+        assert result.content == "test content"
+        assert result.metadata.title == "Test Doc"
+
+    async def test_create_document_raises_on_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        with pytest.raises(RuntimeError, match="Failed to create document"):
+            await adapter.create_document(Document())
+
+    async def test_get_document(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        doc_id = uuid4()
+        row = _document_row(doc_id)
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_document(doc_id)
+        assert result is not None
+        assert result.id == doc_id
+
+    async def test_get_document_returns_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_document(uuid4())
+        assert result is None
+
+    async def test_list_documents(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        ns_id = uuid4()
+        rows = [_document_row(ns_id=ns_id), _document_row(ns_id=ns_id)]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.list_documents(ns_id)
+        assert len(result) == 2
+
+    async def test_list_documents_with_status_filter(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        ns_id = uuid4()
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.list_documents(ns_id, status="completed")
+        assert result == []
+        # Verify the query included the status parameter
+        call_args = conn.query.call_args
+        assert "status" in call_args[0][0]
+
+    async def test_update_document(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+        doc = Document(content="updated")
+        result = await adapter.update_document(doc)
+        conn.execute.assert_awaited_once()
+        assert result is doc
+
+    async def test_delete_document_exists(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        doc_id = uuid4()
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"id": f"document:⟨{doc_id!s}⟩"})
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.delete_document(doc_id)
+        assert result is True
+        conn.execute.assert_awaited_once()
+
+    async def test_delete_document_missing(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.delete_document(uuid4())
+        assert result is False
+        conn.execute.assert_not_awaited()
+
+    async def test_get_document_by_checksum(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        ns_id = uuid4()
+        row = _document_row(ns_id=ns_id)
+        row["checksum"] = "sha256abc"
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_document_by_checksum(ns_id, "sha256abc")
+        assert result is not None
+        assert result.metadata.checksum == "sha256abc"
+
+    async def test_get_document_by_checksum_returns_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_document_by_checksum(uuid4(), "nope")
+        assert result is None
+
+    async def test_get_documents_batch(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        doc1 = uuid4()
+        doc2 = uuid4()
+        rows = [_document_row(doc1), _document_row(doc2)]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_documents_batch([doc1, doc2])
+        assert len(result) == 2
+        assert doc1 in result
+        assert doc2 in result
+
+    async def test_get_documents_batch_empty(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_documents_batch([])
+        assert result == {}
+        conn.query.assert_not_awaited()
+
+    async def test_get_document_sources_batch(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        doc_id = uuid4()
+        now = datetime.now(UTC).isoformat()
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(
+            return_value=[
+                {
+                    "id": f"document:⟨{doc_id!s}⟩",
+                    "title": "My Doc",
+                    "source": "http://example.com",
+                    "source_type": "url",
+                    "created_at": now,
+                    "source_timestamp": None,
+                }
+            ]
+        )
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_document_sources_batch([doc_id])
+        assert doc_id in result
+        assert isinstance(result[doc_id], DocumentSource)
+        assert result[doc_id].title == "My Doc"
+
+    async def test_get_document_sources_batch_empty(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_document_sources_batch([])
+        assert result == {}
+
+
+# ── Relational Adapter — sync checkpoint operations ───────────────────────
+
+
+@pytest.mark.unit
+class TestRelationalAdapterSyncCheckpoint:
+    async def test_get_sync_checkpoint(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"checkpoint": "2025-01-01T00:00:00Z"})
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_sync_checkpoint(uuid4(), "slack")
+        assert result == "2025-01-01T00:00:00Z"
+
+    async def test_get_sync_checkpoint_returns_none(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_sync_checkpoint(uuid4(), "slack")
+        assert result is None
+
+    async def test_set_sync_checkpoint(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+        await adapter.set_sync_checkpoint(uuid4(), "slack", "2025-01-01")
+        conn.execute.assert_awaited_once()
+        # Verify the UPSERT query
+        call_args = conn.execute.call_args
+        assert "UPSERT" in call_args[0][0]
+
+
+# ── Row-to-model conversion ──────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestRelationalRowConversion:
+    def test_row_to_namespace_model(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        row_id = uuid4()
+        ns_id = uuid4()
+        row = _namespace_row(row_id, ns_id, version=3, is_active=False)
+        result = adapter._row_to_namespace(row)
+
+        assert isinstance(result, MemoryNamespace)
+        assert result.id == row_id
+        assert result.namespace_id == ns_id
+        assert result.version == 3
+        assert result.is_active is False
+
+    def test_row_to_document_model(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        doc_id = uuid4()
+        ns_id = uuid4()
+        row = _document_row(doc_id, ns_id)
+        result = adapter._row_to_document(row)
+
+        assert isinstance(result, Document)
+        assert result.id == doc_id
+        assert result.namespace_id == ns_id
+        assert result.content == "test content"
+        assert result.status == DocumentStatus.PENDING
+        assert result.metadata.source == "test-source"
+        assert result.metadata.source_type == "file"
+        assert result.metadata.title == "Test Doc"
+        assert result.metadata.custom == {"key": "value"}
+
+    def test_row_to_document_handles_completed_status(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        row = _document_row()
+        row["status"] = "completed"
+        row["chunk_count"] = 5
+        row["entity_count"] = 3
+        row["processed_at"] = datetime.now(UTC).isoformat()
+
+        result = adapter._row_to_document(row)
+        assert result.status == DocumentStatus.COMPLETED
+        assert result.chunk_count == 5
+        assert result.entity_count == 3
+        assert result.processed_at is not None
+
+
+# ── Connection query/query_one edge cases ─────────────────────────────────
+
+
+@pytest.mark.unit
+class TestConnectionQueryEdgeCases:
+    async def test_query_flattens_nested_lists(self) -> None:
+        """Verify that query() flattens nested list-of-list responses."""
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        conn._connected = True
+
+        mock_client = AsyncMock()
+        # SurrealDB sometimes returns [[{...}, {...}]] for multi-statement results
+        mock_client.query = AsyncMock(return_value=[[{"a": 1}, {"b": 2}]])
+        conn._client = mock_client
+
+        results = await conn.query("SELECT * FROM chunk")
+        assert len(results) == 2
+        assert results[0] == {"a": 1}
+
+    async def test_query_handles_dict_response(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        conn._connected = True
+
+        mock_client = AsyncMock()
+        mock_client.query = AsyncMock(return_value={"x": 1})
+        conn._client = mock_client
+
+        results = await conn.query("RETURN 1")
+        assert results == [{"x": 1}]
+
+    async def test_query_handles_non_list_non_dict(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        conn._connected = True
+
+        mock_client = AsyncMock()
+        mock_client.query = AsyncMock(return_value=42)
+        conn._client = mock_client
+
+        results = await conn.query("RETURN 1")
+        assert results == []
+
+    async def test_query_one_returns_first(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        conn._connected = True
+
+        mock_client = AsyncMock()
+        mock_client.query = AsyncMock(return_value=[{"id": "x"}, {"id": "y"}])
+        conn._client = mock_client
+
+        result = await conn.query_one("SELECT * FROM thing")
+        assert result == {"id": "x"}
+
+    async def test_query_one_returns_none_on_empty(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        conn._connected = True
+
+        mock_client = AsyncMock()
+        mock_client.query = AsyncMock(return_value=[])
+        conn._client = mock_client
+
+        result = await conn.query_one("SELECT * FROM thing WHERE id = 'nope'")
+        assert result is None
+
+
+# ── Vector Adapter — helpers ──────────────────────────────────────────────
+
+
+def _chunk_row(
+    chunk_id: UUID | None = None,
+    ns_id: UUID | None = None,
+    doc_id: UUID | None = None,
+    *,
+    content: str = "test chunk content",
+    embedding: list[float] | None = None,
+    similarity: float | None = None,
+    rank: float | None = None,
+) -> dict[str, object]:
+    """Build a SurrealDB result dict that looks like a chunk row."""
+    chunk_id = chunk_id or uuid4()
+    ns_id = ns_id or uuid4()
+    doc_id = doc_id or uuid4()
+    now = datetime.now(UTC).isoformat()
+    row: dict[str, object] = {
+        "id": f"chunk:\u27e8{chunk_id!s}\u27e9",
+        "namespace": f"memory_namespace:\u27e8{ns_id!s}\u27e9",
+        "document": f"document:\u27e8{doc_id!s}\u27e9",
+        "content": content,
+        "chunk_index": 0,
+        "start_char": 0,
+        "end_char": len(content),
+        "token_count": 3,
+        "metadata_": {},
+        "embedding": embedding,
+        "embedding_model": "test-model",
+        "created_at": now,
+        "source_timestamp": None,
+    }
+    if similarity is not None:
+        row["similarity"] = similarity
+    if rank is not None:
+        row["rank"] = rank
+    return row
+
+
+def _entity_row(
+    entity_id: UUID | None = None,
+    ns_id: UUID | None = None,
+    *,
+    name: str = "TestEntity",
+    entity_type: str = "PERSON",
+    similarity: float | None = None,
+) -> dict[str, object]:
+    """Build a SurrealDB result dict that looks like an entity row."""
+    entity_id = entity_id or uuid4()
+    ns_id = ns_id or uuid4()
+    now = datetime.now(UTC).isoformat()
+    row: dict[str, object] = {
+        "id": f"entity:\u27e8{entity_id!s}\u27e9",
+        "namespace": f"memory_namespace:\u27e8{ns_id!s}\u27e9",
+        "name": name,
+        "entity_type": entity_type,
+        "description": "A test entity",
+        "attributes": {},
+        "source_document_ids": [],
+        "source_chunk_ids": [],
+        "source_tool": "",
+        "mention_count": 1,
+        "embedding": [0.1] * 10,
+        "embedding_model": "test-model",
+        "valid_from": None,
+        "valid_until": None,
+        "confidence": 0.95,
+        "metadata_": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+    if similarity is not None:
+        row["similarity"] = similarity
+    return row
+
+
+# ── Vector Adapter — lifecycle ────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestVectorAdapterLifecycle:
+    async def test_connect_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+        await adapter.connect()
+        conn.connect.assert_awaited_once()
+
+    async def test_disconnect_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+        await adapter.disconnect()
+        conn.disconnect.assert_awaited_once()
+
+    async def test_is_healthy_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+        result = await adapter.is_healthy()
+        assert result is True
+
+    def test_get_session_returns_none(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+        assert adapter._get_session() is None
+
+    def test_from_config_defaults(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        adapter = SurrealDBVectorAdapter.from_config({})
+        assert adapter._conn._mode == "memory"
+        assert adapter._hnsw_ef_search == 40
+
+    def test_from_config_custom(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        adapter = SurrealDBVectorAdapter.from_config(
+            {
+                "mode": "remote",
+                "url": "ws://db:8000",
+                "hnsw_ef_search": 100,
+            }
+        )
+        assert adapter._conn._mode == "remote"
+        assert adapter._hnsw_ef_search == 100
+
+
+# ── Vector Adapter — helpers ──────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestVectorAdapterHelpers:
+    def test_rid(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _rid
+
+        uid = UUID("12345678-1234-5678-1234-567812345678")
+        assert _rid("chunk", uid) == "chunk:\u27e812345678-1234-5678-1234-567812345678\u27e9"
+
+    def test_parse_uuid_bare(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_uuid
+
+        uid = _parse_uuid("12345678-1234-5678-1234-567812345678")
+        assert uid == UUID("12345678-1234-5678-1234-567812345678")
+
+    def test_parse_uuid_with_table_prefix(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_uuid
+
+        uid = _parse_uuid("chunk:12345678-1234-5678-1234-567812345678")
+        assert uid == UUID("12345678-1234-5678-1234-567812345678")
+
+    def test_parse_uuid_with_angle_brackets(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_uuid
+
+        uid = _parse_uuid("chunk:\u27e812345678-1234-5678-1234-567812345678\u27e9")
+        assert uid == UUID("12345678-1234-5678-1234-567812345678")
+
+    def test_parse_uuid_passthrough(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_uuid
+
+        uid = UUID("12345678-1234-5678-1234-567812345678")
+        assert _parse_uuid(uid) is uid
+
+    def test_iso(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _iso
+
+        dt = datetime(2025, 6, 15, 12, 0, 0, tzinfo=UTC)
+        result = _iso(dt)
+        assert result is not None
+        assert "2025-06-15" in result
+
+    def test_iso_none(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _iso
+
+        assert _iso(None) is None
+
+    def test_parse_dt(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_dt
+
+        result = _parse_dt("2025-06-15T12:00:00+00:00")
+        assert result is not None
+        assert result.year == 2025
+
+    def test_parse_dt_none(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_dt
+
+        assert _parse_dt(None) is None
+
+    def test_parse_dt_passthrough(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_dt
+
+        dt = datetime(2025, 1, 1, tzinfo=UTC)
+        assert _parse_dt(dt) is dt
+
+    def test_parse_dt_z_suffix(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_dt
+
+        result = _parse_dt("2025-06-15T12:00:00Z")
+        assert result is not None
+        assert result.year == 2025
+
+    def test_parse_dt_invalid(self) -> None:
+        from khora.storage.backends.surrealdb.vector import _parse_dt
+
+        assert _parse_dt("not-a-date") is None
+
+
+# ── Vector Adapter — chunk operations ─────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestVectorAdapterChunkOps:
+    async def test_create_chunk(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        from khora.core.models import Chunk, ChunkMetadata
+
+        chunk = Chunk(
+            content="hello world",
+            embedding=[0.1] * 10,
+            embedding_model="test",
+            metadata=ChunkMetadata(chunk_index=0),
+        )
+        result = await adapter.create_chunk(chunk)
+        conn.execute.assert_awaited_once()
+        assert result is chunk
+
+    async def test_create_chunks_batch(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        from khora.core.models import Chunk, ChunkMetadata
+
+        chunks = [
+            Chunk(content="a", embedding=[0.1], metadata=ChunkMetadata()),
+            Chunk(content="b", embedding=[0.2], metadata=ChunkMetadata()),
+        ]
+        result = await adapter.create_chunks_batch(chunks)
+        conn.execute.assert_awaited_once()
+        assert len(result) == 2
+
+    async def test_create_chunks_batch_empty(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+        result = await adapter.create_chunks_batch([])
+        assert result == []
+        conn.execute.assert_not_awaited()
+
+    async def test_get_chunk(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        chunk_id = uuid4()
+        row = _chunk_row(chunk_id)
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.get_chunk(chunk_id)
+        assert result is not None
+        assert result.id == chunk_id
+        assert result.content == "test chunk content"
+
+    async def test_get_chunk_returns_none(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.get_chunk(uuid4())
+        assert result is None
+
+    async def test_get_chunks_batch(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        c1, c2 = uuid4(), uuid4()
+        rows = [_chunk_row(c1), _chunk_row(c2)]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.get_chunks_batch([c1, c2])
+        assert len(result) == 2
+        assert c1 in result
+        assert c2 in result
+
+    async def test_get_chunks_batch_empty(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+        result = await adapter.get_chunks_batch([])
+        assert result == {}
+
+    async def test_get_chunks_by_document(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        doc_id = uuid4()
+        rows = [_chunk_row(doc_id=doc_id), _chunk_row(doc_id=doc_id)]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.get_chunks_by_document(doc_id)
+        assert len(result) == 2
+
+    async def test_delete_chunks_by_document(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"cnt": 3})
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.delete_chunks_by_document(uuid4())
+        assert result == 3
+        conn.execute.assert_awaited_once()
+
+    async def test_delete_chunks_by_document_zero(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"cnt": 0})
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.delete_chunks_by_document(uuid4())
+        assert result == 0
+        conn.execute.assert_not_awaited()
+
+    async def test_count_chunks(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"cnt": 42})
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.count_chunks(uuid4())
+        assert result == 42
+
+    async def test_count_chunks_empty(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.count_chunks(uuid4())
+        assert result == 0
+
+    async def test_list_chunks(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        rows = [_chunk_row(ns_id=ns_id), _chunk_row(ns_id=ns_id)]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.list_chunks(ns_id, limit=10, offset=0)
+        assert len(result) == 2
+
+
+# ── Vector Adapter — search operations ────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestVectorAdapterSearch:
+    async def test_search_similar_returns_tuples(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        chunk_id = uuid4()
+        row = _chunk_row(chunk_id, ns_id, embedding=[0.1] * 10, similarity=0.95)
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[row])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        results = await adapter.search_similar(ns_id, [0.1] * 10, limit=5)
+        assert len(results) == 1
+        chunk, score = results[0]
+        assert score == pytest.approx(0.95)
+        assert chunk.id == chunk_id
+
+    async def test_search_similar_filters_by_min_similarity(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        row = _chunk_row(ns_id=ns_id, similarity=0.3)
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[row])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        results = await adapter.search_similar(ns_id, [0.1] * 10, min_similarity=0.5)
+        assert len(results) == 0
+
+    async def test_search_similar_with_document_filter(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        doc_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        await adapter.search_similar(ns_id, [0.1] * 10, filter_document_ids=[doc_id])
+        call_args = conn.query.call_args
+        sql = call_args[0][0]
+        assert "document IN" in sql
+
+    async def test_search_similar_with_time_filters(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        after = datetime(2025, 1, 1, tzinfo=UTC)
+        before = datetime(2025, 12, 31, tzinfo=UTC)
+        await adapter.search_similar(ns_id, [0.1] * 10, created_after=after, created_before=before)
+        call_args = conn.query.call_args
+        sql = call_args[0][0]
+        assert "created_after" in sql
+        assert "created_before" in sql
+
+    async def test_search_similar_with_metadata_filters(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        await adapter.search_similar(ns_id, [0.1] * 10, metadata_filters={"topic": "science"})
+        call_args = conn.query.call_args
+        sql = call_args[0][0]
+        assert "metadata_" in sql
+
+    async def test_search_fulltext(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        chunk_id = uuid4()
+        row = _chunk_row(chunk_id, ns_id, content="hello world", rank=1.5)
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[row])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        results = await adapter.search_fulltext(ns_id, "hello", limit=5)
+        assert len(results) == 1
+        chunk, score = results[0]
+        assert score == pytest.approx(1.5)
+        assert chunk.content == "hello world"
+
+    async def test_search_fulltext_with_time_filters(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        after = datetime(2025, 1, 1, tzinfo=UTC)
+        await adapter.search_fulltext(ns_id, "query", created_after=after)
+        call_args = conn.query.call_args
+        sql = call_args[0][0]
+        assert "created_after" in sql
+
+    async def test_search_similar_entities(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        eid = uuid4()
+        row = _entity_row(eid, ns_id, similarity=0.88)
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[row])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        results = await adapter.search_similar_entities(ns_id, [0.1] * 10, limit=5)
+        assert len(results) == 1
+        entity_id, score = results[0]
+        assert entity_id == eid
+        assert score == pytest.approx(0.88)
+
+    async def test_search_similar_entities_min_similarity(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        ns_id = uuid4()
+        row = _entity_row(ns_id=ns_id, similarity=0.2)
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[row])
+        adapter = SurrealDBVectorAdapter(conn)
+
+        results = await adapter.search_similar_entities(ns_id, [0.1] * 10, min_similarity=0.5)
+        assert len(results) == 0
+
+
+# ── Vector Adapter — entity operations ────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestVectorAdapterEntityOps:
+    async def test_create_entity(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        from khora.core.models import Entity
+
+        entity = Entity(name="Alice", entity_type="PERSON")
+        await adapter.create_entity(entity)
+        conn.execute.assert_awaited_once()
+
+    async def test_update_entity(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        from khora.core.models import Entity
+
+        entity = Entity(name="Alice", entity_type="PERSON", description="updated")
+        await adapter.update_entity(entity)
+        conn.execute.assert_awaited_once()
+
+    async def test_entity_exists_true(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"cnt": 1})
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.entity_exists(uuid4())
+        assert result is True
+
+    async def test_entity_exists_false(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"cnt": 0})
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.entity_exists(uuid4())
+        assert result is False
+
+    async def test_entity_exists_none_row(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.entity_exists(uuid4())
+        assert result is False
+
+    async def test_update_entity_embedding(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        await adapter.update_entity_embedding(uuid4(), [0.1] * 10, "test-model")
+        conn.execute.assert_awaited_once()
+
+    async def test_update_entity_embeddings_batch(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        updates = [
+            (uuid4(), [0.1] * 10, "model-a"),
+            (uuid4(), [0.2] * 10, "model-b"),
+        ]
+        result = await adapter.update_entity_embeddings_batch(updates)
+        assert result == 2
+        conn.execute.assert_awaited_once()
+
+    async def test_update_entity_embeddings_batch_empty(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        result = await adapter.update_entity_embeddings_batch([])
+        assert result == 0
+        conn.execute.assert_not_awaited()
+
+
+# ── Vector Adapter — row-to-model conversion ──────────────────────────────
+
+
+@pytest.mark.unit
+class TestVectorRowConversion:
+    def test_row_to_chunk(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        chunk_id = uuid4()
+        ns_id = uuid4()
+        doc_id = uuid4()
+        row = _chunk_row(chunk_id, ns_id, doc_id, embedding=[0.5, 0.6])
+
+        result = adapter._row_to_chunk(row)
+        assert result.id == chunk_id
+        assert result.namespace_id == ns_id
+        assert result.document_id == doc_id
+        assert result.content == "test chunk content"
+        assert result.embedding is not None
+        assert result.metadata.chunk_index == 0
+
+    def test_row_to_chunk_no_embedding(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        row = _chunk_row(embedding=None)
+        result = adapter._row_to_chunk(row)
+        assert result.embedding is None
+
+    def test_row_to_chunk_invalid_metadata(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        row = _chunk_row()
+        row["metadata_"] = "not-a-dict"
+        result = adapter._row_to_chunk(row)
+        assert result.metadata.custom == {}
+
+    def test_row_to_entity(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        eid = uuid4()
+        ns_id = uuid4()
+        row = _entity_row(eid, ns_id, name="Alice", entity_type="PERSON")
+
+        result = adapter._row_to_entity(row)
+        assert result.id == eid
+        assert result.namespace_id == ns_id
+        assert result.name == "Alice"
+        assert result.entity_type == "PERSON"
+        assert result.confidence == pytest.approx(0.95)
+
+    def test_chunk_to_bindings(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        from khora.core.models import Chunk, ChunkMetadata
+
+        chunk = Chunk(
+            content="test",
+            embedding=[0.1, 0.2],
+            embedding_model="model",
+            metadata=ChunkMetadata(chunk_index=3, start_char=10, end_char=20, token_count=5),
+        )
+        bindings = adapter._chunk_to_bindings(chunk)
+        assert bindings["content"] == "test"
+        assert bindings["embedding"] == [0.1, 0.2]
+        assert bindings["chunk_index"] == 3
+        assert bindings["start_char"] == 10
+        assert bindings["end_char"] == 20
+        assert bindings["token_count"] == 5
+
+    def test_entity_to_bindings(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        from khora.core.models import Entity
+
+        entity = Entity(
+            name="Bob",
+            entity_type="PERSON",
+            description="A person",
+            embedding=[0.3, 0.4],
+            confidence=0.9,
+        )
+        bindings = adapter._entity_to_bindings(entity)
+        assert bindings["name"] == "Bob"
+        assert bindings["entity_type"] == "PERSON"
+        assert bindings["embedding"] == [0.3, 0.4]
+        assert bindings["confidence"] == pytest.approx(0.9)

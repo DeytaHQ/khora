@@ -31,11 +31,13 @@ _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
     "kuzu": ("khora.storage.backends.kuzu", "KuzuBackend"),
     "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
     "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
+    "surrealdb": ("khora.storage.backends.surrealdb.backend", "SurrealDBBackend"),
 }
 
 _VECTOR_REGISTRY: dict[str, tuple[str, str]] = {
     "pgvector": ("khora.storage.backends.pgvector", "PgVectorBackend"),
     "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
+    "surrealdb": ("khora.storage.backends.surrealdb.backend", "SurrealDBBackend"),
 }
 
 
@@ -82,6 +84,10 @@ class StorageConfig:
     graph_config: Any = None  # GraphConfig union type
     vector_config: Any = None  # VectorConfig union type
 
+    # Unified backend selector
+    backend: str = "postgres"  # "postgres" (traditional) or "surrealdb" (unified)
+    surrealdb_config: Any = None  # SurrealDBConfig from config/schema.py
+
     # Event store configuration (uses PostgreSQL by default)
     event_store_url: str | None = None
 
@@ -123,6 +129,9 @@ class StorageConfig:
 
 # Cache for ArcadeDB dual-role instance sharing
 _arcadedb_instances: dict[str, Any] = {}
+
+# Cache for SurrealDB dual-role instance sharing
+_surrealdb_instances: dict[str, Any] = {}
 
 
 def _normalize_url(url: str) -> str:
@@ -315,6 +324,16 @@ class StorageFactory:
                 logger.info(f"Reusing ArcadeDB instance for {role} role (url={url})")
                 return _arcadedb_instances[cache_key]
 
+        if backend_name == "surrealdb":
+            # SurrealDB dual-role: reuse instance for same endpoint
+            url = getattr(config, "url", None) or ""
+            path = getattr(config, "path", None) or ""
+            mode = getattr(config, "mode", "memory")
+            cache_key = f"surrealdb:{mode}:{url}:{path}"
+            if cache_key in _surrealdb_instances:
+                logger.info(f"Reusing SurrealDB instance for {role} role (mode={mode})")
+                return _surrealdb_instances[cache_key]
+
         module_path, class_name = registry[backend_name]
         cls = _import_backend_class(module_path, class_name)
         if cls is None:
@@ -329,6 +348,12 @@ class StorageFactory:
         if backend_name == "arcadedb":
             url = getattr(config, "url", None) or ""
             _arcadedb_instances[f"arcadedb:{url}"] = instance
+
+        if backend_name == "surrealdb":
+            url = getattr(config, "url", None) or ""
+            path = getattr(config, "path", None) or ""
+            mode = getattr(config, "mode", "memory")
+            _surrealdb_instances[f"surrealdb:{mode}:{url}:{path}"] = instance
 
         return instance
 
@@ -361,7 +386,26 @@ class StorageFactory:
             return None
 
     def create_coordinator(self) -> StorageCoordinator:
-        """Create a storage coordinator with all configured backends."""
+        """Create a storage coordinator with all configured backends.
+
+        When backend='surrealdb', the same SurrealDB instance is used for
+        graph and vector roles (relational and event_store are set to None
+        since SurrealDB handles those internally).
+        """
+        if self.config.backend == "surrealdb":
+            surreal_config = self.config.surrealdb_config
+            if surreal_config is None:
+                raise ValueError("SurrealDB backend selected but surrealdb_config is not set")
+
+            # Create a single SurrealDB backend instance shared across roles
+            surreal_backend = self._create_from_registry(_GRAPH_REGISTRY, "surrealdb", surreal_config, "graph+vector")
+            return StorageCoordinator(
+                relational=None,
+                vector=surreal_backend,
+                graph=surreal_backend,
+                event_store=None,
+            )
+
         return StorageCoordinator(
             relational=self.create_relational_backend(),
             vector=self.create_vector_backend(),
