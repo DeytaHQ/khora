@@ -129,6 +129,9 @@ class Relationship:
     source_document_ids: list[UUID] = field(default_factory=list)
     source_chunk_ids: list[UUID] = field(default_factory=list)
 
+    # Populated by MemoryLake when include_sources=True
+    source_documents: dict[UUID, DocumentSource] | None = None
+
     # Temporal validity
     valid_from: datetime | None = None
     valid_until: datetime | None = None

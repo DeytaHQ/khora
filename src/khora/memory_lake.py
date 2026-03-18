@@ -474,7 +474,7 @@ class MemoryLake:
                     raw=raw,
                 )
                 if include_sources:
-                    await self._populate_sources(result.chunks, result.entities)
+                    await self._populate_sources(result.chunks, result.entities, result.relationships)
                 return result
         finally:
             clear_trace_id()
@@ -525,7 +525,7 @@ class MemoryLake:
         """
         entity = await self._get_engine().get_entity(entity_id)
         if entity is not None and include_sources:
-            await self._populate_sources([], [entity])
+            await self._populate_sources([], [entity], [])
         return entity
 
     async def list_entities(
@@ -551,7 +551,7 @@ class MemoryLake:
         namespace_id = await self._resolve_namespace(namespace)
         entities = await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
         if include_sources:
-            await self._populate_sources([], entities)
+            await self._populate_sources([], entities, [])
         return entities
 
     async def find_related_entities(
@@ -584,7 +584,7 @@ class MemoryLake:
             limit=limit,
         )
         if include_sources:
-            await self._populate_sources([], results)
+            await self._populate_sources([], results, [])
         return results
 
     # =========================================================================
@@ -643,7 +643,7 @@ class MemoryLake:
         namespace_id = await self._resolve_namespace(namespace)
         entities = await self._get_engine().search_entities(query, namespace_id, limit=limit)
         if include_sources:
-            await self._populate_sources([], entities)
+            await self._populate_sources([], entities, [])
         return entities
 
     async def stats(self, *, namespace: str | UUID) -> Stats:
@@ -666,18 +666,20 @@ class MemoryLake:
         self,
         chunks: list[tuple[Chunk, float]],
         entities: list[tuple[Entity, float]] | list[Entity],
+        relationships: list[tuple[Relationship, float]],
     ) -> None:
-        """Batch-fetch document sources and populate entity/chunk fields **in-place**.
+        """Batch-fetch document sources and populate entity/chunk/relationship fields **in-place**.
 
         ``entities`` accepts either ``list[Entity]`` or
         ``list[tuple[Entity, float]]`` (entity, score pairs).  The method
         unwraps tuples transparently.
 
-        Collects unique document IDs from both *chunks* and *entities*, fetches
-        lightweight metadata via batched SELECTs (chunked at 1 000 IDs), then
-        populates ``chunk.source_document`` and ``entity.source_documents`` on
-        the provided objects.  No value is returned; callers observe changes
-        through the mutated inputs.
+        Collects unique document IDs from *chunks*, *entities*, and
+        *relationships*, fetches lightweight metadata via batched SELECTs
+        (chunked at 1 000 IDs), then populates ``chunk.source_document``,
+        ``entity.source_documents``, and ``relationship.source_documents``
+        on the provided objects.  No value is returned; callers observe
+        changes through the mutated inputs.
         """
         # Collect unique doc IDs
         doc_ids: set[UUID] = set()
@@ -686,6 +688,8 @@ class MemoryLake:
         for item in entities:
             entity = item[0] if isinstance(item, tuple) else item
             doc_ids.update(entity.source_document_ids)
+        for rel, _score in relationships:
+            doc_ids.update(rel.source_document_ids)
 
         if not doc_ids:
             return
@@ -708,6 +712,11 @@ class MemoryLake:
             # "all source documents deleted".  Callers distinguish via the
             # include_sources flag they passed.
             entity.source_documents = entity_sources if entity_sources else None
+
+        # Populate relationships
+        for rel, _score in relationships:
+            rel_sources = {did: sources[did] for did in rel.source_document_ids if did in sources}
+            rel.source_documents = rel_sources if rel_sources else None
 
     async def _resolve_namespace(self, namespace: str | UUID) -> UUID:
         """Resolve a namespace_id to the active version's row-level id.
