@@ -651,6 +651,8 @@ class VectorCypherRetriever:
                 target_entity_id=tgt_id,
                 relationship_type=raw.get("relationship_type", "RELATES_TO"),
                 description=raw.get("description", "") or "",
+                source_document_ids=[UUID(d) for d in (raw.get("source_document_ids") or [])],
+                source_chunk_ids=[UUID(c) for c in (raw.get("source_chunk_ids") or [])],
                 confidence=raw.get("confidence") if raw.get("confidence") is not None else 1.0,
                 weight=raw.get("weight") if raw.get("weight") is not None else 1.0,
             )

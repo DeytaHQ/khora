@@ -574,7 +574,8 @@ class DualNodeManager:
 
         Returns:
             List of relationship dicts with id, source_entity_id,
-            target_entity_id, relationship_type, description, confidence, weight
+            target_entity_id, relationship_type, description, confidence, weight,
+            source_document_ids, source_chunk_ids
         """
         if len(entity_ids) < 2:
             return []
@@ -587,7 +588,9 @@ class DualNodeManager:
           AND source.id <> target.id
         RETURN DISTINCT r.id AS id, source.id AS source_entity_id, target.id AS target_entity_id,
                type(r) AS relationship_type, r.description AS description,
-               r.confidence AS confidence, r.weight AS weight
+               r.confidence AS confidence, r.weight AS weight,
+               r.source_document_ids AS source_document_ids,
+               r.source_chunk_ids AS source_chunk_ids
         """
 
         async with self._driver.session(database=self._database) as session:
