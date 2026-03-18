@@ -266,13 +266,15 @@ def format_entity_section(entities: list[tuple[Entity, float]]) -> str:
 
 def format_relationship_section(
     relationships: list[tuple[Relationship, float]],
-    entity_names: dict[UUID, str] | None = None,
 ) -> str:
     """Format relationships into a text section for context_text.
 
     Returns an empty string if no relationships, otherwise returns a section like:
         \\n\\n--- Relationships ---\\n\\n- Alice --FOUNDED--> Acme Corp: description
     Deduplicates by relationship ID (falls back to source+target+type when ID is None).
+
+    Relies on denormalized ``source_entity_name`` / ``target_entity_name``
+    fields populated at retrieval time.
     """
     if not relationships:
         return ""
@@ -285,12 +287,8 @@ def format_relationship_section(
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
-        if entity_names:
-            source_name = entity_names.get(rel.source_entity_id, str(rel.source_entity_id))
-            target_name = entity_names.get(rel.target_entity_id, str(rel.target_entity_id))
-        else:
-            source_name = str(rel.source_entity_id)
-            target_name = str(rel.target_entity_id)
+        source_name = rel.source_entity_name or str(rel.source_entity_id)
+        target_name = rel.target_entity_name or str(rel.target_entity_id)
         line = f"- {source_name} --{rel.relationship_type}--> {target_name}"
         if rel.description:
             line += f": {rel.description}"

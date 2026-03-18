@@ -639,6 +639,7 @@ class VectorCypherRetriever:
             str(namespace_id),
         )
         entity_scores_by_id: dict[UUID, float] = {entity.id: score for entity, score in entity_results}
+        entity_names_by_id: dict[UUID, str] = {entity.id: entity.name for entity, _ in entity_results}
         relationships: list[tuple[Relationship, float]] = []
         for raw in raw_rels:
             src_id = UUID(raw["source_entity_id"])
@@ -651,6 +652,8 @@ class VectorCypherRetriever:
                 target_entity_id=tgt_id,
                 relationship_type=raw.get("relationship_type", "RELATES_TO"),
                 description=raw.get("description", "") or "",
+                source_entity_name=entity_names_by_id.get(src_id, ""),
+                target_entity_name=entity_names_by_id.get(tgt_id, ""),
                 source_document_ids=[UUID(d) for d in (raw.get("source_document_ids") or [])],
                 source_chunk_ids=[UUID(c) for c in (raw.get("source_chunk_ids") or [])],
                 confidence=raw.get("confidence") if raw.get("confidence") is not None else 1.0,

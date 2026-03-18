@@ -1138,8 +1138,7 @@ class VectorCypherEngine:
         if entity_section:
             context_text = context_text + entity_section if context_text else entity_section
 
-        entity_name_map: dict[UUID, str] = {entity.id: entity.name for entity, _ in result.entities if entity.id}
-        relationship_section = format_relationship_section(result.relationships, entity_name_map)
+        relationship_section = format_relationship_section(result.relationships)
         if relationship_section:
             context_text = context_text + relationship_section if context_text else relationship_section
 

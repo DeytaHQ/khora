@@ -122,6 +122,11 @@ class Relationship:
     relationship_type: str = "RELATES_TO"
     description: str = ""
 
+    # Denormalized endpoint names — populated at recall time so
+    # relationships are self-describing without a separate entity lookup.
+    source_entity_name: str = ""
+    target_entity_name: str = ""
+
     # Additional properties
     properties: dict[str, Any] = field(default_factory=dict)
 
