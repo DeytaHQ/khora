@@ -582,8 +582,22 @@ class VectorCypherRetriever:
         # Cap total entities to max_entities
         all_entity_scores = all_entity_scores[: self._config.max_entities]
 
-        # Batch-fetch full entities from storage instead of constructing stubs
+        # OPTIMIZATION: Fire entity batch-fetch (PostgreSQL) and relationship
+        # fetch (Neo4j) in parallel — they hit different databases and both
+        # only need the final entity ID list computed above.
         entity_ids_to_fetch = [eid for eid, _ in all_entity_scores]
+        entity_ids_str = [str(eid) for eid, _ in all_entity_scores]
+
+        # Start relationship fetch immediately (doesn't need full Entity objects)
+        rels_task = asyncio.create_task(
+            self._dual_nodes.get_relationships_between(
+                entity_ids_str,
+                str(namespace_id),
+                limit=self._config.max_relationships,
+            )
+        )
+
+        # Batch-fetch full entities from storage in parallel
         entity_results: list[tuple[Entity, float]] = []
 
         if entity_ids_to_fetch and self._storage:
@@ -632,14 +646,8 @@ class VectorCypherRetriever:
                 )
                 entity_results.append((entity, score))
 
-        # Closed-world relationship fetch: query Neo4j with only the final
-        # entity IDs so the DB never returns relationships we'd discard.
-        result_entity_ids_str = [str(entity.id) for entity, _ in entity_results]
-        raw_rels = await self._dual_nodes.get_relationships_between(
-            result_entity_ids_str,
-            str(namespace_id),
-            limit=self._config.max_relationships,
-        )
+        # Await the parallel relationship fetch
+        raw_rels = await rels_task
         entity_scores_by_id: dict[UUID, float] = {entity.id: score for entity, score in entity_results}
         entity_names_by_id: dict[UUID, str] = {entity.id: entity.name for entity, _ in entity_results}
         relationships: list[tuple[Relationship, float]] = []
