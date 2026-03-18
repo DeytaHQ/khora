@@ -40,7 +40,7 @@ from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
-from khora.query.engine import format_entity_section
+from khora.query.engine import format_entity_section, format_relationship_section
 from khora.storage import StorageConfig, create_storage_coordinator
 from khora.telemetry import trace, trace_span
 
@@ -1138,6 +1138,10 @@ class VectorCypherEngine:
         if entity_section:
             context_text = context_text + entity_section if context_text else entity_section
 
+        relationship_section = format_relationship_section(result.relationships)
+        if relationship_section:
+            context_text = context_text + relationship_section if context_text else relationship_section
+
         # Compute retrieval confidence signals for abstention calibration
         scores = [s for _, s in validated_chunks]
         if len(scores) >= 2:
@@ -1159,6 +1163,7 @@ class VectorCypherEngine:
             chunks=validated_chunks,
             entities=result.entities,
             context_text=context_text,
+            relationships=result.relationships,
             metadata={
                 "engine": "vectorcypher",
                 "routing": result.routing_decision.complexity.value,

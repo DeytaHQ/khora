@@ -21,12 +21,12 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from loguru import logger
 from neo4j.exceptions import Neo4jError
 
-from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.core.models import Chunk, ChunkMetadata, Entity, Relationship
 from khora.telemetry import trace_span
 
 from .dual_nodes import DualNodeManager
@@ -62,6 +62,7 @@ class VectorCypherResult:
     chunks: list[tuple[Chunk, float]]
     entities: list[tuple[Entity, float]]
     routing_decision: RoutingDecision
+    relationships: list[tuple[Relationship, float]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -117,6 +118,7 @@ class RetrieverConfig:
     # Limits
     max_chunks: int = 50
     max_entities: int = 30
+    max_relationships: int = 90  # ~3x max_entities
 
 
 def _extract_occurred_at(item: Any) -> str | None:
@@ -564,14 +566,44 @@ class VectorCypherRetriever:
             },
         }
 
-        # Batch-fetch full entities from storage instead of constructing stubs
-        entity_ids_to_fetch = [eid for eid, _ in entry_entities[: self._config.max_entities]]
+        # Collect all entity IDs: entry entities (score 1.0) + expanded (score from graph distance).
+        # Entry entities come first (higher relevance), expanded follow sorted by score desc.
+        all_entity_scores: list[tuple[UUID, float]] = []
+        seen_ids: set[UUID] = set()
+        for eid, score in entry_entities:
+            if eid not in seen_ids:
+                all_entity_scores.append((eid, score))
+                seen_ids.add(eid)
+        for eid, score in sorted(expanded_entities.items(), key=lambda x: x[1], reverse=True):
+            if eid not in seen_ids:
+                all_entity_scores.append((eid, score))
+                seen_ids.add(eid)
+
+        # Cap total entities to max_entities
+        all_entity_scores = all_entity_scores[: self._config.max_entities]
+
+        # OPTIMIZATION: Fire entity batch-fetch (PostgreSQL) and relationship
+        # fetch (Neo4j) in parallel — they hit different databases and both
+        # only need the final entity ID list computed above.
+        entity_ids_to_fetch = [eid for eid, _ in all_entity_scores]
+        entity_ids_str = [str(eid) for eid, _ in all_entity_scores]
+
+        # Start relationship fetch immediately (doesn't need full Entity objects)
+        rels_task = asyncio.create_task(
+            self._dual_nodes.get_relationships_between(
+                entity_ids_str,
+                str(namespace_id),
+                limit=self._config.max_relationships,
+            )
+        )
+
+        # Batch-fetch full entities from storage in parallel
         entity_results: list[tuple[Entity, float]] = []
 
         if entity_ids_to_fetch and self._storage:
             try:
                 entities_map = await self._storage.get_entities_batch(entity_ids_to_fetch)
-                for eid, score in entry_entities[: self._config.max_entities]:
+                for eid, score in all_entity_scores:
                     if eid in entities_map:
                         entity_results.append((entities_map[eid], score))
                     else:
@@ -589,7 +621,7 @@ class VectorCypherRetriever:
             except Exception as e:
                 logger.warning(f"Failed to batch-fetch entities, using stubs: {e}")
                 # Fall back to stub construction
-                for eid, score in entry_entities[: self._config.max_entities]:
+                for eid, score in all_entity_scores:
                     info = entity_info_map.get(str(eid), {})
                     entity = Entity(
                         id=eid,
@@ -602,7 +634,7 @@ class VectorCypherRetriever:
                     entity_results.append((entity, score))
         else:
             # No storage available or no entities to fetch
-            for eid, score in entry_entities[: self._config.max_entities]:
+            for eid, score in all_entity_scores:
                 info = entity_info_map.get(str(eid), {})
                 entity = Entity(
                     id=eid,
@@ -614,9 +646,40 @@ class VectorCypherRetriever:
                 )
                 entity_results.append((entity, score))
 
+        # Await the parallel relationship fetch
+        try:
+            raw_rels = await rels_task
+        except Exception:
+            logger.warning("Relationship fetch failed, continuing without relationships", exc_info=True)
+            raw_rels = []
+        entity_scores_by_id: dict[UUID, float] = {entity.id: score for entity, score in entity_results}
+        entity_names_by_id: dict[UUID, str] = {entity.id: entity.name for entity, _ in entity_results}
+        relationships: list[tuple[Relationship, float]] = []
+        for raw in raw_rels:
+            src_id = UUID(raw["source_entity_id"])
+            tgt_id = UUID(raw["target_entity_id"])
+            rel_score = (entity_scores_by_id.get(src_id, 0.0) + entity_scores_by_id.get(tgt_id, 0.0)) / 2
+            rel = Relationship(
+                id=UUID(raw["id"]) if raw.get("id") else uuid4(),
+                namespace_id=namespace_id,
+                source_entity_id=src_id,
+                target_entity_id=tgt_id,
+                relationship_type=raw.get("relationship_type", "RELATES_TO"),
+                description=raw.get("description", "") or "",
+                source_entity_name=entity_names_by_id.get(src_id, ""),
+                target_entity_name=entity_names_by_id.get(tgt_id, ""),
+                source_document_ids=[UUID(d) for d in (raw.get("source_document_ids") or [])],
+                source_chunk_ids=[UUID(c) for c in (raw.get("source_chunk_ids") or [])],
+                confidence=raw.get("confidence") if raw.get("confidence") is not None else 1.0,
+                weight=raw.get("weight") if raw.get("weight") is not None else 1.0,
+            )
+            relationships.append((rel, rel_score))
+        relationships.sort(key=lambda x: x[1], reverse=True)
+
         return VectorCypherResult(
             chunks=chunk_results,
             entities=entity_results,
+            relationships=relationships,
             routing_decision=routing,
             metadata={
                 "entry_entities": len(entry_entities),

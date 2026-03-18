@@ -122,12 +122,20 @@ class Relationship:
     relationship_type: str = "RELATES_TO"
     description: str = ""
 
+    # Denormalized endpoint names — populated at recall time so
+    # relationships are self-describing without a separate entity lookup.
+    source_entity_name: str = ""
+    target_entity_name: str = ""
+
     # Additional properties
     properties: dict[str, Any] = field(default_factory=dict)
 
     # Source tracking
     source_document_ids: list[UUID] = field(default_factory=list)
     source_chunk_ids: list[UUID] = field(default_factory=list)
+
+    # Populated by MemoryLake when include_sources=True
+    source_documents: dict[UUID, DocumentSource] | None = None
 
     # Temporal validity
     valid_from: datetime | None = None
