@@ -61,11 +61,11 @@ class SurrealDBConnection:
     async def connect(self) -> None:
         if self._connected:
             return
-        from surrealdb import AsyncSurreal  # ty: ignore[unresolved-import]
+        from surrealdb import AsyncSurreal
 
         endpoint = self._build_endpoint()
         logger.info(f"Connecting to SurrealDB ({self._mode}): {endpoint}")
-        self._client = AsyncSurreal(endpoint)
+        self._client: Any = AsyncSurreal(endpoint)
         await self._client.connect()
         await self._client.use(self._namespace, self._database)
         await self._client.signin({"username": self._user, "password": self._password})
