@@ -7,7 +7,6 @@ indexing and BM25 full-text search.  All record IDs follow the
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -15,6 +14,15 @@ from uuid import UUID
 from loguru import logger
 
 from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.storage.backends.surrealdb._helpers import (
+    _HAS_NUMPY,
+    _entity_to_bindings,
+    _iso,
+    _parse_dt,
+    _parse_uuid,
+    _rid,
+    _row_to_entity,
+)
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
@@ -22,56 +30,8 @@ if TYPE_CHECKING:
 
 try:
     import numpy as np
-
-    _HAS_NUMPY = True
 except ImportError:
-    _HAS_NUMPY = False
-
-# Regex to extract a UUID from a SurrealDB record ID.
-# Handles both ``table:uuid`` and ``table:⟨uuid⟩`` forms.
-_RECORD_ID_RE = re.compile(r"[^:]+:\u27e8?([0-9a-fA-F\-]{36})\u27e9?")
-
-
-def _rid(table: str, uid: UUID) -> str:
-    """Build a SurrealDB record-link literal ``table:⟨uuid⟩``."""
-    return f"{table}:\u27e8{uid}\u27e9"
-
-
-def _parse_uuid(record_id: str | dict | UUID | Any) -> UUID:
-    """Extract a UUID from a SurrealDB record ID.
-
-    Handles strings like ``chunk:018f...``, ``chunk:⟨018f...⟩``,
-    bare UUID strings, and ``uuid.UUID`` objects.
-    """
-    if isinstance(record_id, UUID):
-        return record_id
-    raw = str(record_id)
-    m = _RECORD_ID_RE.match(raw)
-    if m:
-        return UUID(m.group(1))
-    # Fall back: try treating the whole string as a UUID
-    return UUID(raw)
-
-
-def _iso(dt: datetime | None) -> str | None:
-    """Convert a datetime to an ISO-8601 string or *None*."""
-    if dt is None:
-        return None
-    return dt.isoformat()
-
-
-def _parse_dt(val: Any) -> datetime | None:
-    """Best-effort parse of a SurrealDB datetime value."""
-    if val is None:
-        return None
-    if isinstance(val, datetime):
-        return val
-    try:
-        raw = str(val)
-        # SurrealDB may return ISO strings
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
+    pass
 
 
 class SurrealDBVectorAdapter:
@@ -382,7 +342,7 @@ class SurrealDBVectorAdapter:
             "created_at = $created_at, "
             "updated_at = $updated_at"
         )
-        await self._conn.execute(sql, self._entity_to_bindings(entity))
+        await self._conn.execute(sql, _entity_to_bindings(entity))
 
     async def update_entity(self, entity: Entity) -> None:
         """Update an existing entity record."""
@@ -404,7 +364,7 @@ class SurrealDBVectorAdapter:
             "metadata_ = $metadata_, "
             "updated_at = $updated_at"
         )
-        bindings = self._entity_to_bindings(entity)
+        bindings = _entity_to_bindings(entity)
         # No created_at on update
         bindings.pop("created_at", None)
         await self._conn.execute(sql, bindings)
@@ -521,29 +481,6 @@ class SurrealDBVectorAdapter:
             "source_timestamp": _iso(chunk.source_timestamp),
         }
 
-    def _entity_to_bindings(self, entity: Entity) -> dict[str, Any]:
-        """Convert an :class:`Entity` to SurrealQL parameter bindings."""
-        return {
-            "id": str(entity.id),
-            "ns": str(entity.namespace_id),
-            "name": entity.name,
-            "entity_type": entity.entity_type,
-            "description": entity.description,
-            "attributes": entity.attributes or {},
-            "source_document_ids": [str(uid) for uid in entity.source_document_ids],
-            "source_chunk_ids": [str(uid) for uid in entity.source_chunk_ids],
-            "source_tool": entity.source_tool,
-            "mention_count": entity.mention_count,
-            "embedding": list(entity.embedding) if entity.embedding is not None else None,
-            "embedding_model": entity.embedding_model,
-            "valid_from": _iso(entity.valid_from),
-            "valid_until": _iso(entity.valid_until),
-            "confidence": entity.confidence,
-            "metadata_": entity.metadata or {},
-            "created_at": _iso(entity.created_at),
-            "updated_at": _iso(entity.updated_at),
-        }
-
     def _row_to_chunk(self, row: dict[str, Any]) -> Chunk:
         """Map a SurrealDB result row to a domain :class:`Chunk`."""
         chunk_id = _parse_uuid(row.get("id", ""))
@@ -582,40 +519,9 @@ class SurrealDBVectorAdapter:
             source_timestamp=_parse_dt(row.get("source_timestamp")),
         )
 
-    def _row_to_entity(self, row: dict[str, Any]) -> Entity:
+    # _row_to_entity is now a module-level function in _helpers.py;
+    # keep a thin instance-method wrapper for backward compatibility.
+    @staticmethod
+    def _row_to_entity(row: dict[str, Any]) -> Entity:  # noqa: D401
         """Map a SurrealDB result row to a domain :class:`Entity`."""
-        entity_id = _parse_uuid(row.get("id", ""))
-        namespace_id = _parse_uuid(row.get("namespace", ""))
-
-        raw_embedding = row.get("embedding")
-        if raw_embedding is not None:
-            if _HAS_NUMPY:
-                embedding: list[float] | Any = np.asarray(raw_embedding, dtype=np.float32)
-            else:
-                embedding = [float(v) for v in raw_embedding]
-        else:
-            embedding = None
-
-        src_doc_ids = [UUID(s) for s in (row.get("source_document_ids") or [])]
-        src_chunk_ids = [UUID(s) for s in (row.get("source_chunk_ids") or [])]
-
-        return Entity(
-            id=entity_id,
-            namespace_id=namespace_id,
-            name=row.get("name", ""),
-            entity_type=row.get("entity_type", "CONCEPT"),
-            description=row.get("description", ""),
-            attributes=row.get("attributes") or {},
-            source_tool=row.get("source_tool", ""),
-            source_document_ids=src_doc_ids,
-            source_chunk_ids=src_chunk_ids,
-            mention_count=int(row.get("mention_count", 1)),
-            embedding=embedding,
-            embedding_model=row.get("embedding_model", ""),
-            valid_from=_parse_dt(row.get("valid_from")),
-            valid_until=_parse_dt(row.get("valid_until")),
-            confidence=float(row.get("confidence", 1.0)),
-            metadata=row.get("metadata_") or {},
-            created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),
-            updated_at=_parse_dt(row.get("updated_at")) or datetime.now(UTC),
-        )
+        return _row_to_entity(row)

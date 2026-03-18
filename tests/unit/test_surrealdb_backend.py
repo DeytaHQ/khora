@@ -353,7 +353,7 @@ class TestSurrealDBFactory:
         assert "surrealdb" in _GRAPH_REGISTRY
         module_path, class_name = _GRAPH_REGISTRY["surrealdb"]
         assert "surrealdb" in module_path
-        assert class_name == "SurrealDBBackend"
+        assert class_name == "SurrealDBGraphAdapter"
 
     def test_surrealdb_in_vector_registry(self) -> None:
         from khora.storage.factory import _VECTOR_REGISTRY
@@ -361,7 +361,7 @@ class TestSurrealDBFactory:
         assert "surrealdb" in _VECTOR_REGISTRY
         module_path, class_name = _VECTOR_REGISTRY["surrealdb"]
         assert "surrealdb" in module_path
-        assert class_name == "SurrealDBBackend"
+        assert class_name == "SurrealDBVectorAdapter"
 
     def test_storage_config_default_backend(self) -> None:
         from khora.storage.factory import StorageConfig
@@ -1718,12 +1718,8 @@ class TestVectorRowConversion:
         assert bindings["token_count"] == 5
 
     def test_entity_to_bindings(self) -> None:
-        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
-
-        conn = _make_mock_conn()
-        adapter = SurrealDBVectorAdapter(conn)
-
         from khora.core.models import Entity
+        from khora.storage.backends.surrealdb._helpers import _entity_to_bindings
 
         entity = Entity(
             name="Bob",
@@ -1732,8 +1728,971 @@ class TestVectorRowConversion:
             embedding=[0.3, 0.4],
             confidence=0.9,
         )
-        bindings = adapter._entity_to_bindings(entity)
+        bindings = _entity_to_bindings(entity)
         assert bindings["name"] == "Bob"
         assert bindings["entity_type"] == "PERSON"
         assert bindings["embedding"] == [0.3, 0.4]
         assert bindings["confidence"] == pytest.approx(0.9)
+
+
+# ===========================================================================
+# Phase 2 — Graph adapter + Event store adapter tests
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Helpers for graph / event-store tests
+# ---------------------------------------------------------------------------
+
+
+def _graph_entity_row(
+    entity_id: UUID | None = None,
+    ns_id: UUID | None = None,
+    *,
+    name: str = "Alice",
+    entity_type: str = "PERSON",
+    description: str = "A test entity",
+    mention_count: int = 1,
+    confidence: float = 0.95,
+) -> dict[str, object]:
+    """Build a SurrealDB result dict that looks like a graph entity row."""
+    entity_id = entity_id or uuid4()
+    ns_id = ns_id or uuid4()
+    now = datetime.now(UTC).isoformat()
+    return {
+        "id": f"entity:\u27e8{entity_id!s}\u27e9",
+        "namespace": f"memory_namespace:\u27e8{ns_id!s}\u27e9",
+        "name": name,
+        "entity_type": entity_type,
+        "description": description,
+        "attributes": {"role": "engineer"},
+        "source_document_ids": [],
+        "source_chunk_ids": [],
+        "source_tool": "",
+        "mention_count": mention_count,
+        "embedding": None,
+        "embedding_model": "",
+        "valid_from": None,
+        "valid_until": None,
+        "confidence": confidence,
+        "metadata_": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _relationship_row(
+    rel_id: UUID | None = None,
+    ns_id: UUID | None = None,
+    source_id: UUID | None = None,
+    target_id: UUID | None = None,
+    *,
+    relationship_type: str = "KNOWS",
+    weight: float = 1.0,
+) -> dict[str, object]:
+    """Build a SurrealDB result dict that looks like a relates_to edge."""
+    rel_id = rel_id or uuid4()
+    ns_id = ns_id or uuid4()
+    source_id = source_id or uuid4()
+    target_id = target_id or uuid4()
+    now = datetime.now(UTC).isoformat()
+    return {
+        "id": f"relates_to:\u27e8{rel_id!s}\u27e9",
+        "namespace_id": str(ns_id),
+        "in": f"entity:\u27e8{source_id!s}\u27e9",
+        "out": f"entity:\u27e8{target_id!s}\u27e9",
+        "relationship_type": relationship_type,
+        "description": "test relationship",
+        "properties": {},
+        "source_document_ids": [],
+        "source_chunk_ids": [],
+        "valid_from": None,
+        "valid_until": None,
+        "confidence": 0.9,
+        "weight": weight,
+        "metadata_": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _episode_row(
+    episode_id: UUID | None = None,
+    ns_id: UUID | None = None,
+    *,
+    name: str = "Meeting",
+    occurred_at: str | None = None,
+) -> dict[str, object]:
+    """Build a SurrealDB result dict that looks like an episode row."""
+    episode_id = episode_id or uuid4()
+    ns_id = ns_id or uuid4()
+    now = datetime.now(UTC).isoformat()
+    return {
+        "id": f"episode:\u27e8{episode_id!s}\u27e9",
+        "namespace": f"memory_namespace:\u27e8{ns_id!s}\u27e9",
+        "name": name,
+        "description": "A test episode",
+        "occurred_at": occurred_at or now,
+        "duration_seconds": 3600,
+        "entity_ids": [],
+        "source_document_ids": [],
+        "source_chunk_ids": [],
+        "embedding": None,
+        "embedding_model": "",
+        "metadata_": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _event_row(
+    event_id: UUID | None = None,
+    ns_id: UUID | None = None,
+    resource_id: UUID | None = None,
+    *,
+    event_type: str = "document.created",
+    resource_type: str = "document",
+) -> dict[str, object]:
+    """Build a SurrealDB result dict that looks like a memory_event row."""
+    event_id = event_id or uuid4()
+    ns_id = ns_id or uuid4()
+    resource_id = resource_id or uuid4()
+    now = datetime.now(UTC).isoformat()
+    return {
+        "id": f"memory_event:\u27e8{event_id!s}\u27e9",
+        "namespace_id": str(ns_id),
+        "event_type": event_type,
+        "timestamp": now,
+        "resource_type": resource_type,
+        "resource_id": str(resource_id),
+        "data": {"key": "value"},
+        "previous_data": None,
+        "actor_id": None,
+        "actor_type": "system",
+        "correlation_id": None,
+        "version": 1,
+        "metadata_": {},
+    }
+
+
+# ── Graph Adapter — lifecycle ─────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBGraphAdapterLifecycle:
+    async def test_connect_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+        await adapter.connect()
+        conn.connect.assert_awaited_once()
+
+    async def test_disconnect_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+        await adapter.disconnect()
+        conn.disconnect.assert_awaited_once()
+
+    async def test_is_healthy_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+        result = await adapter.is_healthy()
+        assert result is True
+        conn.is_healthy.assert_awaited_once()
+
+    def test_get_session_returns_none(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+        assert adapter._get_session() is None
+
+
+# ── Graph Adapter — entity operations ─────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBGraphAdapterEntity:
+    async def test_create_entity(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        eid = uuid4()
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models.entity import Entity
+
+        entity = Entity(id=eid, namespace_id=ns_id, name="Alice", entity_type="PERSON")
+        result = await adapter.create_entity(entity)
+
+        conn.execute.assert_awaited_once()
+        assert result.id == eid
+        assert result.name == "Alice"
+        assert result.entity_type == "PERSON"
+
+    async def test_get_entity(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        eid = uuid4()
+        ns_id = uuid4()
+        row = _graph_entity_row(eid, ns_id, name="Bob", entity_type="ORGANIZATION")
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_entity(eid)
+
+        assert result is not None
+        assert result.id == eid
+        assert result.name == "Bob"
+        assert result.entity_type == "ORGANIZATION"
+
+    async def test_get_entity_not_found(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_entity(uuid4())
+        assert result is None
+
+    async def test_get_entity_by_name(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        eid = uuid4()
+        ns_id = uuid4()
+        row = _graph_entity_row(eid, ns_id, name="Charlie", entity_type="CONCEPT")
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_entity_by_name(ns_id, "Charlie", "CONCEPT")
+
+        assert result is not None
+        assert result.name == "Charlie"
+        assert result.entity_type == "CONCEPT"
+        # Verify the query used namespace_id, name, and entity_type
+        call_args = conn.query_one.call_args
+        query_str = call_args[0][0]
+        assert "name" in query_str
+        assert "entity_type" in query_str
+
+    async def test_update_entity(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        eid = uuid4()
+        ns_id = uuid4()
+        row = _graph_entity_row(eid, ns_id, name="Updated", entity_type="PERSON")
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models.entity import Entity
+
+        entity = Entity(id=eid, namespace_id=ns_id, name="Updated", entity_type="PERSON")
+        result = await adapter.update_entity(entity)
+
+        assert result.id == eid
+        assert result.name == "Updated"
+
+    async def test_delete_entity(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        eid = uuid4()
+        conn = _make_mock_conn()
+        # delete_entity calls query_one to check existence, then execute to delete
+        conn.query_one = AsyncMock(return_value={"cnt": 1})
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.delete_entity(eid)
+        assert result is True
+        conn.query_one.assert_awaited_once()
+        conn.execute.assert_awaited()
+
+    async def test_delete_entity_not_found(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.delete_entity(uuid4())
+        assert result is False
+
+    async def test_list_entities(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        rows = [
+            _graph_entity_row(ns_id=ns_id, name="E1"),
+            _graph_entity_row(ns_id=ns_id, name="E2"),
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.list_entities(ns_id)
+        assert len(result) == 2
+        assert result[0].name == "E1"
+        assert result[1].name == "E2"
+
+    async def test_list_entities_with_type_filter(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        rows = [_graph_entity_row(ns_id=ns_id, name="Org1", entity_type="ORGANIZATION")]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.list_entities(ns_id, entity_type="ORGANIZATION")
+        assert len(result) == 1
+        assert result[0].entity_type == "ORGANIZATION"
+        # Verify entity_type filter was included in the query
+        call_args = conn.query.call_args
+        query_str = call_args[0][0]
+        assert "entity_type" in query_str
+
+    async def test_count_entities(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"cnt": 42})
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.count_entities(ns_id)
+        assert result == 42
+
+    async def test_get_entities_batch(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        eid1 = uuid4()
+        eid2 = uuid4()
+        ns_id = uuid4()
+        rows = [
+            _graph_entity_row(eid1, ns_id, name="BatchE1"),
+            _graph_entity_row(eid2, ns_id, name="BatchE2"),
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_entities_batch([eid1, eid2])
+        assert len(result) == 2
+        assert eid1 in result
+        assert eid2 in result
+        assert result[eid1].name == "BatchE1"
+        assert result[eid2].name == "BatchE2"
+
+
+# ── Graph Adapter — relationship operations ───────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBGraphAdapterRelationship:
+    async def test_create_relationship(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        rel_id = uuid4()
+        ns_id = uuid4()
+        src_id = uuid4()
+        tgt_id = uuid4()
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models.entity import Relationship
+
+        rel = Relationship(
+            id=rel_id,
+            namespace_id=ns_id,
+            source_entity_id=src_id,
+            target_entity_id=tgt_id,
+            relationship_type="WORKS_AT",
+        )
+        result = await adapter.create_relationship(rel)
+
+        conn.execute.assert_awaited_once()
+        assert result.id == rel_id
+        assert result.relationship_type == "WORKS_AT"
+        # Verify RELATE was used (SurrealDB relation creation)
+        call_args = conn.execute.call_args
+        query_str = call_args[0][0]
+        assert "RELATE" in query_str
+
+    async def test_get_relationship(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        rel_id = uuid4()
+        ns_id = uuid4()
+        src_id = uuid4()
+        tgt_id = uuid4()
+        row = _relationship_row(rel_id, ns_id, src_id, tgt_id)
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_relationship(rel_id)
+        assert result is not None
+        assert result.id == rel_id
+        assert result.source_entity_id == src_id
+        assert result.target_entity_id == tgt_id
+
+    async def test_delete_relationship(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        rel_id = uuid4()
+        conn = _make_mock_conn()
+        # delete_relationship calls query_one to check existence, then execute to delete
+        conn.query_one = AsyncMock(return_value={"cnt": 1})
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.delete_relationship(rel_id)
+        assert result is True
+        conn.query_one.assert_awaited_once()
+        conn.execute.assert_awaited_once()
+
+    async def test_get_entity_relationships_outgoing(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        entity_id = uuid4()
+        ns_id = uuid4()
+        rows = [_relationship_row(ns_id=ns_id, source_id=entity_id)]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_entity_relationships(entity_id, direction="outgoing")
+        assert len(result) == 1
+        # Verify query uses in=entity:⟨id⟩ for outgoing (in = source in SurrealDB)
+        call_args = conn.query.call_args
+        query_str = call_args[0][0]
+        assert "in" in query_str or "out" in query_str
+
+    async def test_get_entity_relationships_incoming(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        entity_id = uuid4()
+        ns_id = uuid4()
+        rows = [_relationship_row(ns_id=ns_id, target_id=entity_id)]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_entity_relationships(entity_id, direction="incoming")
+        assert len(result) == 1
+
+    async def test_get_entity_relationships_both(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        entity_id = uuid4()
+        ns_id = uuid4()
+        rows = [
+            _relationship_row(ns_id=ns_id, source_id=entity_id),
+            _relationship_row(ns_id=ns_id, target_id=entity_id),
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_entity_relationships(entity_id, direction="both")
+        assert len(result) == 2
+
+    async def test_list_relationships(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        rows = [
+            _relationship_row(ns_id=ns_id, relationship_type="KNOWS"),
+            _relationship_row(ns_id=ns_id, relationship_type="WORKS_WITH"),
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.list_relationships(ns_id)
+        assert len(result) == 2
+        # Verify namespace filter was used
+        call_args = conn.query.call_args
+        query_str = call_args[0][0]
+        assert "namespace_id" in query_str
+
+    async def test_create_relationships_batch(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[{}, {}, {}])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models.entity import Relationship
+
+        rels = [
+            Relationship(namespace_id=ns_id, relationship_type="KNOWS"),
+            Relationship(namespace_id=ns_id, relationship_type="WORKS_WITH"),
+            Relationship(namespace_id=ns_id, relationship_type="LOCATED_IN"),
+        ]
+        count = await adapter.create_relationships_batch(rels)
+        assert count == 3
+
+
+# ── Graph Adapter — episode operations ────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBGraphAdapterEpisode:
+    async def test_create_episode(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ep_id = uuid4()
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models.entity import Episode
+
+        episode = Episode(id=ep_id, namespace_id=ns_id, name="Team Standup")
+        result = await adapter.create_episode(episode)
+
+        conn.execute.assert_awaited_once()
+        assert result.id == ep_id
+        assert result.name == "Team Standup"
+
+    async def test_get_episode(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ep_id = uuid4()
+        ns_id = uuid4()
+        row = _episode_row(ep_id, ns_id, name="Sprint Review")
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_episode(ep_id)
+
+        assert result is not None
+        assert result.id == ep_id
+        assert result.name == "Sprint Review"
+
+    async def test_list_episodes(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        rows = [
+            _episode_row(ns_id=ns_id, name="Morning"),
+            _episode_row(ns_id=ns_id, name="Afternoon"),
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 12, 31, tzinfo=UTC)
+        result = await adapter.list_episodes(ns_id, start_time=start, end_time=end)
+
+        assert len(result) == 2
+        # Verify time filters were used in the query
+        call_args = conn.query.call_args
+        query_str = call_args[0][0]
+        # Should contain time-related filtering
+        assert "occurred_at" in query_str or "created_at" in query_str
+
+
+# ── Graph Adapter — traversal operations ──────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBGraphAdapterTraversal:
+    async def test_find_paths(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        src_id = uuid4()
+        tgt_id = uuid4()
+        # find_paths issues one query per depth (1..3), each returning a
+        # "targets" field with entity dicts.  Provide a match at depth 1.
+        depth1_result = [
+            {"targets": [{"id": f"entity:\u27e8{tgt_id!s}\u27e9"}]},
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=depth1_result)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.find_paths(ns_id, src_id, tgt_id, max_depth=3)
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        # find_paths calls conn.query once per depth level (up to 3)
+        assert conn.query.await_count == 3
+
+    async def test_get_neighborhood(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        entity_id = uuid4()
+        ns_id = uuid4()
+        neighbor_id = uuid4()
+        # Neighborhood returns entities + relationships
+        neighborhood_data = [
+            _graph_entity_row(neighbor_id, ns_id, name="Neighbor"),
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=neighborhood_data)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_neighborhood(entity_id, depth=1)
+        assert isinstance(result, dict)
+        conn.query.assert_awaited()
+
+    async def test_search_entities_by_attribute(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        rows = [_graph_entity_row(ns_id=ns_id, name="Found")]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.search_entities_by_attribute(ns_id, "role", "engineer")
+        assert len(result) == 1
+        assert result[0].name == "Found"
+
+
+# ── Graph Adapter — upsert operations ─────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBGraphAdapterUpsert:
+    async def test_upsert_entities_batch_new(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        eid = uuid4()
+        row = _graph_entity_row(eid, ns_id, name="NewEntity")
+
+        conn = _make_mock_conn()
+        # get_entity_by_name returns None => entity is new
+        conn.query_one = AsyncMock(side_effect=[None, row])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models.entity import Entity
+
+        entity = Entity(id=eid, namespace_id=ns_id, name="NewEntity", entity_type="CONCEPT")
+        result = await adapter.upsert_entities_batch(ns_id, [entity])
+
+        assert len(result) == 1
+        returned_entity, is_new = result[0]
+        assert returned_entity.name == "NewEntity"
+        assert is_new is True
+
+    async def test_upsert_entities_batch_existing(self) -> None:
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        eid = uuid4()
+        existing_row = _graph_entity_row(eid, ns_id, name="ExistingEntity", mention_count=3)
+        updated_row = _graph_entity_row(eid, ns_id, name="ExistingEntity", mention_count=4)
+
+        conn = _make_mock_conn()
+        # get_entity_by_name returns existing row => entity exists
+        conn.query_one = AsyncMock(side_effect=[existing_row, updated_row])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models.entity import Entity
+
+        entity = Entity(id=eid, namespace_id=ns_id, name="ExistingEntity", entity_type="CONCEPT")
+        result = await adapter.upsert_entities_batch(ns_id, [entity])
+
+        assert len(result) == 1
+        returned_entity, is_new = result[0]
+        assert returned_entity.name == "ExistingEntity"
+        assert is_new is False
+
+
+# ── Event Store Adapter — lifecycle ───────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBEventStoreLifecycle:
+    async def test_connect_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBEventStoreAdapter(conn)
+        await adapter.connect()
+        conn.connect.assert_awaited_once()
+
+    async def test_disconnect_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBEventStoreAdapter(conn)
+        await adapter.disconnect()
+        conn.disconnect.assert_awaited_once()
+
+    async def test_is_healthy_delegates(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBEventStoreAdapter(conn)
+        result = await adapter.is_healthy()
+        assert result is True
+        conn.is_healthy.assert_awaited_once()
+
+
+# ── Event Store Adapter — operations ──────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBEventStoreOperations:
+    async def test_append_event(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        ev_id = uuid4()
+        ns_id = uuid4()
+        res_id = uuid4()
+        row = _event_row(ev_id, ns_id, res_id, event_type="entity.created", resource_type="entity")
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        from khora.core.models.event import EventType, MemoryEvent
+
+        event = MemoryEvent(
+            id=ev_id,
+            namespace_id=ns_id,
+            event_type=EventType.ENTITY_CREATED,
+            resource_type="entity",
+            resource_id=res_id,
+            data={"key": "value"},
+        )
+        result = await adapter.append_event(event)
+
+        conn.query_one.assert_awaited_once()
+        assert result.id == ev_id
+        assert result.event_type == EventType.ENTITY_CREATED
+        assert result.resource_type == "entity"
+
+    async def test_append_event_raises_on_none(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        from khora.core.models.event import MemoryEvent
+
+        event = MemoryEvent()
+        with pytest.raises(RuntimeError, match="Failed to append event"):
+            await adapter.append_event(event)
+
+    async def test_append_events_batch(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        ns_id = uuid4()
+        ev1_id = uuid4()
+        ev2_id = uuid4()
+        rows = [
+            _event_row(ev1_id, ns_id, event_type="document.created"),
+            _event_row(ev2_id, ns_id, event_type="document.updated"),
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        from khora.core.models.event import EventType, MemoryEvent
+
+        events = [
+            MemoryEvent(id=ev1_id, namespace_id=ns_id, event_type=EventType.DOCUMENT_CREATED),
+            MemoryEvent(id=ev2_id, namespace_id=ns_id, event_type=EventType.DOCUMENT_UPDATED),
+        ]
+        result = await adapter.append_events_batch(events)
+
+        assert len(result) == 2
+        conn.query.assert_awaited_once()
+        # Verify INSERT INTO was used
+        call_args = conn.query.call_args
+        query_str = call_args[0][0]
+        assert "INSERT INTO" in query_str
+
+    async def test_append_events_batch_empty(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.append_events_batch([])
+        assert result == []
+        conn.query.assert_not_awaited()
+
+    async def test_get_events(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        ns_id = uuid4()
+        rows = [
+            _event_row(ns_id=ns_id, event_type="document.created"),
+            _event_row(ns_id=ns_id, event_type="entity.created"),
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.get_events(ns_id)
+        assert len(result) == 2
+        conn.query.assert_awaited_once()
+
+    async def test_get_events_with_type_filter(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        ns_id = uuid4()
+        rows = [_event_row(ns_id=ns_id, event_type="entity.created")]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.get_events(ns_id, event_types=["entity.created"])
+        assert len(result) == 1
+        # Verify event_type filter was included in the query
+        call_args = conn.query.call_args
+        query_str = call_args[0][0]
+        assert "event_type" in query_str
+        bindings = call_args[0][1]
+        assert bindings["event_types"] == ["entity.created"]
+
+    async def test_get_events_with_time_filter(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        ns_id = uuid4()
+        rows = [_event_row(ns_id=ns_id)]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        after = datetime(2024, 1, 1, tzinfo=UTC)
+        before = datetime(2024, 12, 31, tzinfo=UTC)
+        result = await adapter.get_events(ns_id, after=after, before=before)
+
+        assert len(result) == 1
+        call_args = conn.query.call_args
+        query_str = call_args[0][0]
+        assert "timestamp > $after" in query_str
+        assert "timestamp < $before" in query_str
+
+    async def test_get_events_for_resource(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        res_id = uuid4()
+        rows = [_event_row(resource_id=res_id, resource_type="document")]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=rows)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.get_events_for_resource("document", res_id)
+        assert len(result) == 1
+        # Verify resource_type and resource_id were used
+        call_args = conn.query.call_args
+        query_str = call_args[0][0]
+        assert "resource_type" in query_str
+        assert "resource_id" in query_str
+
+    async def test_get_latest_event(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        res_id = uuid4()
+        row = _event_row(resource_id=res_id, resource_type="entity", event_type="entity.updated")
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.get_latest_event("entity", res_id)
+        assert result is not None
+        # Verify LIMIT 1 and ORDER BY were used
+        call_args = conn.query_one.call_args
+        query_str = call_args[0][0]
+        assert "LIMIT 1" in query_str
+        assert "ORDER BY" in query_str
+
+    async def test_get_latest_event_not_found(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.get_latest_event("document", uuid4())
+        assert result is None
+
+    async def test_count_events(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"total": 17})
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.count_events(ns_id)
+        assert result == 17
+        # Verify count() query was used
+        call_args = conn.query_one.call_args
+        query_str = call_args[0][0]
+        assert "count()" in query_str
+
+    async def test_count_events_empty(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.count_events(ns_id)
+        assert result == 0
+
+    async def test_count_events_with_type_filter(self) -> None:
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"total": 5})
+        adapter = SurrealDBEventStoreAdapter(conn)
+
+        result = await adapter.count_events(ns_id, event_types=["entity.created"])
+        assert result == 5
+        call_args = conn.query_one.call_args
+        query_str = call_args[0][0]
+        assert "event_type" in query_str

@@ -31,13 +31,13 @@ _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
     "kuzu": ("khora.storage.backends.kuzu", "KuzuBackend"),
     "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
     "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
-    "surrealdb": ("khora.storage.backends.surrealdb.backend", "SurrealDBBackend"),
+    "surrealdb": ("khora.storage.backends.surrealdb.graph", "SurrealDBGraphAdapter"),
 }
 
 _VECTOR_REGISTRY: dict[str, tuple[str, str]] = {
     "pgvector": ("khora.storage.backends.pgvector", "PgVectorBackend"),
     "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
-    "surrealdb": ("khora.storage.backends.surrealdb.backend", "SurrealDBBackend"),
+    "surrealdb": ("khora.storage.backends.surrealdb.vector", "SurrealDBVectorAdapter"),
 }
 
 
@@ -397,14 +397,34 @@ class StorageFactory:
             if surreal_config is None:
                 raise ValueError("SurrealDB backend selected but surrealdb_config is not set")
 
-            # Create a single SurrealDB backend instance shared across roles
-            surreal_backend = self._create_from_registry(_GRAPH_REGISTRY, "surrealdb", surreal_config, "graph+vector")
-            return StorageCoordinator(
-                relational=None,
-                vector=surreal_backend,
-                graph=surreal_backend,
-                event_store=None,
-            )
+            # Create a shared SurrealDB connection for all four adapters
+            try:
+                from .backends.surrealdb.connection import SurrealDBConnection
+                from .backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+                from .backends.surrealdb.graph import SurrealDBGraphAdapter
+                from .backends.surrealdb.relational import SurrealDBRelationalAdapter
+                from .backends.surrealdb.vector import SurrealDBVectorAdapter
+
+                conn = SurrealDBConnection(
+                    mode=getattr(surreal_config, "mode", "memory"),
+                    path=getattr(surreal_config, "path", None),
+                    url=getattr(surreal_config, "url", None),
+                    namespace=getattr(surreal_config, "namespace", "khora"),
+                    database=getattr(surreal_config, "database", "default"),
+                    user=getattr(surreal_config, "user", "root"),
+                    password=getattr(surreal_config, "password", "root"),
+                )
+                return StorageCoordinator(
+                    relational=SurrealDBRelationalAdapter(conn),
+                    vector=SurrealDBVectorAdapter(conn),
+                    graph=SurrealDBGraphAdapter(conn),
+                    event_store=SurrealDBEventStoreAdapter(conn),
+                )
+            except ImportError:
+                raise ValueError(
+                    "SurrealDB backend selected but surrealdb package is not installed. "
+                    "Install with: pip install khora[surrealdb]"
+                )
 
         return StorageCoordinator(
             relational=self.create_relational_backend(),
