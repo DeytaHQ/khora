@@ -22,6 +22,7 @@ from khora.db.models import (
     MemoryNamespaceModel,
     SyncCheckpointModel,
 )
+from khora.db.schema import sync_enum_values
 from khora.storage.backends.base import PaginatedResult
 from khora.storage.backends.mixins import AsyncSessionMixin, retry_on_deadlock
 
@@ -120,6 +121,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             raise RuntimeError("Backend not connected. Call connect() first.")
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await sync_enum_values(self._engine)
 
     # =========================================================================
     # Namespace operations
