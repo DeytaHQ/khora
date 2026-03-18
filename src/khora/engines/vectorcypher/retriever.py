@@ -565,14 +565,30 @@ class VectorCypherRetriever:
             },
         }
 
+        # Collect all entity IDs: entry entities (score 1.0) + expanded (score from graph distance).
+        # Entry entities come first (higher relevance), expanded follow sorted by score desc.
+        all_entity_scores: list[tuple[UUID, float]] = []
+        seen_ids: set[UUID] = set()
+        for eid, score in entry_entities:
+            if eid not in seen_ids:
+                all_entity_scores.append((eid, score))
+                seen_ids.add(eid)
+        for eid, score in sorted(expanded_entities.items(), key=lambda x: x[1], reverse=True):
+            if eid not in seen_ids:
+                all_entity_scores.append((eid, score))
+                seen_ids.add(eid)
+
+        # Cap total entities to max_entities
+        all_entity_scores = all_entity_scores[: self._config.max_entities]
+
         # Batch-fetch full entities from storage instead of constructing stubs
-        entity_ids_to_fetch = [eid for eid, _ in entry_entities[: self._config.max_entities]]
+        entity_ids_to_fetch = [eid for eid, _ in all_entity_scores]
         entity_results: list[tuple[Entity, float]] = []
 
         if entity_ids_to_fetch and self._storage:
             try:
                 entities_map = await self._storage.get_entities_batch(entity_ids_to_fetch)
-                for eid, score in entry_entities[: self._config.max_entities]:
+                for eid, score in all_entity_scores:
                     if eid in entities_map:
                         entity_results.append((entities_map[eid], score))
                     else:
@@ -590,7 +606,7 @@ class VectorCypherRetriever:
             except Exception as e:
                 logger.warning(f"Failed to batch-fetch entities, using stubs: {e}")
                 # Fall back to stub construction
-                for eid, score in entry_entities[: self._config.max_entities]:
+                for eid, score in all_entity_scores:
                     info = entity_info_map.get(str(eid), {})
                     entity = Entity(
                         id=eid,
@@ -603,7 +619,7 @@ class VectorCypherRetriever:
                     entity_results.append((entity, score))
         else:
             # No storage available or no entities to fetch
-            for eid, score in entry_entities[: self._config.max_entities]:
+            for eid, score in all_entity_scores:
                 info = entity_info_map.get(str(eid), {})
                 entity = Entity(
                     id=eid,
