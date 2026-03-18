@@ -65,10 +65,11 @@ class SurrealDBConnection:
 
         endpoint = self._build_endpoint()
         logger.info(f"Connecting to SurrealDB ({self._mode}): {endpoint}")
-        self._client: Any = AsyncSurreal(endpoint)
-        await self._client.connect()
-        await self._client.use(self._namespace, self._database)
-        await self._client.signin({"username": self._user, "password": self._password})
+        client: Any = AsyncSurreal(endpoint)
+        await client.connect()
+        await client.use(self._namespace, self._database)
+        await client.signin({"username": self._user, "password": self._password})
+        self._client = client
         self._connected = True
         logger.info(f"Connected to SurrealDB ({self._mode}), ns={self._namespace}, db={self._database}")
 
