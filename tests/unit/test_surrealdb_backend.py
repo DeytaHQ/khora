@@ -96,11 +96,16 @@ class TestSurrealDBFeatureFlag:
 
         assert isinstance(_HAS_SURREALDB, bool)
 
-    def test_has_surrealdb_false_without_package(self) -> None:
-        """In the test environment surrealdb is not installed."""
+    def test_has_surrealdb_flag_consistent(self) -> None:
+        """_HAS_SURREALDB reflects whether surrealdb is importable."""
         from khora.storage.backends.surrealdb import _HAS_SURREALDB
 
-        assert _HAS_SURREALDB is False
+        try:
+            import surrealdb  # noqa: F401
+
+            assert _HAS_SURREALDB is True
+        except ImportError:
+            assert _HAS_SURREALDB is False
 
 
 # ── Config ────────────────────────────────────────────────────────────────
