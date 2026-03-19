@@ -66,7 +66,10 @@ class _EntityKeyGate:
         self._max_concurrent = max_concurrent
 
     @asynccontextmanager
-    async def acquire(self, entities: list) -> AsyncIterator[None]:
+    async def acquire(self, entities: list, *, bypass: bool = False) -> AsyncIterator[None]:
+        if bypass:
+            yield
+            return
         keys = {
             (
                 str(e.namespace_id),
@@ -641,6 +644,7 @@ class Neo4jBackend(GraphBackendBase):
         entities: list[Entity],
         *,
         batch_size: int = 100,
+        bulk_mode: bool = False,
     ) -> list[tuple[Entity, bool]]:
         """Batch upsert entities using UNWIND + MERGE.
 
@@ -779,99 +783,118 @@ class Neo4jBackend(GraphBackendBase):
             batch = sorted_entities[start : start + batch_size]
             rows = [_entity_to_cypher_params(e) for e in batch]
 
-            # Phase 0: Snapshot existing entities before MERGE
-            prefetch_keys = [
-                {
-                    "namespace_id": str(e.namespace_id),
-                    "name": e.name,
-                    "entity_type": e.entity_type,
-                }
-                for e in batch
-            ]
+            if bulk_mode:
+                # Bulk mode: skip prefetch+versioning, bypass gate.
+                # Used for --rewrite (new namespace) where no existing entities
+                # can conflict and no prior versions need tracking.
+                async def _merge_only_tx(
+                    tx: AsyncManagedTransaction,
+                ) -> list[dict[str, Any]]:
+                    merge_result = await tx.run(_UPSERT_CYPHER, rows=rows)
+                    return await merge_result.data()
 
-            # Combined prefetch + MERGE in a single write transaction.
-            # The prefetch read runs first (seeing pre-merge state), then
-            # the MERGE runs — one round trip instead of two separate sessions.
-            async def _prefetch_and_upsert_tx(
-                tx: AsyncManagedTransaction,
-            ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-                pre_result = await tx.run(_PREFETCH_CYPHER, keys=prefetch_keys)
-                pre_data = await pre_result.data()
-                merge_result = await tx.run(_UPSERT_CYPHER, rows=rows)
-                merge_data = await merge_result.data()
-                return pre_data, merge_data
-
-            _gate_t0 = _time.perf_counter()
-            async with self._entity_key_gate.acquire(batch):
-                _total_gate_wait_ms += (_time.perf_counter() - _gate_t0) * 1000
-
-                _merge_t0 = _time.perf_counter()
-                async with driver.session(database=self._database) as session:
-                    pre_existing, records = await session.execute_write(_prefetch_and_upsert_tx)
-                _total_prefetch_merge_ms += (_time.perf_counter() - _merge_t0) * 1000
-
-            # Index pre-existing entities by (namespace_id, name, entity_type)
-            pre_map: dict[tuple[str, str, str], dict[str, Any]] = {}
-            for rec in pre_existing:
-                key = (rec["namespace_id"], rec["name"], rec["entity_type"])
-                pre_map[key] = rec
-
-            # Phase 2: Create versioned snapshots for entities with changed attributes
-            now_iso = datetime.now(UTC).isoformat()
-            version_rows: list[dict[str, Any]] = []
-            input_id_to_row = {r["id"]: r for r in rows}
-
-            for record in records:
-                if record["is_new"]:
-                    continue
-                # This was a MATCH (existing entity) — check if attributes changed
-                neo4j_id = record["id"]
-                # Find the corresponding input row
-                input_id = record["input_id"]
-                input_row = input_id_to_row.get(input_id)
-                if not input_row:
-                    continue
-
-                pre_key = (input_row["namespace_id"], input_row["name"], input_row["entity_type"])
-                pre = pre_map.get(pre_key)
-                if not pre:
-                    continue
-
-                # Compare serialized attributes to detect real changes
-                if pre["attributes"] == input_row["attributes"]:
-                    continue
-
-                version_rows.append(
+                _gate_t0 = _time.perf_counter()
+                async with self._entity_key_gate.acquire(batch, bypass=True):
+                    _total_gate_wait_ms += (_time.perf_counter() - _gate_t0) * 1000
+                    _merge_t0 = _time.perf_counter()
+                    async with driver.session(database=self._database) as session:
+                        records = await session.execute_write(_merge_only_tx)
+                    _total_prefetch_merge_ms += (_time.perf_counter() - _merge_t0) * 1000
+            else:
+                # Normal mode: prefetch + MERGE + versioning
+                # Phase 0: Snapshot existing entities before MERGE
+                prefetch_keys = [
                     {
-                        "current_id": neo4j_id,
-                        "old_version_id": str(uuid4()),
-                        "old_attributes": pre["attributes"],
-                        "old_description": pre.get("description", ""),
-                        "old_source_document_ids": pre.get("source_document_ids", []),
-                        "old_source_chunk_ids": pre.get("source_chunk_ids", []),
-                        "old_mention_count": pre.get("mention_count", 1),
-                        "old_confidence": pre.get("confidence", 1.0),
-                        "old_metadata": pre.get("metadata"),
-                        "old_version_valid_from": pre.get("version_valid_from") or now_iso,
-                        "superseded_at": now_iso,
-                        "new_version_valid_from": input_row["version_valid_from"],
+                        "namespace_id": str(e.namespace_id),
+                        "name": e.name,
+                        "entity_type": e.entity_type,
                     }
-                )
+                    for e in batch
+                ]
 
-            if version_rows:
+                # Combined prefetch + MERGE in a single write transaction.
+                # The prefetch read runs first (seeing pre-merge state), then
+                # the MERGE runs — one round trip instead of two separate sessions.
+                async def _prefetch_and_upsert_tx(
+                    tx: AsyncManagedTransaction,
+                ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                    pre_result = await tx.run(_PREFETCH_CYPHER, keys=prefetch_keys)
+                    pre_data = await pre_result.data()
+                    merge_result = await tx.run(_UPSERT_CYPHER, rows=rows)
+                    merge_data = await merge_result.data()
+                    return pre_data, merge_data
 
-                async def _version_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
-                    result = await tx.run(_VERSION_CYPHER, version_rows=version_rows)
-                    return await result.data()
+                _gate_t0 = _time.perf_counter()
+                async with self._entity_key_gate.acquire(batch):
+                    _total_gate_wait_ms += (_time.perf_counter() - _gate_t0) * 1000
 
-                _ver_t0 = _time.perf_counter()
-                async with driver.session(database=self._database) as session:
-                    version_records = await session.execute_write(_version_tx)
-                _total_versioning_ms += (_time.perf_counter() - _ver_t0) * 1000
-                logger.debug(
-                    f"Bi-temporal versioning: created {len(version_records)} "
-                    f"SUPERSEDES snapshots for {len(version_rows)} changed entities"
-                )
+                    _merge_t0 = _time.perf_counter()
+                    async with driver.session(database=self._database) as session:
+                        pre_existing, records = await session.execute_write(_prefetch_and_upsert_tx)
+                    _total_prefetch_merge_ms += (_time.perf_counter() - _merge_t0) * 1000
+
+                # Index pre-existing entities by (namespace_id, name, entity_type)
+                pre_map: dict[tuple[str, str, str], dict[str, Any]] = {}
+                for rec in pre_existing:
+                    key = (rec["namespace_id"], rec["name"], rec["entity_type"])
+                    pre_map[key] = rec
+
+                # Phase 2: Create versioned snapshots for entities with changed attributes
+                now_iso = datetime.now(UTC).isoformat()
+                version_rows: list[dict[str, Any]] = []
+                input_id_to_row = {r["id"]: r for r in rows}
+
+                for record in records:
+                    if record["is_new"]:
+                        continue
+                    # This was a MATCH (existing entity) — check if attributes changed
+                    neo4j_id = record["id"]
+                    # Find the corresponding input row
+                    input_id = record["input_id"]
+                    input_row = input_id_to_row.get(input_id)
+                    if not input_row:
+                        continue
+
+                    pre_key = (input_row["namespace_id"], input_row["name"], input_row["entity_type"])
+                    pre = pre_map.get(pre_key)
+                    if not pre:
+                        continue
+
+                    # Compare serialized attributes to detect real changes
+                    if pre["attributes"] == input_row["attributes"]:
+                        continue
+
+                    version_rows.append(
+                        {
+                            "current_id": neo4j_id,
+                            "old_version_id": str(uuid4()),
+                            "old_attributes": pre["attributes"],
+                            "old_description": pre.get("description", ""),
+                            "old_source_document_ids": pre.get("source_document_ids", []),
+                            "old_source_chunk_ids": pre.get("source_chunk_ids", []),
+                            "old_mention_count": pre.get("mention_count", 1),
+                            "old_confidence": pre.get("confidence", 1.0),
+                            "old_metadata": pre.get("metadata"),
+                            "old_version_valid_from": pre.get("version_valid_from") or now_iso,
+                            "superseded_at": now_iso,
+                            "new_version_valid_from": input_row["version_valid_from"],
+                        }
+                    )
+
+                if version_rows:
+
+                    async def _version_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+                        result = await tx.run(_VERSION_CYPHER, version_rows=version_rows)
+                        return await result.data()
+
+                    _ver_t0 = _time.perf_counter()
+                    async with driver.session(database=self._database) as session:
+                        version_records = await session.execute_write(_version_tx)
+                    _total_versioning_ms += (_time.perf_counter() - _ver_t0) * 1000
+                    logger.debug(
+                        f"Bi-temporal versioning: created {len(version_records)} "
+                        f"SUPERSEDES snapshots for {len(version_rows)} changed entities"
+                    )
 
             # Build result mapping - each input entity should get exactly one result
             input_id_to_entity = {str(e.id): e for e in batch}

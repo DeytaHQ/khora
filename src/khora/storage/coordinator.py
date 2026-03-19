@@ -668,11 +668,17 @@ class StorageCoordinator:
         entities: list[Entity],
         *,
         batch_size: int = 200,
+        bulk_mode: bool = False,
     ) -> list[tuple[Entity, bool]]:
         """Batch upsert entities across graph and vector backends.
 
         Uses MERGE semantics: creates new entities, updates existing ones
         matched by (namespace_id, name, entity_type).
+
+        Args:
+            bulk_mode: When True, skip prefetch/versioning and bypass the
+                entity key gate.  Used for --rewrite (new namespace) where
+                no existing entities can conflict.
 
         Returns list of (entity, is_new) tuples.
         """
@@ -691,16 +697,31 @@ class StorageCoordinator:
             assert self.vector is not None  # narrowed by has_vector
             if self._is_unified_backend:
                 # Single DB — graph adapter upsert is sufficient
-                results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+                results = await self.graph.upsert_entities_batch(
+                    namespace_id,
+                    entities,
+                    batch_size=batch_size,
+                    bulk_mode=bulk_mode,
+                )
             else:
                 graph_results, _ = await asyncio.gather(
-                    self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
+                    self.graph.upsert_entities_batch(
+                        namespace_id,
+                        entities,
+                        batch_size=batch_size,
+                        bulk_mode=bulk_mode,
+                    ),
                     self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),  # type: ignore[unresolved-attribute]
                 )
                 results = graph_results
         elif has_graph:
             assert self.graph is not None
-            results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+            results = await self.graph.upsert_entities_batch(
+                namespace_id,
+                entities,
+                batch_size=batch_size,
+                bulk_mode=bulk_mode,
+            )
         elif has_vector:
             results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)  # type: ignore[unresolved-attribute]
 
