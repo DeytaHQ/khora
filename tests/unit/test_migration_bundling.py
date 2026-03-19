@@ -411,3 +411,226 @@ class TestMigrationPackageStructure:
         """__init__.py exists making migrations a proper package."""
         init_path = Path(__file__).parent.parent.parent / "src" / "khora" / "db" / "migrations" / "__init__.py"
         assert init_path.exists(), f"__init__.py not found at {init_path}"
+
+
+# ---------------------------------------------------------------------------
+# env.py — _seed_version_table logic
+# ---------------------------------------------------------------------------
+
+
+def _load_env_functions():
+    """Load env.py functions without triggering module-level Alembic side effects.
+
+    env.py executes ``context.is_offline_mode()`` at import time (lines 150-153)
+    and reads ``context.config`` at module level (line 20).  We mock the entire
+    alembic.context *attribute* on the alembic package so ``from alembic import context``
+    resolves to our mock, then force-reimport the env module.
+    """
+    import importlib
+    import sys
+
+    import alembic
+
+    # Build a mock that satisfies all module-level access patterns
+    mock_context = MagicMock()
+    mock_context.config = MagicMock()
+    mock_context.config.config_file_name = None
+    mock_context.config.attributes = {}
+    mock_context.is_offline_mode.return_value = False
+    mock_context.configure = MagicMock()
+    mock_context.begin_transaction = MagicMock(return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock()))
+    mock_context.run_migrations = MagicMock()
+
+    # Patch alembic.context at both the attribute and sys.modules level
+    orig_attr = getattr(alembic, "context", None)
+    orig_mod = sys.modules.get("alembic.context")
+    alembic.context = mock_context
+    sys.modules["alembic.context"] = mock_context
+
+    mod_name = "khora.db.migrations.env"
+    orig_env = sys.modules.pop(mod_name, None)
+
+    try:
+        with patch("asyncio.run"):
+            mod = importlib.import_module(mod_name)
+        return mod
+    finally:
+        # Restore original state
+        sys.modules.pop(mod_name, None)
+        if orig_env is not None:
+            sys.modules[mod_name] = orig_env
+        if orig_mod is not None:
+            sys.modules["alembic.context"] = orig_mod
+        elif "alembic.context" in sys.modules:
+            del sys.modules["alembic.context"]
+        if orig_attr is not None:
+            alembic.context = orig_attr
+
+
+class TestSeedVersionTable:
+    """Tests for _seed_version_table in env.py."""
+
+    @pytest.mark.unit
+    def test_skips_when_already_seeded(self):
+        """Skips seeding if khora_alembic_version already has rows."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        # First query: SELECT 1 FROM khora_alembic_version — has data
+        conn.execute.return_value.fetchone.return_value = (1,)
+
+        env._seed_version_table(conn)
+
+        # Only one execute call (the check), no INSERT
+        assert conn.execute.call_count == 1
+
+    @pytest.mark.unit
+    def test_seeds_from_old_table(self):
+        """Copies revision from alembic_version when khora table is empty."""
+        env = _load_env_functions()
+        conn = MagicMock()
+
+        call_count = [0]
+
+        def fake_execute(stmt, params=None):
+            call_count[0] += 1
+            result = MagicMock()
+            if call_count[0] == 1:
+                # khora_alembic_version is empty
+                result.fetchone.return_value = None
+            elif call_count[0] == 2:
+                # alembic_version has a revision
+                result.fetchone.return_value = ("abc123",)
+            return result
+
+        conn.execute.side_effect = fake_execute
+
+        env._seed_version_table(conn)
+
+        # 3 calls: check khora table, check old table, INSERT
+        assert conn.execute.call_count == 3
+
+    @pytest.mark.unit
+    def test_skips_when_old_table_missing(self):
+        """Skips seeding when alembic_version table doesn't exist."""
+        env = _load_env_functions()
+        conn = MagicMock()
+
+        call_count = [0]
+
+        def fake_execute(stmt, params=None):
+            call_count[0] += 1
+            result = MagicMock()
+            if call_count[0] == 1:
+                # khora_alembic_version is empty
+                result.fetchone.return_value = None
+            elif call_count[0] == 2:
+                # alembic_version doesn't exist
+                raise Exception("relation does not exist")
+            return result
+
+        conn.execute.side_effect = fake_execute
+
+        env._seed_version_table(conn)
+
+        # Only 2 calls — no INSERT
+        assert conn.execute.call_count == 2
+
+    @pytest.mark.unit
+    def test_skips_when_old_table_empty(self):
+        """Skips seeding when alembic_version exists but is empty."""
+        env = _load_env_functions()
+        conn = MagicMock()
+
+        call_count = [0]
+
+        def fake_execute(stmt, params=None):
+            call_count[0] += 1
+            result = MagicMock()
+            if call_count[0] == 1:
+                # khora_alembic_version is empty
+                result.fetchone.return_value = None
+            elif call_count[0] == 2:
+                # alembic_version exists but is empty
+                result.fetchone.return_value = None
+            return result
+
+        conn.execute.side_effect = fake_execute
+
+        env._seed_version_table(conn)
+
+        # Only 2 calls — no INSERT
+        assert conn.execute.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# env.py — _acquire_advisory_lock logic
+# ---------------------------------------------------------------------------
+
+
+class TestAcquireAdvisoryLock:
+    """Tests for _acquire_advisory_lock in env.py."""
+
+    @pytest.mark.unit
+    def test_acquires_immediately(self):
+        """Lock acquired on first try returns immediately."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        conn.execute.return_value.scalar.return_value = True
+
+        env._acquire_advisory_lock(conn)
+
+        conn.execute.assert_called_once()
+
+    @pytest.mark.unit
+    def test_retries_then_acquires(self):
+        """Retries when lock not available, succeeds on subsequent attempt."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        # First call: not acquired. Second call: acquired.
+        conn.execute.return_value.scalar.side_effect = [False, True]
+
+        with patch("time.sleep"):
+            env._acquire_advisory_lock(conn, timeout=60.0)
+
+        assert conn.execute.call_count == 2
+
+    @pytest.mark.unit
+    def test_timeout_raises(self):
+        """Raises TimeoutError when lock cannot be acquired within timeout."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        conn.execute.return_value.scalar.return_value = False
+
+        with patch("time.sleep"), pytest.raises(TimeoutError, match="advisory lock"):
+            env._acquire_advisory_lock(conn, timeout=0.0)
+
+
+# ---------------------------------------------------------------------------
+# MemoryLake.connect() — already connected (idempotent)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryLakeConnectIdempotent:
+    """Tests for MemoryLake.connect() idempotency."""
+
+    @pytest.mark.unit
+    async def test_connect_already_connected_is_noop(self):
+        """Calling connect() when already connected is a no-op."""
+        mock_engine = MagicMock()
+        mock_engine.connect = AsyncMock()
+
+        with (
+            patch("khora.memory_lake.load_config", return_value=_mock_config()),
+            patch("khora.engines.create_engine", return_value=mock_engine) as mock_create,
+        ):
+            lake = MemoryLake(run_migrations=True)
+            # Simulate already connected
+            lake._connected = True
+            lake._engine = mock_engine
+
+            await lake.connect()
+
+        # create_engine should NOT have been called (short-circuited)
+        mock_create.assert_not_called()
+        # engine.connect should NOT have been called again
+        mock_engine.connect.assert_not_called()
