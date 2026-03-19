@@ -1267,6 +1267,14 @@ class VectorCypherEngine:
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
+        Uses a staged pipeline to batch API calls across documents:
+          Stage 1: Dedup, create Document objects, chunk (parallel CPU)
+          Stage 2: Batch-embed ALL chunks in one API call
+          Stage 3: Store chunks to pgvector + Neo4j (parallel DB)
+          Stage 4: Skeleton-select core chunks, extract entities (parallel LLM)
+          Stage 5: Batch-embed ALL entities in one API call
+          Stage 6: Batch store entities + relationships to Neo4j + pgvector
+
         Args:
             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
             namespace_id: Namespace to store documents in
@@ -1275,25 +1283,40 @@ class VectorCypherEngine:
             deduplicate: Whether to skip duplicate documents
             infer_relationships: Whether to infer relationships
             on_progress: Callback for progress updates
+            entity_types: Entity types to extract
+            relationship_types: Relationship types to extract
 
         Returns:
             BatchResult with processing statistics
         """
         if not documents:
-            return BatchResult(
-                total=0,
-                processed=0,
-                skipped=0,
-                failed=0,
-                chunks=0,
-                entities=0,
-                relationships=0,
+            return BatchResult(total=0, processed=0, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+
+        use_streaming = self._vc_config.streaming_pipeline
+        if not use_streaming:
+            # Legacy path: fall back to per-document processing
+            return await self._remember_batch_legacy(
+                documents,
+                namespace_id,
+                skill_name=skill_name,
+                expertise=expertise,
+                extraction_model=extraction_model,
+                max_concurrent=max_concurrent,
+                deduplicate=deduplicate,
+                on_progress=on_progress,
+                entity_types=entity_types,
+                relationship_types=relationship_types,
             )
 
+        from khora.extraction.chunkers import create_chunker
+        from khora.pipelines.tasks.extract import extract_entities
+
         storage = self._get_storage()
+        embedder = self._get_embedder()
+        temporal_store = self._get_temporal_store()
+        dual_nodes = self._get_dual_nodes()
         total = len(documents)
 
-        # Track results
         results: dict[str, int] = {
             "processed": 0,
             "skipped": 0,
@@ -1302,187 +1325,301 @@ class VectorCypherEngine:
             "entities": 0,
             "relationships": 0,
         }
-        results_lock = asyncio.Lock()
         progress_count = 0
-        progress_lock = asyncio.Lock()
 
-        # Compute checksums
-        doc_checksums: list[str] = []
-        for doc_data in documents:
-            content = doc_data.get("content", "")
-            checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            doc_checksums.append(checksum)
+        def _report_progress(n: int = 1) -> None:
+            nonlocal progress_count
+            if on_progress:
+                progress_count += n
+                on_progress(progress_count, total)
 
-        # Batch lookup existing documents
+        # ── Stage 0: Dedup ──────────────────────────────────────────────
+        _stage0_t0 = _time.perf_counter()
+        doc_checksums = [hashlib.sha256(d.get("content", "").encode("utf-8")).hexdigest() for d in documents]
         existing_docs: dict[str, Any] = {}
         if deduplicate:
             existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
 
-        # Track in-flight checksums for intra-batch deduplication
-        checksums_in_flight: set[str] = set()
-        checksums_lock = asyncio.Lock()
+        # Filter to non-duplicate documents, preserving original index
+        checksums_seen: set[str] = set()
+        active_indices: list[int] = []
+        for idx, checksum in enumerate(doc_checksums):
+            if checksum in checksums_seen or (deduplicate and checksum in existing_docs):
+                results["skipped"] += 1
+                _report_progress()
+            else:
+                checksums_seen.add(checksum)
+                active_indices.append(idx)
+        _stage0_ms = (_time.perf_counter() - _stage0_t0) * 1000
 
-        semaphore = asyncio.Semaphore(max_concurrent)
+        if not active_indices:
+            return BatchResult(total=total, **results)
 
-        use_streaming = self._vc_config.streaming_pipeline
-
-        # WS3: Detect conversation mode and build context-enriched embedding text.
-        # Conversation mode: >50% of docs have occurred_at AND avg content < 200 chars.
-        conversation_context: dict[int, str] = {}
+        # ── Conversation mode detection ─────────────────────────────────
         docs_with_ts = sum(1 for d in documents if "occurred_at" in d.get("metadata", {}))
-        avg_content_len = sum(len(d.get("content", "")) for d in documents) / max(len(documents), 1)
-        if docs_with_ts > len(documents) * 0.5 and avg_content_len < 200:
-            # Sort by occurred_at for context windowing
+        avg_content_len = sum(len(d.get("content", "")) for d in documents) / max(total, 1)
+        context_by_orig: dict[int, str] = {}
+        is_conversation_mode = False
+        if docs_with_ts > total * 0.5 and avg_content_len < 200:
             indexed_docs = list(enumerate(documents))
-            indexed_docs.sort(
-                key=lambda x: x[1].get("metadata", {}).get("occurred_at", ""),
-            )
+            indexed_docs.sort(key=lambda x: x[1].get("metadata", {}).get("occurred_at", ""))
             sorted_docs = [d for _, d in indexed_docs]
             conversation_context = self._build_conversation_context(sorted_docs)
-            # Map from original index to context text
             orig_to_sorted = {orig_idx: sort_idx for sort_idx, (orig_idx, _) in enumerate(indexed_docs)}
-            context_by_orig: dict[int, str] = {
+            context_by_orig = {
                 orig_idx: conversation_context[sort_idx]
                 for orig_idx, sort_idx in orig_to_sorted.items()
                 if sort_idx in conversation_context
             }
+            is_conversation_mode = bool(context_by_orig)
             logger.info(
-                f"Conversation mode detected: {docs_with_ts}/{len(documents)} docs with timestamps, "
+                f"Conversation mode detected: {docs_with_ts}/{total} docs with timestamps, "
                 f"avg content {avg_content_len:.0f} chars, enriching embeddings"
             )
-        else:
-            context_by_orig = {}
 
-        is_conversation_mode = bool(context_by_orig)
+        skeleton_ratio = self._vc_config.conversation_skeleton_ratio if is_conversation_mode else None
 
-        # Streaming pipeline: accumulate entities across documents for batch storage
+        # ── Stage 1: Create documents + chunk in parallel (CPU) ─────────
+        _stage1_t0 = _time.perf_counter()
+
+        chunker = create_chunker(
+            strategy=self._config.pipeline.chunking_strategy,
+            chunk_size=self._config.pipeline.chunk_size,
+            chunk_overlap=self._config.pipeline.chunk_overlap,
+        )
+
+        @dataclass
+        class _DocState:
+            idx: int
+            doc_data: dict[str, Any]
+            checksum: str
+            document: Document | None = None
+            raw_chunks: list = field(default_factory=list)
+            embed_texts: list[str] = field(default_factory=list)
+            occurred_at: datetime | None = None
+            failed: bool = False
+
+        doc_states: list[_DocState] = []
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def _create_and_chunk(idx: int) -> _DocState:
+            doc_data = documents[idx]
+            checksum = doc_checksums[idx]
+            state = _DocState(idx=idx, doc_data=doc_data, checksum=checksum)
+            try:
+                doc_metadata = doc_data.get("metadata", {})
+                if "occurred_at" in doc_metadata:
+                    state.occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+
+                async with sem:
+                    document = Document(
+                        namespace_id=namespace_id,
+                        content=doc_data.get("content", ""),
+                        metadata=DocumentMetadata(
+                            title=doc_data.get("title", ""),
+                            source=doc_data.get("source", ""),
+                            checksum=checksum,
+                            source_type="api",
+                            custom=doc_metadata,
+                        ),
+                    )
+                    document = await storage.create_document(document)
+                    state.document = document
+
+                    raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
+                    state.raw_chunks = raw_chunks
+
+                    # Determine embedding text (conversation context or raw chunk content)
+                    if idx in context_by_orig:
+                        state.embed_texts = [context_by_orig[idx]]
+                    else:
+                        state.embed_texts = [c.content for c in raw_chunks]
+            except Exception as e:
+                logger.error(f"Failed to create/chunk document {idx}: {e}")
+                state.failed = True
+            return state
+
+        doc_states = await asyncio.gather(*[_create_and_chunk(idx) for idx in active_indices])
+
+        # Separate successful from failed
+        failed_states = [s for s in doc_states if s.failed or not s.raw_chunks]
+        ok_states = [s for s in doc_states if not s.failed and s.raw_chunks]
+        for s in failed_states:
+            if s.failed:
+                results["failed"] += 1
+            elif not s.raw_chunks and s.document:
+                s.document.mark_completed(0, 0)
+                await storage.update_document(s.document)
+                results["processed"] += 1
+            _report_progress()
+
+        _stage1_ms = (_time.perf_counter() - _stage1_t0) * 1000
+
+        if not ok_states:
+            return BatchResult(total=total, **results)
+
+        # ── Stage 2: Batch-embed ALL chunk texts ────────────────────────
+        _stage2_t0 = _time.perf_counter()
+
+        # Collect all texts with provenance tracking
+        all_embed_texts: list[str] = []
+        text_offsets: list[tuple[int, int]] = []  # (state_index, start_offset) into all_embed_texts
+        for si, state in enumerate(ok_states):
+            text_offsets.append((si, len(all_embed_texts)))
+            all_embed_texts.extend(state.embed_texts)
+
+        logger.debug(f"Batch embedding {len(all_embed_texts)} texts across {len(ok_states)} documents")
+        all_embeddings = await embedder.embed_batch(all_embed_texts)
+
+        _stage2_ms = (_time.perf_counter() - _stage2_t0) * 1000
+
+        # ── Stage 3: Build TemporalChunks + store to pgvector + Neo4j ───
+        _stage3_t0 = _time.perf_counter()
+
+        # Build TemporalChunk objects with pre-computed embeddings
+        all_temporal_chunks: list[TemporalChunk] = []
+        state_chunk_ranges: list[tuple[int, int]] = []  # (start, end) indices into all_temporal_chunks
+
+        for si, state in enumerate(ok_states):
+            doc = state.document
+            assert doc is not None
+            doc_metadata = doc.metadata.custom if doc.metadata else {}
+            occurred = state.occurred_at or datetime.now(UTC)
+
+            start_idx = len(all_temporal_chunks)
+            _, embed_offset = text_offsets[si]
+
+            for ci, raw_chunk in enumerate(state.raw_chunks):
+                embedding = all_embeddings[embed_offset + min(ci, len(state.embed_texts) - 1)]
+                tc = TemporalChunk(
+                    id=None,
+                    namespace_id=doc.namespace_id,
+                    document_id=doc.id,
+                    content=raw_chunk.content,
+                    embedding=embedding,
+                    occurred_at=occurred,
+                    created_at=datetime.now(UTC),
+                    source_system=doc_metadata.get("source_system"),
+                    author=doc_metadata.get("author"),
+                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                    tags=doc_metadata.get("tags", []),
+                    confidence=1.0,
+                    metadata={
+                        "chunk_index": ci,
+                        "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+                        "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                        **{k: v for k, v in doc_metadata.items() if isinstance(v, (str, int, float, bool))},
+                    },
+                )
+                all_temporal_chunks.append(tc)
+
+            state_chunk_ranges.append((start_idx, len(all_temporal_chunks)))
+
+        # Batch store to pgvector
+        stored = await temporal_store.create_chunks_batch(all_temporal_chunks)
+        for i, s in enumerate(stored):
+            all_temporal_chunks[i].id = s.id
+
+        # Batch create Neo4j chunk nodes
+        await dual_nodes.create_chunk_nodes_batch(all_temporal_chunks, namespace_id)
+
+        _stage3_ms = (_time.perf_counter() - _stage3_t0) * 1000
+
+        # ── Stage 4: Skeleton extraction across ALL documents ───────────
+        _stage4_t0 = _time.perf_counter()
+
         all_entities: list[Entity] = []
         all_relationships: list[Relationship] = []
         all_entity_chunk_links: list[EntityChunkLink] = []
-        entity_lock = asyncio.Lock()
 
-        async def process_document(doc_data: dict[str, Any], checksum: str, doc_index: int = 0) -> None:
-            nonlocal progress_count
+        if self._config.pipeline.extract_entities:
+            # Collect all chunks across documents for batch skeleton extraction
+            all_core_chunk_objects: list[Chunk] = []
 
-            # Check for intra-batch duplicate
-            async with checksums_lock:
-                if checksum in checksums_in_flight:
-                    async with results_lock:
-                        results["skipped"] += 1
-                    return
-                checksums_in_flight.add(checksum)
+            for si, state in enumerate(ok_states):
+                start, end = state_chunk_ranges[si]
+                doc_chunks = all_temporal_chunks[start:end]
 
-            # Check if already exists
-            if deduplicate and checksum in existing_docs:
-                async with results_lock:
-                    results["skipped"] += 1
-                if on_progress:
-                    async with progress_lock:
-                        progress_count += 1
-                        on_progress(progress_count, total)
-                return
+                if not doc_chunks:
+                    continue
 
-            async with semaphore:
-                try:
-                    doc_metadata = doc_data.get("metadata", {})
-                    occurred_at = None
-                    if "occurred_at" in doc_metadata:
-                        occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+                # Skeleton selection per document (maintains document-level PageRank semantics)
+                min_tokens = self._vc_config.min_extraction_tokens
+                if is_conversation_mode:
+                    min_tokens = min(min_tokens, 15)
+                if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in doc_chunks):
+                    continue
 
-                    if use_streaming:
-                        # Streaming path: create document + process, defer entity storage
-                        document = Document(
-                            namespace_id=namespace_id,
-                            content=doc_data.get("content", ""),
-                            metadata=DocumentMetadata(
-                                title=doc_data.get("title", ""),
-                                source=doc_data.get("source", ""),
-                                checksum=checksum,
-                                source_type="api",
-                                custom=doc_metadata,
-                            ),
-                        )
-                        document = await storage.create_document(document)
+                if len(doc_chunks) <= 2:
+                    core_ids = {c.id for c in doc_chunks}
+                else:
+                    effective_ratio = skeleton_ratio or self._vc_config.skeleton_core_ratio
+                    skeleton = SkeletonIndexer(core_ratio=effective_ratio)
+                    skeleton.add_chunks_batch(doc_chunks)
+                    core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
-                        chunks_created, entities, rels, links = await self._process_document_streaming(
-                            document,
-                            skill_name=skill_name,
-                            expertise=expertise,
-                            extraction_model=extraction_model,
-                            occurred_at=occurred_at or datetime.now(UTC),
-                            embedding_text_override=context_by_orig.get(doc_index),
-                            entity_types=entity_types,
-                            relationship_types=relationship_types,
-                            skeleton_ratio_override=(
-                                self._vc_config.conversation_skeleton_ratio if is_conversation_mode else None
-                            ),
+                for tc in doc_chunks:
+                    if tc.id in core_ids:
+                        all_core_chunk_objects.append(
+                            Chunk(
+                                id=tc.id,
+                                namespace_id=tc.namespace_id,
+                                document_id=tc.document_id,
+                                content=tc.content,
+                                created_at=tc.created_at or tc.occurred_at,
+                            )
                         )
 
-                        # Accumulate entities for batch storage
-                        if entities or rels or links:
-                            async with entity_lock:
-                                all_entities.extend(entities)
-                                all_relationships.extend(rels)
-                                all_entity_chunk_links.extend(links)
+            if all_core_chunk_objects:
+                logger.debug(
+                    f"Batch extraction: {len(all_core_chunk_objects)} core chunks " f"from {len(ok_states)} documents"
+                )
+                model = extraction_model or self._config.llm.model
+                entities, relationships = await extract_entities(
+                    all_core_chunk_objects,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    model=model,
+                    max_concurrent=self._vc_config.max_concurrent_extractions,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    store_events=self._vc_config.store_events,
+                )
 
-                        # Update document status
-                        document.mark_completed(chunks_created, len(entities))
-                        await storage.update_document(document)
+                if entities:
+                    all_entities = list(entities)
+                    all_relationships = list(relationships)
 
-                        async with results_lock:
-                            results["processed"] += 1
-                            results["chunks"] += chunks_created
-                            results["entities"] += len(entities)
-                            results["relationships"] += len(rels)
-                    else:
-                        # Legacy path: per-document storage
-                        result = await self.remember(
-                            doc_data.get("content", ""),
-                            namespace_id,
-                            title=doc_data.get("title", ""),
-                            source=doc_data.get("source", ""),
-                            metadata=doc_metadata,
-                            skill_name=skill_name,
-                            expertise=expertise,
-                            extraction_model=extraction_model,
-                            occurred_at=occurred_at,
-                            entity_types=entity_types,
-                            relationship_types=relationship_types,
-                        )
+                    # Build entity-chunk links
+                    for entity in all_entities:
+                        for chunk_id in entity.source_chunk_ids:
+                            all_entity_chunk_links.append(EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id))
 
-                        async with results_lock:
-                            if result.metadata.get("duplicate"):
-                                results["skipped"] += 1
-                            else:
-                                results["processed"] += 1
-                                results["chunks"] += result.chunks_created
-                                results["entities"] += result.entities_extracted
-                                results["relationships"] += result.relationships_created
+                    # Co-occurrence relationships
+                    cooccurrence_rels = _build_cooccurrence_relationships(all_entities, namespace_id, all_relationships)
+                    if cooccurrence_rels:
+                        all_relationships.extend(cooccurrence_rels)
 
-                except Exception as e:
-                    logger.error(f"Failed to process document: {e}")
-                    async with results_lock:
-                        results["failed"] += 1
+        _stage4_ms = (_time.perf_counter() - _stage4_t0) * 1000
 
-            if on_progress:
-                async with progress_lock:
-                    progress_count += 1
-                    on_progress(progress_count, total)
+        # ── Stage 5: Batch-embed ALL entity texts ───────────────────────
+        _stage5_t0 = _time.perf_counter()
 
-        # Phase 2: Process all documents in parallel
-        _phase2_t0 = _time.perf_counter()
-        await asyncio.gather(
-            *[process_document(doc, checksum, idx) for idx, (doc, checksum) in enumerate(zip(documents, doc_checksums))]
-        )
-        _phase2_ms = (_time.perf_counter() - _phase2_t0) * 1000
+        if all_entities:
+            entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in all_entities]
+            entity_embeddings = await embedder.embed_batch(entity_texts)
+            for entity, emb in zip(all_entities, entity_embeddings):
+                entity.embedding = emb
+                entity.embedding_model = embedder.model_name
 
-        # Phase 3: Batch entity storage (streaming pipeline only)
-        _phase3_upsert_ms = 0.0
-        _phase3_rels_ms = 0.0
-        _phase3_links_ms = 0.0
-        if use_streaming and all_entities:
-            dual_nodes = self._get_dual_nodes()
+        _stage5_ms = (_time.perf_counter() - _stage5_t0) * 1000
 
+        # ── Stage 6: Batch store entities + relationships ───────────────
+        _stage6_upsert_ms = 0.0
+        _stage6_rels_ms = 0.0
+        _stage6_links_ms = 0.0
+
+        if all_entities:
             # Cross-document entity dedup by normalized name:type
             if self._vc_config.enable_smart_resolution:
                 from khora._accel import normalize_entity_name
@@ -1504,27 +1641,44 @@ class VectorCypherEngine:
                 all_entities = list(deduped.values())
                 logger.debug(f"Cross-document dedup: {len(deduped)} unique entities")
 
-            # Single batch upsert to Neo4j + pgvector
             _t0 = _time.perf_counter()
             await storage.upsert_entities_batch(namespace_id, all_entities)
-            _phase3_upsert_ms = (_time.perf_counter() - _t0) * 1000
+            _stage6_upsert_ms = (_time.perf_counter() - _t0) * 1000
 
             if all_relationships:
                 _t0 = _time.perf_counter()
                 await storage.create_relationships_batch(all_relationships)
-                _phase3_rels_ms = (_time.perf_counter() - _t0) * 1000
+                _stage6_rels_ms = (_time.perf_counter() - _t0) * 1000
 
             if all_entity_chunk_links:
                 _t0 = _time.perf_counter()
                 await dual_nodes.link_entities_to_chunks_batch(all_entity_chunk_links)
-                _phase3_links_ms = (_time.perf_counter() - _t0) * 1000
+                _stage6_links_ms = (_time.perf_counter() - _t0) * 1000
 
             logger.info(
                 f"Streaming pipeline batch store: {len(all_entities)} entities, "
                 f"{len(all_relationships)} relationships, {len(all_entity_chunk_links)} links"
             )
 
-        _phase3_total_ms = _phase3_upsert_ms + _phase3_rels_ms + _phase3_links_ms
+        # ── Update document statuses ────────────────────────────────────
+        for si, state in enumerate(ok_states):
+            doc = state.document
+            assert doc is not None
+            start, end = state_chunk_ranges[si]
+            chunks_created = end - start
+            # Count entities from this document's chunks
+            doc_chunk_ids = {all_temporal_chunks[i].id for i in range(start, end)}
+            doc_entity_count = sum(1 for e in all_entities if any(cid in doc_chunk_ids for cid in e.source_chunk_ids))
+            doc.mark_completed(chunks_created, doc_entity_count)
+            await storage.update_document(doc)
+            results["processed"] += 1
+            results["chunks"] += chunks_created
+            _report_progress()
+
+        results["entities"] += len(all_entities)
+        results["relationships"] += len(all_relationships)
+
+        _stage6_total_ms = _stage6_upsert_ms + _stage6_rels_ms + _stage6_links_ms
         with trace_span(
             "khora.vectorcypher.remember_batch",
             document_count=total,
@@ -1534,13 +1688,22 @@ class VectorCypherEngine:
             chunks=results["chunks"],
             entities=results["entities"],
             relationships=results["relationships"],
-            phase2_processing_ms=round(_phase2_ms, 2),
-            phase3_entity_upsert_ms=round(_phase3_upsert_ms, 2),
-            phase3_relationships_ms=round(_phase3_rels_ms, 2),
-            phase3_entity_chunk_links_ms=round(_phase3_links_ms, 2),
-            phase3_total_ms=round(_phase3_total_ms, 2),
+            stage0_dedup_ms=round(_stage0_ms, 2),
+            stage1_chunk_ms=round(_stage1_ms, 2),
+            stage2_embed_chunks_ms=round(_stage2_ms, 2),
+            stage3_store_chunks_ms=round(_stage3_ms, 2),
+            stage4_extraction_ms=round(_stage4_ms, 2),
+            stage5_embed_entities_ms=round(_stage5_ms, 2),
+            stage6_store_entities_ms=round(_stage6_total_ms, 2),
         ):
             pass
+
+        logger.info(
+            f"Staged pipeline: dedup={_stage0_ms:.0f}ms, chunk={_stage1_ms:.0f}ms, "
+            f"embed_chunks={_stage2_ms:.0f}ms, store_chunks={_stage3_ms:.0f}ms, "
+            f"extract={_stage4_ms:.0f}ms, embed_entities={_stage5_ms:.0f}ms, "
+            f"store_entities={_stage6_total_ms:.0f}ms"
+        )
 
         return BatchResult(
             total=total,
@@ -1551,6 +1714,97 @@ class VectorCypherEngine:
             entities=results["entities"],
             relationships=results["relationships"],
         )
+
+    async def _remember_batch_legacy(
+        self,
+        documents: list[dict[str, Any]],
+        namespace_id: UUID,
+        *,
+        skill_name: str = "general_entities",
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_model: str | None = None,
+        max_concurrent: int = 20,
+        deduplicate: bool = True,
+        on_progress: Callable[[int, int], None] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
+    ) -> BatchResult:
+        """Legacy per-document remember_batch (non-streaming pipeline)."""
+        storage = self._get_storage()
+        total = len(documents)
+        results: dict[str, int] = {
+            "processed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "chunks": 0,
+            "entities": 0,
+            "relationships": 0,
+        }
+        results_lock = asyncio.Lock()
+        progress_count = 0
+        progress_lock = asyncio.Lock()
+        doc_checksums = [hashlib.sha256(d.get("content", "").encode("utf-8")).hexdigest() for d in documents]
+        existing_docs: dict[str, Any] = {}
+        if deduplicate:
+            existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
+        checksums_in_flight: set[str] = set()
+        checksums_lock = asyncio.Lock()
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
+            nonlocal progress_count
+            async with checksums_lock:
+                if checksum in checksums_in_flight:
+                    async with results_lock:
+                        results["skipped"] += 1
+                    return
+                checksums_in_flight.add(checksum)
+            if deduplicate and checksum in existing_docs:
+                async with results_lock:
+                    results["skipped"] += 1
+                if on_progress:
+                    async with progress_lock:
+                        progress_count += 1
+                        on_progress(progress_count, total)
+                return
+            async with semaphore:
+                try:
+                    doc_metadata = doc_data.get("metadata", {})
+                    occurred_at = None
+                    if "occurred_at" in doc_metadata:
+                        occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+                    result = await self.remember(
+                        doc_data.get("content", ""),
+                        namespace_id,
+                        title=doc_data.get("title", ""),
+                        source=doc_data.get("source", ""),
+                        metadata=doc_metadata,
+                        skill_name=skill_name,
+                        expertise=expertise,
+                        extraction_model=extraction_model,
+                        occurred_at=occurred_at,
+                        entity_types=entity_types,
+                        relationship_types=relationship_types,
+                    )
+                    async with results_lock:
+                        if result.metadata.get("duplicate"):
+                            results["skipped"] += 1
+                        else:
+                            results["processed"] += 1
+                            results["chunks"] += result.chunks_created
+                            results["entities"] += result.entities_extracted
+                            results["relationships"] += result.relationships_created
+                except Exception as e:
+                    logger.error(f"Failed to process document: {e}")
+                    async with results_lock:
+                        results["failed"] += 1
+            if on_progress:
+                async with progress_lock:
+                    progress_count += 1
+                    on_progress(progress_count, total)
+
+        await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
+        return BatchResult(total=total, **results)
 
     # Compiled regex for lightweight temporal keyword detection
     _TEMPORAL_KW_RE = re.compile(
