@@ -473,10 +473,14 @@ class TestAcquireAdvisoryLock:
         # First call: not acquired. Second call: acquired.
         conn.execute.return_value.scalar.side_effect = [False, True]
 
-        with patch("time.sleep"):
+        with patch("time.sleep") as mock_sleep, patch("random.uniform", return_value=0.05) as mock_uniform:
             env._acquire_advisory_lock(conn, timeout=60.0)
 
         assert conn.execute.call_count == 2
+        # One retry → one sleep with jitter
+        mock_sleep.assert_called_once()
+        # attempt=0: high = min(2.0, 0.05 * 2^0) = 0.05
+        mock_uniform.assert_called_once_with(0.05, 0.05)
 
     @pytest.mark.unit
     def test_timeout_raises(self):
@@ -494,10 +498,148 @@ class TestAcquireAdvisoryLock:
         conn = MagicMock()
         conn.execute.return_value.scalar.return_value = False
 
-        # First monotonic() sets deadline, second monotonic() exceeds it
-        with patch("time.sleep"), patch("time.monotonic", side_effect=[0.0, 61.0]):
+        # monotonic() calls: (1) deadline=0+60=60, (2) check=30 (under deadline, retry),
+        # (3) check=61 (over deadline, raise)
+        with (
+            patch("time.sleep"),
+            patch("time.monotonic", side_effect=[0.0, 30.0, 61.0]),
+            patch("random.uniform", return_value=0.05) as mock_uniform,
+        ):
             with pytest.raises(TimeoutError, match="advisory lock"):
                 env._acquire_advisory_lock(conn, timeout=60.0)
+
+        # One retry before deadline exceeded → one uniform call
+        # attempt=0: high = min(2.0, 0.05 * 2^0) = 0.05
+        mock_uniform.assert_called_once_with(0.05, 0.05)
+
+    @pytest.mark.unit
+    def test_backoff_increases_exponentially(self):
+        """Successive retries increase the upper bound exponentially, capped at max_delay."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        # Lock never acquired — 8 attempts then deadline exceeded
+        conn.execute.return_value.scalar.return_value = False
+
+        min_delay, max_delay = 0.05, 2.0
+        num_retries = 8
+        # monotonic: first call sets deadline, then num_retries checks under deadline,
+        # then one final check that exceeds deadline
+        mono_values = [0.0] + [1.0] * num_retries + [61.0]
+
+        with (
+            patch("time.sleep"),
+            patch("time.monotonic", side_effect=mono_values),
+            patch("random.uniform", return_value=0.01) as mock_uniform,
+        ):
+            with pytest.raises(TimeoutError):
+                env._acquire_advisory_lock(conn, timeout=60.0, min_delay=min_delay, max_delay=max_delay)
+
+        # Verify the upper bounds passed to random.uniform increase exponentially
+        expected_highs = []
+        for attempt in range(num_retries):
+            high = min(max_delay, min_delay * (2**attempt))
+            expected_highs.append(high)
+
+        assert mock_uniform.call_count == num_retries
+        for i, call in enumerate(mock_uniform.call_args_list):
+            assert call == ((min_delay, expected_highs[i]),), (
+                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), " f"got uniform{call}"
+            )
+
+        # Verify the cap kicks in: attempts 6 and 7 should both be capped at max_delay
+        assert expected_highs[6] == max_delay
+        assert expected_highs[7] == max_delay
+        # And earlier attempts are strictly less
+        assert expected_highs[5] < max_delay
+
+    @pytest.mark.unit
+    def test_custom_delay_params(self):
+        """Custom min_delay/max_delay are respected in random.uniform bounds."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        # Lock never acquired — 4 attempts then deadline exceeded
+        conn.execute.return_value.scalar.return_value = False
+
+        min_delay, max_delay = 0.1, 0.5
+        num_retries = 4
+        mono_values = [0.0] + [1.0] * num_retries + [61.0]
+
+        with (
+            patch("time.sleep"),
+            patch("time.monotonic", side_effect=mono_values),
+            patch("random.uniform", return_value=0.05) as mock_uniform,
+        ):
+            with pytest.raises(TimeoutError):
+                env._acquire_advisory_lock(
+                    conn,
+                    timeout=60.0,
+                    min_delay=min_delay,
+                    max_delay=max_delay,
+                )
+
+        # Expected upper bounds with custom params:
+        # attempt 0: min(0.5, 0.1 * 1) = 0.1
+        # attempt 1: min(0.5, 0.1 * 2) = 0.2
+        # attempt 2: min(0.5, 0.1 * 4) = 0.4
+        # attempt 3: min(0.5, 0.1 * 8) = 0.5 (capped)
+        expected_highs = [0.1, 0.2, 0.4, 0.5]
+
+        assert mock_uniform.call_count == num_retries
+        for i, call in enumerate(mock_uniform.call_args_list):
+            assert call == ((min_delay, expected_highs[i]),), (
+                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), " f"got uniform{call}"
+            )
+
+        # Verify cap applied on last attempt
+        assert expected_highs[-1] == max_delay
+
+    @pytest.mark.unit
+    def test_min_delay_gte_max_delay_raises(self):
+        """Raises ValueError when min_delay >= max_delay."""
+        env = _load_env_functions()
+        conn = MagicMock()
+
+        with pytest.raises(ValueError, match="min_delay"):
+            env._acquire_advisory_lock(conn, min_delay=1.0, max_delay=0.5)
+
+    @pytest.mark.unit
+    def test_overflow_falls_back_to_max_delay(self):
+        """OverflowError in exponentiation falls back to max_delay as upper bound."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        conn.execute.return_value.scalar.return_value = False
+
+        min_delay, max_delay = 0.05, 2.0
+
+        # Use a float subclass whose __mul__ raises OverflowError, simulating
+        # what happens when min_delay * (2 ** attempt) overflows.
+        class OverflowFloat(float):
+            def __mul__(self, other):
+                raise OverflowError("simulated overflow")
+
+            def __rmul__(self, other):
+                raise OverflowError("simulated overflow")
+
+        overflow_min_delay = OverflowFloat(min_delay)
+
+        # 1 retry then deadline exceeded
+        mono_values = [0.0, 1.0, 61.0]
+
+        with (
+            patch("time.sleep"),
+            patch("time.monotonic", side_effect=mono_values),
+            patch("random.uniform", return_value=0.05) as mock_uniform,
+        ):
+            with pytest.raises(TimeoutError):
+                env._acquire_advisory_lock(
+                    conn,
+                    timeout=60.0,
+                    min_delay=overflow_min_delay,
+                    max_delay=max_delay,
+                )
+
+        # The overflow fallback should use max_delay as the high bound
+        mock_uniform.assert_called_once_with(overflow_min_delay, max_delay)
 
 
 # ---------------------------------------------------------------------------

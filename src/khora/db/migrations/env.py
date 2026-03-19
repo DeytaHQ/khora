@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import random
 import time
 from logging.config import fileConfig
 
@@ -54,14 +55,25 @@ def _get_url() -> str:
     return url
 
 
-def _acquire_advisory_lock(connection: Connection, timeout: float = 60.0) -> None:
+def _acquire_advisory_lock(
+    connection: Connection,
+    timeout: float = 60.0,
+    min_delay: float = 0.05,
+    max_delay: float = 2.0,
+) -> None:
     """Block until pg_advisory_xact_lock is acquired, with timeout.
+
+    Uses full jitter exponential backoff to decorrelate concurrent callers
+    (algorithm: ``wait_random_exponential`` from tenacity / AWS Architecture Blog).
 
     Transaction-scoped lock auto-releases on commit/rollback.
     """
     if timeout <= 0:
         raise ValueError("timeout must be positive")
+    if min_delay >= max_delay:
+        raise ValueError(f"min_delay ({min_delay}) must be < max_delay ({max_delay})")
     deadline = time.monotonic() + timeout
+    attempt = 0
     while True:
         acquired = connection.execute(
             text("SELECT pg_try_advisory_xact_lock(:lock_id)"),
@@ -74,7 +86,14 @@ def _acquire_advisory_lock(connection: Connection, timeout: float = 60.0) -> Non
                 f"Could not acquire migration advisory lock within {timeout}s. " "Another migration may be running."
             )
         logger.warning("Waiting for migration lock...")
-        time.sleep(0.5)
+        # Full jitter backoff — decorrelates concurrent callers
+        # Algorithm: wait_random_exponential from tenacity / AWS Architecture Blog
+        try:
+            high = min(max_delay, min_delay * (2**attempt))
+        except OverflowError:
+            high = max_delay
+        time.sleep(random.uniform(min_delay, high))
+        attempt += 1
 
 
 def do_run_migrations(connection: Connection) -> None:
