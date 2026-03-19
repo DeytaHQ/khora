@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from logging.config import fileConfig
 import os
 import random
 import time
-from logging.config import fileConfig
 
 from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection

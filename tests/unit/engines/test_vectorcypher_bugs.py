@@ -11,8 +11,8 @@ Bug #2: DualNodeManager passes dict metadata to Neo4j which only accepts
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
+import json
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 

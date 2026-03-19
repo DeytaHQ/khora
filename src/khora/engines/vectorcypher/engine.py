@@ -14,12 +14,12 @@ Target: Sub-300ms P95 for simple queries, sub-800ms for complex multi-hop querie
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import re
-import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import hashlib
+import re
+import time as _time
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 

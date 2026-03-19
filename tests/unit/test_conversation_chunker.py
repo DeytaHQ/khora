@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
+import json
 
 from khora.extraction.chunkers.conversation import (
     ConversationChunker,

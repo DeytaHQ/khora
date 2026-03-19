@@ -7,12 +7,12 @@ in Neo4j graph database.
 from __future__ import annotations
 
 import asyncio
-import re as _re
-import time as _time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import copy
 from datetime import UTC, datetime
+import re as _re
+import time as _time
 from typing import Any
 from uuid import UUID, uuid4
 

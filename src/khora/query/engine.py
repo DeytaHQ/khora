@@ -11,12 +11,12 @@ with configurable fusion weights. Now enhanced with:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
+from enum import Enum, auto
 
 # Regex for simple-query detection heuristic
 import re
 import time
-from dataclasses import dataclass, field
-from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 

@@ -7,8 +7,8 @@ by 50%+ while maintaining graph connectivity via co-occurrence edges.
 
 from __future__ import annotations
 
-import re
 from itertools import combinations
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:

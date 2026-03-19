@@ -5,8 +5,8 @@ Handles change detection and incremental processing of documents.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
+import hashlib
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 

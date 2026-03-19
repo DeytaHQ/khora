@@ -6,8 +6,8 @@ and feature flags for every query execution.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
+import time
 from typing import Any
 
 from loguru import logger

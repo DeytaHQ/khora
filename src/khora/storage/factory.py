@@ -6,8 +6,8 @@ Supports registry-based dispatch for multiple graph and vector backend types.
 
 from __future__ import annotations
 
-import importlib
 from dataclasses import dataclass, field
+import importlib
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 

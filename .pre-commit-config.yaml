@@ -25,7 +25,7 @@ repos:
       - id: isort
         name: isort
         entry: uv run isort
-        args: ["--profile=black", "--line-length=120", "-p", "khora", "--diff", "--check"]
+        args: ["--profile=black", "--line-length=120", "-p", "khora", "--force-sort-within-sections"]
         language: system
         types: [python]
 

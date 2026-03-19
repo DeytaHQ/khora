@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import re
-import time as _time_mod
 from collections import OrderedDict
 from hashlib import sha256
+import re
+import time as _time_mod
 from typing import TYPE_CHECKING
 
 from loguru import logger

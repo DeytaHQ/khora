@@ -14,9 +14,9 @@ Telemetry is logged for all routing decisions to enable analysis and tuning.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import TYPE_CHECKING
 
 from loguru import logger

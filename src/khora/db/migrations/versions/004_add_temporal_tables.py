@@ -18,8 +18,8 @@ Key features:
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
+import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
 from alembic import op

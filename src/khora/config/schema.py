@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
-import yaml
 from pydantic import BaseModel, Discriminator, Field, Tag, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import yaml
 
 
 @dataclass

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
+import warnings
 
 import pytest
 

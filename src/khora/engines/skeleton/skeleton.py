@@ -11,9 +11,9 @@ Expected cost reduction: 5-10x fewer LLM extraction calls compared to full KG.
 
 from __future__ import annotations
 
-import math
 from collections import defaultdict
 from dataclasses import dataclass, field
+import math
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 

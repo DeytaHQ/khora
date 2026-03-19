@@ -22,10 +22,10 @@ Usage::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import enum
 import functools
 import inspect
-from collections.abc import Callable
 from typing import Any, overload
 from uuid import UUID
 

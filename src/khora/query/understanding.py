@@ -13,10 +13,10 @@ Provides comprehensive LLM-based query interpretation in a SINGLE request:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum, auto
+import json
 from typing import TYPE_CHECKING
 
 from loguru import logger

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import os
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -169,8 +169,8 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
     Returns:
         MigrationResult with outcome details.
     """
-    import time
     from pathlib import Path
+    import time
 
     from alembic.config import Config
     from alembic.script import ScriptDirectory

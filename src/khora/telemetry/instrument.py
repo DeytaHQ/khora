@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import functools
 import time
-from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 

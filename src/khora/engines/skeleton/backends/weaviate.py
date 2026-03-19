@@ -360,8 +360,8 @@ class WeaviateTemporalStore(TemporalVectorStore):
 
     def _object_to_chunk(self, obj, namespace_id: UUID) -> TemporalChunk:
         """Convert a Weaviate object to a TemporalChunk."""
-        import json
         from datetime import datetime
+        import json
 
         props = obj.properties
 

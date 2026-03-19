@@ -6,10 +6,10 @@ vector search.
 
 from __future__ import annotations
 
-import math
-import re
 from collections import Counter
 from dataclasses import dataclass, field
+import math
+import re
 from typing import TYPE_CHECKING
 
 from loguru import logger

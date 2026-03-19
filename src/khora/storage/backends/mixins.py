@@ -6,8 +6,8 @@ backends get them for free and can override with optimized versions.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
+import json
 from typing import Any
 from uuid import UUID
 

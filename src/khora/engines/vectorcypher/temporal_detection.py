@@ -11,10 +11,10 @@ retrieval parameters (recency weight, sort order, decay rate).
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+import re
 from typing import TYPE_CHECKING, Any
 
 from khora._accel import detect_temporal_category

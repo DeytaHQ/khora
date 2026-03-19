@@ -11,8 +11,8 @@ Uses multiple strategies:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
