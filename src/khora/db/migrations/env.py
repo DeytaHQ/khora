@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -29,8 +30,8 @@ target_metadata = Base.metadata
 # Dedicated version table — avoids collision with downstream apps
 VERSION_TABLE = "khora_alembic_version"
 
-# Advisory lock ID — fixed int64, unique to khora migrations
-LOCK_ID = 0x4B484F5241  # "KHORA" in hex
+# Advisory lock ID — deterministic int64 from hashlib, unique to khora migrations
+LOCK_ID = int.from_bytes(hashlib.md5(b"khora_migrations").digest()[:8], "big", signed=True)
 
 
 def _get_url() -> str:
