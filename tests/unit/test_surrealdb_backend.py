@@ -2338,21 +2338,21 @@ class TestSurrealDBGraphAdapterTraversal:
         ns_id = uuid4()
         src_id = uuid4()
         tgt_id = uuid4()
-        # find_paths issues one query per depth (1..3), each returning a
-        # "targets" field with entity dicts.  Provide a match at depth 1.
-        depth1_result = [
+        # find_paths tries deepest first and stops early when a path is found.
+        # Provide a match so it stops after the first query (depth 3).
+        depth_result = [
             {"targets": [{"id": f"entity:\u27e8{tgt_id!s}\u27e9"}]},
         ]
 
         conn = _make_mock_conn()
-        conn.query = AsyncMock(return_value=depth1_result)
+        conn.query = AsyncMock(return_value=depth_result)
         adapter = SurrealDBGraphAdapter(conn)
 
         result = await adapter.find_paths(ns_id, src_id, tgt_id, max_depth=3)
         assert isinstance(result, list)
         assert len(result) >= 1
-        # find_paths calls conn.query once per depth level (up to 3)
-        assert conn.query.await_count == 3
+        # find_paths tries deepest first and breaks early on first match
+        assert conn.query.await_count == 1
 
     async def test_get_neighborhood(self) -> None:
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
@@ -2398,11 +2398,10 @@ class TestSurrealDBGraphAdapterUpsert:
 
         ns_id = uuid4()
         eid = uuid4()
-        row = _graph_entity_row(eid, ns_id, name="NewEntity")
 
         conn = _make_mock_conn()
-        # get_entity_by_name returns None => entity is new
-        conn.query_one = AsyncMock(side_effect=[None, row])
+        # Batch fetch returns empty list => no existing entities
+        conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBGraphAdapter(conn)
 
         from khora.core.models.entity import Entity
@@ -2414,18 +2413,25 @@ class TestSurrealDBGraphAdapterUpsert:
         returned_entity, is_new = result[0]
         assert returned_entity.name == "NewEntity"
         assert is_new is True
+        # Batch create via execute
+        conn.execute.assert_awaited_once()
 
     async def test_upsert_entities_batch_existing(self) -> None:
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
 
         ns_id = uuid4()
         eid = uuid4()
-        existing_row = _graph_entity_row(eid, ns_id, name="ExistingEntity", mention_count=3)
-        updated_row = _graph_entity_row(eid, ns_id, name="ExistingEntity", mention_count=4)
+        existing_row = _graph_entity_row(
+            eid,
+            ns_id,
+            name="ExistingEntity",
+            entity_type="CONCEPT",
+            mention_count=3,
+        )
 
         conn = _make_mock_conn()
-        # get_entity_by_name returns existing row => entity exists
-        conn.query_one = AsyncMock(side_effect=[existing_row, updated_row])
+        # Batch fetch returns the existing entity row
+        conn.query = AsyncMock(return_value=[existing_row])
         adapter = SurrealDBGraphAdapter(conn)
 
         from khora.core.models.entity import Entity
@@ -2437,6 +2443,8 @@ class TestSurrealDBGraphAdapterUpsert:
         returned_entity, is_new = result[0]
         assert returned_entity.name == "ExistingEntity"
         assert is_new is False
+        # Batch update via execute
+        conn.execute.assert_awaited_once()
 
 
 # ── Event Store Adapter — lifecycle ───────────────────────────────────────
@@ -2701,3 +2709,406 @@ class TestSurrealDBEventStoreOperations:
         call_args = conn.query_one.call_args
         query_str = call_args[0][0]
         assert "event_type" in query_str
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 3 optimizations (DYT-626)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+# ── Unified backend detection ─────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBUnifiedBackendDetection:
+    """Tests for StorageCoordinator._is_unified_backend detection."""
+
+    def test_unified_detected_when_same_connection(self) -> None:
+        """Coordinator detects shared SurrealDB connection."""
+        from khora.storage.coordinator import StorageCoordinator
+
+        conn = MagicMock()
+        graph = MagicMock()
+        graph._conn = conn
+        vector = MagicMock()
+        vector._conn = conn
+        coord = StorageCoordinator(graph=graph, vector=vector)
+        assert coord._is_unified_backend is True
+
+    def test_not_unified_when_different_connections(self) -> None:
+        """Coordinator does NOT detect unified for different connections."""
+        from khora.storage.coordinator import StorageCoordinator
+
+        graph = MagicMock()
+        graph._conn = MagicMock()
+        vector = MagicMock()
+        vector._conn = MagicMock()
+        coord = StorageCoordinator(graph=graph, vector=vector)
+        assert coord._is_unified_backend is False
+
+    def test_not_unified_when_no_conn_attr(self) -> None:
+        """Coordinator does NOT detect unified for non-SurrealDB backends."""
+        from khora.storage.coordinator import StorageCoordinator
+
+        graph = MagicMock(spec=[])  # no _conn attribute
+        vector = MagicMock(spec=[])
+        coord = StorageCoordinator(graph=graph, vector=vector)
+        assert coord._is_unified_backend is False
+
+    def test_not_unified_when_graph_is_none(self) -> None:
+        """No crash when graph backend is None."""
+        from khora.storage.coordinator import StorageCoordinator
+
+        vector = MagicMock()
+        vector._conn = MagicMock()
+        coord = StorageCoordinator(graph=None, vector=vector)
+        assert coord._is_unified_backend is False
+
+    def test_not_unified_when_vector_is_none(self) -> None:
+        """No crash when vector backend is None."""
+        from khora.storage.coordinator import StorageCoordinator
+
+        graph = MagicMock()
+        graph._conn = MagicMock()
+        coord = StorageCoordinator(graph=graph, vector=None)
+        assert coord._is_unified_backend is False
+
+    def test_not_unified_when_conn_is_none(self) -> None:
+        """Handles the case where _conn exists but is None on one backend."""
+        from khora.storage.coordinator import StorageCoordinator
+
+        graph = MagicMock()
+        graph._conn = None
+        vector = MagicMock()
+        vector._conn = MagicMock()
+        coord = StorageCoordinator(graph=graph, vector=vector)
+        assert coord._is_unified_backend is False
+
+
+# ── Auto-schema initialization ────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBAutoSchemaInit:
+    """Tests for SurrealDBConnection schema/sync defaults.
+
+    NOTE (devil's advocate): The connection class currently has NO
+    ``_schema_initialized`` or ``_sync_data`` attributes. These tests
+    document the *desired* Phase 3 contract. If they fail, it means
+    the Phase 3 connection changes have not landed yet.
+    """
+
+    def test_connection_has_schema_initialized_flag(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        assert hasattr(conn, "_schema_initialized"), (
+            "Phase 3 contract: SurrealDBConnection must track whether "
+            "schema has been initialized to avoid redundant DDL on reconnect"
+        )
+        assert conn._schema_initialized is False
+
+    def test_sync_data_default_true(self) -> None:
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        assert hasattr(conn, "_sync_data"), (
+            "Phase 3 contract: SurrealDBConnection must expose _sync_data " "flag so crash-safe fsync can be toggled"
+        )
+        assert conn._sync_data is True
+
+
+# ── Crash-safe defaults in config ─────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBCrashSafeDefaults:
+    """Tests for SurrealDBConfig.sync_data field.
+
+    NOTE (devil's advocate): SurrealDBConfig currently does NOT have a
+    ``sync_data`` field (see config/schema.py). These tests document the
+    Phase 3 requirement. They will fail until the config is extended.
+    """
+
+    def test_sync_data_in_config(self) -> None:
+        from khora.config.schema import SurrealDBConfig
+
+        cfg = SurrealDBConfig()
+        assert hasattr(cfg, "sync_data"), (
+            "Phase 3 contract: SurrealDBConfig must include sync_data " "field to control crash-safe fsync behaviour"
+        )
+        assert cfg.sync_data is True
+
+    def test_sync_data_can_be_disabled(self) -> None:
+        from khora.config.schema import SurrealDBConfig
+
+        cfg = SurrealDBConfig(sync_data=False)
+        assert cfg.sync_data is False
+
+
+# ── Batch optimizations ──────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBBatchOptimizations:
+    """Tests verifying batch operations use efficient queries.
+
+    Batch optimisations (DYT-626 Phase 3): ``create_relationships_batch``
+    now uses a single ``FOR $rel IN $rels { RELATE ... }`` SurrealQL call
+    instead of N individual round-trips.
+    """
+
+    async def test_create_relationships_batch_single_call(self) -> None:
+        """Batch relationship creation uses single SurrealQL FOR loop, not N calls."""
+        conn = _make_mock_conn()
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models import Relationship
+
+        ns_id = uuid4()
+        entity_a = uuid4()
+        entity_b = uuid4()
+        rels = [
+            Relationship(
+                namespace_id=ns_id,
+                source_entity_id=entity_a,
+                target_entity_id=entity_b,
+                relationship_type="RELATES_TO",
+            )
+            for _ in range(5)
+        ]
+        result = await adapter.create_relationships_batch(rels)
+
+        # Phase 3 batch optimisation: single FOR $rel IN $rels SurrealQL call
+        assert conn.execute.await_count == 1, (
+            f"Expected 1 batched execute call but got "
+            f"{conn.execute.await_count}. The batch should use a single "
+            f"FOR loop, not N individual RELATE statements."
+        )
+        assert result == 5
+
+        # Verify the SQL uses a FOR loop
+        sql = conn.execute.call_args[0][0]
+        assert "FOR $rel IN $rels" in sql, "Batch RELATE should use a SurrealQL FOR loop"
+
+    async def test_create_relationships_batch_passes_all_rels_as_bindings(self) -> None:
+        """All relationships are passed as a $rels binding, not string-interpolated."""
+        conn = _make_mock_conn()
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models import Relationship
+
+        rels = [
+            Relationship(
+                namespace_id=uuid4(),
+                source_entity_id=uuid4(),
+                target_entity_id=uuid4(),
+            )
+            for _ in range(3)
+        ]
+        await adapter.create_relationships_batch(rels)
+
+        bindings = conn.execute.call_args[0][1]
+        assert "rels" in bindings
+        assert len(bindings["rels"]) == 3
+
+    async def test_create_relationships_batch_empty(self) -> None:
+        """Empty list produces zero execute calls."""
+        conn = _make_mock_conn()
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        adapter = SurrealDBGraphAdapter(conn)
+        result = await adapter.create_relationships_batch([])
+        assert result == 0
+        conn.execute.assert_not_awaited()
+
+
+# ── SQL injection vectors (devil's advocate review) ──────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBSQLInjectionVectors:
+    """Review findings: several SurrealQL queries use f-string interpolation
+    of user-supplied values rather than parameterised bindings.
+
+    FINDING 1 — ``search_entities_by_attribute`` interpolates
+    ``attribute_name`` directly into the query:
+        ``f"AND attributes.{attribute_name} = $attr_value "``
+    An attacker-controlled attribute name like
+    ``"x = 1; DELETE entity WHERE true; -- "`` would produce valid
+    (destructive) SurrealQL.
+
+    FINDING 2 — ``find_paths`` and ``get_neighborhood`` interpolate
+    ``relationship_types`` list items into the query via:
+        ``", ".join(f"'{rt}'" for rt in relationship_types)``
+    A relationship type containing a single quote (e.g. ``"RELATES_TO'; DELETE entity--"``)
+    would break out of the string literal.
+
+    FINDING 3 — ``get_neighborhood`` interpolates ``limit`` as a raw int
+    into the SQL string (``f"LIMIT {limit}"``), though this is lower risk
+    since Python ``int`` cannot contain SQL.
+    """
+
+    async def test_attribute_name_injection_is_possible(self) -> None:
+        """Demonstrates that attribute_name is interpolated unsafely."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn(query=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        # Malicious attribute name — should ideally be rejected or escaped
+        malicious_attr = "x = 1; DELETE entity WHERE true; --"
+        await adapter.search_entities_by_attribute(uuid4(), malicious_attr, "anything")
+
+        # Inspect the generated SQL — it should NOT contain the raw injection
+        call_args = conn.query.call_args
+        sql = call_args[0][0]
+        # This assertion PASSES (the injection IS present) proving the vuln
+        assert "DELETE entity" in sql, (
+            "Expected the raw injection payload in the SQL string. "
+            "If this fails, the attribute_name is now being sanitised — good!"
+        )
+
+    async def test_relationship_type_quote_injection(self) -> None:
+        """Demonstrates that relationship_types are interpolated unsafely."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn(query=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        malicious_rt = "RELATES_TO'; DELETE entity WHERE true; --"
+        await adapter.find_paths(
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            relationship_types=[malicious_rt],
+        )
+
+        # Inspect the generated SQL for the escaped/unescaped payload
+        call_args = conn.query.call_args
+        sql = call_args[0][0]
+        assert "DELETE entity" in sql, (
+            "Expected the raw injection payload in the arrow-filter SQL. "
+            "If this fails, relationship_types are now parameterised — good!"
+        )
+
+
+# ── UUID parsing edge cases ──────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBUUIDParsingEdgeCases:
+    """Review findings: ``_parse_uuid`` silently raises ``ValueError`` on
+    garbage input, which propagates as an unhandled exception in
+    ``_row_to_entity``, ``_row_to_relationship``, etc.
+
+    FINDING: If SurrealDB returns an unexpected record ID format (e.g.
+    a nested object, an integer, or ``None``), ``_parse_uuid`` will raise
+    ``ValueError`` with a confusing message like "badly formed hexadecimal
+    UUID string". Callers never catch this.
+    """
+
+    def test_parse_uuid_with_empty_string_raises(self) -> None:
+        """Empty string raises ValueError — callers should handle this."""
+        from khora.storage.backends.surrealdb._helpers import _parse_uuid
+
+        with pytest.raises(ValueError):
+            _parse_uuid("")
+
+    def test_parse_uuid_with_none_raises(self) -> None:
+        """None input raises — but callers pass row.get('id', '') which
+        defaults to empty string, so this path is reachable only if the
+        row dict contains an explicit None value."""
+        from khora.storage.backends.surrealdb._helpers import _parse_uuid
+
+        with pytest.raises((ValueError, AttributeError)):
+            _parse_uuid(None)
+
+    def test_parse_uuid_with_nested_dict_raises(self) -> None:
+        """SurrealDB sometimes returns record links as dicts with an 'id'
+        key. ``_parse_uuid`` calls ``str()`` on it, which produces
+        something like "{'id': 'entity:...'}" — not a valid UUID."""
+        from khora.storage.backends.surrealdb._helpers import _parse_uuid
+
+        with pytest.raises(ValueError):
+            _parse_uuid({"id": "entity:12345678-1234-5678-1234-567812345678"})
+
+    def test_parse_uuid_with_integer_raises(self) -> None:
+        """An integer record ID (possible with SurrealDB auto-increment)
+        is not a valid UUID."""
+        from khora.storage.backends.surrealdb._helpers import _parse_uuid
+
+        with pytest.raises(ValueError):
+            _parse_uuid(42)
+
+    def test_parse_uuid_with_valid_uuid_object(self) -> None:
+        """UUID objects pass through unchanged."""
+        from khora.storage.backends.surrealdb._helpers import _parse_uuid
+
+        uid = uuid4()
+        assert _parse_uuid(uid) is uid
+
+
+# ── Silent failure review ─────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestSurrealDBSilentFailures:
+    """Review findings: several methods silently swallow exceptions.
+
+    FINDING 1 — ``create_relationships_batch`` catches all exceptions
+    per-relationship and only logs a warning (graph.py line 510-511).
+    A caller has no way to know that 3 out of 5 relationships failed.
+    The method returns a count but no error details.
+
+    FINDING 2 — ``create_episode`` swallows exceptions when creating
+    ``involves`` edges (graph.py line 568-569). If the entity doesn't
+    exist, the edge silently isn't created and the episode's entity_ids
+    will be inconsistent with the graph.
+
+    FINDING 3 — ``get_neighborhoods_batch`` catches all exceptions per
+    entity and returns an empty neighborhood (graph.py line 770-772).
+    The caller cannot distinguish "this entity has no neighbors" from
+    "the query failed".
+    """
+
+    async def test_create_relationships_batch_swallows_errors(self) -> None:
+        """Demonstrate that failures are silently swallowed."""
+        conn = _make_mock_conn()
+        conn.execute = AsyncMock(side_effect=RuntimeError("DB down"))
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        adapter = SurrealDBGraphAdapter(conn)
+
+        from khora.core.models import Relationship
+
+        rels = [
+            Relationship(
+                namespace_id=uuid4(),
+                source_entity_id=uuid4(),
+                target_entity_id=uuid4(),
+            )
+            for _ in range(3)
+        ]
+
+        # No exception raised — all 3 failures swallowed
+        result = await adapter.create_relationships_batch(rels)
+        assert result == 0  # all failed but no error propagated
+
+    async def test_row_to_relationship_wrong_uuid_field(self) -> None:
+        """If SurrealDB omits 'in'/'out' fields, _parse_uuid gets empty
+        string and raises ValueError — this is NOT caught by the caller."""
+        from khora.storage.backends.surrealdb.graph import _row_to_relationship
+
+        row = {
+            "rel_id": str(uuid4()),
+            "namespace_id": str(uuid4()),
+            # deliberately omitting 'in' and 'out'
+            "relationship_type": "RELATES_TO",
+        }
+        with pytest.raises(ValueError):
+            _row_to_relationship(row)

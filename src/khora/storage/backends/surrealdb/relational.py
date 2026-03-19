@@ -17,47 +17,13 @@ from loguru import logger
 from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.storage.backends.base import PaginatedResult
+from khora.storage.backends.surrealdb._helpers import (
+    _dt_to_iso,
+    _iso_to_dt,
+    _parse_uuid,
+    _record_id,
+)
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _record_id(table: str, uid: UUID) -> str:
-    """Build a SurrealDB record ID string: ``table:⟨uuid⟩``."""
-    return f"{table}:⟨{uid!s}⟩"
-
-
-def _parse_uuid(record_id_or_str: str) -> UUID:
-    """Extract a UUID from a SurrealDB record-ID string or a plain UUID string.
-
-    Handles both ``table:uuid_part`` and bare ``uuid_part`` forms, as well as
-    the angle-bracket variant ``table:⟨uuid_part⟩``.
-    """
-    raw = record_id_or_str
-    if ":" in raw:
-        raw = raw.rsplit(":", 1)[1]
-    # Strip angle brackets if present
-    raw = raw.strip("⟨⟩")
-    return UUID(raw)
-
-
-def _dt_to_iso(dt: datetime | None) -> str | None:
-    """Serialise a datetime to ISO-8601 for SurrealDB, or ``None``."""
-    if dt is None:
-        return None
-    return dt.isoformat()
-
-
-def _iso_to_dt(value: str | datetime | None) -> datetime | None:
-    """Deserialise an ISO-8601 string (or pass-through datetime) from SurrealDB."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    return datetime.fromisoformat(value)
-
 
 # ---------------------------------------------------------------------------
 # Adapter

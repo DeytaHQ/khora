@@ -15,6 +15,11 @@ from uuid import UUID
 from loguru import logger
 
 from khora.core.models.event import EventType, MemoryEvent
+from khora.storage.backends.surrealdb._helpers import (
+    _dt_to_iso,
+    _iso_to_dt,
+    _parse_uuid,
+)
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 
 # ---------------------------------------------------------------------------
@@ -24,38 +29,9 @@ from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 _TABLE = "memory_event"
 
 
-def _record_id(uid: UUID) -> str:
+def _event_record_id(uid: UUID) -> str:
     """Build a SurrealDB record ID string: ``memory_event:⟨uuid⟩``."""
     return f"{_TABLE}:⟨{uid!s}⟩"
-
-
-def _parse_uuid(record_id_or_str: str) -> UUID:
-    """Extract a UUID from a SurrealDB record-ID string or a plain UUID string.
-
-    Handles both ``table:uuid_part`` and bare ``uuid_part`` forms, as well as
-    the angle-bracket variant ``table:⟨uuid_part⟩``.
-    """
-    raw = record_id_or_str
-    if ":" in raw:
-        raw = raw.rsplit(":", 1)[1]
-    raw = raw.strip("⟨⟩")
-    return UUID(raw)
-
-
-def _dt_to_iso(dt: datetime | None) -> str | None:
-    """Serialise a datetime to ISO-8601 for SurrealDB, or ``None``."""
-    if dt is None:
-        return None
-    return dt.isoformat()
-
-
-def _iso_to_dt(value: str | datetime | None) -> datetime | None:
-    """Deserialise an ISO-8601 string (or pass-through datetime) from SurrealDB."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    return datetime.fromisoformat(value)
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +104,7 @@ class SurrealDBEventStoreAdapter:
 
     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
         """Append a single event to the log."""
-        rid = _record_id(event.id)
+        rid = _event_record_id(event.id)
         row = await self._conn.query_one(
             "CREATE $rid SET "
             "namespace_id = $namespace_id, "
@@ -173,7 +149,7 @@ class SurrealDBEventStoreAdapter:
         for event in events:
             records.append(
                 {
-                    "id": _record_id(event.id),
+                    "id": _event_record_id(event.id),
                     "namespace_id": str(event.namespace_id),
                     "event_type": (
                         event.event_type.value if isinstance(event.event_type, EventType) else event.event_type

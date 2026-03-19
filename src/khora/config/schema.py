@@ -116,6 +116,7 @@ class SurrealDBConfig(BaseModel):
     user: str = Field(default="root", description="SurrealDB username")
     password: str = Field(default="root", description="SurrealDB password")
     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    sync_data: bool = Field(default=True, description="Enable SURREAL_SYNC_DATA for crash-safe writes")
 
 
 def _graph_discriminator(v: Any) -> str:

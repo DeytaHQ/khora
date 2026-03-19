@@ -2,6 +2,14 @@
 
 Memory Lake library combining knowledge graphs, vector database (pgvector), and PostgreSQL for unified knowledge storage and retrieval. **This is a library, not a deployable application.**
 
+## Project Config
+
+```
+LINEAR_TEAM: {TEAM_KEY}
+```
+
+<!-- LINEAR_TEAM: the Linear team key used for branch names and issue refs (e.g., ENG) -->
+
 ## Commands
 
 ```bash
@@ -66,6 +74,183 @@ IMPORTANT: When bumping the version, always update **all four files** and regene
 3. `rust/khora-accel/Cargo.toml` — khora-accel version
 4. `rust/khora-accel/pyproject.toml` — khora-accel version
 5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
+
+## Claude Code Settings
+
+Run `uv run ttoj install -p /path/to/your-project` to deploy shared settings, commands, and skills. This installs `.claude/settings.json` with team-wide tool permissions (git, GitHub CLI, basic shell) so engineers don't get prompted for every action.
+
+- Add project-specific commands (lint, test, build) to the `allow` list.
+- Commit `.claude/settings.json` to version control.
+- Personal overrides go in `.claude/settings.local.json` (auto-gitignored by Claude Code).
+
+See the TTOJ README for a full explanation of the settings layers.
+
+### Linear MCP
+
+Set up the Linear MCP server (one-time):
+
+```bash
+claude mcp add --transport http linear-server https://mcp.linear.app/mcp
+```
+
+Then run `/mcp` inside Claude Code to authenticate with your Linear account. The TTOJ settings template pre-allows all Linear MCP tools so you won't be prompted for routine operations.
+
+## Workflow Lifecycle
+
+Every feature, bugfix, or task follows: **Linear ticket → branch → implement → PR → done**.
+
+If your project uses Linear (has `LINEAR_TEAM` in its CLAUDE.md):
+
+### Starting work
+1. Search Linear for an existing ticket matching the task. If none exists, create one.
+2. Assign yourself (or the requesting user) to the ticket.
+3. Move the ticket to **In Progress**.
+4. Create a branch from `staging` (default) following the branch naming convention below. For hotfixes, branch from `main`.
+5. Begin implementation.
+
+### During work
+- Commit early and often with descriptive messages.
+- Keep the Linear ticket updated if scope changes or blockers arise.
+- If you discover sub-tasks, create child issues in Linear.
+
+### Finishing work
+1. Run any project-defined lint/format/test commands.
+2. Commit all changes with a clear message.
+3. Push the branch and create a PR following PR standards below. PRs target `staging` by default; only hotfixes target `main`.
+4. Add the PR link as a comment on the Linear ticket.
+5. The ticket stays **In Progress** until the PR is merged, then move to **Done**.
+
+## Git Conventions
+
+### Branch naming
+Format: `{initials}/{TICKET-ID}-{kebab-description}`
+Examples: `nn/DYT-42-add-auth`, `ms/DYT-108-fix-pagination`
+
+The `initials` and `TICKET-ID` are required. Every branch must trace back to a Linear ticket.
+
+### Commit messages
+- Use imperative mood: "Add feature", not "Added feature"
+- First line: concise summary under 72 characters
+- Format: `{TICKET-ID}: {description}` (e.g., `DYT-42: Add auth middleware`)
+- Body (optional): explain *why*, not *what*
+- Reference the Linear ticket ID when relevant
+
+### Branching strategy
+- `main` = production. `staging` = staging / default PR target.
+- Feature branches are created from `staging` (default). For hotfixes, branch from `main`.
+- PRs **always** target `staging`, unless it's a hotfix.
+- Hotfixes: branch from `main`, PR targets `main` (production deploy).
+
+### Rules
+- Never force-push to `main`, `staging`, or shared branches.
+- Rebase feature branches on the PR target branch (`staging` or `main` for hotfixes) before opening a PR when possible.
+- Delete branches after merge.
+
+## Linear Integration
+
+Use the Linear MCP tools for all ticket operations. Refer to the `linear-workflow` skill for exact tool patterns.
+
+### Status transitions
+- **Backlog** → **Todo** → **In Progress** → **Done**
+- Other states: **Canceled**, **Duplicate**
+- Move to In Progress when you start working.
+- Move to Done only after the PR is merged.
+
+### Linking
+- Always add the PR URL as a comment on the Linear ticket.
+- Include the ticket ID (e.g., `DYT-42`) in the PR title.
+
+## PR Standards
+
+### Title format
+`TICKET-ID: Short imperative description` (e.g., `DYT-42: Add JWT authentication`)
+
+### Body structure
+```
+## Summary
+- Bullet points describing what changed and why
+
+## Test plan
+- How to verify the changes work
+```
+
+- PRs target `staging` by default; hotfix PRs target `main`.
+- Keep it concise. The code should speak for itself.
+
+## Multi-Agent Coordination
+
+When working as part of an agent team:
+
+- Claim tasks explicitly via TaskUpdate before starting work.
+- Never modify files owned by another agent without coordinating first.
+- Avoid editing the same file concurrently. If unavoidable, coordinate line ranges.
+- If two agents disagree on approach, escalate to the team lead.
+
+## PRD & ADR
+
+Major features require a PRD in `docs/prds/`. Significant architectural decisions require an ADR in `docs/adrs/`. Use `/plan:create` and `/plan:adr` to scaffold these documents. See the TTOJ repo for templates.
+
+## Agent Teams
+
+Use `/team:feature`, `/team:bugfix`, or `/team:review` for purpose-built teams. Default to single-agent work unless the task clearly benefits from parallelism. Role definitions are in the TTOJ repo under `content/templates/team-profiles/` and are available via the `/team:*` commands.
+
+## Slack Integration
+
+Commands post to team-wide default channels (deployed via TTOJ):
+- `/done` → `#pull-requests` — PR opened notification with detailed context in thread.
+- `/automerge` → `#pull-requests` — merge success or CI failure.
+- `/plan:create` → `#engineering` — optionally shares a PRD summary with goals and requirements in thread.
+- `/slack:notify` — sends an ad-hoc message to any channel or user.
+
+Default channels are defined in the `slack-workflow` skill. Commands never fail due to Slack errors.
+
+## Orchestrated Workflow
+
+The recommended command sequence for feature development:
+
+1. `/plan:create` — scaffold a PRD (optionally share on Slack)
+2. `/plan:adr` — document key decisions (if needed)
+3. `/plan:expand` — break PRD into Linear tickets
+4. `/workflow` — pick a ticket, create branch, start work
+5. Implement (solo or `/team:feature`)
+6. `/done` — commit, PR, update Linear, notify Slack
+7. `/audit` — review the PR
+
+## Tool Preferences
+
+- **Documentation lookup**: Use Context7 MCP for up-to-date library docs.
+- **Linear operations**: Use Linear MCP tools (list_issues, create_issue, update_issue, etc.).
+- **GitHub operations**: Use `gh` CLI for PRs, issues, and repo operations.
+- **File operations**: Prefer dedicated Claude Code tools (Read, Write, Edit, Grep, Glob) over shell equivalents.
+- **Web research**: Use WebSearch/WebFetch for current information beyond training data.
+
+## Team Configuration
+
+Default team profiles are deployed to `.ttoj/templates/team-profiles/` and referenced by the `/team:*` commands. To customize team composition for this project, edit the deployed profiles or create project-specific overrides in `.claude/commands/team/`.
+
+## AI Changelog
+
+After every completed task, append an entry to `docs/AI_CHANGELOG.md`. Create the file if it doesn't exist.
+
+### Format
+
+```
+- YYYY-MM-DD: TICKET-ID: Brief description of change
+```
+
+- One line per task, max 72 characters.
+- Use the Linear ticket ID (e.g., `DYT-42`) when available.
+- If there is no ticket, omit the ticket ID: `- YYYY-MM-DD: Brief description of change`.
+- Append new entries at the bottom of the file.
+- Do not edit or remove existing entries.
+
+## Conventions
+
+<!-- Replace with project-specific coding conventions. Examples:              -->
+<!-- - All API responses use a standard envelope: { data, error, meta }      -->
+<!-- - Prefer named exports over default exports                             -->
+<!-- - Database migrations must be backwards-compatible (expand-and-contract)-->
+<!-- - Error messages are user-facing; keep them clear and actionable        -->
 
 ## Gotchas
 

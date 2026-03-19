@@ -413,6 +413,7 @@ class StorageFactory:
                     database=getattr(surreal_config, "database", "default"),
                     user=getattr(surreal_config, "user", "root"),
                     password=getattr(surreal_config, "password", "root"),
+                    sync_data=getattr(surreal_config, "sync_data", True),
                 )
                 return StorageCoordinator(
                     relational=SurrealDBRelationalAdapter(conn),

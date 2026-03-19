@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from loguru import logger
@@ -26,6 +27,7 @@ class SurrealDBConnection:
         database: str = "default",
         user: str = "root",
         password: str = "root",
+        sync_data: bool = True,
     ) -> None:
         self._mode = mode
         self._path = path
@@ -34,8 +36,13 @@ class SurrealDBConnection:
         self._database = database
         self._user = user
         self._password = password
+        self._sync_data = sync_data
         self._client: Any = None
         self._connected = False
+        self._schema_initialized = False
+
+        if not sync_data:
+            logger.warning("SurrealDB running without sync_data — data may be lost on crash")
 
     @property
     def connected(self) -> bool:
@@ -61,6 +68,10 @@ class SurrealDBConnection:
     async def connect(self) -> None:
         if self._connected:
             return
+
+        if self._sync_data:
+            os.environ["SURREAL_SYNC_DATA"] = "true"
+
         import surrealdb
 
         endpoint = self._build_endpoint()
@@ -75,6 +86,13 @@ class SurrealDBConnection:
         await self._client.signin({"username": self._user, "password": self._password})
         self._connected = True
         logger.info(f"Connected to SurrealDB ({self._mode}), ns={self._namespace}, db={self._database}")
+
+        # Auto-initialize schema (idempotent, skipped on reconnect)
+        if not self._schema_initialized:
+            from .schema import initialize_schema
+
+            await initialize_schema(self)
+            self._schema_initialized = True
 
     async def disconnect(self) -> None:
         if self._client and self._connected:

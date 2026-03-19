@@ -26,6 +26,10 @@ def _rid(table: str, uid: UUID) -> str:
     return f"{table}:\u27e8{uid}\u27e9"
 
 
+# Alias used by graph/vector adapters
+_record_id = _rid
+
+
 def _parse_uuid(record_id: str | dict | UUID | Any) -> UUID:
     """Extract a UUID from a SurrealDB record ID.
 
@@ -61,6 +65,22 @@ def _parse_dt(val: Any) -> datetime | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+
+
+def _dt_to_iso(dt: datetime | None) -> str | None:
+    """Serialise a datetime to ISO-8601 for SurrealDB, or ``None``."""
+    if dt is None:
+        return None
+    return dt.isoformat()
+
+
+def _iso_to_dt(value: str | datetime | None) -> datetime | None:
+    """Deserialise an ISO-8601 string (or pass-through datetime) from SurrealDB."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(value)
 
 
 def _row_to_entity(row: dict[str, Any]) -> Entity:
