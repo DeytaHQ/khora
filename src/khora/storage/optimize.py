@@ -287,6 +287,119 @@ NEO4J_INDEXES = [
 # ---------------------------------------------------------------------------
 
 
+async def drop_hnsw_indexes(engine) -> dict:
+    """Drop HNSW indexes before bulk ingestion to speed up inserts.
+
+    HNSW indexes add significant overhead to every INSERT because each new
+    vector must be connected into the graph.  For bulk loads (--rewrite),
+    dropping them beforehand and recreating via optimize_storage() after
+    ingestion is much faster.
+
+    Args:
+        engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+
+    Returns:
+        Dict with ``indexes_dropped`` count and ``errors``.
+    """
+    from sqlalchemy import text
+
+    result: dict[str, Any] = {
+        "indexes_dropped": 0,
+        "errors": [],
+    }
+
+    all_hnsw = list(HNSW_INDEXES) + [idx["name"] for idx in HALFVEC_INDEXES]
+    for idx_name in all_hnsw:
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                row = await conn.execute(
+                    text("SELECT 1 FROM pg_indexes WHERE indexname = :name"),
+                    {"name": idx_name},
+                )
+                if row.scalar() is None:
+                    continue
+                logger.info(f"Dropping HNSW index {idx_name} for bulk load")
+                await conn.execute(text(f"DROP INDEX IF EXISTS {idx_name}"))
+            result["indexes_dropped"] += 1
+        except Exception as e:
+            msg = f"DROP INDEX {idx_name}: {e}"
+            result["errors"].append(msg)
+            logger.warning(msg)
+
+    return result
+
+
+async def ensure_hnsw_indexes(engine) -> dict:
+    """Recreate HNSW indexes if they don't exist.
+
+    Used after bulk load to restore indexes that were dropped by
+    ``drop_hnsw_indexes``.  Uses CREATE INDEX IF NOT EXISTS for idempotency.
+
+    Args:
+        engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+
+    Returns:
+        Dict with ``indexes_created`` count and ``errors``.
+    """
+    from sqlalchemy import text
+
+    result: dict[str, Any] = {
+        "indexes_created": 0,
+        "errors": [],
+    }
+
+    hnsw_ddl = [
+        (
+            "ix_chunks_embedding_hnsw",
+            "CREATE INDEX IF NOT EXISTS ix_chunks_embedding_hnsw "
+            "ON chunks USING hnsw (embedding vector_cosine_ops) "
+            "WITH (m = 24, ef_construction = 128)",
+        ),
+        (
+            "ix_entities_embedding_hnsw",
+            "CREATE INDEX IF NOT EXISTS ix_entities_embedding_hnsw "
+            "ON entities USING hnsw (embedding vector_cosine_ops) "
+            "WITH (m = 24, ef_construction = 128)",
+        ),
+    ]
+
+    for idx_name, ddl in hnsw_ddl:
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                logger.info(f"Creating HNSW index {idx_name}")
+                await conn.execute(text(ddl))
+            result["indexes_created"] += 1
+        except Exception as e:
+            msg = f"CREATE INDEX {idx_name}: {e}"
+            result["errors"].append(msg)
+            logger.warning(msg)
+
+    return result
+
+
+async def prepare_for_bulk_load(coordinator) -> dict:
+    """Prepare storage for bulk data ingestion by dropping HNSW indexes.
+
+    Call before bulk ingestion (e.g., --rewrite mode) to eliminate HNSW
+    overhead on every INSERT.  Call ``optimize_storage()`` after ingestion
+    to recreate and reindex.
+
+    Args:
+        coordinator: A connected ``StorageCoordinator`` instance.
+
+    Returns:
+        Dict with results from index dropping.
+    """
+    backend = coordinator.vector or coordinator.relational
+    if backend is not None:
+        engine = getattr(backend, "_engine", None)
+        if engine is not None:
+            return await drop_hnsw_indexes(engine)
+    return {"indexes_dropped": 0, "errors": []}
+
+
 async def reindex_hnsw_concurrently(engine) -> dict:
     """Reindex HNSW indexes concurrently after bulk inserts.
 
@@ -431,8 +544,13 @@ async def optimize_postgresql(engine, *, reindex_hnsw: bool = True) -> dict:
                 result["errors"].append(msg)
                 logger.warning(msg)
 
-    # Reindex HNSW indexes after bulk operations for optimal recall
+    # Ensure HNSW indexes exist (may have been dropped by prepare_for_bulk_load)
+    # then reindex them for optimal recall after bulk operations.
     if reindex_hnsw:
+        ensure_result = await ensure_hnsw_indexes(engine)
+        result["indexes_created"] += ensure_result["indexes_created"]
+        result["errors"].extend(ensure_result["errors"])
+
         hnsw_result = await reindex_hnsw_concurrently(engine)
         result["hnsw_reindexed"] = hnsw_result["indexes_reindexed"]
         result["errors"].extend(hnsw_result["errors"])
