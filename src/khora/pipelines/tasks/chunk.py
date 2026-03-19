@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -33,7 +34,7 @@ async def chunk_document(
     chunker = create_chunker(strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     # Chunk the document
-    chunk_results = chunker.chunk(document.content)
+    chunk_results = await asyncio.to_thread(chunker.chunk, document.content)
 
     # Convert to Chunk objects
     # Inherit document timestamp and custom metadata so they propagate to search results
