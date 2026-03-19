@@ -75,6 +75,20 @@ class SurrealDBEventStoreAdapter:
         return cls(connection=conn)
 
     # ------------------------------------------------------------------
+    # Schema bootstrap
+    # ------------------------------------------------------------------
+
+    async def create_tables(self) -> None:
+        """Create SurrealDB tables and indexes (idempotent).
+
+        Schema is also auto-initialized on connect(), so this is
+        safe to call multiple times.
+        """
+        from .schema import initialize_schema
+
+        await initialize_schema(self._conn)
+
+    # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
 

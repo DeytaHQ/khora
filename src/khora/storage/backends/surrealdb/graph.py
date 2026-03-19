@@ -963,6 +963,185 @@ class SurrealDBGraphAdapter:
         return [_row_to_entity(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # Temporal traversal
+    # ------------------------------------------------------------------
+
+    @trace(
+        "khora.surrealdb.graph.get_temporal_neighbors",
+        include={"entity_id", "namespace_id", "max_hops", "limit"},
+        result=lambda r: {"count": len(r)},
+    )
+    async def get_temporal_neighbors(
+        self,
+        entity_id: UUID,
+        namespace_id: UUID,
+        *,
+        valid_after: datetime | None = None,
+        valid_before: datetime | None = None,
+        max_hops: int = 2,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get neighboring entities connected via relationships within a time window.
+
+        Traverses 1..max_hops outgoing relationships from the entity and
+        filters by valid_from / valid_until temporal constraints on those
+        relationships.  Returns property dicts for the connected neighbor
+        entities.
+
+        Args:
+            entity_id: Starting entity ID
+            namespace_id: Namespace to restrict traversal to
+            valid_after: Only include relationships where valid_from >= this
+            valid_before: Only include relationships where valid_until <= this
+            max_hops: Maximum path length (1-3 recommended)
+            limit: Maximum neighbor entities to return
+
+        Returns:
+            List of neighbor entity property dicts
+        """
+        eid = _rid("entity", entity_id)
+        effective_max = min(max_hops, 3)
+
+        all_neighbors: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for depth in range(1, effective_max + 1):
+            # Build temporal filter for the relationship hop
+            rel_conditions: list[str] = []
+            bindings: dict[str, Any] = {"limit": limit}
+
+            if valid_after is not None:
+                rel_conditions.append("(valid_from IS NULL OR valid_from >= $valid_after)")
+                bindings["valid_after"] = _iso(valid_after)
+            if valid_before is not None:
+                rel_conditions.append("(valid_until IS NULL OR valid_until <= $valid_before)")
+                bindings["valid_before"] = _iso(valid_before)
+
+            rel_filter = ""
+            if rel_conditions:
+                rel_filter = "[WHERE " + " AND ".join(rel_conditions) + "]"
+
+            # Chain arrows for the requested depth
+            arrow_chain = ("->relates_to" + rel_filter + "->entity") * depth
+            sql = f"SELECT {arrow_chain} AS targets FROM {eid}"
+
+            rows = await self._conn.query(sql, bindings or None)
+            if not rows:
+                continue
+
+            targets_raw = rows[0].get("targets") if rows else None
+            if targets_raw is None:
+                continue
+
+            flat = self._flatten(targets_raw)
+            for item in flat:
+                if not isinstance(item, dict):
+                    continue
+                # Filter by namespace
+                item_ns = str(_parse_uuid(item.get("namespace", "")))
+                if item_ns != str(namespace_id):
+                    continue
+                item_id = str(_parse_uuid(item.get("id", "")))
+                if item_id == str(entity_id):
+                    continue
+                if item_id not in seen_ids:
+                    seen_ids.add(item_id)
+                    all_neighbors.append(item)
+                    if len(all_neighbors) >= limit:
+                        return all_neighbors
+
+        return all_neighbors
+
+    @trace(
+        "khora.surrealdb.graph.create_session_links",
+        include={"namespace_id"},
+        result=lambda r: {"created": r},
+    )
+    async def create_session_links(self, namespace_id: UUID) -> int:
+        """Create next_session edges between consecutive session chunks.
+
+        Reads chunks from the namespace, groups them by ``session_id``
+        stored in their metadata, orders sessions by earliest chunk
+        timestamp, and RELATEs the last chunk of session A to the first
+        chunk of session B via the ``next_session`` relation table.
+
+        Args:
+            namespace_id: Namespace to process
+
+        Returns:
+            Number of next_session edges created
+        """
+        ns_rid = _rid("memory_namespace", namespace_id)
+
+        # 1. Fetch all chunks with their metadata
+        rows = await self._conn.query(
+            f"SELECT id, metadata_, created_at, source_timestamp FROM chunk "
+            f"WHERE namespace = {ns_rid} "
+            f"ORDER BY (source_timestamp ?? created_at) ASC",
+        )
+        if not rows:
+            return 0
+
+        # 2. Group by session_id from metadata
+        sessions: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            meta = row.get("metadata_") or {}
+            if not isinstance(meta, dict):
+                continue
+            session_id = meta.get("session_id")
+            if not session_id:
+                continue
+            sessions.setdefault(str(session_id), []).append(row)
+
+        if len(sessions) < 2:
+            return 0
+
+        # 3. Sort sessions by earliest chunk timestamp
+        def _earliest_ts(chunks: list[dict[str, Any]]) -> str:
+            timestamps = []
+            for c in chunks:
+                ts = c.get("source_timestamp") or c.get("created_at")
+                if ts is not None:
+                    timestamps.append(str(ts))
+            return min(timestamps) if timestamps else ""
+
+        ordered_sessions = sorted(sessions.values(), key=_earliest_ts)
+
+        # 4. Build link pairs: last chunk of session A -> first chunk of session B
+        links: list[dict[str, str]] = []
+        for i in range(len(ordered_sessions) - 1):
+            from_chunk = ordered_sessions[i][-1]
+            to_chunk = ordered_sessions[i + 1][0]
+            from_id = str(_parse_uuid(from_chunk["id"]))
+            to_id = str(_parse_uuid(to_chunk["id"]))
+            links.append({"from_id": from_id, "to_id": to_id})
+
+        if not links:
+            return 0
+
+        # 5. Create next_session edges in a single batch round-trip
+        ns_str = str(namespace_id)
+        now_iso = _iso(datetime.now(UTC))
+        sql = (
+            "FOR $link IN $links {"
+            "  RELATE chunk:⟨$link.from_id⟩->next_session->chunk:⟨$link.to_id⟩ SET "
+            "    namespace_id = $ns, "
+            "    created_at = $created_at;"
+            "}"
+        )
+        await self._conn.execute(
+            sql,
+            {
+                "links": links,
+                "ns": ns_str,
+                "created_at": now_iso,
+            },
+        )
+
+        logger.debug(f"Created {len(links)} next_session edges for namespace {namespace_id}")
+        return len(links)
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

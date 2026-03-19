@@ -164,6 +164,13 @@ DEFINE FIELD IF NOT EXISTS link_type ON time_edge_link TYPE string DEFAULT 'occu
 DEFINE FIELD IF NOT EXISTS metadata ON time_edge_link FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS created_at ON time_edge_link TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_time_edge_link_namespace ON time_edge_link FIELDS namespace_id;
+
+-- Next-session link (connects last chunk of session A to first chunk of session B)
+DEFINE TABLE IF NOT EXISTS next_session TYPE RELATION SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS namespace_id ON next_session TYPE string;
+DEFINE FIELD IF NOT EXISTS metadata ON next_session FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS created_at ON next_session TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_next_session_namespace ON next_session FIELDS namespace_id;
 """
 
 

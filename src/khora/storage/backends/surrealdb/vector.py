@@ -75,6 +75,16 @@ class SurrealDBVectorAdapter:
         connection = SurrealDBConnection(**conn_kwargs)
         return cls(connection, hnsw_ef_search=config.get("hnsw_ef_search", 40))
 
+    async def create_tables(self) -> None:
+        """Create SurrealDB tables and indexes (idempotent).
+
+        Schema is also auto-initialized on connect(), so this is
+        safe to call multiple times.
+        """
+        from .schema import initialize_schema
+
+        await initialize_schema(self._conn)
+
     async def connect(self) -> None:
         """Ensure the underlying connection is established."""
         await self._conn.connect()
@@ -577,6 +587,47 @@ class SurrealDBVectorAdapter:
             entity_id = _parse_uuid(row.get("id", ""))
             results.append((entity_id, sim))
         return results
+
+    # ------------------------------------------------------------------
+    # Entity retrieval (by ID + namespace)
+    # ------------------------------------------------------------------
+
+    async def get_entity(self, entity_id: UUID, namespace_id: UUID | None = None) -> Entity | None:
+        """Fetch an entity by primary key.
+
+        The *namespace_id* parameter is accepted for API compatibility with
+        other backends but is not used for filtering — SurrealDB record IDs
+        are globally unique.
+        """
+        sql = "SELECT * FROM entity:⟨$id⟩"
+        row = await self._conn.query_one(sql, {"id": str(entity_id)})
+        if not row:
+            return None
+        return _row_to_entity(row)
+
+    # ------------------------------------------------------------------
+    # Embedding statistics
+    # ------------------------------------------------------------------
+
+    async def get_embedding_stats(self, namespace_id: UUID) -> dict[str, int]:
+        """Get statistics about embeddings in a namespace.
+
+        Returns:
+            Dict with ``chunk_embeddings`` and ``entity_embeddings`` counts.
+        """
+        ns_rid = _rid("memory_namespace", namespace_id)
+
+        chunk_row = await self._conn.query_one(
+            f"SELECT count() AS cnt FROM chunk WHERE namespace = {ns_rid} AND embedding IS NOT NULL GROUP ALL",
+        )
+        entity_row = await self._conn.query_one(
+            f"SELECT count() AS cnt FROM entity WHERE namespace = {ns_rid} AND embedding IS NOT NULL GROUP ALL",
+        )
+
+        return {
+            "chunk_embeddings": int(chunk_row.get("cnt", 0)) if chunk_row else 0,
+            "entity_embeddings": int(entity_row.get("cnt", 0)) if entity_row else 0,
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers

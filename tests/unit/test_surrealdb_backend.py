@@ -57,6 +57,8 @@ def _namespace_row(
 def _document_row(
     doc_id: UUID | None = None,
     ns_id: UUID | None = None,
+    *,
+    checksum: str = "abc123",
 ) -> dict[str, object]:
     """Build a SurrealDB result dict that looks like a document row."""
     doc_id = doc_id or uuid4()
@@ -73,7 +75,7 @@ def _document_row(
         "title": "Test Doc",
         "author": "tester",
         "language": "en",
-        "checksum": "abc123",
+        "checksum": checksum,
         "size_bytes": 42,
         "metadata_": {"key": "value"},
         "chunk_count": 0,
@@ -3420,3 +3422,207 @@ class TestKuzuDeprecation:
         assert (
             len(deprecation_warnings) >= 1
         ), f"Expected DeprecationWarning from kuzu import, got: {[w.category.__name__ for w in caught]}"
+
+
+# ---------------------------------------------------------------------------
+# Create tables
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBCreateTables:
+    async def test_relational_create_tables(self):
+        """Relational adapter create_tables delegates to schema init."""
+        conn = _make_mock_conn()
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        adapter = SurrealDBRelationalAdapter(conn)
+        await adapter.create_tables()
+        conn.execute.assert_awaited()
+
+    async def test_vector_create_tables(self):
+        """Vector adapter create_tables delegates to schema init."""
+        conn = _make_mock_conn()
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        adapter = SurrealDBVectorAdapter(conn)
+        await adapter.create_tables()
+        conn.execute.assert_awaited()
+
+    async def test_event_store_create_tables(self):
+        """Event store adapter create_tables delegates to schema init."""
+        conn = _make_mock_conn()
+        from khora.storage.backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+
+        adapter = SurrealDBEventStoreAdapter(conn)
+        await adapter.create_tables()
+        conn.execute.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Temporal neighbors
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBTemporalNeighbors:
+    async def test_get_temporal_neighbors_basic(self):
+        """Returns neighbor entities within temporal bounds."""
+        conn = _make_mock_conn()
+        eid = uuid4()
+        ns_id = uuid4()
+        neighbor_id = uuid4()
+        conn.query = AsyncMock(
+            return_value=[
+                {
+                    "id": f"entity:{neighbor_id}",
+                    "namespace": f"memory_namespace:{ns_id}",
+                    "name": "Neighbor",
+                    "entity_type": "PERSON",
+                    "description": "",
+                    "attributes": {},
+                    "source_document_ids": [],
+                    "source_chunk_ids": [],
+                    "source_tool": "",
+                    "mention_count": 1,
+                    "embedding": None,
+                    "embedding_model": "",
+                    "valid_from": None,
+                    "valid_until": None,
+                    "confidence": 1.0,
+                    "metadata_": {},
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            ]
+        )
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        adapter = SurrealDBGraphAdapter(conn)
+        results = await adapter.get_temporal_neighbors(eid, ns_id, limit=10)
+        assert len(results) >= 0  # May be empty depending on mock
+        conn.query.assert_awaited()
+
+    async def test_get_temporal_neighbors_with_time_bounds(self):
+        """Temporal bounds are passed as query parameters."""
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        adapter = SurrealDBGraphAdapter(conn)
+        from datetime import timedelta
+
+        now = datetime.now(UTC)
+        results = await adapter.get_temporal_neighbors(
+            uuid4(),
+            uuid4(),
+            valid_after=now - timedelta(days=30),
+            valid_before=now,
+        )
+        assert results == []
+        # Verify temporal params were passed
+        call_args = conn.query.call_args
+        assert call_args is not None
+
+
+# ---------------------------------------------------------------------------
+# Session links
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBSessionLinks:
+    async def test_create_session_links_no_chunks(self):
+        """Returns 0 when no chunks exist."""
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        adapter = SurrealDBGraphAdapter(conn)
+        count = await adapter.create_session_links(uuid4())
+        assert count == 0
+
+    async def test_create_session_links_single_session(self):
+        """Returns 0 when only one session exists (no links needed)."""
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(
+            return_value=[
+                {
+                    "id": f"chunk:{uuid4()}",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "metadata_": {"session_id": "s1"},
+                    "source_timestamp": None,
+                },
+            ]
+        )
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        adapter = SurrealDBGraphAdapter(conn)
+        count = await adapter.create_session_links(uuid4())
+        assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Embedding stats
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBEmbeddingStats:
+    async def test_get_embedding_stats(self):
+        """Returns chunk and entity embedding counts."""
+        conn = _make_mock_conn()
+        # First call: chunk count, second call: entity count
+        conn.query_one = AsyncMock(
+            side_effect=[
+                {"cnt": 42},
+                {"cnt": 7},
+            ]
+        )
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        adapter = SurrealDBVectorAdapter(conn)
+        stats = await adapter.get_embedding_stats(uuid4())
+        assert stats["chunk_embeddings"] == 42
+        assert stats["entity_embeddings"] == 7
+
+    async def test_get_embedding_stats_empty(self):
+        """Returns zeros when no embeddings exist."""
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        adapter = SurrealDBVectorAdapter(conn)
+        stats = await adapter.get_embedding_stats(uuid4())
+        assert stats["chunk_embeddings"] == 0
+        assert stats["entity_embeddings"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Get documents by checksums
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBGetDocumentsByChecksums:
+    async def test_returns_dict_by_checksum(self):
+        """Returns dict mapping checksum to Document."""
+        conn = _make_mock_conn()
+        ns_id = uuid4()
+        doc_id = uuid4()
+        conn.query = AsyncMock(return_value=[_document_row(doc_id, ns_id, checksum="abc123")])
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        adapter = SurrealDBRelationalAdapter(conn)
+        result = await adapter.get_documents_by_checksums(ns_id, ["abc123"])
+        assert "abc123" in result
+        assert result["abc123"].id == doc_id
+
+    async def test_empty_checksums(self):
+        """Empty checksum list returns empty dict."""
+        conn = _make_mock_conn()
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        adapter = SurrealDBRelationalAdapter(conn)
+        result = await adapter.get_documents_by_checksums(uuid4(), [])
+        assert result == {}

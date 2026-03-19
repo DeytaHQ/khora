@@ -66,6 +66,20 @@ class SurrealDBRelationalAdapter:
         return cls(connection=conn)
 
     # ------------------------------------------------------------------
+    # Schema bootstrap
+    # ------------------------------------------------------------------
+
+    async def create_tables(self) -> None:
+        """Create SurrealDB tables and indexes (idempotent).
+
+        Schema is also auto-initialized on connect(), so this is
+        safe to call multiple times.
+        """
+        from .schema import initialize_schema
+
+        await initialize_schema(self._conn)
+
+    # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
 
@@ -399,6 +413,33 @@ class SurrealDBRelationalAdapter:
         if row is None:
             return None
         return self._row_to_document(row)
+
+    async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+        """Fetch documents by content checksums in a single query.
+
+        Used for batch deduplication to avoid N serial DB queries.
+
+        Args:
+            namespace_id: Namespace to search in
+            checksums: List of content checksums to look up
+
+        Returns:
+            Dictionary mapping checksum to Document (only for existing documents)
+        """
+        if not checksums:
+            return {}
+        ns_str = str(namespace_id)
+        rows = await self._conn.query(
+            "SELECT * FROM document WHERE namespace_id = $ns AND checksum IN $checksums",
+            {"ns": ns_str, "checksums": checksums},
+        )
+        result: dict[str, Document] = {}
+        for r in rows:
+            doc = self._row_to_document(r)
+            cs = r.get("checksum", "")
+            if cs:
+                result[cs] = doc
+        return result
 
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
         """Fetch multiple documents in a single query."""
