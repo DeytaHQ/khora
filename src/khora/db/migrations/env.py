@@ -43,6 +43,9 @@ def _get_url() -> str:
         url = os.getenv("KHORA_DATABASE_URL", "")
     if not url:
         raise ValueError("No database URL. Set KHORA_DATABASE_URL or pass database_url to run_migrations().")
+    # Already normalized — nothing to do
+    if "+asyncpg" in url:
+        return url
     # Normalize to asyncpg
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -56,6 +59,8 @@ def _acquire_advisory_lock(connection: Connection, timeout: float = 60.0) -> Non
 
     Transaction-scoped lock auto-releases on commit/rollback.
     """
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
     deadline = time.monotonic() + timeout
     while True:
         acquired = connection.execute(

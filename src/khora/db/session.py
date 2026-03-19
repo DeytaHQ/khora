@@ -39,9 +39,8 @@ class MigrationResult:
     """Result of running database migrations."""
 
     success: bool
+    target_revision: str | None
     current_revision: str | None
-    previous_revision: str | None
-    migrations_run: int
     elapsed_seconds: float
     error: str | None = None
 
@@ -183,9 +182,8 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
     if not url:
         return MigrationResult(
             success=False,
+            target_revision=None,
             current_revision=None,
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.0,
             error="No database URL. Set KHORA_DATABASE_URL or pass database_url.",
         )
@@ -206,11 +204,11 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
         elapsed = time.monotonic() - start
         logger.info("Migrations completed in {:.2f}s", elapsed)
 
+        head = script.get_current_head()
         return MigrationResult(
             success=True,
-            current_revision=script.get_current_head(),
-            previous_revision=None,
-            migrations_run=0,
+            target_revision=head,
+            current_revision=head,
             elapsed_seconds=elapsed,
         )
     except Exception as e:
@@ -218,11 +216,10 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
         logger.error("Migration failed: {}", e)
         return MigrationResult(
             success=False,
+            target_revision=None,
             current_revision=None,
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=elapsed,
-            error=str(e),
+            error=f"{type(e).__name__}: {e}",
         )
 
 

@@ -12,8 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import khora.db.migrations
 from khora.db.session import MigrationResult, _run_migrations_sync, run_migrations
 from khora.memory_lake import MemoryLake
+
+# Derive migrations directory from the installed package — not relative to this test file
+_MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,16 +45,14 @@ class TestMigrationResult:
         """All fields are set correctly on construction."""
         result = MigrationResult(
             success=True,
+            target_revision="abc123",
             current_revision="abc123",
-            previous_revision="def456",
-            migrations_run=3,
             elapsed_seconds=1.5,
             error=None,
         )
         assert result.success is True
+        assert result.target_revision == "abc123"
         assert result.current_revision == "abc123"
-        assert result.previous_revision == "def456"
-        assert result.migrations_run == 3
         assert result.elapsed_seconds == 1.5
         assert result.error is None
 
@@ -59,9 +61,8 @@ class TestMigrationResult:
         """error field defaults to None when not provided."""
         result = MigrationResult(
             success=True,
+            target_revision="abc",
             current_revision="abc",
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.1,
         )
         assert result.error is None
@@ -71,9 +72,8 @@ class TestMigrationResult:
         """MigrationResult is immutable (frozen=True)."""
         result = MigrationResult(
             success=True,
+            target_revision=None,
             current_revision=None,
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.0,
         )
         with pytest.raises(FrozenInstanceError):
@@ -84,9 +84,8 @@ class TestMigrationResult:
         """MigrationResult uses slots (no __dict__)."""
         result = MigrationResult(
             success=True,
+            target_revision=None,
             current_revision=None,
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.0,
         )
         assert not hasattr(result, "__dict__")
@@ -96,9 +95,8 @@ class TestMigrationResult:
         """Typical success result."""
         result = MigrationResult(
             success=True,
+            target_revision="head_rev",
             current_revision="head_rev",
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=2.3,
         )
         assert result.success is True
@@ -109,9 +107,8 @@ class TestMigrationResult:
         """Typical failure result with error message."""
         result = MigrationResult(
             success=False,
+            target_revision=None,
             current_revision=None,
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.1,
             error="connection refused",
         )
@@ -165,8 +162,7 @@ class TestRunMigrationsSyncConfig:
         mock_config_cls.assert_called_once_with()
 
         # script_location points to db/migrations/
-        migrations_dir = str(Path(__file__).parent.parent.parent / "src" / "khora" / "db" / "migrations")
-        mock_cfg_instance.set_main_option.assert_any_call("script_location", migrations_dir)
+        mock_cfg_instance.set_main_option.assert_any_call("script_location", str(_MIGRATIONS_DIR))
 
         # URL passed via config.attributes
         assert mock_cfg_instance.attributes["database_url"] == "postgresql://localhost/testdb"
@@ -175,6 +171,7 @@ class TestRunMigrationsSyncConfig:
         mock_upgrade.assert_called_once_with(mock_cfg_instance, "head")
 
         assert result.success is True
+        assert result.target_revision == "abc123"
         assert result.current_revision == "abc123"
 
     @pytest.mark.unit
@@ -192,7 +189,7 @@ class TestRunMigrationsSyncConfig:
         result = _run_migrations_sync("postgresql://localhost/testdb")
 
         assert result.success is False
-        assert result.error == "connection refused"
+        assert result.error == "RuntimeError: connection refused"
         assert result.elapsed_seconds >= 0
 
 
@@ -209,9 +206,8 @@ class TestRunMigrationsAsync:
         """run_migrations calls _run_migrations_sync with the database_url."""
         expected = MigrationResult(
             success=True,
+            target_revision="abc",
             current_revision="abc",
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.5,
         )
         with patch(
@@ -228,9 +224,8 @@ class TestRunMigrationsAsync:
         """run_migrations passes None when no URL given."""
         expected = MigrationResult(
             success=False,
+            target_revision=None,
             current_revision=None,
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.0,
             error="No database URL",
         )
@@ -280,9 +275,8 @@ class TestMemoryLakeConnectMigrations:
         """When run_migrations=True, migrations run before engine creation."""
         migration_result = MigrationResult(
             success=True,
+            target_revision="abc",
             current_revision="abc",
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.5,
         )
         mock_engine = MagicMock()
@@ -314,9 +308,8 @@ class TestMemoryLakeConnectMigrations:
         """When migrations fail, connect() raises RuntimeError."""
         migration_result = MigrationResult(
             success=False,
+            target_revision=None,
             current_revision=None,
-            previous_revision=None,
-            migrations_run=0,
             elapsed_seconds=0.1,
             error="migration table locked",
         )
@@ -383,13 +376,13 @@ class TestMigrationPackageStructure:
     @pytest.mark.unit
     def test_env_py_exists(self):
         """env.py exists in the migrations package."""
-        env_path = Path(__file__).parent.parent.parent / "src" / "khora" / "db" / "migrations" / "env.py"
+        env_path = _MIGRATIONS_DIR / "env.py"
         assert env_path.exists(), f"env.py not found at {env_path}"
 
     @pytest.mark.unit
     def test_versions_dir_has_15_files(self):
         """versions/ directory contains 15 migration files."""
-        versions_dir = Path(__file__).parent.parent.parent / "src" / "khora" / "db" / "migrations" / "versions"
+        versions_dir = _MIGRATIONS_DIR / "versions"
         migration_files = sorted(versions_dir.glob("*.py"))
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
@@ -401,7 +394,7 @@ class TestMigrationPackageStructure:
     def test_env_py_constants(self):
         """VERSION_TABLE and LOCK_ID constants are defined in env.py."""
         # Import indirectly to avoid triggering alembic context at module level
-        env_path = Path(__file__).parent.parent.parent / "src" / "khora" / "db" / "migrations" / "env.py"
+        env_path = _MIGRATIONS_DIR / "env.py"
         source = env_path.read_text()
         assert "VERSION_TABLE" in source, "VERSION_TABLE constant not found in env.py"
         assert "LOCK_ID" in source, "LOCK_ID constant not found in env.py"
@@ -409,7 +402,7 @@ class TestMigrationPackageStructure:
     @pytest.mark.unit
     def test_init_py_exists(self):
         """__init__.py exists making migrations a proper package."""
-        init_path = Path(__file__).parent.parent.parent / "src" / "khora" / "db" / "migrations" / "__init__.py"
+        init_path = _MIGRATIONS_DIR / "__init__.py"
         assert init_path.exists(), f"__init__.py not found at {init_path}"
 
 
@@ -487,13 +480,147 @@ class TestAcquireAdvisoryLock:
 
     @pytest.mark.unit
     def test_timeout_raises(self):
-        """Raises TimeoutError when lock cannot be acquired within timeout."""
+        """Raises ValueError when timeout is non-positive."""
+        env = _load_env_functions()
+        conn = MagicMock()
+
+        with pytest.raises(ValueError, match="timeout must be positive"):
+            env._acquire_advisory_lock(conn, timeout=0.0)
+
+    @pytest.mark.unit
+    def test_deadline_exceeded_raises(self):
+        """Raises TimeoutError when lock cannot be acquired before deadline."""
         env = _load_env_functions()
         conn = MagicMock()
         conn.execute.return_value.scalar.return_value = False
 
-        with patch("time.sleep"), pytest.raises(TimeoutError, match="advisory lock"):
-            env._acquire_advisory_lock(conn, timeout=0.0)
+        # First monotonic() sets deadline, second monotonic() exceeds it
+        with patch("time.sleep"), patch("time.monotonic", side_effect=[0.0, 61.0]):
+            with pytest.raises(TimeoutError, match="advisory lock"):
+                env._acquire_advisory_lock(conn, timeout=60.0)
+
+
+# ---------------------------------------------------------------------------
+# env.py — _get_url() URL normalization
+# ---------------------------------------------------------------------------
+
+
+class TestGetUrl:
+    """Tests for _get_url() URL normalization in env.py."""
+
+    @pytest.mark.unit
+    def test_postgresql_normalized_to_asyncpg(self):
+        """postgresql:// is rewritten to postgresql+asyncpg://."""
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgresql://host/db"
+        assert env._get_url() == "postgresql+asyncpg://host/db"
+
+    @pytest.mark.unit
+    def test_postgres_normalized_to_asyncpg(self):
+        """postgres:// (Heroku-style) is rewritten to postgresql+asyncpg://."""
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgres://host/db"
+        assert env._get_url() == "postgresql+asyncpg://host/db"
+
+    @pytest.mark.unit
+    def test_asyncpg_url_passes_through(self):
+        """Already-normalized postgresql+asyncpg:// passes through unchanged."""
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgresql+asyncpg://host/db"
+        assert env._get_url() == "postgresql+asyncpg://host/db"
+
+    @pytest.mark.unit
+    def test_no_url_raises_value_error(self, monkeypatch):
+        """Raises ValueError when no URL is available."""
+        monkeypatch.delenv("KHORA_DATABASE_URL", raising=False)
+        env = _load_env_functions()
+        env.config.attributes.clear()
+        with pytest.raises(ValueError, match="No database URL"):
+            env._get_url()
+
+
+# ---------------------------------------------------------------------------
+# env.py — run_migrations_offline()
+# ---------------------------------------------------------------------------
+
+
+class TestRunMigrationsOffline:
+    """Tests for run_migrations_offline() in env.py."""
+
+    @pytest.mark.unit
+    def test_configures_with_version_table(self):
+        """Offline mode calls context.configure with version_table."""
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgresql://host/db"
+
+        env.run_migrations_offline()
+
+        env.context.configure.assert_called_once()
+        call_kwargs = env.context.configure.call_args[1]
+        assert call_kwargs["version_table"] == env.VERSION_TABLE
+
+    @pytest.mark.unit
+    def test_runs_migrations_in_transaction(self):
+        """Offline mode calls begin_transaction and run_migrations."""
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgresql://host/db"
+
+        env.run_migrations_offline()
+
+        env.context.begin_transaction.assert_called_once()
+        env.context.run_migrations.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# env.py — run_async_migrations()
+# ---------------------------------------------------------------------------
+
+
+class TestRunAsyncMigrations:
+    """Tests for run_async_migrations() in env.py."""
+
+    @staticmethod
+    def _mock_async_engine():
+        """Build a mock async engine with proper async context manager for connect()."""
+        mock_conn = AsyncMock()
+        # connect() returns an async context manager that yields mock_conn
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_conn
+        mock_cm.__aexit__.return_value = False
+
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value = mock_cm
+        mock_engine.dispose = AsyncMock()
+        return mock_engine, mock_conn
+
+    @pytest.mark.unit
+    async def test_creates_engine_with_null_pool(self):
+        """Async migrations create engine with NullPool."""
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgresql://host/db"
+
+        mock_engine, _ = self._mock_async_engine()
+
+        with patch.object(env, "create_async_engine", return_value=mock_engine) as mock_create:
+            await env.run_async_migrations()
+
+            mock_create.assert_called_once()
+            call_kwargs = mock_create.call_args
+            assert call_kwargs[1]["poolclass"] is env.pool.NullPool
+
+    @pytest.mark.unit
+    async def test_runs_sync_and_disposes(self):
+        """Async migrations call connection.run_sync and engine.dispose."""
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgresql://host/db"
+
+        mock_engine, mock_conn = self._mock_async_engine()
+
+        with patch.object(env, "create_async_engine", return_value=mock_engine):
+            await env.run_async_migrations()
+
+        mock_conn.run_sync.assert_called_once_with(env.do_run_migrations)
+        mock_engine.dispose.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

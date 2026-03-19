@@ -87,4 +87,4 @@ IMPORTANT: When bumping the version, always update **all four files** and regene
 - **`ty` type checker** — Pre-commit hook runs `ty check src/` which passes clean (`All checks passed!`). If ty fails on your changes, fix the diagnostics before committing
 - **Migrations are bundled** — Alembic migrations live in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is for dev CLI only. Programmatic usage via `run_migrations(database_url)` or `MemoryLake(run_migrations=True)` needs no `.ini` file
 - **Dedicated version table** — Khora uses `khora_alembic_version` (not `alembic_version`) to avoid conflicts with downstream apps. Existing deployments must run all migrations fresh against the new version table (clean cut)
-- **Migration advisory lock** — `run_migrations()` acquires `pg_advisory_xact_lock(0x4B484F5241)` with 60s timeout. Safe for concurrent startups
+- **Migration advisory lock** — `run_migrations()` acquires `pg_advisory_xact_lock(LOCK_ID)` where `LOCK_ID = int.from_bytes(hashlib.md5(b"khora_migrations").digest()[:8], "big", signed=True)` (= `6001515088189075507`). 60s timeout. Safe for concurrent startups
