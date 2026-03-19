@@ -2,11 +2,17 @@
 
 Kùzu is an embedded graph database that supports Cypher queries.
 All operations are synchronous and wrapped in asyncio.to_thread().
+
+.. deprecated::
+    KuzuDB backend is deprecated. Kuzu was acquired by Apple in October 2025
+    and the repository is archived. Consider using ``neo4j`` or ``surrealdb``
+    backends instead.
 """
 
 from __future__ import annotations
 
 import asyncio
+import warnings
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -21,6 +27,13 @@ from khora.storage.backends.mixins import (
     parse_uuid,
     parse_uuid_list,
     serialize_dict,
+)
+
+warnings.warn(
+    "KuzuDB backend is deprecated. Kuzu was acquired by Apple in October 2025 "
+    "and the repository is archived. Consider using 'neo4j' or 'surrealdb' backends instead.",
+    DeprecationWarning,
+    stacklevel=2,
 )
 
 

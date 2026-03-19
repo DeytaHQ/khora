@@ -73,7 +73,13 @@ class Neo4jConfig(BaseModel):
 
 
 class KuzuConfig(BaseModel):
-    """Kùzu embedded graph backend configuration."""
+    """Kùzu embedded graph backend configuration.
+
+    .. deprecated::
+        KuzuDB backend is deprecated. Kuzu was acquired by Apple in October 2025
+        and the repository is archived. Consider using :class:`Neo4jConfig` or
+        :class:`SurrealDBConfig` instead.
+    """
 
     backend: Literal["kuzu"] = "kuzu"
     database_path: str = Field(default="./kuzu_db", description="Path to Kùzu database directory")
@@ -100,6 +106,25 @@ class ArcadeDBGraphConfig(BaseModel):
     query_language: str = Field(default="cypher", description="Query language: cypher or gremlin")
 
 
+class SurrealDBConfig(BaseModel):
+    """SurrealDB unified backend configuration (graph role).
+
+    SurrealDB serves as a unified backend providing graph, vector, and
+    relational storage in a single database.
+    """
+
+    backend: Literal["surrealdb"] = "surrealdb"
+    mode: str = Field(default="memory", description="Connection mode: memory, embedded, or remote")
+    url: str | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
+    path: str | None = Field(default=None, description="Database file path (for embedded mode)")
+    namespace: str = Field(default="khora", description="SurrealDB namespace")
+    database: str = Field(default="default", description="SurrealDB database")
+    user: str = Field(default="root", description="SurrealDB username")
+    password: str = Field(default="root", description="SurrealDB password")
+    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    sync_data: bool = Field(default=True, description="Enable SURREAL_SYNC_DATA for crash-safe writes")
+
+
 def _graph_discriminator(v: Any) -> str:
     if isinstance(v, dict):
         return v.get("backend", "neo4j")
@@ -110,7 +135,8 @@ GraphConfig = Annotated[
     Annotated[Neo4jConfig, Tag("neo4j")]
     | Annotated[KuzuConfig, Tag("kuzu")]
     | Annotated[MemgraphConfig, Tag("memgraph")]
-    | Annotated[ArcadeDBGraphConfig, Tag("arcadedb")],
+    | Annotated[ArcadeDBGraphConfig, Tag("arcadedb")]
+    | Annotated[SurrealDBConfig, Tag("surrealdb")],
     Discriminator(_graph_discriminator),
 ]
 
@@ -139,6 +165,23 @@ class ArcadeDBVectorConfig(BaseModel):
     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
 
 
+class SurrealDBVectorConfig(BaseModel):
+    """SurrealDB unified backend configuration (vector role).
+
+    Shares the same SurrealDB instance as the graph role.
+    """
+
+    backend: Literal["surrealdb"] = "surrealdb"
+    mode: str = Field(default="memory", description="Connection mode: memory, embedded, or remote")
+    url: str | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
+    path: str | None = Field(default=None, description="Database file path (for embedded mode)")
+    namespace: str = Field(default="khora", description="SurrealDB namespace")
+    database: str = Field(default="default", description="SurrealDB database")
+    user: str = Field(default="root", description="SurrealDB username")
+    password: str = Field(default="root", description="SurrealDB password")
+    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+
+
 def _vector_discriminator(v: Any) -> str:
     if isinstance(v, dict):
         return v.get("backend", "pgvector")
@@ -146,7 +189,9 @@ def _vector_discriminator(v: Any) -> str:
 
 
 VectorConfig = Annotated[
-    Annotated[PgVectorConfig, Tag("pgvector")] | Annotated[ArcadeDBVectorConfig, Tag("arcadedb")],
+    Annotated[PgVectorConfig, Tag("pgvector")]
+    | Annotated[ArcadeDBVectorConfig, Tag("arcadedb")]
+    | Annotated[SurrealDBVectorConfig, Tag("surrealdb")],
     Discriminator(_vector_discriminator),
 ]
 
@@ -163,6 +208,18 @@ class StorageSettings(BaseModel):
     the legacy flat fields (neo4j_url, pgvector_url, etc.) for backwards
     compatibility.
     """
+
+    # Unified backend selector (postgres = traditional PG+pgvector+Neo4j, surrealdb = unified)
+    backend: str = Field(
+        default="postgres",
+        description="Storage backend strategy: 'postgres' (traditional PG+pgvector+graph) or 'surrealdb' (unified)",
+    )
+
+    # SurrealDB unified backend config (used when backend='surrealdb')
+    surrealdb: SurrealDBConfig | None = Field(
+        default=None,
+        description="SurrealDB unified backend configuration (used when backend='surrealdb')",
+    )
 
     # PostgreSQL (relational)
     postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
