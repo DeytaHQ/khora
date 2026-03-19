@@ -173,11 +173,11 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
     import time
     from pathlib import Path
 
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
     from loguru import logger
 
     from alembic import command
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
 
     url = database_url or os.getenv("KHORA_DATABASE_URL", "")
     if not url:
