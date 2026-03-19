@@ -61,15 +61,18 @@ class SurrealDBConnection:
     async def connect(self) -> None:
         if self._connected:
             return
-        from surrealdb import AsyncSurreal
+        import surrealdb
 
         endpoint = self._build_endpoint()
         logger.info(f"Connecting to SurrealDB ({self._mode}): {endpoint}")
-        client: Any = AsyncSurreal(endpoint)
-        await client.connect()
-        await client.use(self._namespace, self._database)
-        await client.signin({"username": self._user, "password": self._password})
-        self._client = client
+        # Use getattr to create the client so ty does not infer the union
+        # return type of AsyncSurreal() (whose HTTP variant .connect(url)
+        # has a required url param that conflicts with the WS variant).
+        factory = getattr(surrealdb, "AsyncSurreal")
+        self._client = factory(endpoint)
+        await self._client.connect()
+        await self._client.use(self._namespace, self._database)
+        await self._client.signin({"username": self._user, "password": self._password})
         self._connected = True
         logger.info(f"Connected to SurrealDB ({self._mode}), ns={self._namespace}, db={self._database}")
 
