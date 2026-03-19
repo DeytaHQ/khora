@@ -10,11 +10,10 @@ are now tracked via the stable namespace_id column (added in migration 012).
 
 from collections.abc import Sequence
 
+from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import UUID
-
-from alembic import op
 
 revision: str = "013_drop_previous_version_id"
 down_revision: str | Sequence[str] | None = "012_add_stable_namespace_id"

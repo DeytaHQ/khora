@@ -18,11 +18,10 @@ Key features:
 
 from collections.abc import Sequence
 
+from alembic import op
 from pgvector.sqlalchemy import Vector
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
-
-from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "004_add_temporal_tables"

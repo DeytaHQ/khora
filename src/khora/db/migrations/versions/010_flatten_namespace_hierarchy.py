@@ -22,11 +22,10 @@ Steps:
 
 from collections.abc import Sequence
 
+from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
-
-from alembic import op
 
 revision: str = "010_flatten_namespace_hierarchy"
 down_revision: str | Sequence[str] | None = "009_temporal_search_indexes"

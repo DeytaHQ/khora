@@ -20,10 +20,9 @@ Steps:
 
 from collections.abc import Sequence
 
+from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import text
-
-from alembic import op
 
 revision: str = "012_add_stable_namespace_id"
 down_revision: str | Sequence[str] | None = "011_drop_namespace_slug"

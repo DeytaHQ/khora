@@ -10,9 +10,8 @@ For fresh installs, these columns are already included in 000_initial_schema.
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
-
 from alembic import op
+import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "001_namespace_versioning"

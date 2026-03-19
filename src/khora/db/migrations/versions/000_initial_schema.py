@@ -16,11 +16,10 @@ Creates all base tables for Khora Memory Lake:
 
 from collections.abc import Sequence
 
+from alembic import op
 from pgvector.sqlalchemy import Vector
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
-
-from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "000_initial_schema"
