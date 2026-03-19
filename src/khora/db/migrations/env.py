@@ -51,37 +51,6 @@ def _get_url() -> str:
     return url
 
 
-def _seed_version_table(connection: Connection) -> None:
-    """One-time: copy stamp from 'alembic_version' to 'khora_alembic_version'.
-
-    Existing deployments track migration state in the default
-    'alembic_version' table. On first run with the new version table,
-    copy the current revision so Alembic doesn't re-run everything.
-
-    Idempotent — skips if khora_alembic_version already has rows,
-    or if alembic_version doesn't exist / is empty.
-    """
-    # Check if khora_alembic_version already has data
-    result = connection.execute(text(f"SELECT 1 FROM {VERSION_TABLE} LIMIT 1"))
-    if result.fetchone() is not None:
-        return  # already seeded
-
-    # Check if old table exists and has data
-    try:
-        result = connection.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
-        row = result.fetchone()
-    except Exception:
-        # alembic_version table doesn't exist (fresh database)
-        return
-
-    if row is not None:
-        connection.execute(
-            text(f"INSERT INTO {VERSION_TABLE} (version_num) VALUES (:v)"),
-            {"v": row[0]},
-        )
-        logger.info("Seeded %s from alembic_version (revision: %s)", VERSION_TABLE, row[0])
-
-
 def _acquire_advisory_lock(connection: Connection, timeout: float = 60.0) -> None:
     """Block until pg_advisory_xact_lock is acquired, with timeout.
 
@@ -104,7 +73,7 @@ def _acquire_advisory_lock(connection: Connection, timeout: float = 60.0) -> Non
 
 
 def do_run_migrations(connection: Connection) -> None:
-    """Run migrations with advisory lock and version table seeding."""
+    """Run migrations with advisory lock."""
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
@@ -113,7 +82,6 @@ def do_run_migrations(connection: Connection) -> None:
 
     with context.begin_transaction():
         _acquire_advisory_lock(connection)
-        _seed_version_table(connection)
         context.run_migrations()
 
 
