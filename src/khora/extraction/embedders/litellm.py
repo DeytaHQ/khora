@@ -19,6 +19,50 @@ from .base import Embedder
 if TYPE_CHECKING:
     from khora.config import LiteLLMConfig
 
+# Token limits per embedding model family.  OpenAI text-embedding-3-*
+# accepts up to 8191 tokens.  We leave a small margin.
+_MODEL_TOKEN_LIMITS: dict[str, int] = {
+    "text-embedding-3-small": 8191,
+    "text-embedding-3-large": 8191,
+    "text-embedding-ada-002": 8191,
+}
+_DEFAULT_TOKEN_LIMIT = 8191
+
+# Cached tiktoken encoding (lazy-loaded, thread-safe after first call)
+_tiktoken_encoding = None
+
+
+def _get_encoding():
+    """Get or create the cached tiktoken encoding for cl100k_base."""
+    global _tiktoken_encoding  # noqa: PLW0603
+    if _tiktoken_encoding is None:
+        try:
+            import tiktoken
+
+            _tiktoken_encoding = tiktoken.get_encoding("cl100k_base")
+        except ImportError:
+            return None
+    return _tiktoken_encoding
+
+
+def _truncate_text(text: str, max_tokens: int) -> str:
+    """Truncate text to fit within the token limit.
+
+    Uses tiktoken for accurate counting; falls back to a conservative
+    character-based estimate (~3.5 chars/token) if tiktoken is unavailable.
+    """
+    enc = _get_encoding()
+    if enc is not None:
+        tokens = enc.encode(text)
+        if len(tokens) <= max_tokens:
+            return text
+        return enc.decode(tokens[:max_tokens])
+    # Fallback: conservative chars-per-token estimate
+    char_limit = int(max_tokens * 3.5)
+    if len(text) <= char_limit:
+        return text
+    return text[:char_limit]
+
 
 class LiteLLMEmbedder(Embedder):
     """LiteLLM-based embedder for text embeddings.
@@ -50,6 +94,7 @@ class LiteLLMEmbedder(Embedder):
         embed_concurrency: int = 20,
         retry_wait: float = 1.0,
         cache_ttl_hours: int | None = None,
+        max_token_limit: int | None = None,
     ) -> None:
         """Initialize the LiteLLM embedder.
 
@@ -63,6 +108,7 @@ class LiteLLMEmbedder(Embedder):
             embed_concurrency: Maximum concurrent embedding sub-batch API calls
             retry_wait: Base wait time (seconds) for exponential backoff between retries
             cache_ttl_hours: Cache entry TTL in hours (None = no expiry)
+            max_token_limit: Per-text token limit; auto-detected from model if None
         """
         self._model = model
         self._dimension = dimension
@@ -77,6 +123,14 @@ class LiteLLMEmbedder(Embedder):
         self._cache_hits = 0
         self._cache_misses = 0
         self._dimension_validated = False
+        # Resolve per-text token limit from model name or explicit override
+        if max_token_limit is not None:
+            self._max_token_limit = max_token_limit
+        else:
+            # Match model name against known limits (supports prefixed model names)
+            base = model.split("/")[-1] if "/" in model else model
+            self._max_token_limit = _MODEL_TOKEN_LIMITS.get(base, _DEFAULT_TOKEN_LIMIT)
+        self._truncation_count = 0
 
     def _cache_key(self, text: str) -> str:
         """Generate a cache key for a text."""
@@ -278,6 +332,21 @@ class LiteLLMEmbedder(Embedder):
         # (preserving \t, \n, \r) and replace empty strings with a placeholder.
         _ctrl_re = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
         sanitized = [_ctrl_re.sub("", t) if t and t.strip() else " " for t in texts]
+
+        # Truncate texts that exceed the model's per-text token limit to prevent
+        # 400 Bad Request errors from the embedding API.
+        truncated = 0
+        for i, text in enumerate(sanitized):
+            result = _truncate_text(text, self._max_token_limit)
+            if len(result) < len(text):
+                sanitized[i] = result
+                truncated += 1
+        if truncated:
+            self._truncation_count += truncated
+            logger.warning(
+                f"Truncated {truncated}/{len(sanitized)} texts to {self._max_token_limit} tokens "
+                f"for model {self._model}"
+            )
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self._max_retries),
