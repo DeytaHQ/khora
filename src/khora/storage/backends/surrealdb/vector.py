@@ -22,6 +22,7 @@ from khora.storage.backends.surrealdb._helpers import (
     _parse_uuid,
     _rid,
     _row_to_entity,
+    _sanitize_field_name,
 )
 from khora.telemetry import trace
 
@@ -232,8 +233,9 @@ class SurrealDBVectorAdapter:
 
         if metadata_filters:
             for i, (key, value) in enumerate(metadata_filters.items()):
+                safe_key = _sanitize_field_name(key)
                 param = f"mf_{i}"
-                where_clauses.append(f"metadata_.{key} = ${param}")
+                where_clauses.append(f"metadata_.{safe_key} = ${param}")
                 bindings[param] = value
 
         where_sql = " AND ".join(where_clauses)
@@ -423,6 +425,123 @@ class SurrealDBVectorAdapter:
         )
         await self._conn.execute(sql, {"updates": update_dicts})
         return len(updates)
+
+    @trace(
+        "khora.surrealdb.upsert_entities_batch",
+        include={"namespace_id"},
+        result=lambda r: {"count": len(r)},
+    )
+    async def upsert_entities_batch(
+        self,
+        namespace_id: UUID,
+        entities: list[Entity],
+    ) -> list[tuple[Entity, bool]]:
+        """Batch upsert entities using match-by (namespace, name, entity_type).
+
+        For existing entities: merge descriptions, sum mention_counts, union source_ids.
+        For new entities: create.
+        Returns list of (Entity, is_new) tuples.
+        """
+        if not entities:
+            return []
+
+        ns_rid = _rid("memory_namespace", namespace_id)
+
+        # 1. Batch-fetch all existing entities matching any (name, type) pair
+        name_type_pairs = [(e.name, e.entity_type) for e in entities]
+        or_clauses = []
+        fetch_bindings: dict[str, Any] = {}
+        for i, (name, etype) in enumerate(name_type_pairs):
+            or_clauses.append(f"(name = $n{i} AND entity_type = $t{i})")
+            fetch_bindings[f"n{i}"] = name
+            fetch_bindings[f"t{i}"] = etype
+
+        fetch_sql = f"SELECT * FROM entity WHERE namespace = {ns_rid} " f"AND ({' OR '.join(or_clauses)})"
+        existing_rows = await self._conn.query(fetch_sql, fetch_bindings)
+
+        # Index existing entities by (name, entity_type)
+        existing_map: dict[tuple[str, str], Entity] = {}
+        for row in existing_rows:
+            ent = _row_to_entity(row)
+            existing_map[(ent.name, ent.entity_type)] = ent
+
+        # 2. Separate into creates vs updates
+        results: list[tuple[Entity, bool]] = []
+        to_create: list[Entity] = []
+        to_update: list[Entity] = []
+
+        for entity in entities:
+            key = (entity.name, entity.entity_type)
+            existing = existing_map.get(key)
+            if existing:
+                existing.merge_with(entity)
+                to_update.append(existing)
+                results.append((existing, False))
+            else:
+                entity.namespace_id = namespace_id
+                to_create.append(entity)
+                results.append((entity, True))
+
+        # 3. Batch create new entities
+        if to_create:
+            create_data = [_entity_to_bindings(e) for e in to_create]
+            create_sql = (
+                "FOR $e IN $entities {"
+                "  CREATE entity:\u27e8$e.id\u27e9 SET "
+                "    namespace = memory_namespace:\u27e8$e.ns\u27e9, "
+                "    name = $e.name, "
+                "    entity_type = $e.entity_type, "
+                "    description = $e.description, "
+                "    attributes = $e.attributes, "
+                "    source_document_ids = $e.source_document_ids, "
+                "    source_chunk_ids = $e.source_chunk_ids, "
+                "    source_tool = $e.source_tool, "
+                "    mention_count = $e.mention_count, "
+                "    embedding = $e.embedding, "
+                "    embedding_model = $e.embedding_model, "
+                "    valid_from = $e.valid_from, "
+                "    valid_until = $e.valid_until, "
+                "    confidence = $e.confidence, "
+                "    metadata_ = $e.metadata_, "
+                "    created_at = $e.created_at, "
+                "    updated_at = $e.updated_at;"
+                "}"
+            )
+            await self._conn.execute(create_sql, {"entities": create_data})
+
+        # 4. Batch update existing entities
+        if to_update:
+            update_data = []
+            for ent in to_update:
+                update_data.append(
+                    {
+                        "id": str(ent.id),
+                        "description": ent.description,
+                        "attributes": ent.attributes or {},
+                        "source_document_ids": [str(uid) for uid in ent.source_document_ids],
+                        "source_chunk_ids": [str(uid) for uid in ent.source_chunk_ids],
+                        "mention_count": ent.mention_count,
+                        "confidence": ent.confidence,
+                        "metadata_": ent.metadata or {},
+                        "updated_at": _iso(ent.updated_at),
+                    }
+                )
+            update_sql = (
+                "FOR $e IN $entities {"
+                "  UPDATE entity:\u27e8$e.id\u27e9 SET "
+                "    description = $e.description, "
+                "    attributes = $e.attributes, "
+                "    source_document_ids = $e.source_document_ids, "
+                "    source_chunk_ids = $e.source_chunk_ids, "
+                "    mention_count = $e.mention_count, "
+                "    confidence = $e.confidence, "
+                "    metadata_ = $e.metadata_, "
+                "    updated_at = $e.updated_at;"
+                "}"
+            )
+            await self._conn.execute(update_sql, {"entities": update_data})
+
+        return results
 
     @trace(
         "khora.surrealdb.search_similar_entities",

@@ -73,7 +73,13 @@ class Neo4jConfig(BaseModel):
 
 
 class KuzuConfig(BaseModel):
-    """Kùzu embedded graph backend configuration."""
+    """Kùzu embedded graph backend configuration.
+
+    .. deprecated::
+        KuzuDB backend is deprecated. Kuzu was acquired by Apple in October 2025
+        and the repository is archived. Consider using :class:`Neo4jConfig` or
+        :class:`SurrealDBConfig` instead.
+    """
 
     backend: Literal["kuzu"] = "kuzu"
     database_path: str = Field(default="./kuzu_db", description="Path to Kùzu database directory")

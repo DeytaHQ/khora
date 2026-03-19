@@ -22,6 +22,7 @@ from khora.storage.backends.surrealdb._helpers import (
     _parse_uuid,
     _rid,
     _row_to_entity,
+    _sanitize_field_name,
 )
 from khora.telemetry import trace
 
@@ -720,9 +721,10 @@ class SurrealDBGraphAdapter:
 
         # Build an optional relationship-type filter applied to each hop.
         rel_filter = ""
+        rel_bindings: dict[str, Any] = {}
         if relationship_types:
-            rt_list = ", ".join(f"'{rt}'" for rt in relationship_types)
-            rel_filter = f"[WHERE relationship_type IN [{rt_list}]]"
+            rel_filter = "[WHERE relationship_type IN $rel_types]"
+            rel_bindings["rel_types"] = list(relationship_types)
 
         effective_max = min(max_depth, 3)
 
@@ -732,7 +734,7 @@ class SurrealDBGraphAdapter:
             arrow_chain = ("->relates_to" + rel_filter + "->entity") * depth
 
             sql = f"SELECT {arrow_chain} AS targets FROM {src}"
-            rows = await self._conn.query(sql)
+            rows = await self._conn.query(sql, rel_bindings or None)
             if not rows:
                 continue
 
@@ -779,15 +781,16 @@ class SurrealDBGraphAdapter:
         eid = _rid("entity", entity_id)
 
         rel_filter = ""
+        rel_bindings: dict[str, Any] = {}
         if relationship_types:
-            rt_list = ", ".join(f"'{rt}'" for rt in relationship_types)
-            rel_filter = f"[WHERE relationship_type IN [{rt_list}]]"
+            rel_filter = "[WHERE relationship_type IN $rel_types]"
+            rel_bindings["rel_types"] = list(relationship_types)
 
         # Combine outgoing + incoming neighbor traversal in a single query
         out_arrow = ("->relates_to" + rel_filter + "->entity") * depth
         in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
         combined_sql = f"SELECT {out_arrow} AS out_neighbors, " f"{in_arrow} AS in_neighbors " f"FROM {eid}"
-        rows = await self._conn.query(combined_sql)
+        rows = await self._conn.query(combined_sql, rel_bindings or None)
 
         # Collect unique entities from both directions
         seen_ids: set[str] = set()
@@ -852,9 +855,10 @@ class SurrealDBGraphAdapter:
             return {}
 
         rel_filter = ""
+        rel_bindings: dict[str, Any] = {}
         if relationship_types:
-            rt_list = ", ".join(f"'{rt}'" for rt in relationship_types)
-            rel_filter = f"[WHERE relationship_type IN [{rt_list}]]"
+            rel_filter = "[WHERE relationship_type IN $rel_types]"
+            rel_bindings["rel_types"] = list(relationship_types)
 
         out_arrow = ("->relates_to" + rel_filter + "->entity") * depth
         in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
@@ -867,7 +871,7 @@ class SurrealDBGraphAdapter:
             f"FROM entity WHERE id IN [{ids_list}]"
         )
         try:
-            rows = await self._conn.query(batch_sql)
+            rows = await self._conn.query(batch_sql, rel_bindings or None)
         except Exception:
             logger.warning("Batch neighborhood query failed, falling back to individual queries")
             result: dict[UUID, dict[str, Any]] = {}
@@ -952,7 +956,7 @@ class SurrealDBGraphAdapter:
         sql = (
             f"SELECT * FROM entity "
             f"WHERE namespace = memory_namespace:\u27e8{namespace_id}\u27e9 "
-            f"AND attributes.{attribute_name} = $attr_value "
+            f"AND attributes.{_sanitize_field_name(attribute_name)} = $attr_value "
             "LIMIT $limit"
         )
         rows = await self._conn.query(sql, {"attr_value": attribute_value, "limit": limit})

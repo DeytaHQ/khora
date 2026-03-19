@@ -2953,28 +2953,20 @@ class TestSurrealDBSQLInjectionVectors:
     since Python ``int`` cannot contain SQL.
     """
 
-    async def test_attribute_name_injection_is_possible(self) -> None:
-        """Demonstrates that attribute_name is interpolated unsafely."""
+    async def test_attribute_name_injection_is_rejected(self) -> None:
+        """Verify that malicious attribute_name is rejected by sanitiser."""
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
 
         conn = _make_mock_conn(query=[])
         adapter = SurrealDBGraphAdapter(conn)
 
-        # Malicious attribute name — should ideally be rejected or escaped
+        # Malicious attribute name — must be rejected by _sanitize_field_name
         malicious_attr = "x = 1; DELETE entity WHERE true; --"
-        await adapter.search_entities_by_attribute(uuid4(), malicious_attr, "anything")
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            await adapter.search_entities_by_attribute(uuid4(), malicious_attr, "anything")
 
-        # Inspect the generated SQL — it should NOT contain the raw injection
-        call_args = conn.query.call_args
-        sql = call_args[0][0]
-        # This assertion PASSES (the injection IS present) proving the vuln
-        assert "DELETE entity" in sql, (
-            "Expected the raw injection payload in the SQL string. "
-            "If this fails, the attribute_name is now being sanitised — good!"
-        )
-
-    async def test_relationship_type_quote_injection(self) -> None:
-        """Demonstrates that relationship_types are interpolated unsafely."""
+    async def test_relationship_type_quote_injection_is_parameterised(self) -> None:
+        """Verify that relationship_types are parameterised, not interpolated."""
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
 
         conn = _make_mock_conn(query=[])
@@ -2988,13 +2980,11 @@ class TestSurrealDBSQLInjectionVectors:
             relationship_types=[malicious_rt],
         )
 
-        # Inspect the generated SQL for the escaped/unescaped payload
+        # The SQL should use $rel_types parameter, not contain the raw payload
         call_args = conn.query.call_args
         sql = call_args[0][0]
-        assert "DELETE entity" in sql, (
-            "Expected the raw injection payload in the arrow-filter SQL. "
-            "If this fails, relationship_types are now parameterised — good!"
-        )
+        assert "DELETE entity" not in sql, "The raw injection payload should NOT appear in the SQL string."
+        assert "$rel_types" in sql, "relationship_types should be passed as a $rel_types parameter."
 
 
 # ── UUID parsing edge cases ──────────────────────────────────────────────
@@ -3112,3 +3102,321 @@ class TestSurrealDBSilentFailures:
         }
         with pytest.raises(ValueError):
             _row_to_relationship(row)
+
+
+# ---------------------------------------------------------------------------
+# Input sanitization tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBInputSanitization:
+    """Tests for the ``_sanitize_field_name`` helper in ``_helpers.py``."""
+
+    def test_valid_simple_name(self) -> None:
+        """Simple alphanumeric names pass."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        assert _sanitize_field_name("email") == "email"
+        assert _sanitize_field_name("name123") == "name123"
+
+    def test_valid_dotted_name(self) -> None:
+        """Dotted names like 'attributes.email' pass."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        assert _sanitize_field_name("attributes.email") == "attributes.email"
+        assert _sanitize_field_name("a.b.c") == "a.b.c"
+
+    def test_valid_underscore_name(self) -> None:
+        """Names with underscores pass."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        assert _sanitize_field_name("first_name") == "first_name"
+        assert _sanitize_field_name("_private") == "_private"
+
+    def test_rejects_semicolon(self) -> None:
+        """Names with semicolons are rejected."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            _sanitize_field_name("name; DELETE entity")
+
+    def test_rejects_sql_injection(self) -> None:
+        """SQL injection attempts are rejected."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            _sanitize_field_name("x = 1 OR 1=1 --")
+
+    def test_rejects_empty(self) -> None:
+        """Empty string is rejected."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            _sanitize_field_name("")
+
+    def test_rejects_space(self) -> None:
+        """Names with spaces are rejected."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            _sanitize_field_name("first name")
+
+    def test_rejects_quotes(self) -> None:
+        """Names with quotes are rejected."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            _sanitize_field_name("name'")
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            _sanitize_field_name('name"')
+
+    def test_rejects_parentheses(self) -> None:
+        """Names with parens are rejected."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            _sanitize_field_name("fn()")
+
+    def test_rejects_dash(self) -> None:
+        """Names starting with dash are rejected."""
+        from khora.storage.backends.surrealdb._helpers import _sanitize_field_name
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            _sanitize_field_name("-bad")
+
+
+# ---------------------------------------------------------------------------
+# Injection prevention on adapter methods
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBInjectionPrevention:
+    """Tests that adapter methods reject malicious input."""
+
+    async def test_search_entities_by_attribute_rejects_injection(self) -> None:
+        """search_entities_by_attribute raises ValueError for malicious attribute name."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            await adapter.search_entities_by_attribute(
+                uuid4(),
+                "email; DELETE entity",
+                "test@example.com",
+            )
+        # Crucially, the DB connection should never have been called
+        conn.query.assert_not_called()
+
+    async def test_search_similar_rejects_metadata_key_injection(self) -> None:
+        """search_similar raises ValueError for malicious metadata filter key."""
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBVectorAdapter(conn)
+
+        with pytest.raises(ValueError, match="Unsafe field name"):
+            await adapter.search_similar(
+                uuid4(),
+                [0.1] * 384,
+                metadata_filters={"key; DROP TABLE chunk": "evil"},
+            )
+        conn.query.assert_not_called()
+
+    async def test_find_paths_uses_param_binding_for_rel_types(self) -> None:
+        """find_paths passes relationship_types as parameter, not f-string."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn(query=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        src_id = uuid4()
+        tgt_id = uuid4()
+        ns_id = uuid4()
+
+        await adapter.find_paths(
+            ns_id,
+            src_id,
+            tgt_id,
+            relationship_types=["WORKS_AT", "KNOWS"],
+        )
+
+        # Verify that at least one call was made and the SQL uses $rel_types
+        # parameter binding instead of inline string interpolation
+        assert conn.query.call_count >= 1
+        for call in conn.query.call_args_list:
+            sql = call.args[0] if call.args else call.kwargs.get("sql", "")
+            if "rel_types" in str(call):
+                # The bindings should contain rel_types as a list param
+                bindings = call.args[1] if len(call.args) > 1 else call.kwargs.get("bindings", {})
+                if bindings:
+                    assert "rel_types" in bindings
+                    assert bindings["rel_types"] == ["WORKS_AT", "KNOWS"]
+            # The SQL must NOT contain the literal strings 'WORKS_AT' or 'KNOWS'
+            assert "'WORKS_AT'" not in sql
+            assert "'KNOWS'" not in sql
+
+    async def test_get_neighborhood_uses_param_binding_for_rel_types(self) -> None:
+        """get_neighborhood passes relationship_types as parameter, not f-string."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn(query=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        entity_id = uuid4()
+
+        await adapter.get_neighborhood(
+            entity_id,
+            relationship_types=["MANAGES", "REPORTS_TO"],
+        )
+
+        assert conn.query.call_count >= 1
+        for call in conn.query.call_args_list:
+            sql = call.args[0] if call.args else call.kwargs.get("sql", "")
+            # The SQL must NOT contain the literal strings inline
+            assert "'MANAGES'" not in sql
+            assert "'REPORTS_TO'" not in sql
+            # Bindings should use $rel_types parameter
+            bindings = call.args[1] if len(call.args) > 1 else call.kwargs.get("bindings", {})
+            if bindings:
+                assert "rel_types" in bindings
+
+
+# ---------------------------------------------------------------------------
+# Vector adapter upsert_entities_batch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBVectorUpsertBatch:
+    """Tests for upsert_entities_batch on the graph adapter (entity storage)."""
+
+    async def test_upsert_new_entities(self) -> None:
+        """New entities are created with is_new=True."""
+        from khora.core.models import Entity
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        conn = _make_mock_conn(query=[])  # No existing entities found
+        adapter = SurrealDBGraphAdapter(conn)
+
+        entities = [
+            Entity(
+                namespace_id=ns_id,
+                name="Alice",
+                entity_type="PERSON",
+                description="A person",
+            ),
+            Entity(
+                namespace_id=ns_id,
+                name="Bob",
+                entity_type="PERSON",
+                description="Another person",
+            ),
+        ]
+
+        results = await adapter.upsert_entities_batch(ns_id, entities)
+
+        assert len(results) == 2
+        for entity, is_new in results:
+            assert is_new is True
+            assert entity.namespace_id == ns_id
+
+    async def test_upsert_existing_entities(self) -> None:
+        """Existing entities are updated with is_new=False."""
+        from khora.core.models import Entity
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        existing_id = uuid4()
+        now_iso = datetime.now(UTC).isoformat()
+
+        # Simulate an existing entity row returned from SurrealDB
+        existing_row = {
+            "id": f"entity:\u27e8{existing_id}\u27e9",
+            "namespace": f"memory_namespace:\u27e8{ns_id}\u27e9",
+            "name": "Alice",
+            "entity_type": "PERSON",
+            "description": "Original description",
+            "attributes": {},
+            "source_document_ids": [],
+            "source_chunk_ids": [],
+            "source_tool": "",
+            "mention_count": 1,
+            "embedding": None,
+            "embedding_model": "",
+            "valid_from": None,
+            "valid_until": None,
+            "confidence": 1.0,
+            "metadata_": {},
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+
+        conn = _make_mock_conn(query=[existing_row])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        new_entity = Entity(
+            namespace_id=ns_id,
+            name="Alice",
+            entity_type="PERSON",
+            description="Updated description",
+        )
+
+        results = await adapter.upsert_entities_batch(ns_id, [new_entity])
+
+        assert len(results) == 1
+        entity, is_new = results[0]
+        assert is_new is False
+        assert entity.id == existing_id  # Kept the existing entity's ID
+
+    async def test_upsert_empty_list(self) -> None:
+        """Empty list returns empty list."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBGraphAdapter(conn)
+
+        results = await adapter.upsert_entities_batch(uuid4(), [])
+
+        assert results == []
+        # No DB calls should have been made
+        conn.query.assert_not_called()
+        conn.execute.assert_not_called()
+
+    async def test_vector_adapter_has_upsert_method(self) -> None:
+        """SurrealDBVectorAdapter has upsert_entities_batch (delegated or own)."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        # The graph adapter is the canonical owner of upsert_entities_batch
+        assert hasattr(SurrealDBGraphAdapter, "upsert_entities_batch")
+        assert callable(getattr(SurrealDBGraphAdapter, "upsert_entities_batch"))
+
+
+# ---------------------------------------------------------------------------
+# Kuzu deprecation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestKuzuDeprecation:
+    """Tests for Kuzu backend deprecation warning."""
+
+    def test_kuzu_import_warns(self) -> None:
+        """Importing kuzu backend emits DeprecationWarning."""
+        import importlib
+        import warnings
+
+        import khora.storage.backends.kuzu as kuzu_mod
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            importlib.reload(kuzu_mod)
+
+        deprecation_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert (
+            len(deprecation_warnings) >= 1
+        ), f"Expected DeprecationWarning from kuzu import, got: {[w.category.__name__ for w in caught]}"

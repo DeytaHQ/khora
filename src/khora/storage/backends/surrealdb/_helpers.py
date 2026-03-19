@@ -83,6 +83,20 @@ def _iso_to_dt(value: str | datetime | None) -> datetime | None:
     return datetime.fromisoformat(value)
 
 
+_SAFE_FIELD_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")
+
+
+def _sanitize_field_name(name: str) -> str:
+    """Validate a field/attribute name for safe use in SurrealQL queries.
+
+    Only allows alphanumeric characters, underscores, and dots (for nested access).
+    Raises ValueError if the name contains unsafe characters.
+    """
+    if not name or not _SAFE_FIELD_RE.match(name):
+        raise ValueError(f"Unsafe field name for SurrealQL query: {name!r}")
+    return name
+
+
 def _row_to_entity(row: dict[str, Any]) -> Entity:
     """Map a SurrealDB result row to a domain :class:`Entity`."""
     entity_id = _parse_uuid(row.get("id", ""))
