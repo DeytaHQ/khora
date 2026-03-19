@@ -1795,7 +1795,8 @@ async def run_smart_resolution(
         min_confidence=expertise.confidence.min_inferred,
     )
 
-    inferred = inferrer.infer(
+    inferred = await asyncio.to_thread(
+        inferrer.infer,
         resolved_entities,
         relationships,
         depth=expertise.expansion.depth,
