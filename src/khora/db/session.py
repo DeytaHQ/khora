@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -30,6 +32,18 @@ def get_database_url() -> str:
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
 
     return url
+
+
+@dataclass(slots=True, frozen=True)
+class MigrationResult:
+    """Result of running database migrations."""
+
+    success: bool
+    current_revision: str | None
+    previous_revision: str | None
+    migrations_run: int
+    elapsed_seconds: float
+    error: str | None = None
 
 
 class DatabaseManager:
@@ -147,56 +161,81 @@ async def close_db() -> None:
     await get_default_manager().close_db()
 
 
-def _run_migrations_sync() -> None:
-    """Internal function to run migrations synchronously."""
+def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
+    """Run Alembic migrations synchronously.
+
+    Args:
+        database_url: PostgreSQL URL. Falls back to KHORA_DATABASE_URL env var.
+
+    Returns:
+        MigrationResult with outcome details.
+    """
+    import time
     from pathlib import Path
 
     from loguru import logger
 
     from alembic import command
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
-    # Check if database URL is configured
-    url = os.getenv("KHORA_DATABASE_URL", "")
+    url = database_url or os.getenv("KHORA_DATABASE_URL", "")
     if not url:
-        logger.warning("KHORA_DATABASE_URL not set, skipping migrations")
-        return
+        return MigrationResult(
+            success=False,
+            current_revision=None,
+            previous_revision=None,
+            migrations_run=0,
+            elapsed_seconds=0.0,
+            error="No database URL. Set KHORA_DATABASE_URL or pass database_url.",
+        )
 
-    # Find alembic.ini - look in common locations
-    possible_paths = [
-        Path(__file__).parent.parent.parent.parent / "alembic.ini",  # src/khora/db -> root
-        Path.cwd() / "alembic.ini",
-        Path("/app/alembic.ini"),  # Docker container path
-    ]
+    start = time.monotonic()
 
-    alembic_cfg_path = None
-    for path in possible_paths:
-        if path.exists():
-            alembic_cfg_path = path
-            break
+    # Build programmatic Config — no alembic.ini needed
+    alembic_cfg = Config()
+    migrations_dir = str(Path(__file__).parent / "migrations")
+    alembic_cfg.set_main_option("script_location", migrations_dir)
+    alembic_cfg.set_main_option("sqlalchemy.url", "")  # unused, env.py reads attributes
+    alembic_cfg.attributes["database_url"] = url
 
-    if alembic_cfg_path is None:
-        logger.warning("alembic.ini not found, skipping migrations")
-        return
+    try:
+        script = ScriptDirectory.from_config(alembic_cfg)
+        logger.info("Running khora database migrations...")
+        command.upgrade(alembic_cfg, "head")
+        elapsed = time.monotonic() - start
+        logger.info("Migrations completed in {:.2f}s", elapsed)
 
-    logger.info(f"Running database migrations from {alembic_cfg_path}")
+        return MigrationResult(
+            success=True,
+            current_revision=script.get_current_head(),
+            previous_revision=None,
+            migrations_run=0,
+            elapsed_seconds=elapsed,
+        )
+    except Exception as e:
+        elapsed = time.monotonic() - start
+        logger.error("Migration failed: {}", e)
+        return MigrationResult(
+            success=False,
+            current_revision=None,
+            previous_revision=None,
+            migrations_run=0,
+            elapsed_seconds=elapsed,
+            error=str(e),
+        )
 
-    alembic_cfg = Config(str(alembic_cfg_path))
-    # Override the script location to be relative to alembic.ini
-    alembic_cfg.set_main_option("script_location", str(alembic_cfg_path.parent / "alembic"))
 
-    command.upgrade(alembic_cfg, "head")
-    logger.info("Database migrations completed")
-
-
-async def run_migrations() -> None:
+async def run_migrations(database_url: str | None = None) -> MigrationResult:
     """Run database migrations using Alembic.
 
-    Runs migrations in a thread pool to avoid conflicts with the running event loop.
-    """
-    import asyncio
-    import concurrent.futures
+    Runs in a thread pool to avoid blocking the event loop.
 
+    Args:
+        database_url: PostgreSQL URL. Falls back to KHORA_DATABASE_URL env var.
+
+    Returns:
+        MigrationResult with outcome details.
+    """
     loop = asyncio.get_running_loop()
-    with concurrent.futures.ThreadPoolExecutor() as pool:
-        await loop.run_in_executor(pool, _run_migrations_sync)
+    return await loop.run_in_executor(None, _run_migrations_sync, database_url)

@@ -137,6 +137,7 @@ class MemoryLake:
         embedding_model: str = "text-embedding-3-small",
         storage_config: StorageConfig | None = None,
         engine_kwargs: dict[str, Any] | None = None,
+        run_migrations: bool = False,
     ) -> None:
         """Initialize the Memory Lake.
 
@@ -148,6 +149,7 @@ class MemoryLake:
             storage_config: Storage configuration (derived from config if None) - deprecated
             engine_kwargs: Additional keyword arguments forwarded to the engine constructor
                 (e.g., vectorcypher_config=VectorCypherConfig(...))
+            run_migrations: If True, run Alembic migrations during connect() (default: False)
 
         Examples:
             # Simplest - from env vars
@@ -190,6 +192,7 @@ class MemoryLake:
         self._engine_name = engine
         self._storage_config = storage_config  # for backwards compat
         self._engine_kwargs = engine_kwargs or {}
+        self._run_migrations = run_migrations
         self._engine: MemoryEngineProtocol | None = None
         self._connected = False
 
@@ -199,6 +202,14 @@ class MemoryLake:
             return
 
         logger.info("Connecting Memory Lake...")
+
+        if self._run_migrations:
+            from khora.db.session import run_migrations as _run_migrations
+
+            db_url = self._config.database_url
+            result = await _run_migrations(db_url)
+            if not result.success:
+                raise RuntimeError(f"Database migration failed: {result.error}")
 
         from khora.engines import create_engine
 
