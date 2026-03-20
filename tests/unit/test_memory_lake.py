@@ -362,7 +362,8 @@ class TestRemember:
                 relationship_types=["WORKS_FOR", "KNOWS", "LOCATED_IN"],
             )
 
-        assert result is mock_result
+        assert result == mock_result
+        assert result.llm_usage == []
         lake._engine.remember.assert_awaited_once()
 
 

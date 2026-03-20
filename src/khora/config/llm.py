@@ -271,13 +271,34 @@ async def acompletion(
     from khora.telemetry import get_collector
 
     usage = getattr(response, "usage", None)
+    _prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+    _completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+    _total_tokens = getattr(usage, "total_tokens", 0) or 0
+    _operation = kwargs.get("_telemetry_op", "completion")
     get_collector().record_llm_call(
-        operation=kwargs.get("_telemetry_op", "completion"),
+        operation=_operation,
         model=config.model,
-        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-        total_tokens=getattr(usage, "total_tokens", 0) or 0,
+        prompt_tokens=_prompt_tokens,
+        completion_tokens=_completion_tokens,
+        total_tokens=_total_tokens,
         latency_ms=_latency,
+    )
+
+    # DYT-645: Extractors call litellm.acompletion() directly, not this helper.
+    # If they switch to this helper, remove their own record_usage() calls to
+    # avoid double-counting.
+    from khora.memory_lake import LLMUsage
+    from khora.telemetry.context import record_usage
+
+    record_usage(
+        LLMUsage(
+            operation=_operation,
+            model=config.model,
+            prompt_tokens=_prompt_tokens,
+            completion_tokens=_completion_tokens,
+            total_tokens=_total_tokens,
+            latency_ms=_latency,
+        )
     )
 
     return response.choices[0].message.content
@@ -325,13 +346,33 @@ async def aembedding(
     from khora.telemetry import get_collector
 
     usage = getattr(response, "usage", None)
+    _prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+    _total_tokens = getattr(usage, "total_tokens", 0) or 0
     get_collector().record_llm_call(
         operation="embedding",
         model=config.embedding_model,
-        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-        total_tokens=getattr(usage, "total_tokens", 0) or 0,
+        prompt_tokens=_prompt_tokens,
+        total_tokens=_total_tokens,
         latency_ms=_latency,
         metadata={"batch_size": len(text)},
+    )
+
+    # DYT-645: Embedders call litellm.aembedding() directly, not this helper.
+    # If they switch to this helper, remove their own record_usage() calls to
+    # avoid double-counting.
+    from khora.memory_lake import LLMUsage
+    from khora.telemetry.context import record_usage
+
+    record_usage(
+        LLMUsage(
+            operation="embedding",
+            model=config.embedding_model,
+            prompt_tokens=_prompt_tokens,
+            completion_tokens=0,
+            total_tokens=_total_tokens,
+            latency_ms=_latency,
+            batch_size=len(text),
+        )
     )
 
     return [item["embedding"] for item in response.data]

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -28,6 +28,28 @@ if TYPE_CHECKING:
     from khora.storage import StorageConfig, StorageCoordinator
 
 
+# DYT-645: LLMUsage is a public API type consumed by Poros (DYT-650) and Peras (DYT-651).
+# Changes to field names or types require coordination with those projects.
+@dataclass(slots=True, frozen=True)
+class LLMUsage:
+    """A single LLM API call's token usage.
+
+    Read-only value object — Khora produces it, consumers read it.
+    """
+
+    operation: str
+    """Logical operation name (e.g. "entity_extraction", "embedding")."""
+    model: str
+    """Model identifier (e.g. "gpt-4o", "text-embedding-3-small")."""
+    prompt_tokens: int
+    completion_tokens: int
+    """0 for embeddings."""
+    total_tokens: int
+    latency_ms: float
+    batch_size: int = 1
+    """>1 for embedding batches."""
+
+
 @dataclass(slots=True, frozen=True)
 class RememberResult:
     """Result of a remember operation."""
@@ -38,6 +60,7 @@ class RememberResult:
     entities_extracted: int
     relationships_created: int
     metadata: dict[str, Any] = field(default_factory=dict)
+    llm_usage: list[LLMUsage] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -52,6 +75,7 @@ class BatchResult:
     entities: int
     relationships: int
     metadata: dict[str, Any] = field(default_factory=dict)
+    llm_usage: list[LLMUsage] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -88,6 +112,7 @@ class RecallResult:
     context_text: str
     metadata: dict[str, Any] = field(default_factory=dict)
     relationships: list[tuple[Relationship, float]] = field(default_factory=list)
+    llm_usage: list[LLMUsage] = field(default_factory=list)
 
 
 class MemoryLake:
@@ -353,13 +378,19 @@ class MemoryLake:
         Returns:
             RememberResult with details
         """
-        from khora.telemetry.context import clear_trace_id, ensure_trace_id
+        from khora.telemetry.context import (
+            clear_trace_id,
+            collect_usage,
+            ensure_trace_id,
+            start_usage_collection,
+        )
 
         ensure_trace_id()
+        start_usage_collection()
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
-                return await self._get_engine().remember(
+                result = await self._get_engine().remember(
                     content,
                     namespace_id,
                     title=title,
@@ -369,7 +400,9 @@ class MemoryLake:
                     entity_types=entity_types,
                     relationship_types=relationship_types,
                 )
+                return replace(result, llm_usage=collect_usage())
         finally:
+            collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
 
     async def remember_batch(
@@ -415,13 +448,19 @@ class MemoryLake:
         Returns:
             BatchResult with aggregated statistics
         """
-        from khora.telemetry.context import clear_trace_id, ensure_trace_id
+        from khora.telemetry.context import (
+            clear_trace_id,
+            collect_usage,
+            ensure_trace_id,
+            start_usage_collection,
+        )
 
         ensure_trace_id()
+        start_usage_collection()
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
-                return await self._get_engine().remember_batch(
+                result = await self._get_engine().remember_batch(
                     documents,
                     namespace_id,
                     skill_name=skill_name,
@@ -432,7 +471,9 @@ class MemoryLake:
                     entity_types=entity_types,
                     relationship_types=relationship_types,
                 )
+                return replace(result, llm_usage=collect_usage())
         finally:
+            collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
 
     async def recall(
@@ -484,9 +525,15 @@ class MemoryLake:
             engine, ``relationships`` contains scored relationship tuples and
             ``context_text`` includes a ``--- Relationships ---`` section.
         """
-        from khora.telemetry.context import clear_trace_id, ensure_trace_id
+        from khora.telemetry.context import (
+            clear_trace_id,
+            collect_usage,
+            ensure_trace_id,
+            start_usage_collection,
+        )
 
         ensure_trace_id()
+        start_usage_collection()
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.recall", namespace_id=str(namespace_id), query=query):
@@ -501,8 +548,9 @@ class MemoryLake:
                 )
                 if include_sources:
                     await self._populate_sources(result.chunks, result.entities, result.relationships)
-                return result
+                return replace(result, llm_usage=collect_usage())
         finally:
+            collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
 
     async def forget(

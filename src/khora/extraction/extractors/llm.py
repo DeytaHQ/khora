@@ -705,13 +705,30 @@ class LLMEntityExtractor(EntityExtractor):
 
                         # Record telemetry
                         usage = getattr(response, "usage", None)
+                        _pt = getattr(usage, "prompt_tokens", 0) or 0
+                        _ct = getattr(usage, "completion_tokens", 0) or 0
+                        _tt = getattr(usage, "total_tokens", 0) or 0
                         get_collector().record_llm_call(
                             operation="entity_extraction",
                             model=self._model,
-                            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                            prompt_tokens=_pt,
+                            completion_tokens=_ct,
+                            total_tokens=_tt,
                             latency_ms=_latency,
+                        )
+
+                        from khora.memory_lake import LLMUsage
+                        from khora.telemetry.context import record_usage
+
+                        record_usage(
+                            LLMUsage(
+                                operation="entity_extraction",
+                                model=self._model,
+                                prompt_tokens=_pt,
+                                completion_tokens=_ct,
+                                total_tokens=_tt,
+                                latency_ms=_latency,
+                            )
                         )
 
                     content = response.choices[0].message.content
@@ -829,13 +846,30 @@ class LLMEntityExtractor(EntityExtractor):
                 _latency = (_time.perf_counter() - _t0) * 1000
 
                 usage = getattr(response, "usage", None)
+                _pt = getattr(usage, "prompt_tokens", 0) or 0
+                _ct = getattr(usage, "completion_tokens", 0) or 0
+                _tt = getattr(usage, "total_tokens", 0) or 0
                 get_collector().record_llm_call(
                     operation="relationship_extraction_second_pass",
                     model=self._model,
-                    prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                    completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                    total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                    prompt_tokens=_pt,
+                    completion_tokens=_ct,
+                    total_tokens=_tt,
                     latency_ms=_latency,
+                )
+
+                from khora.memory_lake import LLMUsage
+                from khora.telemetry.context import record_usage
+
+                record_usage(
+                    LLMUsage(
+                        operation="relationship_extraction_second_pass",
+                        model=self._model,
+                        prompt_tokens=_pt,
+                        completion_tokens=_ct,
+                        total_tokens=_tt,
+                        latency_ms=_latency,
+                    )
                 )
 
             content = response.choices[0].message.content
@@ -1425,14 +1459,32 @@ Return ONLY valid JSON, no other text."""
 
                         # Record telemetry
                         usage = getattr(response, "usage", None)
+                        _pt = getattr(usage, "prompt_tokens", 0) or 0
+                        _ct = getattr(usage, "completion_tokens", 0) or 0
+                        _tt = getattr(usage, "total_tokens", 0) or 0
                         get_collector().record_llm_call(
                             operation="entity_extraction_multi",
                             model=self._model,
-                            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                            prompt_tokens=_pt,
+                            completion_tokens=_ct,
+                            total_tokens=_tt,
                             latency_ms=_latency,
                             metadata={"batch_size": len(texts)},
+                        )
+
+                        from khora.memory_lake import LLMUsage
+                        from khora.telemetry.context import record_usage
+
+                        record_usage(
+                            LLMUsage(
+                                operation="entity_extraction_multi",
+                                model=self._model,
+                                prompt_tokens=_pt,
+                                completion_tokens=_ct,
+                                total_tokens=_tt,
+                                latency_ms=_latency,
+                                batch_size=len(texts),
+                            )
                         )
 
                     content = response.choices[0].message.content
