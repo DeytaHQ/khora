@@ -39,7 +39,18 @@ jobs:
         run: uv run ty check src/
 
       - name: Run prek checks (formatting, linting, imports)
-        run: uv run prek run --all-files
+        run: |
+          echo "=== isort version (pre-commit hook) ==="
+          uv run prek run isort --all-files || true
+          echo ""
+          echo "=== isort version (project venv) ==="
+          uv run isort --version
+          echo ""
+          echo "=== Diff after isort ran ==="
+          git diff
+          echo ""
+          echo "=== Running all hooks ==="
+          uv run prek run --all-files
 
       - name: Run tests with coverage
         run: |
