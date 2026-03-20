@@ -151,6 +151,16 @@ class StorageCoordinator:
     event_store: EventStoreProtocol | None = None
 
     _connected: bool = field(default=False, init=False)
+    _is_unified_backend: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        # Detect if graph and vector share a SurrealDB connection (unified backend)
+        if self.graph is not None and self.vector is not None:
+            graph_conn = getattr(self.graph, "_conn", None)
+            vector_conn = getattr(self.vector, "_conn", None)
+            if graph_conn is not None and graph_conn is vector_conn:
+                self._is_unified_backend = True
+                logger.info("Detected unified SurrealDB backend — entity dual-writes will be collapsed")
 
     async def connect(self) -> None:
         """Connect all configured backends in parallel.
@@ -544,14 +554,22 @@ class StorageCoordinator:
 
     @_record_storage_op("create_entity", "graph+vector")
     async def create_entity(self, entity: Entity) -> Entity:
-        """Create an entity in both graph and vector stores (parallel)."""
-        # Parallel writes to graph + vector, matching update_entity pattern
+        """Create an entity in both graph and vector stores (parallel).
+
+        When a unified backend is detected (graph and vector share the same
+        connection, e.g. SurrealDB), the vector write is skipped to avoid
+        duplicate records in the same database.
+        """
         if self.graph and self.vector:
-            graph_result, _ = await asyncio.gather(
-                self.graph.create_entity(entity),
-                self.vector.create_entity(entity),
-            )
-            entity = graph_result
+            if self._is_unified_backend:
+                # Single DB — graph adapter write is sufficient
+                entity = await self.graph.create_entity(entity)
+            else:
+                graph_result, _ = await asyncio.gather(
+                    self.graph.create_entity(entity),
+                    self.vector.create_entity(entity),
+                )
+                entity = graph_result
         elif self.graph:
             entity = await self.graph.create_entity(entity)
         elif self.vector:
@@ -571,8 +589,13 @@ class StorageCoordinator:
         return None
 
     async def update_entity(self, entity: Entity) -> Entity:
-        """Update an entity in both graph and vector stores (parallel)."""
+        """Update an entity in both graph and vector stores (parallel).
+
+        When a unified backend is detected, the vector write is skipped.
+        """
         if self.graph and self.vector:
+            if self._is_unified_backend:
+                return await self.graph.update_entity(entity)
             graph_result, _ = await asyncio.gather(
                 self.graph.update_entity(entity),
                 self.vector.update_entity(entity),
@@ -645,11 +668,17 @@ class StorageCoordinator:
         entities: list[Entity],
         *,
         batch_size: int = 200,
+        bulk_mode: bool = False,
     ) -> list[tuple[Entity, bool]]:
         """Batch upsert entities across graph and vector backends.
 
         Uses MERGE semantics: creates new entities, updates existing ones
         matched by (namespace_id, name, entity_type).
+
+        Args:
+            bulk_mode: When True, skip prefetch/versioning and bypass the
+                entity key gate.  Used for --rewrite (new namespace) where
+                no existing entities can conflict.
 
         Returns list of (entity, is_new) tuples.
         """
@@ -666,14 +695,33 @@ class StorageCoordinator:
         if has_graph and has_vector:
             assert self.graph is not None  # narrowed by has_graph
             assert self.vector is not None  # narrowed by has_vector
-            graph_results, _ = await asyncio.gather(
-                self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),
-                self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),  # type: ignore[unresolved-attribute]
-            )
-            results = graph_results
+            if self._is_unified_backend:
+                # Single DB — graph adapter upsert is sufficient
+                results = await self.graph.upsert_entities_batch(
+                    namespace_id,
+                    entities,
+                    batch_size=batch_size,
+                    bulk_mode=bulk_mode,
+                )
+            else:
+                graph_results, _ = await asyncio.gather(
+                    self.graph.upsert_entities_batch(
+                        namespace_id,
+                        entities,
+                        batch_size=batch_size,
+                        bulk_mode=bulk_mode,
+                    ),
+                    self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),  # type: ignore[unresolved-attribute]
+                )
+                results = graph_results
         elif has_graph:
             assert self.graph is not None
-            results = await self.graph.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)
+            results = await self.graph.upsert_entities_batch(
+                namespace_id,
+                entities,
+                batch_size=batch_size,
+                bulk_mode=bulk_mode,
+            )
         elif has_vector:
             results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)  # type: ignore[unresolved-attribute]
 

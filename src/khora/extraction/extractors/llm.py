@@ -32,11 +32,45 @@ if TYPE_CHECKING:
     from khora.config import LiteLLMConfig
     from khora.extraction.skills import ExpertiseConfig
 
-# Default system prompt for extraction
-DEFAULT_SYSTEM_PROMPT = """You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON."""
+# Default system prompt for extraction — kept static and long for prefix caching.
+# OpenAI automatically caches identical prompt prefixes (~50% latency reduction).
+# By putting all static guidelines in the system prompt, every call shares the same
+# prefix regardless of document content.
+DEFAULT_SYSTEM_PROMPT = """\
+You are an expert entity extraction system. Extract entities and relationships from text and return them as structured JSON.
 
-# Extraction prompt template with temporal awareness
-EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
+Guidelines:
+- Extract all named entities mentioned or implied in the text — if a person, organization, location, or concept is referenced even indirectly, extract it
+- Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
+- Include aliases for entities that have multiple names/abbreviations
+- Extract temporal information when dates, times, or relative time references appear
+- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with these required attributes: {"entity_affected": "name of entity whose state changed", "previous_state": "old value", "new_state": "new value", "attribute_changed": "what changed (e.g. job_title, location, instrument)", "transition_date": "ISO date or null"}. Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
+- For EVENT detection: when text describes specific occurrences, extract the event with date, participants, and location when available
+- Use temporal relationships (PRECEDES, FOLLOWS, INVOLVES) to connect events and state changes to other entities
+- Ensure relationship source/target names match extracted entity names exactly
+- RELATIONSHIP DENSITY: For N extracted entities, aim to identify N to 2N relationships between them. Include both explicit relationships (stated directly) and implicit ones (inferred from context, co-occurrence, or logical connection)
+- For every pair of extracted entities that have any direct or implied connection, create a relationship. It is better to have a weak relationship than no relationship
+- Use ASSOCIATED_WITH or RELATES_TO for weaker/implied connections when a more specific type doesn't fit
+- Before returning, verify that each extracted entity has at least one relationship connecting it to another entity. If an entity appears isolated, re-examine the text for implicit connections (e.g., co-location, temporal co-occurrence, shared attributes, being mentioned in the same document)
+
+Return ONLY valid JSON, no other text."""
+
+# Extraction prompt template — dynamic content only (guidelines moved to system prompt).
+# Structured-output models already enforce the JSON schema via response_format,
+# so we skip the JSON example to save ~400-500 tokens per call.
+EXTRACTION_PROMPT_STRUCTURED = """\
+Extract entities, relationships, and temporal information from the following text.
+{document_context}
+Entity types to extract: {entity_types}
+Relationship types to use: {relationship_types}
+
+Text:
+{text}"""
+
+# Full extraction prompt for models without structured output support —
+# includes inline JSON schema example since json_object mode doesn't enforce structure.
+EXTRACTION_PROMPT = """\
+Extract entities, relationships, and temporal information from the following text.
 {document_context}
 Entity types to extract: {entity_types}
 Relationship types to use: {relationship_types}
@@ -81,24 +115,7 @@ Return a JSON object with the following structure:
             "event_type": "MEETING|DECISION|MILESTONE|ANNOUNCEMENT|INCIDENT|etc"
         }}
     ]
-}}
-
-Guidelines:
-- Extract all named entities mentioned or implied in the text — if a person, organization, location, or concept is referenced even indirectly, extract it
-- Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
-- Include aliases for entities that have multiple names/abbreviations
-- Extract temporal information when dates, times, or relative time references appear
-- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with these required attributes: {{"entity_affected": "name of entity whose state changed", "previous_state": "old value", "new_state": "new value", "attribute_changed": "what changed (e.g. job_title, location, instrument)", "transition_date": "ISO date or null"}}. Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
-- For EVENT detection: when text describes specific occurrences, extract the event with date, participants, and location when available
-- Use temporal relationships (PRECEDES, FOLLOWS, INVOLVES) to connect events and state changes to other entities
-- Ensure relationship source/target names match extracted entity names exactly
-- RELATIONSHIP DENSITY: For N extracted entities, aim to identify N to 2N relationships between them. Include both explicit relationships (stated directly) and implicit ones (inferred from context, co-occurrence, or logical connection)
-- For every pair of extracted entities that have any direct or implied connection, create a relationship. It is better to have a weak relationship than no relationship
-- Use ASSOCIATED_WITH or RELATES_TO for weaker/implied connections when a more specific type doesn't fit
-
-Before returning your response, verify that each extracted entity has at least one relationship connecting it to another entity. If an entity appears isolated, re-examine the text for implicit connections (e.g., co-location, temporal co-occurrence, shared attributes, being mentioned in the same document).
-
-Return ONLY valid JSON, no other text."""
+}}"""
 
 # Second-pass prompt for focused relationship extraction (G-6: two-pass extraction)
 # Reference: DeepStruct (Wang et al., 2022) shows 30-40% more relationships with two-pass
@@ -326,10 +343,12 @@ class LLMEntityExtractor(EntityExtractor):
             text_tokens = self._estimate_tokens(text[:4000])
 
             # Density-based limit: shorter texts can be batched more aggressively.
-            # Short messages (e.g. Slack) are packed 30 per call to minimize
+            # Short messages (e.g. Slack) are packed densely to minimize
             # API round-trips while staying within context limits.
             text_len = len(text)
-            if text_len < 300:
+            if text_len < 150:
+                density_limit = 50  # Very short texts (Slack reactions, status updates)
+            elif text_len < 300:
                 density_limit = 30
             elif text_len < 800:
                 density_limit = 15
@@ -662,6 +681,14 @@ class LLMEntityExtractor(EntityExtractor):
                         from khora.telemetry import get_collector, trace_span
 
                         _t0 = _time.perf_counter()
+                        # Adaptive max_tokens: reduce for short texts to signal API to reserve less compute
+                        effective_max_tokens = self._max_tokens
+                        text_len = len(text)
+                        if text_len < 500:
+                            effective_max_tokens = min(self._max_tokens, 4096)
+                        elif text_len < 2000:
+                            effective_max_tokens = min(self._max_tokens, 8192)
+
                         with trace_span("khora.extraction.llm_call", model=self._model, call_type="single"):
                             response = await litellm.acompletion(
                                 model=self._model,
@@ -670,7 +697,7 @@ class LLMEntityExtractor(EntityExtractor):
                                     {"role": "user", "content": extraction_prompt},
                                 ],
                                 temperature=self._temperature,
-                                max_tokens=self._max_tokens,
+                                max_tokens=effective_max_tokens,
                                 timeout=self._timeout,
                                 response_format=self._get_response_format(),
                             )
@@ -1054,7 +1081,13 @@ class LLMEntityExtractor(EntityExtractor):
         # Build document temporal context from the context dict
         document_context = self._build_document_context(context)
 
-        prompt = EXTRACTION_PROMPT.format(
+        # Use the stripped prompt for structured-output models (JSON schema already enforced).
+        # This saves ~400-500 tokens per call since the JSON example is redundant.
+        prompt_template = (
+            EXTRACTION_PROMPT_STRUCTURED if self._model in self.MODELS_REQUIRING_JSON_SCHEMA else EXTRACTION_PROMPT
+        )
+
+        prompt = prompt_template.format(
             entity_types=", ".join(entity_types),
             relationship_types=", ".join(relationship_types or []),
             text=text[:8000],  # Truncate very long texts

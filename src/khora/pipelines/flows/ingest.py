@@ -782,6 +782,7 @@ async def process_document(
     selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
+    bulk_mode: bool = False,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
 
@@ -1093,7 +1094,11 @@ async def process_document(
                 logger.debug(f"Document {document.id}: upserting {len(entities)} entities")
 
                 # Batch upsert: single MERGE operation instead of N+1 individual lookups
-                upsert_results = await storage.upsert_entities_batch(document.namespace_id, entities)
+                upsert_results = await storage.upsert_entities_batch(
+                    document.namespace_id,
+                    entities,
+                    bulk_mode=bulk_mode,
+                )
 
                 logger.debug(
                     f"Document {document.id}: upsert returned {len(upsert_results)} results "
@@ -1481,6 +1486,7 @@ async def ingest_documents(
                 selective_extraction=selective_extraction,
                 extraction_importance_ratio=extraction_importance_ratio,
                 extraction_min_importance=extraction_min_importance,
+                bulk_mode=skip_checksum_dedup,
             )
 
     results = await asyncio.gather(
@@ -1795,7 +1801,8 @@ async def run_smart_resolution(
         min_confidence=expertise.confidence.min_inferred,
     )
 
-    inferred = inferrer.infer(
+    inferred = await asyncio.to_thread(
+        inferrer.infer,
         resolved_entities,
         relationships,
         depth=expertise.expansion.depth,

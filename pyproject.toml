@@ -73,6 +73,7 @@ all-backends = [
     "pgvector>=0.4.2",
     "httpx>=0.28.1",
     "weaviate-client>=4.20.1",
+    "surrealdb>=1.0.2",
 ]
 # Neural reranking
 reranking = [
@@ -90,6 +91,9 @@ nlp = ["spacy>=3.8.0"]
 rust = [
     "khora-accel>=0.1.0",
 ]
+# SurrealDB unified backend (graph + vector + relational in one DB)
+surrealdb = ["surrealdb>=1.0.2"]
+embedded = ["surrealdb>=1.0.2"]
 
 [project.scripts]
 khora = "khora:main"

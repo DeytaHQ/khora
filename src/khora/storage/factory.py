@@ -31,11 +31,13 @@ _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
     "kuzu": ("khora.storage.backends.kuzu", "KuzuBackend"),
     "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
     "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
+    "surrealdb": ("khora.storage.backends.surrealdb.graph", "SurrealDBGraphAdapter"),
 }
 
 _VECTOR_REGISTRY: dict[str, tuple[str, str]] = {
     "pgvector": ("khora.storage.backends.pgvector", "PgVectorBackend"),
     "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
+    "surrealdb": ("khora.storage.backends.surrealdb.vector", "SurrealDBVectorAdapter"),
 }
 
 
@@ -82,6 +84,10 @@ class StorageConfig:
     graph_config: Any = None  # GraphConfig union type
     vector_config: Any = None  # VectorConfig union type
 
+    # Unified backend selector
+    backend: str = "postgres"  # "postgres" (traditional) or "surrealdb" (unified)
+    surrealdb_config: Any = None  # SurrealDBConfig from config/schema.py
+
     # Event store configuration (uses PostgreSQL by default)
     event_store_url: str | None = None
 
@@ -123,6 +129,9 @@ class StorageConfig:
 
 # Cache for ArcadeDB dual-role instance sharing
 _arcadedb_instances: dict[str, Any] = {}
+
+# Cache for SurrealDB dual-role instance sharing
+_surrealdb_instances: dict[str, Any] = {}
 
 
 def _normalize_url(url: str) -> str:
@@ -315,6 +324,16 @@ class StorageFactory:
                 logger.info(f"Reusing ArcadeDB instance for {role} role (url={url})")
                 return _arcadedb_instances[cache_key]
 
+        if backend_name == "surrealdb":
+            # SurrealDB dual-role: reuse instance for same endpoint
+            url = getattr(config, "url", None) or ""
+            path = getattr(config, "path", None) or ""
+            mode = getattr(config, "mode", "memory")
+            cache_key = f"surrealdb:{mode}:{url}:{path}"
+            if cache_key in _surrealdb_instances:
+                logger.info(f"Reusing SurrealDB instance for {role} role (mode={mode})")
+                return _surrealdb_instances[cache_key]
+
         module_path, class_name = registry[backend_name]
         cls = _import_backend_class(module_path, class_name)
         if cls is None:
@@ -329,6 +348,12 @@ class StorageFactory:
         if backend_name == "arcadedb":
             url = getattr(config, "url", None) or ""
             _arcadedb_instances[f"arcadedb:{url}"] = instance
+
+        if backend_name == "surrealdb":
+            url = getattr(config, "url", None) or ""
+            path = getattr(config, "path", None) or ""
+            mode = getattr(config, "mode", "memory")
+            _surrealdb_instances[f"surrealdb:{mode}:{url}:{path}"] = instance
 
         return instance
 
@@ -361,7 +386,47 @@ class StorageFactory:
             return None
 
     def create_coordinator(self) -> StorageCoordinator:
-        """Create a storage coordinator with all configured backends."""
+        """Create a storage coordinator with all configured backends.
+
+        When backend='surrealdb', the same SurrealDB instance is used for
+        graph and vector roles (relational and event_store are set to None
+        since SurrealDB handles those internally).
+        """
+        if self.config.backend == "surrealdb":
+            surreal_config = self.config.surrealdb_config
+            if surreal_config is None:
+                raise ValueError("SurrealDB backend selected but surrealdb_config is not set")
+
+            # Create a shared SurrealDB connection for all four adapters
+            try:
+                from .backends.surrealdb.connection import SurrealDBConnection
+                from .backends.surrealdb.event_store import SurrealDBEventStoreAdapter
+                from .backends.surrealdb.graph import SurrealDBGraphAdapter
+                from .backends.surrealdb.relational import SurrealDBRelationalAdapter
+                from .backends.surrealdb.vector import SurrealDBVectorAdapter
+
+                conn = SurrealDBConnection(
+                    mode=getattr(surreal_config, "mode", "memory"),
+                    path=getattr(surreal_config, "path", None),
+                    url=getattr(surreal_config, "url", None),
+                    namespace=getattr(surreal_config, "namespace", "khora"),
+                    database=getattr(surreal_config, "database", "default"),
+                    user=getattr(surreal_config, "user", "root"),
+                    password=getattr(surreal_config, "password", "root"),
+                    sync_data=getattr(surreal_config, "sync_data", True),
+                )
+                return StorageCoordinator(
+                    relational=SurrealDBRelationalAdapter(conn),
+                    vector=SurrealDBVectorAdapter(conn),
+                    graph=SurrealDBGraphAdapter(conn),
+                    event_store=SurrealDBEventStoreAdapter(conn),
+                )
+            except ImportError:
+                raise ValueError(
+                    "SurrealDB backend selected but surrealdb package is not installed. "
+                    "Install with: pip install khora[surrealdb]"
+                )
+
         return StorageCoordinator(
             relational=self.create_relational_backend(),
             vector=self.create_vector_backend(),
