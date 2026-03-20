@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
+import re
 from typing import Any
 from uuid import UUID
 

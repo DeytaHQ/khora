@@ -12,10 +12,10 @@ All operations are synchronous and wrapped in asyncio.to_thread().
 from __future__ import annotations
 
 import asyncio
-import warnings
 from datetime import datetime
 from typing import Any
 from uuid import UUID
+import warnings
 
 from loguru import logger
 
