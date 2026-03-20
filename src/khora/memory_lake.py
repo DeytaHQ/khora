@@ -403,10 +403,8 @@ class MemoryLake:
                     relationship_types=relationship_types,
                 )
                 return replace(result, llm_usage=collect_usage())
-        except Exception:
-            collect_usage()  # clean up context var on failure
-            raise
         finally:
+            collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
 
     async def remember_batch(
@@ -478,10 +476,8 @@ class MemoryLake:
                     relationship_types=relationship_types,
                 )
                 return replace(result, llm_usage=collect_usage())
-        except Exception:
-            collect_usage()  # clean up context var on failure
-            raise
         finally:
+            collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
 
     async def recall(
@@ -559,10 +555,8 @@ class MemoryLake:
                 if include_sources:
                     await self._populate_sources(result.chunks, result.entities, result.relationships)
                 return replace(result, llm_usage=collect_usage())
-        except Exception:
-            collect_usage()  # clean up context var on failure
-            raise
         finally:
+            collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
 
     async def forget(
