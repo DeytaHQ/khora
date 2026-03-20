@@ -38,7 +38,7 @@ from .cli import main
 from .config import KhoraConfig
 from .core.models.document import DocumentSource
 from .engines import create_engine, list_engines, register_engine
-from .memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
+from .memory_lake import BatchResult, LLMUsage, MemoryLake, RecallResult, RememberResult, Stats
 from .query import SearchMode
 
 __version__ = "0.4.0"
@@ -46,6 +46,7 @@ __version__ = "0.4.0"
 __all__ = [
     "main",
     "MemoryLake",
+    "LLMUsage",
     "RememberResult",
     "RecallResult",
     "BatchResult",

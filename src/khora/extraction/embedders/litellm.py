@@ -393,6 +393,21 @@ class LiteLLMEmbedder(Embedder):
                         cache_hit=False,
                     )
 
+                    from khora.memory_lake import LLMUsage
+                    from khora.telemetry.context import record_usage
+
+                    record_usage(
+                        LLMUsage(
+                            operation="embedding",
+                            model=self._model,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=0,
+                            total_tokens=total_tokens,
+                            latency_ms=_latency,
+                            batch_size=len(texts),
+                        )
+                    )
+
                 result = [item["embedding"] for item in response.data]
 
                 # Validate embedding dimension on first successful call

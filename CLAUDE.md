@@ -10,15 +10,21 @@ LINEAR_TEAM: {TEAM_KEY}
 
 <!-- LINEAR_TEAM: the Linear team key used for branch names and issue refs (e.g., ENG) -->
 
-## Commands
+## Project Overview
 
-```bash
-make test              # Run tests (pytest, coverage ≥30%)
-make format            # Format code (black, isort, ruff)
-make lint              # Lint + typecheck (ruff, ty)
-make dev               # Start local databases (postgres + neo4j)
-uv run alembic upgrade head  # Run migrations
-```
+<!-- Replace with 2-3 sentences describing what this project does, who it serves, -->
+<!-- and any critical context an agent or new contributor needs up front.          -->
+
+## Tech Stack
+
+<!-- Replace with the actual stack. Add or remove lines as needed. -->
+
+- **Language:** {e.g., TypeScript, Python, Go}
+- **Framework:** {e.g., Next.js, FastAPI, Gin}
+- **Database:** {e.g., PostgreSQL, DynamoDB}
+- **ORM / Query layer:** {e.g., Prisma, SQLAlchemy, raw SQL}
+- **Package manager:** {e.g., pnpm, uv, go modules}
+- **Infra / Hosting:** {e.g., Vercel, AWS, Fly.io}
 
 ## Architecture
 
@@ -47,7 +53,6 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 - `_accel.py` — Rust/NumPy/Python acceleration facade (MMR, cosine, `detect_temporal_category()`, BM25, etc.)
 - `engines/vectorcypher/temporal_detection.py` — `TemporalDetector`, category-specific `RetrievalParams` for VectorCypher recall
 - `pipelines/flows/ingest.py` — Document ingestion pipeline with entity ID mapping
-- `db/migrations/env.py` — Alembic env with advisory locking and programmatic config
 
 ## Engine Selection
 
@@ -57,24 +62,26 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 | Multi-hop queries, complex relationships | `vectorcypher` | Vector + Cypher hybrid, requires Neo4j |
 | Chat history, event streams, cost-sensitive | `skeleton` | Temporal-first, 5-10x fewer LLM calls, Neo4j optional |
 
-## Testing
+## Tech Stack
+
+<!-- Replace with the actual stack. Add or remove lines as needed. -->
+
+- **Language:** {e.g., TypeScript, Python, Go}
+- **Framework:** {e.g., Next.js, FastAPI, Gin}
+- **Database:** {e.g., PostgreSQL, DynamoDB}
+- **ORM / Query layer:** {e.g., Prisma, SQLAlchemy, raw SQL}
+- **Package manager:** {e.g., pnpm, uv, go modules}
+- **Infra / Hosting:** {e.g., Vercel, AWS, Fly.io}
+
+## Commands
 
 ```bash
-uv run pytest tests/unit/ -v               # Unit tests only
-uv run pytest -k "test_remember" -v         # By name
-uv run pytest tests/unit/test_memory_lake.py  # Single file
+make test              # Run tests (pytest, coverage ≥30%)
+make format            # Format code (black, isort, ruff)
+make lint              # Lint + typecheck (ruff, ty)
+make dev               # Start local databases (postgres + neo4j)
+uv run alembic upgrade head  # Run migrations
 ```
-
-Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`. Async tests use `asyncio_mode = "auto"`.
-
-## Version Bumps
-
-IMPORTANT: When bumping the version, always update **all four files** and regenerate lockfiles:
-1. `pyproject.toml` — khora version
-2. `src/khora/__init__.py` — `__version__`
-3. `rust/khora-accel/Cargo.toml` — khora-accel version
-4. `rust/khora-accel/pyproject.toml` — khora-accel version
-5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
 
 ## Claude Code Settings
 
@@ -229,21 +236,24 @@ The recommended command sequence for feature development:
 
 Default team profiles are deployed to `.ttoj/templates/team-profiles/` and referenced by the `/team:*` commands. To customize team composition for this project, edit the deployed profiles or create project-specific overrides in `.claude/commands/team/`.
 
-## AI Changelog
+## Testing
 
-After every completed task, append an entry to `docs/AI_CHANGELOG.md`. Create the file if it doesn't exist.
-
-### Format
-
-```
-- YYYY-MM-DD: TICKET-ID: Brief description of change
+```bash
+uv run pytest tests/unit/ -v               # Unit tests only
+uv run pytest -k "test_remember" -v         # By name
+uv run pytest tests/unit/test_memory_lake.py  # Single file
 ```
 
-- One line per task, max 72 characters.
-- Use the Linear ticket ID (e.g., `DYT-42`) when available.
-- If there is no ticket, omit the ticket ID: `- YYYY-MM-DD: Brief description of change`.
-- Append new entries at the bottom of the file.
-- Do not edit or remove existing entries.
+Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`. Async tests use `asyncio_mode = "auto"`.
+
+## Version Bumps
+
+IMPORTANT: When bumping the version, always update **all four files** and regenerate lockfiles:
+1. `pyproject.toml` — khora version
+2. `src/khora/__init__.py` — `__version__`
+3. `rust/khora-accel/Cargo.toml` — khora-accel version
+4. `rust/khora-accel/pyproject.toml` — khora-accel version
+5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
 
 ## Conventions
 
@@ -268,8 +278,5 @@ After every completed task, append an entry to `docs/AI_CHANGELOG.md`. Create th
 - **Entity unique constraint** — `entities(namespace_id, name, entity_type)` has a UNIQUE constraint (migration 008). Entity upserts use `ON CONFLICT` on this constraint. Dedup migration is irreversible
 - **Pre-normalized embeddings** — All embeddings are L2-normalized at ingest time. Scoring uses `batch_dot_product` instead of `batch_cosine_similarity` for ~3x speedup. Dot product of unit vectors = cosine similarity
 - **MMR diversity enabled by default** — `enable_diversity=True` in `QuerySettings`. The MMR stage runs in Rust via `_accel.mmr_diversity_select` with NumPy and pure-Python fallbacks
-- **`include_sources` on read methods** — `recall()`, `get_entity()`, `list_entities()`, `find_related_entities()`, and `search_entities()` accept `include_sources: bool = False`. When `False` (default), no extra query runs — zero overhead. When `True`, `_populate_sources()` batch-fetches `DocumentSource` metadata (chunked at 1 000 IDs) and populates `chunk.source_document`, `entity.source_documents`, and `relationship.source_documents` in-place
+- **`include_sources` on read methods** — `recall()`, `get_entity()`, `list_entities()`, `find_related_entities()`, and `search_entities()` accept `include_sources: bool = False`. When `False`, no extra query runs — zero overhead. When `True`, `_populate_sources()` batch-fetches `DocumentSource` metadata (chunked at 1 000 IDs) and populates `chunk.source_document` and `entity.source_documents` in-place
 - **`ty` type checker** — Pre-commit hook runs `ty check src/` which passes clean (`All checks passed!`). If ty fails on your changes, fix the diagnostics before committing
-- **Migrations are bundled** — Alembic migrations live in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is for dev CLI only. Programmatic usage via `run_migrations(database_url)` or `MemoryLake(run_migrations=True)` needs no `.ini` file
-- **Dedicated version table** — Khora uses `khora_alembic_version` (not `alembic_version`) to avoid conflicts with downstream apps. Existing deployments must run all migrations fresh against the new version table (clean cut)
-- **Migration advisory lock** — `run_migrations()` acquires `pg_advisory_xact_lock(LOCK_ID)` where `LOCK_ID = int.from_bytes(hashlib.md5(b"khora_migrations").digest()[:8], "big", signed=True)` (= `6001515088189075507`). 60s timeout. Safe for concurrent startups

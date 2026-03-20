@@ -23,7 +23,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .collector import TelemetryCollector
-from .context import clear_trace_id, ensure_trace_id, get_trace_id, set_trace_id
+from .context import (
+    clear_trace_id,
+    collect_usage,
+    ensure_trace_id,
+    get_trace_id,
+    record_usage,
+    set_trace_id,
+    start_usage_collection,
+)
 from .logfire_integration import trace_span
 from .noop import NoOpCollector
 from .trace_decorator import trace
@@ -41,6 +49,9 @@ __all__ = [
     "set_trace_id",
     "ensure_trace_id",
     "clear_trace_id",
+    "start_usage_collection",
+    "record_usage",
+    "collect_usage",
     "trace_span",
     "trace",
 ]
