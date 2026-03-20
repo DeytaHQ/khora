@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -378,8 +378,6 @@ class MemoryLake:
         Returns:
             RememberResult with details
         """
-        from dataclasses import replace
-
         from khora.telemetry.context import (
             clear_trace_id,
             collect_usage,
@@ -450,8 +448,6 @@ class MemoryLake:
         Returns:
             BatchResult with aggregated statistics
         """
-        from dataclasses import replace
-
         from khora.telemetry.context import (
             clear_trace_id,
             collect_usage,
@@ -529,8 +525,6 @@ class MemoryLake:
             engine, ``relationships`` contains scored relationship tuples and
             ``context_text`` includes a ``--- Relationships ---`` section.
         """
-        from dataclasses import replace
-
         from khora.telemetry.context import (
             clear_trace_id,
             collect_usage,
