@@ -363,6 +363,7 @@ class TestRemember:
             )
 
         assert result == mock_result
+        assert result.llm_usage == []
         lake._engine.remember.assert_awaited_once()
 
 
