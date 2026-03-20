@@ -47,6 +47,7 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 - `_accel.py` — Rust/NumPy/Python acceleration facade (MMR, cosine, `detect_temporal_category()`, BM25, etc.)
 - `engines/vectorcypher/temporal_detection.py` — `TemporalDetector`, category-specific `RetrievalParams` for VectorCypher recall
 - `pipelines/flows/ingest.py` — Document ingestion pipeline with entity ID mapping
+- `db/migrations/env.py` — Alembic env with advisory locking and programmatic config
 
 ## Engine Selection
 
@@ -269,3 +270,6 @@ After every completed task, append an entry to `docs/AI_CHANGELOG.md`. Create th
 - **MMR diversity enabled by default** — `enable_diversity=True` in `QuerySettings`. The MMR stage runs in Rust via `_accel.mmr_diversity_select` with NumPy and pure-Python fallbacks
 - **`include_sources` on read methods** — `recall()`, `get_entity()`, `list_entities()`, `find_related_entities()`, and `search_entities()` accept `include_sources: bool = False`. When `False` (default), no extra query runs — zero overhead. When `True`, `_populate_sources()` batch-fetches `DocumentSource` metadata (chunked at 1 000 IDs) and populates `chunk.source_document`, `entity.source_documents`, and `relationship.source_documents` in-place
 - **`ty` type checker** — Pre-commit hook runs `ty check src/` which passes clean (`All checks passed!`). If ty fails on your changes, fix the diagnostics before committing
+- **Migrations are bundled** — Alembic migrations live in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is for dev CLI only. Programmatic usage via `run_migrations(database_url)` or `MemoryLake(run_migrations=True)` needs no `.ini` file
+- **Dedicated version table** — Khora uses `khora_alembic_version` (not `alembic_version`) to avoid conflicts with downstream apps. Existing deployments must run all migrations fresh against the new version table (clean cut)
+- **Migration advisory lock** — `run_migrations()` acquires `pg_advisory_xact_lock(LOCK_ID)` where `LOCK_ID = int.from_bytes(hashlib.md5(b"khora_migrations").digest()[:8], "big", signed=True)` (= `6001515088189075507`). 60s timeout. Safe for concurrent startups

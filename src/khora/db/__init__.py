@@ -15,7 +15,7 @@ from .models import (
     RelationshipModel,
     SyncCheckpointModel,
 )
-from .session import close_db, get_db, get_engine, init_db, run_migrations
+from .session import MigrationResult, close_db, get_db, get_engine, init_db, run_migrations
 
 __all__ = [
     # Base
@@ -31,6 +31,7 @@ __all__ = [
     "PermissionModel",
     "SyncCheckpointModel",
     # Session utilities
+    "MigrationResult",
     "close_db",
     "get_db",
     "get_engine",

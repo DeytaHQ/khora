@@ -102,6 +102,10 @@ khora = "khora:main"
 requires = ["uv_build>=0.8.17,<0.9.0"]
 build-backend = "uv_build"
 
+[tool.uv-build]
+# Ensure Alembic migration files and templates are included in the wheel
+data-includes = ["src/khora/db/migrations/versions/*.py", "src/khora/db/migrations/script.py.mako"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
