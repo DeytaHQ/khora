@@ -261,8 +261,13 @@ class SkeletonConstructionEngine:
             namespace_id=namespace_id,
             content=content,
             metadata=doc_metadata,
+            extraction_config_hash=extraction_config_hash,
         )
         document = await storage.create_document(document)
+
+        # Note: expertise is intentionally not used by the skeleton engine —
+        # it skips full entity extraction for cost efficiency. The hash is
+        # still persisted for change-detection workflows.
 
         # Process through simplified pipeline (no full KG extraction)
         chunks_created, entities_extracted, relationships_created = await self._process_document(
@@ -684,6 +689,8 @@ class SkeletonConstructionEngine:
                         occurred_at=occurred_at,
                         entity_types=entity_types,
                         relationship_types=relationship_types,
+                        expertise=expertise,
+                        extraction_config_hash=extraction_config_hash,
                     )
 
                     async with results_lock:
