@@ -38,6 +38,7 @@ from .cli import main
 from .config import KhoraConfig
 from .core.models.document import DocumentSource
 from .engines import create_engine, list_engines, register_engine
+from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTypeConfig
 from .memory_lake import BatchResult, LLMUsage, MemoryLake, RecallResult, RememberResult, Stats
 from .query import SearchMode
 
@@ -58,4 +59,8 @@ __all__ = [
     "create_engine",
     "list_engines",
     "register_engine",
+    # Expertise types — stable public API (ADR-022)
+    "ExpertiseConfig",
+    "EntityTypeConfig",
+    "RelationshipTypeConfig",
 ]

@@ -25,6 +25,7 @@ from khora.telemetry import trace_span
 if TYPE_CHECKING:
     from khora.core.models import Relationship
     from khora.engines.protocol import MemoryEngineProtocol
+    from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageConfig, StorageCoordinator
 
 
@@ -356,6 +357,8 @@ class MemoryLake:
         skill_name: str = "general_entities",
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> RememberResult:
         """Store content in the memory lake.
 
@@ -374,6 +377,8 @@ class MemoryLake:
             skill_name: Extraction skill to use
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
+            expertise: Optional expertise config for domain-specific extraction
+            extraction_config_hash: Optional hash of the extraction config for change detection
 
         Returns:
             RememberResult with details
@@ -399,6 +404,8 @@ class MemoryLake:
                     skill_name=skill_name,
                     entity_types=entity_types,
                     relationship_types=relationship_types,
+                    expertise=expertise,
+                    extraction_config_hash=extraction_config_hash,
                 )
                 return replace(result, llm_usage=collect_usage())
         finally:
@@ -417,6 +424,8 @@ class MemoryLake:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -444,6 +453,8 @@ class MemoryLake:
             on_progress: Callback(processed_count, total_count) for progress updates
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
+            expertise: Optional expertise config for domain-specific extraction
+            extraction_config_hash: Optional hash of the extraction config for change detection
 
         Returns:
             BatchResult with aggregated statistics
@@ -470,6 +481,8 @@ class MemoryLake:
                     on_progress=on_progress,
                     entity_types=entity_types,
                     relationship_types=relationship_types,
+                    expertise=expertise,
+                    extraction_config_hash=extraction_config_hash,
                 )
                 return replace(result, llm_usage=collect_usage())
         finally:

@@ -462,6 +462,7 @@ class VectorCypherEngine:
         occurred_at: datetime | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        extraction_config_hash: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -1264,6 +1265,7 @@ class VectorCypherEngine:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        extraction_config_hash: str | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 

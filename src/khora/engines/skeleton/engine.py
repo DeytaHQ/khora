@@ -35,7 +35,7 @@ from khora.storage import StorageConfig, StorageCoordinator, create_storage_coor
 from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
 
 if TYPE_CHECKING:
-    pass
+    from khora.extraction.skills import ExpertiseConfig
 
 
 class SkeletonConstructionEngine:
@@ -213,6 +213,8 @@ class SkeletonConstructionEngine:
         occurred_at: datetime | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -580,6 +582,8 @@ class SkeletonConstructionEngine:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
