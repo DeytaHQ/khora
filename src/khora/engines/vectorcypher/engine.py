@@ -509,6 +509,7 @@ class VectorCypherEngine:
             namespace_id=namespace_id,
             content=content,
             metadata=doc_metadata,
+            extraction_config_hash=extraction_config_hash,
         )
         document = await storage.create_document(document)
 
@@ -1308,6 +1309,7 @@ class VectorCypherEngine:
                 on_progress=on_progress,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
+                extraction_config_hash=extraction_config_hash,
             )
 
         from khora.extraction.chunkers import create_chunker
@@ -1424,6 +1426,7 @@ class VectorCypherEngine:
                             source_type="api",
                             custom=doc_metadata,
                         ),
+                        extraction_config_hash=extraction_config_hash,
                     )
                     document = await storage.create_document(document)
                     state.document = document
@@ -1730,6 +1733,7 @@ class VectorCypherEngine:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        extraction_config_hash: str | None = None,
     ) -> BatchResult:
         """Legacy per-document remember_batch (non-streaming pipeline)."""
         storage = self._get_storage()
@@ -1787,6 +1791,7 @@ class VectorCypherEngine:
                         occurred_at=occurred_at,
                         entity_types=entity_types,
                         relationship_types=relationship_types,
+                        extraction_config_hash=extraction_config_hash,
                     )
                     async with results_lock:
                         if result.metadata.get("duplicate"):
