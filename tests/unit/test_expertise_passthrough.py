@@ -6,7 +6,7 @@ for expertise and extraction_config_hash parameters.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -17,59 +17,13 @@ from khora.extraction.skills import (
     ExpertiseConfig,
     RelationshipTypeConfig,
 )
-from khora.memory_lake import BatchResult, MemoryLake, RememberResult
+from khora.memory_lake import BatchResult, RememberResult
+
+from .helpers import make_lake
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _mock_config() -> MagicMock:
-    """Create a mock KhoraConfig with all required methods."""
-    mock_config = MagicMock()
-    mock_config.get_postgresql_url.return_value = "postgresql://test"
-    mock_config.get_graph_config.return_value = None
-    mock_config.get_vector_config.return_value = None
-    mock_config.get_neo4j_url.return_value = None
-    mock_config.get_neo4j_user.return_value = None
-    mock_config.get_neo4j_password.return_value = None
-    mock_config.get_neo4j_database.return_value = None
-    mock_config.storage.embedding_dimension = 1536
-    mock_config.llm.model = "gpt-4o-mini"
-    mock_config.llm.embedding_model = "text-embedding-3-small"
-    mock_config.llm.embedding_dimension = 1536
-    mock_config.llm.extraction_model = None
-    mock_config.llm.timeout = 30
-    mock_config.llm.max_retries = 3
-    mock_config.telemetry_database_url = None
-    mock_config.telemetry_service_name = "khora-test"
-    return mock_config
-
-
-_RESOLVE_ROW_ID = uuid4()
-
-
-def _mock_engine() -> MagicMock:
-    """Create a mock engine with all required methods."""
-    mock_eng = MagicMock()
-    mock_eng._storage = MagicMock()
-    mock_eng._storage.resolve_namespace = AsyncMock(return_value=_RESOLVE_ROW_ID)
-    mock_eng._embedder = MagicMock()
-    mock_eng.connect = AsyncMock()
-    mock_eng.disconnect = AsyncMock()
-    mock_eng.remember = AsyncMock()
-    mock_eng.remember_batch = AsyncMock()
-    return mock_eng
-
-
-def _make_lake(*, connected: bool = False) -> MemoryLake:
-    """Create a MemoryLake with mocked config, optionally pre-connected."""
-    with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-        lake = MemoryLake()
-    if connected:
-        lake._connected = True
-        lake._engine = _mock_engine()
-    return lake
 
 
 def _sample_expertise(*, expansion_enabled: bool = False) -> ExpertiseConfig:
@@ -134,7 +88,7 @@ class TestRememberWithExpertise:
     @pytest.mark.asyncio
     async def test_remember_passes_expertise_to_engine(self) -> None:
         """expertise param is forwarded to the engine."""
-        lake = _make_lake(connected=True)
+        lake = make_lake(connected=True)
         ns_id = uuid4()
         expertise = _sample_expertise()
 
@@ -166,7 +120,7 @@ class TestRememberWithExpertise:
     @pytest.mark.asyncio
     async def test_remember_passes_extraction_config_hash(self) -> None:
         """extraction_config_hash param is forwarded to the engine."""
-        lake = _make_lake(connected=True)
+        lake = make_lake(connected=True)
         ns_id = uuid4()
 
         mock_result = RememberResult(
@@ -196,7 +150,7 @@ class TestRememberWithExpertise:
     @pytest.mark.asyncio
     async def test_remember_none_expertise_backward_compat(self) -> None:
         """Calling without expertise (None) preserves backward compatibility."""
-        lake = _make_lake(connected=True)
+        lake = make_lake(connected=True)
         ns_id = uuid4()
 
         mock_result = RememberResult(
@@ -236,7 +190,7 @@ class TestRememberBatchWithExpertise:
     @pytest.mark.asyncio
     async def test_remember_batch_passes_expertise(self) -> None:
         """expertise param is forwarded to the engine for batch."""
-        lake = _make_lake(connected=True)
+        lake = make_lake(connected=True)
         ns_id = uuid4()
         expertise = _sample_expertise()
 
@@ -277,7 +231,7 @@ class TestRememberBatchWithExpertise:
     @pytest.mark.asyncio
     async def test_remember_batch_none_expertise_backward_compat(self) -> None:
         """Calling remember_batch without expertise preserves backward compat."""
-        lake = _make_lake(connected=True)
+        lake = make_lake(connected=True)
         ns_id = uuid4()
 
         mock_result = BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=2, entities=1, relationships=0)
@@ -349,6 +303,125 @@ class TestExpansionControl:
         """ExpansionConfig is disabled by default."""
         expertise = _sample_expertise(expansion_enabled=False)
         assert expertise.expansion.enabled is False
+
+    @pytest.mark.asyncio
+    async def test_graphrag_batch_enables_expansion_from_expertise(self) -> None:
+        """GraphRAGEngine.remember_batch() sets enable_expansion=True when
+        expertise.expansion.enabled is True, even if infer_relationships=False."""
+        from khora.engines.graphrag.engine import GraphRAGEngine
+
+        expertise = _sample_expertise(expansion_enabled=True)
+
+        # Build a minimal GraphRAGEngine with mocked internals
+        engine = object.__new__(GraphRAGEngine)
+        mock_storage = AsyncMock()
+        mock_storage.get_documents_by_checksums = AsyncMock(return_value={})
+        mock_storage.list_entities = AsyncMock(return_value=[])
+        engine._storage = mock_storage
+        engine._config = type(
+            "C",
+            (),
+            {
+                "llm": type(
+                    "L",
+                    (),
+                    {
+                        "embedding_model": "text-embedding-3-small",
+                        "extraction_model": "gpt-4o-mini",
+                        "model": "gpt-4o-mini",
+                    },
+                )(),
+            },
+        )()
+        engine._query_engine = AsyncMock()
+        engine._query_engine.invalidate_caches = lambda *a: None
+
+        mock_ingest = AsyncMock(
+            return_value={
+                "total_documents": 1,
+                "processed_documents": 1,
+                "skipped_documents": 0,
+                "failed_documents": 0,
+                "total_chunks": 2,
+                "total_entities": 1,
+                "total_relationships": 0,
+                "total_inferred_relationships": 0,
+            }
+        )
+
+        with patch("khora.pipelines.flows.ingest.ingest_documents", mock_ingest):
+            # Note: infer_relationships=False, but expertise.expansion.enabled=True
+            await engine.remember_batch(
+                [{"content": "test"}],
+                uuid4(),
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                expertise=expertise,
+                infer_relationships=False,
+            )
+
+        # The key assertion: enable_expansion should be True because
+        # expertise.expansion.enabled overrides infer_relationships=False
+        call_kwargs = mock_ingest.call_args.kwargs
+        assert call_kwargs["enable_expansion"] is True
+        assert call_kwargs["expertise"] is expertise
+
+    @pytest.mark.asyncio
+    async def test_graphrag_batch_no_expansion_when_disabled(self) -> None:
+        """GraphRAGEngine.remember_batch() respects infer_relationships=False
+        when expertise.expansion.enabled is also False."""
+        from khora.engines.graphrag.engine import GraphRAGEngine
+
+        expertise = _sample_expertise(expansion_enabled=False)
+
+        engine = object.__new__(GraphRAGEngine)
+        mock_storage = AsyncMock()
+        mock_storage.get_documents_by_checksums = AsyncMock(return_value={})
+        mock_storage.list_entities = AsyncMock(return_value=[])
+        engine._storage = mock_storage
+        engine._config = type(
+            "C",
+            (),
+            {
+                "llm": type(
+                    "L",
+                    (),
+                    {
+                        "embedding_model": "text-embedding-3-small",
+                        "extraction_model": "gpt-4o-mini",
+                        "model": "gpt-4o-mini",
+                    },
+                )(),
+            },
+        )()
+        engine._query_engine = AsyncMock()
+        engine._query_engine.invalidate_caches = lambda *a: None
+
+        mock_ingest = AsyncMock(
+            return_value={
+                "total_documents": 1,
+                "processed_documents": 1,
+                "skipped_documents": 0,
+                "failed_documents": 0,
+                "total_chunks": 2,
+                "total_entities": 1,
+                "total_relationships": 0,
+                "total_inferred_relationships": 0,
+            }
+        )
+
+        with patch("khora.pipelines.flows.ingest.ingest_documents", mock_ingest):
+            await engine.remember_batch(
+                [{"content": "test"}],
+                uuid4(),
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                expertise=expertise,
+                infer_relationships=False,
+            )
+
+        call_kwargs = mock_ingest.call_args.kwargs
+        assert call_kwargs["enable_expansion"] is False
 
 
 # ---------------------------------------------------------------------------
