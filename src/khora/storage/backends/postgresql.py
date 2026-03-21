@@ -340,6 +340,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             chunk_count=document.chunk_count,
             entity_count=document.entity_count,
             error_message=document.error_message,
+            extraction_config_hash=document.extraction_config_hash,
             created_at=document.created_at,
             updated_at=document.updated_at,
             processed_at=document.processed_at,
@@ -405,6 +406,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 chunk_count=document.chunk_count,
                 entity_count=document.entity_count,
                 error_message=document.error_message,
+                extraction_config_hash=document.extraction_config_hash,
                 updated_at=datetime.now(UTC),
                 processed_at=document.processed_at,
             )
@@ -541,6 +543,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             chunk_count=model.chunk_count,
             entity_count=model.entity_count,
             error_message=model.error_message,
+            extraction_config_hash=model.extraction_config_hash,
             created_at=model.created_at,
             updated_at=model.updated_at,
             processed_at=model.processed_at,

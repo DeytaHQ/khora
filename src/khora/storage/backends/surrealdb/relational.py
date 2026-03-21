@@ -282,6 +282,7 @@ class SurrealDBRelationalAdapter:
             "chunk_count = $chunk_count, "
             "entity_count = $entity_count, "
             "error_message = $error_message, "
+            "extraction_config_hash = $extraction_config_hash, "
             "created_at = $created_at, "
             "updated_at = $updated_at, "
             "processed_at = $processed_at, "
@@ -303,6 +304,7 @@ class SurrealDBRelationalAdapter:
                 "chunk_count": document.chunk_count,
                 "entity_count": document.entity_count,
                 "error_message": document.error_message,
+                "extraction_config_hash": document.extraction_config_hash,
                 "created_at": _dt_to_iso(document.created_at),
                 "updated_at": _dt_to_iso(document.updated_at),
                 "processed_at": _dt_to_iso(document.processed_at),
@@ -367,6 +369,7 @@ class SurrealDBRelationalAdapter:
             "chunk_count = $chunk_count, "
             "entity_count = $entity_count, "
             "error_message = $error_message, "
+            "extraction_config_hash = $extraction_config_hash, "
             "updated_at = $updated_at, "
             "processed_at = $processed_at, "
             "source_timestamp = $source_timestamp",
@@ -386,6 +389,7 @@ class SurrealDBRelationalAdapter:
                 "chunk_count": document.chunk_count,
                 "entity_count": document.entity_count,
                 "error_message": document.error_message,
+                "extraction_config_hash": document.extraction_config_hash,
                 "updated_at": _dt_to_iso(datetime.now(UTC)),
                 "processed_at": _dt_to_iso(document.processed_at),
                 "source_timestamp": _dt_to_iso(document.source_timestamp),
@@ -497,6 +501,7 @@ class SurrealDBRelationalAdapter:
             chunk_count=row.get("chunk_count", 0),
             entity_count=row.get("entity_count", 0),
             error_message=row.get("error_message"),
+            extraction_config_hash=row.get("extraction_config_hash"),
             created_at=_iso_to_dt(row.get("created_at")) or datetime.now(UTC),
             updated_at=_iso_to_dt(row.get("updated_at")) or datetime.now(UTC),
             processed_at=_iso_to_dt(row.get("processed_at")),

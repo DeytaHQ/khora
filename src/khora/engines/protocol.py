@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from khora.core.models import Document, Entity, MemoryNamespace
+    from khora.extraction.skills import ExpertiseConfig
     from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
     from khora.query import SearchMode
 
@@ -56,6 +57,8 @@ class MemoryEngineProtocol(Protocol):
         skill_name: str = "general_entities",
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -68,6 +71,8 @@ class MemoryEngineProtocol(Protocol):
             skill_name: Extraction skill to use
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
+            expertise: Optional expertise config for domain-specific extraction
+            extraction_config_hash: Optional hash of the extraction config for change detection
 
         Returns:
             RememberResult with details
@@ -125,6 +130,8 @@ class MemoryEngineProtocol(Protocol):
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -138,6 +145,8 @@ class MemoryEngineProtocol(Protocol):
             on_progress: Callback(processed_count, total_count) for progress updates
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
+            expertise: Optional expertise config for domain-specific extraction
+            extraction_config_hash: Optional hash of the extraction config for change detection
 
         Returns:
             BatchResult with aggregated statistics

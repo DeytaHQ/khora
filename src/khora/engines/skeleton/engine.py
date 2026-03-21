@@ -35,7 +35,7 @@ from khora.storage import StorageConfig, StorageCoordinator, create_storage_coor
 from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
 
 if TYPE_CHECKING:
-    pass
+    from khora.extraction.skills import ExpertiseConfig
 
 
 class SkeletonConstructionEngine:
@@ -213,6 +213,8 @@ class SkeletonConstructionEngine:
         occurred_at: datetime | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -259,8 +261,13 @@ class SkeletonConstructionEngine:
             namespace_id=namespace_id,
             content=content,
             metadata=doc_metadata,
+            extraction_config_hash=extraction_config_hash,
         )
         document = await storage.create_document(document)
+
+        # Note: expertise is intentionally not used by the skeleton engine —
+        # it skips full entity extraction for cost efficiency. The hash is
+        # still persisted for change-detection workflows.
 
         # Process through simplified pipeline (no full KG extraction)
         chunks_created, entities_extracted, relationships_created = await self._process_document(
@@ -580,6 +587,8 @@ class SkeletonConstructionEngine:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -680,6 +689,8 @@ class SkeletonConstructionEngine:
                         occurred_at=occurred_at,
                         entity_types=entity_types,
                         relationship_types=relationship_types,
+                        expertise=expertise,
+                        extraction_config_hash=extraction_config_hash,
                     )
 
                     async with results_lock:

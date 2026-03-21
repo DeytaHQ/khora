@@ -27,7 +27,7 @@ from khora.storage import StorageConfig, StorageCoordinator, create_storage_coor
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
-    pass
+    from khora.extraction.skills import ExpertiseConfig
 
 
 @dataclass
@@ -222,6 +222,8 @@ class GraphRAGEngine:
         skill_name: str = "general_entities",
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -241,7 +243,10 @@ class GraphRAGEngine:
 
         storage = self._get_storage()
 
-        # Check for duplicate - skip if any document with same checksum exists
+        # Check for duplicate - skip if any document with same checksum exists.
+        # NOTE: dedup is content-only; changing extraction_config_hash without
+        # changing content will still hit this early return. Re-extraction on
+        # config change would require a force_reprocess flag or composite key.
         start = time.perf_counter()
         existing = await storage.get_document_by_checksum(namespace_id, checksum)
         timings["dedup_check_ms"] = (time.perf_counter() - start) * 1000
@@ -272,6 +277,7 @@ class GraphRAGEngine:
             namespace_id=namespace_id,
             content=content,
             metadata=doc_metadata,
+            extraction_config_hash=extraction_config_hash,
         )
         document = await storage.create_document(document)
         timings["document_create_ms"] = (time.perf_counter() - start) * 1000
@@ -288,6 +294,7 @@ class GraphRAGEngine:
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
             entity_types=entity_types,
             relationship_types=relationship_types,
+            expertise=expertise,
         )
         timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
@@ -392,6 +399,8 @@ class GraphRAGEngine:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -419,15 +428,16 @@ class GraphRAGEngine:
         start = time.perf_counter()
         doc_inputs = []
         for doc_data in documents:
-            doc_inputs.append(
-                {
-                    "content": doc_data.get("content", ""),
-                    "title": doc_data.get("title", ""),
-                    "source": doc_data.get("source", ""),
-                    "source_type": "api",
-                    "metadata": doc_data.get("metadata", {}),
-                }
-            )
+            entry: dict[str, Any] = {
+                "content": doc_data.get("content", ""),
+                "title": doc_data.get("title", ""),
+                "source": doc_data.get("source", ""),
+                "source_type": "api",
+                "metadata": doc_data.get("metadata", {}),
+            }
+            if extraction_config_hash is not None:
+                entry["extraction_config_hash"] = extraction_config_hash
+            doc_inputs.append(entry)
         timings["prepare_inputs_ms"] = (time.perf_counter() - start) * 1000
 
         from khora.pipelines.flows.ingest import ingest_documents
@@ -452,6 +462,11 @@ class GraphRAGEngine:
             if existing_entities:
                 logger.debug(f"Preloaded {len(existing_entities)} existing entities into EntityIndex")
 
+        # Determine expansion: expertise.expansion.enabled takes precedence
+        effective_expansion = infer_relationships
+        if expertise is not None and expertise.expansion.enabled:
+            effective_expansion = True
+
         start = time.perf_counter()
         result = await ingest_documents(
             namespace_id,
@@ -463,9 +478,10 @@ class GraphRAGEngine:
             max_concurrent_documents=max_concurrent,
             shared_embedder=shared_embedder,
             shared_entity_index=shared_entity_index,
-            enable_expansion=infer_relationships,
+            enable_expansion=effective_expansion,
             entity_types=entity_types,
             relationship_types=relationship_types,
+            expertise=expertise,
         )
         timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000

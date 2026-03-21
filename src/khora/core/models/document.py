@@ -76,6 +76,9 @@ class Document:
     entity_count: int = 0
     error_message: str | None = None
 
+    # Extraction config tracking
+    extraction_config_hash: str | None = None
+
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
