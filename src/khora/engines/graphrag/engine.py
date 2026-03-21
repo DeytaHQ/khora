@@ -274,14 +274,10 @@ class GraphRAGEngine:
             namespace_id=namespace_id,
             content=content,
             metadata=doc_metadata,
+            extraction_config_hash=extraction_config_hash,
         )
         document = await storage.create_document(document)
         timings["document_create_ms"] = (time.perf_counter() - start) * 1000
-
-        # Store extraction_config_hash on the document if provided
-        if extraction_config_hash is not None:
-            document.extraction_config_hash = extraction_config_hash
-            await storage.update_document(document)
 
         # Process through pipeline (handles chunking, embedding, extraction in parallel)
         from khora.pipelines.flows.ingest import process_document
