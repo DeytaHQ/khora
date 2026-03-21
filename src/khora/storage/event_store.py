@@ -104,7 +104,21 @@ class PostgreSQLEventStore(AsyncSessionMixin):
             return False
 
     async def create_tables(self) -> None:
-        """Create database tables (for testing/development)."""
+        """Create database tables.
+
+        .. deprecated::
+            Use ``run_migrations()`` instead. ``create_tables()`` bypasses
+            Alembic and masks missing migrations — tests pass locally but
+            production breaks. Will be removed in a future release.
+        """
+        import warnings
+
+        warnings.warn(
+            "create_tables() is deprecated. Use khora.db.run_migrations() instead. "
+            "create_tables() bypasses Alembic and masks missing migrations.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self._engine is None:
             raise RuntimeError("Event store not connected. Call connect() first.")
         async with self._engine.begin() as conn:
