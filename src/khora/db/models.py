@@ -151,7 +151,7 @@ class DocumentModel(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Extraction config tracking — NULL for legacy documents (ADR-022)
-    extraction_config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extraction_config_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

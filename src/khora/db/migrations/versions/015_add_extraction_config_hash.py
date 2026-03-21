@@ -4,7 +4,7 @@ Revision ID: 015_add_extraction_config_hash
 Revises: 014_sync_document_status_enum
 Create Date: 2026-03-21
 
-Adds a nullable VARCHAR(64) column for tracking which extraction configuration
+Adds a nullable VARCHAR(255) column for tracking which extraction configuration
 was used to process each document. NULL for legacy documents that pre-date
 expertise-based extraction (ADR-022).
 """
@@ -24,7 +24,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column(
         "documents",
-        sa.Column("extraction_config_hash", sa.String(64), nullable=True),
+        sa.Column("extraction_config_hash", sa.String(255), nullable=True),
     )
 
 
