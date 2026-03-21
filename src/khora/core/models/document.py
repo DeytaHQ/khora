@@ -76,14 +76,24 @@ class Document:
     entity_count: int = 0
     error_message: str | None = None
 
-    # Extraction config tracking
+    # Extraction config tracking (SHA-256 hex digest, max 64 chars)
     extraction_config_hash: str | None = None
+
+    # Maximum length for extraction_config_hash (matches DB column String(64))
+    _EXTRACTION_HASH_MAX_LEN: int = field(default=64, init=False, repr=False, compare=False)
 
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     processed_at: datetime | None = None
     source_timestamp: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.extraction_config_hash is not None and len(self.extraction_config_hash) > self._EXTRACTION_HASH_MAX_LEN:
+            raise ValueError(
+                f"extraction_config_hash must be at most {self._EXTRACTION_HASH_MAX_LEN} characters, "
+                f"got {len(self.extraction_config_hash)}"
+            )
 
     @property
     def is_processed(self) -> bool:

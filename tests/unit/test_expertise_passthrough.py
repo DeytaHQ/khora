@@ -285,6 +285,22 @@ class TestDocumentModelExtractionConfigHash:
         assert col.nullable is True
         assert col.type.length == 64
 
+    def test_extraction_config_hash_rejects_overlength(self) -> None:
+        """extraction_config_hash longer than 64 chars raises ValueError."""
+        import pytest
+
+        from khora.core.models.document import Document
+
+        with pytest.raises(ValueError, match="at most 64 characters"):
+            Document(content="test", extraction_config_hash="x" * 65)
+
+    def test_extraction_config_hash_accepts_64_chars(self) -> None:
+        """extraction_config_hash of exactly 64 chars is accepted."""
+        from khora.core.models.document import Document
+
+        doc = Document(content="test", extraction_config_hash="a" * 64)
+        assert len(doc.extraction_config_hash) == 64  # type: ignore[arg-type]
+
 
 # ---------------------------------------------------------------------------
 # 5. Expansion control via expertise
