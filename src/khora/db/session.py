@@ -91,7 +91,20 @@ class DatabaseManager:
             await session.close()
 
     async def init_db(self) -> None:
-        """Initialize database tables."""
+        """Initialize database tables.
+
+        .. deprecated::
+            Use ``run_migrations()`` instead. ``init_db()`` bypasses Alembic
+            and masks missing migrations. Will be removed in a future release.
+        """
+        import warnings
+
+        warnings.warn(
+            "init_db() is deprecated. Use khora.db.run_migrations() instead. "
+            "init_db() bypasses Alembic and masks missing migrations.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         from .models import Base
 
         engine = self.get_engine()
@@ -150,7 +163,9 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
 async def init_db() -> None:
     """Initialize database tables.
 
-    For development/testing only. Use Alembic migrations in production.
+    .. deprecated::
+        Use ``run_migrations()`` instead. ``init_db()`` bypasses Alembic
+        and masks missing migrations. Will be removed in a future release.
     """
     await get_default_manager().init_db()
 
