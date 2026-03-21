@@ -243,7 +243,10 @@ class GraphRAGEngine:
 
         storage = self._get_storage()
 
-        # Check for duplicate - skip if any document with same checksum exists
+        # Check for duplicate - skip if any document with same checksum exists.
+        # NOTE: dedup is content-only; changing extraction_config_hash without
+        # changing content will still hit this early return. Re-extraction on
+        # config change would require a force_reprocess flag or composite key.
         start = time.perf_counter()
         existing = await storage.get_document_by_checksum(namespace_id, checksum)
         timings["dedup_check_ms"] = (time.perf_counter() - start) * 1000
