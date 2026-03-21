@@ -283,7 +283,7 @@ class TestDocumentModelExtractionConfigHash:
         assert hasattr(DocumentModel, "extraction_config_hash")
         col = DocumentModel.__table__.columns["extraction_config_hash"]
         assert col.nullable is True
-        assert col.type.length == 255
+        assert col.type.length == 64
 
 
 # ---------------------------------------------------------------------------
