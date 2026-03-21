@@ -137,19 +137,32 @@ class TestORMMigrationDrift:
         )
 
     def test_all_orm_columns_referenced_in_migrations(self):
-        """Every ORM column should be referenced in at least one migration."""
-        migration_text = _read_all_migration_text()
+        """Every ORM column should be referenced alongside its table in migrations.
+
+        Uses a table-scoped check: for each ORM column, we verify the column
+        name appears in at least one migration file that also references its
+        table. This avoids false negatives where a common column name (e.g.
+        ``status``, ``created_at``) exists on another table's migration.
+        """
+        # Build per-file text for table-scoped matching
+        migration_files: list[str] = []
+        for py_file in VERSIONS_DIR.glob("*.py"):
+            if py_file.name != "__init__.py":
+                migration_files.append(py_file.read_text())
 
         missing_columns = []
         for table_name, table in Base.metadata.tables.items():
+            # Find migration files that reference this table
+            table_migrations = [m for m in migration_files if table_name in m]
             for column in table.columns:
                 col_name = column.name
-                # Column should appear in migration text (in create_table, add_column, etc.)
-                if col_name not in migration_text:
+                # Column must appear in at least one migration that also
+                # references its owning table
+                if not any(col_name in m for m in table_migrations):
                     missing_columns.append(f"{table_name}.{col_name}")
 
         assert not missing_columns, (
-            f"ORM columns not covered by any migration: {missing_columns}. "
+            f"ORM columns not covered by any migration for their table: {missing_columns}. "
             f"Create an Alembic migration for these columns."
         )
 

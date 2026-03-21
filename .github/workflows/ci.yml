@@ -43,7 +43,7 @@ jobs:
 
       - name: Verify migration source files and ORM/migration drift
         run: |
-          uv run pytest tests/unit/test_migration_drift.py -v
+          uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
 
       - name: Run tests with coverage
         run: |
