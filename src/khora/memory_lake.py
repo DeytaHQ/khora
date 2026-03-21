@@ -395,6 +395,9 @@ class MemoryLake:
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
+                # NOTE: expertise and extraction_config_hash are always forwarded,
+                # even when None. Custom engines registered via register_engine()
+                # must accept these kwargs to remain compatible (ADR-022).
                 result = await self._get_engine().remember(
                     content,
                     namespace_id,
@@ -471,6 +474,7 @@ class MemoryLake:
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
+                # NOTE: see remember() comment re: custom engine compatibility
                 result = await self._get_engine().remember_batch(
                     documents,
                     namespace_id,
