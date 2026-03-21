@@ -16,6 +16,29 @@ import pytest
 
 from khora.db.models import Base
 
+VERSIONS_DIR = Path(__file__).resolve().parents[2] / "src" / "khora" / "db" / "migrations" / "versions"
+
+
+def _make_mock_engine() -> tuple[MagicMock, AsyncMock]:
+    """Create a mock SQLAlchemy async engine with a begin() context manager."""
+    mock_engine = MagicMock()
+    mock_conn = AsyncMock()
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+    mock_conn.run_sync = AsyncMock()
+    mock_engine.begin = MagicMock(return_value=mock_conn)
+    return mock_engine, mock_conn
+
+
+def _read_all_migration_text() -> str:
+    """Read and concatenate all migration source files."""
+    parts: list[str] = []
+    for py_file in VERSIONS_DIR.glob("*.py"):
+        if py_file.name != "__init__.py":
+            parts.append(py_file.read_text())
+    return "".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Migration source file integrity
 # ---------------------------------------------------------------------------
@@ -25,22 +48,20 @@ from khora.db.models import Base
 class TestMigrationSourceFiles:
     """Verify that all migration .py source files are committed."""
 
-    VERSIONS_DIR = Path(__file__).resolve().parents[2] / "src" / "khora" / "db" / "migrations" / "versions"
-
     def test_versions_directory_exists(self):
         """The migrations/versions directory must exist."""
-        assert self.VERSIONS_DIR.is_dir(), f"Missing migrations directory: {self.VERSIONS_DIR}"
+        assert VERSIONS_DIR.is_dir(), f"Missing migrations directory: {VERSIONS_DIR}"
 
     def test_no_orphan_pyc_files(self):
         """Every .pyc must have a corresponding .py source file."""
-        pycache = self.VERSIONS_DIR / "__pycache__"
+        pycache = VERSIONS_DIR / "__pycache__"
         if not pycache.exists():
             return  # No compiled files — nothing to check
 
         for pyc in pycache.glob("*.pyc"):
             # .pyc names are like "000_initial_schema.cpython-313.pyc"
             stem = pyc.stem.rsplit(".", 1)[0]  # Strip cpython-3xx suffix
-            source = self.VERSIONS_DIR / f"{stem}.py"
+            source = VERSIONS_DIR / f"{stem}.py"
             assert source.exists(), (
                 f"Migration source file missing: {source.name}. "
                 f"Only the compiled .pyc exists ({pyc.name}). "
@@ -49,7 +70,7 @@ class TestMigrationSourceFiles:
 
     def test_all_migrations_have_revision(self):
         """Every migration .py file must define a revision variable."""
-        for py_file in sorted(self.VERSIONS_DIR.glob("*.py")):
+        for py_file in sorted(VERSIONS_DIR.glob("*.py")):
             if py_file.name == "__init__.py":
                 continue
             content = py_file.read_text()
@@ -59,7 +80,7 @@ class TestMigrationSourceFiles:
         """Each migration's down_revision must reference the previous one."""
         migrations: list[tuple[str, str | None]] = []
 
-        for py_file in sorted(self.VERSIONS_DIR.glob("*.py")):
+        for py_file in sorted(VERSIONS_DIR.glob("*.py")):
             if py_file.name == "__init__.py":
                 continue
             content = py_file.read_text()
@@ -102,13 +123,7 @@ class TestORMMigrationDrift:
 
     def test_all_orm_tables_exist_in_migrations(self):
         """Every ORM table name should appear in at least one migration."""
-        versions_dir = Path(__file__).resolve().parents[2] / "src" / "khora" / "db" / "migrations" / "versions"
-
-        # Gather all migration source content
-        migration_text = ""
-        for py_file in versions_dir.glob("*.py"):
-            if py_file.name != "__init__.py":
-                migration_text += py_file.read_text()
+        migration_text = _read_all_migration_text()
 
         # Check every ORM table is referenced in migrations
         missing_tables = []
@@ -123,12 +138,7 @@ class TestORMMigrationDrift:
 
     def test_all_orm_columns_referenced_in_migrations(self):
         """Every ORM column should be referenced in at least one migration."""
-        versions_dir = Path(__file__).resolve().parents[2] / "src" / "khora" / "db" / "migrations" / "versions"
-
-        migration_text = ""
-        for py_file in versions_dir.glob("*.py"):
-            if py_file.name != "__init__.py":
-                migration_text += py_file.read_text()
+        migration_text = _read_all_migration_text()
 
         missing_columns = []
         for table_name, table in Base.metadata.tables.items():
@@ -158,13 +168,7 @@ class TestCreateTablesDeprecation:
         from khora.storage.backends.postgresql import PostgreSQLBackend
 
         backend = PostgreSQLBackend("postgresql://localhost/test")
-        # Mock engine to avoid real DB connection
-        mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_conn.run_sync = AsyncMock()
-        mock_engine.begin = MagicMock(return_value=mock_conn)
+        mock_engine, _ = _make_mock_engine()
         backend._engine = mock_engine
 
         with patch("khora.storage.backends.postgresql.sync_enum_values", new_callable=AsyncMock):
@@ -180,12 +184,7 @@ class TestCreateTablesDeprecation:
         from khora.storage.backends.pgvector import PgVectorBackend
 
         backend = PgVectorBackend("postgresql://localhost/test")
-        mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_conn.run_sync = AsyncMock()
-        mock_engine.begin = MagicMock(return_value=mock_conn)
+        mock_engine, _ = _make_mock_engine()
         backend._engine = mock_engine
 
         with patch("khora.storage.backends.pgvector.sync_enum_values", new_callable=AsyncMock):
@@ -201,12 +200,7 @@ class TestCreateTablesDeprecation:
         from khora.storage.event_store import PostgreSQLEventStore
 
         store = PostgreSQLEventStore("postgresql://localhost/test")
-        mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_conn.run_sync = AsyncMock()
-        mock_engine.begin = MagicMock(return_value=mock_conn)
+        mock_engine, _ = _make_mock_engine()
         store._engine = mock_engine
 
         with warnings.catch_warnings(record=True) as w:
@@ -221,13 +215,7 @@ class TestCreateTablesDeprecation:
         from khora.db.session import DatabaseManager
 
         manager = DatabaseManager()
-
-        mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_conn.run_sync = AsyncMock()
-        mock_engine.begin = MagicMock(return_value=mock_conn)
+        mock_engine, _ = _make_mock_engine()
 
         with patch.object(manager, "get_engine", return_value=mock_engine):
             with warnings.catch_warnings(record=True) as w:
