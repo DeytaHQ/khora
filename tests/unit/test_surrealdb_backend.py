@@ -191,13 +191,13 @@ class TestSurrealDBConnection:
         from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 
         conn = SurrealDBConnection(mode="memory")
-        assert conn._build_endpoint() == "memory"
+        assert conn._build_endpoint() == "memory://default"
 
     def test_endpoint_embedded(self) -> None:
         from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 
         conn = SurrealDBConnection(mode="embedded", path="/tmp/test.db")
-        assert conn._build_endpoint() == "file:///tmp/test.db"
+        assert conn._build_endpoint() == "surrealkv:///tmp/test.db"
 
     def test_endpoint_remote(self) -> None:
         from khora.storage.backends.surrealdb.connection import SurrealDBConnection
@@ -393,7 +393,8 @@ class TestRelationalHelpers:
 
         uid = UUID("12345678-1234-5678-1234-567812345678")
         result = _record_id("document", uid)
-        assert result == "document:⟨12345678-1234-5678-1234-567812345678⟩"
+        # _record_id returns a RecordID object; str() gives the wire format
+        assert str(result) == "document:⟨12345678-1234-5678-1234-567812345678⟩"
 
     def test_parse_uuid_bare(self) -> None:
         from khora.storage.backends.surrealdb.relational import _parse_uuid
@@ -418,8 +419,8 @@ class TestRelationalHelpers:
 
         dt = datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC)
         result = _dt_to_iso(dt)
-        assert result is not None
-        assert "2025-01-15" in result
+        # _dt_to_iso now returns the native datetime for SDK 1.0.8 binding
+        assert result is dt
 
     def test_dt_to_iso_none(self) -> None:
         from khora.storage.backends.surrealdb.relational import _dt_to_iso
@@ -1171,7 +1172,8 @@ class TestVectorAdapterHelpers:
         from khora.storage.backends.surrealdb.vector import _rid
 
         uid = UUID("12345678-1234-5678-1234-567812345678")
-        assert _rid("chunk", uid) == "chunk:\u27e812345678-1234-5678-1234-567812345678\u27e9"
+        # _rid returns a RecordID object; str() gives the wire format
+        assert str(_rid("chunk", uid)) == "chunk:\u27e812345678-1234-5678-1234-567812345678\u27e9"
 
     def test_parse_uuid_bare(self) -> None:
         from khora.storage.backends.surrealdb.vector import _parse_uuid
