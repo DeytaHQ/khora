@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -27,10 +28,12 @@ from khora.core.models import (
     Entity,
     MemoryNamespace,
 )
+from khora.engines._storage_config import build_storage_config
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+from khora.telemetry import trace, trace_span
 
 from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
 
@@ -78,34 +81,8 @@ class SkeletonConstructionEngine:
         self._backend_type = backend
         self._weaviate_url = weaviate_url
 
-        # Build storage config
-        if storage_config:
-            self._storage_config = storage_config
-        else:
-            postgresql_url = config.get_postgresql_url()
-            graph_config = config.get_graph_config()
-
-            # Only use legacy neo4j_url fields when graph_config is explicitly set
-            # This prevents environment variables (KHORA_NEO4J_URL) from overriding
-            # the explicit graph_config=None setting
-            storage_kwargs: dict[str, Any] = {
-                "postgresql_url": postgresql_url,
-                "pgvector_url": postgresql_url,
-                "postgresql_pool_size": config.storage.postgresql_pool_size,
-                "postgresql_max_overflow": config.storage.postgresql_max_overflow,
-                "pgvector_embedding_dimension": config.storage.embedding_dimension,
-                "pgvector_use_halfvec": config.storage.use_halfvec,
-                "graph_config": graph_config,
-                "vector_config": config.get_vector_config(),
-            }
-            if graph_config is not None:
-                # Only pass legacy neo4j fields when graph is configured
-                storage_kwargs["neo4j_url"] = config.get_neo4j_url()
-                storage_kwargs["neo4j_user"] = config.get_neo4j_user()
-                storage_kwargs["neo4j_password"] = config.get_neo4j_password()
-                storage_kwargs["neo4j_database"] = config.get_neo4j_database()
-
-            self._storage_config = StorageConfig(**storage_kwargs)
+        # Build storage config (shared helper handles SurrealDB, pool_pre_ping, etc.)
+        self._storage_config = storage_config or build_storage_config(config)
 
         self._storage: StorageCoordinator | None = None
         self._temporal_store: TemporalVectorStore | None = None
@@ -201,6 +178,7 @@ class SkeletonConstructionEngine:
     # Core API: remember, recall, forget
     # =========================================================================
 
+    @trace("khora.skeleton.remember")
     async def remember(
         self,
         content: str,
@@ -290,6 +268,8 @@ class SkeletonConstructionEngine:
         *,
         skill_name: str,
         occurred_at: datetime,
+        selective_embedding: bool = False,
+        importance_ratio: float = 0.7,
     ) -> tuple[int, int, int]:
         """Process a document into chunks (simplified pipeline).
 
@@ -311,7 +291,9 @@ class SkeletonConstructionEngine:
 
         # Chunk the document (run in thread to avoid blocking event loop during
         # CPU-bound tiktoken operations)
-        raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
+        with trace_span("khora.skeleton.chunk") as span:
+            raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
+            span.set_attribute("chunk_count", len(raw_chunks))
 
         if not raw_chunks:
             # Mark document as processed with 0 chunks
@@ -319,16 +301,35 @@ class SkeletonConstructionEngine:
             await storage.update_document(document)
             return 0, 0, 0
 
-        # Embed chunks in batch
-        chunk_texts = [c.content for c in raw_chunks]
-        embeddings = await embedder.embed_batch(chunk_texts)
+        # Select chunks for embedding based on importance scoring
+        if selective_embedding:
+            from khora.extraction.importance import ChunkImportanceScorer
+
+            scorer = ChunkImportanceScorer()
+            embed_chunks, skip_chunks = scorer.select_for_extraction(raw_chunks, ratio=importance_ratio)
+            # Only embed selected chunks, store all with None embedding for skipped
+        else:
+            embed_chunks = raw_chunks
+
+        # Embed selected chunks in batch
+        chunk_texts = [c.content for c in embed_chunks]
+        with trace_span("khora.skeleton.embed") as span:
+            embeddings = await embedder.embed_batch(chunk_texts)
+            span.set_attribute("embedding_count", len(embeddings))
+
+        # Build a mapping from chunk content to embedding for selected chunks
+        embed_map: dict[int, list[float]] = {}
+        for idx, (chunk, embedding) in enumerate(zip(embed_chunks, embeddings)):
+            # Use id of the raw_chunk object to map back
+            embed_map[id(chunk)] = embedding
 
         # Extract metadata for filtering (source_system, author, channel, etc.)
         doc_metadata = document.metadata.custom if document.metadata else {}
 
-        # Create temporal chunks
+        # Create temporal chunks (all chunks, with None embedding for skipped)
         temporal_chunks = []
-        for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+        for i, raw_chunk in enumerate(raw_chunks):
+            embedding = embed_map.get(id(raw_chunk))
             temporal_chunk = TemporalChunk(
                 id=None,  # Will be assigned
                 namespace_id=document.namespace_id,
@@ -361,6 +362,7 @@ class SkeletonConstructionEngine:
 
         return len(stored_chunks), 0, 0
 
+    @trace("khora.skeleton.recall")
     async def recall(
         self,
         query: str,
@@ -575,6 +577,7 @@ class SkeletonConstructionEngine:
         # Delete from relational storage
         return await storage.delete_document(document_id)
 
+    @trace("khora.skeleton.remember_batch")
     async def remember_batch(
         self,
         documents: list[dict[str, Any]],
@@ -589,26 +592,37 @@ class SkeletonConstructionEngine:
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
+        bulk_mode: bool = False,
     ) -> BatchResult:
-        """Store multiple documents with automatic optimization.
+        """Store multiple documents with staged batch pipeline.
 
-        The Skeleton Construction engine uses a simplified pipeline:
-        - Fast chunking without full entity extraction
-        - Batch embedding for cost efficiency
-        - Parallel processing with semaphore control
+        Staged architecture (no entity extraction -- skeleton's identity):
+          Stage 0: Batch dedup (checksum lookup + intra-batch dedup)
+          Stage 1: Create documents + chunk in parallel
+          Stage 2: Batch embed ALL chunks in one API call
+          Stage 3: Build TemporalChunks + store batch
+          Stage 4: Update document statuses
 
         Args:
             documents: List of document dicts with 'content', 'title', 'source', 'metadata'
             namespace_id: Namespace to store documents in
             skill_name: Extraction skill to use
-            max_concurrent: Maximum concurrent document processing (default 10)
+            max_concurrent: Maximum concurrent document processing
             deduplicate: Whether to skip duplicate documents
-            infer_relationships: Not used in Skeleton engine
+            infer_relationships: Not used in Skeleton engine (protocol compliance)
             on_progress: Callback for progress updates (completed, total)
+            entity_types: Not used in Skeleton engine (protocol compliance)
+            relationship_types: Not used in Skeleton engine (protocol compliance)
+            expertise: Not used in Skeleton engine (protocol compliance)
+            extraction_config_hash: Persisted for change-detection workflows
+            bulk_mode: When True, defer HNSW index creation for faster bulk loads
 
         Returns:
-            BatchResult with processing statistics
+            BatchResult with processing statistics and timing metrics
         """
+        timings: dict[str, float] = {}
+        total_start = time.perf_counter()
+
         if not documents:
             return BatchResult(
                 total=0,
@@ -620,109 +634,259 @@ class SkeletonConstructionEngine:
                 relationships=0,
             )
 
+        from khora.extraction.chunkers import create_chunker
+
         storage = self._get_storage()
+        embedder = self._get_embedder()
+        temporal_store = self._get_temporal_store()
         total = len(documents)
 
-        # Track results with thread-safe counters
-        results: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "chunks": 0}
-        results_lock = asyncio.Lock()
-        progress_count = 0
-        progress_lock = asyncio.Lock()
+        if bulk_mode:
+            from khora.storage.optimize import prepare_for_bulk_load
 
-        # Compute checksums for all documents upfront
-        doc_checksums: list[str] = []
-        for doc_data in documents:
-            content = doc_data.get("content", "")
-            checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            doc_checksums.append(checksum)
+            await prepare_for_bulk_load(storage)
 
-        # Batch lookup existing documents by checksum (single query instead of N queries)
-        existing_docs: dict[str, Any] = {}
-        if deduplicate:
-            existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
+        try:
+            # ── Stage 0: Batch dedup ──────────────────────────────────────
+            start = time.perf_counter()
 
-        # Track checksums we've started processing (for intra-batch deduplication)
-        checksums_in_flight: set[str] = set()
-        checksums_lock = asyncio.Lock()
+            # Compute checksums for all documents upfront
+            doc_checksums: list[str] = []
+            for doc_data in documents:
+                content = doc_data.get("content", "")
+                checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                doc_checksums.append(checksum)
 
-        semaphore = asyncio.Semaphore(max_concurrent)
+            # Batch lookup existing documents by checksum (single query instead of N)
+            existing_docs: dict[str, Any] = {}
+            if deduplicate:
+                existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
 
-        async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
-            """Process a single document with semaphore control."""
-            nonlocal progress_count
-
-            # Check for duplicate within the batch (before acquiring semaphore)
-            async with checksums_lock:
+            # Filter to non-duplicate documents with intra-batch dedup
+            checksums_in_flight: set[str] = set()
+            new_indices: list[int] = []
+            skipped = 0
+            for i, checksum in enumerate(doc_checksums):
+                if deduplicate and checksum in existing_docs:
+                    skipped += 1
+                    continue
                 if checksum in checksums_in_flight:
-                    async with results_lock:
-                        results["skipped"] += 1
-                    return
+                    skipped += 1
+                    continue
                 checksums_in_flight.add(checksum)
+                new_indices.append(i)
 
-            # Check if already exists in storage (using pre-fetched batch result)
-            if deduplicate and checksum in existing_docs:
-                async with results_lock:
-                    results["skipped"] += 1
-                # Update progress
+            timings["dedup_ms"] = (time.perf_counter() - start) * 1000
+            logger.debug(f"Stage 0 dedup: {len(new_indices)} new, {skipped} skipped " f"in {timings['dedup_ms']:.1f}ms")
+
+            if not new_indices:
+                timings["total_ms"] = (time.perf_counter() - total_start) * 1000
                 if on_progress:
-                    async with progress_lock:
-                        progress_count += 1
-                        on_progress(progress_count, total)
-                return
+                    on_progress(total, total)
+                return BatchResult(
+                    total=total,
+                    processed=0,
+                    skipped=skipped,
+                    failed=0,
+                    chunks=0,
+                    entities=0,
+                    relationships=0,
+                    metadata={"timings": timings},
+                )
 
-            async with semaphore:
-                try:
-                    # Extract occurred_at from metadata if present
-                    doc_metadata = doc_data.get("metadata", {})
-                    occurred_at = None
-                    if "occurred_at" in doc_metadata:
+            # ── Stage 1: Create documents + chunk in parallel ────────────
+            start = time.perf_counter()
+
+            chunker = create_chunker(
+                strategy=self._config.pipeline.chunking_strategy,
+                chunk_size=self._config.pipeline.chunk_size,
+                chunk_overlap=self._config.pipeline.chunk_overlap,
+            )
+
+            # Create Document records for all new docs
+            created_docs: list[Document] = []
+            doc_metas: list[dict[str, Any]] = []
+            occurred_ats: list[datetime] = []
+            failed = 0
+
+            for i in new_indices:
+                doc_data = documents[i]
+                checksum = doc_checksums[i]
+                content = doc_data.get("content", "")
+                doc_metadata = doc_data.get("metadata", {})
+
+                # Parse occurred_at
+                occurred_at = datetime.now(UTC)
+                if "occurred_at" in doc_metadata:
+                    try:
                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+                    except ValueError:
+                        pass
 
-                    content = doc_data.get("content", "")
-                    result = await self.remember(
-                        content,
-                        namespace_id,
-                        title=doc_data.get("title", ""),
-                        source=doc_data.get("source", ""),
-                        metadata=doc_metadata,
-                        skill_name=skill_name,
-                        occurred_at=occurred_at,
-                        entity_types=entity_types,
-                        relationship_types=relationship_types,
-                        expertise=expertise,
-                        extraction_config_hash=extraction_config_hash,
-                    )
-
-                    async with results_lock:
-                        if result.metadata.get("duplicate"):
-                            results["skipped"] += 1
-                        else:
-                            results["processed"] += 1
-                            results["chunks"] += result.chunks_created
-
+                doc_meta = DocumentMetadata(
+                    title=doc_data.get("title", ""),
+                    source=doc_data.get("source", ""),
+                    source_type="api",
+                    checksum=checksum,
+                    size_bytes=len(content.encode("utf-8")),
+                    custom=doc_metadata,
+                )
+                document = Document(
+                    namespace_id=namespace_id,
+                    content=content,
+                    metadata=doc_meta,
+                    extraction_config_hash=extraction_config_hash,
+                )
+                try:
+                    document = await storage.create_document(document)
+                    created_docs.append(document)
+                    doc_metas.append(doc_metadata)
+                    occurred_ats.append(occurred_at)
                 except Exception as e:
-                    logger.error(f"Failed to process document: {e}")
-                    async with results_lock:
-                        results["failed"] += 1
+                    logger.error(f"Failed to create document: {e}")
+                    failed += 1
 
-            # Update progress
+            # Chunk all documents in parallel (CPU-bound tiktoken runs in threads)
+            with trace_span("khora.skeleton.batch_chunk") as span:
+                chunk_tasks = [asyncio.to_thread(chunker.chunk, doc.content) for doc in created_docs]
+                all_raw_chunks = await asyncio.gather(*chunk_tasks, return_exceptions=True)
+                span.set_attribute("doc_count", len(created_docs))
+
+            timings["create_and_chunk_ms"] = (time.perf_counter() - start) * 1000
+            logger.debug(
+                f"Stage 1 create+chunk: {len(created_docs)} docs " f"in {timings['create_and_chunk_ms']:.1f}ms"
+            )
+
+            # Build per-document chunk lists, tracking which docs had errors
+            per_doc_chunks: list[list[Any]] = []
+            docs_to_process: list[int] = []  # indices into created_docs
+            for doc_idx, raw_result in enumerate(all_raw_chunks):
+                if isinstance(raw_result, BaseException):
+                    logger.error(f"Chunking failed for doc {created_docs[doc_idx].id}: {raw_result}")
+                    failed += 1
+                    per_doc_chunks.append([])
+                else:
+                    per_doc_chunks.append(raw_result)
+                    if raw_result:
+                        docs_to_process.append(doc_idx)
+
+            # ── Stage 2: Batch embed ALL chunks in one API call ──────────
+            start = time.perf_counter()
+
+            # Collect all chunk texts with a mapping back to (doc_idx, chunk_idx)
+            all_chunk_texts: list[str] = []
+            chunk_map: list[tuple[int, int]] = []  # (doc_idx, chunk_idx_within_doc)
+            for doc_idx in docs_to_process:
+                for chunk_idx, raw_chunk in enumerate(per_doc_chunks[doc_idx]):
+                    all_chunk_texts.append(raw_chunk.content)
+                    chunk_map.append((doc_idx, chunk_idx))
+
+            all_embeddings: list[list[float]] = []
+            if all_chunk_texts:
+                with trace_span("khora.skeleton.batch_embed") as span:
+                    all_embeddings = await embedder.embed_batch(all_chunk_texts)
+                    span.set_attribute("chunk_count", len(all_chunk_texts))
+
+            timings["embed_ms"] = (time.perf_counter() - start) * 1000
+            logger.debug(f"Stage 2 embed: {len(all_chunk_texts)} chunks " f"in {timings['embed_ms']:.1f}ms")
+
+            # ── Stage 3: Build TemporalChunks + store batch ──────────────
+            start = time.perf_counter()
+
+            temporal_chunks: list[TemporalChunk] = []
+            for emb_idx, (doc_idx, chunk_idx) in enumerate(chunk_map):
+                doc = created_docs[doc_idx]
+                raw_chunk = per_doc_chunks[doc_idx][chunk_idx]
+                embedding = all_embeddings[emb_idx]
+                doc_custom = doc_metas[doc_idx]
+                occurred_at = occurred_ats[doc_idx]
+
+                temporal_chunk = TemporalChunk(
+                    id=None,
+                    namespace_id=doc.namespace_id,
+                    document_id=doc.id,
+                    content=raw_chunk.content,
+                    embedding=embedding,
+                    occurred_at=occurred_at,
+                    created_at=datetime.now(UTC),
+                    source_system=doc_custom.get("source_system"),
+                    author=doc_custom.get("author"),
+                    channel=doc_custom.get("channel"),
+                    tags=doc_custom.get("tags", []),
+                    confidence=1.0,
+                    metadata={
+                        "chunk_index": chunk_idx,
+                        "start_char": (raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0),
+                        "end_char": (raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content)),
+                    },
+                )
+                temporal_chunks.append(temporal_chunk)
+
+            stored_chunks: list[Any] = []
+            if temporal_chunks:
+                with trace_span("khora.skeleton.batch_store") as span:
+                    stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+                    span.set_attribute("stored_count", len(stored_chunks))
+
+            timings["store_ms"] = (time.perf_counter() - start) * 1000
+            logger.debug(f"Stage 3 store: {len(stored_chunks)} chunks " f"in {timings['store_ms']:.1f}ms")
+
+            # ── Stage 4: Update document statuses ─────────────────────────
+            start = time.perf_counter()
+
+            # Count chunks per document for status update
+            chunks_per_doc: dict[int, int] = {}
+            for doc_idx, _ in chunk_map:
+                chunks_per_doc[doc_idx] = chunks_per_doc.get(doc_idx, 0) + 1
+
+            processed = 0
+            for doc_idx, doc in enumerate(created_docs):
+                if isinstance(all_raw_chunks[doc_idx], BaseException):
+                    continue
+                chunk_count = chunks_per_doc.get(doc_idx, 0)
+                doc.mark_completed(chunk_count, 0)
+                try:
+                    await storage.update_document(doc)
+                    processed += 1
+                except Exception as e:
+                    logger.error(f"Failed to update document {doc.id}: {e}")
+                    failed += 1
+
+            timings["status_update_ms"] = (time.perf_counter() - start) * 1000
+            timings["total_ms"] = (time.perf_counter() - total_start) * 1000
+
+            total_chunks = len(stored_chunks)
+
+            # Calculate throughput metrics
+            if processed > 0 and timings["total_ms"] > 0:
+                timings["docs_per_second"] = processed / (timings["total_ms"] / 1000)
+                timings["avg_doc_ms"] = timings["total_ms"] / processed
+                timings["chunks_per_second"] = total_chunks / (timings["total_ms"] / 1000)
+
+            logger.info(
+                f"remember_batch() completed: {processed}/{total} docs, "
+                f"{total_chunks} chunks in {timings['total_ms']:.1f}ms "
+                f"({timings.get('docs_per_second', 0):.1f} docs/sec)"
+            )
+
             if on_progress:
-                async with progress_lock:
-                    progress_count += 1
-                    on_progress(progress_count, total)
+                on_progress(total, total)
 
-        # Process all documents concurrently with semaphore control
-        await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
+            return BatchResult(
+                total=total,
+                processed=processed,
+                skipped=skipped,
+                failed=failed,
+                chunks=total_chunks,
+                entities=0,
+                relationships=0,
+                metadata={"timings": timings},
+            )
+        finally:
+            if bulk_mode:
+                from khora.storage.optimize import ensure_hnsw_indexes
 
-        return BatchResult(
-            total=total,
-            processed=results["processed"],
-            skipped=results["skipped"],
-            failed=results["failed"],
-            chunks=results["chunks"],
-            entities=0,
-            relationships=0,
-        )
+                await ensure_hnsw_indexes(storage)
 
     # =========================================================================
     # Namespace Management

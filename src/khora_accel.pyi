@@ -77,6 +77,15 @@ def weighted_rrf_normalized_with_provenance(
     vector_weight: float = 0.6,
     graph_weight: float = 0.4,
 ) -> list[tuple[str, float, int]]: ...
+def weighted_rrf_normalized_with_diagnostics(
+    vector_results: list[tuple[str, float]],
+    graph_results: list[tuple[str, float]],
+    k: int = 60,
+    vector_weight: float = 0.6,
+    graph_weight: float = 0.4,
+) -> list[tuple[str, float, int, int, int, float, float, float, float]]: ...
+def batch_score_stats(scores: list[float]) -> tuple[float, float, float, float, float]: ...
+def score_entropy(scores: list[float]) -> float: ...
 
 # -- Temporal -----------------------------------------------------------------
 
@@ -86,6 +95,19 @@ def batch_temporal_filter(
 def batch_recency_scores(
     timestamps_secs: list[float], now_secs: float, decay_days: float, recency_weight: float
 ) -> list[float]: ...
+def detect_temporal_keywords(query: str) -> bool: ...
+def detect_temporal_category(query: str) -> int: ...
+def detect_temporal_category_with_confidence(query: str) -> tuple[int, float, list[str]]: ...
+
+# -- Chunk deduplication ------------------------------------------------------
+
+def deduplicate_chunks(
+    chunks: list[str], threshold: float = 0.85, num_perm: int = 64
+) -> list[tuple[int, int | None]]: ...
+
+# -- Thread pool configuration ------------------------------------------------
+
+def configure_thread_pool(num_threads: int = 0, mode: str = "query") -> None: ...
 
 # -- Community detection ------------------------------------------------------
 

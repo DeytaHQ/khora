@@ -35,6 +35,7 @@ from khora.core.models import (
     MemoryNamespace,
     Relationship,
 )
+from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.extraction.embedders import LiteLLMEmbedder
@@ -241,30 +242,8 @@ class VectorCypherEngine:
         self._config = config
         self._vc_config = vectorcypher_config or VectorCypherConfig()
 
-        # Build storage config
-        if storage_config:
-            self._storage_config = storage_config
-        else:
-            postgresql_url = config.get_postgresql_url()
-            graph_config = config.get_graph_config()
-
-            storage_kwargs: dict[str, Any] = {
-                "postgresql_url": postgresql_url,
-                "pgvector_url": postgresql_url,
-                "postgresql_pool_size": config.storage.postgresql_pool_size,
-                "postgresql_max_overflow": config.storage.postgresql_max_overflow,
-                "pgvector_embedding_dimension": config.storage.embedding_dimension,
-                "pgvector_use_halfvec": config.storage.use_halfvec,
-                "graph_config": graph_config,
-                "vector_config": config.get_vector_config(),
-            }
-            if graph_config is not None:
-                storage_kwargs["neo4j_url"] = config.get_neo4j_url()
-                storage_kwargs["neo4j_user"] = config.get_neo4j_user()
-                storage_kwargs["neo4j_password"] = config.get_neo4j_password()
-                storage_kwargs["neo4j_database"] = config.get_neo4j_database()
-
-            self._storage_config = StorageConfig(**storage_kwargs)
+        # Build storage config (shared helper handles SurrealDB, pool_pre_ping, etc.)
+        self._storage_config = storage_config or build_storage_config(config)
 
         # Component instances (initialized on connect)
         self._storage: StorageCoordinator | None = None
@@ -1272,6 +1251,7 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
+        bulk_mode: bool = False,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -1293,6 +1273,7 @@ class VectorCypherEngine:
             on_progress: Callback for progress updates
             entity_types: Entity types to extract
             relationship_types: Relationship types to extract
+            bulk_mode: If True, defer HNSW indexes during load and rebuild after
 
         Returns:
             BatchResult with processing statistics
@@ -1300,6 +1281,50 @@ class VectorCypherEngine:
         if not documents:
             return BatchResult(total=0, processed=0, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
 
+        storage = self._get_storage()
+        if bulk_mode:
+            from khora.storage.optimize import prepare_for_bulk_load
+
+            await prepare_for_bulk_load(storage)
+
+        try:
+            return await self._remember_batch_impl(
+                documents,
+                namespace_id,
+                skill_name=skill_name,
+                expertise=expertise,
+                extraction_model=extraction_model,
+                max_concurrent=max_concurrent,
+                deduplicate=deduplicate,
+                infer_relationships=infer_relationships,
+                on_progress=on_progress,
+                entity_types=entity_types,
+                relationship_types=relationship_types,
+                extraction_config_hash=extraction_config_hash,
+            )
+        finally:
+            if bulk_mode:
+                from khora.storage.optimize import ensure_hnsw_indexes
+
+                await ensure_hnsw_indexes(storage)
+
+    async def _remember_batch_impl(
+        self,
+        documents: list[dict[str, Any]],
+        namespace_id: UUID,
+        *,
+        skill_name: str = "general_entities",
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_model: str | None = None,
+        max_concurrent: int = 20,
+        deduplicate: bool = True,
+        infer_relationships: bool = True,
+        on_progress: Callable[[int, int], None] | None = None,
+        entity_types: list[str],
+        relationship_types: list[str],
+        extraction_config_hash: str | None = None,
+    ) -> BatchResult:
+        """Internal implementation of remember_batch (separated for bulk_mode wrapping)."""
         use_streaming = self._vc_config.streaming_pipeline
         if not use_streaming:
             # Legacy path: fall back to per-document processing
