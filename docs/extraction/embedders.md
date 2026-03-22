@@ -204,6 +204,40 @@ results = await storage.search_similar_chunks(
 )
 ```
 
+## Token-Aware Truncation
+
+The embedder automatically truncates texts that exceed the model's token limit before sending them to the API:
+
+```python
+# Handled automatically — no configuration needed
+embedding = await embedder.embed(very_long_text)
+# Text is truncated at sentence boundaries if too long
+```
+
+**How it works:**
+1. Estimates token count using `tiktoken` (when available) or a character-based heuristic
+2. If the text exceeds the model's limit (e.g., 8191 tokens for `text-embedding-3-small`), truncates at the nearest sentence boundary
+3. Falls back to word boundary truncation if no sentence break is found
+
+This eliminates API errors from oversized inputs and ensures truncation preserves semantic coherence by breaking at natural language boundaries.
+
+## Pre-Normalized Embeddings
+
+All embeddings are **L2-normalized at ingest time**. This enables using dot product instead of cosine similarity for scoring:
+
+```
+dot_product(unit_vector_a, unit_vector_b) = cosine_similarity(a, b)
+```
+
+Dot product is ~3x faster than cosine similarity because it skips the norm computation step. The Rust acceleration layer provides `batch_dot_product` which takes advantage of this.
+
+```python
+from khora._accel import batch_dot_product
+
+# Pre-normalized embeddings → dot product = cosine similarity
+results = batch_dot_product(query_embedding, candidate_embeddings, threshold=0.3)
+```
+
 ## Important: Dimension Matching
 
 Your database must match your embedding dimension:

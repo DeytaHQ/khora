@@ -491,6 +491,70 @@ age_days = (max_occurred - doc.occurred_at).total_seconds() / 86400
 
 This eliminates wall-clock dependency — historical and benchmark data produces meaningful recency discrimination regardless of when the query executes. The most recent document in the result set always gets the highest recency score (age = 0), and older documents are scored relative to it. For live systems, behavior is equivalent since `max(occurred_at) ≈ now`.
 
+## Phase 11: Staged Batch Pipeline
+
+The ingestion pipeline was restructured from a per-document sequential model to a staged batch model. Instead of each document flowing independently through chunk → embed → extract → store, all documents now flow through stages together:
+
+```
+Before (per-document):
+  Doc1: chunk → embed → extract → store
+  Doc2: chunk → embed → extract → store  (waits for Doc1)
+
+After (staged batch):
+  Stage 1: chunk(Doc1, Doc2, Doc3)              ← all docs chunked first
+  Stage 2: embed(all) ∥ extract(all)            ← parallel across all chunks
+  Stage 3: store(all)                           ← batch writes
+```
+
+Benefits:
+- Better LLM API utilization — larger concurrent batches
+- Batch database writes instead of per-document writes
+- Embedding sub-batches are larger and more efficient
+- Cross-document entity deduplication runs on the full set
+
+## Phase 12: Token-Aware Embedding Truncation
+
+The LiteLLM embedder now performs token-aware truncation before sending texts to the embedding API. Previously, texts exceeding the model's token limit would fail or be silently truncated by the API (losing the end of the text). Now:
+
+1. **Token counting** — Uses `tiktoken` (when available) or a character-based heuristic
+2. **Smart truncation** — Truncates at sentence boundaries when possible, falling back to word boundaries
+3. **Model-aware limits** — Respects per-model token limits (e.g., 8191 for `text-embedding-3-small`)
+
+This eliminates API errors from oversized inputs and ensures truncation preserves semantic coherence.
+
+## Phase 13: HNSW Index Deferral for Bulk Loads
+
+When `bulk_mode=True`, HNSW vector indexes are deferred until after the bulk load completes. HNSW indexes are expensive to maintain during writes — each insertion updates the graph structure. Deferring the index and building it once is significantly faster for bulk operations.
+
+```python
+from khora.storage.optimize import ensure_hnsw_indexes
+
+# After bulk load completes (idempotent)
+await ensure_hnsw_indexes(engine, schema="public")
+```
+
+The function creates indexes with `ef_construction=128` and uses `IF NOT EXISTS` for safe repeated calls.
+
+## Phase 14: Neo4j Bulk Mode Write Optimization
+
+When `bulk_mode=True`, the Neo4j backend applies several write optimizations: larger batch sizes, deferred constraint creation, reduced per-write validation, and higher concurrent write limits. After bulk loading, call `neo4j_backend.ensure_constraints()` to re-enable constraints.
+
+## Phase 15: LLM Extraction Prompt Optimization for Prefix Caching
+
+Extraction prompts were restructured to maximize prefix caching hits. Static instruction content (entity types, guidelines) is placed at the start of the system message, and variable content (the actual text) is placed at the end in the user message.
+
+When processing hundreds of documents with the same extraction configuration, the system message prefix is identical across calls. LLM providers cache this prefix, reducing per-call latency and cost.
+
+## Phase 16: Async Pipeline Fixes
+
+Several blocking synchronous calls were identified and fixed in the async pipeline:
+
+- **Chunking** — spaCy sentence splitting now runs in `asyncio.to_thread()`
+- **Checksum computation** — SHA-256 for large documents offloaded to thread pool
+- **JSON parsing** — Large extraction results offloaded for documents exceeding 100KB
+
+These fixes are particularly impactful when running many documents concurrently, as a single blocking call stalls all concurrent tasks sharing the event loop.
+
 ## What's Next
 
 - **[Query Engine Overview](../query-engine/overview.md)** -- How the full search pipeline works

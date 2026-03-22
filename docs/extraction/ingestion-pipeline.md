@@ -108,9 +108,19 @@ await storage.create_document(document)
 
 Staging runs in parallel with controlled concurrency - typically `2 * max_concurrent_documents` since it's lightweight.
 
-## Phase 2: Enrichment
+## Phase 2: Enrichment (Staged Batch Pipeline)
 
-This is where content becomes knowledge. Each staged document goes through four steps. Notably, steps 2 and 3 (embedding and extraction) run **concurrently** since they both depend only on the chunks from step 1 — extraction doesn't need embeddings, and embedding doesn't need entities.
+This is where content becomes knowledge. The pipeline uses a **staged batch architecture** — instead of processing each document independently through all steps, all documents flow through each stage together:
+
+```
+Stage 1: chunk(Doc1, Doc2, ..., DocN)              ← all docs chunked first
+Stage 2: embed(all chunks) ∥ extract(all chunks)   ← parallel across all
+Stage 3: store(all results)                        ← batch writes
+```
+
+Embedding and extraction run **concurrently** via `asyncio.gather` since they both depend only on chunks — extraction doesn't need embeddings, and embedding doesn't need entities. The staged approach provides better LLM API utilization (larger concurrent batches), more efficient batch database writes, and enables cross-document entity deduplication on the full set.
+
+> **Note:** Chunking now runs in `asyncio.to_thread()` when using spaCy, avoiding blocking the event loop during sentence splitting.
 
 ### Step 1: Chunking
 

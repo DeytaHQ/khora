@@ -198,6 +198,16 @@ Recency bias can also be applied - recent content scores higher:
 config = QueryConfig(recency_bias=0.3)
 ```
 
+## Step 5b: MMR Diversity Selection (Optional)
+
+When `enable_diversity=True` (the default in `QuerySettings`), Maximal Marginal Relevance (MMR) selection ensures result diversity after fusion. MMR iteratively picks candidates that maximize relevance while minimizing similarity to already-selected results:
+
+```
+selected = argmax(lambda * relevance - (1 - lambda) * max_sim_to_selected)
+```
+
+The MMR stage runs in Rust via `_accel.mmr_diversity_select` with NumPy and pure-Python fallbacks. This prevents returning redundant near-duplicate chunks when the same information appears in multiple documents.
+
 ## Step 6: Reranking (Optional)
 
 For higher precision, a neural reranker can reorder the top results:

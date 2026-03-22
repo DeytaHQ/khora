@@ -404,6 +404,19 @@ entity = Entity(
 await lake.storage.create_entity(entity)
 ```
 
+## Entity Unique Constraint
+
+Entities have a UNIQUE constraint on `(namespace_id, name, entity_type)` (added in migration 008). This enables efficient `ON CONFLICT` upserts:
+
+```sql
+INSERT INTO entities (id, namespace_id, name, entity_type, ...)
+VALUES (...)
+ON CONFLICT (namespace_id, name, entity_type)
+DO UPDATE SET description = EXCLUDED.description, ...
+```
+
+The dedup migration is irreversible. All entity upserts use this constraint for atomic create-or-update semantics.
+
 ## Deduplication
 
 Entities are deduplicated during ingestion. The approach depends on the inference mode.
@@ -441,6 +454,8 @@ for entity in extracted_entities:
 ```
 
 After all documents are processed, entities are written to storage in batches using `upsert_entities_batch()`, and cross-document fuzzy/embedding resolution runs via token-blocked candidate matching.
+
+For batch deduplication, the Rust `resolve_entities_batch` function provides a 3-stage cascade: exact name match → alias match → fuzzy Levenshtein, with Rayon parallelism for large batches (≥512 entities).
 
 See [Semantic Expansion](../extraction/semantic-expansion.md) for full details on the `EntityIndex`, token blocking, and the smart mode resolution pipeline.
 

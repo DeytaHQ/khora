@@ -86,14 +86,18 @@ from khora.storage import StorageConfig
 config = StorageConfig(
     postgresql_url="postgresql://user:pass@localhost:5432/khora",
     pool_size=5,
-    max_overflow=10
+    max_overflow=10,
+    pool_pre_ping=True,  # Check connection health before use
 )
 ```
 
 Or via environment:
 ```bash
 export KHORA_DATABASE_URL="postgresql://user:pass@localhost:5432/khora"
+export KHORA_STORAGE__POOL_PRE_PING=true
 ```
+
+**`pool_pre_ping`** issues a lightweight `SELECT 1` before handing out a connection from the pool. This detects stale connections (from network interruptions, DB restarts, or idle timeouts) and transparently replaces them. Adds ~1ms per connection checkout but prevents `connection reset by peer` errors in long-running processes.
 
 ## pgvector: Semantic Search
 
@@ -469,6 +473,7 @@ Beyond Neo4j, Khora supports three additional graph backends:
 | **Kùzu** | Embedded | Cypher | Single-process, CI/testing, edge devices |
 | **Memgraph** | Server | Bolt/Cypher | In-memory, low-latency, streaming |
 | **ArcadeDB** | Server | HTTP/Cypher+SQL | Multi-model (graph + vector in one DB) |
+| **SurrealDB** | Server | WebSocket/HTTP | Unified multi-model (graph + vector + relational in one DB) |
 
 ### Kùzu (Embedded)
 
@@ -517,12 +522,100 @@ storage:
     database: khora
 ```
 
+## SurrealDB: The Unified Backend
+
+SurrealDB is an alternative that serves as **all three backends** — relational, vector, and graph — in a single database. This simplifies deployment dramatically: one database instead of PostgreSQL + pgvector + Neo4j.
+
+### What It Provides
+
+| Role | SurrealDB Implementation |
+|------|-------------------------|
+| **Relational** | Document/namespace storage with SurrealQL queries |
+| **Vector** | Native vector similarity search with HNSW indexes |
+| **Graph** | Native graph traversal via SurrealQL graph queries |
+| **Event Store** | Append-only event log with SurrealQL |
+
+### Configuration
+
+```python
+from khora.config.schema import SurrealDBConfig, StorageSettings
+
+settings = StorageSettings(
+    surrealdb=SurrealDBConfig(
+        url="ws://localhost:8000/rpc",
+        namespace="khora",
+        database="main",
+    )
+)
+```
+
+Or via environment:
+```bash
+export KHORA_STORAGE__SURREALDB__URL="ws://localhost:8000/rpc"
+export KHORA_STORAGE__SURREALDB__NAMESPACE="khora"
+export KHORA_STORAGE__SURREALDB__DATABASE="main"
+```
+
+### Architecture
+
+```
+src/khora/storage/backends/surrealdb/
+├── __init__.py       # Package exports
+├── connection.py     # WebSocket/HTTP connection management
+├── relational.py     # Document, namespace, chunk storage
+├── vector.py         # Embedding storage and similarity search
+├── graph.py          # Entity nodes, relationship edges, graph traversal
+├── event_store.py    # Immutable event log
+├── schema.py         # SurrealQL schema definitions (tables, indexes)
+└── _helpers.py       # Shared utilities (UUID conversion, etc.)
+```
+
+### When to Use SurrealDB
+
+| Scenario | Recommendation |
+|----------|---------------|
+| Simplest deployment | SurrealDB — one database to manage |
+| Maximum performance | PostgreSQL + pgvector + Neo4j — each optimized for its role |
+| Development/testing | SurrealDB — easy setup, no multi-DB coordination |
+| Production at scale | PostgreSQL + Neo4j — mature, battle-tested |
+
+> **Status:** SurrealDB support is Phase 1 — the foundation is implemented and functional, but may lack some advanced features available in the PostgreSQL + Neo4j stack.
+
 ## Alternative Vector Backends
 
 | Backend | Type | Best For |
 |---------|------|----------|
 | **pgvector** (default) | PostgreSQL extension | Most deployments, colocated with relational data |
+| **SurrealDB** | WebSocket/HTTP | Unified single-server setup |
 | **ArcadeDB** | HTTP/REST | Multi-model single-server setup |
+
+## Bulk Mode
+
+For initial data loading, `bulk_mode=True` applies write optimizations across all backends:
+
+```python
+config = StorageSettings(bulk_mode=True)
+```
+
+| Backend | Optimization |
+|---------|-------------|
+| **pgvector** | Defers HNSW index creation until after bulk load. Call `ensure_hnsw_indexes()` afterward. |
+| **Neo4j** | Larger batch sizes, deferred constraints, reduced per-write validation |
+| **PostgreSQL** | Standard behavior (already batch-optimized) |
+
+After bulk loading completes:
+
+```python
+from khora.storage.optimize import ensure_hnsw_indexes
+
+# Rebuild deferred indexes (idempotent)
+await ensure_hnsw_indexes(engine, schema="public")
+
+# Re-enable Neo4j constraints
+await neo4j_backend.ensure_constraints()
+```
+
+> **Note:** Bulk mode is for initial data loading, not production use. It trades consistency guarantees for throughput.
 
 ## Configuration
 

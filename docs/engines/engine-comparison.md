@@ -160,6 +160,18 @@ Neo4j (required)
 └── Graph traversal
 ```
 
+**Alternative: SurrealDB (any engine)**
+
+```
+SurrealDB (single database)
+├── Documents & metadata (relational)
+├── Vector embeddings (native vector search)
+├── Entity/relationship graph (native graph)
+└── Event sourcing
+```
+
+SurrealDB can serve as all three backends in a single database, simplifying deployment. It's available as an alternative for any engine, though the PostgreSQL + Neo4j stack is more mature for production use.
+
 ### Search Capabilities (VectorCypher)
 
 **VectorCypher:**

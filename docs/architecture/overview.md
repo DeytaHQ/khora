@@ -22,7 +22,7 @@ At its heart, Khora combines three different ways of storing and finding informa
             |                |                |
             v                v                v
     +---------------+ +-------------+ +--------------+
-    |  PostgreSQL   | |  pgvector   | |    Neo4j     |
+    |  PostgreSQL   | |  pgvector   | |  Graph DB    |
     |               | |             | |              |
     |  The facts    | |  The        | |  The         |
     |  Documents,   | |  meaning    | |  connections |
@@ -31,13 +31,17 @@ At its heart, Khora combines three different ways of storing and finding informa
     |  what         | |  search     | |  relates to  |
     +---------------+ +-------------+ |  what        |
                                       +--------------+
+
+    Alternative: SurrealDB (unified backend — all three roles in one DB)
 ```
 
 **PostgreSQL** is your source of truth - it stores the actual documents, tracks who owns what, and keeps an immutable log of everything that happens.
 
 **pgvector** enables semantic search - when you ask "what do we know about machine learning?", it finds content that's *conceptually* related, even if it doesn't contain those exact words.
 
-**Neo4j** captures relationships - people, organizations, concepts, and how they connect. When you ask "who works with Alice?", it traverses a graph of knowledge to find the answer.
+**Graph DB** (Neo4j, Kuzu, Memgraph, or SurrealDB) captures relationships - people, organizations, concepts, and how they connect. When you ask "who works with Alice?", it traverses a graph of knowledge to find the answer.
+
+**SurrealDB** is an alternative unified backend that can serve all three roles (relational, vector, graph) in a single database, simplifying deployment at the cost of specialization.
 
 ## How Data Flows Through Khora
 
@@ -61,14 +65,14 @@ Your Content
      |
      v
 +--------------------------------------------+
-|          Phase 2: Enrichment               |
+|     Phase 2: Enrichment (Staged Batch)     |
 |                                            |
 |   "What does this content contain?"        |
 |                                            |
-|   1. CHUNK - Split into digestible pieces  |
-|   2. EMBED - Convert to vectors            |
-|   3. EXTRACT - Find entities & relations   |
-|   4. STORE - Save everywhere it belongs    |
+|   Stage 1: CHUNK all documents             |
+|   Stage 2: EMBED + EXTRACT in parallel     |
+|            (asyncio.gather)                |
+|   Stage 3: STORE in batch writes           |
 +--------------------------------------------+
      |
      v
@@ -171,35 +175,33 @@ The search brain. Lives at `src/khora/query/engine.py`.
 
 This component orchestrates the multi-source search pipeline shown above. It runs searches in parallel, applies Reciprocal Rank Fusion to combine results, and handles temporal filtering and reranking.
 
-### PipelineManager
+### Ingestion Pipeline
 
-The extraction orchestrator. Lives at `src/khora/pipelines/`.
+The extraction orchestrator. Lives at `src/khora/pipelines/flows/ingest.py`.
 
-Built on Prefect, it manages the ingestion workflow - chunking documents, generating embeddings, extracting entities. It handles concurrency, retries, and progress tracking.
+A native async Python pipeline that manages the ingestion workflow — chunking documents, generating embeddings, extracting entities. It uses a staged batch architecture where all documents flow through each stage together, with `asyncio.gather` for parallel embed+extract and batch database writes for storage.
 
 ## Multi-Tenancy: Who Owns What
 
-Khora supports multiple isolated data spaces through a hierarchy (ACL enforcement is designed but not yet wired at runtime — see `docs/design/namespace-optimization-plan.md`):
+Khora isolates data through **namespaces** — the sole unit of isolation. There is no organization or workspace hierarchy within khora; higher-level grouping is the consuming service's responsibility.
 
 ```
-Organization
-     |
-     +-- Workspace
-     |        |
-     |        +-- Namespace (your data lives here)
-     |        |
-     |        +-- Namespace (version 2, for replacements)
-     |
-     +-- Workspace (different team)
-              |
-              +-- Namespace
+Namespace A  (your data lives here)
+Namespace B  (another dataset)
+Namespace A' (version 2 of A, for zero-downtime rebuilds)
 ```
 
-**Organizations** are top-level containers (your company).
+**Namespaces** hold actual data and can be versioned — create a new version, populate it, then swap it in atomically.
 
-**Workspaces** group related namespaces (a team, a project).
+Each namespace has two IDs:
+- **`namespace_id`** — Stable across all versions. Use this in your application.
+- **`id`** — Row-level, changes per version. Used internally for FK references.
 
-**Namespaces** hold actual data. They can be versioned - create a new version, populate it, then swap it in atomically. Great for full rebuilds.
+Public API methods accept `namespace_id` and resolve to the active version's `id` automatically via `resolve_namespace()`. You can also look up a namespace by its stable ID:
+
+```python
+ns = await lake.get_namespace_by_stable_id(stable_namespace_id)
+```
 
 ## Event Sourcing: Nothing is Forgotten
 
@@ -220,6 +222,30 @@ This enables:
 - **Audit trails** - Who changed what, when?
 - **Temporal queries** - What did we know last Tuesday?
 - **Debugging** - Replay events to understand issues
+
+## Observability: Logfire / OpenTelemetry
+
+Khora includes optional Logfire instrumentation for OTEL-compatible distributed tracing. Install with `pip install khora[logfire]`.
+
+When present, spans are emitted for:
+- LLM extraction calls
+- Entity deduplication passes
+- Skeleton build phases
+- Ingestion pipeline stages
+
+Two APIs are available:
+- **`@trace` decorator** — Automatic span creation per function. Auto-captures arguments as span attributes.
+- **`trace_span()` context manager** — For complex methods needing mid-function attributes.
+
+When Logfire is not installed, both APIs short-circuit to zero-overhead no-ops. Khora never calls `logfire.configure()` — that's the consumer's responsibility.
+
+```python
+from khora.telemetry import trace, trace_span
+
+@trace("khora.search", exclude={"query"}, result=lambda r: {"count": len(r)})
+async def search(query: str, namespace_id: UUID) -> list:
+    ...
+```
 
 ## Configuration: Layers of Overrides
 
