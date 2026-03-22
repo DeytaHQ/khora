@@ -203,6 +203,8 @@ class Neo4jBackend(GraphBackendBase):
         max_connection_pool_size: int = 100,
         connection_acquisition_timeout: float = 60.0,
         retry_delay_jitter_factor: float = 0.5,
+        max_connection_lifetime: int = 900,
+        liveness_check_timeout: float | None = 30.0,
         entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
     ) -> None:
@@ -216,6 +218,8 @@ class Neo4jBackend(GraphBackendBase):
             max_connection_pool_size: Maximum connection pool size
             connection_acquisition_timeout: Timeout waiting for a connection from the pool
             retry_delay_jitter_factor: Jitter factor for transaction retry delays (0.0-1.0)
+            max_connection_lifetime: Max seconds a connection stays in the pool before rotation
+            liveness_check_timeout: Seconds of idle time before liveness check (None disables)
             entity_write_concurrency: Max concurrent entity write transactions
             relationship_write_concurrency: Max concurrent relationship write transactions
         """
@@ -226,6 +230,8 @@ class Neo4jBackend(GraphBackendBase):
         self._max_connection_pool_size = max_connection_pool_size
         self._connection_acquisition_timeout = connection_acquisition_timeout
         self._retry_delay_jitter_factor = retry_delay_jitter_factor
+        self._max_connection_lifetime = max_connection_lifetime
+        self._liveness_check_timeout = liveness_check_timeout
         self._driver: AsyncDriver | None = None
         self._owns_driver: bool = True
         self._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
@@ -242,6 +248,8 @@ class Neo4jBackend(GraphBackendBase):
             max_connection_pool_size=getattr(config, "max_connection_pool_size", 100),
             connection_acquisition_timeout=getattr(config, "connection_acquisition_timeout", 60.0),
             retry_delay_jitter_factor=getattr(config, "retry_delay_jitter_factor", 0.5),
+            max_connection_lifetime=getattr(config, "max_connection_lifetime", 900),
+            liveness_check_timeout=getattr(config, "liveness_check_timeout", 30.0),
             entity_write_concurrency=getattr(config, "entity_write_concurrency", _DEFAULT_ENTITY_WRITE_CONCURRENCY),
             relationship_write_concurrency=getattr(
                 config, "relationship_write_concurrency", _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY
@@ -279,6 +287,8 @@ class Neo4jBackend(GraphBackendBase):
         instance._max_connection_pool_size = 0
         instance._connection_acquisition_timeout = 60.0
         instance._retry_delay_jitter_factor = 0.5
+        instance._max_connection_lifetime = 900
+        instance._liveness_check_timeout = 30.0
         instance._driver = driver
         instance._owns_driver = False
         instance._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
@@ -299,6 +309,9 @@ class Neo4jBackend(GraphBackendBase):
             max_connection_pool_size=self._max_connection_pool_size,
             connection_acquisition_timeout=self._connection_acquisition_timeout,
             retry_delay_jitter_factor=self._retry_delay_jitter_factor,
+            max_connection_lifetime=self._max_connection_lifetime,
+            liveness_check_timeout=self._liveness_check_timeout,
+            keep_alive=True,
         )
         # Verify connectivity
         await self._driver.verify_connectivity()
