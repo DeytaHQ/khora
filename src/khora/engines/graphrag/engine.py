@@ -20,9 +20,16 @@ from loguru import logger
 
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace
+from khora.engines._storage_config import build_storage_config
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import HybridQueryEngine, QueryConfig, SearchMode
+from khora.query.temporal_detection import (
+    TemporalCategory,
+    TemporalDetector,
+    TemporalSignal,
+    get_retrieval_params,
+)
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
 from khora.telemetry import trace
 
@@ -106,27 +113,8 @@ class GraphRAGEngine:
         """
         self._config = config
 
-        # Set up storage config
-        if storage_config:
-            self._storage_config = storage_config
-        else:
-            postgresql_url = config.get_postgresql_url()
-            graph_config = config.get_graph_config()
-            vector_config = config.get_vector_config()
-            self._storage_config = StorageConfig(
-                postgresql_url=postgresql_url,
-                pgvector_url=postgresql_url,  # pgvector uses same database as relational
-                postgresql_pool_size=config.storage.postgresql_pool_size,
-                postgresql_max_overflow=config.storage.postgresql_max_overflow,
-                neo4j_url=config.get_neo4j_url(),
-                neo4j_user=config.get_neo4j_user(),
-                neo4j_password=config.get_neo4j_password(),
-                neo4j_database=config.get_neo4j_database(),
-                pgvector_embedding_dimension=config.storage.embedding_dimension,
-                pgvector_use_halfvec=config.storage.use_halfvec,
-                graph_config=graph_config,
-                vector_config=vector_config,
-            )
+        # Build storage config (shared helper handles SurrealDB, pool_pre_ping, etc.)
+        self._storage_config = storage_config or build_storage_config(config)
 
         self._storage: StorageCoordinator | None = None
         self._embedder: LiteLLMEmbedder | None = None
@@ -211,6 +199,7 @@ class GraphRAGEngine:
     # Core API: remember, recall, forget
     # =========================================================================
 
+    @trace("khora.graphrag.remember")
     async def remember(
         self,
         content: str,
@@ -333,6 +322,7 @@ class GraphRAGEngine:
             },
         )
 
+    @trace("khora.graphrag.recall")
     async def recall(
         self,
         query: str,
@@ -343,6 +333,8 @@ class GraphRAGEngine:
         min_similarity: float = 0.0,
         agentic: bool = False,
         raw: bool = False,
+        temporal_filter: Any | None = None,
+        recency_bias: float | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query."""
         config = QueryConfig(
@@ -363,7 +355,30 @@ class GraphRAGEngine:
             config.enable_reranking = False
             config.enable_hyde = "never"
 
+        # Auto-detect temporal category when no explicit filter and not raw mode
+        temporal_signal: TemporalSignal | None = None
+        if temporal_filter is None and not raw:
+            detector = TemporalDetector()
+            temporal_signal = detector.detect(query)
+            params = get_retrieval_params(temporal_signal)
+
+            if temporal_signal.is_temporal:
+                config.enable_temporal_detection = True
+            if temporal_signal.category in (TemporalCategory.RECENCY, TemporalCategory.STATE_QUERY):
+                config.apply_recency_bias = True
+                config.recency_weight = params.recency_weight
+
+        # Apply explicit recency_bias override
+        if recency_bias is not None:
+            config.apply_recency_bias = True
+            config.recency_weight = recency_bias
+
         result = await self._get_query_engine().query(query, namespace_id, config=config, agentic=agentic)
+
+        metadata = dict(result.metadata)
+        if temporal_signal is not None:
+            metadata["temporal_category"] = temporal_signal.category.value
+            metadata["temporal_confidence"] = temporal_signal.confidence
 
         return RecallResult(
             query=query,
@@ -371,7 +386,7 @@ class GraphRAGEngine:
             chunks=result.chunks,
             entities=result.entities,
             context_text=result.get_context_text(max_chunks=limit),
-            metadata=result.metadata,
+            metadata=metadata,
         )
 
     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
@@ -387,6 +402,7 @@ class GraphRAGEngine:
 
         return await storage.delete_document(document_id)
 
+    @trace("khora.graphrag.remember_batch")
     async def remember_batch(
         self,
         documents: list[dict[str, Any]],
@@ -631,34 +647,30 @@ class GraphRAGEngine:
         """Get document/chunk/entity/relationship counts for a namespace."""
         storage = self._get_storage()
 
-        # Get counts
-        documents = await storage.list_documents(namespace_id, limit=0)
-        doc_count = len(documents) if documents else 0
+        doc_count = 0
+        chunk_count = 0
+        entity_count = 0
+        relationship_count = 0
 
-        # For more accurate counts, query directly
-        # These may vary by backend implementation
         try:
-            doc_count = await storage.count_documents(namespace_id)  # type: ignore[unresolved-attribute]
+            doc_count = await storage.count_documents(namespace_id)
         except (AttributeError, NotImplementedError):
             pass
 
         try:
             chunk_count = await storage.count_chunks(namespace_id)
         except (AttributeError, NotImplementedError):
-            chunks = await storage.list_chunks(namespace_id, limit=0)
-            chunk_count = len(chunks) if chunks else 0
+            pass
 
         try:
             entity_count = await storage.count_entities(namespace_id)
         except (AttributeError, NotImplementedError):
-            entities = await storage.list_entities(namespace_id, limit=0)
-            entity_count = len(entities) if entities else 0
+            pass
 
         try:
-            relationship_count = await storage.count_relationships(namespace_id)  # type: ignore[unresolved-attribute]
+            relationship_count = await storage.count_relationships(namespace_id)
         except (AttributeError, NotImplementedError):
-            rels = await storage.list_relationships(namespace_id, limit=0)
-            relationship_count = len(rels) if rels else 0
+            pass
 
         return Stats(
             documents=doc_count,
