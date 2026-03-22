@@ -29,8 +29,8 @@ _TABLE_DEFINITIONS = """
 -- Namespace / tenancy
 DEFINE TABLE IF NOT EXISTS memory_namespace SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS namespace_id ON memory_namespace TYPE string;
-DEFINE FIELD IF NOT EXISTS name ON memory_namespace TYPE string;
-DEFINE FIELD IF NOT EXISTS stable_id ON memory_namespace TYPE string;
+DEFINE FIELD IF NOT EXISTS name ON memory_namespace TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS stable_id ON memory_namespace TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS tenancy_mode ON memory_namespace TYPE string DEFAULT 'shared';
 DEFINE FIELD IF NOT EXISTS version ON memory_namespace TYPE int DEFAULT 1;
 DEFINE FIELD IF NOT EXISTS is_active ON memory_namespace TYPE bool DEFAULT true;
