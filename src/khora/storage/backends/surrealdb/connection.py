@@ -83,7 +83,9 @@ class SurrealDBConnection:
         self._client = factory(endpoint)
         await self._client.connect()
         await self._client.use(self._namespace, self._database)
-        await self._client.signin({"username": self._user, "password": self._password})
+        # Embedded/memory modes don't have a root user — only sign in for remote
+        if self._mode == "remote":
+            await self._client.signin({"username": self._user, "password": self._password})
         self._connected = True
         logger.info(f"Connected to SurrealDB ({self._mode}), ns={self._namespace}, db={self._database}")
 
