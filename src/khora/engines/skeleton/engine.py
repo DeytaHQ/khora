@@ -291,7 +291,7 @@ class SkeletonConstructionEngine:
 
         # Chunk the document (run in thread to avoid blocking event loop during
         # CPU-bound tiktoken operations)
-        async with trace_span("khora.skeleton.chunk") as span:
+        with trace_span("khora.skeleton.chunk") as span:
             raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
             span.set_attribute("chunk_count", len(raw_chunks))
 
@@ -313,7 +313,7 @@ class SkeletonConstructionEngine:
 
         # Embed selected chunks in batch
         chunk_texts = [c.content for c in embed_chunks]
-        async with trace_span("khora.skeleton.embed") as span:
+        with trace_span("khora.skeleton.embed") as span:
             embeddings = await embedder.embed_batch(chunk_texts)
             span.set_attribute("embedding_count", len(embeddings))
 
@@ -747,7 +747,7 @@ class SkeletonConstructionEngine:
                     failed += 1
 
             # Chunk all documents in parallel (CPU-bound tiktoken runs in threads)
-            async with trace_span("khora.skeleton.batch_chunk") as span:
+            with trace_span("khora.skeleton.batch_chunk") as span:
                 chunk_tasks = [asyncio.to_thread(chunker.chunk, doc.content) for doc in created_docs]
                 all_raw_chunks = await asyncio.gather(*chunk_tasks, return_exceptions=True)
                 span.set_attribute("doc_count", len(created_docs))
@@ -783,7 +783,7 @@ class SkeletonConstructionEngine:
 
             all_embeddings: list[list[float]] = []
             if all_chunk_texts:
-                async with trace_span("khora.skeleton.batch_embed") as span:
+                with trace_span("khora.skeleton.batch_embed") as span:
                     all_embeddings = await embedder.embed_batch(all_chunk_texts)
                     span.set_attribute("chunk_count", len(all_chunk_texts))
 
@@ -824,7 +824,7 @@ class SkeletonConstructionEngine:
 
             stored_chunks: list[Any] = []
             if temporal_chunks:
-                async with trace_span("khora.skeleton.batch_store") as span:
+                with trace_span("khora.skeleton.batch_store") as span:
                     stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
                     span.set_attribute("stored_count", len(stored_chunks))
 
