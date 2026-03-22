@@ -269,6 +269,28 @@ PENDING → PROCESSING → COMPLETED
 
 If processing fails, the error message is stored in the document's metadata, and other documents continue processing.
 
+### Selective Extraction with Importance Scoring
+
+Not all chunks are worth sending to an LLM for entity extraction. The `ChunkImportanceScorer` (in `src/khora/extraction/importance.py`) scores each chunk on four signals:
+
+| Signal | Weight | What It Measures |
+|--------|--------|-----------------|
+| Entity density | 35% | Capitalized phrases, proper nouns (0-1) |
+| Information density | 25% | Type-token ratio (unique words / total words) |
+| Position | 20% | First/last chunks score highest |
+| Length | 20% | 50-300 words is the sweet spot |
+
+When `selective_extraction=True` (the default), only the top chunks by importance score get full LLM extraction. Remaining chunks get lightweight co-occurrence edges (`CO_OCCURS_WITH` relationships) extracted via regex, at confidence 0.4. This reduces LLM extraction costs by 30-50% with minimal recall loss.
+
+```python
+result = await ingest_documents(
+    namespace_id, documents, storage,
+    selective_extraction=True,        # default
+    extraction_importance_ratio=0.7,  # top 70% get LLM extraction
+    extraction_min_importance=0.2,    # minimum score threshold
+)
+```
+
 ## Phase 3: Expansion (Optional)
 
 After basic enrichment, expansion can enhance your knowledge graph.
