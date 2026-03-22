@@ -154,13 +154,15 @@ def create_temporal_store(
     config: KhoraConfig,
     *,
     weaviate_url: str | None = None,
+    surrealdb_config: Any | None = None,
 ) -> TemporalVectorStore:
     """Create a temporal vector store backend.
 
     Args:
-        backend: Backend type ("pgvector" or "weaviate")
+        backend: Backend type ("pgvector", "weaviate", or "surrealdb")
         config: Khora configuration
         weaviate_url: Weaviate URL (required for weaviate backend)
+        surrealdb_config: SurrealDBConfig instance (optional, falls back to config.storage.surrealdb)
 
     Returns:
         Configured TemporalVectorStore implementation
@@ -175,8 +177,12 @@ def create_temporal_store(
         from khora.engines.skeleton.backends.weaviate import WeaviateTemporalStore
 
         return WeaviateTemporalStore(config, weaviate_url)
+    elif backend == "surrealdb":
+        from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
+
+        return SurrealDBTemporalStore(config, surrealdb_config=surrealdb_config)
     else:
-        raise ValueError(f"Unknown backend: {backend}. Available: pgvector, weaviate")
+        raise ValueError(f"Unknown backend: {backend}. Available: pgvector, weaviate, surrealdb")
 
 
 __all__ = [

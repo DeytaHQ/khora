@@ -74,10 +74,13 @@ class SkeletonConstructionEngine:
         Args:
             config: KhoraConfig instance
             storage_config: Storage configuration (deprecated, derived from config)
-            backend: Backend type ("pgvector" or "weaviate")
+            backend: Backend type ("pgvector", "weaviate", or "surrealdb")
             weaviate_url: Weaviate URL (required for weaviate backend)
         """
         self._config = config
+        # Auto-detect surrealdb backend from config when not explicitly set
+        if backend == "pgvector" and config.storage.backend == "surrealdb":
+            backend = "surrealdb"
         self._backend_type = backend
         self._weaviate_url = weaviate_url
 
@@ -105,6 +108,7 @@ class SkeletonConstructionEngine:
             self._backend_type,
             self._config,
             weaviate_url=self._weaviate_url,
+            surrealdb_config=self._config.storage.surrealdb if self._backend_type == "surrealdb" else None,
         )
         await self._temporal_store.connect()
 
@@ -378,6 +382,7 @@ class SkeletonConstructionEngine:
         temporal_reference: datetime | None = None,
         hybrid_alpha: float | None = None,
         filters: dict[str, Any] | None = None,
+        recency_bias: float | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
@@ -933,13 +938,16 @@ class SkeletonConstructionEngine:
         max_depth: int = 2,
         limit: int = 20,
     ) -> list[tuple[Entity, float]]:
-        """Find entities related to a given entity.
+        """Not supported by Skeleton Construction engine.
 
-        Note: Skeleton Construction engine focuses on temporal chunk retrieval.
-        For full entity graph traversal, use the GraphRAG engine.
+        The Skeleton engine focuses on temporal chunk retrieval without
+        maintaining entity graphs. Use GraphRAG or VectorCypher for
+        entity graph traversal.
         """
-        # Return empty for now - Khora focuses on chunks
-        return []
+        raise NotImplementedError(
+            "find_related_entities is not supported by the Skeleton Construction engine. "
+            "Use GraphRAG or VectorCypher for entity graph operations."
+        )
 
     # =========================================================================
     # Document Operations
@@ -965,13 +973,16 @@ class SkeletonConstructionEngine:
         *,
         limit: int = 10,
     ) -> list[Entity]:
-        """Search entities by query text.
+        """Not supported by Skeleton Construction engine.
 
-        Note: Skeleton Construction engine focuses on temporal chunk retrieval.
-        For full entity search, use the GraphRAG engine.
+        The Skeleton engine focuses on temporal chunk retrieval without
+        maintaining entity graphs. Use GraphRAG or VectorCypher for
+        entity search.
         """
-        # Return empty for now - Khora focuses on chunks
-        return []
+        raise NotImplementedError(
+            "search_entities is not supported by the Skeleton Construction engine. "
+            "Use GraphRAG or VectorCypher for entity graph operations."
+        )
 
     async def stats(self, namespace_id: UUID) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace."""
