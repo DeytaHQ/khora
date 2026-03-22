@@ -146,7 +146,7 @@ class VectorCypherRetriever:
     def __init__(
         self,
         vector_store: TemporalVectorStore,
-        neo4j_driver: AsyncDriver,
+        neo4j_driver: AsyncDriver | None,
         embedder: EmbedderProtocol,
         *,
         database: str = "neo4j",
@@ -181,7 +181,7 @@ class VectorCypherRetriever:
                 complex_depth=self._config.default_depth,
             )
         self._router = QueryComplexityRouter(router_config)
-        self._dual_nodes = DualNodeManager(neo4j_driver, database)
+        self._dual_nodes = DualNodeManager(neo4j_driver, database) if neo4j_driver else None
 
         # Query result cache (LRU + TTL)
         self._cache: dict[str, tuple[float, VectorCypherResult]] = {}
@@ -1035,6 +1035,10 @@ class VectorCypherRetriever:
         if not entity_ids:
             return []
 
+        # SurrealDB unified backend — no Neo4j driver, skip version filtering
+        if self._neo4j_driver is None:
+            return list(entity_ids)
+
         # First: keep current Entity nodes that are valid at target_date,
         # OR that have no version properties (backward-compatible).
         # Second: for entities not valid at target_date, check if a prior
@@ -1098,7 +1102,7 @@ class VectorCypherRetriever:
             List of dicts with ``current_*`` and ``previous_*`` fields
             representing the version transition chain.
         """
-        if not entity_ids:
+        if not entity_ids or self._neo4j_driver is None:
             return []
 
         query = """

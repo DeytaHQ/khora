@@ -198,10 +198,9 @@ class TestVectorCypherEngineGetters:
         with pytest.raises(RuntimeError, match="not connected"):
             engine._get_retriever()
 
-    def test_get_dual_nodes_raises_when_not_connected(self, engine: VectorCypherEngine) -> None:
-        """Test _get_dual_nodes raises RuntimeError when not connected."""
-        with pytest.raises(RuntimeError, match="not connected"):
-            engine._get_dual_nodes()
+    def test_get_dual_nodes_returns_none_when_not_connected(self, engine: VectorCypherEngine) -> None:
+        """Test _get_dual_nodes returns None when not connected (or SurrealDB backend)."""
+        assert engine._get_dual_nodes() is None
 
 
 @pytest.mark.unit

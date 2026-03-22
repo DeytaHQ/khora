@@ -262,46 +262,56 @@ class VectorCypherEngine:
 
         logger.info("Connecting VectorCypher engine...")
 
-        # Connect to Neo4j (required for VectorCypher) — single shared driver
-        neo4j_url = self._config.get_neo4j_url()
-        if not neo4j_url:
-            raise ValueError(
-                "Neo4j URL is required for VectorCypher engine. Set GENESIS_NEO4J_URL or configure graph_config."
+        # Detect unified SurrealDB backend — skips Neo4j and uses SurrealDB for everything
+        is_surrealdb = getattr(self._config.storage, "backend", "postgres") == "surrealdb"
+        neo4j_database = "neo4j"
+
+        if not is_surrealdb:
+            # Connect to Neo4j (required for VectorCypher with traditional stack)
+            neo4j_url = self._config.get_neo4j_url()
+            if not neo4j_url:
+                raise ValueError(
+                    "Neo4j URL is required for VectorCypher engine. Set GENESIS_NEO4J_URL or configure graph_config."
+                )
+
+            neo4j_cfg = self._config.get_graph_config()
+            pool_size = getattr(neo4j_cfg, "max_connection_pool_size", 100) if neo4j_cfg else 100
+            max_conn_lifetime = getattr(neo4j_cfg, "max_connection_lifetime", 900) if neo4j_cfg else 900
+            liveness_timeout = getattr(neo4j_cfg, "liveness_check_timeout", 30.0) if neo4j_cfg else 30.0
+            self._neo4j_driver = AsyncGraphDatabase.driver(
+                neo4j_url,
+                auth=(self._config.get_neo4j_user(), self._config.get_neo4j_password()),
+                max_connection_pool_size=pool_size,
+                max_connection_lifetime=max_conn_lifetime,
+                liveness_check_timeout=liveness_timeout,
+                keep_alive=True,
             )
+            await self._neo4j_driver.verify_connectivity()
 
-        neo4j_cfg = self._config.get_graph_config()
-        pool_size = getattr(neo4j_cfg, "max_connection_pool_size", 100) if neo4j_cfg else 100
-        max_conn_lifetime = getattr(neo4j_cfg, "max_connection_lifetime", 900) if neo4j_cfg else 900
-        liveness_timeout = getattr(neo4j_cfg, "liveness_check_timeout", 30.0) if neo4j_cfg else 30.0
-        self._neo4j_driver = AsyncGraphDatabase.driver(
-            neo4j_url,
-            auth=(self._config.get_neo4j_user(), self._config.get_neo4j_password()),
-            max_connection_pool_size=pool_size,
-            max_connection_lifetime=max_conn_lifetime,
-            liveness_check_timeout=liveness_timeout,
-            keep_alive=True,
-        )
-        await self._neo4j_driver.verify_connectivity()
-
-        # Create and connect relational storage, sharing the Neo4j driver
-        # so only one connection pool is used for the entire engine.
+        # Create and connect relational storage
         self._storage = create_storage_coordinator(self._storage_config)
 
-        from khora.storage.backends.neo4j import Neo4jBackend
+        if not is_surrealdb:
+            # Share the Neo4j driver so only one connection pool is used
+            from khora.storage.backends.neo4j import Neo4jBackend
 
-        neo4j_database = self._config.get_neo4j_database() or "neo4j"
-        if self._storage.graph is not None:
-            self._storage.graph = Neo4jBackend.from_driver(
-                self._neo4j_driver,
-                database=neo4j_database,
-                entity_write_concurrency=getattr(neo4j_cfg, "entity_write_concurrency", 12),
-                relationship_write_concurrency=getattr(neo4j_cfg, "relationship_write_concurrency", 8),
-            )
+            neo4j_cfg = self._config.get_graph_config()
+            neo4j_database = self._config.get_neo4j_database() or "neo4j"
+            if self._storage.graph is not None:
+                self._storage.graph = Neo4jBackend.from_driver(
+                    self._neo4j_driver,
+                    database=neo4j_database,
+                    entity_write_concurrency=getattr(neo4j_cfg, "entity_write_concurrency", 12),
+                    relationship_write_concurrency=getattr(neo4j_cfg, "relationship_write_concurrency", 8),
+                )
 
         await self._storage.connect()
 
-        # Create and connect temporal vector store (pgvector)
-        self._temporal_store = create_temporal_store("pgvector", self._config)
+        # Create and connect temporal vector store
+        if is_surrealdb:
+            self._temporal_store = create_temporal_store("surrealdb", self._config)
+        else:
+            self._temporal_store = create_temporal_store("pgvector", self._config)
         await self._temporal_store.connect()
 
         # Create embedder
@@ -314,9 +324,10 @@ class VectorCypherEngine:
         )
         self._embedder = LiteLLMEmbedder.from_config(llm_config)
 
-        # Initialize dual node manager
-        self._dual_nodes = DualNodeManager(self._neo4j_driver, neo4j_database)
-        await self._dual_nodes.ensure_indexes()
+        # Initialize dual node manager (Neo4j only — SurrealDB uses graph adapter)
+        if not is_surrealdb:
+            self._dual_nodes = DualNodeManager(self._neo4j_driver, neo4j_database)
+            await self._dual_nodes.ensure_indexes()
 
         # Initialize router
         router_config = RouterConfig(
@@ -423,9 +434,8 @@ class VectorCypherEngine:
             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
         return self._retriever
 
-    def _get_dual_nodes(self) -> DualNodeManager:
-        if self._dual_nodes is None:
-            raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
+    def _get_dual_nodes(self) -> DualNodeManager | None:
+        """Get the dual node manager. Returns None for SurrealDB unified backend."""
         return self._dual_nodes
 
     # =========================================================================
@@ -606,8 +616,9 @@ class VectorCypherEngine:
             for i, stored in enumerate(stored_chunks):
                 temporal_chunks[i].id = stored.id
 
-            # Create Chunk nodes in Neo4j
-            await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+            # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
+            if dual_nodes is not None:
+                await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
 
             # Skeleton-based entity extraction (for core chunks only)
             entities_extracted = 0
@@ -764,7 +775,8 @@ class VectorCypherEngine:
 
             # Create MENTIONED_IN edges in Neo4j
             if entity_chunk_links:
-                await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
+                if dual_nodes is not None:
+                    await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
 
             logger.debug(
                 f"Skeleton extraction: {len(entities)} entities, "
@@ -968,8 +980,9 @@ class VectorCypherEngine:
         for i, stored in enumerate(stored_chunks):
             temporal_chunks[i].id = stored.id
 
-        # Create Chunk nodes in Neo4j
-        await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+        # Create Chunk nodes in Neo4j (skipped for SurrealDB)
+        if dual_nodes is not None:
+            await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
 
         # Deferred skeleton extraction — returns entities instead of storing
         entities: list[Entity] = []
@@ -1191,7 +1204,8 @@ class VectorCypherEngine:
                 return False
 
         # Delete from Neo4j (Chunk nodes and relationships)
-        await dual_nodes.delete_chunks_by_document(document_id, ns_id)
+        if dual_nodes is not None:
+            await dual_nodes.delete_chunks_by_document(document_id, ns_id)
 
         # Delete from pgvector
         await temporal_store.delete_chunks_by_document(document_id, ns_id)
@@ -1555,8 +1569,9 @@ class VectorCypherEngine:
         for i, s in enumerate(stored):
             all_temporal_chunks[i].id = s.id
 
-        # Batch create Neo4j chunk nodes
-        await dual_nodes.create_chunk_nodes_batch(all_temporal_chunks, namespace_id)
+        # Batch create Neo4j chunk nodes (skipped for SurrealDB)
+        if dual_nodes is not None:
+            await dual_nodes.create_chunk_nodes_batch(all_temporal_chunks, namespace_id)
 
         _stage3_ms = (_time.perf_counter() - _stage3_t0) * 1000
 
@@ -1685,7 +1700,7 @@ class VectorCypherEngine:
                 await storage.create_relationships_batch(all_relationships)
                 _stage6_rels_ms = (_time.perf_counter() - _t0) * 1000
 
-            if all_entity_chunk_links:
+            if all_entity_chunk_links and dual_nodes is not None:
                 _t0 = _time.perf_counter()
                 await dual_nodes.link_entities_to_chunks_batch(all_entity_chunk_links)
                 _stage6_links_ms = (_time.perf_counter() - _t0) * 1000
@@ -1984,6 +1999,13 @@ class VectorCypherEngine:
     ) -> list[tuple[Entity, float]]:
         """Find entities related to a given entity via graph traversal."""
         dual_nodes = self._get_dual_nodes()
+        if dual_nodes is None:
+            # SurrealDB: use storage coordinator's graph backend
+            storage = self._get_storage()
+            if storage.graph:
+                related = await storage.graph.get_related_entities(entity_id, namespace_id)
+                return [(e, 1.0) for e in related[:limit]]
+            return []
 
         neighborhoods = await dual_nodes.get_entity_neighborhoods(
             entity_ids=[entity_id],
@@ -2062,8 +2084,11 @@ class VectorCypherEngine:
             documents = await storage.list_documents(namespace_id, limit=0)
             doc_count = len(documents) if documents else 0
 
-        # Get chunk count from Neo4j
-        chunk_count = await dual_nodes.count_chunks(namespace_id)
+        # Get chunk count
+        if dual_nodes is not None:
+            chunk_count = await dual_nodes.count_chunks(namespace_id)
+        else:
+            chunk_count = await self._get_temporal_store().count_chunks(namespace_id)
 
         try:
             entity_count = await storage.count_entities(namespace_id)
