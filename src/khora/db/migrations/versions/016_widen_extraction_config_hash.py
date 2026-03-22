@@ -5,7 +5,7 @@ Revises: 015_add_extraction_config_hash
 Create Date: 2026-03-22
 
 DYT-761: The original DYT-697 widening was reverted by the DYT-752 merge.
-VARCHAR(255) accommodates SHA-512, compound keys, and other hash algorithms.
+VARCHAR(255) accommodates compound keys and longer hash algorithms.
 """
 
 from collections.abc import Sequence

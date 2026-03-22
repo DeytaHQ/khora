@@ -76,7 +76,7 @@ class Document:
     entity_count: int = 0
     error_message: str | None = None
 
-    # Extraction config tracking (supports SHA-512, compound keys, etc.)
+    # Extraction config tracking (max 255 chars; accommodates compound keys)
     extraction_config_hash: str | None = None
 
     # Maximum length for extraction_config_hash (matches DB column String(255))
