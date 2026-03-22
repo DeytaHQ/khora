@@ -6,3 +6,11 @@
 - 2026-03-22: DYT-753: Deprecate create_tables/init_db, add migration drift CI
 - 2026-03-22: DYT-761: Widen extraction_config_hash to VARCHAR(255)
 - 2026-03-22: DYT-768: Add Neo4j connection lifetime and liveness config
+- 2026-03-22: DYT-789: Extract shared build_storage_config() helper for all engines
+- 2026-03-22: DYT-790: Move TemporalDetector to shared query/ location
+- 2026-03-22: DYT-791: Modernize Skeleton remember_batch with staged pipeline
+- 2026-03-22: DYT-792: Add temporal detection to GraphRAG recall()
+- 2026-03-22: DYT-793: Add @trace telemetry to Skeleton and GraphRAG engines
+- 2026-03-22: DYT-794: Add bulk_mode support to all engines
+- 2026-03-22: DYT-795: Improve GraphRAG stats() efficiency
+- 2026-03-22: DYT-796: Add importance scoring to Skeleton engine
