@@ -62,6 +62,16 @@ class Neo4jConfig(BaseModel):
     password: str = Field(default="", description="Neo4j password")
     database: str = Field(default="neo4j", description="Neo4j database name")
     max_connection_pool_size: int = Field(default=100, description="Neo4j connection pool size")
+    max_connection_lifetime: int = Field(
+        default=900,
+        description="Max seconds a connection stays in the pool before rotation. "
+        "Set below the server-side TTL (e.g. Aura ~20min) to avoid reset errors.",
+    )
+    liveness_check_timeout: float | None = Field(
+        default=30.0,
+        description="Seconds of idle time after which connections are checked for liveness "
+        "before being returned from the pool. None disables the check.",
+    )
     connection_acquisition_timeout: float = Field(
         default=60.0, description="Timeout in seconds waiting for a connection from the pool"
     )

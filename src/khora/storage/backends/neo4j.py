@@ -201,6 +201,8 @@ class Neo4jBackend(GraphBackendBase):
         password: str = "",
         database: str = "neo4j",
         max_connection_pool_size: int = 100,
+        max_connection_lifetime: int = 900,
+        liveness_check_timeout: float | None = 30.0,
         connection_acquisition_timeout: float = 60.0,
         retry_delay_jitter_factor: float = 0.5,
         entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
@@ -214,6 +216,8 @@ class Neo4jBackend(GraphBackendBase):
             password: Database password
             database: Database name
             max_connection_pool_size: Maximum connection pool size
+            max_connection_lifetime: Max seconds before a pooled connection is rotated
+            liveness_check_timeout: Idle seconds before a connection is checked for liveness
             connection_acquisition_timeout: Timeout waiting for a connection from the pool
             retry_delay_jitter_factor: Jitter factor for transaction retry delays (0.0-1.0)
             entity_write_concurrency: Max concurrent entity write transactions
@@ -224,6 +228,8 @@ class Neo4jBackend(GraphBackendBase):
         self._password = password
         self._database = database
         self._max_connection_pool_size = max_connection_pool_size
+        self._max_connection_lifetime = max_connection_lifetime
+        self._liveness_check_timeout = liveness_check_timeout
         self._connection_acquisition_timeout = connection_acquisition_timeout
         self._retry_delay_jitter_factor = retry_delay_jitter_factor
         self._driver: AsyncDriver | None = None
@@ -240,6 +246,8 @@ class Neo4jBackend(GraphBackendBase):
             password=config.password,
             database=config.database,
             max_connection_pool_size=getattr(config, "max_connection_pool_size", 100),
+            max_connection_lifetime=getattr(config, "max_connection_lifetime", 900),
+            liveness_check_timeout=getattr(config, "liveness_check_timeout", 30.0),
             connection_acquisition_timeout=getattr(config, "connection_acquisition_timeout", 60.0),
             retry_delay_jitter_factor=getattr(config, "retry_delay_jitter_factor", 0.5),
             entity_write_concurrency=getattr(config, "entity_write_concurrency", _DEFAULT_ENTITY_WRITE_CONCURRENCY),
@@ -277,6 +285,8 @@ class Neo4jBackend(GraphBackendBase):
         instance._password = ""
         instance._database = database
         instance._max_connection_pool_size = 0
+        instance._max_connection_lifetime = 900
+        instance._liveness_check_timeout = 30.0
         instance._connection_acquisition_timeout = 60.0
         instance._retry_delay_jitter_factor = 0.5
         instance._driver = driver
@@ -293,12 +303,19 @@ class Neo4jBackend(GraphBackendBase):
             return
 
         logger.info(f"Connecting to Neo4j at {self._url}...")
+        driver_kwargs: dict[str, Any] = {
+            "max_connection_pool_size": self._max_connection_pool_size,
+            "max_connection_lifetime": self._max_connection_lifetime,
+            "connection_acquisition_timeout": self._connection_acquisition_timeout,
+            "retry_delay_jitter_factor": self._retry_delay_jitter_factor,
+            "keep_alive": True,
+        }
+        if self._liveness_check_timeout is not None:
+            driver_kwargs["liveness_check_timeout"] = self._liveness_check_timeout
         self._driver = AsyncGraphDatabase.driver(
             self._url,
             auth=(self._user, self._password),
-            max_connection_pool_size=self._max_connection_pool_size,
-            connection_acquisition_timeout=self._connection_acquisition_timeout,
-            retry_delay_jitter_factor=self._retry_delay_jitter_factor,
+            **driver_kwargs,
         )
         # Verify connectivity
         await self._driver.verify_connectivity()
