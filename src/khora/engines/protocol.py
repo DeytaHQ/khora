@@ -89,6 +89,9 @@ class MemoryEngineProtocol(Protocol):
         min_similarity: float = 0.0,
         agentic: bool = False,
         raw: bool = False,
+        # Temporal parameters (optional — engines may ignore these)
+        temporal_filter: Any | None = None,
+        recency_bias: float | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
@@ -100,6 +103,11 @@ class MemoryEngineProtocol(Protocol):
             min_similarity: Minimum similarity threshold
             agentic: If True, use multi-step agentic search
             raw: If True, skip all LLM features
+            temporal_filter: Optional temporal filter for time-scoped retrieval.
+                Type varies by engine (e.g. TemporalFilter for Skeleton).
+                Engines that do not support temporal filtering may ignore this.
+            recency_bias: Optional recency bias weight (0.0–1.0).
+                Engines that do not support recency biasing may ignore this.
 
         Returns:
             RecallResult with matched memories
