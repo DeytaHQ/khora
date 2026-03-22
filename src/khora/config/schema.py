@@ -68,6 +68,16 @@ class Neo4jConfig(BaseModel):
     retry_delay_jitter_factor: float = Field(
         default=0.5, description="Jitter factor for transaction retry delays (0.0-1.0)"
     )
+    max_connection_lifetime: int = Field(
+        default=900,
+        description="Max seconds a connection stays in the pool before rotation. "
+        "Set below the server-side TTL (e.g. Aura ~20min) to avoid reset errors.",
+    )
+    liveness_check_timeout: float | None = Field(
+        default=30.0,
+        description="Seconds of idle time after which connections are checked for liveness "
+        "before being returned from the pool. None disables the check.",
+    )
     entity_write_concurrency: int = Field(default=12, description="Max concurrent entity write transactions")
     relationship_write_concurrency: int = Field(default=8, description="Max concurrent relationship write transactions")
 
