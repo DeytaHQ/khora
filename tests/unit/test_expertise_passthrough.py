@@ -283,23 +283,23 @@ class TestDocumentModelExtractionConfigHash:
         assert hasattr(DocumentModel, "extraction_config_hash")
         col = DocumentModel.__table__.columns["extraction_config_hash"]
         assert col.nullable is True
-        assert col.type.length == 64
+        assert col.type.length == 255
 
     def test_extraction_config_hash_rejects_overlength(self) -> None:
-        """extraction_config_hash longer than 64 chars raises ValueError."""
+        """extraction_config_hash longer than 255 chars raises ValueError."""
         import pytest
 
         from khora.core.models.document import Document
 
-        with pytest.raises(ValueError, match="at most 64 characters"):
-            Document(content="test", extraction_config_hash="x" * 65)
+        with pytest.raises(ValueError, match="at most 255 characters"):
+            Document(content="test", extraction_config_hash="x" * 256)
 
-    def test_extraction_config_hash_accepts_64_chars(self) -> None:
-        """extraction_config_hash of exactly 64 chars is accepted."""
+    def test_extraction_config_hash_accepts_255_chars(self) -> None:
+        """extraction_config_hash of exactly 255 chars is accepted."""
         from khora.core.models.document import Document
 
-        doc = Document(content="test", extraction_config_hash="a" * 64)
-        assert len(doc.extraction_config_hash) == 64  # type: ignore[arg-type]
+        doc = Document(content="test", extraction_config_hash="a" * 255)
+        assert len(doc.extraction_config_hash) == 255  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

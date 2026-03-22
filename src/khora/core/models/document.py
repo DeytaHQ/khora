@@ -76,11 +76,11 @@ class Document:
     entity_count: int = 0
     error_message: str | None = None
 
-    # Extraction config tracking (SHA-256 hex digest, max 64 chars)
+    # Extraction config tracking (supports SHA-512, compound keys, etc.)
     extraction_config_hash: str | None = None
 
-    # Maximum length for extraction_config_hash (matches DB column String(64))
-    _EXTRACTION_HASH_MAX_LEN: int = field(default=64, init=False, repr=False, compare=False)
+    # Maximum length for extraction_config_hash (matches DB column String(255))
+    _EXTRACTION_HASH_MAX_LEN: int = field(default=255, init=False, repr=False, compare=False)
 
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
