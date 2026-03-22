@@ -54,11 +54,11 @@ class SurrealDBConnection:
 
     def _build_endpoint(self) -> str:
         if self._mode == "memory":
-            return "memory"
+            return "memory://default"
         if self._mode == "embedded":
             if not self._path:
                 raise ValueError("SurrealDB embedded mode requires 'path' to be set")
-            return f"file://{self._path}"
+            return f"surrealkv://{self._path}"
         if self._mode == "remote":
             if not self._url:
                 raise ValueError("SurrealDB remote mode requires 'url' to be set")

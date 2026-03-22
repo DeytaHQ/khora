@@ -21,9 +21,15 @@ except ImportError:
     _HAS_NUMPY = False
 
 
-def _rid(table: str, uid: UUID) -> str:
-    """Build a SurrealDB record-link literal ``table:⟨uuid⟩``."""
-    return f"{table}:\u27e8{uid}\u27e9"
+def _rid(table: str, uid: UUID) -> Any:
+    """Build a SurrealDB RecordID for use as a query parameter.
+
+    SurrealDB 1.x requires ``RecordID`` objects (not strings) when binding
+    record IDs in parameterised queries like ``CREATE $rid SET ...``.
+    """
+    from surrealdb.data.types.record_id import RecordID
+
+    return RecordID(table, str(uid))
 
 
 # Alias used by graph/vector adapters
