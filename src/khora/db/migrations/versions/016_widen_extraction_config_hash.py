@@ -31,6 +31,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Truncate any hashes longer than 64 chars before shrinking the column,
+    # so the ALTER doesn't fail or silently truncate on strict databases.
+    op.execute(
+        sa.text(
+            "UPDATE documents SET extraction_config_hash = LEFT(extraction_config_hash, 64) "
+            "WHERE LENGTH(extraction_config_hash) > 64"
+        )
+    )
     op.alter_column(
         "documents",
         "extraction_config_hash",
