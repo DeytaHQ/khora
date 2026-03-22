@@ -73,11 +73,14 @@ def _parse_dt(val: Any) -> datetime | None:
         return None
 
 
-def _dt_to_iso(dt: datetime | None) -> str | None:
-    """Serialise a datetime to ISO-8601 for SurrealDB, or ``None``."""
-    if dt is None:
-        return None
-    return dt.isoformat()
+def _dt_to_iso(dt: datetime | None) -> datetime | None:
+    """Return a datetime for SurrealDB parameter binding, or ``None``.
+
+    SurrealDB 1.x SCHEMAFULL datetime fields require native ``datetime``
+    objects — the Python SDK serialises them to the CBOR wire format.
+    The function name is kept for backwards compatibility with callers.
+    """
+    return dt
 
 
 def _iso_to_dt(value: str | datetime | None) -> datetime | None:
