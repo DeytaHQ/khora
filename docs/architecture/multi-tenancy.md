@@ -43,25 +43,38 @@ You can't accidentally see another namespace's data.
 
 ```python
 from khora import MemoryLake
-from khora.core.models import MemoryNamespace
 
 async with MemoryLake() as lake:
-    # Create a namespace (UUID-identified, no name/description)
-    namespace = await lake.storage.create_namespace(
-        MemoryNamespace()
-    )
+    # Create a namespace via the public API
+    namespace = await lake.create_namespace()
 
-    # Now store data
+    # Now store data using the stable namespace_id
     await lake.remember(
         "Important content...",
-        namespace=namespace.id
+        namespace=namespace.namespace_id
     )
 ```
+
+## Namespace Dual-ID Scheme
+
+Each namespace has two IDs:
+
+| ID | Purpose | Changes? |
+|----|---------|----------|
+| **`namespace_id`** | Stable identifier across all versions | Never — use this in your application |
+| **`id`** | Row-level UUID | Changes per version (v1, v2, etc.) |
+
+Public API methods accept `namespace_id` and resolve to the active version's `id` automatically. Resolution via `resolve_namespace()` is idempotent — it accepts either ID type. This adds one indexed lookup per API call (sub-ms).
+
+Child table foreign keys (documents, chunks, entities) reference `id`, not `namespace_id`.
 
 ## Finding Namespaces
 
 ```python
-# By UUID
+# By stable namespace_id (recommended)
+ns = await lake.get_namespace_by_stable_id(stable_namespace_id)
+
+# By row-level UUID
 ns = await lake.storage.get_namespace(namespace_id)
 
 # List all (active only by default)

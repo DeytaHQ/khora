@@ -73,7 +73,7 @@ The `KHORA_ACCEL_BACKEND` environment variable overrides auto-detection:
 Backend availability is logged at import time via the `_HAS_RUST`,
 `_HAS_NUMPY`, and `_HAS_RAPIDFUZZ` flags in `_accel.py`.
 
-## Module Reference (11 Modules, 27+ Exported Functions)
+## Module Reference (13 Modules, 40+ Exported Functions)
 
 ### `cosine.rs` — Vector Similarity (5 functions)
 
@@ -127,7 +127,7 @@ Greedy Maximal Marginal Relevance for diversity-aware result selection.
 
 ---
 
-### `temporal.rs` — Temporal Filtering & Detection (4 functions)
+### `temporal.rs` — Temporal Filtering & Detection (5 functions)
 
 Batch datetime comparison, recency scoring, and temporal query detection.
 
@@ -137,6 +137,7 @@ Batch datetime comparison, recency scoring, and temporal query detection.
 | `batch_recency_scores` | `(py, timestamps_secs: Vec<Option<f64>>, now_secs: f64, decay_days: f64, recency_weight: f64) -> Vec<f64>` | Weighted exponential decay recency scoring. Score = `(1 - recency_weight) + recency_weight * 0.5^(age_days / decay_days)`. |
 | `detect_temporal_category` | `(query: &str) -> u8` | Categorise a query by temporal intent. Returns a category ID: 0=NONE, 1=EXPLICIT, 2=STATE_QUERY, 3=ORDINAL, 4=AGGREGATE, 5=RECENCY, 6=CHANGE. Uses ~200 Aho-Corasick patterns with case-insensitive matching; highest-priority category wins on multiple matches. |
 | `detect_temporal_keywords` | `(query: &str) -> bool` | Fast boolean check for temporal keywords in a query string. Uses a compiled `LazyLock<Regex>`. |
+| `detect_temporal_category_with_confidence` | `(query: &str) -> (u8, f64, Vec<String>)` | Like `detect_temporal_category` but also returns the confidence score and the list of matched temporal keyword patterns. |
 
 **Rust techniques:**
 - **Rayon parallel** — `batch_temporal_filter` and `batch_recency_scores` use `par_iter()` for large input batches.
@@ -153,7 +154,7 @@ Batch datetime comparison, recency scoring, and temporal query detection.
 
 ---
 
-### `string_sim.rs` — String Similarity (4 functions)
+### `string_sim.rs` — String Similarity (6 functions)
 
 Levenshtein and sequence-match similarity with batch variants.
 
@@ -163,6 +164,8 @@ Levenshtein and sequence-match similarity with batch variants.
 | `sequence_match_ratio` | `(s1: &str, s2: &str) -> f64` | Sequence match ratio using Jaro-Winkler as an approximation of Python's `difflib.SequenceMatcher.ratio()`. Uses `strsim::jaro_winkler`. |
 | `batch_levenshtein` | `(py, query: String, candidates: Vec<String>, threshold: f64) -> Vec<(usize, f64)>` | One query against N candidates using Levenshtein. Returns `(index, similarity)` pairs above threshold, sorted descending. |
 | `batch_sequence_match` | `(py, query: String, candidates: Vec<String>, threshold: f64) -> Vec<(usize, f64)>` | One query against N candidates using Jaro-Winkler. Returns `(index, similarity)` pairs above threshold, sorted descending. |
+| `normalize_entity_name` | `(name: &str) -> String` | Normalize an entity name: lowercase, strip punctuation, collapse whitespace. Used for consistent entity dedup across the pipeline. |
+| `normalize_entity_names_batch` | `(py, names: Vec<String>) -> Vec<String>` | Batch normalize entity names with GIL release. |
 
 **Rust techniques:**
 - **strsim crate** — Provides optimised `normalized_levenshtein` and `jaro_winkler` implementations in pure Rust.
@@ -233,15 +236,20 @@ identified as "core" for LLM extraction.
 
 ---
 
-### `rrf.rs` — Reciprocal Rank Fusion (3 functions)
+### `rrf.rs` — Reciprocal Rank Fusion (8 functions)
 
-RRF scoring and score normalisation for result fusion.
+RRF scoring, score normalisation, and fusion diagnostics for result fusion.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `reciprocal_rank_fusion` | `(ranked_lists: Vec<Vec<String>>, k: usize = 60) -> Vec<(String, f64)>` | Basic RRF over string ID lists. Score = `1 / (k + rank)` where rank is 1-indexed. Returns `(id, score)` sorted descending. |
 | `weighted_rrf` | `(ranked_lists: Vec<(f64, Vec<String>)>, k: usize = 60) -> Vec<(String, f64)>` | Weighted RRF. Each list carries a weight. Score = `weight / (k + rank)`. Returns `(id, score)` sorted descending. |
 | `normalize_scores` | `(scores: Vec<f64>) -> Vec<f64>` | Min-max normalise to `[0, 1]`. Returns all `1.0` when all scores are identical. |
+| `weighted_rrf_normalized` | Normalized weighted RRF | Normalizes vector and graph scores to [0, 1] via min-max before computing RRF. Prevents the source with larger absolute scores from dominating. |
+| `weighted_rrf_normalized_with_provenance` | RRF with source tracking | Returns fused results along with provenance information (which source contributed each result). |
+| `weighted_rrf_normalized_with_diagnostics` | RRF with fusion diagnostics | Returns fused results along with diagnostic information including per-source score distributions, overlap statistics, and fusion quality metrics. |
+| `batch_score_stats` | `(scores: Vec<f64>) -> (f64, f64, f64, f64)` | Compute min, max, mean, and standard deviation for a batch of scores. |
+| `score_entropy` | `(scores: Vec<f64>) -> f64` | Compute Shannon entropy of a score distribution. Used for fusion quality assessment. |
 
 **Rust techniques:**
 - **hashbrown::HashMap** — Fast hash accumulation of scores across ranked lists.
@@ -255,13 +263,60 @@ RRF scoring and score normalisation for result fusion.
 
 ---
 
-### `entity_resolution.rs` — Entity Resolution (1 function)
+### `dedup.rs` — Chunk Deduplication (1 function)
+
+MinHash-based near-duplicate text chunk detection. Detects near-duplicate chunks BEFORE they are sent to LLM extraction, reducing unnecessary LLM calls.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `deduplicate_chunks` | `(py, chunks: Vec<String>, threshold: f64 = 0.85, num_perm: usize = 64) -> Vec<(usize, Option<usize>)>` | Deduplicate text chunks using MinHash + LSH. Returns `(chunk_index, duplicate_of_index)` pairs. `None` for duplicate_of_index means the chunk is unique (canonical). |
+
+**Algorithm:**
+1. **MinHash signatures** — Compute MinHash over word 3-grams for each chunk. Each permutation (seeded hash function) takes the minimum hash value.
+2. **LSH banding** — Split signatures into bands and hash each band into buckets. Chunks sharing a bucket are candidate duplicates.
+3. **Verification** — For candidate pairs, verify with exact MinHash similarity against the threshold.
+4. **Marking** — Later chunks are marked as duplicates of earlier (canonical) chunks.
+
+**Rust techniques:**
+- **GIL release** — `py.detach()` releases the GIL for the entire computation.
+- **hashbrown::HashMap** — Fast bucket accumulation for LSH banding.
+- **Optimal banding** — Automatically computes the number of bands to match the desired similarity threshold.
+
+**Python consumers:**
+- `khora._accel.deduplicate_chunks` — used by ingestion pipeline to skip redundant LLM extraction calls
+
+---
+
+### `community.rs` — Community Detection (1 function)
+
+Louvain-style modularity optimization for detecting entity communities in the knowledge graph.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `detect_communities` | `(py, n: usize, edges: Vec<(usize, usize, f64)>, resolution: f64 = 1.0, max_iter: usize = 10) -> Vec<usize>` | Detect communities using Louvain-style modularity optimization. Returns community assignment for each node. |
+
+**Algorithm:**
+- Each node starts in its own community. Iteratively, each node is greedily moved to the neighboring community offering maximum modularity gain.
+- Uses the resolution parameter γ to control community granularity (higher → smaller communities).
+- Stops when no node changes community or max_iter passes complete.
+
+**Rust techniques:**
+- **GIL release** — `py.allow_threads()` during optimization.
+- **hashbrown::HashMap** — Fast community membership tracking.
+
+**Python consumers:**
+- `khora._accel.detect_communities` — community detection for knowledge graph analysis
+
+---
+
+### `entity_resolution.rs` — Entity Resolution (2 functions)
 
 Batch entity matching with a 3-stage cascade.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `resolve_entities_batch` | `(py, new_names: Vec<String>, existing_names: Vec<String>, existing_aliases: Vec<Vec<String>>, threshold: f64) -> Vec<Option<(usize, f64, String)>>` | For each new name, attempts matching in order: (1) exact case-insensitive name match, (2) alias match, (3) fuzzy Levenshtein above threshold. Returns parallel vec of `Some((index, score, match_type))` or `None`. |
+| `resolve_entities_enhanced` | Enhanced version with additional matching capabilities | Extended matching with configurable strategies beyond the base 3-stage cascade. |
 
 **3-stage matching pipeline:**
 1. **Exact match** — `HashMap<String, usize>` lookup of lowercased existing names → O(1) per new name, score `1.0`, type `"exact"`
@@ -311,6 +366,25 @@ Mirrors the `_extract_keywords` method in `SkeletonIndexer`.
 This is an internal Rust-only utility (not exported to Python via PyO3).
 The Python-facing `normalize_scores` in `rrf.rs` provides the same
 functionality as a `#[pyfunction]`.
+
+### Thread Pool Configuration
+
+The Rust acceleration layer provides a `configure_thread_pool` function to tune Rayon's global thread pool:
+
+```python
+import khora_accel
+
+# For query workloads: fewer threads, lower latency
+khora_accel.configure_thread_pool(mode="query")   # num_cpus / 2
+
+# For ingestion workloads: more threads, higher throughput
+khora_accel.configure_thread_pool(mode="ingest")  # num_cpus * 3/4
+
+# Explicit thread count
+khora_accel.configure_thread_pool(num_threads=8)
+```
+
+Must be called before any parallel work is spawned. Rayon only allows one global pool per process — subsequent calls log a warning.
 
 ## Installation & Building
 
@@ -408,6 +482,7 @@ All dependencies are declared in `rust/khora-accel/Cargo.toml`:
 | **aho-corasick** | 1.1 | Multi-pattern string matching automaton for `detect_temporal_category` — single-pass search over ~200 categorised patterns |
 | **hashbrown** | 0.16 | High-performance `HashMap`/`HashSet` (Swiss Table algorithm) — faster than std for the access patterns here |
 | **ordered-float** | 5.0 | `OrderedFloat<f64>` wrapper providing total ordering for floats, used in RRF result sorting |
+| **num_cpus** | — | CPU count detection for thread pool auto-configuration |
 
 **Dev dependencies:**
 

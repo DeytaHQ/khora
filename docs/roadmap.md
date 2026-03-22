@@ -21,6 +21,10 @@ These improvements are focused on making Khora faster and more reliable for prod
 | Item | Status | Why It Matters |
 |------|--------|----------------|
 | **Smart Entity Resolution** | Done | Two-phase architecture with token-blocked matching. Replaces O(n^2) per-document entity resolution with O(1) per-doc dedup + single O(n*k) post-ingestion pass. Batch storage operations reduce N+1 queries. See [Performance Optimization](architecture/performance-optimization.md). |
+| **Staged Batch Pipeline** | Done | Documents processed through stages (chunk → embed+extract → store) as batches rather than individually. Better LLM utilization, batch DB writes, cross-document dedup on full set. |
+| **Bulk Mode** | Done | `bulk_mode=True` defers HNSW indexes and Neo4j constraints for faster initial data loading. See [Storage Backends](architecture/storage-backends.md). |
+| **Prefix Caching Optimization** | Done | Extraction prompts restructured for LLM prefix caching — static instructions first, variable content last. Reduces per-call latency with OpenAI and Anthropic. |
+| **Async Pipeline Fixes** | Done | Blocking sync calls (spaCy chunking, SHA-256, JSON parsing) fixed with `asyncio.to_thread()`. |
 | **Streaming Ingestion** | Planned | Process documents as they arrive rather than waiting for batches. Critical for real-time applications. |
 | **Distributed Workers** | Planned | Scale extraction across multiple machines. Currently limited by single-process throughput. |
 | **GPU-Accelerated Embedding** | Planned | Local embedding models can be 10-100x faster on GPU. Important for cost-sensitive deployments. |
@@ -29,8 +33,10 @@ These improvements are focused on making Khora faster and more reliable for prod
 
 | Item | Why It Matters |
 |------|----------------|
-| **Chunk Deduplication** | Identical text appearing in multiple documents (boilerplate, headers) creates redundant chunks. Deduplication saves space and improves retrieval. |
-| **Vector Quantization** | 1536-dimension float32 vectors are 6KB each. Quantization can reduce this to 768 bytes with minimal quality loss. |
+| **Document-Level Dedup** | Done. SHA-256 checksum deduplication skips already-ingested documents. Chunk-level dedup (identical text across documents) is not yet implemented. |
+| **SurrealDB Unified Backend** | Done (Phase 1). SurrealDB serves as relational + vector + graph backend in a single database. See [Storage Backends](architecture/storage-backends.md). |
+| **Token-Aware Embedding Truncation** | Done. Embedder truncates at sentence boundaries before API call, avoiding silent truncation or errors. |
+| **Vector Quantization** | 1536-dimension float32 vectors are 6KB each. Quantization can reduce this to 768 bytes with minimal quality loss. pgvector's `halfvec` type is supported for float16 storage. |
 | **Cold Storage Tiering** | Older, rarely-accessed data could move to cheaper storage while staying queryable. |
 
 ## Medium-Term: Features & Capabilities
@@ -96,7 +102,7 @@ Khora becomes more valuable when it connects to where your data lives.
 
 | Integration | Notes |
 |-------------|-------|
-| **OpenTelemetry** | Distributed tracing across the full query/ingestion pipeline. Critical for debugging. |
+| **OpenTelemetry / Logfire** | Done. Logfire instrumentation (OTEL-based) added for LLM extraction calls, entity dedup, skeleton build, and ingestion pipeline. Optional: `pip install khora[logfire]`. `@trace` decorator and `trace_span()` context manager for span creation. Zero overhead when Logfire is not installed. |
 | **Prometheus Metrics** | Query latency, ingestion throughput, queue depths. Standard monitoring. |
 | **Query Analytics** | What are users searching for? Which queries return empty? Drives improvement priorities. |
 

@@ -10,16 +10,13 @@ Everything in Khora fits into one of three layers:
 +-----------------------------------------------------------+
 |                      TENANCY LAYER                        |
 |                                                           |
-|   Organization                                            |
-|        |                                                  |
-|        +-- Workspace                                      |
-|        |       |                                          |
-|        |       +-- Namespace  (your data lives here)      |
-|        |       +-- Namespace  (maybe version 2)           |
-|        |                                                  |
-|        +-- Workspace  (different team)                    |
-|                |                                          |
-|                +-- Namespace                              |
+|   Namespace A  (your data lives here)                     |
+|   Namespace B  (another dataset)                          |
+|   Namespace A' (version 2 of A, for zero-downtime swaps)  |
+|                                                           |
+|   Each namespace has two IDs:                             |
+|     namespace_id — stable across versions                 |
+|     id — row-level, changes per version                   |
 +-----------------------------------------------------------+
                             |
                             v

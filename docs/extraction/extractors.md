@@ -156,6 +156,21 @@ Guidelines:
 Return ONLY valid JSON, no other text."""
 ```
 
+## Prompt Optimization for Prefix Caching
+
+Extraction prompts are structured to maximize prefix caching hits with LLM providers. Static instruction content (entity types, guidelines, output schema) is placed in the system message, and variable content (the actual text to extract from) is placed in the user message:
+
+```
+System: You are an entity extractor.
+        Entity types: {entity_types}
+        Guidelines: {static_instructions}
+        Output schema: {json_schema}
+
+User: Extract from this text: {variable_text}
+```
+
+When processing hundreds of documents with the same extraction configuration, the system message is identical across calls. LLM providers (OpenAI, Anthropic) cache this prefix, reducing per-call latency and cost. The improvement is most significant with GPT-4o (automatic prefix caching) and Claude models.
+
 ## Entity Types
 
 Entity types must be provided by the caller — Khora does not define defaults.

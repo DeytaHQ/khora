@@ -108,9 +108,19 @@ await storage.create_document(document)
 
 Staging runs in parallel with controlled concurrency - typically `2 * max_concurrent_documents` since it's lightweight.
 
-## Phase 2: Enrichment
+## Phase 2: Enrichment (Staged Batch Pipeline)
 
-This is where content becomes knowledge. Each staged document goes through four steps. Notably, steps 2 and 3 (embedding and extraction) run **concurrently** since they both depend only on the chunks from step 1 — extraction doesn't need embeddings, and embedding doesn't need entities.
+This is where content becomes knowledge. The pipeline uses a **staged batch architecture** — instead of processing each document independently through all steps, all documents flow through each stage together:
+
+```
+Stage 1: chunk(Doc1, Doc2, ..., DocN)              ← all docs chunked first
+Stage 2: embed(all chunks) ∥ extract(all chunks)   ← parallel across all
+Stage 3: store(all results)                        ← batch writes
+```
+
+Embedding and extraction run **concurrently** via `asyncio.gather` since they both depend only on chunks — extraction doesn't need embeddings, and embedding doesn't need entities. The staged approach provides better LLM API utilization (larger concurrent batches), more efficient batch database writes, and enables cross-document entity deduplication on the full set.
+
+> **Note:** Chunking now runs in `asyncio.to_thread()` when using spaCy, avoiding blocking the event loop during sentence splitting.
 
 ### Step 1: Chunking
 
@@ -258,6 +268,28 @@ PENDING → PROCESSING → COMPLETED
 ```
 
 If processing fails, the error message is stored in the document's metadata, and other documents continue processing.
+
+### Selective Extraction with Importance Scoring
+
+Not all chunks are worth sending to an LLM for entity extraction. The `ChunkImportanceScorer` (in `src/khora/extraction/importance.py`) scores each chunk on four signals:
+
+| Signal | Weight | What It Measures |
+|--------|--------|-----------------|
+| Entity density | 35% | Capitalized phrases, proper nouns (0-1) |
+| Information density | 25% | Type-token ratio (unique words / total words) |
+| Position | 20% | First/last chunks score highest |
+| Length | 20% | 50-300 words is the sweet spot |
+
+When `selective_extraction=True` (the default), only the top chunks by importance score get full LLM extraction. Remaining chunks get lightweight co-occurrence edges (`CO_OCCURS_WITH` relationships) extracted via regex, at confidence 0.4. This reduces LLM extraction costs by 30-50% with minimal recall loss.
+
+```python
+result = await ingest_documents(
+    namespace_id, documents, storage,
+    selective_extraction=True,        # default
+    extraction_importance_ratio=0.7,  # top 70% get LLM extraction
+    extraction_min_importance=0.2,    # minimum score threshold
+)
+```
 
 ## Phase 3: Expansion (Optional)
 

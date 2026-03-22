@@ -199,6 +199,27 @@ result = await engine.query(
 )
 ```
 
+## Rust-Accelerated RRF
+
+RRF fusion has a Rust-accelerated implementation via the `khora-accel` extension:
+
+| Function | Description |
+|----------|-------------|
+| `khora._accel.reciprocal_rank_fusion` | Basic RRF over string ID lists |
+| `khora._accel.weighted_rrf` | Weighted RRF with per-list weights |
+| `khora._accel.normalize_scores` | Min-max score normalization to [0, 1] |
+
+The Rust implementation uses `hashbrown::HashMap` for fast score accumulation and `OrderedFloat` for total ordering during sort. Falls back to Python when the Rust extension is not installed.
+
+## Adaptive Fusion
+
+The VectorCypher engine can adaptively adjust fusion weights based on query characteristics. The temporal detection signal and query complexity classification influence the vector/graph weight ratios:
+
+- **Temporal queries** — Higher recency weight, temporal sort enabled in Neo4j
+- **Simple queries** — Vector-heavy weights (0.8/0.2)
+- **Complex queries** — Graph-heavy weights (0.4/0.6)
+- **Aggregate queries** — No recency bias, pure relevance scoring
+
 ## Implementation Details
 
 The HybridQueryEngine fusion happens in `src/khora/query/fusion.py`. The VectorCypher engine has its own fusion in `src/khora/engines/vectorcypher/fusion.py`:

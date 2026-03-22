@@ -42,7 +42,7 @@ from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTy
 from .memory_lake import BatchResult, LLMUsage, MemoryLake, RecallResult, RememberResult, Stats
 from .query import SearchMode
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "main",

@@ -349,7 +349,7 @@ async def search(
 -- HNSW for vector similarity (pgvector)
 CREATE INDEX idx_chunks_embedding_hnsw ON khora_chunks
     USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
+    WITH (m = 24, ef_construction = 128);
 
 -- GIN for full-text search
 CREATE INDEX idx_chunks_content_tsv ON khora_chunks

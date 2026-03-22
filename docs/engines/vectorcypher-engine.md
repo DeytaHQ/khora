@@ -112,6 +112,31 @@ async with MemoryLake("postgresql://...", engine="vectorcypher") as lake:
 | `find_related_entities()` | Graph traversal to find related entities |
 | `stats()` | Get document/chunk/entity counts |
 
+### RecallResult Context
+
+`recall()` returns `RecallResult` objects whose `context_text` field includes:
+- **Chunk content** — The matching text passages
+- **Entity data** — Names, types, descriptions of entities mentioned in matching chunks
+- **Relationship data** — Connections between entities in the result set
+
+This rich context enables downstream consumers (e.g., LLM chat) to answer questions about relationships without additional queries.
+
+### Source Document Population
+
+All read methods (`recall()`, `get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) accept `include_sources: bool = False`:
+
+```python
+# Default: no source metadata (zero overhead)
+results = await lake.recall("query")
+
+# With sources: populates source_document metadata on chunks/entities
+results = await lake.recall("query", include_sources=True)
+for chunk, score in results.chunks:
+    print(chunk.source_document)  # DocumentSource with title, source, etc.
+```
+
+When `False` (default), no extra query runs. When `True`, `_populate_sources()` batch-fetches `DocumentSource` metadata (chunked at 1,000 IDs) and populates `chunk.source_document`, `entity.source_documents`, and `relationship.source_documents` in-place.
+
 ### VectorCypherRetriever (`src/khora/engines/vectorcypher/retriever.py`)
 
 Implements the hybrid retrieval pipeline:
