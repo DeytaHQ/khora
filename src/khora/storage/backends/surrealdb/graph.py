@@ -548,7 +548,7 @@ class SurrealDBGraphAdapter:
         "khora.surrealdb.graph.create_relationships_batch",
         result=lambda r: {"created": r},
     )
-    async def create_relationships_batch(self, relationships: list[Relationship]) -> int:
+    async def create_relationships_batch(self, relationships: list[Relationship], *, batch_size: int = 200) -> int:
         if not relationships:
             return 0
 
