@@ -215,11 +215,11 @@ class SurrealDBVectorAdapter:
         created_before: datetime | None = None,
         metadata_filters: dict[str, Any] | None = None,
     ) -> list[tuple[Chunk, float]]:
-        """Semantic search using SurrealDB HNSW index.
+        """Semantic search using cosine similarity.
 
-        Uses the ``<|K,EF|>`` KNN operator for HNSW acceleration and
-        computes an explicit cosine similarity score via
-        ``vector::similarity::cosine``.
+        Computes cosine similarity via ``vector::similarity::cosine``
+        and sorts by descending similarity.  HNSW index accelerates
+        the distance computation when available.
         """
         # Build WHERE predicates
         where_clauses = [f"namespace = memory_namespace:\u27e8{namespace_id}\u27e9", "embedding IS NOT NULL"]
@@ -249,10 +249,12 @@ class SurrealDBVectorAdapter:
                 bindings[param] = value
 
         where_sql = " AND ".join(where_clauses)
+        # Use brute-force cosine + ORDER BY instead of <|K|> KNN operator
+        # (KNN is unreliable in embedded mode and rejects parameterised limits)
         sql = (
             "SELECT *, vector::similarity::cosine(embedding, $query_embedding) AS similarity "
             f"FROM chunk WHERE {where_sql} "
-            "ORDER BY embedding <|$limit,$ef|> $query_embedding"
+            f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
 
         rows = await self._conn.query(sql, bindings)
@@ -568,16 +570,14 @@ class SurrealDBVectorAdapter:
         limit: int = 10,
         min_similarity: float = 0.0,
     ) -> list[tuple[UUID, float]]:
-        """HNSW KNN search over entity embeddings."""
+        """Cosine similarity search over entity embeddings."""
         sql = (
             "SELECT id, vector::similarity::cosine(embedding, $query_embedding) AS similarity "
             f"FROM entity WHERE namespace = memory_namespace:\u27e8{namespace_id}\u27e9 AND embedding IS NOT NULL "
-            "ORDER BY embedding <|$limit,$ef|> $query_embedding"
+            f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
         bindings: dict[str, Any] = {
             "query_embedding": list(query_embedding),
-            "limit": limit,
-            "ef": self._hnsw_ef_search,
         }
 
         rows = await self._conn.query(sql, bindings)

@@ -341,16 +341,17 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         clauses = [*where_clauses, "embedding IS NOT NULL"]
         where_sql = " AND ".join(clauses)
 
+        # Use brute-force cosine similarity + ORDER BY + LIMIT.
+        # The SurrealDB <|K|> KNN operator does not accept parameterised
+        # values and is unreliable in embedded mode (returns 0 results).
         sql = (
             "SELECT *, vector::similarity::cosine(embedding, $query_embedding) AS similarity "
             f"FROM temporal_chunk WHERE {where_sql} "
-            "ORDER BY embedding <|$limit,$ef|> $query_embedding"
+            f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
         params = {
             **bindings,
             "query_embedding": list(query_embedding),
-            "limit": limit,
-            "ef": self._hnsw_ef_search,
         }
 
         rows = await self._conn.query(sql, params)
