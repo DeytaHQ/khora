@@ -549,11 +549,13 @@ class TestRelationalAdapterNamespace:
         ns_id = uuid4()
         row_id = uuid4()
         conn = _make_mock_conn()
-        conn.query_one = AsyncMock(return_value={"id": f"memory_namespace:⟨{row_id!s}⟩"})
+        conn.query_one = AsyncMock(return_value={"id": f"memory_namespace:⟨{row_id!s}⟩", "namespace_id": str(ns_id)})
         adapter = SurrealDBRelationalAdapter(conn)
 
         result = await adapter.resolve_namespace(ns_id)
-        assert result == row_id
+        # SurrealDB resolve returns the stable namespace_id (not row-level id)
+        # because chunks store namespace refs using namespace_id
+        assert result == ns_id
 
     async def test_resolve_namespace_raises_on_missing(self) -> None:
         from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
