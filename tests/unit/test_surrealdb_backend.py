@@ -10,6 +10,7 @@ import pytest
 
 from khora.core.models import Document, DocumentMetadata, MemoryNamespace
 from khora.core.models.document import DocumentSource, DocumentStatus
+from khora.storage.backends.surrealdb import _HAS_SURREALDB
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -388,6 +389,7 @@ class TestSurrealDBFactory:
 
 @pytest.mark.unit
 class TestRelationalHelpers:
+    @pytest.mark.skipif(not _HAS_SURREALDB, reason="surrealdb not installed")
     def test_record_id(self) -> None:
         from khora.storage.backends.surrealdb.relational import _record_id
 
