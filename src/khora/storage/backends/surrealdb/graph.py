@@ -323,6 +323,9 @@ class SurrealDBGraphAdapter:
         self,
         namespace_id: UUID,
         entities: list[Entity],
+        *,
+        batch_size: int = 200,
+        bulk_mode: bool = False,
     ) -> list[tuple[Entity, bool]]:
         """Batch upsert entities using match-by (namespace, name, entity_type).
 
