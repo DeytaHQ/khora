@@ -445,6 +445,8 @@ class SurrealDBVectorAdapter:
         self,
         namespace_id: UUID,
         entities: list[Entity],
+        *,
+        batch_size: int = 200,
     ) -> list[tuple[Entity, bool]]:
         """Batch upsert entities using match-by (namespace, name, entity_type).
 
