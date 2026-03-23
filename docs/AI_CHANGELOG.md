@@ -14,3 +14,4 @@
 - 2026-03-22: DYT-794: Add bulk_mode support to all engines
 - 2026-03-22: DYT-795: Improve GraphRAG stats() efficiency
 - 2026-03-22: DYT-796: Add importance scoring to Skeleton engine
+- 2026-03-23: DYT-820: Fix CI failure on PR #115 — SurrealDB test compatibility
