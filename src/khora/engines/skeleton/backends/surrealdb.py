@@ -78,28 +78,35 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         *,
         surrealdb_config: SurrealDBConfig | None = None,
         hnsw_ef_search: int = 40,
+        connection: SurrealDBConnection | None = None,
     ) -> None:
         self._config = config
         self._hnsw_ef_search = hnsw_ef_search
 
-        # Resolve SurrealDB connection parameters
-        surreal_cfg = surrealdb_config or getattr(config.storage, "surrealdb", None)
-        if surreal_cfg is None:
-            raise ValueError(
-                "SurrealDB configuration is required. Set config.storage.surrealdb "
-                "or pass surrealdb_config explicitly."
-            )
+        if connection is not None:
+            # Reuse an existing shared connection (avoids isolated embedded views)
+            self._conn = connection
+            self._owns_connection = False
+        else:
+            self._owns_connection = True
+            # Resolve SurrealDB connection parameters
+            surreal_cfg = surrealdb_config or getattr(config.storage, "surrealdb", None)
+            if surreal_cfg is None:
+                raise ValueError(
+                    "SurrealDB configuration is required. Set config.storage.surrealdb "
+                    "or pass surrealdb_config explicitly."
+                )
 
-        self._conn = SurrealDBConnection(
-            mode=surreal_cfg.mode,
-            path=surreal_cfg.path,
-            url=surreal_cfg.url,
-            namespace=surreal_cfg.namespace,
-            database=surreal_cfg.database,
-            user=surreal_cfg.user,
-            password=surreal_cfg.password,
-            sync_data=surreal_cfg.sync_data,
-        )
+            self._conn = SurrealDBConnection(
+                mode=surreal_cfg.mode,
+                path=surreal_cfg.path,
+                url=surreal_cfg.url,
+                namespace=surreal_cfg.namespace,
+                database=surreal_cfg.database,
+                user=surreal_cfg.user,
+                password=surreal_cfg.password,
+                sync_data=surreal_cfg.sync_data,
+            )
         self._connected = False
 
     # ------------------------------------------------------------------
@@ -120,9 +127,10 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         logger.info("SurrealDBTemporalStore connected")
 
     async def disconnect(self) -> None:
-        """Close the SurrealDB connection."""
+        """Close the SurrealDB connection (only if we own it)."""
         if self._conn and self._connected:
-            await self._conn.disconnect()
+            if self._owns_connection:
+                await self._conn.disconnect()
             self._connected = False
             logger.info("SurrealDBTemporalStore disconnected")
 
