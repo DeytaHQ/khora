@@ -18,6 +18,7 @@ used in the WHERE clauses, enabling index range scans.
 from collections.abc import Sequence
 
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "017_temporal_coalesce_index"
 down_revision: str = "016_widen_extraction_config_hash"
@@ -26,11 +27,15 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chunks_ns_temporal "
-        "ON chunks (namespace_id, (COALESCE(source_timestamp, created_at)))"
-    )
+    with op.get_context().autocommit_block():
+        op.execute(
+            text(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chunks_ns_temporal "
+                "ON chunks (namespace_id, (COALESCE(source_timestamp, created_at)))"
+            )
+        )
 
 
 def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS ix_chunks_ns_temporal")
+    with op.get_context().autocommit_block():
+        op.execute(text("DROP INDEX CONCURRENTLY IF EXISTS ix_chunks_ns_temporal"))
