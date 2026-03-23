@@ -52,11 +52,14 @@ def _parse_uuid(record_id: str | dict | UUID | Any) -> UUID:
     return UUID(raw)
 
 
-def _iso(dt: datetime | None) -> str | None:
-    """Convert a datetime to an ISO-8601 string or *None*."""
-    if dt is None:
-        return None
-    return dt.isoformat()
+def _iso(dt: datetime | None) -> datetime | None:
+    """Return a datetime for SurrealDB parameter binding, or ``None``.
+
+    SurrealDB 1.x SCHEMAFULL datetime fields require native ``datetime``
+    objects — the Python SDK serialises them to the CBOR wire format.
+    The function name is kept for backwards compatibility.
+    """
+    return dt
 
 
 def _parse_dt(val: Any) -> datetime | None:
