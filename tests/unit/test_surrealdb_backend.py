@@ -1204,8 +1204,8 @@ class TestVectorAdapterHelpers:
 
         dt = datetime(2025, 6, 15, 12, 0, 0, tzinfo=UTC)
         result = _iso(dt)
-        assert result is not None
-        assert "2025-06-15" in result
+        # _iso now returns native datetime for SDK 1.0.8 binding
+        assert result is dt
 
     def test_iso_none(self) -> None:
         from khora.storage.backends.surrealdb.vector import _iso
