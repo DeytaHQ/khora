@@ -20,6 +20,11 @@ try:
 except ImportError:
     _HAS_NUMPY = False
 
+try:
+    from surrealdb.data.types.record_id import RecordID as _RecordID
+except ImportError:
+    _RecordID = None
+
 
 def _rid(table: str, uid: UUID) -> Any:
     """Build a SurrealDB RecordID for use as a query parameter.
@@ -27,9 +32,10 @@ def _rid(table: str, uid: UUID) -> Any:
     SurrealDB 1.x requires ``RecordID`` objects (not strings) when binding
     record IDs in parameterised queries like ``CREATE $rid SET ...``.
     """
-    from surrealdb.data.types.record_id import RecordID
-
-    return RecordID(table, str(uid))
+    if _RecordID is not None:
+        return _RecordID(table, str(uid))
+    # Fallback for environments without surrealdb (e.g. unit tests with mocks)
+    return f"{table}:\u27e8{uid}\u27e9"
 
 
 # Alias used by graph/vector adapters
