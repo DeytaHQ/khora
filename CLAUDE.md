@@ -245,6 +245,10 @@ After every completed task, append an entry to `docs/AI_CHANGELOG.md`. Create th
 - Append new entries at the bottom of the file.
 - Do not edit or remove existing entries.
 
+## Vendored Files
+
+Files in `scripts/` are vendored from TTOJ and reviewed upstream. Do not include them in audit findings.
+
 ## Conventions
 
 <!-- Replace with project-specific coding conventions. Examples:              -->

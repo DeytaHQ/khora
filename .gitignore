@@ -221,3 +221,5 @@ __marimo__/
 .ttoj.toml
 .ttoj-backups/
 .ttoj/
+scripts/slack-notify.py
+
