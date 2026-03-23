@@ -222,7 +222,11 @@ class SurrealDBVectorAdapter:
         the distance computation when available.
         """
         # Build WHERE predicates
-        where_clauses = [f"namespace = memory_namespace:\u27e8{namespace_id}\u27e9", "embedding IS NOT NULL"]
+        ns_ref = f"memory_namespace:\u27e8{namespace_id}\u27e9"
+        where_clauses = [
+            f"(namespace = {ns_ref} OR namespace.namespace_id = '{namespace_id}')",
+            "embedding IS NOT NULL",
+        ]
         bindings: dict[str, Any] = {
             "query_embedding": list(query_embedding),
             "limit": limit,
@@ -287,8 +291,9 @@ class SurrealDBVectorAdapter:
         Uses SurrealDB's ``@1@`` match operator and ``search::score(1)``
         for BM25 ranking.
         """
+        ns_ref = f"memory_namespace:\u27e8{namespace_id}\u27e9"
         where_clauses = [
-            f"namespace = memory_namespace:\u27e8{namespace_id}\u27e9",
+            f"(namespace = {ns_ref} OR namespace.namespace_id = '{namespace_id}')",
             "content @1@ $query_text",
         ]
         bindings: dict[str, Any] = {"query_text": query_text, "limit": limit}
@@ -571,9 +576,10 @@ class SurrealDBVectorAdapter:
         min_similarity: float = 0.0,
     ) -> list[tuple[UUID, float]]:
         """Cosine similarity search over entity embeddings."""
+        ns_ref = f"memory_namespace:\u27e8{namespace_id}\u27e9"
         sql = (
             "SELECT id, vector::similarity::cosine(embedding, $query_embedding) AS similarity "
-            f"FROM entity WHERE namespace = memory_namespace:\u27e8{namespace_id}\u27e9 AND embedding IS NOT NULL "
+            f"FROM entity WHERE (namespace = {ns_ref} OR namespace.namespace_id = '{namespace_id}') AND embedding IS NOT NULL "
             f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
         bindings: dict[str, Any] = {

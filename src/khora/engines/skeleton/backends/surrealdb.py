@@ -542,8 +542,15 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         namespace_id: UUID,
         temporal_filter: TemporalFilter | None,
     ) -> tuple[list[str], dict[str, Any]]:
-        """Build WHERE clauses and bindings from a TemporalFilter."""
-        clauses = [f"namespace = memory_namespace:\u27e8{namespace_id}\u27e9"]
+        """Build WHERE clauses and bindings from a TemporalFilter.
+
+        The namespace_id may be either the row-level ``id`` or the stable
+        ``namespace_id`` — we match both so the filter works regardless of
+        which ID the caller passes (recall resolves to row-level, but chunks
+        store the stable namespace_id as record reference).
+        """
+        ns_ref = f"memory_namespace:\u27e8{namespace_id}\u27e9"
+        clauses = [f"(namespace = {ns_ref} OR namespace.namespace_id = '{namespace_id}')"]
         bindings: dict[str, Any] = {}
 
         if not temporal_filter:
