@@ -2239,12 +2239,14 @@ class HybridQueryEngine:
 
         result: list[tuple[Any, float]] = []
         for chunk, score in chunks:
-            created_at = getattr(chunk, "created_at", None)
-            if created_at is None:
+            # Use source_timestamp when available, matching the SQL
+            # COALESCE(source_timestamp, created_at) pushdown.
+            effective_ts = getattr(chunk, "source_timestamp", None) or getattr(chunk, "created_at", None)
+            if effective_ts is None:
                 result.append((chunk, score))
                 continue
 
-            ts = _dt_to_epoch(_TF._normalize_tz(created_at))
+            ts = _dt_to_epoch(_TF._normalize_tz(effective_ts))
             if ts is None:
                 result.append((chunk, score))
                 continue
