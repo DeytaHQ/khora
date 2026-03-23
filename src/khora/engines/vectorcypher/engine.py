@@ -309,7 +309,15 @@ class VectorCypherEngine:
 
         # Create and connect temporal vector store
         if is_surrealdb:
-            self._temporal_store = create_temporal_store("surrealdb", self._config)
+            # Share the coordinator's SurrealDB connection to avoid isolated
+            # embedded views (each embedded connection has its own write buffer)
+            shared_conn = getattr(self._storage.relational, "_conn", None)
+            from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
+
+            self._temporal_store = SurrealDBTemporalStore(
+                self._config,
+                connection=shared_conn,
+            )
         else:
             self._temporal_store = create_temporal_store("pgvector", self._config)
         await self._temporal_store.connect()
