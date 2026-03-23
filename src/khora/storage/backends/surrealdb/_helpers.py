@@ -35,6 +35,12 @@ def _rid(table: str, uid: UUID) -> Any:
     if _RecordID is not None:
         return _RecordID(table, str(uid))
     # Fallback for environments without surrealdb (e.g. unit tests with mocks)
+    import warnings
+
+    warnings.warn(
+        "surrealdb not installed; _rid returns string fallback",
+        stacklevel=2,
+    )
     return f"{table}:\u27e8{uid}\u27e9"
 
 
