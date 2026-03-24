@@ -15,7 +15,6 @@ from khora.core.models.document import Chunk, ChunkMetadata, DocumentMetadata
 from khora.core.models.entity import Entity, Episode, Relationship
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 
-
 # ── helpers ──────────────────────────────────────────────────────────
 
 # High-frequency models that are allocated in hot loops.
@@ -52,21 +51,17 @@ class TestSlottedInstancesOmitDict:
     def test_hot_path_model_instance_has_no_dict(self, cls):
         instance = cls()
         assert not hasattr(instance, "__dict__"), (
-            f"{cls.__name__} instance has __dict__ — "
-            "slots=True may have been removed from the dataclass decorator"
+            f"{cls.__name__} instance has __dict__ — " "slots=True may have been removed from the dataclass decorator"
         )
 
-    @pytest.mark.parametrize(
-        "cls", _FROZEN_RESULT_CLASSES, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("cls", _FROZEN_RESULT_CLASSES, ids=lambda c: c.__name__)
     def test_frozen_result_instance_has_no_dict(self, cls):
         # Frozen dataclasses require all fields at construction; use
         # sensible defaults to avoid importing extra types.
         kwargs = _minimal_kwargs(cls)
         instance = cls(**kwargs)
         assert not hasattr(instance, "__dict__"), (
-            f"{cls.__name__} instance has __dict__ — "
-            "slots=True may have been removed from the dataclass decorator"
+            f"{cls.__name__} instance has __dict__ — " "slots=True may have been removed from the dataclass decorator"
         )
 
 
@@ -84,9 +79,7 @@ class TestSlottedInstancesRejectArbitraryAttrs:
         with pytest.raises(AttributeError):
             instance._undeclared_test_attr = "oops"  # type: ignore[attr-defined]
 
-    @pytest.mark.parametrize(
-        "cls", _FROZEN_RESULT_CLASSES, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("cls", _FROZEN_RESULT_CLASSES, ids=lambda c: c.__name__)
     def test_frozen_result_rejects_extra_attr(self, cls):
         kwargs = _minimal_kwargs(cls)
         instance = cls(**kwargs)
