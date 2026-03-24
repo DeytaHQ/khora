@@ -16,3 +16,5 @@
 - 2026-03-22: DYT-796: Add importance scoring to Skeleton engine
 - 2026-03-23: DYT-820: Fix CI failure on PR #115 — SurrealDB test compatibility
 - 2026-03-23: DYT-865: Gitignore scripts/slack-notify.py, remove from tracking
+- 2026-03-24: DYT-891: Add publish.yml workflow for khora to CodeArtifact
+- 2026-03-24: DYT-892: Add publish-accel.yml workflow for khora-accel to CodeArtifact
