@@ -1,0 +1,211 @@
+# Release pipeline — tests first, then publish khora + khora-accel in parallel.
+#
+# Trigger: v[0-9]* tag push (e.g. v0.5.0, v1.0.0-rc1) plus manual dispatch.
+# This is the ONLY workflow that runs on tag push; ci.yml handles PRs and branches.
+#
+# Pipeline:
+#   test ──> build-accel (4-platform matrix) ──┬──> publish-khora
+#                                              └──> publish-accel
+#
+# Authentication: GitHub OIDC federation — no long-lived AWS credentials.
+# Concurrency: one release at a time; never cancel in-flight publishes.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ============================================================================
+  # Test — must pass before anything is published.
+  # ============================================================================
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Type check with ty
+        run: uv run ty check src/
+
+      - name: Run prek checks (formatting, linting, imports)
+        run: uv run prek run --all-files
+
+      - name: Verify migration source files and ORM/migration drift
+        run: uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
+
+      - name: Run tests with coverage
+        run: uv run pytest --cov=src/khora --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=30
+
+  # ============================================================================
+  # Publish khora — pure Python wheel to CodeArtifact.
+  # Runs in parallel with publish-accel after build-accel completes.
+  # hatch-vcs derives the version from the git tag.
+  # ============================================================================
+  publish-khora:
+    needs: build-accel
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history required for hatch-vcs to derive version from git tags.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install build dependencies
+        run: uv pip install build twine --system
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::956322716887:role/github-actions-codeartifact-publish
+          aws-region: us-west-2
+
+      - name: Get CodeArtifact authorization token
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token --domain deyta --query authorizationToken --output text)
+          echo "::add-mask::$TOKEN"
+          echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      # hatch-vcs reads the version from the most recent git tag automatically.
+      - name: Build wheel
+        run: python -m build
+
+      - name: Publish to CodeArtifact
+        run: |
+          twine upload \
+            --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
+            --username aws \
+            --password "${{ env.CA_TOKEN }}" \
+            dist/*
+
+  # ============================================================================
+  # Build khora-accel — native wheels for 4 platforms via maturin.
+  # Runs after tests pass. Builds must complete before either publish job starts.
+  # ============================================================================
+  build-accel:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Stamp the git tag version into Cargo.toml (single source of truth).
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Publishing khora-accel version: $VERSION"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" rust/khora-accel/Cargo.toml
+          rm -f rust/khora-accel/Cargo.toml.bak
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # --interpreter python3.13 ensures the manylinux container uses Python 3.13
+      # (not the default 3.8), matching requires-python >= 3.13.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter python3.13
+          working-directory: rust/khora-accel
+          manylinux: auto
+          sccache: 'true'
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: rust/khora-accel/dist/*.whl
+
+  # ============================================================================
+  # Publish khora-accel — upload all platform wheels to CodeArtifact.
+  # ============================================================================
+  publish-accel:
+    needs: build-accel
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install twine
+        run: uv pip install twine --system
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::956322716887:role/github-actions-codeartifact-publish
+          aws-region: us-west-2
+
+      - name: Get CodeArtifact authorization token
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token --domain deyta --query authorizationToken --output text)
+          echo "::add-mask::$TOKEN"
+          echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Publish to CodeArtifact
+        run: |
+          twine upload \
+            --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
+            --username aws \
+            --password "${{ env.CA_TOKEN }}" \
+            dist/*

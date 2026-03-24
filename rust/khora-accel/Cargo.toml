@@ -11,7 +11,7 @@ name = "khora_accel"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["auto-initialize"] }
+pyo3 = { version = "0.28" }
 numpy = "0.28"
 ndarray = "0.17"
 rayon = "1.10"
