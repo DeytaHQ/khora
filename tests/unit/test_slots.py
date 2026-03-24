@@ -7,6 +7,8 @@ it, these tests catch the regression via observable behaviour — not by
 inspecting the class attribute.
 """
 
+from uuid import uuid4
+
 import pytest
 
 from khora.core.models.document import Chunk, ChunkMetadata, DocumentMetadata
@@ -95,8 +97,6 @@ class TestSlottedInstancesRejectArbitraryAttrs:
 
 
 # ── minimal construction helpers ─────────────────────────────────────
-
-from uuid import uuid4  # noqa: E402
 
 
 def _minimal_kwargs(cls):
