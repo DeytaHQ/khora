@@ -1601,12 +1601,13 @@ class VectorCypherEngine:
                 if not doc_chunks:
                     continue
 
-                # Skeleton selection per document (maintains document-level PageRank semantics)
-                min_tokens = self._vc_config.min_extraction_tokens
-                if is_conversation_mode:
-                    min_tokens = min(min_tokens, 15)
-                if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in doc_chunks):
-                    continue
+                # Skeleton selection per document (maintains document-level PageRank semantics).
+                # Skip min_tokens gate for conversation mode — short messages are the norm
+                # and should always reach extraction with skeleton_ratio=0.90.
+                if not is_conversation_mode:
+                    min_tokens = self._vc_config.min_extraction_tokens
+                    if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in doc_chunks):
+                        continue
 
                 if len(doc_chunks) <= 2:
                     core_ids = {c.id for c in doc_chunks}
@@ -1629,20 +1630,68 @@ class VectorCypherEngine:
                         )
 
             if all_core_chunk_objects:
-                logger.debug(
-                    f"Batch extraction: {len(all_core_chunk_objects)} core chunks " f"from {len(ok_states)} documents"
-                )
                 model = extraction_model or self._config.llm.model
-                entities, relationships = await extract_entities(
-                    all_core_chunk_objects,
-                    skill_name=skill_name,
-                    expertise=expertise,
-                    model=model,
-                    max_concurrent=self._vc_config.max_concurrent_extractions,
-                    entity_types=entity_types,
-                    relationship_types=relationship_types,
-                    store_events=self._vc_config.store_events,
-                )
+
+                if is_conversation_mode:
+                    # In conversation mode, extract per-document to match the
+                    # old pipeline's behaviour.  The old code called
+                    # extract_entities once per document (1-2 chunks each),
+                    # which produced more entities because the LLM saw each
+                    # message in isolation.  Batching all chunks together
+                    # causes cross-document entity deduplication that drops
+                    # ~60% of entities for short conversation messages.
+                    from collections import defaultdict
+
+                    doc_chunks_map: dict[UUID, list[Chunk]] = defaultdict(list)
+                    for chunk in all_core_chunk_objects:
+                        doc_chunks_map[chunk.document_id].append(chunk)
+
+                    logger.debug(
+                        f"Conversation extraction: {len(all_core_chunk_objects)} chunks "
+                        f"across {len(doc_chunks_map)} documents (per-document mode)"
+                    )
+
+                    per_doc_entities: list[Entity] = []
+                    per_doc_relationships: list[Relationship] = []
+                    sem = asyncio.Semaphore(self._vc_config.max_concurrent_extractions)
+
+                    async def _extract_one_doc(chunks: list[Chunk]) -> tuple[list, list]:
+                        async with sem:
+                            return await extract_entities(
+                                chunks,
+                                skill_name=skill_name,
+                                expertise=expertise,
+                                model=model,
+                                max_concurrent=1,
+                                entity_types=entity_types,
+                                relationship_types=relationship_types,
+                                store_events=self._vc_config.store_events,
+                            )
+
+                    extraction_results = await asyncio.gather(
+                        *[_extract_one_doc(cks) for cks in doc_chunks_map.values()]
+                    )
+                    for ents, rels in extraction_results:
+                        per_doc_entities.extend(ents)
+                        per_doc_relationships.extend(rels)
+
+                    entities = per_doc_entities
+                    relationships = per_doc_relationships
+                else:
+                    logger.debug(
+                        f"Batch extraction: {len(all_core_chunk_objects)} core chunks "
+                        f"from {len(ok_states)} documents"
+                    )
+                    entities, relationships = await extract_entities(
+                        all_core_chunk_objects,
+                        skill_name=skill_name,
+                        expertise=expertise,
+                        model=model,
+                        max_concurrent=self._vc_config.max_concurrent_extractions,
+                        entity_types=entity_types,
+                        relationship_types=relationship_types,
+                        store_events=self._vc_config.store_events,
+                    )
 
                 if entities:
                     all_entities = list(entities)
