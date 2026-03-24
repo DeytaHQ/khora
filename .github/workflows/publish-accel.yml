@@ -41,8 +41,9 @@ jobs:
   # ==========================================================================
   build:
     strategy:
-      # Don't fail-fast: if one platform fails, still build the others so we can
-      # publish partial platform coverage rather than nothing.
+      # Don't fail-fast: if one platform fails, the others still complete so their
+      # build logs are available for debugging. Note: the publish job requires ALL
+      # builds to succeed (needs: build), so a single platform failure blocks publish.
       fail-fast: false
       matrix:
         include:
