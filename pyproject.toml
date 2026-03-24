@@ -1,6 +1,6 @@
 [project]
 name = "khora"
-version = "0.5.0"
+dynamic = ["version"]
 description = "Khora is Memory Lake"
 readme = "README.md"
 authors = [
@@ -99,12 +99,14 @@ embedded = ["surrealdb>=1.0.2"]
 khora = "khora:main"
 
 [build-system]
-requires = ["uv_build>=0.8.17,<0.9.0"]
-build-backend = "uv_build"
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
 
-[tool.uv-build]
-# Ensure Alembic migration files and templates are included in the wheel
-data-includes = ["src/khora/db/migrations/versions/*.py", "src/khora/db/migrations/script.py.mako"]
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/khora"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

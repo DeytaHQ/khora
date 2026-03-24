@@ -1,0 +1,154 @@
+# Publish khora-accel native wheels to AWS CodeArtifact.
+#
+# khora-accel is a Rust/PyO3 extension that provides accelerated operations (MMR,
+# cosine similarity, BM25, etc.). It must be compiled per-platform, so this workflow
+# uses a build matrix to produce wheels for 4 targets:
+#   - Linux x86_64   (ubuntu-latest, native compilation)
+#   - Linux aarch64  (ubuntu-latest, cross-compiled via maturin/zig)
+#   - macOS x86_64   (macos-13, the last Intel runner)
+#   - macOS aarch64  (macos-latest, Apple Silicon)
+#
+# The build job compiles wheels in parallel, uploads them as artifacts, then a single
+# publish job downloads all wheels and uploads them to CodeArtifact in one batch.
+#
+# Authentication: GitHub OIDC federation (same pattern as publish.yml).
+# Concurrency: separate group (publish-accel) so it doesn't block the pure-Python
+# publish workflow. cancel-in-progress: false to avoid partial uploads.
+
+name: Publish khora-accel to CodeArtifact
+
+on:
+  push:
+    tags:
+      # Matches v0.5.0, v1.0.0, v2.0.0-rc1, etc.
+      - "v[0-9]*"
+  workflow_dispatch:
+
+# OIDC requires id-token:write; contents:read for checkout.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: publish-accel
+  # Don't cancel an in-flight publish — let it finish to avoid partial uploads.
+  cancel-in-progress: false
+
+jobs:
+  # ==========================================================================
+  # Build: compile native wheels for each platform target in parallel.
+  # Each matrix entry produces one .whl file uploaded as a GitHub Actions artifact.
+  # ==========================================================================
+  build:
+    strategy:
+      # Don't fail-fast: if one platform fails, the others still complete so their
+      # build logs are available for debugging. Note: the publish job requires ALL
+      # builds to succeed (needs: build), so a single platform failure blocks publish.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            # Cross-compiled from x86_64 runner using maturin's built-in zig linker.
+            target: aarch64-unknown-linux-gnu
+          - os: macos-13
+            # macos-13 is the last GitHub-hosted Intel macOS runner.
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            # macos-latest = Apple Silicon (M-series) runner.
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Extract the version from the git tag (e.g. v0.5.0 → 0.5.0) and stamp it
+      # into Cargo.toml so the built wheel carries the correct version.
+      # This makes the git tag the single source of truth — no manual version
+      # bumps in Cargo.toml are needed.
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Publishing khora-accel version: $VERSION"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" rust/khora-accel/Cargo.toml
+          rm -f rust/khora-accel/Cargo.toml.bak
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # PyO3/maturin-action handles Rust toolchain installation, cross-compilation
+      # setup (zig for Linux aarch64), and maturin invocation.
+      # The crate requires Rust 1.83+ (see rust/khora-accel/Cargo.toml rust-version).
+      # manylinux: auto lets maturin pick the appropriate manylinux tag for Linux.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          working-directory: rust/khora-accel
+          manylinux: auto
+          # sccache caches compiled Rust artifacts across runs, cutting rebuild times
+          # significantly for incremental changes (retries, re-runs, close version bumps).
+          sccache: 'true'
+
+      # Upload the built wheel so the publish job can download all of them.
+      # Each artifact is named by target to avoid collisions.
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: rust/khora-accel/dist/*.whl
+
+  # ==========================================================================
+  # Publish: download all platform wheels and upload to CodeArtifact in one batch.
+  # Runs only after all build matrix jobs succeed.
+  # ==========================================================================
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Download all wheel-* artifacts into a single dist/ directory.
+      # merge-multiple: true flattens them so twine sees all .whl files.
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      # Only twine is needed in the publish job — no build tools required.
+      - name: Install twine
+        run: uv pip install twine --system
+
+      # Exchange the GitHub OIDC token for temporary AWS credentials.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::956322716887:role/github-actions-codeartifact-publish
+          aws-region: us-west-2
+
+      # Fetch a CodeArtifact auth token and mask it in CI logs.
+      - name: Get CodeArtifact authorization token
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token --domain deyta --query authorizationToken --output text)
+          echo "::add-mask::$TOKEN"
+          echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      # Upload all platform wheels to CodeArtifact in a single twine invocation.
+      - name: Publish to CodeArtifact
+        run: |
+          twine upload \
+            --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
+            --username aws \
+            --password "${{ env.CA_TOKEN }}" \
+            dist/*
