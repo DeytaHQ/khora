@@ -2,13 +2,7 @@
 
 Memory Lake library combining knowledge graphs, vector database (pgvector), and PostgreSQL for unified knowledge storage and retrieval. **This is a library, not a deployable application.**
 
-## Project Config
-
-```
-LINEAR_TEAM: {TEAM_KEY}
-```
-
-<!-- LINEAR_TEAM: the Linear team key used for branch names and issue refs (e.g., ENG) -->
+<!-- Machine-readable workflow config lives in .ttoj.toml. Keep this file human-facing. -->
 
 ## Commands
 
@@ -78,7 +72,7 @@ IMPORTANT: When bumping the version, always update **all four files** and regene
 
 ## Claude Code Settings
 
-Run `uv run ttoj install -p /path/to/your-project` to deploy shared settings, commands, and skills. This installs `.claude/settings.json` with team-wide tool permissions (git, GitHub CLI, basic shell) so engineers don't get prompted for every action.
+Run `uv run ttoj install -p /path/to/your-project` to deploy the repo-shared Claude surface: shared settings, commands, and skills. TTOJ also installs the Codex repo surface by default, but each host still handles its own machine-local runtime setup. This installs `.claude/settings.json` with team-wide tool permissions (git, GitHub CLI, basic shell) so engineers don't get prompted for every action.
 
 - Add project-specific commands (lint, test, build) to the `allow` list.
 - Commit `.claude/settings.json` to version control.
@@ -96,11 +90,13 @@ claude mcp add --transport http linear-server https://mcp.linear.app/mcp
 
 Then run `/mcp` inside Claude Code to authenticate with your Linear account. The TTOJ settings template pre-allows all Linear MCP tools so you won't be prompted for routine operations.
 
+If teammates also use Codex, they configure Codex's own local Linear connection separately. Shared workflow metadata still belongs in `.ttoj.toml`, not in host-local config.
+
 ## Workflow Lifecycle
 
 Every feature, bugfix, or task follows: **Linear ticket → branch → implement → PR → done**.
 
-If your project uses Linear (has `LINEAR_TEAM` in its CLAUDE.md):
+If your project uses Linear (has `project.linear_team` in `.ttoj.toml`):
 
 ### Starting work
 1. Search Linear for an existing ticket matching the task. If none exists, create one.
@@ -127,7 +123,7 @@ If your project uses Linear (has `LINEAR_TEAM` in its CLAUDE.md):
 Format: `{initials}/{TICKET-ID}-{kebab-description}`
 Examples: `nn/DYT-42-add-auth`, `ms/DYT-108-fix-pagination`
 
-The `initials` and `TICKET-ID` are required. Every branch must trace back to a Linear ticket.
+The `initials` and `TICKET-ID` are required. Every branch must trace back to a Linear ticket. TTOJ stores the engineer-specific branch prefix in `.ttoj.toml`.
 
 ### Commit messages
 - Use imperative mood: "Add feature", not "Added feature"
@@ -244,6 +240,22 @@ After every completed task, append an entry to `docs/AI_CHANGELOG.md`. Create th
 - If there is no ticket, omit the ticket ID: `- YYYY-MM-DD: Brief description of change`.
 - Append new entries at the bottom of the file.
 - Do not edit or remove existing entries.
+
+## TTOJ Local Files (`.ttoj/`)
+
+The `.ttoj/` directory is **gitignored by default** — it contains locally-deployed commands, skills, scripts, and templates installed by `ttoj install`. These files are not versioned because they are managed by TTOJ and can be regenerated at any time.
+
+**Worktree limitation:** Git worktrees do not share the main checkout's `.ttoj/` directory. TTOJ commands, skills, and scripts will not be available in a worktree until you run the installer there:
+
+```bash
+uv run ttoj install -p /path/to/worktree
+```
+
+For worktree-heavy workflows, use `--symlink` mode to symlink `.ttoj/` contents instead of copying. This way, updates to the TTOJ source propagate automatically without re-installing:
+
+```bash
+uv run ttoj install -p /path/to/worktree --symlink
+```
 
 ## Vendored Files
 
