@@ -20,3 +20,4 @@
 - 2026-03-24: DYT-892: Add publish-accel.yml workflow for khora-accel to CodeArtifact
 - 2026-03-24: DYT-882: Add sccache, RELEASE.md, CLAUDE.md publish docs
 - 2026-03-24: DYT-882: Switch to git-tag-based versioning (hatch-vcs)
+- 2026-03-24: DYT-882: Consolidate into single release pipeline, fix accel builds
