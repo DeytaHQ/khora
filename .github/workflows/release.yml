@@ -4,7 +4,7 @@
 # This is the ONLY workflow that runs on tag push; ci.yml handles PRs and branches.
 #
 # Pipeline:
-#   test ──> build-accel (4-platform matrix) ──┬──> publish-khora
+#   test ──> build-accel (3-platform matrix) ──┬──> publish-khora
 #                                              └──> publish-accel
 #
 # Authentication: GitHub OIDC federation — no long-lived AWS credentials.
@@ -114,7 +114,7 @@ jobs:
             dist/*
 
   # ============================================================================
-  # Build khora-accel — native wheels for 4 platforms via maturin.
+  # Build khora-accel — native wheels for 3 platforms via maturin.
   # Runs after tests pass. Builds must complete before either publish job starts.
   # ============================================================================
   build-accel:
@@ -127,8 +127,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
