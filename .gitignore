@@ -224,3 +224,6 @@ __marimo__/
 
 # TTOJ-managed scripts
 scripts/slack-notify.py
+
+# TTOJ agent skills (deployed per-machine, not tracked)
+.agents/
