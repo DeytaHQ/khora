@@ -6,41 +6,73 @@
 
 ## Project Overview
 
-<!-- Replace with 2-3 sentences describing what this project does, who it serves, -->
-<!-- and the context an engineer or agent needs before making changes.            -->
-
-## Tech Stack
-
-<!-- Replace with the actual stack. Add or remove lines as needed. -->
-
-- **Language:** {e.g., TypeScript, Python, Go}
-- **Framework:** {e.g., Next.js, FastAPI, Gin}
-- **Database:** {e.g., PostgreSQL, DynamoDB}
-- **ORM / Query layer:** {e.g., Prisma, SQLAlchemy, raw SQL}
-- **Package manager:** {e.g., pnpm, uv, go modules}
-- **Infra / Hosting:** {e.g., Vercel, AWS, Fly.io}
-
-## Architecture
-
-<!-- Replace with a brief map of key directories and modules. Example: -->
-<!-- src/api/    — route handlers                                      -->
-<!-- src/lib/    — shared utilities and domain logic                    -->
-<!-- src/db/     — database schema, migrations, queries                -->
-<!-- tests/      — unit and integration tests                          -->
+Memory Lake library combining knowledge graphs, vector database (`pgvector`), and PostgreSQL for unified knowledge storage and retrieval. This is a library, not a deployable application.
 
 ## Commands
 
-<!-- Replace each placeholder with the actual command for this project. -->
-<!-- Remove any that don't apply.                                       -->
+```bash
+make test              # Run tests (pytest, coverage >=30%)
+make format            # Format code (black, isort, ruff)
+make lint              # Lint + typecheck (ruff, ty)
+make dev               # Start local databases (postgres + neo4j)
+uv run alembic upgrade head  # Run migrations
+```
 
-| Task       | Command              |
-|------------|----------------------|
-| Lint       | `{lint command}`     |
-| Format     | `{format command}`   |
-| Test       | `{test command}`     |
-| Build      | `{build command}`    |
-| Dev server | `{dev command}`      |
-| Typecheck  | `{typecheck command}`|
+## Architecture
+
+```text
+MemoryLake (facade) -> Engine (graphrag | skeleton | vectorcypher) -> StorageCoordinator
+                                                    |- PostgreSQL (documents, tenancy)
+                                                    |- pgvector (embeddings)
+                                                    `- Graph backend (entities, relationships)
+```
+
+- Engines are pluggable via `engines/protocol.py`
+- Graph backends implement `GraphBackend` in `storage/backends/base.py`
+- Extraction skills are YAML-defined in `extraction/skills/builtin/`
+- `MemoryNamespace` is the sole multi-tenant isolation boundary
+- Config uses `KHORA_` env vars with `__` for nesting
+
+## Key Entry Points
+
+- `memory_lake.py`: `remember()`, `recall()`, `forget()`, `remember_batch()`, namespace helpers
+- `storage/coordinator.py`: backend orchestration and transaction handling
+- `storage/factory.py`: backend creation with shared engine pools
+- `db/session.py`: `DatabaseManager` lifecycle
+- `db/models.py`: SQLAlchemy ORM models
+- `engines/`: GraphRAG, Skeleton Construction, VectorCypher
+- `query/engine.py`: `HybridQueryEngine`
+- `_accel.py`: Rust/NumPy/Python acceleration facade
+- `pipelines/flows/ingest.py`: ingestion pipeline with entity ID mapping
+- `db/migrations/env.py`: Alembic env with advisory locking
+
+## Engine Selection
+
+| Use Case | Engine | Key Trait |
+|----------|--------|-----------|
+| Knowledge bases, entity exploration | `graphrag` | Full graph extraction, requires Neo4j or Kuzu |
+| Multi-hop queries, complex relationships | `vectorcypher` | Vector + Cypher hybrid, requires Neo4j |
+| Chat history, event streams, cost-sensitive workloads | `skeleton` | Temporal-first, 5-10x fewer LLM calls, Neo4j optional |
+
+## Testing
+
+```bash
+uv run pytest tests/unit/ -v
+uv run pytest -k "test_remember" -v
+uv run pytest tests/unit/test_memory_lake.py
+```
+
+Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`. Async tests use `asyncio_mode = "auto"`.
+
+## Version Bumps
+
+When bumping the version, update all of the following and regenerate lockfiles:
+
+1. `pyproject.toml`
+2. `src/khora/__init__.py`
+3. `rust/khora-accel/Cargo.toml`
+4. `rust/khora-accel/pyproject.toml`
+5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
 
 ## Codex Settings
 
