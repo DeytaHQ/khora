@@ -38,6 +38,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Full history required for hatch-vcs to derive version from git tags.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -71,8 +74,8 @@ jobs:
           echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       # Use `python -m build` directly — NOT `uv run python -m build`.
-      # uv run creates a venv and may not find the build backend (uv_build) on the
-      # system path. This was a lesson learned from deyta-core PR #17.
+      # uv run creates a project venv where build/twine aren't installed.
+      # hatch-vcs reads the version from the most recent git tag automatically.
       - name: Build wheel
         run: python -m build
 

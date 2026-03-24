@@ -64,6 +64,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Extract the version from the git tag (e.g. v0.5.0 → 0.5.0) and stamp it
+      # into Cargo.toml so the built wheel carries the correct version.
+      # This makes the git tag the single source of truth — no manual version
+      # bumps in Cargo.toml are needed.
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Publishing khora-accel version: $VERSION"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" rust/khora-accel/Cargo.toml
+          rm -f rust/khora-accel/Cargo.toml.bak
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

@@ -4,39 +4,36 @@
 
 Tags follow semantic versioning: `v{major}.{minor}.{patch}` (e.g., `v0.5.0`).
 
-The `v` prefix is required -- it triggers the publish workflows.
+The `v` prefix is required — it triggers the publish workflows.
 
-## Version Bumps
+## Versioning
 
-Before tagging a release, update the version in **all four files** and regenerate lockfiles:
+Versions are derived automatically from git tags — no files need manual version bumps.
 
-1. `pyproject.toml` -- khora version
-2. `src/khora/__init__.py` -- `__version__`
-3. `rust/khora-accel/Cargo.toml` -- khora-accel version
-4. `rust/khora-accel/pyproject.toml` -- khora-accel version
-5. Run `uv lock` to regenerate the Python lockfile
-6. Run `cargo generate-lockfile` in `rust/khora-accel/` to regenerate the Cargo lockfile
+| Package | How version is set |
+|---------|-------------------|
+| `khora` | `hatch-vcs` reads the most recent git tag at build time |
+| `khora-accel` | `publish-accel.yml` extracts the tag and stamps it into `Cargo.toml` before maturin builds |
 
-Commit the version bump and lockfile changes before tagging.
+At runtime, `khora.__version__` reads the installed package version via `importlib.metadata`.
+
+In development (no tag on current commit), the version will be something like `0.5.0.dev3+gabc1234`.
 
 ## Publishing
 
-Pushing a `v*` tag triggers two GitHub Actions workflows:
+1. Create and push a tag:
+   ```bash
+   git tag v0.6.0
+   git push origin v0.6.0
+   ```
+2. Two workflows trigger automatically:
 
 | Workflow | Package | What it does |
 |----------|---------|-------------|
-| `publish.yml` | `khora` | Builds a pure Python wheel and publishes to CodeArtifact |
+| `publish.yml` | `khora` | Builds a pure Python wheel via `hatch-vcs` and publishes to CodeArtifact |
 | `publish-accel.yml` | `khora-accel` | Builds native wheels for 4 platforms (Linux x64/ARM64, macOS x64/ARM64) and publishes to CodeArtifact |
 
-Both workflows use OIDC authentication -- no secrets required.
-
-### Steps
-
-1. Bump versions in all four files (see above).
-2. Commit: `git commit -m "Bump version to X.Y.Z"`
-3. Tag: `git tag vX.Y.Z`
-4. Push: `git push origin main --tags`
-5. Both workflows trigger automatically.
+Both workflows use OIDC authentication — no secrets required.
 
 ### Manual Publish
 
@@ -66,5 +63,5 @@ aws codeartifact list-package-versions \
 |---------|-------|-----|
 | OIDC credential error | IAM role trust policy misconfigured | Check `github-actions-codeartifact-publish` role in AWS |
 | Twine upload 403 | Expired or invalid CodeArtifact token | Re-run the workflow; tokens are generated per-run |
-| Version mismatch | Tag doesn't match pyproject.toml version | Ensure all 4 version files match the tag |
+| Version shows `0.0.0` or `dev` | No git tags reachable from HEAD | Ensure you've pushed tags: `git push origin --tags` |
 | khora-accel build fails on one platform | Platform-specific compilation issue | Check build logs; other platforms still complete |

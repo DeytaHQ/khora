@@ -67,17 +67,15 @@ uv run pytest tests/unit/test_memory_lake.py  # Single file
 
 Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`. Async tests use `asyncio_mode = "auto"`.
 
-## Version Bumps
+## Releasing
 
-IMPORTANT: When bumping the version, always update **all four files** and regenerate lockfiles:
-1. `pyproject.toml` — khora version
-2. `src/khora/__init__.py` — `__version__`
-3. `rust/khora-accel/Cargo.toml` — khora-accel version
-4. `rust/khora-accel/pyproject.toml` — khora-accel version
-5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
-6. Commit, tag (`git tag vX.Y.Z`), and push — the `v*` tag triggers `publish.yml` and `publish-accel.yml` to publish both packages to CodeArtifact
+Versions are derived from git tags — no manual version bumps needed:
+- **khora**: `hatch-vcs` reads the version from git tags at build time
+- **khora-accel**: `publish-accel.yml` stamps the tag version into `Cargo.toml` at build time
 
-See [`docs/RELEASE.md`](docs/RELEASE.md) for the full release process.
+To release: `git tag vX.Y.Z && git push origin vX.Y.Z` — both publish workflows trigger automatically.
+
+See [`docs/RELEASE.md`](docs/RELEASE.md) for the full process.
 
 ## Claude Code Settings
 

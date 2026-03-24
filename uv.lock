@@ -1043,7 +1043,6 @@ wheels = [
 
 [[package]]
 name = "khora"
-version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -1199,7 +1198,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'all-backends'", specifier = ">=4.20.1" },
     { name = "weaviate-client", marker = "extra == 'weaviate'", specifier = ">=4.20.1" },
 ]
-provides-extras = ["dev", "postgres", "neo4j", "kuzu", "memgraph", "arcadedb", "graph-all", "weaviate", "all-backends", "reranking", "accel", "logfire", "nlp", "rust", "surrealdb", "embedded"]
+provides-extras = ["accel", "all-backends", "arcadedb", "dev", "embedded", "graph-all", "kuzu", "logfire", "memgraph", "neo4j", "nlp", "postgres", "reranking", "rust", "surrealdb", "weaviate"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1217,7 +1216,6 @@ dev = [
 
 [[package]]
 name = "khora-accel"
-version = "0.5.0"
 source = { editable = "rust/khora-accel" }
 
 [[package]]
