@@ -75,6 +75,9 @@ IMPORTANT: When bumping the version, always update **all four files** and regene
 3. `rust/khora-accel/Cargo.toml` — khora-accel version
 4. `rust/khora-accel/pyproject.toml` — khora-accel version
 5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
+6. Commit, tag (`git tag vX.Y.Z`), and push — the `v*` tag triggers `publish.yml` and `publish-accel.yml` to publish both packages to CodeArtifact
+
+See [`docs/RELEASE.md`](docs/RELEASE.md) for the full release process.
 
 ## Claude Code Settings
 

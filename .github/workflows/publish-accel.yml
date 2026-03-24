@@ -80,6 +80,9 @@ jobs:
           args: --release --out dist
           working-directory: rust/khora-accel
           manylinux: auto
+          # sccache caches compiled Rust artifacts across runs, cutting rebuild times
+          # significantly for incremental changes (retries, re-runs, close version bumps).
+          sccache: 'true'
 
       # Upload the built wheel so the publish job can download all of them.
       # Each artifact is named by target to avoid collisions.

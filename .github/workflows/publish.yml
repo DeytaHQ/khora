@@ -38,11 +38,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          # fetch-depth: 0 fetches full history. Not strictly required since khora's
-          # version is hardcoded in pyproject.toml (no hatch-vcs), but included as a
-          # safety measure in case version inference is added later.
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
