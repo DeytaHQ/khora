@@ -71,17 +71,25 @@ DEFINE INDEX IF NOT EXISTS idx_chunk_content_ft ON chunk FIELDS content SEARCH A
 
 -- Entity (with HNSW vector index and unique constraint)
 DEFINE TABLE IF NOT EXISTS entity SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS namespace_id ON entity TYPE string;
+DEFINE FIELD IF NOT EXISTS namespace ON entity TYPE record<memory_namespace>;
+DEFINE FIELD IF NOT EXISTS namespace_id ON entity TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS name ON entity TYPE string;
 DEFINE FIELD IF NOT EXISTS entity_type ON entity TYPE string;
 DEFINE FIELD IF NOT EXISTS description ON entity TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS attributes ON entity FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS source_document_ids ON entity TYPE option<array>;
+DEFINE FIELD IF NOT EXISTS source_chunk_ids ON entity TYPE option<array>;
+DEFINE FIELD IF NOT EXISTS source_tool ON entity TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS embedding ON entity TYPE option<array<float>>;
+DEFINE FIELD IF NOT EXISTS embedding_model ON entity TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS mention_count ON entity TYPE int DEFAULT 1;
-DEFINE FIELD IF NOT EXISTS metadata ON entity FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS valid_from ON entity TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS valid_until ON entity TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS confidence ON entity TYPE float DEFAULT 1.0;
+DEFINE FIELD IF NOT EXISTS metadata_ ON entity FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS created_at ON entity TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at ON entity TYPE datetime DEFAULT time::now();
-DEFINE INDEX IF NOT EXISTS idx_entity_unique ON entity FIELDS namespace_id, name, entity_type UNIQUE;
-DEFINE INDEX IF NOT EXISTS idx_entity_namespace ON entity FIELDS namespace_id;
+DEFINE INDEX IF NOT EXISTS idx_entity_namespace ON entity FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_entity_embedding ON entity FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
 
 -- Relates-to (graph edge between entities)

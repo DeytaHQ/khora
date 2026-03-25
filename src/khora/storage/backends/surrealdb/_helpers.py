@@ -164,7 +164,9 @@ def _entity_to_bindings(entity: Entity) -> dict[str, Any]:
     """Convert an :class:`Entity` to SurrealQL parameter bindings."""
     return {
         "id": str(entity.id),
+        "rid": _rid("entity", entity.id),
         "ns": str(entity.namespace_id),
+        "ns_rid": _rid("memory_namespace", entity.namespace_id),
         "name": entity.name,
         "entity_type": entity.entity_type,
         "description": entity.description,
