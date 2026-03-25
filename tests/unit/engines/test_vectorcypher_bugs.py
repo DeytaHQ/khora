@@ -219,3 +219,120 @@ class TestMetadataSerializedForNeo4j:
         assert isinstance(
             metadata_value, str
         ), f"metadata must be a JSON string for Neo4j, got {type(metadata_value).__name__}: {metadata_value!r}"
+
+
+# ---------------------------------------------------------------------------
+# Bug #3: Non-scalar metadata silently dropped (DYT-1114)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNonScalarMetadataPreserved:
+    """VectorCypher engine must propagate all doc_metadata values to chunk
+    metadata, including lists, dicts, None, and datetime — not just scalars.
+
+    Previously the engine used an isinstance(v, (str, int, float, bool))
+    guard that silently dropped non-scalar types. Both storage backends
+    (JSONB for pgvector, JSON-serialized string for Neo4j) handle nested
+    types correctly, so the filter was unnecessary.
+    """
+
+    def test_chunk_metadata_includes_list_values(self) -> None:
+        """Lists in doc_metadata must survive into the chunk metadata dict."""
+        doc_metadata = {
+            "participants": ["alice", "bob"],
+            "priority": "high",
+        }
+        chunk_metadata = {
+            "chunk_index": 0,
+            "start_char": 0,
+            "end_char": 100,
+            **doc_metadata,
+        }
+        assert chunk_metadata["participants"] == ["alice", "bob"]
+        assert chunk_metadata["priority"] == "high"
+
+    def test_chunk_metadata_includes_dict_values(self) -> None:
+        """Nested dicts in doc_metadata must survive into chunk metadata."""
+        doc_metadata = {
+            "context": {"parent_id": "123", "thread": "abc"},
+            "source_system": "slack",
+        }
+        chunk_metadata = {
+            "chunk_index": 0,
+            "start_char": 0,
+            "end_char": 100,
+            **doc_metadata,
+        }
+        assert chunk_metadata["context"] == {"parent_id": "123", "thread": "abc"}
+        assert chunk_metadata["source_system"] == "slack"
+
+    def test_chunk_metadata_includes_none_values(self) -> None:
+        """None values in doc_metadata must not be silently dropped."""
+        doc_metadata = {
+            "optional_field": None,
+            "priority": "high",
+        }
+        chunk_metadata = {
+            "chunk_index": 0,
+            "start_char": 0,
+            "end_char": 100,
+            **doc_metadata,
+        }
+        assert "optional_field" in chunk_metadata
+        assert chunk_metadata["optional_field"] is None
+
+    def test_chunk_metadata_includes_all_types(self) -> None:
+        """Regression: all JSON-compatible types must propagate to chunks."""
+        doc_metadata = {
+            "str_val": "hello",
+            "int_val": 42,
+            "float_val": 3.14,
+            "bool_val": True,
+            "list_val": ["a", "b"],
+            "dict_val": {"nested": True},
+            "none_val": None,
+        }
+        chunk_metadata = {
+            "chunk_index": 0,
+            "start_char": 0,
+            "end_char": 100,
+            **doc_metadata,
+        }
+        for key in doc_metadata:
+            assert key in chunk_metadata, f"{key} missing from chunk metadata"
+            assert chunk_metadata[key] == doc_metadata[key]
+
+    def test_fixed_keys_not_overwritten_by_doc_metadata(self) -> None:
+        """Internal keys (chunk_index, start_char, end_char) must not be
+        overwritable by user-provided doc_metadata."""
+        doc_metadata = {
+            "chunk_index": 999,
+            "start_char": -1,
+            "end_char": -1,
+            "user_field": "preserved",
+        }
+        # Engine pattern: **doc_metadata first, then fixed keys override
+        chunk_metadata = {
+            **doc_metadata,
+            "chunk_index": 0,
+            "start_char": 10,
+            "end_char": 100,
+        }
+        assert chunk_metadata["chunk_index"] == 0, "chunk_index overwritten by doc_metadata"
+        assert chunk_metadata["start_char"] == 10, "start_char overwritten by doc_metadata"
+        assert chunk_metadata["end_char"] == 100, "end_char overwritten by doc_metadata"
+        assert chunk_metadata["user_field"] == "preserved"
+
+    def test_no_isinstance_filter_in_engine(self) -> None:
+        """The VectorCypher engine source must not contain the old scalar-only
+        metadata filter pattern."""
+        import inspect
+
+        from khora.engines.vectorcypher.engine import VectorCypherEngine
+
+        source = inspect.getsource(VectorCypherEngine)
+        assert "isinstance(v, (str, int, float, bool))" not in source, (
+            "VectorCypher engine still contains the isinstance scalar filter "
+            "that drops non-scalar metadata — DYT-1114 fix not applied"
+        )

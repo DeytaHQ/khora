@@ -609,10 +609,10 @@ class VectorCypherEngine:
                     tags=doc_metadata.get("tags", []),
                     confidence=1.0,
                     metadata={
+                        **doc_metadata,
                         "chunk_index": i,
                         "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                         "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                        **{k: v for k, v in doc_metadata.items() if isinstance(v, (str, int, float, bool))},
                     },
                 )
                 temporal_chunks.append(temporal_chunk)
@@ -975,10 +975,10 @@ class VectorCypherEngine:
                 tags=doc_metadata.get("tags", []),
                 confidence=1.0,
                 metadata={
+                    **doc_metadata,
                     "chunk_index": i,
                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                    **{k: v for k, v in doc_metadata.items() if isinstance(v, (str, int, float, bool))},
                 },
             )
             temporal_chunks.append(temporal_chunk)
@@ -1562,10 +1562,10 @@ class VectorCypherEngine:
                     tags=doc_metadata.get("tags", []),
                     confidence=1.0,
                     metadata={
+                        **doc_metadata,
                         "chunk_index": ci,
                         "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                         "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                        **{k: v for k, v in doc_metadata.items() if isinstance(v, (str, int, float, bool))},
                     },
                 )
                 all_temporal_chunks.append(tc)
