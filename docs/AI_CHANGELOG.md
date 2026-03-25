@@ -23,3 +23,4 @@
 - 2026-03-24: DYT-882: Consolidate into single release pipeline, fix accel builds
 - 2026-03-24: DYT-882: Remove auto-initialize from pyo3 (manylinux compat)
 - 2026-03-24: DYT-984: Replace __slots__ detail tests with behavioral checks
+- 2026-03-25: DYT-882: Fix publish-accel uv cache failure
