@@ -10,11 +10,11 @@ import random
 import time
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from alembic import context
 from khora.db.models import Base
 
 # ── Configuration ──────────────────────────────────────────────

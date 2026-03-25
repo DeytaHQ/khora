@@ -10,8 +10,9 @@ for tracking original content timestamps separate from ingestion time.
 
 from collections.abc import Sequence
 
-from alembic import op
 from sqlalchemy import Column, DateTime, text
+
+from alembic import op
 
 revision: str = "009_temporal_search_indexes"
 down_revision: str | Sequence[str] | None = "008_entity_dedup_and_indexes"
