@@ -227,3 +227,9 @@ scripts/slack-notify.py
 
 # TTOJ agent skills (deployed per-machine, not tracked)
 .agents/
+.ttoj-worktrees/
+# Claude Code user-specific files
+.claude/CLAUDE.md
+.claude/settings.local.json
+.claude/projects/
+.claude/worktrees/
