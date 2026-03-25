@@ -6,7 +6,6 @@ from pathlib import Path
 
 import click
 import yaml
-from rich.table import Table
 
 from khora.extraction.skills.base import ExpertiseConfig
 
@@ -89,22 +88,17 @@ def construct(
     """Construct an ontology from data sources using LLM analysis."""
     print_header()
 
-    # Show configured options
-    opts = Table(title="Configuration", show_lines=True)
-    opts.add_column("Option", style="bold")
-    opts.add_column("Value")
+    from .flow import run_construct
 
-    opts.add_row("Sources", ", ".join(source) if source else "(none)")
-    opts.add_row("Output", output)
-    opts.add_row("Model", model)
-    opts.add_row("Budget", f"${budget:.2f}")
-    opts.add_row("Extends", extends_skill or "(none)")
-    opts.add_row("Non-interactive", str(non_interactive))
-    opts.add_row("Resume", resume or "(none)")
-
-    console.print(opts)
-    console.print()
-    console.print("[dim]Ontology construction is under development.[/]")
+    run_construct(
+        source=source,
+        output=output,
+        model=model,
+        budget=budget,
+        extends_skill=extends_skill,
+        non_interactive=non_interactive,
+        resume=resume,
+    )
 
 
 # ---------------------------------------------------------------------------
