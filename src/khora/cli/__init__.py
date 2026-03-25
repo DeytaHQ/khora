@@ -36,6 +36,16 @@ def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | No
     ctx.obj["json_logs"] = json_logs
 
 
+def _register_subcommands() -> None:
+    """Register subcommand groups (called after cli is defined)."""
+    from khora.cli.ontology import ontology_group
+
+    cli.add_command(ontology_group)
+
+
+_register_subcommands()
+
+
 def main() -> None:
     """Main entry point."""
     cli()
