@@ -17,7 +17,6 @@ from khora.core.models import Chunk, ChunkMetadata, Entity
 from khora.storage.backends.surrealdb._helpers import (
     _HAS_NUMPY,
     _entity_to_bindings,
-    _iso,
     _parse_dt,
     _parse_uuid,
     _rid,
@@ -148,8 +147,8 @@ class SurrealDBVectorAdapter:
                     "end_char": chunk.metadata.end_char,
                     "token_count": chunk.metadata.token_count,
                     "metadata_": chunk.metadata.custom or {},
-                    "created_at": _iso(chunk.created_at),
-                    "source_timestamp": _iso(chunk.source_timestamp),
+                    "created_at": chunk.created_at,
+                    "source_timestamp": chunk.source_timestamp,
                 }
             )
 
@@ -242,11 +241,11 @@ class SurrealDBVectorAdapter:
 
         if created_after is not None:
             where_clauses.append("(source_timestamp ?? created_at) >= $created_after")
-            bindings["created_after"] = _iso(created_after)
+            bindings["created_after"] = created_after
 
         if created_before is not None:
             where_clauses.append("(source_timestamp ?? created_at) <= $created_before")
-            bindings["created_before"] = _iso(created_before)
+            bindings["created_before"] = created_before
 
         if metadata_filters:
             for i, (key, value) in enumerate(metadata_filters.items()):
@@ -308,11 +307,11 @@ class SurrealDBVectorAdapter:
 
         if created_after is not None:
             where_clauses.append("(source_timestamp ?? created_at) >= $created_after")
-            bindings["created_after"] = _iso(created_after)
+            bindings["created_after"] = created_after
 
         if created_before is not None:
             where_clauses.append("(source_timestamp ?? created_at) <= $created_before")
-            bindings["created_before"] = _iso(created_before)
+            bindings["created_before"] = created_before
 
         where_sql = " AND ".join(where_clauses)
         sql = "SELECT *, search::score(1) AS rank " f"FROM chunk WHERE {where_sql} " "ORDER BY rank DESC LIMIT $limit"
@@ -415,7 +414,7 @@ class SurrealDBVectorAdapter:
                 "id": str(entity_id),
                 "embedding": list(embedding),
                 "embedding_model": model,
-                "updated_at": _iso(datetime.now(UTC)),
+                "updated_at": datetime.now(UTC),
             },
         )
 
@@ -428,7 +427,7 @@ class SurrealDBVectorAdapter:
         if not updates:
             return 0
 
-        now_iso = _iso(datetime.now(UTC))
+        now_iso = datetime.now(UTC)
         update_dicts: list[dict[str, Any]] = [
             {
                 "rid": _rid("entity", eid),
@@ -549,7 +548,7 @@ class SurrealDBVectorAdapter:
                         "mention_count": ent.mention_count,
                         "confidence": ent.confidence,
                         "metadata_": ent.metadata or {},
-                        "updated_at": _iso(ent.updated_at),
+                        "updated_at": ent.updated_at,
                     }
                 )
             update_sql = (
@@ -666,8 +665,8 @@ class SurrealDBVectorAdapter:
             "end_char": chunk.metadata.end_char,
             "token_count": chunk.metadata.token_count,
             "metadata_": chunk.metadata.custom or {},
-            "created_at": _iso(chunk.created_at),
-            "source_timestamp": _iso(chunk.source_timestamp),
+            "created_at": chunk.created_at,
+            "source_timestamp": chunk.source_timestamp,
         }
 
     def _row_to_chunk(self, row: dict[str, Any]) -> Chunk:

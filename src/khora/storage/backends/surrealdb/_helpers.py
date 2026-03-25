@@ -29,11 +29,14 @@ except ImportError:
 def _rid(table: str, uid: UUID) -> Any:
     """Build a SurrealDB RecordID for use as a query parameter.
 
-    SurrealDB 1.x requires ``RecordID`` objects (not strings) when binding
+    SurrealDB 1.x+ requires ``RecordID`` objects (not strings) when binding
     record IDs in parameterised queries like ``CREATE $rid SET ...``.
+
+    The SDK's ``RecordID`` accepts ``UUID`` objects directly — no ``str()``
+    wrapper needed.
     """
     if _RecordID is not None:
-        return _RecordID(table, str(uid))
+        return _RecordID(table, uid)
     # Fallback for environments without surrealdb (e.g. unit tests with mocks)
     import warnings
 
@@ -64,16 +67,6 @@ def _parse_uuid(record_id: str | dict | UUID | Any) -> UUID:
     return UUID(raw)
 
 
-def _iso(dt: datetime | None) -> datetime | None:
-    """Return a datetime for SurrealDB parameter binding, or ``None``.
-
-    SurrealDB 1.x SCHEMAFULL datetime fields require native ``datetime``
-    objects — the Python SDK serialises them to the CBOR wire format.
-    The function name is kept for backwards compatibility.
-    """
-    return dt
-
-
 def _parse_dt(val: Any) -> datetime | None:
     """Best-effort parse of a SurrealDB datetime value."""
     if val is None:
@@ -86,25 +79,6 @@ def _parse_dt(val: Any) -> datetime | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
-
-
-def _dt_to_iso(dt: datetime | None) -> datetime | None:
-    """Return a datetime for SurrealDB parameter binding, or ``None``.
-
-    SurrealDB 1.x SCHEMAFULL datetime fields require native ``datetime``
-    objects — the Python SDK serialises them to the CBOR wire format.
-    The function name is kept for backwards compatibility with callers.
-    """
-    return dt
-
-
-def _iso_to_dt(value: str | datetime | None) -> datetime | None:
-    """Deserialise an ISO-8601 string (or pass-through datetime) from SurrealDB."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    return datetime.fromisoformat(value)
 
 
 _SAFE_FIELD_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")
@@ -177,10 +151,10 @@ def _entity_to_bindings(entity: Entity) -> dict[str, Any]:
         "mention_count": entity.mention_count,
         "embedding": list(entity.embedding) if entity.embedding is not None else None,
         "embedding_model": entity.embedding_model,
-        "valid_from": _iso(entity.valid_from),
-        "valid_until": _iso(entity.valid_until),
+        "valid_from": entity.valid_from,
+        "valid_until": entity.valid_until,
         "confidence": entity.confidence,
         "metadata_": entity.metadata or {},
-        "created_at": _iso(entity.created_at),
-        "updated_at": _iso(entity.updated_at),
+        "created_at": entity.created_at,
+        "updated_at": entity.updated_at,
     }

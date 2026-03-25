@@ -18,8 +18,7 @@ from khora.core.models import Document, DocumentMetadata, MemoryNamespace, Tenan
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.storage.backends.base import PaginatedResult
 from khora.storage.backends.surrealdb._helpers import (
-    _dt_to_iso,
-    _iso_to_dt,
+    _parse_dt,
     _parse_uuid,
     _record_id,
 )
@@ -123,8 +122,8 @@ class SurrealDBRelationalAdapter:
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace record."""
         rid = _record_id("memory_namespace", namespace.id)
-        now_iso = _dt_to_iso(namespace.created_at)
-        upd_iso = _dt_to_iso(namespace.updated_at)
+        now_iso = namespace.created_at
+        upd_iso = namespace.updated_at
 
         row = await self._conn.query_one(
             "CREATE $rid SET "
@@ -209,7 +208,7 @@ class SurrealDBRelationalAdapter:
                 "config_overrides": namespace.config_overrides or {},
                 "sync_checkpoints": namespace.sync_checkpoints or {},
                 "metadata_": namespace.metadata or {},
-                "updated_at": _dt_to_iso(datetime.now(UTC)),
+                "updated_at": datetime.now(UTC),
             },
         )
         return namespace
@@ -241,7 +240,7 @@ class SurrealDBRelationalAdapter:
         rid = _record_id("memory_namespace", namespace_id)
         await self._conn.execute(
             "UPDATE $rid SET is_active = false, updated_at = $updated_at",
-            {"rid": rid, "updated_at": _dt_to_iso(datetime.now(UTC))},
+            {"rid": rid, "updated_at": datetime.now(UTC)},
         )
         logger.info(f"Deactivated namespace {namespace_id}")
 
@@ -258,8 +257,8 @@ class SurrealDBRelationalAdapter:
             config_overrides=row.get("config_overrides") or {},
             sync_checkpoints=row.get("sync_checkpoints") or {},
             metadata=row.get("metadata_") or {},
-            created_at=_iso_to_dt(row.get("created_at")) or datetime.now(UTC),
-            updated_at=_iso_to_dt(row.get("updated_at")) or datetime.now(UTC),
+            created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),
+            updated_at=_parse_dt(row.get("updated_at")) or datetime.now(UTC),
         )
 
     # ------------------------------------------------------------------
@@ -309,10 +308,10 @@ class SurrealDBRelationalAdapter:
                 "entity_count": document.entity_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
-                "created_at": _dt_to_iso(document.created_at),
-                "updated_at": _dt_to_iso(document.updated_at),
-                "processed_at": _dt_to_iso(document.processed_at),
-                "source_timestamp": _dt_to_iso(document.source_timestamp),
+                "created_at": document.created_at,
+                "updated_at": document.updated_at,
+                "processed_at": document.processed_at,
+                "source_timestamp": document.source_timestamp,
             },
         )
         if row is None:
@@ -394,9 +393,9 @@ class SurrealDBRelationalAdapter:
                 "entity_count": document.entity_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
-                "updated_at": _dt_to_iso(datetime.now(UTC)),
-                "processed_at": _dt_to_iso(document.processed_at),
-                "source_timestamp": _dt_to_iso(document.source_timestamp),
+                "updated_at": datetime.now(UTC),
+                "processed_at": document.processed_at,
+                "source_timestamp": document.source_timestamp,
             },
         )
         return document
@@ -477,8 +476,8 @@ class SurrealDBRelationalAdapter:
                 title=r.get("title", ""),
                 source=r.get("source", ""),
                 source_type=r.get("source_type", ""),
-                created_at=_iso_to_dt(r.get("created_at")),
-                source_timestamp=_iso_to_dt(r.get("source_timestamp")),
+                created_at=_parse_dt(r.get("created_at")),
+                source_timestamp=_parse_dt(r.get("source_timestamp")),
             )
         return result
 
@@ -506,10 +505,10 @@ class SurrealDBRelationalAdapter:
             entity_count=row.get("entity_count", 0),
             error_message=row.get("error_message"),
             extraction_config_hash=row.get("extraction_config_hash"),
-            created_at=_iso_to_dt(row.get("created_at")) or datetime.now(UTC),
-            updated_at=_iso_to_dt(row.get("updated_at")) or datetime.now(UTC),
-            processed_at=_iso_to_dt(row.get("processed_at")),
-            source_timestamp=_iso_to_dt(row.get("source_timestamp")),
+            created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),
+            updated_at=_parse_dt(row.get("updated_at")) or datetime.now(UTC),
+            processed_at=_parse_dt(row.get("processed_at")),
+            source_timestamp=_parse_dt(row.get("source_timestamp")),
         )
 
     # ------------------------------------------------------------------
@@ -548,7 +547,7 @@ class SurrealDBRelationalAdapter:
                 "ns": ns_str,
                 "source": source,
                 "checkpoint": checkpoint,
-                "updated_at": _dt_to_iso(datetime.now(UTC)),
+                "updated_at": datetime.now(UTC),
             },
         )
 
