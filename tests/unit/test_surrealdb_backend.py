@@ -324,6 +324,7 @@ class TestSurrealDBSchema:
         from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
 
         assert "UNIQUE" in _TABLE_DEFINITIONS
+        assert "idx_entity_unique" in _TABLE_DEFINITIONS
         assert "idx_sync_checkpoint_ns_source" in _TABLE_DEFINITIONS
 
     def test_schema_has_relation_tables(self) -> None:
@@ -1151,7 +1152,7 @@ class TestVectorAdapterLifecycle:
 
         adapter = SurrealDBVectorAdapter.from_config({})
         assert adapter._conn._mode == "memory"
-        assert adapter._hnsw_ef_search == 40
+        assert adapter._hnsw_ef_search == 100
 
     def test_from_config_custom(self) -> None:
         from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
