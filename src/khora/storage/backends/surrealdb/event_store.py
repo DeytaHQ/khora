@@ -16,8 +16,7 @@ from loguru import logger
 
 from khora.core.models.event import EventType, MemoryEvent
 from khora.storage.backends.surrealdb._helpers import (
-    _dt_to_iso,
-    _iso_to_dt,
+    _parse_dt,
     _parse_uuid,
 )
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection
@@ -137,7 +136,7 @@ class SurrealDBEventStoreAdapter:
                 "rid": rid,
                 "namespace_id": str(event.namespace_id),
                 "event_type": event.event_type.value if isinstance(event.event_type, EventType) else event.event_type,
-                "timestamp": _dt_to_iso(event.timestamp),
+                "timestamp": event.timestamp,
                 "resource_type": event.resource_type,
                 "resource_id": str(event.resource_id),
                 "data": event.data or {},
@@ -168,7 +167,7 @@ class SurrealDBEventStoreAdapter:
                     "event_type": (
                         event.event_type.value if isinstance(event.event_type, EventType) else event.event_type
                     ),
-                    "timestamp": _dt_to_iso(event.timestamp),
+                    "timestamp": event.timestamp,
                     "resource_type": event.resource_type,
                     "resource_id": str(event.resource_id),
                     "data": event.data or {},
@@ -222,11 +221,11 @@ class SurrealDBEventStoreAdapter:
 
         if after:
             clauses.append("timestamp > $after")
-            bindings["after"] = _dt_to_iso(after)
+            bindings["after"] = after
 
         if before:
             clauses.append("timestamp < $before")
-            bindings["before"] = _dt_to_iso(before)
+            bindings["before"] = before
 
         where = " AND ".join(clauses)
         bindings["lim"] = limit
@@ -294,7 +293,7 @@ class SurrealDBEventStoreAdapter:
 
         if after:
             clauses.append("timestamp > $after")
-            bindings["after"] = _dt_to_iso(after)
+            bindings["after"] = after
 
         where = " AND ".join(clauses)
 
@@ -319,7 +318,7 @@ class SurrealDBEventStoreAdapter:
             id=_parse_uuid(row["id"]),
             namespace_id=UUID(row["namespace_id"]) if isinstance(row["namespace_id"], str) else row["namespace_id"],
             event_type=EventType(event_type_raw) if isinstance(event_type_raw, str) else event_type_raw,
-            timestamp=_iso_to_dt(row.get("timestamp")) or row.get("timestamp"),
+            timestamp=_parse_dt(row.get("timestamp")) or row.get("timestamp"),
             resource_type=row.get("resource_type", ""),
             resource_id=(
                 UUID(row["resource_id"]) if isinstance(row.get("resource_id"), str) else row.get("resource_id")

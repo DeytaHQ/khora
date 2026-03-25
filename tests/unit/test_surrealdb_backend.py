@@ -396,8 +396,8 @@ class TestRelationalHelpers:
 
         uid = UUID("12345678-1234-5678-1234-567812345678")
         result = _record_id("document", uid)
-        # _record_id returns a RecordID object; str() gives the wire format
-        assert str(result) == "document:⟨12345678-1234-5678-1234-567812345678⟩"
+        # _record_id returns a RecordID; UUID passed directly (no angle brackets)
+        assert str(result) == "document:12345678-1234-5678-1234-567812345678"
 
     def test_parse_uuid_bare(self) -> None:
         from khora.storage.backends.surrealdb.relational import _parse_uuid
@@ -417,36 +417,23 @@ class TestRelationalHelpers:
         uid = _parse_uuid("document:⟨12345678-1234-5678-1234-567812345678⟩")
         assert uid == UUID("12345678-1234-5678-1234-567812345678")
 
-    def test_dt_to_iso(self) -> None:
-        from khora.storage.backends.surrealdb.relational import _dt_to_iso
+    def test_parse_dt(self) -> None:
+        from khora.storage.backends.surrealdb._helpers import _parse_dt
 
-        dt = datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC)
-        result = _dt_to_iso(dt)
-        # _dt_to_iso now returns the native datetime for SDK 1.0.8 binding
-        assert result is dt
-
-    def test_dt_to_iso_none(self) -> None:
-        from khora.storage.backends.surrealdb.relational import _dt_to_iso
-
-        assert _dt_to_iso(None) is None
-
-    def test_iso_to_dt(self) -> None:
-        from khora.storage.backends.surrealdb.relational import _iso_to_dt
-
-        result = _iso_to_dt("2025-01-15T12:00:00+00:00")
+        result = _parse_dt("2025-01-15T12:00:00+00:00")
         assert result is not None
         assert result.year == 2025
 
-    def test_iso_to_dt_none(self) -> None:
-        from khora.storage.backends.surrealdb.relational import _iso_to_dt
+    def test_parse_dt_none(self) -> None:
+        from khora.storage.backends.surrealdb._helpers import _parse_dt
 
-        assert _iso_to_dt(None) is None
+        assert _parse_dt(None) is None
 
-    def test_iso_to_dt_passthrough_datetime(self) -> None:
-        from khora.storage.backends.surrealdb.relational import _iso_to_dt
+    def test_parse_dt_passthrough_datetime(self) -> None:
+        from khora.storage.backends.surrealdb._helpers import _parse_dt
 
         dt = datetime(2025, 1, 15, tzinfo=UTC)
-        assert _iso_to_dt(dt) is dt
+        assert _parse_dt(dt) is dt
 
 
 # ── Relational Adapter — lifecycle ────────────────────────────────────────
@@ -1177,8 +1164,8 @@ class TestVectorAdapterHelpers:
         from khora.storage.backends.surrealdb.vector import _rid
 
         uid = UUID("12345678-1234-5678-1234-567812345678")
-        # _rid returns a RecordID object; str() gives the wire format
-        assert str(_rid("chunk", uid)) == "chunk:\u27e812345678-1234-5678-1234-567812345678\u27e9"
+        # _rid returns a RecordID object; UUID passed directly (no angle brackets)
+        assert str(_rid("chunk", uid)) == "chunk:12345678-1234-5678-1234-567812345678"
 
     def test_parse_uuid_bare(self) -> None:
         from khora.storage.backends.surrealdb.vector import _parse_uuid
@@ -1203,19 +1190,6 @@ class TestVectorAdapterHelpers:
 
         uid = UUID("12345678-1234-5678-1234-567812345678")
         assert _parse_uuid(uid) is uid
-
-    def test_iso(self) -> None:
-        from khora.storage.backends.surrealdb.vector import _iso
-
-        dt = datetime(2025, 6, 15, 12, 0, 0, tzinfo=UTC)
-        result = _iso(dt)
-        # _iso now returns native datetime for SDK 1.0.8 binding
-        assert result is dt
-
-    def test_iso_none(self) -> None:
-        from khora.storage.backends.surrealdb.vector import _iso
-
-        assert _iso(None) is None
 
     def test_parse_dt(self) -> None:
         from khora.storage.backends.surrealdb.vector import _parse_dt

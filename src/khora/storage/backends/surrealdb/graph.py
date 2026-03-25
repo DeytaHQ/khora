@@ -8,6 +8,9 @@ schema.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -17,7 +20,6 @@ from loguru import logger
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.surrealdb._helpers import (
     _entity_to_bindings,
-    _iso,
     _parse_dt,
     _parse_uuid,
     _rid,
@@ -28,6 +30,46 @@ from khora.telemetry import trace
 
 if TYPE_CHECKING:
     from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+
+# ---------------------------------------------------------------------------
+# Entity key gate (prevents upsert race conditions)
+# ---------------------------------------------------------------------------
+
+
+class _SurrealDBEntityKeyGate:
+    """Serialize access to entities by ``(namespace_id, name, entity_type)`` key.
+
+    Prevents the prefetch-compare-update race condition in
+    :meth:`SurrealDBGraphAdapter.upsert_entities_batch` by ensuring that
+    two concurrent batches touching overlapping entity keys are executed
+    sequentially.  Identical in design to Neo4j's ``_EntityKeyGate``.
+    """
+
+    def __init__(self, max_concurrent: int = 10) -> None:
+        self._condition = asyncio.Condition()
+        self._in_flight: set[tuple[str, str, str]] = set()
+        self._active = 0
+        self._max_concurrent = max_concurrent
+
+    @asynccontextmanager
+    async def acquire(self, entities: list[Entity]) -> AsyncIterator[None]:
+        """Acquire exclusive access for a set of entity keys."""
+        keys = {(str(e.namespace_id), e.name, str(e.entity_type)) for e in entities}
+
+        async with self._condition:
+            while (keys & self._in_flight) or self._active >= self._max_concurrent:
+                await self._condition.wait()
+            self._in_flight |= keys
+            self._active += 1
+
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._in_flight -= keys
+                self._active -= 1
+                self._condition.notify_all()
 
 
 # ---------------------------------------------------------------------------
@@ -115,13 +157,13 @@ def _relationship_to_bindings(rel: Relationship) -> dict[str, Any]:
         "properties": rel.properties or {},
         "source_document_ids": [str(d) for d in rel.source_document_ids],
         "source_chunk_ids": [str(c) for c in rel.source_chunk_ids],
-        "valid_from": _iso(rel.valid_from),
-        "valid_until": _iso(rel.valid_until),
+        "valid_from": rel.valid_from,
+        "valid_until": rel.valid_until,
         "confidence": rel.confidence,
         "weight": rel.weight,
         "metadata_": rel.metadata or {},
-        "created_at": _iso(rel.created_at),
-        "updated_at": _iso(rel.updated_at),
+        "created_at": rel.created_at,
+        "updated_at": rel.updated_at,
     }
 
 
@@ -142,6 +184,7 @@ class SurrealDBGraphAdapter:
 
     def __init__(self, connection: SurrealDBConnection) -> None:
         self._conn = connection
+        self._entity_key_gate = _SurrealDBEntityKeyGate(max_concurrent=10)
 
     # ------------------------------------------------------------------
     # Factory / lifecycle
@@ -335,12 +378,27 @@ class SurrealDBGraphAdapter:
         For existing entities: merge descriptions, sum mention_counts, union source_ids.
         For new entities: create.
         Returns list of (Entity, is_new) tuples.
+
+        Uses :class:`_SurrealDBEntityKeyGate` to prevent race conditions
+        between the prefetch and write phases.
         """
         if not entities:
             return []
 
         ns_rid = _rid("memory_namespace", namespace_id)
 
+        # Acquire exclusive access for these entity keys to prevent
+        # concurrent upsert races (prefetch-compare-update pattern).
+        async with self._entity_key_gate.acquire(entities):
+            return await self._upsert_entities_batch_locked(ns_rid, namespace_id, entities)
+
+    async def _upsert_entities_batch_locked(
+        self,
+        ns_rid: Any,
+        namespace_id: UUID,
+        entities: list[Entity],
+    ) -> list[tuple[Entity, bool]]:
+        """Inner upsert logic, called while holding the entity key gate."""
         # 1. Batch-fetch all existing entities matching any (name, type) pair
         #    in a single query instead of N individual lookups.
         name_type_pairs = [(e.name, e.entity_type) for e in entities]
@@ -352,7 +410,8 @@ class SurrealDBGraphAdapter:
             fetch_bindings[f"n{i}"] = name
             fetch_bindings[f"t{i}"] = etype
 
-        fetch_sql = f"SELECT * FROM entity WHERE namespace = {ns_rid} " f"AND ({' OR '.join(or_clauses)})"
+        fetch_sql = "SELECT * FROM entity WHERE namespace = $ns_rid " f"AND ({' OR '.join(or_clauses)})"
+        fetch_bindings["ns_rid"] = ns_rid
         existing_rows = await self._conn.query(fetch_sql, fetch_bindings)
 
         # Index existing entities by (name, entity_type)
@@ -419,7 +478,7 @@ class SurrealDBGraphAdapter:
                         "mention_count": ent.mention_count,
                         "confidence": ent.confidence,
                         "metadata_": ent.metadata or {},
-                        "updated_at": _iso(ent.updated_at),
+                        "updated_at": ent.updated_at,
                     }
                 )
             update_sql = (
@@ -589,12 +648,15 @@ class SurrealDBGraphAdapter:
         except Exception:
             logger.warning("Batch relationship creation failed, falling back to individual inserts")
             created = 0
+            failed = 0
             for rel in relationships:
                 try:
                     await self.create_relationship(rel)
                     created += 1
                 except Exception:
+                    failed += 1
                     logger.warning(f"Failed to create relationship {rel.id}, skipping")
+            logger.info(f"Relationship batch fallback: {created}/{len(relationships)} succeeded, {failed} failed")
             return created
 
     # ------------------------------------------------------------------
@@ -624,7 +686,7 @@ class SurrealDBGraphAdapter:
             "ns": str(episode.namespace_id),
             "name": episode.name,
             "description": episode.description,
-            "occurred_at": _iso(episode.occurred_at),
+            "occurred_at": episode.occurred_at,
             "duration_seconds": episode.duration_seconds,
             "entity_ids": [str(eid) for eid in episode.entity_ids],
             "source_document_ids": [str(d) for d in episode.source_document_ids],
@@ -632,8 +694,8 @@ class SurrealDBGraphAdapter:
             "embedding": list(episode.embedding) if episode.embedding is not None else None,
             "embedding_model": episode.embedding_model,
             "metadata_": episode.metadata or {},
-            "created_at": _iso(episode.created_at),
-            "updated_at": _iso(episode.updated_at),
+            "created_at": episode.created_at,
+            "updated_at": episode.updated_at,
         }
         await self._conn.execute(sql, bindings)
 
@@ -651,11 +713,13 @@ class SurrealDBGraphAdapter:
                     {
                         "entity_ids": [str(eid) for eid in episode.entity_ids],
                         "ns": str(episode.namespace_id),
-                        "created_at": _iso(episode.created_at),
+                        "created_at": episode.created_at,
                     },
                 )
             except Exception:
-                logger.debug(f"Could not create involves edges for episode {episode.id}")
+                logger.warning(
+                    f"Could not create involves edges for episode {episode.id} " f"({len(episode.entity_ids)} entities)"
+                )
 
         return episode
 
@@ -686,11 +750,11 @@ class SurrealDBGraphAdapter:
 
         if start_time is not None:
             conditions.append("occurred_at >= $start_time")
-            bindings["start_time"] = _iso(start_time)
+            bindings["start_time"] = start_time
 
         if end_time is not None:
             conditions.append("occurred_at <= $end_time")
-            bindings["end_time"] = _iso(end_time)
+            bindings["end_time"] = end_time
 
         sql = f"SELECT * FROM episode WHERE {' AND '.join(conditions)} " "ORDER BY occurred_at DESC LIMIT $limit"
         rows = await self._conn.query(sql, bindings)
@@ -1019,10 +1083,10 @@ class SurrealDBGraphAdapter:
 
             if valid_after is not None:
                 rel_conditions.append("(valid_from IS NULL OR valid_from >= $valid_after)")
-                bindings["valid_after"] = _iso(valid_after)
+                bindings["valid_after"] = valid_after
             if valid_before is not None:
                 rel_conditions.append("(valid_until IS NULL OR valid_until <= $valid_before)")
-                bindings["valid_before"] = _iso(valid_before)
+                bindings["valid_before"] = valid_before
 
             rel_filter = ""
             if rel_conditions:
@@ -1128,7 +1192,7 @@ class SurrealDBGraphAdapter:
 
         # 5. Create next_session edges in a single batch round-trip
         ns_str = str(namespace_id)
-        now_iso = _iso(datetime.now(UTC))
+        now_iso = datetime.now(UTC)
         sql = (
             "FOR $link IN $links {"
             "  RELATE chunk:⟨$link.from_id⟩->next_session->chunk:⟨$link.to_id⟩ SET "
