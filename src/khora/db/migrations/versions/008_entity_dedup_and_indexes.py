@@ -30,8 +30,9 @@ expected.
 
 from collections.abc import Sequence
 
-from alembic import op
 from sqlalchemy import text
+
+from alembic import op
 
 revision: str = "008_entity_dedup_and_indexes"
 down_revision: str | Sequence[str] | None = "007_hnsw_parameter_tuning"
