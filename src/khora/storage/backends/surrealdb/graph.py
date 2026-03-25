@@ -214,12 +214,13 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.get_entity_by_name", include={"namespace_id", "name", "entity_type"})
     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+        ns_rid = _rid("memory_namespace", namespace_id)
         sql = (
             "SELECT * FROM entity "
-            f"WHERE namespace = memory_namespace:\u27e8{namespace_id}\u27e9 "
+            "WHERE namespace = $ns_rid "
             "AND name = $name AND entity_type = $entity_type LIMIT 1"
         )
-        row = await self._conn.query_one(sql, {"name": name, "entity_type": entity_type})
+        row = await self._conn.query_one(sql, {"ns_rid": ns_rid, "name": name, "entity_type": entity_type})
         if not row:
             return None
         return _row_to_entity(row)
@@ -251,19 +252,21 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.delete_entity", include={"entity_id"})
     async def delete_entity(self, entity_id: UUID) -> bool:
+        eid = _rid("entity", entity_id)
         # Check existence first
         check = await self._conn.query_one(
-            "SELECT count() AS cnt FROM entity WHERE id = entity:\u27e8$id\u27e9 GROUP ALL",
-            {"id": str(entity_id)},
+            "SELECT count() AS cnt FROM entity WHERE id = $eid GROUP ALL",
+            {"eid": eid},
         )
         if not check or int(check.get("cnt", 0)) == 0:
             return False
 
-        eid = _rid("entity", entity_id)
-        # Delete relationships referencing this entity
-        await self._conn.execute(f"DELETE FROM relates_to WHERE in = {eid} OR out = {eid}")
-        # Delete the entity itself
-        await self._conn.execute(f"DELETE FROM entity WHERE id = {eid}")
+        # Delete relationships referencing this entity, then the entity itself
+        await self._conn.execute(
+            "DELETE FROM relates_to WHERE in = $eid OR out = $eid",
+            {"eid": eid},
+        )
+        await self._conn.execute("DELETE FROM entity WHERE id = $eid", {"eid": eid})
         return True
 
     @trace(
@@ -279,8 +282,9 @@ class SurrealDBGraphAdapter:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
-        where = [f"namespace = memory_namespace:\u27e8{namespace_id}\u27e9"]
-        bindings: dict[str, Any] = {"limit": limit, "offset": offset}
+        ns_rid = _rid("memory_namespace", namespace_id)
+        where = ["namespace = $ns_rid"]
+        bindings: dict[str, Any] = {"ns_rid": ns_rid, "limit": limit, "offset": offset}
         if entity_type is not None:
             where.append("entity_type = $entity_type")
             bindings["entity_type"] = entity_type
@@ -308,10 +312,9 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.count_entities", include={"namespace_id"})
     async def count_entities(self, namespace_id: UUID) -> int:
-        sql = (
-            f"SELECT count() AS cnt FROM entity WHERE namespace = memory_namespace:\u27e8{namespace_id}\u27e9 GROUP ALL"
-        )
-        row = await self._conn.query_one(sql)
+        ns_rid = _rid("memory_namespace", namespace_id)
+        sql = "SELECT count() AS cnt FROM entity WHERE namespace = $ns_rid GROUP ALL"
+        row = await self._conn.query_one(sql, {"ns_rid": ns_rid})
         return int(row.get("cnt", 0)) if row else 0
 
     @trace(
@@ -499,22 +502,20 @@ class SurrealDBGraphAdapter:
         limit: int = 100,
     ) -> list[Relationship]:
         eid = _rid("entity", entity_id)
+        bindings: dict[str, Any] = {"eid": eid, "limit": limit}
 
         if direction == "outgoing":
-            where = f"in = {eid}"
+            where = "in = $eid"
         elif direction == "incoming":
-            where = f"out = {eid}"
+            where = "out = $eid"
         else:
-            where = f"(in = {eid} OR out = {eid})"
+            where = "(in = $eid OR out = $eid)"
 
         conditions = [where]
-        bindings: dict[str, Any] = {"limit": limit}
 
         if relationship_types:
-            placeholders = ", ".join(f"$rt_{i}" for i in range(len(relationship_types)))
-            conditions.append(f"relationship_type IN [{placeholders}]")
-            for i, rt in enumerate(relationship_types):
-                bindings[f"rt_{i}"] = rt
+            conditions.append("relationship_type IN $rel_types")
+            bindings["rel_types"] = list(relationship_types)
 
         sql = f"SELECT * FROM relates_to WHERE {' AND '.join(conditions)} LIMIT $limit"
         rows = await self._conn.query(sql, bindings)
@@ -679,8 +680,9 @@ class SurrealDBGraphAdapter:
         end_time: datetime | None = None,
         limit: int = 100,
     ) -> list[Episode]:
-        conditions = [f"namespace = memory_namespace:\u27e8{namespace_id}\u27e9"]
-        bindings: dict[str, Any] = {"limit": limit}
+        ns_rid = _rid("memory_namespace", namespace_id)
+        conditions = ["namespace = $ns_rid"]
+        bindings: dict[str, Any] = {"ns_rid": ns_rid, "limit": limit}
 
         if start_time is not None:
             conditions.append("occurred_at >= $start_time")
@@ -956,13 +958,15 @@ class SurrealDBGraphAdapter:
         *,
         limit: int = 100,
     ) -> list[Entity]:
+        ns_rid = _rid("memory_namespace", namespace_id)
+        safe_attr = _sanitize_field_name(attribute_name)
         sql = (
-            f"SELECT * FROM entity "
-            f"WHERE namespace = memory_namespace:\u27e8{namespace_id}\u27e9 "
-            f"AND attributes.{_sanitize_field_name(attribute_name)} = $attr_value "
+            "SELECT * FROM entity "
+            "WHERE namespace = $ns_rid "
+            f"AND attributes.{safe_attr} = $attr_value "
             "LIMIT $limit"
         )
-        rows = await self._conn.query(sql, {"attr_value": attribute_value, "limit": limit})
+        rows = await self._conn.query(sql, {"ns_rid": ns_rid, "attr_value": attribute_value, "limit": limit})
         return [_row_to_entity(r) for r in rows]
 
     # ------------------------------------------------------------------

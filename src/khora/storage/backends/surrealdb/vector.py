@@ -49,7 +49,7 @@ class SurrealDBVectorAdapter:
         self,
         connection: SurrealDBConnection,
         *,
-        hnsw_ef_search: int = 40,
+        hnsw_ef_search: int = 100,
     ) -> None:
         self._conn = connection
         self._hnsw_ef_search = hnsw_ef_search
@@ -73,7 +73,7 @@ class SurrealDBVectorAdapter:
                 conn_kwargs[key] = config[key]
 
         connection = SurrealDBConnection(**conn_kwargs)
-        return cls(connection, hnsw_ef_search=config.get("hnsw_ef_search", 40))
+        return cls(connection, hnsw_ef_search=config.get("hnsw_ef_search", 100))
 
     async def create_tables(self) -> None:
         """Create SurrealDB tables and indexes (idempotent).
@@ -170,9 +170,9 @@ class SurrealDBVectorAdapter:
         if not chunk_ids:
             return {}
 
-        ids_list = ", ".join(f"chunk:\u27e8{uid}\u27e9" for uid in chunk_ids)
-        sql = f"SELECT * FROM chunk WHERE id IN [{ids_list}]"
-        rows = await self._conn.query(sql)
+        chunk_rids = [_rid("chunk", uid) for uid in chunk_ids]
+        sql = "SELECT * FROM chunk WHERE id IN $ids"
+        rows = await self._conn.query(sql, {"ids": chunk_rids})
         result: dict[UUID, Chunk] = {}
         for row in rows:
             chunk = self._row_to_chunk(row)
@@ -222,20 +222,23 @@ class SurrealDBVectorAdapter:
         the distance computation when available.
         """
         # Build WHERE predicates
-        ns_ref = f"memory_namespace:\u27e8{namespace_id}\u27e9"
+        ns_rid = _rid("memory_namespace", namespace_id)
         where_clauses = [
-            f"(namespace = {ns_ref} OR namespace.namespace_id = '{namespace_id}')",
+            "(namespace = $ns_rid OR namespace.namespace_id = $ns_str)",
             "embedding IS NOT NULL",
         ]
         bindings: dict[str, Any] = {
+            "ns_rid": ns_rid,
+            "ns_str": str(namespace_id),
             "query_embedding": list(query_embedding),
             "limit": limit,
             "ef": self._hnsw_ef_search,
         }
 
         if filter_document_ids:
-            ids_list = ", ".join(f"document:\u27e8{uid}\u27e9" for uid in filter_document_ids)
-            where_clauses.append(f"document IN [{ids_list}]")
+            doc_rids = [_rid("document", uid) for uid in filter_document_ids]
+            where_clauses.append("document IN $filter_doc_ids")
+            bindings["filter_doc_ids"] = doc_rids
 
         if created_after is not None:
             where_clauses.append("(source_timestamp ?? created_at) >= $created_after")
@@ -291,12 +294,17 @@ class SurrealDBVectorAdapter:
         Uses SurrealDB's ``@1@`` match operator and ``search::score(1)``
         for BM25 ranking.
         """
-        ns_ref = f"memory_namespace:\u27e8{namespace_id}\u27e9"
+        ns_rid = _rid("memory_namespace", namespace_id)
         where_clauses = [
-            f"(namespace = {ns_ref} OR namespace.namespace_id = '{namespace_id}')",
+            "(namespace = $ns_rid OR namespace.namespace_id = $ns_str)",
             "content @1@ $query_text",
         ]
-        bindings: dict[str, Any] = {"query_text": query_text, "limit": limit}
+        bindings: dict[str, Any] = {
+            "ns_rid": ns_rid,
+            "ns_str": str(namespace_id),
+            "query_text": query_text,
+            "limit": limit,
+        }
 
         if created_after is not None:
             where_clauses.append("(source_timestamp ?? created_at) >= $created_after")
@@ -314,8 +322,9 @@ class SurrealDBVectorAdapter:
 
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Return the total number of chunks in a namespace."""
-        sql = "SELECT count() AS cnt FROM chunk WHERE namespace = memory_namespace:\u27e8$ns\u27e9 GROUP ALL"
-        row = await self._conn.query_one(sql, {"ns": str(namespace_id)})
+        ns_rid = _rid("memory_namespace", namespace_id)
+        sql = "SELECT count() AS cnt FROM chunk WHERE namespace = $ns_rid GROUP ALL"
+        row = await self._conn.query_one(sql, {"ns_rid": ns_rid})
         return int(row.get("cnt", 0)) if row else 0
 
     async def list_chunks(
@@ -326,13 +335,11 @@ class SurrealDBVectorAdapter:
         offset: int = 0,
     ) -> list[Chunk]:
         """Paginated listing of chunks in a namespace."""
+        ns_rid = _rid("memory_namespace", namespace_id)
         sql = (
-            "SELECT * FROM chunk "
-            "WHERE namespace = memory_namespace:\u27e8$ns\u27e9 "
-            "ORDER BY created_at DESC "
-            "LIMIT $limit START $offset"
+            "SELECT * FROM chunk " "WHERE namespace = $ns_rid " "ORDER BY created_at DESC " "LIMIT $limit START $offset"
         )
-        rows = await self._conn.query(sql, {"ns": str(namespace_id), "limit": limit, "offset": offset})
+        rows = await self._conn.query(sql, {"ns_rid": ns_rid, "limit": limit, "offset": offset})
         return [self._row_to_chunk(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -576,13 +583,15 @@ class SurrealDBVectorAdapter:
         min_similarity: float = 0.0,
     ) -> list[tuple[UUID, float]]:
         """Cosine similarity search over entity embeddings."""
-        ns_ref = f"memory_namespace:\u27e8{namespace_id}\u27e9"
+        ns_rid = _rid("memory_namespace", namespace_id)
         sql = (
             "SELECT id, vector::similarity::cosine(embedding, $query_embedding) AS similarity "
-            f"FROM entity WHERE (namespace = {ns_ref} OR namespace.namespace_id = '{namespace_id}') AND embedding IS NOT NULL "
+            "FROM entity WHERE (namespace = $ns_rid OR namespace.namespace_id = $ns_str) AND embedding IS NOT NULL "
             f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
         bindings: dict[str, Any] = {
+            "ns_rid": ns_rid,
+            "ns_str": str(namespace_id),
             "query_embedding": list(query_embedding),
         }
 
@@ -626,10 +635,12 @@ class SurrealDBVectorAdapter:
         ns_rid = _rid("memory_namespace", namespace_id)
 
         chunk_row = await self._conn.query_one(
-            f"SELECT count() AS cnt FROM chunk WHERE namespace = {ns_rid} AND embedding IS NOT NULL GROUP ALL",
+            "SELECT count() AS cnt FROM chunk WHERE namespace = $ns_rid AND embedding IS NOT NULL GROUP ALL",
+            {"ns_rid": ns_rid},
         )
         entity_row = await self._conn.query_one(
-            f"SELECT count() AS cnt FROM entity WHERE namespace = {ns_rid} AND embedding IS NOT NULL GROUP ALL",
+            "SELECT count() AS cnt FROM entity WHERE namespace = $ns_rid AND embedding IS NOT NULL GROUP ALL",
+            {"ns_rid": ns_rid},
         )
 
         return {
