@@ -320,11 +320,11 @@ class TestSurrealDBSchema:
         assert "khora_fulltext" in _ANALYZER_DEFINITIONS
         assert "snowball" in _ANALYZER_DEFINITIONS
 
-    def test_schema_has_entity_unique_index(self) -> None:
+    def test_schema_has_unique_indexes(self) -> None:
         from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
 
         assert "UNIQUE" in _TABLE_DEFINITIONS
-        assert "idx_entity_unique" in _TABLE_DEFINITIONS
+        assert "idx_sync_checkpoint_ns_source" in _TABLE_DEFINITIONS
 
     def test_schema_has_relation_tables(self) -> None:
         from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS

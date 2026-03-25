@@ -182,8 +182,8 @@ class SurrealDBGraphAdapter:
     @trace("khora.surrealdb.graph.create_entity", include={"entity"})
     async def create_entity(self, entity: Entity) -> Entity:
         sql = (
-            "CREATE entity:\u27e8$id\u27e9 SET "
-            "namespace = memory_namespace:\u27e8$ns\u27e9, "
+            "CREATE $rid SET "
+            "namespace = $ns_rid, "
             "name = $name, "
             "entity_type = $entity_type, "
             "description = $description, "
