@@ -303,6 +303,27 @@ class TestNonScalarMetadataPreserved:
             assert key in chunk_metadata, f"{key} missing from chunk metadata"
             assert chunk_metadata[key] == doc_metadata[key]
 
+    def test_fixed_keys_not_overwritten_by_doc_metadata(self) -> None:
+        """Internal keys (chunk_index, start_char, end_char) must not be
+        overwritable by user-provided doc_metadata."""
+        doc_metadata = {
+            "chunk_index": 999,
+            "start_char": -1,
+            "end_char": -1,
+            "user_field": "preserved",
+        }
+        # Engine pattern: **doc_metadata first, then fixed keys override
+        chunk_metadata = {
+            **doc_metadata,
+            "chunk_index": 0,
+            "start_char": 10,
+            "end_char": 100,
+        }
+        assert chunk_metadata["chunk_index"] == 0, "chunk_index overwritten by doc_metadata"
+        assert chunk_metadata["start_char"] == 10, "start_char overwritten by doc_metadata"
+        assert chunk_metadata["end_char"] == 100, "end_char overwritten by doc_metadata"
+        assert chunk_metadata["user_field"] == "preserved"
+
     def test_no_isinstance_filter_in_engine(self) -> None:
         """The VectorCypher engine source must not contain the old scalar-only
         metadata filter pattern."""
