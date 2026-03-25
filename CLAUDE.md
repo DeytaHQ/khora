@@ -24,19 +24,24 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
                                                     ├── PostgreSQL (documents, tenancy)
                                                     ├── pgvector (embeddings)
                                                     └── Graph backend (entities, relationships)
+
+Traditional stack: PostgreSQL + pgvector + Neo4j  (three databases)
+Unified stack:     SurrealDB                      (one database, all roles)
 ```
 
 - **Engines are pluggable** — implement `MemoryEngineProtocol` in `engines/protocol.py`
-- **Graph backends are interchangeable** — all implement `GraphBackend` in `storage/backends/base.py`
-- **Extraction skills are YAML-defined** — see `extraction/skills/builtin/`
+- **Graph backends are interchangeable** — Neo4j, SurrealDB, Kuzu (deprecated), Memgraph, ArcadeDB — all implement `GraphBackend` in `storage/backends/base.py`
+- **SurrealDB is a unified backend** — serves graph, vector, and relational roles from a single database. Set `backend: surrealdb` in config; supports `memory://`, `surrealkv://` (embedded), and `ws://` (remote) modes
+- **Extraction skills are YAML-defined** — see `extraction/skills/builtin/`. Use `khora ontology construct` to generate new ones from data
 - **Multi-tenancy:** MemoryNamespace (sole isolation boundary)
 - **Config via env vars** — prefix `KHORA_`, use `__` for nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
 
 ## Key Entry Points
 
-- `memory_lake.py` — Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`, `create_namespace()`, `get_namespace_by_stable_id()`
+- `memory_lake.py` — Public API: `remember()`, `recall()`, `forget()`, `remember_batch()`, `create_namespace()`, `get_namespace_by_stable_id()`. Accepts `expertise: ExpertiseConfig` for custom ontologies
 - `storage/coordinator.py` — Backend orchestration, `TransactionContext`, `transaction()`
 - `storage/factory.py` — Backend creation with shared engine pools
+- `storage/backends/surrealdb/` — Unified SurrealDB backend (graph + vector + relational + event store in one DB)
 - `db/session.py` — `DatabaseManager` class for session/engine lifecycle
 - `db/models.py` — SQLAlchemy ORM (all UUID columns use `as_uuid=True`)
 - `engines/` — GraphRAG (default), Skeleton Construction, VectorCypher
@@ -45,14 +50,17 @@ MemoryLake (facade) → Engine (graphrag | skeleton | vectorcypher) → StorageC
 - `engines/vectorcypher/temporal_detection.py` — `TemporalDetector`, category-specific `RetrievalParams` for VectorCypher recall
 - `pipelines/flows/ingest.py` — Document ingestion pipeline with entity ID mapping
 - `db/migrations/env.py` — Alembic env with advisory locking and programmatic config
+- `cli/ontology/` — AI-powered ontology construction CLI (`construct`, `validate`, `preview`)
 
 ## Engine Selection
 
 | Use Case | Engine | Key Trait |
 |----------|--------|-----------|
-| Knowledge bases, entity exploration | `graphrag` | Full graph extraction, requires Neo4j/Kuzu |
-| Multi-hop queries, complex relationships | `vectorcypher` | Vector + Cypher hybrid, requires Neo4j |
-| Chat history, event streams, cost-sensitive | `skeleton` | Temporal-first, 5-10x fewer LLM calls, Neo4j optional |
+| Knowledge bases, entity exploration | `graphrag` | Full graph extraction, requires Neo4j or SurrealDB |
+| Multi-hop queries, complex relationships | `vectorcypher` | Vector + Cypher hybrid, requires Neo4j or SurrealDB |
+| Chat history, event streams, cost-sensitive | `skeleton` | Temporal-first, 5-10x fewer LLM calls, graph backend optional |
+
+All three engines work with both the traditional stack (PostgreSQL + pgvector + Neo4j) and the unified SurrealDB backend.
 
 ## Testing
 
@@ -265,14 +273,6 @@ uv run ttoj install -p /path/to/worktree --symlink
 
 Files in `scripts/` are vendored from TTOJ and reviewed upstream. Do not include them in audit findings.
 
-## Conventions
-
-<!-- Replace with project-specific coding conventions. Examples:              -->
-<!-- - All API responses use a standard envelope: { data, error, meta }      -->
-<!-- - Prefer named exports over default exports                             -->
-<!-- - Database migrations must be backwards-compatible (expand-and-contract)-->
-<!-- - Error messages are user-facing; keep them clear and actionable        -->
-
 ## Ontology CLI
 
 The `khora ontology` command group provides AI-powered ontology construction:
@@ -309,7 +309,12 @@ uv run khora ontology preview ./my_ontology.yaml
 - **@trace decorator** — Use `from khora.telemetry import trace` for automatic span creation. Decorates sync/async functions, auto-captures arguments as span attributes (UUID→str, list/tuple/set→count, enum→value, complex objects skipped). Supports `include`/`exclude` filters and `result` extractor for return values. When logfire is absent, short-circuits to direct function call (zero overhead). Use `@trace` for simple span-per-function patterns; use `trace_span()` context manager for complex methods needing mid-function attributes. Example: `@trace("khora.search", exclude={"query"}, result=lambda r: {"count": len(r)})`
 - **Namespace versioning** — `MemoryNamespace` has two IDs: `id` (row-level, changes per version) and `namespace_id` (stable across versions). Public API methods accept `namespace_id` and resolve to the active version's `id` via DB lookup. Child table FKs reference `id`, not `namespace_id`. Resolution (`resolve_namespace`) is idempotent — accepts either ID type. This adds one indexed query per public API call (sub-ms but visible in benchmarks). If namespace versioning is removed in the future, the resolution layer and dual-ID scheme can be collapsed to a single UUID
 - **Downstream consumers** — `genesis` and `khora-benchmarks` depend on khora. Check compatibility when changing public APIs. `lake.storage` is a stable public API used by both
-- **Entity unique constraint** — `entities(namespace_id, name, entity_type)` has a UNIQUE constraint (migration 008). Entity upserts use `ON CONFLICT` on this constraint. Dedup migration is irreversible
+- **Entity unique constraint** — `entities(namespace_id, name, entity_type)` has a UNIQUE constraint (migration 008). Entity upserts use `ON CONFLICT` on this constraint. Dedup migration is irreversible. SurrealDB enforces the same constraint via `idx_entity_unique` on `(namespace, name, entity_type)`
+- **SurrealDB SDK version** — Khora pins `surrealdb>=2.0.0a1` for SurrealDB 3.x server support. The SDK embeds the Rust engine via PyO3 for embedded/memory modes. Install with `pip install khora[surrealdb]`
+- **SurrealDB entity key gate** — `_SurrealDBEntityKeyGate` (identical to Neo4j's `_EntityKeyGate`) serializes concurrent `upsert_entities_batch()` calls by `(namespace, name, type)` key using `asyncio.Condition`. Prevents the prefetch-compare-update race condition in the SurrealDB graph adapter
+- **SurrealDB KNN operator broken** — The `<|K|>` KNN operator is unreliable in embedded mode (parameterized limits fail with parse errors, hardcoded limits return 0 results). Vector search uses brute-force `ORDER BY vector::similarity::cosine(...)` instead. The HNSW index still accelerates distance computation. Monitor SurrealDB 3.x stable release for a fix
+- **SurrealDB unified backend** — When `backend=surrealdb`, all four adapter roles (relational, vector, graph, event store) share a single `SurrealDBConnection`. The `StorageCoordinator` detects this and skips duplicate writes. Connection modes: `memory://` (ephemeral), `surrealkv://path` (file-backed), `ws://host` (remote)
+- **SurrealDB has no Alembic** — Schema is defined declaratively in `storage/backends/surrealdb/schema.py` using `DEFINE ... IF NOT EXISTS`. Schema auto-initializes on every `connect()` call. Adding fields is safe (IF NOT EXISTS); removing or renaming fields requires manual intervention
 - **Pre-normalized embeddings** — All embeddings are L2-normalized at ingest time. Scoring uses `batch_dot_product` instead of `batch_cosine_similarity` for ~3x speedup. Dot product of unit vectors = cosine similarity
 - **MMR diversity enabled by default** — `enable_diversity=True` in `QuerySettings`. The MMR stage runs in Rust via `_accel.mmr_diversity_select` with NumPy and pure-Python fallbacks
 - **`include_sources` on read methods** — `recall()`, `get_entity()`, `list_entities()`, `find_related_entities()`, and `search_entities()` accept `include_sources: bool = False`. When `False` (default), no extra query runs — zero overhead. When `True`, `_populate_sources()` batch-fetches `DocumentSource` metadata (chunked at 1 000 IDs) and populates `chunk.source_document`, `entity.source_documents`, and `relationship.source_documents` in-place

@@ -25,3 +25,15 @@
 - 2026-03-24: DYT-984: Replace __slots__ detail tests with behavioral checks
 - 2026-03-25: DYT-882: Fix publish-accel uv cache failure
 - 2026-03-25: DYT-1114: Fix VectorCypher engine dropping non-scalar chunk metadata
+- 2026-03-25: DYT-1118: Align SurrealDB entity schema with ORM, use record links
+- 2026-03-25: DYT-1117: SurrealDB schema parity, SQL injection fixes, indexes
+- 2026-03-25: DYT-1119: Upgrade surrealdb Python SDK to 2.0.0a1
+- 2026-03-25: DYT-1115: Add entity key gate to prevent SurrealDB upsert races
+- 2026-03-25: DYT-1116: Remove no-op helpers, pass UUID to RecordID directly
+- 2026-03-25: DYT-1128: Ontology CLI scaffold with construct/validate/preview
+- 2026-03-25: DYT-1130: Ontology LLM wrapper with token/cost tracking
+- 2026-03-25: DYT-1129: Ontology data sampling with stratified multi-source support
+- 2026-03-25: DYT-1131: Ontology inference prompts and domain detection
+- 2026-03-25: DYT-1132: Ontology validation, output, and $EDITOR integration
+- 2026-03-25: DYT-1133: Ontology flow orchestrator and session management
+- 2026-03-25: DYT-1134: Ontology CLI tests (50 tests) and documentation
