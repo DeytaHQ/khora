@@ -12,6 +12,9 @@ make format            # Format code (black, isort, ruff)
 make lint              # Lint + typecheck (ruff, ty)
 make dev               # Start local databases (postgres + neo4j)
 uv run alembic upgrade head  # Run migrations
+uv run khora ontology construct --source <path>  # AI-powered ontology construction
+uv run khora ontology validate <file.yaml>       # Validate ontology YAML
+uv run khora ontology preview <file.yaml>        # Rich preview of ontology
 ```
 
 ## Architecture
@@ -269,6 +272,30 @@ Files in `scripts/` are vendored from TTOJ and reviewed upstream. Do not include
 <!-- - Prefer named exports over default exports                             -->
 <!-- - Database migrations must be backwards-compatible (expand-and-contract)-->
 <!-- - Error messages are user-facing; keep them clear and actionable        -->
+
+## Ontology CLI
+
+The `khora ontology` command group provides AI-powered ontology construction:
+
+```bash
+# Construct an ontology from local data (interactive)
+uv run khora ontology construct --source ./data/ --model gpt-4o
+
+# Non-interactive mode (CI/scripting)
+uv run khora ontology construct --source ./data/ --non-interactive --budget 2.00
+
+# Validate an existing ontology YAML
+uv run khora ontology validate ./my_ontology.yaml
+
+# Rich preview of an ontology
+uv run khora ontology preview ./my_ontology.yaml
+```
+
+**Key options:** `--source` (repeatable), `--model` (LiteLLM model ID), `--budget` (USD cap), `--output` (default `./ontology.yaml`), `--extends` (compose with builtin skill), `--resume` (continue from saved session)
+
+**Pipeline:** source scanning → data sampling (30K chars, sqrt-weighted) → domain detection → entity/relationship/rule inference → system prompt generation → YAML output
+
+**Module layout:** `src/khora/cli/ontology/` — `commands.py` (Click), `flow.py` (orchestrator), `llm.py` (LiteLLM wrapper), `sources/` (data handlers), `sampling/` (stratified sampler), `inference/` (LLM prompts + inferrers), `output/` (validation + serialization), `tui/` (Rich console), `session.py` (persistence)
 
 ## Gotchas
 
