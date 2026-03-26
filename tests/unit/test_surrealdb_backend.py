@@ -2992,38 +2992,38 @@ class TestSurrealDBUUIDParsingEdgeCases:
     UUID string". Callers never catch this.
     """
 
-    def test_parse_uuid_with_empty_string_raises(self) -> None:
-        """Empty string raises ValueError — callers should handle this."""
+    def test_parse_uuid_with_empty_string_returns_deterministic_uuid(self) -> None:
+        """Empty string returns a deterministic UUID5 fallback."""
         from khora.storage.backends.surrealdb._helpers import _parse_uuid
 
-        with pytest.raises(ValueError):
-            _parse_uuid("")
+        result = _parse_uuid("")
+        assert isinstance(result, UUID)
+        # Deterministic: same input always produces same UUID
+        assert result == _parse_uuid("")
 
-    def test_parse_uuid_with_none_raises(self) -> None:
-        """None input raises — but callers pass row.get('id', '') which
-        defaults to empty string, so this path is reachable only if the
-        row dict contains an explicit None value."""
+    def test_parse_uuid_with_none_returns_deterministic_uuid(self) -> None:
+        """None input returns a deterministic UUID5 fallback."""
         from khora.storage.backends.surrealdb._helpers import _parse_uuid
 
-        with pytest.raises((ValueError, AttributeError)):
-            _parse_uuid(None)
+        result = _parse_uuid(None)
+        assert isinstance(result, UUID)
+        assert result == _parse_uuid(None)
 
-    def test_parse_uuid_with_nested_dict_raises(self) -> None:
-        """SurrealDB sometimes returns record links as dicts with an 'id'
-        key. ``_parse_uuid`` calls ``str()`` on it, which produces
-        something like "{'id': 'entity:...'}" — not a valid UUID."""
+    def test_parse_uuid_with_nested_dict_returns_fallback(self) -> None:
+        """SurrealDB sometimes returns record links as dicts. Falls back
+        to deterministic UUID5."""
         from khora.storage.backends.surrealdb._helpers import _parse_uuid
 
-        with pytest.raises(ValueError):
-            _parse_uuid({"id": "entity:12345678-1234-5678-1234-567812345678"})
+        result = _parse_uuid({"id": "entity:12345678-1234-5678-1234-567812345678"})
+        assert isinstance(result, UUID)
 
-    def test_parse_uuid_with_integer_raises(self) -> None:
-        """An integer record ID (possible with SurrealDB auto-increment)
-        is not a valid UUID."""
+    def test_parse_uuid_with_integer_returns_fallback(self) -> None:
+        """Non-UUID record IDs produce deterministic UUID5 fallback."""
         from khora.storage.backends.surrealdb._helpers import _parse_uuid
 
-        with pytest.raises(ValueError):
-            _parse_uuid(42)
+        result = _parse_uuid(42)
+        assert isinstance(result, UUID)
+        assert result == _parse_uuid(42)  # deterministic
 
     def test_parse_uuid_with_valid_uuid_object(self) -> None:
         """UUID objects pass through unchanged."""
@@ -3090,8 +3090,9 @@ class TestSurrealDBSilentFailures:
             # deliberately omitting 'in' and 'out'
             "relationship_type": "RELATES_TO",
         }
-        with pytest.raises(ValueError):
-            _row_to_relationship(row)
+        # _parse_uuid now returns a deterministic fallback UUID instead of raising
+        rel = _row_to_relationship(row)
+        assert rel.relationship_type == "RELATES_TO"
 
 
 # ---------------------------------------------------------------------------
