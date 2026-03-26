@@ -7,8 +7,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from khora.cli.ontology.commands import ontology_group
-from khora.cli.ontology.discover import _has_discovery_keys, _render_discovered_sources
-from khora.discovery.state import DiscoveredSource, SourceType
+from khora.cli.ontology.discover import _has_discovery_keys
 
 
 class TestHasDiscoveryKeys:
@@ -29,27 +28,6 @@ class TestHasDiscoveryKeys:
             keys = _has_discovery_keys()
             assert keys["perplexity"] is False
             assert keys["firecrawl"] is False
-
-
-class TestRenderDiscoveredSources:
-    def test_renders_table(self) -> None:
-        sources = [
-            DiscoveredSource(
-                url="https://example.com/data.csv",
-                title="Test Dataset",
-                source_type=SourceType.CSV,
-                relevance_score=0.85,
-            ),
-            DiscoveredSource(
-                url="https://api.example.com/v1",
-                title="Test API",
-                source_type=SourceType.API,
-                relevance_score=0.3,
-            ),
-        ]
-        table = _render_discovered_sources(sources)
-        assert table.title == "Discovered Sources"
-        assert table.row_count == 2
 
 
 class TestDiscoverCommand:
