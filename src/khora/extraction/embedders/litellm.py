@@ -90,6 +90,7 @@ class LiteLLMEmbedder(Embedder):
         timeout: int = 30,
         max_retries: int = 3,
         batch_size: int = 200,
+        max_batch_tokens: int = 50_000,
         cache_max_size: int = 50000,
         embed_concurrency: int = 20,
         retry_wait: float = 1.0,
@@ -103,7 +104,11 @@ class LiteLLMEmbedder(Embedder):
             dimension: Embedding vector dimension
             timeout: Request timeout in seconds
             max_retries: Maximum retries on failure
-            batch_size: Maximum batch size for embed_batch
+            batch_size: Maximum texts per sub-batch (hard cap)
+            max_batch_tokens: Maximum estimated tokens per sub-batch.
+                Dynamically sizes batches so short texts get large batches
+                and long texts get small batches, keeping API response
+                payloads under ~2MB to avoid HTTP transfer corruption.
             cache_max_size: Maximum cached embeddings (0 to disable)
             embed_concurrency: Maximum concurrent embedding sub-batch API calls
             retry_wait: Base wait time (seconds) for exponential backoff between retries
@@ -115,6 +120,7 @@ class LiteLLMEmbedder(Embedder):
         self._timeout = timeout
         self._max_retries = max_retries
         self._batch_size = batch_size
+        self._max_batch_tokens = max_batch_tokens
         self._embed_concurrency = embed_concurrency
         self._retry_wait = retry_wait
         self._cache: OrderedDict[str, tuple[list[float], float]] = OrderedDict()
@@ -191,6 +197,8 @@ class LiteLLMEmbedder(Embedder):
             max_retries=config.max_retries,
             retry_wait=config.retry_wait,
             embed_concurrency=config.embed_concurrency,
+            batch_size=getattr(config, "embed_batch_size", 200),
+            max_batch_tokens=getattr(config, "embed_batch_tokens", 50_000),
         )
 
     @property
@@ -217,6 +225,33 @@ class LiteLLMEmbedder(Embedder):
             return cached
         embeddings = await self.embed_batch([text])
         return embeddings[0]
+
+    def _split_by_budget(self, texts: list[str]) -> list[list[str]]:
+        """Split texts into sub-batches respecting both count and token limits.
+
+        Uses ``len(text) // 4`` as a cheap token estimate (avoids tiktoken
+        overhead).  Each sub-batch stays under *both* ``_batch_size`` texts
+        and ``_max_batch_tokens`` estimated tokens.  Short texts get large
+        batches; long texts get small batches — keeping API response payloads
+        under ~2 MB regardless of input content length.
+        """
+        batches: list[list[str]] = []
+        current: list[str] = []
+        current_tokens = 0
+
+        for text in texts:
+            est_tokens = max(len(text) // 4, 1)
+            # Start a new batch if adding this text would exceed either limit
+            if current and (len(current) >= self._batch_size or current_tokens + est_tokens > self._max_batch_tokens):
+                batches.append(current)
+                current = []
+                current_tokens = 0
+            current.append(text)
+            current_tokens += est_tokens
+
+        if current:
+            batches.append(current)
+        return batches
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for multiple texts.
@@ -290,10 +325,8 @@ class LiteLLMEmbedder(Embedder):
                 api_span.set_attribute("batch_size", len(uncached_texts))
                 api_span.set_attribute("deduplicated", len(uncached_texts) - len(unique_texts))
 
-                if len(unique_texts) > self._batch_size:
-                    sub_batches = [
-                        unique_texts[i : i + self._batch_size] for i in range(0, len(unique_texts), self._batch_size)
-                    ]
+                sub_batches = self._split_by_budget(unique_texts)
+                if len(sub_batches) > 1:
                     api_span.set_attribute("sub_batches", len(sub_batches))
                     sem = asyncio.Semaphore(self._embed_concurrency)
 
