@@ -7,6 +7,7 @@ indexing and BM25 full-text search.  Reuses the shared
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -31,6 +32,27 @@ from khora.telemetry import trace, trace_span
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
     from khora.config.schema import SurrealDBConfig
+
+
+def _ensure_list(value: Any) -> list:
+    """Coerce a value to a list for SurrealDB array fields.
+
+    Handles JSON strings (e.g., ``'["a","b"]'``) from PostgreSQL metadata
+    that weren't deserialized to native Python lists.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return [value] if value else []
+    return list(value)
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +205,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                     "source_system": chunk.source_system,
                     "author": chunk.author,
                     "channel": chunk.channel,
-                    "tags": chunk.tags or [],
+                    "tags": _ensure_list(chunk.tags),
                     "confidence": chunk.confidence,
                     "metadata_": chunk.metadata or {},
                 }
@@ -495,7 +517,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
             "source_system": chunk.source_system,
             "author": chunk.author,
             "channel": chunk.channel,
-            "tags": chunk.tags or [],
+            "tags": _ensure_list(chunk.tags),
             "confidence": chunk.confidence,
             "metadata_": chunk.metadata or {},
         }
