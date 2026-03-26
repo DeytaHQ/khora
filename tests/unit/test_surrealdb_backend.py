@@ -2003,20 +2003,21 @@ class TestSurrealDBGraphAdapterEntity:
 
         eid = uuid4()
         conn = _make_mock_conn()
-        # delete_entity calls query_one to check existence, then execute to delete
-        conn.query_one = AsyncMock(return_value={"cnt": 1})
+        # delete_entity uses DELETE RETURN BEFORE; non-empty list means entity existed
+        conn.query = AsyncMock(return_value=[{"id": f"entity:⟨{eid}⟩"}])
         adapter = SurrealDBGraphAdapter(conn)
 
         result = await adapter.delete_entity(eid)
         assert result is True
-        conn.query_one.assert_awaited_once()
-        conn.execute.assert_awaited()
+        conn.execute.assert_awaited()  # relationship delete
+        conn.query.assert_awaited()  # entity DELETE RETURN BEFORE
 
     async def test_delete_entity_not_found(self) -> None:
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
 
         conn = _make_mock_conn()
-        conn.query_one = AsyncMock(return_value=None)
+        # Empty list from DELETE RETURN BEFORE means nothing was deleted
+        conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBGraphAdapter(conn)
 
         result = await adapter.delete_entity(uuid4())
@@ -2152,14 +2153,13 @@ class TestSurrealDBGraphAdapterRelationship:
 
         rel_id = uuid4()
         conn = _make_mock_conn()
-        # delete_relationship calls query_one to check existence, then execute to delete
-        conn.query_one = AsyncMock(return_value={"cnt": 1})
+        # DELETE RETURN BEFORE returns deleted rows
+        conn.query = AsyncMock(return_value=[{"rel_id": str(rel_id)}])
         adapter = SurrealDBGraphAdapter(conn)
 
         result = await adapter.delete_relationship(rel_id)
         assert result is True
-        conn.query_one.assert_awaited_once()
-        conn.execute.assert_awaited_once()
+        conn.query.assert_awaited_once()
 
     async def test_get_entity_relationships_outgoing(self) -> None:
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter

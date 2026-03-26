@@ -296,21 +296,17 @@ class SurrealDBGraphAdapter:
     @trace("khora.surrealdb.graph.delete_entity", include={"entity_id"})
     async def delete_entity(self, entity_id: UUID) -> bool:
         eid = _rid("entity", entity_id)
-        # Check existence first
-        check = await self._conn.query_one(
-            "SELECT count() AS cnt FROM entity WHERE id = $eid GROUP ALL",
-            {"eid": eid},
-        )
-        if not check or int(check.get("cnt", 0)) == 0:
-            return False
-
-        # Delete relationships referencing this entity, then the entity itself
+        # Delete relationships first, then the entity.
+        # DELETE ... RETURN BEFORE returns deleted rows (empty list if nothing matched).
         await self._conn.execute(
             "DELETE FROM relates_to WHERE in = $eid OR out = $eid",
             {"eid": eid},
         )
-        await self._conn.execute("DELETE FROM entity WHERE id = $eid", {"eid": eid})
-        return True
+        deleted = await self._conn.query(
+            "DELETE FROM entity WHERE id = $eid RETURN BEFORE",
+            {"eid": eid},
+        )
+        return len(deleted) > 0
 
     @trace(
         "khora.surrealdb.graph.list_entities",
@@ -537,15 +533,12 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.delete_relationship", include={"relationship_id"})
     async def delete_relationship(self, relationship_id: UUID) -> bool:
-        # Check existence
-        check = await self._conn.query_one(
-            "SELECT count() AS cnt FROM relates_to WHERE rel_id = $rel_id GROUP ALL",
+        # DELETE ... RETURN BEFORE returns deleted rows (empty if nothing matched)
+        deleted = await self._conn.query(
+            "DELETE FROM relates_to WHERE rel_id = $rel_id RETURN BEFORE",
             {"rel_id": str(relationship_id)},
         )
-        if not check or int(check.get("cnt", 0)) == 0:
-            return False
-        await self._conn.execute("DELETE FROM relates_to WHERE rel_id = $rel_id", {"rel_id": str(relationship_id)})
-        return True
+        return len(deleted) > 0
 
     @trace(
         "khora.surrealdb.graph.get_entity_relationships",
