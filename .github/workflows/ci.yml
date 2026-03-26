@@ -7,6 +7,14 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # ============================================================================
   # Test Job — runs on all pushes and PRs
@@ -91,11 +99,21 @@ jobs:
       - name: Compute dev version from git describe
         id: version
         run: |
-          DESC=$(git describe --tags --match 'v*' --long)
+          DESC=$(git describe --tags --match 'v*' --long) || {
+            echo "::error::No v* tags found. Create at least one version tag."
+            exit 1
+          }
           echo "git describe: $DESC"
-          TAG=$(echo "$DESC" | sed 's/-[0-9]*-g[0-9a-f]*$//')
-          DISTANCE=$(echo "$DESC" | sed 's/.*-\([0-9]*\)-g[0-9a-f]*$/\1/')
-          BASE=${TAG#v}
+          # Extract distance and hash from the guaranteed --long suffix: -DISTANCE-gHASH
+          DISTANCE=$(echo "$DESC" | grep -oE '\-([0-9]+)\-g[0-9a-f]+$' | cut -d- -f2)
+          # Tag is everything before -DISTANCE-gHASH
+          TAG=$(echo "$DESC" | sed "s/-${DISTANCE}-g[0-9a-f]*$//")
+          # Strip v prefix and any pre-release suffix (e.g. v1.0.0-rc1 → 1.0.0)
+          BASE=$(echo "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          if [ -z "$BASE" ] || [ -z "$DISTANCE" ]; then
+            echo "::error::Failed to parse git describe output: $DESC"
+            exit 1
+          fi
           MAJOR=$(echo "$BASE" | cut -d. -f1)
           MINOR=$(echo "$BASE" | cut -d. -f2)
           PATCH=$(echo "$BASE" | cut -d. -f3)
@@ -131,11 +149,11 @@ jobs:
 
   publish-dev-khora:
     needs: build-accel-dev
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      id-token: write
-      contents: read
+    env:
+      SETUPTOOLS_SCM_LOCAL_SCHEME: no-local-version
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -170,9 +188,8 @@ jobs:
       - name: Build wheel
         run: |
           python -m build
+          ls dist/*.whl || { echo "::error::No wheels produced"; exit 1; }
           echo "Built: $(ls dist/)"
-        env:
-          SETUPTOOLS_SCM_LOCAL_SCHEME: no-local-version
 
       - name: Publish to CodeArtifact
         run: |
@@ -184,11 +201,9 @@ jobs:
 
   publish-dev-accel:
     needs: build-accel-dev
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      id-token: write
-      contents: read
     steps:
       - name: Download all wheel artifacts
         uses: actions/download-artifact@v4

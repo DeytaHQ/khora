@@ -87,7 +87,7 @@ The `>=X.Y.Z.dev0` specifier tells uv to accept dev/pre-release versions for the
 
 The `upgrade-package` setting makes every `uv sync` re-resolve these packages to the latest available version, ignoring the lockfile pin. No CLI flags needed — plain `uv sync` does the right thing.
 
-> **Note:** This will update `uv.lock` on every sync when a newer version is available. This is intentional — commit the lockfile updates as part of normal workflow.
+> **Note:** This will update `uv.lock` on every `uv sync` when a newer dev version is available. With frequent merges to main, expect lockfile changes daily. This is intentional — commit the updates as part of normal workflow. If lockfile churn is disruptive, pin to a specific dev version instead (e.g., `khora==0.5.5.dev14`).
 
 ## Troubleshooting
 
