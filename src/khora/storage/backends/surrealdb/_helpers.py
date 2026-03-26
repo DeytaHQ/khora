@@ -55,7 +55,9 @@ def _parse_uuid(record_id: str | dict | UUID | Any) -> UUID:
     """Extract a UUID from a SurrealDB record ID.
 
     Handles strings like ``chunk:018f...``, ``chunk:⟨018f...⟩``,
-    bare UUID strings, and ``uuid.UUID`` objects.
+    bare UUID strings, and ``uuid.UUID`` objects.  For non-UUID record
+    IDs (e.g. SurrealDB auto-generated RELATE IDs), generates a
+    deterministic UUID5 from the string so callers always get a valid UUID.
     """
     if isinstance(record_id, UUID):
         return record_id
@@ -64,7 +66,15 @@ def _parse_uuid(record_id: str | dict | UUID | Any) -> UUID:
     if m:
         return UUID(m.group(1))
     # Fall back: try treating the whole string as a UUID
-    return UUID(raw)
+    try:
+        return UUID(raw)
+    except (ValueError, AttributeError):
+        # Non-UUID record ID (e.g. SurrealDB auto-generated RELATE ID).
+        # Generate a deterministic UUID5 so the same record always maps
+        # to the same UUID.
+        from uuid import NAMESPACE_URL, uuid5
+
+        return uuid5(NAMESPACE_URL, raw)
 
 
 def _parse_dt(val: Any) -> datetime | None:
