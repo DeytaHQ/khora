@@ -98,6 +98,19 @@ class LiteLLMConfig(BaseModel):
         gt=0,
         description="Maximum concurrent embedding API calls",
     )
+    embed_batch_size: int = Field(
+        default=200,
+        gt=0,
+        description="Maximum texts per embedding API sub-batch (hard cap)",
+    )
+    embed_batch_tokens: int = Field(
+        default=50_000,
+        gt=0,
+        description="Maximum estimated tokens per embedding sub-batch. "
+        "Dynamically sizes batches so short texts get large batches "
+        "and long texts get small batches, keeping API response "
+        "payloads under ~2MB.",
+    )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
