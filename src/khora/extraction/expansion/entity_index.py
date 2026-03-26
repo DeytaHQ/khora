@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from khora._accel import batch_dot_product, levenshtein_similarity, normalize_entity_name
+from khora._accel import batch_dot_product, batch_levenshtein, normalize_entity_name
 
 if TYPE_CHECKING:
     from khora.core.models import Entity
@@ -189,15 +189,22 @@ class EntityIndex:
         self,
         entity: Entity,
         threshold: float = 0.85,
+        *,
+        max_candidates: int = 100,
+        min_shared_tokens: int = 1,
+        skip_ids: set[UUID] | None = None,
     ) -> list[tuple[Entity, float]]:
         """Find entities sharing name tokens AND same type, ranked by Levenshtein.
 
-        Only computes Levenshtein on the *blocked* candidate set (entities
-        sharing at least one token), giving O(k) instead of O(n).
+        Uses token blocking to generate candidates, then scores the entire
+        batch in a single ``batch_levenshtein`` call (Rust/rayon parallelism).
 
         Args:
             entity: Query entity.
             threshold: Minimum similarity to return.
+            max_candidates: Cap on candidates before scoring (by token overlap).
+            min_shared_tokens: Minimum shared tokens to be a candidate.
+            skip_ids: Entity IDs to exclude (e.g., already-processed).
 
         Returns:
             List of (candidate, similarity) pairs, highest first.
@@ -207,29 +214,55 @@ class EntityIndex:
         if not tokens:
             return []
 
-        # Gather candidate IDs via token blocking
-        candidate_ids: set[UUID] = set()
+        # Gather candidate IDs via token blocking with overlap counting
+        candidate_overlap: dict[UUID, int] = {}
         for token in tokens:
-            candidate_ids |= self._token.get(token, set())
+            posting = self._token.get(token)
+            if posting is None:
+                continue
+            # Skip high-frequency tokens (stopword-like, defeat blocking)
+            if len(posting) > 500:
+                continue
+            for cid in posting:
+                candidate_overlap[cid] = candidate_overlap.get(cid, 0) + 1
 
-        # Remove self
-        candidate_ids.discard(entity.id)
+        # Remove self and skip_ids
+        candidate_overlap.pop(entity.id, None)
+        if skip_ids:
+            for sid in skip_ids:
+                candidate_overlap.pop(sid, None)
 
-        results: list[tuple[Entity, float]] = []
+        # Filter by minimum shared tokens
+        if min_shared_tokens > 1:
+            candidate_overlap = {cid: count for cid, count in candidate_overlap.items() if count >= min_shared_tokens}
+
+        if not candidate_overlap:
+            return []
+
+        # Filter to same type, skip exact matches, cap candidates
         normalized = normalize_entity_name(entity.name)
+        valid_candidates: list[Entity] = []
+        valid_names: list[str] = []
 
-        for cid in candidate_ids:
+        # Sort by overlap count descending, take top max_candidates
+        sorted_ids = sorted(candidate_overlap, key=candidate_overlap.__getitem__, reverse=True)
+        for cid in sorted_ids:
+            if len(valid_candidates) >= max_candidates:
+                break
             candidate = self._by_id.get(cid)
-            if candidate is None:
+            if candidate is None or candidate.entity_type != type_str:
                 continue
-            if candidate.entity_type != type_str:
-                continue
-            # Skip exact matches (already handled by add())
             if normalize_entity_name(candidate.name) == normalized:
                 continue
-            sim = levenshtein_similarity(entity.name, candidate.name)
-            if sim >= threshold:
-                results.append((candidate, sim))
+            valid_candidates.append(candidate)
+            valid_names.append(candidate.name)
+
+        if not valid_candidates:
+            return []
+
+        # Batch Levenshtein — single Rust call with rayon parallelism
+        scored = batch_levenshtein(entity.name, valid_names, threshold)
+        results: list[tuple[Entity, float]] = [(valid_candidates[idx], sim) for idx, sim in scored]
 
         results.sort(key=lambda x: x[1], reverse=True)
         return results
@@ -238,6 +271,9 @@ class EntityIndex:
         self,
         entity: Entity,
         threshold: float = 0.85,
+        *,
+        max_candidates: int = 100,
+        skip_ids: set[UUID] | None = None,
     ) -> list[tuple[Entity, float]]:
         """Find entities sharing name tokens AND same type, ranked by cosine similarity.
 
@@ -247,6 +283,8 @@ class EntityIndex:
         Args:
             entity: Query entity (must have a non-None embedding).
             threshold: Minimum cosine similarity to return.
+            max_candidates: Cap on candidates before scoring (by token overlap).
+            skip_ids: Entity IDs to exclude (e.g., already-processed).
 
         Returns:
             List of (candidate, similarity) pairs, highest first.
@@ -257,17 +295,33 @@ class EntityIndex:
         type_str = entity.entity_type
         tokens = _tokenize(entity.name)
 
-        # Gather candidate IDs via token blocking
-        candidate_ids: set[UUID] = set()
+        # Gather candidate IDs via token blocking with overlap counting
+        candidate_overlap: dict[UUID, int] = {}
         for token in tokens:
-            candidate_ids |= self._token.get(token, set())
+            posting = self._token.get(token)
+            if posting is None:
+                continue
+            if len(posting) > 500:
+                continue
+            for cid in posting:
+                candidate_overlap[cid] = candidate_overlap.get(cid, 0) + 1
 
-        candidate_ids.discard(entity.id)
+        candidate_overlap.pop(entity.id, None)
+        if skip_ids:
+            for sid in skip_ids:
+                candidate_overlap.pop(sid, None)
 
-        # Collect valid candidates and their embeddings for batch comparison
+        if not candidate_overlap:
+            return []
+
+        # Collect valid candidates and their embeddings, capped by token overlap
         valid_candidates: list[Entity] = []
         candidate_embeddings: list[list[float]] = []
-        for cid in candidate_ids:
+
+        sorted_ids = sorted(candidate_overlap, key=candidate_overlap.__getitem__, reverse=True)
+        for cid in sorted_ids:
+            if len(valid_candidates) >= max_candidates:
+                break
             candidate = self._by_id.get(cid)
             if candidate is None or not candidate.embedding:
                 continue
