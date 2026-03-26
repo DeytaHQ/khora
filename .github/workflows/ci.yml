@@ -7,9 +7,16 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # ============================================================================
-  # Test Job - Runs on all pushes and PRs
+  # Test Job — runs on all pushes and PRs
   # ============================================================================
   test:
     runs-on: ubuntu-latest
@@ -55,3 +62,190 @@ jobs:
           flags: unittests
           name: khora-coverage
           fail_ci_if_error: false
+
+  # ============================================================================
+  # Dev Release — publish dev versions on every merge to main.
+  #
+  # Pipeline (mirrors release.yml structure):
+  #   test ──> build-accel-dev (3 platforms) ──┬──> publish-dev-khora
+  #                                            └──> publish-dev-accel
+  #
+  # Version: hatch-vcs produces e.g. 0.5.5.dev14 (PEP 440 dev release).
+  # khora-accel: git describe → semver pre-release (0.5.5-dev.14).
+  # ============================================================================
+
+  build-accel-dev:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute dev version from git describe
+        id: version
+        run: |
+          DESC=$(git describe --tags --match 'v*' --long) || {
+            echo "::error::No v* tags found. Create at least one version tag."
+            exit 1
+          }
+          echo "git describe: $DESC"
+          # Extract distance and hash from the guaranteed --long suffix: -DISTANCE-gHASH
+          DISTANCE=$(echo "$DESC" | grep -oE '\-([0-9]+)\-g[0-9a-f]+$' | cut -d- -f2)
+          # Tag is everything before -DISTANCE-gHASH
+          TAG=$(echo "$DESC" | sed "s/-${DISTANCE}-g[0-9a-f]*$//")
+          # Strip v prefix and any pre-release suffix (e.g. v1.0.0-rc1 → 1.0.0)
+          BASE=$(echo "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          if [ -z "$BASE" ] || [ -z "$DISTANCE" ]; then
+            echo "::error::Failed to parse git describe output: $DESC"
+            exit 1
+          fi
+          MAJOR=$(echo "$BASE" | cut -d. -f1)
+          MINOR=$(echo "$BASE" | cut -d. -f2)
+          PATCH=$(echo "$BASE" | cut -d. -f3)
+          NEXT_PATCH=$((PATCH + 1))
+          CARGO_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}-dev.${DISTANCE}"
+          echo "cargo_version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing khora-accel dev: $CARGO_VERSION"
+
+      - name: Set version in Cargo.toml
+        run: |
+          sed -i.bak "s/^version = .*/version = \"${{ steps.version.outputs.cargo_version }}\"/" rust/khora-accel/Cargo.toml
+          rm -f rust/khora-accel/Cargo.toml.bak
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter python3.13
+          working-directory: rust/khora-accel
+          manylinux: auto
+          sccache: 'true'
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-wheel-${{ matrix.target }}
+          path: rust/khora-accel/dist/*.whl
+
+  publish-dev-khora:
+    needs: build-accel-dev
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      SETUPTOOLS_SCM_LOCAL_SCHEME: no-local-version
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install build dependencies
+        run: uv pip install build twine --system
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::956322716887:role/github-actions-codeartifact-publish
+          aws-region: us-west-2
+
+      - name: Get CodeArtifact authorization token
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token --domain deyta --query authorizationToken --output text)
+          echo "::add-mask::$TOKEN"
+          echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Build wheel
+        run: |
+          python -m build
+          ls dist/*.whl || { echo "::error::No wheels produced"; exit 1; }
+          echo "Built: $(ls dist/)"
+
+      - name: Publish to CodeArtifact
+        run: |
+          twine upload \
+            --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
+            --username aws \
+            --password "${{ env.CA_TOKEN }}" \
+            dist/*
+
+  publish-dev-accel:
+    needs: build-accel-dev
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dev-wheel-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: false
+
+      - name: Install twine
+        run: uv pip install twine --system
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::956322716887:role/github-actions-codeartifact-publish
+          aws-region: us-west-2
+
+      - name: Get CodeArtifact authorization token
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token --domain deyta --query authorizationToken --output text)
+          echo "::add-mask::$TOKEN"
+          echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Publish to CodeArtifact
+        run: |
+          twine upload \
+            --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
+            --username aws \
+            --password "${{ env.CA_TOKEN }}" \
+            dist/*
