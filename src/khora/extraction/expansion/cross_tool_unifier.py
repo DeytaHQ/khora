@@ -292,16 +292,19 @@ class CrossToolUnifier:
             return pairs
 
         if entity_index is not None:
-            # Blocked matching: O(n*k) via entity_index
+            # Blocked matching: O(n*k) via entity_index.
+            # Pass processed_ids to skip reverse comparisons (A→B and B→A).
             seen: set[tuple[UUID, UUID]] = set()
+            processed_ids: set[UUID] = set()
             for entity in with_embeddings:
                 for candidate, similarity in entity_index.find_embedding_candidates(
-                    entity, threshold=self._embedding_threshold
+                    entity, threshold=self._embedding_threshold, skip_ids=processed_ids
                 ):
                     pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
                     if pair not in seen:
                         seen.add(pair)
                         pairs.append((entity.id, candidate.id))
+                processed_ids.add(entity.id)
             return pairs
 
         # Fallback: O(n^2) pairwise comparison
@@ -331,16 +334,19 @@ class CrossToolUnifier:
         pairs = []
 
         if entity_index is not None:
-            # Blocked matching: O(n*k)
+            # Blocked matching: O(n*k) with batch_levenshtein.
+            # Pass processed_ids to skip reverse comparisons.
             seen: set[tuple[UUID, UUID]] = set()
+            processed_ids: set[UUID] = set()
             for entity in entities:
                 for candidate, similarity in entity_index.find_fuzzy_candidates(
-                    entity, threshold=self._fuzzy_threshold
+                    entity, threshold=self._fuzzy_threshold, skip_ids=processed_ids
                 ):
                     pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
                     if pair not in seen:
                         seen.add(pair)
                         pairs.append((entity.id, candidate.id))
+                processed_ids.add(entity.id)
             return pairs
 
         # Fallback: O(n^2) pairwise within type groups
