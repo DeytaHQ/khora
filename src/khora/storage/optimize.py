@@ -364,18 +364,41 @@ async def ensure_hnsw_indexes(engine) -> dict:
         ),
     ]
 
-    for idx_name, ddl in hnsw_ddl:
+    import asyncio
+
+    async def _create_one(idx_name: str, ddl: str) -> tuple[bool, str | None]:
         try:
             async with engine.connect() as conn:
                 await conn.execution_options(isolation_level="AUTOCOMMIT")
+                # Check if index already exists to know if CREATE is a no-op
+                row = await conn.execute(
+                    text("SELECT 1 FROM pg_indexes WHERE indexname = :name"),
+                    {"name": idx_name},
+                )
+                already_exists = row.scalar() is not None
+                if already_exists:
+                    logger.debug(f"HNSW index {idx_name} already exists, skipping CREATE")
+                    return False, None
                 logger.info(f"Creating HNSW index {idx_name}")
                 await conn.execute(text(ddl))
-            result["indexes_created"] += 1
+                return True, None
         except Exception as e:
-            msg = f"CREATE INDEX {idx_name}: {e}"
-            result["errors"].append(msg)
-            logger.warning(msg)
+            return False, f"CREATE INDEX {idx_name}: {e}"
 
+    # Build both indexes in parallel (independent tables, no lock contention)
+    tasks = [_create_one(name, ddl) for name, ddl in hnsw_ddl]
+    outcomes = await asyncio.gather(*tasks)
+
+    freshly_created = 0
+    for created, error in outcomes:
+        if error:
+            result["errors"].append(error)
+            logger.warning(error)
+        elif created:
+            freshly_created += 1
+
+    result["indexes_created"] = freshly_created
+    result["freshly_created"] = freshly_created
     return result
 
 
@@ -544,16 +567,22 @@ async def optimize_postgresql(engine, *, reindex_hnsw: bool = True) -> dict:
                 result["errors"].append(msg)
                 logger.warning(msg)
 
-    # Ensure HNSW indexes exist (may have been dropped by prepare_for_bulk_load)
-    # then reindex them for optimal recall after bulk operations.
+    # Ensure HNSW indexes exist (may have been dropped by prepare_for_bulk_load).
+    # Only reindex when indexes already existed before ensure — a freshly created
+    # index is already optimal, so REINDEX would duplicate the build work.
     if reindex_hnsw:
         ensure_result = await ensure_hnsw_indexes(engine)
         result["indexes_created"] += ensure_result["indexes_created"]
         result["errors"].extend(ensure_result["errors"])
 
-        hnsw_result = await reindex_hnsw_concurrently(engine)
-        result["hnsw_reindexed"] = hnsw_result["indexes_reindexed"]
-        result["errors"].extend(hnsw_result["errors"])
+        freshly_created = ensure_result.get("freshly_created", 0)
+        if freshly_created == 0:
+            # Indexes pre-existed — they may be suboptimal after bulk inserts
+            hnsw_result = await reindex_hnsw_concurrently(engine)
+            result["hnsw_reindexed"] = hnsw_result["indexes_reindexed"]
+            result["errors"].extend(hnsw_result["errors"])
+        else:
+            logger.info(f"Skipping REINDEX — {freshly_created} HNSW index(es) freshly created")
 
     return result
 
