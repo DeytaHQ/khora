@@ -395,20 +395,15 @@ class SurrealDBGraphAdapter:
         entities: list[Entity],
     ) -> list[tuple[Entity, bool]]:
         """Inner upsert logic, called while holding the entity key gate."""
-        # 1. Batch-fetch all existing entities matching any (name, type) pair
-        #    in a single query instead of N individual lookups.
-        name_type_pairs = [(e.name, e.entity_type) for e in entities]
-        # Build OR conditions for each unique (name, entity_type)
-        or_clauses = []
-        fetch_bindings: dict[str, Any] = {}
-        for i, (name, etype) in enumerate(name_type_pairs):
-            or_clauses.append(f"(name = $n{i} AND entity_type = $t{i})")
-            fetch_bindings[f"n{i}"] = name
-            fetch_bindings[f"t{i}"] = etype
-
-        fetch_sql = "SELECT * FROM entity WHERE namespace = $ns_rid " f"AND ({' OR '.join(or_clauses)})"
-        fetch_bindings["ns_rid"] = ns_rid
-        existing_rows = await self._conn.query(fetch_sql, fetch_bindings)
+        # 1. Batch-fetch all existing entities matching any (name, type) pair.
+        #    Uses SurrealDB tuple IN syntax: [name, entity_type] IN $pairs
+        #    which is more efficient than N OR clauses for large batches.
+        unique_pairs = list({(e.name, e.entity_type) for e in entities})
+        fetch_sql = "SELECT * FROM entity WHERE namespace = $ns_rid " "AND [name, entity_type] IN $pairs"
+        existing_rows = await self._conn.query(
+            fetch_sql,
+            {"ns_rid": ns_rid, "pairs": [list(p) for p in unique_pairs]},
+        )
 
         # Index existing entities by (name, entity_type)
         existing_map: dict[tuple[str, str], Entity] = {}
@@ -433,32 +428,35 @@ class SurrealDBGraphAdapter:
                 to_create.append(entity)
                 results.append((entity, True))
 
-        # 3. Batch create new entities in a single FOR statement
+        # 3. Batch create new entities via INSERT INTO (faster than FOR loops).
+        #    INSERT INTO expects records with schema field names as keys.
         if to_create:
-            create_data = [_entity_to_bindings(e) for e in to_create]
-            create_sql = (
-                "FOR $e IN $entities {"
-                "  CREATE entity:\u27e8$e.id\u27e9 SET "
-                "    namespace = memory_namespace:\u27e8$e.ns\u27e9, "
-                "    name = $e.name, "
-                "    entity_type = $e.entity_type, "
-                "    description = $e.description, "
-                "    attributes = $e.attributes, "
-                "    source_document_ids = $e.source_document_ids, "
-                "    source_chunk_ids = $e.source_chunk_ids, "
-                "    source_tool = $e.source_tool, "
-                "    mention_count = $e.mention_count, "
-                "    embedding = $e.embedding, "
-                "    embedding_model = $e.embedding_model, "
-                "    valid_from = $e.valid_from, "
-                "    valid_until = $e.valid_until, "
-                "    confidence = $e.confidence, "
-                "    metadata_ = $e.metadata_, "
-                "    created_at = $e.created_at, "
-                "    updated_at = $e.updated_at;"
-                "}"
-            )
-            await self._conn.execute(create_sql, {"entities": create_data})
+            records = []
+            for e in to_create:
+                b = _entity_to_bindings(e)
+                records.append(
+                    {
+                        "id": b["rid"],  # RecordID
+                        "namespace": b["ns_rid"],  # record<memory_namespace>
+                        "name": b["name"],
+                        "entity_type": b["entity_type"],
+                        "description": b["description"],
+                        "attributes": b["attributes"],
+                        "source_document_ids": b["source_document_ids"],
+                        "source_chunk_ids": b["source_chunk_ids"],
+                        "source_tool": b["source_tool"],
+                        "mention_count": b["mention_count"],
+                        "embedding": b["embedding"],
+                        "embedding_model": b["embedding_model"],
+                        "valid_from": b["valid_from"],
+                        "valid_until": b["valid_until"],
+                        "confidence": b["confidence"],
+                        "metadata_": b["metadata_"],
+                        "created_at": b["created_at"],
+                        "updated_at": b["updated_at"],
+                    }
+                )
+            await self._conn.execute("INSERT INTO entity $records", {"records": records})
 
         # 4. Batch update existing entities in a single FOR statement
         if to_update:
@@ -771,11 +769,11 @@ class SurrealDBGraphAdapter:
         max_depth: int = 3,
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:
-        """Find paths between two entities using chained SurrealDB graph arrows.
+        """Find paths between two entities using SurrealDB graph arrows.
 
-        For each depth from 1..max_depth, issues a query that chains
-        ``->relates_to->entity`` arrows.  Results are de-duplicated and
-        filtered by namespace and optional relationship types.
+        Fetches all depths (1..max_depth) in a **single query** by selecting
+        multiple arrow chains as separate columns.  This avoids the N
+        round-trips of the previous depth-loop approach.
         """
         src = _rid("entity", source_entity_id)
         tgt_id_str = str(target_entity_id)
@@ -789,18 +787,22 @@ class SurrealDBGraphAdapter:
             rel_bindings["rel_types"] = list(relationship_types)
 
         effective_max = min(max_depth, 3)
+        hop = "->relates_to" + rel_filter + "->entity"
 
-        # Try deepest first: if a path exists at depth N, shorter paths are
-        # also likely present and we can stop early once we find the target.
-        for depth in range(effective_max, 0, -1):
-            arrow_chain = ("->relates_to" + rel_filter + "->entity") * depth
+        # Build a single SELECT with one column per depth level.
+        columns = ", ".join(f"{hop * d} AS d{d}" for d in range(1, effective_max + 1))
+        sql = f"SELECT {columns} FROM $src"
+        rel_bindings["src"] = src
 
-            sql = f"SELECT {arrow_chain} AS targets FROM {src}"
-            rows = await self._conn.query(sql, rel_bindings or None)
-            if not rows:
-                continue
+        rows = await self._conn.query(sql, rel_bindings)
+        if not rows:
+            return paths
 
-            targets_raw = rows[0].get("targets") if rows else None
+        row = rows[0] if isinstance(rows[0], dict) else {}
+
+        # Check depths shortest-first so we report the shortest path.
+        for depth in range(1, effective_max + 1):
+            targets_raw = row.get(f"d{depth}")
             if targets_raw is None:
                 continue
 
@@ -812,18 +814,13 @@ class SurrealDBGraphAdapter:
                 if tid != tgt_id_str:
                     continue
                 path: list[dict[str, Any]] = [{"type": "node", "data": {"id": str(source_entity_id)}}]
-                for hop in range(depth):
-                    path.append({"type": "relationship", "data": {"hop": hop + 1}})
-                    if hop < depth - 1:
+                for h in range(depth):
+                    path.append({"type": "relationship", "data": {"hop": h + 1}})
+                    if h < depth - 1:
                         path.append({"type": "node", "data": {"intermediate": True}})
                 path.append({"type": "node", "data": {"id": tgt_id_str}})
                 paths.append(path)
-                break  # One path per depth level is enough
-
-            # Found a path at this depth — deeper traversals subsume shorter
-            # ones, so the target is reachable and we can stop.
-            if paths:
-                break
+                return paths  # Shortest path found — done
 
         return paths
 

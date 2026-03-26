@@ -2325,20 +2325,23 @@ class TestSurrealDBGraphAdapterTraversal:
         ns_id = uuid4()
         src_id = uuid4()
         tgt_id = uuid4()
-        # find_paths tries deepest first and stops early when a path is found.
-        # Provide a match so it stops after the first query (depth 3).
-        depth_result = [
-            {"targets": [{"id": f"entity:\u27e8{tgt_id!s}\u27e9"}]},
+        # find_paths fetches all depths in a single query with d1, d2, d3 columns.
+        single_result = [
+            {
+                "d1": [{"id": f"entity:\u27e8{tgt_id!s}\u27e9"}],
+                "d2": None,
+                "d3": None,
+            },
         ]
 
         conn = _make_mock_conn()
-        conn.query = AsyncMock(return_value=depth_result)
+        conn.query = AsyncMock(return_value=single_result)
         adapter = SurrealDBGraphAdapter(conn)
 
         result = await adapter.find_paths(ns_id, src_id, tgt_id, max_depth=3)
         assert isinstance(result, list)
         assert len(result) >= 1
-        # find_paths tries deepest first and breaks early on first match
+        # Single query for all depths
         assert conn.query.await_count == 1
 
     async def test_get_neighborhood(self) -> None:
