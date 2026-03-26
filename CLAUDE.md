@@ -74,6 +74,7 @@ Versions from git tags — no manual bumps. `git tag vX.Y.Z && git push origin v
 - **Version table:** `khora_alembic_version` (not `alembic_version`) — avoids conflicts with downstream apps
 - **Advisory lock:** `run_migrations()` uses `pg_advisory_xact_lock` (ID `6001515088189075507`), 60s timeout
 - **Migrations bundled** in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is dev-only
+- **Skip-ahead:** When multiple services share a DB with different Khora versions, `run_migrations()` detects if the DB revision is unknown (ahead) and skips gracefully — returns `MigrationResult(success=True, skipped=True)`. Signaled via `_DatabaseAheadError` from `env.py` to `session.py`
 
 ### UUID & Type Handling
 - **ORM:** all 52 UUID columns use `as_uuid=True` — native `uuid.UUID`, never `str()` wrap

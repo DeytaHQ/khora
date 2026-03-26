@@ -17,6 +17,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.db.models import Base
+from khora.db.session import _DatabaseAheadError
 
 # ── Configuration ──────────────────────────────────────────────
 config = context.config
@@ -113,13 +114,12 @@ def do_run_migrations(connection: Connection) -> None:
         if current_rev is not None:
             known_revisions = {r.revision for r in ScriptDirectory.from_config(config).walk_revisions()}
             if current_rev not in known_revisions:
-                logger.info(
+                logger.warning(
                     "Database at revision %s which is not recognized by this Khora version "
                     "— skipping migrations (database is ahead).",
                     current_rev,
                 )
-                config.attributes["skipped_ahead"] = True
-                return
+                raise _DatabaseAheadError(current_rev)
 
         context.run_migrations()
 

@@ -38,3 +38,4 @@
 - 2026-03-25: DYT-1133: Ontology flow orchestrator and session management
 - 2026-03-25: DYT-1134: Ontology CLI tests (50 tests) and documentation
 - 2026-03-26: DYT-1003: Skip migrations when database is ahead
+- 2026-03-26: DYT-1003: Address review — add MigrationResult.skipped, WARNING log, exception-based signaling, exception-path tests

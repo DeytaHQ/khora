@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import khora.db.migrations
-from khora.db.session import MigrationResult, _run_migrations_sync, run_migrations
+from khora.db.session import MigrationResult, _DatabaseAheadError, _run_migrations_sync, run_migrations
 from khora.memory_lake import MemoryLake
 
 # Derive migrations directory from the installed package — not relative to this test file
@@ -54,6 +54,7 @@ class TestMigrationResult:
         assert result.target_revision == "abc123"
         assert result.current_revision == "abc123"
         assert result.elapsed_seconds == 1.5
+        assert result.skipped is False
         assert result.error is None
 
     @pytest.mark.unit
@@ -91,6 +92,17 @@ class TestMigrationResult:
         assert not hasattr(result, "__dict__")
 
     @pytest.mark.unit
+    def test_default_skipped_is_false(self):
+        """skipped field defaults to False when not provided."""
+        result = MigrationResult(
+            success=True,
+            target_revision="abc",
+            current_revision="abc",
+            elapsed_seconds=0.1,
+        )
+        assert result.skipped is False
+
+    @pytest.mark.unit
     def test_success_variant(self):
         """Typical success result."""
         result = MigrationResult(
@@ -100,6 +112,22 @@ class TestMigrationResult:
             elapsed_seconds=2.3,
         )
         assert result.success is True
+        assert result.skipped is False
+        assert result.error is None
+
+    @pytest.mark.unit
+    def test_skipped_variant(self):
+        """Typical skipped result when DB is ahead."""
+        result = MigrationResult(
+            success=True,
+            target_revision="head_rev",
+            current_revision=None,
+            elapsed_seconds=0.5,
+            skipped=True,
+        )
+        assert result.success is True
+        assert result.skipped is True
+        assert result.current_revision is None
         assert result.error is None
 
     @pytest.mark.unit
@@ -386,9 +414,9 @@ class TestMigrationPackageStructure:
         migration_files = sorted(versions_dir.glob("*.py"))
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
-        assert (
-            len(migration_files) == 18
-        ), f"Expected 18 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
+        assert len(migration_files) == 18, (
+            f"Expected 18 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
+        )
 
     @pytest.mark.unit
     def test_env_py_constants(self):
@@ -424,7 +452,9 @@ def _load_env_functions():
     mock_context.config.attributes = {}
     mock_context.is_offline_mode.return_value = False
     mock_context.configure = MagicMock()
-    mock_context.begin_transaction = MagicMock(return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock()))
+    mock_context.begin_transaction = MagicMock(
+        return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+    )
     mock_context.run_migrations = MagicMock()
 
     orig_attr = getattr(alembic, "context", None)
@@ -542,9 +572,9 @@ class TestAcquireAdvisoryLock:
 
         assert mock_uniform.call_count == num_retries
         for i, call in enumerate(mock_uniform.call_args_list):
-            assert call == (
-                (min_delay, expected_highs[i]),
-            ), f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
+            assert call == ((min_delay, expected_highs[i]),), (
+                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
+            )
 
         # Verify the cap kicks in: attempts 6 and 7 should both be capped at max_delay
         assert expected_highs[6] == max_delay
@@ -586,9 +616,9 @@ class TestAcquireAdvisoryLock:
 
         assert mock_uniform.call_count == num_retries
         for i, call in enumerate(mock_uniform.call_args_list):
-            assert call == (
-                (min_delay, expected_highs[i]),
-            ), f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
+            assert call == ((min_delay, expected_highs[i]),), (
+                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
+            )
 
         # Verify cap applied on last attempt
         assert expected_highs[-1] == max_delay
@@ -775,7 +805,7 @@ class TestDoRunMigrationsAheadDetection:
 
     @pytest.mark.unit
     def test_skips_when_db_revision_unknown(self):
-        """Skips migrations when DB revision is not in the known set."""
+        """Raises _DatabaseAheadError when DB revision is not in the known set."""
         env = _load_env_functions()
         conn = MagicMock()
         # Advisory lock acquired
@@ -790,10 +820,11 @@ class TestDoRunMigrationsAheadDetection:
         mock_script_dir.walk_revisions.return_value = [mock_rev]
 
         with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
-            env.do_run_migrations(conn)
+            with pytest.raises(_DatabaseAheadError) as exc_info:
+                env.do_run_migrations(conn)
 
+        assert exc_info.value.current_revision == "unknown_rev_abc"
         env.context.run_migrations.assert_not_called()
-        assert env.config.attributes["skipped_ahead"] is True
 
     @pytest.mark.unit
     def test_proceeds_when_revision_known(self):
@@ -827,21 +858,54 @@ class TestDoRunMigrationsAheadDetection:
 
         env.context.run_migrations.assert_called_once()
 
+    @pytest.mark.unit
+    def test_propagates_walk_revisions_error(self):
+        """Exception from walk_revisions() propagates unhandled."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        conn.execute.return_value.scalar.return_value = True
+
+        env.context.get_current_revision.return_value = "some_rev"
+
+        mock_script_dir = MagicMock()
+        mock_script_dir.walk_revisions.side_effect = RuntimeError("corrupt history")
+
+        with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
+            with pytest.raises(RuntimeError, match="corrupt history"):
+                env.do_run_migrations(conn)
+
+        env.context.run_migrations.assert_not_called()
+
+    @pytest.mark.unit
+    def test_propagates_script_directory_error(self):
+        """Exception from ScriptDirectory.from_config() propagates unhandled."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        conn.execute.return_value.scalar.return_value = True
+
+        env.context.get_current_revision.return_value = "some_rev"
+
+        with patch.object(env.ScriptDirectory, "from_config", side_effect=RuntimeError("bad config")):
+            with pytest.raises(RuntimeError, match="bad config"):
+                env.do_run_migrations(conn)
+
+        env.context.run_migrations.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
-# _run_migrations_sync — skipped_ahead handling
+# _run_migrations_sync — _DatabaseAheadError handling
 # ---------------------------------------------------------------------------
 
 
 class TestRunMigrationsSyncSkippedAhead:
-    """Tests for _run_migrations_sync handling the skipped_ahead attribute."""
+    """Tests for _run_migrations_sync handling _DatabaseAheadError from env.py."""
 
     @pytest.mark.unit
     @patch("alembic.command.upgrade")
     @patch("alembic.script.ScriptDirectory.from_config")
     @patch("alembic.config.Config")
     def test_returns_success_when_skipped_ahead(self, mock_config_cls, mock_from_config, mock_upgrade):
-        """Returns success with current_revision=None when migrations were skipped."""
+        """Returns success with skipped=True when env.py raises _DatabaseAheadError."""
         mock_cfg_instance = MagicMock()
         mock_config_cls.return_value = mock_cfg_instance
         mock_cfg_instance.attributes = {}
@@ -850,17 +914,16 @@ class TestRunMigrationsSyncSkippedAhead:
         mock_script.get_current_head.return_value = "abc123"
         mock_from_config.return_value = mock_script
 
-        # Simulate env.py setting skipped_ahead during upgrade
-        def upgrade_side_effect(cfg, target):
-            cfg.attributes["skipped_ahead"] = True
-
-        mock_upgrade.side_effect = upgrade_side_effect
+        # Simulate env.py raising _DatabaseAheadError during upgrade
+        mock_upgrade.side_effect = _DatabaseAheadError("future_rev_xyz")
 
         result = _run_migrations_sync("postgresql://localhost/testdb")
 
         assert result.success is True
+        assert result.skipped is True
         assert result.current_revision is None
         assert result.target_revision == "abc123"
+        assert result.error is None
 
 
 # ---------------------------------------------------------------------------
