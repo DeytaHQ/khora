@@ -474,17 +474,13 @@ class SurrealDBVectorAdapter:
 
         ns_rid = _rid("memory_namespace", namespace_id)
 
-        # 1. Batch-fetch all existing entities matching any (name, type) pair
-        name_type_pairs = [(e.name, e.entity_type) for e in entities]
-        or_clauses = []
-        fetch_bindings: dict[str, Any] = {}
-        for i, (name, etype) in enumerate(name_type_pairs):
-            or_clauses.append(f"(name = $n{i} AND entity_type = $t{i})")
-            fetch_bindings[f"n{i}"] = name
-            fetch_bindings[f"t{i}"] = etype
-
-        fetch_sql = f"SELECT * FROM entity WHERE namespace = {ns_rid} " f"AND ({' OR '.join(or_clauses)})"
-        existing_rows = await self._conn.query(fetch_sql, fetch_bindings)
+        # 1. Batch-fetch existing entities using tuple IN syntax (faster than N OR clauses)
+        unique_pairs = list({(e.name, e.entity_type) for e in entities})
+        fetch_sql = "SELECT * FROM entity WHERE namespace = $ns_rid " "AND [name, entity_type] IN $pairs"
+        existing_rows = await self._conn.query(
+            fetch_sql,
+            {"ns_rid": ns_rid, "pairs": [list(p) for p in unique_pairs]},
+        )
 
         # Index existing entities by (name, entity_type)
         existing_map: dict[tuple[str, str], Entity] = {}
@@ -509,32 +505,34 @@ class SurrealDBVectorAdapter:
                 to_create.append(entity)
                 results.append((entity, True))
 
-        # 3. Batch create new entities
+        # 3. Batch create new entities via INSERT INTO (faster than FOR loops)
         if to_create:
-            create_data = [_entity_to_bindings(e) for e in to_create]
-            create_sql = (
-                "FOR $e IN $entities {"
-                "  CREATE entity:\u27e8$e.id\u27e9 SET "
-                "    namespace = memory_namespace:\u27e8$e.ns\u27e9, "
-                "    name = $e.name, "
-                "    entity_type = $e.entity_type, "
-                "    description = $e.description, "
-                "    attributes = $e.attributes, "
-                "    source_document_ids = $e.source_document_ids, "
-                "    source_chunk_ids = $e.source_chunk_ids, "
-                "    source_tool = $e.source_tool, "
-                "    mention_count = $e.mention_count, "
-                "    embedding = $e.embedding, "
-                "    embedding_model = $e.embedding_model, "
-                "    valid_from = $e.valid_from, "
-                "    valid_until = $e.valid_until, "
-                "    confidence = $e.confidence, "
-                "    metadata_ = $e.metadata_, "
-                "    created_at = $e.created_at, "
-                "    updated_at = $e.updated_at;"
-                "}"
-            )
-            await self._conn.execute(create_sql, {"entities": create_data})
+            records = []
+            for e in to_create:
+                b = _entity_to_bindings(e)
+                records.append(
+                    {
+                        "id": b["rid"],
+                        "namespace": b["ns_rid"],
+                        "name": b["name"],
+                        "entity_type": b["entity_type"],
+                        "description": b["description"],
+                        "attributes": b["attributes"],
+                        "source_document_ids": b["source_document_ids"],
+                        "source_chunk_ids": b["source_chunk_ids"],
+                        "source_tool": b["source_tool"],
+                        "mention_count": b["mention_count"],
+                        "embedding": b["embedding"],
+                        "embedding_model": b["embedding_model"],
+                        "valid_from": b["valid_from"],
+                        "valid_until": b["valid_until"],
+                        "confidence": b["confidence"],
+                        "metadata_": b["metadata_"],
+                        "created_at": b["created_at"],
+                        "updated_at": b["updated_at"],
+                    }
+                )
+            await self._conn.execute("INSERT INTO entity $records", {"records": records})
 
         # 4. Batch update existing entities
         if to_update:
