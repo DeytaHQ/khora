@@ -49,7 +49,7 @@ class TestRenderSourcesTable:
             ),
         ]
         table = render_sources_table(sources)
-        assert table.title == "Discovered Sources"
+        assert "DISCOVERED SOURCES" in (table.title or "")
         assert table.row_count == 2
 
     def test_empty_sources(self) -> None:
@@ -86,7 +86,7 @@ class TestRenderFetchResultsTable:
             FetchResult(source=src, local_path="", success=False, error="timeout"),
         ]
         table = render_fetch_results_table(results)
-        assert table.title == "Fetch Results"
+        assert "FETCH RESULTS" in (table.title or "")
         assert table.row_count == 2
 
 
@@ -101,7 +101,7 @@ class TestDiscoveryUIOutput:
         ui = DiscoveryUI(console)
         ui.show_welcome(["Perplexity (search)", "Firecrawl (scrape)"], "/tmp/data")
         output = buf.getvalue()
-        assert "Khora Source Discovery" in output
+        assert "SOURCE DISCOVERY" in output
         assert "Perplexity" in output
         assert "/tmp/data" in output
 
@@ -125,7 +125,7 @@ class TestDiscoveryUIOutput:
         ]
         ui.show_review_summary(results)
         output = buf.getvalue()
-        assert "1/2" in output
+        assert "1 ok" in output
         assert "500" in output
 
     def test_show_data_preview(self) -> None:
@@ -149,7 +149,7 @@ class TestDiscoveryUIOutput:
         ui = DiscoveryUI(console)
         ui.show_done([], "/tmp/data")
         output = buf.getvalue()
-        assert "No data fetched" in output
+        assert "no data fetched" in output
 
     def test_show_no_keys(self) -> None:
         console, buf = _make_console()

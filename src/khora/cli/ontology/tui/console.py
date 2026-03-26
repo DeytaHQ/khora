@@ -1,4 +1,9 @@
-"""Shared Rich console, theme, and ASCII art for ontology CLI."""
+"""Shared Rich console, theme, and branding for ontology CLI.
+
+Visual language inspired by Teenage Engineering — monochrome base with
+a single high-contrast accent colour (orange), clean grid layout, and
+brutalist industrial typography.
+"""
 
 from __future__ import annotations
 
@@ -7,23 +12,39 @@ import sys
 from rich.console import Console
 from rich.theme import Theme
 
-# -- Colour constants --------------------------------------------------------
+# -- Palette (TE-inspired: mono + single accent) ----------------------------
 
-CYAN = "bright_cyan"
-ENTITY_COLOR = "bright_blue"
-RELATIONSHIP_COLOR = "bright_green"
-RULE_COLOR = "bright_yellow"
+ACCENT = "#FF6600"  # TE orange
+ACCENT2 = "#FF9933"  # softer orange for secondary highlights
+MUTED = "bright_black"  # dark grey for structure
+TEXT = "white"
 DIM = "dim"
+SUCCESS = "#33FF66"  # terminal green
+WARN = "#FFCC00"  # amber
+ERR = "#FF3333"  # red
+
+# Semantic roles
+ENTITY_COLOR = ACCENT
+RELATIONSHIP_COLOR = ACCENT2
+RULE_COLOR = WARN
 
 # -- Theme -------------------------------------------------------------------
 
 khora_theme = Theme(
     {
-        "header": CYAN,
-        "entity": ENTITY_COLOR,
-        "relationship": RELATIONSHIP_COLOR,
-        "rule": RULE_COLOR,
+        "header": f"bold {ACCENT}",
+        "accent": ACCENT,
+        "accent2": ACCENT2,
+        "muted": MUTED,
+        "entity": f"bold {ACCENT}",
+        "relationship": ACCENT2,
+        "rule": WARN,
+        "success": SUCCESS,
+        "warning": WARN,
+        "error": ERR,
         "dim": DIM,
+        "label": f"bold {TEXT}",
+        "value": ACCENT,
     }
 )
 
@@ -31,19 +52,25 @@ khora_theme = Theme(
 
 console = Console(theme=khora_theme)
 
-# -- ASCII art ---------------------------------------------------------------
+# -- ASCII header ------------------------------------------------------------
+# Block letters built from box-drawing + braille characters — dense, compact,
+# industrial feel.  Orange accent with dim structural lines.
 
-_HEADER = r"""
-  [bright_cyan]╦╔═╦ ╦╔═╗╦═╗╔═╗  ╔═╗╔╗╔╔╦╗╔═╗╦  ╔═╗╔═╗╦ ╦[/]
-  [bright_cyan]╠╩╗╠═╣║ ║╠╦╝╠═╣  ║ ║║║║ ║ ║ ║║  ║ ║║ ╦╚╦╝[/]
-  [bright_cyan]╩ ╩╩ ╩╚═╝╩╚═╩ ╩  ╚═╝╝╚╝ ╩ ╚═╝╩═╝╚═╝╚═╝ ╩[/]
-"""
+_HEADER = f"""\
+[{ACCENT} bold]  ┃ ┃┏━ ┃ ┃ ┏━┃ ┏━┃  ┏━┃[/]
+[{ACCENT} bold]  ┣┻┃┃  ┣━┃ ┃ ┃ ┣┳┛  ┣━┃[/]
+[{ACCENT} bold]  ┃ ┃┗━ ┃ ┃ ┗━┃ ┃ ┗  ┃ ┃[/]
+[{MUTED}]  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/]
+[{DIM}]  ontology processor[/]  [{MUTED}]//[/]  [{ACCENT2}]v0.5[/]  [{MUTED}]//[/]  [{DIM}]deyta.ai[/]"""
 
-_TAGLINE = "  [dim]AI-powered ontology construction[/]\n"
+_TAGLINE = ""
 
 
 def print_header() -> None:
-    """Print the ASCII art header if running in an interactive terminal."""
+    """Print the branded header if running in an interactive terminal."""
     if sys.stdout.isatty():
+        console.print()
         console.print(_HEADER, highlight=False)
-        console.print(_TAGLINE, highlight=False)
+        if _TAGLINE:
+            console.print(_TAGLINE, highlight=False)
+        console.print()
