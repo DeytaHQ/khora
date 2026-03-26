@@ -154,8 +154,6 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    env:
-      SETUPTOOLS_SCM_LOCAL_SCHEME: no-local-version
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
