@@ -47,6 +47,14 @@ class SurrealDBConnection:
         self._connected = False
         self._schema_initialized = False
 
+        # Write semaphore for embedded/memory modes: SurrealDB's surrealkv
+        # engine panics (HNSW index corruption) and raises transaction
+        # conflicts under concurrent writes. Since all SurrealDB ops are
+        # sub-10ms, serializing them adds negligible latency (~200ms queue
+        # drain for 20 concurrent docs) vs 5-30s LLM calls per document.
+        # Remote mode doesn't need this — the server serializes internally.
+        self._write_sem: asyncio.Semaphore | None = asyncio.Semaphore(1) if mode in ("embedded", "memory") else None
+
         if not sync_data:
             logger.warning("SurrealDB running without sync_data — data may be lost on crash")
 
@@ -126,10 +134,42 @@ class SurrealDBConnection:
         except Exception:
             return False
 
-    async def query(self, sql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    _WRITE_CONFLICT_MSG = "read or write conflict"
+    _MAX_CONFLICT_RETRIES = 5
+    _CONFLICT_BASE_DELAY = 0.05  # 50ms, doubles each retry
+
+    async def _execute_raw(self, sql: str, bindings: dict[str, Any] | None = None) -> Any:
+        """Execute a SurrealQL statement with write serialization and retry.
+
+        For embedded/memory modes, acquires a semaphore to prevent concurrent
+        HNSW index mutations (which cause Rust panics in surrealkv).  Also
+        retries on transaction conflicts with exponential backoff.
+        """
         if not self._connected:
             raise RuntimeError("SurrealDB not connected")
-        result = await self._client.query(sql, bindings or {})
+
+        async def _do_query() -> Any:
+            last_err: Exception | None = None
+            for attempt in range(self._MAX_CONFLICT_RETRIES):
+                try:
+                    return await self._client.query(sql, bindings or {})
+                except Exception as e:
+                    if self._WRITE_CONFLICT_MSG in str(e) and attempt < self._MAX_CONFLICT_RETRIES - 1:
+                        delay = self._CONFLICT_BASE_DELAY * (2**attempt)
+                        logger.debug(f"SurrealDB write conflict (attempt {attempt + 1}), retrying in {delay:.3f}s")
+                        await asyncio.sleep(delay)
+                        last_err = e
+                    else:
+                        raise
+            raise last_err  # type: ignore[misc]
+
+        if self._write_sem is not None:
+            async with self._write_sem:
+                return await _do_query()
+        return await _do_query()
+
+    async def query(self, sql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        result = await self._execute_raw(sql, bindings)
         if isinstance(result, list):
             # SurrealDB returns list of statement results; flatten
             flat: list[dict[str, Any]] = []
@@ -149,6 +189,4 @@ class SurrealDBConnection:
 
     async def execute(self, sql: str, bindings: dict[str, Any] | None = None) -> Any:
         """Execute a SurrealQL statement, returning raw result."""
-        if not self._connected:
-            raise RuntimeError("SurrealDB not connected")
-        return await self._client.query(sql, bindings or {})
+        return await self._execute_raw(sql, bindings)
