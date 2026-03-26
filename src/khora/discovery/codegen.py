@@ -518,6 +518,28 @@ def _diff_dir(directory: Path, before: set[str]) -> list[str]:
     return new
 
 
+def extract_urls(source: str) -> list[str]:
+    """Extract URL-like strings from script source for user review.
+
+    Walks the AST and collects all string constants that look like HTTP(S)
+    URLs.  Used by the agent to show the user which domains a generated
+    script will contact before they approve execution.
+    """
+    import re as _re
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    urls: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if _re.match(r"https?://", node.value):
+                urls.append(node.value)
+    return urls
+
+
 def _parse_summary(stdout: str) -> dict[str, Any]:
     """Try to parse a JSON summary from stdout.
 

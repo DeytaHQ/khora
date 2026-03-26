@@ -138,9 +138,9 @@ class DiscoveryUI:
             default="all",
         )
         cmd = raw.strip().lower()
-        if cmd == "search":
+        if cmd in ("search", "back", "new"):
             return None
-        if cmd == "all":
+        if cmd == "all" or "all" in cmd.split():
             return list(range(count))
         try:
             return [int(x.strip()) - 1 for x in raw.split(",")]
