@@ -304,15 +304,15 @@ class TestSurrealDBSchema:
             assert table in _TABLE_DEFINITIONS, f"Missing table: {table}"
 
     def test_schema_has_hnsw_index(self) -> None:
-        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+        from khora.storage.backends.surrealdb.schema import _SEARCH_INDEX_DEFINITIONS
 
-        assert "HNSW" in _TABLE_DEFINITIONS
-        assert "DIMENSION 1536" in _TABLE_DEFINITIONS
+        assert "HNSW" in _SEARCH_INDEX_DEFINITIONS
+        assert "DIMENSION 1536" in _SEARCH_INDEX_DEFINITIONS
 
     def test_schema_has_bm25(self) -> None:
-        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+        from khora.storage.backends.surrealdb.schema import _SEARCH_INDEX_DEFINITIONS
 
-        assert "BM25" in _TABLE_DEFINITIONS
+        assert "BM25" in _SEARCH_INDEX_DEFINITIONS
 
     def test_schema_has_analyzer(self) -> None:
         from khora.storage.backends.surrealdb.schema import _ANALYZER_DEFINITIONS

@@ -48,12 +48,12 @@ class SurrealDBConnection:
         self._schema_initialized = False
 
         # Write semaphore for embedded/memory modes: SurrealDB's surrealkv
-        # engine panics (HNSW index corruption) and raises transaction
-        # conflicts under concurrent writes. Since all SurrealDB ops are
-        # sub-10ms, serializing them adds negligible latency (~200ms queue
-        # drain for 20 concurrent docs) vs 5-30s LLM calls per document.
+        # engine can panic under high concurrent HNSW index mutations.
+        # Semaphore(3) allows enough parallelism for the read-modify-write
+        # entity upsert pattern while preventing thundering-herd writes.
+        # Combined with retry-on-conflict, this balances throughput and safety.
         # Remote mode doesn't need this — the server serializes internally.
-        self._write_sem: asyncio.Semaphore | None = asyncio.Semaphore(1) if mode in ("embedded", "memory") else None
+        self._write_sem: asyncio.Semaphore | None = asyncio.Semaphore(3) if mode in ("embedded", "memory") else None
 
         if not sync_data:
             logger.warning("SurrealDB running without sync_data — data may be lost on crash")

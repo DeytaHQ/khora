@@ -673,7 +673,7 @@ async def optimize_storage(coordinator) -> dict:
     Returns:
         Combined results: ``{"postgresql": {...}, "neo4j": {...}}``.
     """
-    results: dict[str, dict | None] = {"postgresql": None, "neo4j": None}
+    results: dict[str, dict | None] = {"postgresql": None, "neo4j": None, "surrealdb": None}
 
     # Optimize PostgreSQL / pgvector (they share the same engine)
     backend = coordinator.vector or coordinator.relational
@@ -693,5 +693,13 @@ async def optimize_storage(coordinator) -> dict:
             results["neo4j"] = await optimize_neo4j(driver, database=database)
         else:
             logger.warning("No Neo4j driver found on backend; skipping Neo4j optimization")
+
+    # Create deferred SurrealDB search indexes (HNSW + BM25)
+    surreal_conn = getattr(coordinator.relational, "_conn", None) if coordinator.relational else None
+    if surreal_conn is not None and hasattr(surreal_conn, "_client"):
+        from khora.storage.backends.surrealdb.schema import ensure_search_indexes
+
+        await ensure_search_indexes(surreal_conn)
+        results["surrealdb"] = {"search_indexes_created": True}
 
     return results

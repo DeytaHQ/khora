@@ -81,6 +81,13 @@ DEFINE INDEX IF NOT EXISTS idx_tc_document ON temporal_chunk FIELDS document;
 DEFINE INDEX IF NOT EXISTS idx_tc_occurred_at ON temporal_chunk FIELDS occurred_at;
 DEFINE INDEX IF NOT EXISTS idx_tc_author ON temporal_chunk FIELDS author;
 DEFINE INDEX IF NOT EXISTS idx_tc_channel ON temporal_chunk FIELDS channel;
+"""
+
+# Expensive indexes deferred until after bulk ingestion via ensure_search_indexes().
+# HNSW is maintained incrementally on every INSERT and never used for search
+# (brute-force cosine is used instead due to KNN being unreliable in embedded mode).
+# BM25 also adds per-INSERT tokenization overhead.
+_TEMPORAL_CHUNK_SEARCH_INDEXES = """
 DEFINE INDEX IF NOT EXISTS idx_tc_embedding ON temporal_chunk FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
 DEFINE INDEX IF NOT EXISTS idx_tc_content_ft ON temporal_chunk FIELDS content SEARCH ANALYZER khora_fulltext BM25;
 """
@@ -480,6 +487,17 @@ class SurrealDBTemporalStore(TemporalVectorStore):
     # ------------------------------------------------------------------
     # Health / stats
     # ------------------------------------------------------------------
+
+    async def ensure_search_indexes(self) -> None:
+        """Create HNSW and BM25 indexes on temporal_chunk.
+
+        Call after bulk ingestion to avoid per-INSERT index maintenance
+        overhead.  Idempotent (uses IF NOT EXISTS).
+        """
+        if self._conn:
+            logger.info("Creating temporal_chunk search indexes (HNSW + BM25)...")
+            await self._conn.execute(_TEMPORAL_CHUNK_SEARCH_INDEXES)
+            logger.info("Temporal chunk search indexes created")
 
     async def health_check(self) -> dict[str, Any]:
         """Check backend health."""
