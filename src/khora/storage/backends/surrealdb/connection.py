@@ -126,10 +126,35 @@ class SurrealDBConnection:
         except Exception:
             return False
 
-    async def query(self, sql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    _WRITE_CONFLICT_MSG = "read or write conflict"
+    _MAX_CONFLICT_RETRIES = 5
+    _CONFLICT_BASE_DELAY = 0.05  # 50ms, doubles each retry
+
+    async def _execute_raw(self, sql: str, bindings: dict[str, Any] | None = None) -> Any:
+        """Execute a SurrealQL statement with retry on write conflicts.
+
+        SurrealDB's embedded MVCC engine raises transaction conflicts under
+        concurrent writes.  The error message explicitly says "This
+        transaction can be retried", so we do — with exponential backoff.
+        """
         if not self._connected:
             raise RuntimeError("SurrealDB not connected")
-        result = await self._client.query(sql, bindings or {})
+        last_err: Exception | None = None
+        for attempt in range(self._MAX_CONFLICT_RETRIES):
+            try:
+                return await self._client.query(sql, bindings or {})
+            except Exception as e:
+                if self._WRITE_CONFLICT_MSG in str(e) and attempt < self._MAX_CONFLICT_RETRIES - 1:
+                    delay = self._CONFLICT_BASE_DELAY * (2**attempt)
+                    logger.debug(f"SurrealDB write conflict (attempt {attempt + 1}), retrying in {delay:.3f}s")
+                    await asyncio.sleep(delay)
+                    last_err = e
+                else:
+                    raise
+        raise last_err  # type: ignore[misc]
+
+    async def query(self, sql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        result = await self._execute_raw(sql, bindings)
         if isinstance(result, list):
             # SurrealDB returns list of statement results; flatten
             flat: list[dict[str, Any]] = []
@@ -149,6 +174,4 @@ class SurrealDBConnection:
 
     async def execute(self, sql: str, bindings: dict[str, Any] | None = None) -> Any:
         """Execute a SurrealQL statement, returning raw result."""
-        if not self._connected:
-            raise RuntimeError("SurrealDB not connected")
-        return await self._client.query(sql, bindings or {})
+        return await self._execute_raw(sql, bindings)
