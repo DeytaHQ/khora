@@ -4,8 +4,8 @@
 # This is the ONLY workflow that runs on tag push; ci.yml handles PRs and branches.
 #
 # Pipeline:
-#   test ──> build-accel (3-platform matrix) ──┬──> publish-khora
-#                                              └──> publish-accel
+#   test ──> build-accel (3 platforms × 2 Python versions) ──┬──> publish-khora
+#                                                           └──> publish-accel
 #
 # Authentication: GitHub OIDC federation — no long-lived AWS credentials.
 # Concurrency: one release at a time; never cancel in-flight publishes.
@@ -114,7 +114,7 @@ jobs:
             dist/*
 
   # ============================================================================
-  # Build khora-accel — native wheels for 3 platforms via maturin.
+  # Build khora-accel — native wheels for 3 platforms × 2 Python versions via maturin.
   # Runs after tests pass. Builds must complete before either publish job starts.
   # ============================================================================
   build-accel:
@@ -123,12 +123,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Python 3.13
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            python: "3.13"
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            python: "3.13"
           - os: macos-latest
             target: aarch64-apple-darwin
+            python: "3.13"
+          # Python 3.14
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            python: "3.14"
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            python: "3.14"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python: "3.14"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -146,15 +160,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "${{ matrix.python }}"
 
-      # --interpreter python3.13 ensures the manylinux container uses Python 3.13
-      # (not the default 3.8), matching requires-python >= 3.13.
+      # --interpreter ensures the manylinux container uses the correct Python
+      # (not the default 3.8), matching requires-python.
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python3.13
+          args: --release --out dist --interpreter python${{ matrix.python }}
           working-directory: rust/khora-accel
           manylinux: auto
           sccache: 'true'
@@ -162,7 +176,7 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.target }}
+          name: wheel-${{ matrix.target }}-cp${{ matrix.python }}
           path: rust/khora-accel/dist/*.whl
 
   # ============================================================================
