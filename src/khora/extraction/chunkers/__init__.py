@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from .base import Chunker, ChunkResult
 from .conversation import ConversationChunker, ConversationChunkerConfig, SlackMessage
 from .fixed import FixedChunker
 from .recursive import RecursiveChunker
 from .semantic import SemanticChunker
 
+ChunkStrategy = Literal["fixed", "semantic", "recursive", "conversation"]
+
 
 def create_chunker(
-    strategy: str = "semantic",
+    strategy: ChunkStrategy = "semantic",
     *,
     chunk_size: int = 512,
     chunk_overlap: int = 50,
@@ -43,6 +47,7 @@ def create_chunker(
 __all__ = [
     "Chunker",
     "ChunkResult",
+    "ChunkStrategy",
     "ConversationChunker",
     "ConversationChunkerConfig",
     "FixedChunker",

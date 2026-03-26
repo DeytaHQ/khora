@@ -38,6 +38,7 @@ from khora.telemetry import trace, trace_span
 from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
 
 if TYPE_CHECKING:
+    from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
 
 
@@ -205,6 +206,7 @@ class SkeletonConstructionEngine:
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -216,6 +218,9 @@ class SkeletonConstructionEngine:
             metadata: Additional metadata
             skill_name: Extraction skill (default: general_entities)
             occurred_at: When this content/event occurred (default: now)
+            chunk_strategy: Override chunking strategy for this call.
+                Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
 
         Returns:
             RememberResult with document_id and counts
@@ -264,6 +269,7 @@ class SkeletonConstructionEngine:
             document,
             skill_name=skill_name,
             occurred_at=occurred_at or datetime.now(UTC),
+            chunk_strategy=chunk_strategy,
         )
 
         return RememberResult(
@@ -282,6 +288,7 @@ class SkeletonConstructionEngine:
         occurred_at: datetime,
         selective_embedding: bool = False,
         importance_ratio: float = 0.7,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks (simplified pipeline).
 
@@ -295,8 +302,9 @@ class SkeletonConstructionEngine:
         temporal_store = self._get_temporal_store()
 
         # Create chunker
+        strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
         chunker = create_chunker(
-            strategy=self._config.pipeline.chunking_strategy,
+            strategy=strategy,
             chunk_size=self._config.pipeline.chunk_size,
             chunk_overlap=self._config.pipeline.chunk_overlap,
         )
@@ -605,6 +613,7 @@ class SkeletonConstructionEngine:
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
         bulk_mode: bool = False,
     ) -> BatchResult:
         """Store multiple documents with staged batch pipeline.
@@ -628,6 +637,9 @@ class SkeletonConstructionEngine:
             relationship_types: Not used in Skeleton engine (protocol compliance)
             expertise: Not used in Skeleton engine (protocol compliance)
             extraction_config_hash: Persisted for change-detection workflows
+            chunk_strategy: Override chunking strategy for this call.
+                Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
             bulk_mode: When True, defer HNSW index creation for faster bulk loads
 
         Returns:
@@ -710,8 +722,9 @@ class SkeletonConstructionEngine:
             # ── Stage 1: Create documents + chunk in parallel ────────────
             start = time.perf_counter()
 
+            strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
             chunker = create_chunker(
-                strategy=self._config.pipeline.chunking_strategy,
+                strategy=strategy,
                 chunk_size=self._config.pipeline.chunk_size,
                 chunk_overlap=self._config.pipeline.chunk_overlap,
             )

@@ -34,6 +34,7 @@ from khora.storage import StorageConfig, StorageCoordinator, create_storage_coor
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
+    from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
 
 
@@ -213,11 +214,27 @@ class GraphRAGEngine:
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
         Processes document through the ingestion pipeline with parallel
         chunking, embedding, and entity extraction for optimal performance.
+
+        Args:
+            content: The document text to store.
+            namespace_id: Target namespace UUID.
+            title: Optional document title.
+            source: Optional source identifier.
+            metadata: Optional custom metadata dict.
+            skill_name: Extraction skill to use.
+            entity_types: Allowed entity types for extraction.
+            relationship_types: Allowed relationship types for extraction.
+            expertise: Optional expertise configuration.
+            extraction_config_hash: Optional hash for extraction config dedup.
+            chunk_strategy: Override chunking strategy for this call.
+                Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
 
         Returns:
             RememberResult with document_id, counts, and timing metrics in metadata.
@@ -275,9 +292,7 @@ class GraphRAGEngine:
         from khora.pipelines.flows.ingest import process_document
 
         start = time.perf_counter()
-        result = await process_document(
-            document,
-            storage,
+        kwargs: dict[str, Any] = dict(
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
@@ -285,6 +300,9 @@ class GraphRAGEngine:
             relationship_types=relationship_types,
             expertise=expertise,
         )
+        if chunk_strategy is not None:
+            kwargs["chunk_strategy"] = chunk_strategy
+        result = await process_document(document, storage, **kwargs)
         timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
@@ -417,11 +435,28 @@ class GraphRAGEngine:
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
         Processes documents in parallel with configurable concurrency.
         Uses shared embedder and entity index for efficiency.
+
+        Args:
+            documents: List of document dicts with content, title, source, metadata.
+            namespace_id: Target namespace UUID.
+            skill_name: Extraction skill to use.
+            max_concurrent: Maximum number of documents to process in parallel.
+            deduplicate: Whether to deduplicate entities across documents.
+            infer_relationships: Whether to infer relationships between entities.
+            on_progress: Optional callback for progress reporting.
+            entity_types: Allowed entity types for extraction.
+            relationship_types: Allowed relationship types for extraction.
+            expertise: Optional expertise configuration.
+            extraction_config_hash: Optional hash for extraction config dedup.
+            chunk_strategy: Override chunking strategy for this call.
+                Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
 
         Returns:
             BatchResult with counts and timing metrics.
@@ -484,10 +519,7 @@ class GraphRAGEngine:
             effective_expansion = True
 
         start = time.perf_counter()
-        result = await ingest_documents(
-            namespace_id,
-            doc_inputs,
-            self._get_storage(),
+        ingest_kwargs: dict[str, Any] = dict(
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
@@ -499,6 +531,9 @@ class GraphRAGEngine:
             relationship_types=relationship_types,
             expertise=expertise,
         )
+        if chunk_strategy is not None:
+            ingest_kwargs["chunk_strategy"] = chunk_strategy
+        result = await ingest_documents(namespace_id, doc_inputs, self._get_storage(), **ingest_kwargs)
         timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 

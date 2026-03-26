@@ -53,6 +53,7 @@ from .temporal_detection import TemporalDetector, TemporalSignal
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
+    from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
 
@@ -472,6 +473,7 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -485,6 +487,9 @@ class VectorCypherEngine:
             expertise: ExpertiseConfig, expertise name string, or file path
             extraction_model: LLM model for entity extraction (default: config model)
             occurred_at: When this content/event occurred (default: now)
+            chunk_strategy: Override chunking strategy for this call.
+                Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
 
         Returns:
             RememberResult with document_id and counts
@@ -531,6 +536,7 @@ class VectorCypherEngine:
             occurred_at=occurred_at or datetime.now(UTC),
             entity_types=entity_types,
             relationship_types=relationship_types,
+            chunk_strategy=chunk_strategy,
         )
 
         return RememberResult(
@@ -551,6 +557,7 @@ class VectorCypherEngine:
         occurred_at: datetime,
         entity_types: list[str],
         relationship_types: list[str],
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -575,8 +582,9 @@ class VectorCypherEngine:
             dual_nodes = self._get_dual_nodes()
 
             # Create chunker
+            strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
             chunker = create_chunker(
-                strategy=self._config.pipeline.chunking_strategy,
+                strategy=strategy,
                 chunk_size=self._config.pipeline.chunk_size,
                 chunk_overlap=self._config.pipeline.chunk_overlap,
             )
@@ -924,6 +932,7 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         skeleton_ratio_override: float | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
         """Process a document, returning entities for deferred batch storage.
 
@@ -945,8 +954,9 @@ class VectorCypherEngine:
         temporal_store = self._get_temporal_store()
         dual_nodes = self._get_dual_nodes()
 
+        strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
         chunker = create_chunker(
-            strategy=self._config.pipeline.chunking_strategy,
+            strategy=strategy,
             chunk_size=self._config.pipeline.chunk_size,
             chunk_overlap=self._config.pipeline.chunk_overlap,
         )
@@ -1280,6 +1290,7 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
         bulk_mode: bool = False,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
@@ -1302,6 +1313,9 @@ class VectorCypherEngine:
             on_progress: Callback for progress updates
             entity_types: Entity types to extract
             relationship_types: Relationship types to extract
+            chunk_strategy: Override chunking strategy for this call.
+                Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
             bulk_mode: If True, defer HNSW indexes during load and rebuild after
 
         Returns:
@@ -1330,6 +1344,7 @@ class VectorCypherEngine:
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 extraction_config_hash=extraction_config_hash,
+                chunk_strategy=chunk_strategy,
             )
         finally:
             if bulk_mode:
@@ -1352,6 +1367,7 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> BatchResult:
         """Internal implementation of remember_batch (separated for bulk_mode wrapping)."""
         use_streaming = self._vc_config.streaming_pipeline
@@ -1369,6 +1385,7 @@ class VectorCypherEngine:
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 extraction_config_hash=extraction_config_hash,
+                chunk_strategy=chunk_strategy,
             )
 
         from khora.extraction.chunkers import create_chunker
@@ -1445,8 +1462,9 @@ class VectorCypherEngine:
         # ── Stage 1: Create documents + chunk in parallel (CPU) ─────────
         _stage1_t0 = _time.perf_counter()
 
+        strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
         chunker = create_chunker(
-            strategy=self._config.pipeline.chunking_strategy,
+            strategy=strategy,
             chunk_size=self._config.pipeline.chunk_size,
             chunk_overlap=self._config.pipeline.chunk_overlap,
         )
@@ -1843,6 +1861,7 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> BatchResult:
         """Legacy per-document remember_batch (non-streaming pipeline)."""
         storage = self._get_storage()
@@ -1901,6 +1920,7 @@ class VectorCypherEngine:
                         entity_types=entity_types,
                         relationship_types=relationship_types,
                         extraction_config_hash=extraction_config_hash,
+                        chunk_strategy=chunk_strategy,
                     )
                     async with results_lock:
                         if result.metadata.get("duplicate"):

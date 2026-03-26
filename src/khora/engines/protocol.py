@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from khora.core.models import Document, Entity, MemoryNamespace
+    from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
     from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
     from khora.query import SearchMode
@@ -59,6 +60,7 @@ class MemoryEngineProtocol(Protocol):
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -73,6 +75,9 @@ class MemoryEngineProtocol(Protocol):
             relationship_types: Required relationship types to extract
             expertise: Optional expertise config for domain-specific extraction
             extraction_config_hash: Optional hash of the extraction config for change detection
+            chunk_strategy: Override chunking strategy for this call only.
+                Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
 
         Returns:
             RememberResult with details
@@ -140,6 +145,7 @@ class MemoryEngineProtocol(Protocol):
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -155,6 +161,9 @@ class MemoryEngineProtocol(Protocol):
             relationship_types: Required relationship types to extract
             expertise: Optional expertise config for domain-specific extraction
             extraction_config_hash: Optional hash of the extraction config for change detection
+            chunk_strategy: Override chunking strategy for this call only.
+                Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
 
         Returns:
             BatchResult with aggregated statistics
