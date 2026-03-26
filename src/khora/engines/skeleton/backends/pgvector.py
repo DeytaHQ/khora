@@ -31,7 +31,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from khora.engines.skeleton.backends import (
     TemporalChunk,
@@ -81,14 +81,19 @@ class PgVectorTemporalStore(TemporalVectorStore):
     - Standard B-tree indexes on filter fields
     """
 
-    def __init__(self, config: KhoraConfig):
+    def __init__(self, config: KhoraConfig, *, engine: AsyncEngine | None = None):
         """Initialize the backend.
 
         Args:
             config: Khora configuration
+            engine: Optional shared SQLAlchemy engine.  When provided the
+                store reuses this engine instead of creating a private pool,
+                avoiding connection-pool exhaustion when the same PostgreSQL
+                instance is shared with the main StorageCoordinator.
         """
         self._config = config
-        self._engine = None
+        self._engine = engine
+        self._shared_engine = engine is not None
         self._connected = False
         self._embedding_dimension = config.llm.embedding_dimension or 1536
         self._hnsw_m: int = config.storage.hnsw_m
@@ -99,15 +104,18 @@ class PgVectorTemporalStore(TemporalVectorStore):
         if self._connected:
             return
 
-        database_url = self._config.get_postgresql_url()
-        if not database_url:
-            raise ValueError("PostgreSQL URL not configured")
+        if self._engine is None:
+            database_url = self._config.get_postgresql_url()
+            if not database_url:
+                raise ValueError("PostgreSQL URL not configured")
 
-        # Convert to async URL if needed
-        if database_url.startswith("postgresql://"):
-            database_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
+            # Convert to async URL if needed
+            if database_url.startswith("postgresql://"):
+                database_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
 
-        self._engine = create_async_engine(database_url, pool_size=10, max_overflow=20)
+            pool_size = self._config.storage.postgresql_pool_size
+            max_overflow = self._config.storage.postgresql_max_overflow
+            self._engine = create_async_engine(database_url, pool_size=pool_size, max_overflow=max_overflow)
 
         # Create tables if they don't exist
         async with self._engine.begin() as conn:
@@ -154,7 +162,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
     async def disconnect(self) -> None:
         """Disconnect from PostgreSQL."""
-        if self._engine:
+        if self._engine and not self._shared_engine:
             await self._engine.dispose()
             self._engine = None
         self._connected = False

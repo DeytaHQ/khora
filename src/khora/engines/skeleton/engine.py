@@ -103,12 +103,20 @@ class SkeletonConstructionEngine:
         self._storage = create_storage_coordinator(self._storage_config)
         await self._storage.connect()
 
-        # Create and connect temporal vector store
+        # Create and connect temporal vector store.
+        # Share the coordinator's PG engine so we don't double the pool.
+        shared_pg_engine = None
+        if self._backend_type == "pgvector":
+            if self._storage.vector is not None:
+                shared_pg_engine = getattr(self._storage.vector, "_engine", None)
+            if shared_pg_engine is None and self._storage.relational is not None:
+                shared_pg_engine = getattr(self._storage.relational, "_engine", None)
         self._temporal_store = create_temporal_store(
             self._backend_type,
             self._config,
             weaviate_url=self._weaviate_url,
             surrealdb_config=self._config.storage.surrealdb if self._backend_type == "surrealdb" else None,
+            engine=shared_pg_engine,
         )
         await self._temporal_store.connect()
 

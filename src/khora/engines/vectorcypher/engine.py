@@ -319,7 +319,14 @@ class VectorCypherEngine:
                 connection=shared_conn,
             )
         else:
-            self._temporal_store = create_temporal_store("pgvector", self._config)
+            # Share the coordinator's SQLAlchemy engine so the temporal store
+            # does not create a second connection pool against the same PG.
+            shared_pg_engine = None
+            if self._storage.vector is not None:
+                shared_pg_engine = getattr(self._storage.vector, "_engine", None)
+            if shared_pg_engine is None and self._storage.relational is not None:
+                shared_pg_engine = getattr(self._storage.relational, "_engine", None)
+            self._temporal_store = create_temporal_store("pgvector", self._config, engine=shared_pg_engine)
         await self._temporal_store.connect()
 
         # Create embedder
