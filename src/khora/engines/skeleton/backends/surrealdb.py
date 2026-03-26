@@ -20,7 +20,6 @@ from khora.engines.skeleton.backends import (
     TemporalVectorStore,
 )
 from khora.storage.backends.surrealdb._helpers import (
-    _iso,
     _parse_dt,
     _parse_uuid,
     _rid,
@@ -179,8 +178,8 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                     "document": _rid("document", chunk.document_id),
                     "content": chunk.content,
                     "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
-                    "occurred_at": _iso(chunk.occurred_at),
-                    "created_at": _iso(chunk.created_at or datetime.now(UTC)),
+                    "occurred_at": chunk.occurred_at,
+                    "created_at": (chunk.created_at or datetime.now(UTC)),
                     "source_system": chunk.source_system,
                     "author": chunk.author,
                     "channel": chunk.channel,
@@ -491,8 +490,8 @@ class SurrealDBTemporalStore(TemporalVectorStore):
             "doc": str(chunk.document_id),
             "content": chunk.content,
             "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
-            "occurred_at": _iso(chunk.occurred_at),
-            "created_at": _iso(chunk.created_at or datetime.now(UTC)),
+            "occurred_at": chunk.occurred_at,
+            "created_at": (chunk.created_at or datetime.now(UTC)),
             "source_system": chunk.source_system,
             "author": chunk.author,
             "channel": chunk.channel,
@@ -560,16 +559,16 @@ class SurrealDBTemporalStore(TemporalVectorStore):
 
         if f.occurred_after is not None:
             clauses.append("occurred_at >= $occurred_after")
-            bindings["occurred_after"] = _iso(f.occurred_after)
+            bindings["occurred_after"] = f.occurred_after
         if f.occurred_before is not None:
             clauses.append("occurred_at < $occurred_before")
-            bindings["occurred_before"] = _iso(f.occurred_before)
+            bindings["occurred_before"] = f.occurred_before
         if f.created_after is not None:
             clauses.append("created_at >= $created_after")
-            bindings["created_after"] = _iso(f.created_after)
+            bindings["created_after"] = f.created_after
         if f.created_before is not None:
             clauses.append("created_at < $created_before")
-            bindings["created_before"] = _iso(f.created_before)
+            bindings["created_before"] = f.created_before
 
         if f.source_system:
             clauses.append("source_system = $source_system")
