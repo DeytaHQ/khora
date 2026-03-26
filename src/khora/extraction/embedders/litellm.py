@@ -299,12 +299,12 @@ class LiteLLMEmbedder(Embedder):
 
                     async def _embed_sub(batch: list[str]) -> list[list[float]]:
                         async with sem:
-                            return await self._embed_batch_internal(batch)
+                            return await self._embed_with_bisect(batch)
 
                     sub_results = await asyncio.gather(*[_embed_sub(b) for b in sub_batches])
                     unique_embeddings: list[list[float]] = [emb for result in sub_results for emb in result]
                 else:
-                    unique_embeddings = await self._embed_batch_internal(unique_texts)
+                    unique_embeddings = await self._embed_with_bisect(unique_texts)
 
             # L2-normalize all embeddings so dot product == cosine similarity
             # downstream (batch_dot_product is ~3x faster than batch_cosine).
@@ -423,6 +423,32 @@ class LiteLLMEmbedder(Embedder):
                     self._dimension_validated = True
 
                 return result
+
+    async def _embed_with_bisect(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch with bisect-on-failure for transient API errors.
+
+        When the embedding API returns a malformed JSON response (common
+        with large batches), splits the batch in half and retries each
+        half independently instead of retrying the entire batch.
+        """
+        try:
+            return await self._embed_batch_internal(texts)
+        except Exception as e:
+            error_str = str(e)
+            is_parse_error = any(
+                phrase in error_str for phrase in ("Expecting ',' delimiter", "Expecting value", "JSONDecodeError")
+            )
+            if not is_parse_error or len(texts) <= 2:
+                raise
+
+            mid = len(texts) // 2
+            logger.warning(
+                f"Embedding batch ({len(texts)} texts) hit JSON parse error, "
+                f"bisecting into {mid} + {len(texts) - mid}"
+            )
+            left = await self._embed_with_bisect(texts[:mid])
+            right = await self._embed_with_bisect(texts[mid:])
+            return left + right
 
     async def close(self) -> None:
         """Close underlying litellm HTTP sessions to avoid 'Unclosed client session' warnings."""
