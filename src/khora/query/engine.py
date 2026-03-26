@@ -1216,34 +1216,45 @@ class HybridQueryEngine:
                 logger.info("Zero results after fusion — attempting fallback search")
                 fallback_chunks: dict[str, list[tuple[Any, float]]] = {}
 
-                # Fallback 1: vector search with no similarity threshold
+                # Run fallback vector + keyword searches in parallel
+                _fb_tasks: list[tuple[str, Any]] = []
                 if query_embedding is not None:
-                    try:
-                        fb_vector = await self._vector_search(
-                            namespace_id,
-                            query_embedding,
-                            QueryConfig(
-                                max_chunks=cfg.max_chunks,
-                                max_entities=cfg.max_entities,
-                                min_chunk_similarity=0.0,
-                                min_entity_similarity=0.0,
+                    _fb_tasks.append(
+                        (
+                            "vector",
+                            self._vector_search(
+                                namespace_id,
+                                query_embedding,
+                                QueryConfig(
+                                    max_chunks=cfg.max_chunks,
+                                    max_entities=cfg.max_entities,
+                                    min_chunk_similarity=0.0,
+                                    min_entity_similarity=0.0,
+                                ),
                             ),
                         )
-                        if fb_vector["chunks"]:
-                            fallback_chunks["vector"] = fb_vector["chunks"]
-                            if fb_vector.get("entities"):
-                                all_entity_results["vector_fallback"] = fb_vector["entities"]
-                    except Exception as e:
-                        logger.warning(f"Fallback vector search failed: {e}")
-
-                # Fallback 2: keyword search (if not already run)
+                    )
                 if not search_contributions.keyword.chunk_count:
-                    try:
-                        fb_keyword = await self._keyword_search_fulltext(namespace_id, query_text, cfg)
-                        if fb_keyword["chunks"]:
-                            fallback_chunks["keyword"] = fb_keyword["chunks"]
-                    except Exception as e:
-                        logger.warning(f"Fallback keyword search failed: {e}")
+                    _fb_tasks.append(
+                        (
+                            "keyword",
+                            self._keyword_search_fulltext(namespace_id, query_text, cfg),
+                        )
+                    )
+
+                if _fb_tasks:
+                    _fb_results = await asyncio.gather(
+                        *(coro for _, coro in _fb_tasks),
+                        return_exceptions=True,
+                    )
+                    for (source, _), result in zip(_fb_tasks, _fb_results):
+                        if isinstance(result, Exception):
+                            logger.warning(f"Fallback {source} search failed: {result}")
+                            continue
+                        if result.get("chunks"):
+                            fallback_chunks[source] = result["chunks"]
+                        if source == "vector" and result.get("entities"):
+                            all_entity_results["vector_fallback"] = result["entities"]
 
                 if fallback_chunks:
                     fused_chunks = reciprocal_rank_fusion(
