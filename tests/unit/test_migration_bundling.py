@@ -386,9 +386,9 @@ class TestMigrationPackageStructure:
         migration_files = sorted(versions_dir.glob("*.py"))
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
-        assert len(migration_files) == 18, (
-            f"Expected 18 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
-        )
+        assert (
+            len(migration_files) == 18
+        ), f"Expected 18 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
 
     @pytest.mark.unit
     def test_env_py_constants(self):
@@ -542,9 +542,9 @@ class TestAcquireAdvisoryLock:
 
         assert mock_uniform.call_count == num_retries
         for i, call in enumerate(mock_uniform.call_args_list):
-            assert call == ((min_delay, expected_highs[i]),), (
-                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
-            )
+            assert call == (
+                (min_delay, expected_highs[i]),
+            ), f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
 
         # Verify the cap kicks in: attempts 6 and 7 should both be capped at max_delay
         assert expected_highs[6] == max_delay
@@ -586,9 +586,9 @@ class TestAcquireAdvisoryLock:
 
         assert mock_uniform.call_count == num_retries
         for i, call in enumerate(mock_uniform.call_args_list):
-            assert call == ((min_delay, expected_highs[i]),), (
-                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
-            )
+            assert call == (
+                (min_delay, expected_highs[i]),
+            ), f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
 
         # Verify cap applied on last attempt
         assert expected_highs[-1] == max_delay
