@@ -42,7 +42,20 @@ class MigrationResult:
     target_revision: str | None
     current_revision: str | None
     elapsed_seconds: float
+    skipped: bool = False
     error: str | None = None
+
+
+class _DatabaseAheadError(Exception):
+    """Raised when the DB revision is not recognized by the local migration scripts.
+
+    Used by ``env.py`` to signal ``_run_migrations_sync`` that the database
+    is ahead of this Khora version and migrations should be skipped.
+    """
+
+    def __init__(self, current_revision: str) -> None:
+        self.current_revision = current_revision
+        super().__init__(f"Database at unrecognized revision: {current_revision}")
 
 
 class DatabaseManager:
@@ -213,17 +226,31 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
 
     try:
         script = ScriptDirectory.from_config(alembic_cfg)
+        head = script.get_current_head()
         logger.info("Running khora database migrations...")
         command.upgrade(alembic_cfg, "head")
         elapsed = time.monotonic() - start
-        logger.info("Migrations completed in {:.2f}s", elapsed)
 
-        head = script.get_current_head()
+        logger.info("Migrations completed in {:.2f}s", elapsed)
         return MigrationResult(
             success=True,
             target_revision=head,
             current_revision=head,
             elapsed_seconds=elapsed,
+        )
+    except _DatabaseAheadError as exc:
+        elapsed = time.monotonic() - start
+        logger.warning(
+            "Migrations skipped (database is ahead at {}) in {:.2f}s",
+            exc.current_revision,
+            elapsed,
+        )
+        return MigrationResult(
+            success=True,
+            target_revision=head,
+            current_revision=None,
+            elapsed_seconds=elapsed,
+            skipped=True,
         )
     except Exception as e:
         elapsed = time.monotonic() - start

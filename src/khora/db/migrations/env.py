@@ -11,11 +11,13 @@ import time
 from logging.config import fileConfig
 
 from alembic import context
+from alembic.script import ScriptDirectory
 from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.db.models import Base
+from khora.db.session import _DatabaseAheadError
 
 # ── Configuration ──────────────────────────────────────────────
 config = context.config
@@ -83,7 +85,7 @@ def _acquire_advisory_lock(
             return
         if time.monotonic() >= deadline:
             raise TimeoutError(
-                f"Could not acquire migration advisory lock within {timeout}s. " "Another migration may be running."
+                f"Could not acquire migration advisory lock within {timeout}s. Another migration may be running."
             )
         logger.warning("Waiting for migration lock...")
         # Full jitter backoff — decorrelates concurrent callers
@@ -106,6 +108,19 @@ def do_run_migrations(connection: Connection) -> None:
 
     with context.begin_transaction():
         _acquire_advisory_lock(connection)
+
+        # Ahead-detection: skip if DB is at a revision this version doesn't know
+        current_rev = context.get_current_revision()
+        if current_rev is not None:
+            known_revisions = {r.revision for r in ScriptDirectory.from_config(config).walk_revisions()}
+            if current_rev not in known_revisions:
+                logger.warning(
+                    "Database at revision %s which is not recognized by this Khora version "
+                    "— skipping migrations (database is ahead).",
+                    current_rev,
+                )
+                raise _DatabaseAheadError(current_rev)
+
         context.run_migrations()
 
 
