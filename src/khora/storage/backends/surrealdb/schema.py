@@ -87,6 +87,7 @@ DEFINE FIELD IF NOT EXISTS created_at ON chunk TYPE datetime DEFAULT time::now()
 DEFINE FIELD IF NOT EXISTS source_timestamp ON chunk TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS idx_chunk_namespace ON chunk FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_chunk_document ON chunk FIELDS document;
+DEFINE INDEX IF NOT EXISTS idx_chunk_doc_idx ON chunk FIELDS document, chunk_index;
 DEFINE INDEX IF NOT EXISTS idx_chunk_embedding ON chunk FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
 DEFINE INDEX IF NOT EXISTS idx_chunk_content_ft ON chunk FIELDS content SEARCH ANALYZER khora_fulltext BM25;
 
@@ -114,6 +115,7 @@ DEFINE INDEX IF NOT EXISTS idx_entity_namespace ON entity FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_entity_unique ON entity FIELDS namespace, name, entity_type UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_entity_ns_type ON entity FIELDS namespace, entity_type;
 DEFINE INDEX IF NOT EXISTS idx_entity_ns_mention ON entity FIELDS namespace, mention_count;
+DEFINE INDEX IF NOT EXISTS idx_entity_ns_created ON entity FIELDS namespace, created_at;
 DEFINE INDEX IF NOT EXISTS idx_entity_embedding ON entity FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
 
 -- Relates-to (graph edge between entities)
@@ -133,6 +135,7 @@ DEFINE FIELD IF NOT EXISTS created_at ON relates_to TYPE datetime DEFAULT time::
 DEFINE FIELD IF NOT EXISTS updated_at ON relates_to TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_relates_to_namespace ON relates_to FIELDS namespace_id;
 DEFINE INDEX IF NOT EXISTS idx_relates_to_ns_type ON relates_to FIELDS namespace_id, relationship_type;
+DEFINE INDEX IF NOT EXISTS idx_relates_to_ns_weight ON relates_to FIELDS namespace_id, relationship_type, weight;
 
 -- Episode (aligned with SQLAlchemy Episode model)
 DEFINE TABLE IF NOT EXISTS episode SCHEMAFULL;
