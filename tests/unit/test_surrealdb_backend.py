@@ -1164,8 +1164,12 @@ class TestVectorAdapterHelpers:
         from khora.storage.backends.surrealdb.vector import _rid
 
         uid = UUID("12345678-1234-5678-1234-567812345678")
-        # _rid returns a RecordID object; UUID passed directly (no angle brackets)
-        assert str(_rid("chunk", uid)) == "chunk:12345678-1234-5678-1234-567812345678"
+        # _rid returns a RecordID object; SDK ≥2.0 may wrap non-simple keys in angle brackets
+        result = str(_rid("chunk", uid))
+        assert result in (
+            "chunk:12345678-1234-5678-1234-567812345678",
+            "chunk:⟨12345678-1234-5678-1234-567812345678⟩",
+        )
 
     def test_parse_uuid_bare(self) -> None:
         from khora.storage.backends.surrealdb.vector import _parse_uuid
