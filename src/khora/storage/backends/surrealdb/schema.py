@@ -88,8 +88,7 @@ DEFINE FIELD IF NOT EXISTS source_timestamp ON chunk TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS idx_chunk_namespace ON chunk FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_chunk_document ON chunk FIELDS document;
 DEFINE INDEX IF NOT EXISTS idx_chunk_doc_idx ON chunk FIELDS document, chunk_index;
-DEFINE INDEX IF NOT EXISTS idx_chunk_embedding ON chunk FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
-DEFINE INDEX IF NOT EXISTS idx_chunk_content_ft ON chunk FIELDS content SEARCH ANALYZER khora_fulltext BM25;
+-- HNSW + BM25 indexes deferred to ensure_search_indexes() for bulk load performance
 
 -- Entity (with HNSW vector index and unique constraint)
 DEFINE TABLE IF NOT EXISTS entity SCHEMAFULL;
@@ -116,7 +115,7 @@ DEFINE INDEX IF NOT EXISTS idx_entity_unique ON entity FIELDS namespace, name, e
 DEFINE INDEX IF NOT EXISTS idx_entity_ns_type ON entity FIELDS namespace, entity_type;
 DEFINE INDEX IF NOT EXISTS idx_entity_ns_mention ON entity FIELDS namespace, mention_count;
 DEFINE INDEX IF NOT EXISTS idx_entity_ns_created ON entity FIELDS namespace, created_at;
-DEFINE INDEX IF NOT EXISTS idx_entity_embedding ON entity FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
+-- HNSW index deferred to ensure_search_indexes()
 
 -- Relates-to (graph edge between entities)
 DEFINE TABLE IF NOT EXISTS relates_to TYPE RELATION SCHEMAFULL;
@@ -156,7 +155,7 @@ DEFINE FIELD IF NOT EXISTS created_at ON episode TYPE datetime DEFAULT time::now
 DEFINE FIELD IF NOT EXISTS updated_at ON episode TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_episode_namespace ON episode FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_episode_occurred ON episode FIELDS namespace, occurred_at;
-DEFINE INDEX IF NOT EXISTS idx_episode_embedding ON episode FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
+-- HNSW index deferred to ensure_search_indexes()
 
 -- Involves (episode → entity edge)
 DEFINE TABLE IF NOT EXISTS involves TYPE RELATION SCHEMAFULL;
@@ -246,6 +245,31 @@ DEFINE FIELD IF NOT EXISTS metadata_ ON next_session FLEXIBLE TYPE option<object
 DEFINE FIELD IF NOT EXISTS created_at ON next_session TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_next_session_namespace ON next_session FIELDS namespace_id;
 """
+
+
+_SEARCH_INDEX_DEFINITIONS = """
+-- HNSW vector indexes (deferred from table definitions for bulk-load performance).
+-- These are expensive to maintain incrementally on every INSERT.
+DEFINE INDEX IF NOT EXISTS idx_chunk_embedding ON chunk FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
+DEFINE INDEX IF NOT EXISTS idx_chunk_content_ft ON chunk FIELDS content SEARCH ANALYZER khora_fulltext BM25;
+DEFINE INDEX IF NOT EXISTS idx_entity_embedding ON entity FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
+DEFINE INDEX IF NOT EXISTS idx_episode_embedding ON episode FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
+"""
+
+
+async def ensure_search_indexes(conn: SurrealDBConnection) -> None:
+    """Create HNSW and BM25 search indexes on chunk/entity/episode tables.
+
+    Call after bulk ingestion to avoid per-INSERT index maintenance
+    overhead during data loading.  Idempotent (uses IF NOT EXISTS).
+
+    Args:
+        conn: An active SurrealDBConnection instance.
+    """
+    logger.info("Creating SurrealDB search indexes (HNSW + BM25)...")
+    await conn.execute(_ANALYZER_DEFINITIONS)
+    await conn.execute(_SEARCH_INDEX_DEFINITIONS)
+    logger.info("SurrealDB search indexes created")
 
 
 async def initialize_schema(conn: SurrealDBConnection) -> None:
