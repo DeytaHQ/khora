@@ -25,7 +25,7 @@ Every merge to `main` publishes a dev release to CodeArtifact via `ci.yml`:
 
 | Package | Version example | How |
 |---------|----------------|-----|
-| `khora` | `0.5.5.dev14` | `hatch-vcs` with `SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version` |
+| `khora` | `0.5.5.dev14` | `hatch-vcs` with `local_scheme = "no-local-version"` in pyproject.toml |
 | `khora-accel` | `0.5.5-dev.14` (semver) → `0.5.5.dev14` (wheel) | `git describe` → stamp `Cargo.toml` → maturin |
 
 Dev versions are PEP 440 pre-releases. Downstream projects that pin `>=X.Y.Z.dev0` will pick them up.
