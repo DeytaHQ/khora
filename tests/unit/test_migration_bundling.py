@@ -387,7 +387,7 @@ class TestMigrationPackageStructure:
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
         assert len(migration_files) == 18, (
-            f"Expected 18 migration files, found {len(migration_files)}: " f"{[f.name for f in migration_files]}"
+            f"Expected 18 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
         )
 
     @pytest.mark.unit
@@ -543,7 +543,7 @@ class TestAcquireAdvisoryLock:
         assert mock_uniform.call_count == num_retries
         for i, call in enumerate(mock_uniform.call_args_list):
             assert call == ((min_delay, expected_highs[i]),), (
-                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), " f"got uniform{call}"
+                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
             )
 
         # Verify the cap kicks in: attempts 6 and 7 should both be capped at max_delay
@@ -587,7 +587,7 @@ class TestAcquireAdvisoryLock:
         assert mock_uniform.call_count == num_retries
         for i, call in enumerate(mock_uniform.call_args_list):
             assert call == ((min_delay, expected_highs[i]),), (
-                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), " f"got uniform{call}"
+                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
             )
 
         # Verify cap applied on last attempt
@@ -763,6 +763,104 @@ class TestRunAsyncMigrations:
 
         mock_conn.run_sync.assert_called_once_with(env.do_run_migrations)
         mock_engine.dispose.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# env.py — do_run_migrations ahead-detection
+# ---------------------------------------------------------------------------
+
+
+class TestDoRunMigrationsAheadDetection:
+    """Tests for ahead-detection logic in do_run_migrations()."""
+
+    @pytest.mark.unit
+    def test_skips_when_db_revision_unknown(self):
+        """Skips migrations when DB revision is not in the known set."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        # Advisory lock acquired
+        conn.execute.return_value.scalar.return_value = True
+
+        env.context.get_current_revision.return_value = "unknown_rev_abc"
+
+        # Mock ScriptDirectory with revisions that don't include the DB revision
+        mock_rev = MagicMock()
+        mock_rev.revision = "known_rev_1"
+        mock_script_dir = MagicMock()
+        mock_script_dir.walk_revisions.return_value = [mock_rev]
+
+        with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
+            env.do_run_migrations(conn)
+
+        env.context.run_migrations.assert_not_called()
+        assert env.config.attributes["skipped_ahead"] is True
+
+    @pytest.mark.unit
+    def test_proceeds_when_revision_known(self):
+        """Runs migrations normally when DB revision is in the known set."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        conn.execute.return_value.scalar.return_value = True
+
+        env.context.get_current_revision.return_value = "known_rev"
+
+        mock_rev = MagicMock()
+        mock_rev.revision = "known_rev"
+        mock_script_dir = MagicMock()
+        mock_script_dir.walk_revisions.return_value = [mock_rev]
+
+        with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
+            env.do_run_migrations(conn)
+
+        env.context.run_migrations.assert_called_once()
+
+    @pytest.mark.unit
+    def test_proceeds_when_no_current_revision(self):
+        """Runs migrations normally when DB has no current revision (fresh DB)."""
+        env = _load_env_functions()
+        conn = MagicMock()
+        conn.execute.return_value.scalar.return_value = True
+
+        env.context.get_current_revision.return_value = None
+
+        env.do_run_migrations(conn)
+
+        env.context.run_migrations.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _run_migrations_sync — skipped_ahead handling
+# ---------------------------------------------------------------------------
+
+
+class TestRunMigrationsSyncSkippedAhead:
+    """Tests for _run_migrations_sync handling the skipped_ahead attribute."""
+
+    @pytest.mark.unit
+    @patch("alembic.command.upgrade")
+    @patch("alembic.script.ScriptDirectory.from_config")
+    @patch("alembic.config.Config")
+    def test_returns_success_when_skipped_ahead(self, mock_config_cls, mock_from_config, mock_upgrade):
+        """Returns success with current_revision=None when migrations were skipped."""
+        mock_cfg_instance = MagicMock()
+        mock_config_cls.return_value = mock_cfg_instance
+        mock_cfg_instance.attributes = {}
+
+        mock_script = MagicMock()
+        mock_script.get_current_head.return_value = "abc123"
+        mock_from_config.return_value = mock_script
+
+        # Simulate env.py setting skipped_ahead during upgrade
+        def upgrade_side_effect(cfg, target):
+            cfg.attributes["skipped_ahead"] = True
+
+        mock_upgrade.side_effect = upgrade_side_effect
+
+        result = _run_migrations_sync("postgresql://localhost/testdb")
+
+        assert result.success is True
+        assert result.current_revision is None
+        assert result.target_revision == "abc123"
 
 
 # ---------------------------------------------------------------------------

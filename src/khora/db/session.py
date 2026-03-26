@@ -216,9 +216,19 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
         logger.info("Running khora database migrations...")
         command.upgrade(alembic_cfg, "head")
         elapsed = time.monotonic() - start
-        logger.info("Migrations completed in {:.2f}s", elapsed)
 
         head = script.get_current_head()
+
+        if alembic_cfg.attributes.get("skipped_ahead", False):
+            logger.info("Migrations skipped (database is ahead) in {:.2f}s", elapsed)
+            return MigrationResult(
+                success=True,
+                target_revision=head,
+                current_revision=None,  # actual revision is unknown to this version
+                elapsed_seconds=elapsed,
+            )
+
+        logger.info("Migrations completed in {:.2f}s", elapsed)
         return MigrationResult(
             success=True,
             target_revision=head,
