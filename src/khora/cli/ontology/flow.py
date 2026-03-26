@@ -164,15 +164,44 @@ class OntologyConstructFlow:
         )
 
     def _prompt_for_sources(self) -> list[str]:
-        """Interactively prompt user for data source paths."""
+        """Interactively prompt user for data source paths.
+
+        Offers internet discovery if API keys are available and the user
+        has no local sources to provide.
+        """
+        import os
+
+        has_discovery = bool(os.environ.get("PERPLEXITY_API_KEY") or os.environ.get("FIRECRAWL_API_KEY"))
+
+        if has_discovery:
+            console.print(
+                "[dim]Enter data source paths (files or directories), "
+                "or type [bold cyan]discover[/bold cyan] to search the internet for sources. "
+                "Empty line to finish.[/]"
+            )
+        else:
+            console.print("[dim]Enter data source paths (files or directories). Empty line to finish.[/]")
+
         sources: list[str] = []
-        console.print("[dim]Enter data source paths (files or directories). Empty line to finish.[/]")
         while True:
             raw = Prompt.ask("  Source path", default="")
             if not raw:
                 break
+            if raw.strip().lower() == "discover" and has_discovery:
+                discovered = self._run_discovery()
+                sources.extend(discovered)
+                if discovered:
+                    console.print(f"[green]Added {len(discovered)} discovered source(s).[/]")
+                break
             sources.append(raw)
         return sources
+
+    def _run_discovery(self) -> list[str]:
+        """Launch the interactive discovery agent and return local paths."""
+        from .discover import run_discovery_session
+
+        output_dir = Path("./khora_discovery_data")
+        return asyncio.run(run_discovery_session(output_dir))
 
     # ------------------------------------------------------------------
     # Phase 2: Domain detection

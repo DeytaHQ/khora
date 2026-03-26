@@ -22,6 +22,15 @@ def ontology_group() -> None:
     """AI-powered ontology construction and management."""
 
 
+def _register_discover() -> None:
+    from .discover import discover
+
+    ontology_group.add_command(discover)
+
+
+_register_discover()
+
+
 # ---------------------------------------------------------------------------
 # construct
 # ---------------------------------------------------------------------------
