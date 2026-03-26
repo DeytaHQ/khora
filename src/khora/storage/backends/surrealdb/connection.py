@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
 from loguru import logger
+
+# Module-level lock prevents concurrent schema initialization from
+# multiple SurrealDBConnection instances (the StorageCoordinator
+# connects 4 backends in parallel, all sharing the same embedded DB).
+_schema_init_lock = asyncio.Lock()
 
 
 class SurrealDBConnection:
@@ -89,12 +95,17 @@ class SurrealDBConnection:
         self._connected = True
         logger.info(f"Connected to SurrealDB ({self._mode}), ns={self._namespace}, db={self._database}")
 
-        # Auto-initialize schema (idempotent, skipped on reconnect)
+        # Auto-initialize schema (idempotent, skipped on reconnect).
+        # The lock prevents concurrent connections from running DEFINE
+        # statements in parallel, which causes SurrealDB transaction
+        # conflicts on embedded mode.
         if not self._schema_initialized:
-            from .schema import initialize_schema
+            async with _schema_init_lock:
+                if not self._schema_initialized:
+                    from .schema import initialize_schema
 
-            await initialize_schema(self)
-            self._schema_initialized = True
+                    await initialize_schema(self)
+                    self._schema_initialized = True
 
     async def disconnect(self) -> None:
         if self._client and self._connected:
