@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import time as _time
 from collections.abc import Callable
@@ -56,6 +57,21 @@ if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
+
+
+def _ensure_tags(value: Any) -> list[str]:
+    """Coerce tags to a list — handles JSON strings from PostgreSQL metadata."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return [value] if value else []
+    return []
 
 
 _MAX_COOCCURRENCE_PER_CHUNK = 15
@@ -621,7 +637,7 @@ class VectorCypherEngine:
                     source_system=doc_metadata.get("source_system"),
                     author=doc_metadata.get("author"),
                     channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                    tags=doc_metadata.get("tags", []),
+                    tags=_ensure_tags(doc_metadata.get("tags", [])),
                     confidence=1.0,
                     metadata={
                         **doc_metadata,
@@ -989,7 +1005,7 @@ class VectorCypherEngine:
                 source_system=doc_metadata.get("source_system"),
                 author=doc_metadata.get("author"),
                 channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                tags=doc_metadata.get("tags", []),
+                tags=_ensure_tags(doc_metadata.get("tags", [])),
                 confidence=1.0,
                 metadata={
                     **doc_metadata,
@@ -1584,7 +1600,7 @@ class VectorCypherEngine:
                     source_system=doc_metadata.get("source_system"),
                     author=doc_metadata.get("author"),
                     channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                    tags=doc_metadata.get("tags", []),
+                    tags=_ensure_tags(doc_metadata.get("tags", [])),
                     confidence=1.0,
                     metadata={
                         **doc_metadata,
