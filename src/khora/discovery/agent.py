@@ -206,12 +206,7 @@ class DiscoveryAgent:
             elif strategy.method == "direct_download":
                 await self._fetch_direct(src)
             elif strategy.method == "generated_script":
-                # Script generation deferred to DYT-1221/1222
-                # Fall back to Firecrawl or direct download for now
-                if self._has_firecrawl:
-                    await self._fetch_with_firecrawl(src)
-                else:
-                    await self._fetch_direct(src)
+                await self._fetch_with_script(src)
             else:
                 await self._fetch_direct(src)
 
@@ -314,6 +309,78 @@ class DiscoveryAgent:
                 )
             )
             self._ui.show_fetch_saved(out_file.name, len(resp.content), unit="bytes")
+        except Exception as e:
+            self._ui.show_fetch_failed(str(e))
+            self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
+
+    async def _fetch_with_script(self, src: DiscoveredSource) -> None:
+        """Generate a fetch script via LLM, validate, confirm, and execute."""
+        from .codegen import execute_script, extract_urls, render_template, validate_script
+
+        try:
+            # Generate script via planner
+            self._ui.show_info("[dim]Generating fetch script...[/]")
+            raw_body = await self._planner.generate_fetch_script(src, str(self._output_dir))
+
+            script = render_template(title=src.title, url=src.url, fetch_body=raw_body)
+
+            # AST validation
+            violations = validate_script(script)
+            if violations:
+                msg = "Script failed validation:\n" + "\n".join(f"  {v}" for v in violations)
+                self._ui.show_fetch_failed(msg)
+                self._state.fetched.append(FetchResult(source=src, local_path="", error=msg))
+                return
+
+            # Show script and URLs to user for confirmation
+            urls = extract_urls(script)
+            self._ui.show_info(f"\n[bold]Generated script for: {src.title}[/]")
+            if urls:
+                self._ui.show_info(f"[dim]Script will contact: {', '.join(urls)}[/]")
+            self._ui.show_data_preview("fetch_script.py", script, max_chars=2000)
+
+            from rich.prompt import Confirm
+
+            approved = Confirm.ask("Execute this script?", default=False)
+            if not approved:
+                self._ui.show_info("[dim]Script execution skipped by user.[/]")
+                return
+
+            # Execute in sandbox
+            with self._ui.show_fetching(src.url):
+                result = await execute_script(
+                    script,
+                    self._output_dir,
+                    timeout=120,
+                )
+
+            if result.success and result.files_created:
+                for f in result.files_created:
+                    self._ui.show_fetch_saved(f, 0, unit="file(s)")
+                self._state.fetched.append(
+                    FetchResult(
+                        source=src,
+                        local_path=result.files_created[0],
+                        content_type="application/octet-stream",
+                        size_bytes=sum(
+                            Path(self._output_dir / f).stat().st_size
+                            for f in result.files_created
+                            if (self._output_dir / f).exists()
+                        ),
+                        success=True,
+                        attempts=[
+                            FetchAttempt(
+                                method=FetchMethod.GENERATED_SCRIPT,
+                                success=True,
+                            )
+                        ],
+                    )
+                )
+            else:
+                error = result.stderr or result.summary.get("error", "Script produced no output")
+                self._ui.show_fetch_failed(error[:200])
+                self._state.fetched.append(FetchResult(source=src, local_path="", error=error[:500]))
+
         except Exception as e:
             self._ui.show_fetch_failed(str(e))
             self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
