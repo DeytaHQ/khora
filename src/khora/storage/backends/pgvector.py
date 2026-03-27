@@ -140,6 +140,15 @@ class PgVectorBackend(AsyncSessionMixin):
                     "halfvec requested but pgvector extension < 0.7.0 — " "falling back to full-precision vectors"
                 )
 
+        # Verify halfvec HNSW indexes exist before enabling halfvec mode
+        if self._halfvec_available:
+            if not await self._check_halfvec_indexes():
+                self._halfvec_available = False
+                logger.warning(
+                    "halfvec HNSW indexes not found — falling back to full-precision vectors. "
+                    "Run migrations to create them."
+                )
+
         logger.info("Connected to pgvector")
 
     async def disconnect(self) -> None:
@@ -183,6 +192,24 @@ class PgVectorBackend(AsyncSessionMixin):
                 return (major, minor) >= (0, 7)
         except Exception as e:
             logger.debug(f"Failed to detect pgvector version: {e}")
+            return False
+
+    async def _check_halfvec_indexes(self) -> bool:
+        """Check if both halfvec HNSW indexes exist in the database."""
+        required = {"ix_chunks_embedding_halfvec_hnsw", "ix_entities_embedding_halfvec_hnsw"}
+        try:
+            async with self._get_session() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT indexname FROM pg_indexes "
+                        "WHERE indexname IN ('ix_chunks_embedding_halfvec_hnsw', "
+                        "'ix_entities_embedding_halfvec_hnsw')"
+                    )
+                )
+                found = {row[0] for row in result.all()}
+                return required.issubset(found)
+        except Exception as e:
+            logger.debug(f"Failed to check halfvec indexes: {e}")
             return False
 
     async def create_tables(self) -> None:
