@@ -129,32 +129,77 @@ class OntologyLLM:
         return await litellm.acompletion(**kwargs)
 
     def _parse_json(self, content: str) -> dict[str, Any]:
-        """Parse JSON from LLM response, handling markdown code blocks."""
-        # Direct parse
+        """Parse JSON from LLM response, handling common LLM quirks.
+
+        Tries multiple strategies:
+        1. Direct parse
+        2. Extract from markdown code blocks (```json ... ```)
+        3. Find outermost { ... } in the response
+        4. Strip trailing commas (common LLM mistake)
+        5. Wrap bare arrays in a dict
+        """
+        # 1. Direct parse
         try:
-            return json.loads(content)
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"items": parsed}
         except json.JSONDecodeError:
             pass
 
-        # Extract from markdown code blocks
+        # 2. Extract from markdown code blocks
         match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", content, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group(1))
+                parsed = json.loads(match.group(1))
+                if isinstance(parsed, dict):
+                    return parsed
+                if isinstance(parsed, list):
+                    return {"items": parsed}
             except json.JSONDecodeError:
-                pass
+                # Try with trailing comma fix
+                cleaned = self._fix_trailing_commas(match.group(1))
+                try:
+                    parsed = json.loads(cleaned)
+                    return parsed if isinstance(parsed, dict) else {"items": parsed}
+                except json.JSONDecodeError:
+                    pass
 
-        # Strip leading/trailing non-JSON characters
+        # 3. Find outermost { ... }
         stripped = content.strip()
         start = stripped.find("{")
         end = stripped.rfind("}")
         if start != -1 and end != -1 and end > start:
+            candidate = stripped[start : end + 1]
             try:
-                return json.loads(stripped[start : end + 1])
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                # Try with trailing comma fix
+                cleaned = self._fix_trailing_commas(candidate)
+                try:
+                    return json.loads(cleaned)
+                except json.JSONDecodeError:
+                    pass
+
+        # 4. Find outermost [ ... ] (bare array)
+        start = stripped.find("[")
+        end = stripped.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            candidate = stripped[start : end + 1]
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, list):
+                    return {"items": parsed}
             except json.JSONDecodeError:
                 pass
 
         raise LLMResponseError(content)
+
+    @staticmethod
+    def _fix_trailing_commas(text: str) -> str:
+        """Remove trailing commas before } or ] (common LLM JSON error)."""
+        return re.sub(r",\s*([}\]])", r"\1", text)
 
     @property
     def usage_summary(self) -> dict[str, Any]:
