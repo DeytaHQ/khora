@@ -300,6 +300,17 @@ class DiscoveryUI:
         else:
             self._console.print(f"[{_DIM}]no data fetched.[/]")
 
+    async def prompt_continue_to_construct(self) -> bool:
+        """Ask whether to continue directly to ontology construction."""
+        from rich.prompt import Confirm
+
+        result = await asyncio.to_thread(
+            Confirm.ask,
+            f"[{_ACCENT}]>[/] Continue to ontology construction?",
+            default=True,
+        )
+        return result
+
     def show_session_saved(self, path: str) -> None:
         self._console.print(f"[{_DIM}]session saved: {path}[/]")
 

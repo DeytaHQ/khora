@@ -126,7 +126,12 @@ async def run_discovery_session(
     default=None,
     help="Resume a saved discovery session.",
 )
-def discover(output_dir: Path | None, topic: str, resume: str | None) -> None:
+@click.option(
+    "--construct/--no-construct",
+    default=None,
+    help="Continue to ontology construction after discovery (default: ask).",
+)
+def discover(output_dir: Path | None, topic: str, resume: str | None, construct: bool | None) -> None:
     """Interactively discover and fetch datasources from the internet.
 
     Uses Perplexity for search and Firecrawl for web scraping.
@@ -142,10 +147,41 @@ def discover(output_dir: Path | None, topic: str, resume: str | None) -> None:
     ui = DiscoveryUI(console)
     ui.show_rule("Source Discovery")
 
+    resolved_dir: Path | None = output_dir
     try:
-        paths = asyncio.run(run_discovery_session(output_dir, topic=topic, resume_path=resume))
+        paths = asyncio.run(run_discovery_session(resolved_dir, topic=topic, resume_path=resume))
     except KeyboardInterrupt:
         console.print("\n[yellow]Discovery interrupted.[/]")
         paths = []
 
-    ui.show_done(paths, str(output_dir))
+    if not paths:
+        ui.show_done(paths, str(resolved_dir or ""))
+        return
+
+    # Determine the actual output directory from the first path
+    actual_dir = Path(paths[0]).parent if paths else resolved_dir
+    ui.show_done(paths, str(actual_dir))
+
+    # Offer to continue to ontology construction
+    should_construct = construct
+    if should_construct is None and paths:
+        should_construct = asyncio.run(ui.prompt_continue_to_construct())
+
+    if should_construct and actual_dir:
+        _run_construct(actual_dir)
+
+
+def _run_construct(source_dir: Path) -> None:
+    """Launch ontology construction on the discovered data."""
+    from .flow import run_construct
+
+    console.print()
+    run_construct(
+        source=(str(source_dir),),
+        output="./ontology.yaml",
+        model="gpt-4o",
+        budget=1.0,
+        extends_skill=None,
+        non_interactive=False,
+        resume=None,
+    )
