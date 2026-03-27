@@ -290,7 +290,6 @@ class DiscoveryUI:
         except (ValueError, IndexError):
             return 0, min(total, 50)
 
-
     def show_data_preview(self, path: str, content: str, max_chars: int = 500) -> None:
         """Show a preview of fetched data content."""
         preview = content[:max_chars]
