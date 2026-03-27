@@ -803,17 +803,33 @@ class TestRunAsyncMigrations:
 class TestDoRunMigrationsAheadDetection:
     """Tests for ahead-detection logic in do_run_migrations()."""
 
+    def _setup_conn(self, version_num: str | None) -> MagicMock:
+        """Create a mock connection that returns the given version for both
+        the advisory lock query and the version table query."""
+        conn = MagicMock()
+        # We need execute to return different results for different queries.
+        # First call: advisory lock (scalar returns True)
+        # Second call: version table query (fetchone returns row or None)
+        lock_result = MagicMock()
+        lock_result.scalar.return_value = True
+
+        version_result = MagicMock()
+        if version_num is not None:
+            row = MagicMock()
+            row.__getitem__ = MagicMock(return_value=version_num)
+            version_result.fetchone.return_value = row
+        else:
+            version_result.fetchone.return_value = None
+
+        conn.execute.side_effect = [lock_result, version_result]
+        return conn
+
     @pytest.mark.unit
     def test_skips_when_db_revision_unknown(self):
         """Raises _DatabaseAheadError when DB revision is not in the known set."""
         env = _load_env_functions()
-        conn = MagicMock()
-        # Advisory lock acquired
-        conn.execute.return_value.scalar.return_value = True
+        conn = self._setup_conn("unknown_rev_abc")
 
-        env.context.get_current_revision.return_value = "unknown_rev_abc"
-
-        # Mock ScriptDirectory with revisions that don't include the DB revision
         mock_rev = MagicMock()
         mock_rev.revision = "known_rev_1"
         mock_script_dir = MagicMock()
@@ -830,10 +846,7 @@ class TestDoRunMigrationsAheadDetection:
     def test_proceeds_when_revision_known(self):
         """Runs migrations normally when DB revision is in the known set."""
         env = _load_env_functions()
-        conn = MagicMock()
-        conn.execute.return_value.scalar.return_value = True
-
-        env.context.get_current_revision.return_value = "known_rev"
+        conn = self._setup_conn("known_rev")
 
         mock_rev = MagicMock()
         mock_rev.revision = "known_rev"
@@ -849,10 +862,7 @@ class TestDoRunMigrationsAheadDetection:
     def test_proceeds_when_no_current_revision(self):
         """Runs migrations normally when DB has no current revision (fresh DB)."""
         env = _load_env_functions()
-        conn = MagicMock()
-        conn.execute.return_value.scalar.return_value = True
-
-        env.context.get_current_revision.return_value = None
+        conn = self._setup_conn(None)
 
         env.do_run_migrations(conn)
 
@@ -862,10 +872,7 @@ class TestDoRunMigrationsAheadDetection:
     def test_propagates_walk_revisions_error(self):
         """Exception from walk_revisions() propagates unhandled."""
         env = _load_env_functions()
-        conn = MagicMock()
-        conn.execute.return_value.scalar.return_value = True
-
-        env.context.get_current_revision.return_value = "some_rev"
+        conn = self._setup_conn("some_rev")
 
         mock_script_dir = MagicMock()
         mock_script_dir.walk_revisions.side_effect = RuntimeError("corrupt history")
@@ -880,10 +887,7 @@ class TestDoRunMigrationsAheadDetection:
     def test_propagates_script_directory_error(self):
         """Exception from ScriptDirectory.from_config() propagates unhandled."""
         env = _load_env_functions()
-        conn = MagicMock()
-        conn.execute.return_value.scalar.return_value = True
-
-        env.context.get_current_revision.return_value = "some_rev"
+        conn = self._setup_conn("some_rev")
 
         with patch.object(env.ScriptDirectory, "from_config", side_effect=RuntimeError("bad config")):
             with pytest.raises(RuntimeError, match="bad config"):
