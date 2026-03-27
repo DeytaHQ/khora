@@ -96,6 +96,40 @@ class OntologyLLM:
         content = response.choices[0].message.content or ""
         return self._parse_json(content)
 
+    async def complete_raw(
+        self,
+        system: str,
+        user: str,
+        *,
+        temperature: float = 0.3,
+    ) -> str:
+        """Call LLM and return the raw text response (no JSON parsing).
+
+        Use this for code generation or other non-JSON responses.
+        """
+        estimated_tokens = len(system + user) // 4
+        estimated_cost = estimated_tokens * 0.00001
+        if self._total_cost_usd + estimated_cost > self.budget_usd:
+            raise BudgetExhaustedError(self._total_cost_usd, self.budget_usd)
+
+        response = await self._call_llm(system, user, temperature=temperature)
+
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        try:
+            cost = litellm.completion_cost(completion_response=response) or 0.0
+        except Exception:
+            cost = 0.0
+
+        self._call_count += 1
+        self._total_input_tokens += input_tokens
+        self._total_output_tokens += output_tokens
+        self._total_cost_usd += cost
+
+        logger.debug(f"LLM raw call #{self._call_count}: {input_tokens}in/{output_tokens}out, ${cost:.4f}")
+
+        return response.choices[0].message.content or ""
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
