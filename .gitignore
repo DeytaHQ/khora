@@ -233,3 +233,4 @@ scripts/slack-notify.py
 .claude/settings.local.json
 .claude/projects/
 .claude/worktrees/
+khora_discovery_data/
