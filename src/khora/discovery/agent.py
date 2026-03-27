@@ -224,6 +224,7 @@ class DiscoveryAgent:
             self._state.selected_indices = new_indices
             return AgentPhase.FETCH
 
+
         # Run validation on successful fetches
         successful = self._state.successful_fetches
         if successful:
