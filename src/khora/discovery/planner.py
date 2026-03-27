@@ -9,6 +9,7 @@ Uses LiteLLM (via OntologyLLM) to make planning decisions:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -17,6 +18,37 @@ from loguru import logger
 from khora.cli.ontology.llm import OntologyLLM
 
 from .state import DiscoveredSource, SourceType
+
+
+def _extract_code(raw: str) -> str:
+    """Extract Python code from an LLM response.
+
+    Handles:
+    - Markdown code blocks (```python ... ``` or ``` ... ```)
+    - Raw code without fences
+    - JSON wrapper with a "code" key
+    """
+    # Try markdown code blocks first
+    match = re.search(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # Try JSON wrapper: {"code": "..."}
+    if raw.strip().startswith("{"):
+        import json
+
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                code = parsed.get("code") or parsed.get("script") or ""
+                if code:
+                    return code
+        except json.JSONDecodeError:
+            pass
+
+    # Assume the raw response is the code itself
+    return raw.strip()
+
 
 # ---------------------------------------------------------------------------
 # Prompt templates
@@ -304,16 +336,14 @@ class DiscoveryPlanner:
         if extra_context:
             user_msg += extra_context
 
-        result = await self._llm.complete(
+        # Use complete_raw — code generation returns Python, not JSON
+        raw = await self._llm.complete_raw(
             system=system,
             user=user_msg,
             temperature=0.2,
         )
 
-        # The LLM returns JSON with a "code" key, or sometimes the code directly
-        if isinstance(result, dict):
-            return result.get("code", result.get("script", str(result)))
-        return str(result)
+        return _extract_code(raw)
 
     async def summarize_content(self, content: str, source_title: str) -> str:
         """Generate a 2-3 sentence summary of fetched content.

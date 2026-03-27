@@ -247,9 +247,13 @@ class TestGenerateFetchScript:
     @pytest.mark.asyncio
     async def test_returns_script(self) -> None:
         planner = DiscoveryPlanner()
-        mock_result = {"code": 'import httpx\nprint("hello")'}
 
-        with patch.object(planner._llm, "complete", new_callable=AsyncMock, return_value=mock_result):
+        with patch.object(
+            planner._llm,
+            "complete_raw",
+            new_callable=AsyncMock,
+            return_value='```python\nimport httpx\nprint("hello")\n```',
+        ):
             script = await planner.generate_fetch_script(
                 DiscoveredSource(url="https://api.example.com", title="Test", source_type=SourceType.API),
                 "/tmp/output",
