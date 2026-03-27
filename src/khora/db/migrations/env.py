@@ -110,7 +110,13 @@ def do_run_migrations(connection: Connection) -> None:
         _acquire_advisory_lock(connection)
 
         # Ahead-detection: skip if DB is at a revision this version doesn't know
-        current_rev = context.get_current_revision()
+        try:
+            result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))
+            row = result.fetchone()
+            current_rev = row[0] if row else None
+        except Exception:
+            current_rev = None
+
         if current_rev is not None:
             known_revisions = {r.revision for r in ScriptDirectory.from_config(config).walk_revisions()}
             if current_rev not in known_revisions:
