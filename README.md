@@ -13,11 +13,11 @@ This project embodies that philosophy: **Khora is a memory lake**—a receptacle
 
 Khora is a **Memory Lake** system that combines three storage paradigms:
 
-- **Knowledge Graph** (Neo4j) — Entities and their relationships
-- **Vector Database** (pgvector) — Semantic embeddings for similarity search
-- **Relational Database** (PostgreSQL) — Documents, events, and metadata
+- **Knowledge Graph** (Neo4j, SurrealDB, Memgraph, ArcadeDB) — Entities and their relationships
+- **Vector Database** (pgvector, SurrealDB) — Semantic embeddings for similarity search
+- **Relational Database** (PostgreSQL, SurrealDB) — Documents, events, and metadata
 
-It supports **multi-tenancy** with hierarchical isolation (Organization → Workspace → Namespace), **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching.
+It supports **multi-tenancy** with namespace-level isolation, **event sourcing** for complete audit trails, and **hybrid search** combining vector similarity, graph traversal, and keyword matching. A **unified SurrealDB** backend can replace all three databases.
 
 ### Key Features
 
@@ -27,8 +27,10 @@ It supports **multi-tenancy** with hierarchical isolation (Organization → Work
 - **Multi-Tenancy**: Namespace-level isolation (shared mode with ACLs designed but not yet active)
 - **Event Sourcing**: Immutable event log for temporal queries and audit trails
 - **LiteLLM Integration**: Unified access to OpenAI, Anthropic, Google, and other providers
-- **Prefect Pipelines**: Orchestrated ingestion with checksum-based change detection
-- **Semantic Extraction**: LLM-powered entity and relationship extraction
+- **3-Phase Ingestion**: Stage → enrich → expand pipeline with checksum-based change detection
+- **Semantic Extraction**: LLM-powered entity and relationship extraction with domain expertise
+- **Cost Tracking**: `LLMUsage` type for token/cost attribution (consumed by Poros/Peras)
+- **Rust Acceleration**: Optional native Rust extensions for CPU-bound operations (cosine, pagerank, entity resolution)
 
 ---
 
@@ -59,7 +61,7 @@ async with MemoryLake("postgresql://...", engine="graphrag") as lake:
     related = await lake.find_related_entities(entity_id, max_depth=2)
 ```
 
-**Requirements:** PostgreSQL + pgvector + Neo4j/Kuzu/Memgraph
+**Requirements:** PostgreSQL + pgvector + Neo4j/Memgraph/SurrealDB
 
 ### Skeleton Construction Engine (Temporal-First)
 
@@ -154,7 +156,7 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 | [Events](docs/data-models/events.md) | MemoryEvent types and usage |
 | **Extraction Pipeline** | |
 | [Overview](docs/extraction/overview.md) | Pipeline components and flow |
-| [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Two-phase ingestion with Prefect |
+| [Ingestion Pipeline](docs/extraction/ingestion-pipeline.md) | Three-phase async ingestion pipeline |
 | [Chunkers](docs/extraction/chunkers.md) | Fixed, semantic, recursive chunking |
 | [Embedders](docs/extraction/embedders.md) | LiteLLM-based embedding generation |
 | [Extractors](docs/extraction/extractors.md) | LLM entity and relationship extraction |
@@ -348,20 +350,20 @@ async with MemoryLake() as lake:
 from khora import MemoryLake
 
 async with MemoryLake() as lake:
-    # Simple: Get or create a namespace by name
-    namespace_id = await lake.ensure_namespace("physics", description="Physics research")
+    # Create a namespace
+    ns = await lake.create_namespace(name="physics", description="Physics research")
 
     # Store memories in specific namespace
     await lake.remember(
         "Important research findings...",
-        namespace=namespace_id,
+        namespace=ns.namespace_id,
     )
 
     # Query within namespace (isolated from other namespaces)
-    results = await lake.recall("findings", namespace=namespace_id)
+    results = await lake.recall("findings", namespace=ns.namespace_id)
 
     # Get namespace statistics
-    stats = await lake.stats(namespace=namespace_id)
+    stats = await lake.stats(namespace=ns.namespace_id)
     print(f"Documents: {stats.documents}, Entities: {stats.entities}")
 ```
 
@@ -377,7 +379,7 @@ async with MemoryLake() as lake:
 │                                                                              │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   │
 │  │    Query     │   │  Pipelines   │   │  VectorCypher│   │   Config     │   │
-│  │   Engine     │   │  (Prefect)   │   │   Router     │   │   Resolver   │   │
+│  │   Engine     │   │  (Async)     │   │   Router     │   │   Resolver   │   │
 │  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   │
 │         │                  │                  │                  │           │
 ├─────────┴──────────────────┴──────────────────┴──────────────────┴───────────┤
@@ -398,19 +400,19 @@ async with MemoryLake() as lake:
 | Component | Purpose |
 |-----------|---------|
 | `MemoryLake` | Primary API for remember/recall/forget operations |
-| `StorageCoordinator` | Orchestrates all storage backends |
-| `HybridQueryEngine` | Combines vector, graph, and keyword search |
-| `PipelineManager` | Manages Prefect ingestion flows |
+| `StorageCoordinator` | Orchestrates all storage backends with atomic transactions |
+| `HybridQueryEngine` | Combines vector, graph, and keyword search with RRF fusion |
+| `PipelineManager` | Manages async ingestion flows |
 | `ACLEnforcer` | Cross-layer permission enforcement |
 
 ### Storage Backends
 
 | Backend | Technology | Purpose |
 |---------|------------|---------|
-| Relational | PostgreSQL | Documents, events, permissions, metadata |
-| Vector | pgvector | Embeddings for semantic similarity search |
-| Graph | Neo4j | Entity nodes and relationship edges |
-| Event Store | PostgreSQL | Immutable event log for sourcing |
+| Relational | PostgreSQL or SurrealDB | Documents, events, permissions, metadata |
+| Vector | pgvector, ArcadeDB, or SurrealDB | Embeddings for semantic similarity search |
+| Graph | Neo4j, SurrealDB, Memgraph, or ArcadeDB | Entity nodes and relationship edges |
+| Event Store | PostgreSQL or SurrealDB | Immutable event log for sourcing |
 
 ### Data Flow
 
@@ -435,14 +437,25 @@ async with MemoryLake() as lake:
 
 ### Environment Variables
 
+All config uses the `KHORA_` prefix with `__` for nested sections (e.g., `KHORA_LLM__MODEL=gpt-4o`).
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `KHORA_DATABASE_URL` | PostgreSQL connection URL | Required |
 | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
 | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
 | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
+| `KHORA_STORAGE__BACKEND` | Backend mode | `postgres` or `surrealdb` |
+| `KHORA_LLM__MODEL` | Primary LLM model | `gpt-4o-mini` |
+| `KHORA_LLM__EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
+| `KHORA_LLM__EXTRACTION_MODEL` | Extraction model (optional) | Same as `model` |
+| `KHORA_PIPELINE__CHUNK_SIZE` | Chunk size in tokens | `512` |
+| `KHORA_PIPELINE__SELECTIVE_EXTRACTION` | KET-RAG importance filtering | `true` |
+| `KHORA_QUERY__DEFAULT_MODE` | Default search mode | `hybrid` |
+| `KHORA_QUERY__ENABLE_HYDE` | HyDE query expansion | `auto` |
+| `KHORA_TELEMETRY_DATABASE_URL` | PostgreSQL for telemetry events | Disabled |
+| `KHORA_ACCEL_BACKEND` | Acceleration tier | Auto-detect (`rust`/`numpy`/`python`) |
 | `KHORA_DEBUG` | Enable debug mode | `false` |
-| `KHORA_AUTH_ENABLED` | Enable authentication | `true` |
 | `OPENAI_API_KEY` | OpenAI API key (for embeddings) | - |
 | `ANTHROPIC_API_KEY` | Anthropic API key (for extraction) | - |
 
@@ -478,22 +491,30 @@ model_list:
       api_key: os.environ/ANTHROPIC_API_KEY
 ```
 
-### Extraction Skills
+### Extraction Skills & Expertise
 
-Configure entity extraction in your code:
+Configure entity extraction using `ExpertiseConfig` (ADR-022 stable API) or the simpler `ExtractionSkill`:
 
 ```python
-from khora.extraction.skills import ExtractionSkill
+from khora import ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig
 
-skill = ExtractionSkill(
-    name="custom_entities",
-    description="Extract domain-specific entities",
-    entity_types=["COMPANY", "PRODUCT", "TECHNOLOGY"],
-    relationship_types=["DEVELOPS", "COMPETES_WITH", "USES"],
+# Domain-specific expertise configuration
+expertise = ExpertiseConfig(
+    name="custom_domain",
+    entity_types=[
+        EntityTypeConfig(name="COMPANY", description="A business entity"),
+        EntityTypeConfig(name="PRODUCT", description="A product or service"),
+    ],
+    relationship_types=[
+        RelationshipTypeConfig(name="DEVELOPS", source_types=["COMPANY"], target_types=["PRODUCT"]),
+    ],
 )
 
-await lake.remember(content, skill_name="custom_entities")
+await lake.remember(content, expertise=expertise)
+await lake.remember_batch(documents, expertise=expertise)
 ```
+
+Built-in skills in `extraction/skills/builtin/`: `general.yaml` (9 entity types, 21 relationship types), `slack.yaml` (Slack-optimized).
 
 ---
 
@@ -526,12 +547,15 @@ khora/
 │   │   ├── models.py            # SQLAlchemy ORM
 │   │   └── session.py           # DatabaseManager + async sessions
 │   ├── extraction/              # Content processing
-│   │   ├── chunkers/            # Text chunking strategies
-│   │   ├── embedders/           # Embedding generation
-│   │   ├── extractors/          # Entity extraction
-│   │   └── skills/              # Extraction configurations
-│   ├── pipelines/               # Prefect workflows
-│   │   ├── flows/               # Ingestion and sync flows
+│   │   ├── chunkers/            # Text chunking (fixed, semantic, recursive, conversation)
+│   │   ├── embedders/           # Embedding generation (LiteLLM)
+│   │   ├── extractors/          # LLM entity extraction
+│   │   ├── expansion/           # Semantic expansion, entity unification, inference
+│   │   ├── skills/              # Extraction configurations (ExpertiseConfig, ExtractionSkill)
+│   │   ├── entity_resolution.py # Multi-strategy entity deduplication
+│   │   └── importance.py        # Chunk importance scoring (selective extraction)
+│   ├── pipelines/               # Async workflows
+│   │   ├── flows/               # Ingestion and sync flows (3-phase pipeline)
 │   │   ├── tasks/               # Individual pipeline tasks
 │   │   ├── manager.py           # Pipeline orchestration
 │   │   └── registry.py          # Pipeline registration
@@ -539,13 +563,17 @@ khora/
 │   │   ├── engine.py            # HybridQueryEngine
 │   │   ├── fusion.py            # Reciprocal Rank Fusion
 │   │   └── temporal.py          # Time-based queries
+│   ├── telemetry/               # Observability
+│   │   ├── collector.py         # PostgreSQL-backed telemetry collector
+│   │   ├── trace_decorator.py   # @trace decorator (Logfire integration)
+│   │   └── noop.py              # NoOpCollector (zero cost when disabled)
+│   ├── _accel.py                # Rust/NumPy/Python acceleration facade
 │   └── storage/                 # Storage backends
-│       ├── backends/            # PostgreSQL, pgvector, Neo4j
+│       ├── backends/            # PostgreSQL, pgvector, Neo4j, SurrealDB, Memgraph, ArcadeDB
 │       ├── coordinator.py       # Backend orchestration + TransactionContext
 │       ├── event_store.py       # Event sourcing
 │       └── factory.py           # Storage initialization + shared pools
 ├── tests/                       # Test suite
-├── alembic/                     # Database migrations
 ├── examples/config/             # Example configurations
 ├── compose.yaml                 # Development databases
 └── pyproject.toml               # Project configuration
@@ -619,15 +647,19 @@ class MemoryLake:
         self,
         database_url: str | KhoraConfig | None = None,
         *,
+        engine: str = "graphrag",
         graph_url: str | None = None,
         embedding_model: str = "text-embedding-3-small",
+        run_migrations: bool = False,
     ):
         """Initialize the Memory Lake.
 
         Args:
             database_url: PostgreSQL URL, KhoraConfig, or None (reads from env)
+            engine: Engine name ("graphrag", "skeleton", "vectorcypher")
             graph_url: Optional Neo4j URL (bolt://user:pass@host:port)
             embedding_model: Embedding model to use
+            run_migrations: Auto-run Alembic migrations on connect
         """
 ```
 
@@ -638,11 +670,14 @@ class MemoryLake:
         self,
         content: str,
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         title: str = "",
         source: str = "",
-        metadata: dict = {},
+        metadata: dict | None = None,
         skill_name: str = "general_entities",
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> RememberResult:
         """Store content in the memory lake."""
 
@@ -650,12 +685,15 @@ class MemoryLake:
         self,
         documents: list[dict],
         *,
-        namespace: str | UUID | None = None,
+        namespace: str | UUID,
         skill_name: str = "general_entities",
         max_concurrent: int = 10,
         deduplicate: bool = True,
         infer_relationships: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization."""
 
@@ -669,6 +707,7 @@ class MemoryLake:
         min_similarity: float = 0.0,
         agentic: bool = False,
         raw: bool = False,  # Skip all LLM features
+        include_sources: bool = False,
     ) -> RecallResult:
         """Recall memories relevant to a query."""
 
@@ -684,13 +723,14 @@ class MemoryLake:
 #### Convenience Methods
 
 ```python
-    async def ensure_namespace(
-        self,
-        name: str,
-        *,
-        description: str = "",
-    ) -> UUID:
-        """Get or create a namespace by name."""
+    async def create_namespace(self, name: str = "", *, description: str = "") -> MemoryNamespace:
+        """Create a new namespace."""
+
+    async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
+        """Get a namespace by row ID."""
+
+    async def get_namespace_by_stable_id(self, namespace_id: str | UUID) -> MemoryNamespace | None:
+        """Get a namespace by stable namespace_id."""
 
     async def get_document(self, document_id: UUID) -> Document | None:
         """Get a document by ID."""
@@ -709,6 +749,7 @@ class MemoryLake:
         *,
         namespace: str | UUID | None = None,
         limit: int = 10,
+        include_sources: bool = False,
     ) -> list[Entity]:
         """Search entities by query text using embedding similarity."""
 
@@ -725,6 +766,7 @@ class MemoryLake:
         namespace: str | UUID | None = None,
         entity_type: str | None = None,
         limit: int = 100,
+        include_sources: bool = False,
     ) -> list[Entity]:
         """List entities in a namespace."""
 
@@ -734,14 +776,39 @@ class MemoryLake:
         *,
         max_depth: int = 2,
         limit: int = 20,
+        include_sources: bool = False,
     ) -> list[tuple[Entity, float]]:
         """Find entities related to a given entity."""
+
+    async def get_entity(
+        self,
+        entity_id: UUID,
+        *,
+        include_sources: bool = False,
+    ) -> Entity | None:
+        """Fetch a single entity by ID."""
+
+    async def health_check(self) -> dict[str, Any]:
+        """Check health status of all backends."""
 ```
 
 ### Data Classes
 
+All result types are frozen dataclasses (`slots=True, frozen=True`).
+
 ```python
-@dataclass
+@dataclass(slots=True, frozen=True)
+class LLMUsage:
+    """Token usage tracking — consumed by Poros/Peras for cost attribution (DYT-645)."""
+    operation: str           # "entity_extraction", "embedding", etc.
+    model: str               # "gpt-4o", "text-embedding-3-small", etc.
+    prompt_tokens: int
+    completion_tokens: int   # 0 for embeddings
+    total_tokens: int
+    latency_ms: float
+    batch_size: int = 1      # >1 for embedding batches
+
+@dataclass(slots=True, frozen=True)
 class RememberResult:
     """Result of a remember() operation."""
     document_id: UUID
@@ -750,18 +817,21 @@ class RememberResult:
     entities_extracted: int
     relationships_created: int
     metadata: dict[str, Any]
+    llm_usage: list[LLMUsage]
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class RecallResult:
     """Result of a recall() operation."""
     query: str
     namespace_id: UUID
     chunks: list[tuple[Chunk, float]]
     entities: list[tuple[Entity, float]]
-    context_text: str
+    context_text: str               # Pre-formatted for LLM consumption
+    relationships: list[tuple[Relationship, float]]  # VectorCypher only
     metadata: dict[str, Any]
+    llm_usage: list[LLMUsage]
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class BatchResult:
     """Result of remember_batch() operation."""
     total: int        # Total documents submitted
@@ -771,8 +841,10 @@ class BatchResult:
     chunks: int       # Total chunks created
     entities: int     # Total entities extracted
     relationships: int # Total relationships created
+    metadata: dict[str, Any]
+    llm_usage: list[LLMUsage]
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class Stats:
     """Namespace statistics from stats()."""
     documents: int
@@ -790,7 +862,7 @@ class Stats:
 | `HYBRID` | Combined vector + graph + keyword with RRF fusion |
 | `ALL` | All sources (vector, graph, keyword) |
 
-### Entity Types
+### Entity Types (general.yaml)
 
 | Type | Description |
 |------|-------------|
@@ -801,8 +873,10 @@ class Stats:
 | `EVENT` | Occurrences, incidents |
 | `TECHNOLOGY` | Tools, platforms, languages |
 | `PRODUCT` | Goods, services |
-| `DOCUMENT` | Referenced documents |
-| `OTHER` | Uncategorized entities |
+| `STATE_CHANGE` | Transitions from one state to another |
+| `DATE` | Specific dates, time periods, or temporal references |
+
+Custom entity types can be defined via `ExpertiseConfig` or `ExtractionSkill`.
 
 ### Changes in v0.3.5
 

@@ -33,26 +33,63 @@ MemoryLake (facade) -> Engine (graphrag | skeleton | vectorcypher) -> StorageCoo
 - `MemoryNamespace` is the sole multi-tenant isolation boundary
 - Config uses `KHORA_` env vars with `__` for nesting
 
+## Public API
+
+Exported from `khora/__init__.py`: `MemoryLake`, `RememberResult`, `RecallResult`, `BatchResult`, `Stats`, `LLMUsage`, `SearchMode`, `KhoraConfig`, `DocumentSource`, `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `create_engine`, `list_engines`, `register_engine`.
+
+- **LLMUsage**: Token/cost tracking dataclass consumed by Poros/Peras (DYT-645). Fields: `operation`, `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `latency_ms`, `batch_size`. Changes require coordination.
+- **ExpertiseConfig**: Domain expertise definition (ADR-022 stable API). Defines entity types, relationship types, correlation rules, inference rules. Changes require coordination.
+- All result types are frozen dataclasses with `llm_usage: list[LLMUsage]` for cost attribution.
+
 ## Key Entry Points
 
-- `memory_lake.py`: `remember()`, `recall()`, `forget()`, `remember_batch()`, namespace helpers
+- `memory_lake.py`: `remember()`, `recall()`, `forget()`, `remember_batch()`, namespace helpers. Accepts `expertise: ExpertiseConfig`
+- `extraction/skills/base.py`: `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` (ADR-022 stable)
 - `storage/coordinator.py`: backend orchestration and transaction handling
 - `storage/factory.py`: backend creation with shared engine pools
 - `db/session.py`: `DatabaseManager` lifecycle
 - `db/models.py`: SQLAlchemy ORM models
 - `engines/`: GraphRAG, Skeleton Construction, VectorCypher
 - `query/engine.py`: `HybridQueryEngine`
-- `_accel.py`: Rust/NumPy/Python acceleration facade
-- `pipelines/flows/ingest.py`: ingestion pipeline with entity ID mapping
+- `_accel.py`: Rust/NumPy/Python acceleration facade (cosine, pagerank, entity resolution, community detection, temporal)
+- `pipelines/flows/ingest.py`: 3-phase ingestion pipeline (stage → enrich → expand)
+- `extraction/entity_resolution.py`: multi-strategy entity deduplication
+- `extraction/expansion/`: semantic expansion, cross-tool unification, relationship inference
+- `config/schema.py`: `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
+- `telemetry/`: optional PostgreSQL-backed telemetry collector + `@trace` decorator
 - `db/migrations/env.py`: Alembic env with advisory locking
 
 ## Engine Selection
 
 | Use Case | Engine | Key Trait |
 |----------|--------|-----------|
-| Knowledge bases, entity exploration | `graphrag` | Full graph extraction, requires Neo4j or Kuzu |
-| Multi-hop queries, complex relationships | `vectorcypher` | Vector + Cypher hybrid, requires Neo4j |
+| Knowledge bases, entity exploration | `graphrag` | Full graph extraction, requires Neo4j or SurrealDB |
+| Multi-hop queries, complex relationships | `vectorcypher` | Vector + Cypher hybrid, requires Neo4j or SurrealDB |
 | Chat history, event streams, cost-sensitive workloads | `skeleton` | Temporal-first, 5-10x fewer LLM calls, Neo4j optional |
+
+## Entity Extraction Pipeline
+
+3-phase async pipeline in `pipelines/flows/ingest.py`:
+
+1. **Stage** — checksum-based change detection, skip unchanged docs
+2. **Enrich** — parallel per document: chunk (fixed/semantic/recursive/conversation), embed (LiteLLM), extract entities (LLM), selective extraction (top 70% chunks to LLM), entity dedup, co-occurrence edges, store
+3. **Expand** (optional) — cross-tool entity unification, relationship inference (smart/batch/incremental/none)
+
+Built-in skills: `general.yaml` (9 entity types, 21 relationship types), `slack.yaml` (Slack-optimized).
+
+Entity resolution: 5-strategy dedup (exact → alias → attribute → embedding → fuzzy) with per-type thresholds.
+
+## Configuration
+
+`KhoraConfig` uses Pydantic BaseSettings with `KHORA_` prefix and `__` nesting.
+
+Key sections: `storage` (backend, graph, vector, PostgreSQL), `llm` (model, embedding_model, extraction_model), `pipeline` (chunking, selective_extraction), `query` (search mode, fusion weights, reranking, HyDE), `tenancy`.
+
+## Dependencies & Extras
+
+Core: `sqlalchemy[asyncio]`, `asyncpg`, `pgvector`, `neo4j`, `litellm`, `tiktoken`, `sentence-transformers`, `pydantic-settings`, `click`, `rich`, `loguru`, `tenacity`, `dateparser`, `jinja2`, `pyyaml`.
+
+Optional: `surrealdb`, `embedded`, `logfire`, `nlp`, `accel`, `rust`, `memgraph`, `arcadedb`, `graph-all`, `all-backends`, `reranking`, `dev`.
 
 ## Testing
 
@@ -91,13 +128,13 @@ Every feature, bugfix, or task follows: **Linear ticket → branch → implement
 1. Search Linear for an existing ticket matching the task. If none exists, create one.
 2. Assign yourself (or the requesting user) to the ticket.
 3. Move the ticket to **In Progress**.
-4. Create a branch from `staging` (default) following the branch naming convention below. For hotfixes, branch from `main`.
+4. Create a branch from `main` (default) following the branch naming convention below.
 5. Begin implementation.
 
 ### Finishing work
 1. Run the project-defined lint, format, and test commands.
 2. Commit all changes with a clear message.
-3. Push the branch and open a PR to `staging` by default. Only hotfixes target `main`.
+3. Push the branch and open a PR to `main`.
 4. Add the PR link as a comment on the Linear ticket.
 5. Move the ticket to **Done** only after the PR is merged.
 
