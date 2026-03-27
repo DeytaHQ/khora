@@ -85,13 +85,16 @@ class DiscoveryAgent:
             if handler is None:
                 break
 
+            prev_phase = self._state.phase
             next_phase = await handler()
             self._state.phase = next_phase
-            self._state.iteration += 1
 
-            if self._state.iteration >= self._state.max_iterations:
-                self._ui.show_max_iterations()
-                break
+            # Only count full cycles (REVIEW transitions), not individual phase steps
+            if prev_phase == AgentPhase.REVIEW and next_phase not in (AgentPhase.DONE, AgentPhase.REVIEW):
+                self._state.iteration += 1
+                if self._state.iteration >= self._state.max_iterations:
+                    self._ui.show_max_iterations()
+                    break
 
         return self._state
 
@@ -546,76 +549,101 @@ class DiscoveryAgent:
             self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
 
     async def _fetch_with_script(self, src: DiscoveredSource) -> None:
-        """Generate a fetch script via LLM, validate, confirm, and execute."""
+        """Generate a fetch script via LLM, validate, confirm, and execute.
+
+        Retries up to 3 times on generation/validation/execution failures,
+        feeding the error back to the LLM for correction.
+        """
         from .codegen import execute_script, extract_urls, render_template, validate_script
 
-        try:
-            # Generate script via planner
-            self._ui.show_info("[dim]Generating fetch script...[/]")
-            raw_body = await self._planner.generate_fetch_script(src, str(self._output_dir))
+        max_attempts = 3
+        last_error = ""
 
-            script = render_template(title=src.title, url=src.url, fetch_body=raw_body)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Generate script via planner
+                if attempt == 1:
+                    self._ui.show_info("[dim]Generating fetch script...[/]")
+                else:
+                    self._ui.show_info(f"[dim]Retrying script generation (attempt {attempt}/{max_attempts})...[/]")
 
-            # AST validation
-            violations = validate_script(script)
-            if violations:
-                msg = "Script failed validation:\n" + "\n".join(f"  {v}" for v in violations)
-                self._ui.show_fetch_failed(msg)
-                self._state.fetched.append(FetchResult(source=src, local_path="", error=msg))
-                return
+                # Include previous error for correction
+                extra_context = ""
+                if last_error:
+                    extra_context = f"\n\nPrevious attempt failed: {last_error[:500]}\nPlease fix the issue and try a different approach."
 
-            # Show script and URLs to user for confirmation
-            urls = extract_urls(script)
-            self._ui.show_info(f"\n[bold]Generated script for: {src.title}[/]")
-            if urls:
-                self._ui.show_info(f"[dim]Script will contact: {', '.join(urls)}[/]")
-            self._ui.show_data_preview("fetch_script.py", script, max_chars=2000)
-
-            from rich.prompt import Confirm
-
-            approved = Confirm.ask("Execute this script?", default=False)
-            if not approved:
-                self._ui.show_info("[dim]Script execution skipped by user.[/]")
-                return
-
-            # Execute in sandbox
-            with self._ui.show_fetching(src.url):
-                result = await execute_script(
-                    script,
-                    self._output_dir,
-                    timeout=120,
+                raw_body = await self._planner.generate_fetch_script(
+                    src, str(self._output_dir), extra_context=extra_context
                 )
 
-            if result.success and result.files_created:
-                for f in result.files_created:
-                    self._ui.show_fetch_saved(f, 0, unit="file(s)")
-                self._state.fetched.append(
-                    FetchResult(
-                        source=src,
-                        local_path=result.files_created[0],
-                        content_type="application/octet-stream",
-                        size_bytes=sum(
-                            Path(self._output_dir / f).stat().st_size
-                            for f in result.files_created
-                            if (self._output_dir / f).exists()
-                        ),
-                        success=True,
-                        attempts=[
-                            FetchAttempt(
-                                method=FetchMethod.GENERATED_SCRIPT,
-                                success=True,
-                            )
-                        ],
+                script = render_template(title=src.title, url=src.url, fetch_body=raw_body)
+
+                # AST validation
+                violations = validate_script(script)
+                if violations:
+                    last_error = "AST validation failed: " + "; ".join(str(v) for v in violations[:3])
+                    self._ui.show_info(f"    [dim]attempt {attempt}: validation failed, retrying...[/]")
+                    continue
+
+                # Show script and URLs to user for confirmation
+                urls = extract_urls(script)
+                self._ui.show_info(f"\n[bold]Generated script for: {src.title}[/]")
+                if urls:
+                    self._ui.show_info(f"[dim]Script will contact: {', '.join(urls)}[/]")
+                self._ui.show_data_preview("fetch_script.py", script, max_chars=2000)
+
+                from rich.prompt import Confirm
+
+                approved = Confirm.ask("Execute this script?", default=False)
+                if not approved:
+                    self._ui.show_info("[dim]Script execution skipped by user.[/]")
+                    return
+
+                # Execute in sandbox
+                with self._ui.show_fetching(src.url):
+                    result = await execute_script(
+                        script,
+                        self._output_dir,
+                        timeout=120,
                     )
-                )
-            else:
-                error = result.stderr or result.summary.get("error", "Script produced no output")
-                self._ui.show_fetch_failed(error[:200])
-                self._state.fetched.append(FetchResult(source=src, local_path="", error=error[:500]))
 
-        except Exception as e:
-            self._ui.show_fetch_failed(str(e))
-            self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
+                if result.success and result.files_created:
+                    for f in result.files_created:
+                        self._ui.show_fetch_saved(f, 0, unit="file(s)")
+                    self._state.fetched.append(
+                        FetchResult(
+                            source=src,
+                            local_path=result.files_created[0],
+                            content_type="application/octet-stream",
+                            size_bytes=sum(
+                                Path(self._output_dir / f).stat().st_size
+                                for f in result.files_created
+                                if (self._output_dir / f).exists()
+                            ),
+                            success=True,
+                            attempts=[
+                                FetchAttempt(
+                                    method=FetchMethod.GENERATED_SCRIPT,
+                                    success=True,
+                                )
+                            ],
+                        )
+                    )
+                    return  # Success — exit retry loop
+                else:
+                    last_error = result.stderr or result.summary.get("error", "Script produced no output")
+                    self._ui.show_info(f"    [dim]attempt {attempt}: execution failed, retrying...[/]")
+                    continue
+
+            except Exception as e:
+                last_error = str(e)
+                self._ui.show_info(f"    [dim]attempt {attempt}: {last_error[:100]}[/]")
+                if attempt < max_attempts:
+                    continue
+
+        # All attempts exhausted
+        self._ui.show_fetch_failed(f"Failed after {max_attempts} attempts: {last_error[:200]}")
+        self._state.fetched.append(FetchResult(source=src, local_path="", error=last_error[:500]))
 
     def _save_content(self, src: DiscoveredSource, content: str, ext: str) -> Path:
         """Write text content to a file in the output directory."""

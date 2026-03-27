@@ -278,6 +278,7 @@ class DiscoveryPlanner:
         *,
         max_pages: int = 10,
         timeout: int = 120,
+        extra_context: str = "",
     ) -> str:
         """Generate a Python script to download data from a source.
 
@@ -286,6 +287,7 @@ class DiscoveryPlanner:
             output_dir: Directory to write fetched data to.
             max_pages: Maximum pagination pages.
             timeout: Script execution timeout.
+            extra_context: Additional context (e.g., error from previous attempt).
 
         Returns:
             Python script as a string.
@@ -299,6 +301,8 @@ class DiscoveryPlanner:
             f"Description: {source.description}\n\n"
             f"Save output to: {output_dir}"
         )
+        if extra_context:
+            user_msg += extra_context
 
         result = await self._llm.complete(
             system=system,
