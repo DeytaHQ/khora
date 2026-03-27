@@ -111,9 +111,7 @@ def do_run_migrations(connection: Connection) -> None:
 
         # Ahead-detection: skip if DB is at a revision this version doesn't know
         try:
-            result = connection.execute(
-                text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1")
-            )
+            result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))
             row = result.fetchone()
             current_rev = row[0] if row else None
         except Exception:
