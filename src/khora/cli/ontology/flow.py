@@ -200,8 +200,7 @@ class OntologyConstructFlow:
         """Launch the interactive discovery agent and return local paths."""
         from .discover import run_discovery_session
 
-        output_dir = Path("./khora_discovery_data")
-        return asyncio.run(run_discovery_session(output_dir))
+        return asyncio.run(run_discovery_session())
 
     # ------------------------------------------------------------------
     # Phase 2: Domain detection

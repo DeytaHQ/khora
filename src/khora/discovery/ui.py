@@ -81,6 +81,15 @@ class DiscoveryUI:
     # Intent gathering
     # ------------------------------------------------------------------
 
+    async def prompt_output_dir(self, default: str) -> str:
+        """Ask the user where to save fetched data."""
+        raw = await asyncio.to_thread(
+            Prompt.ask,
+            f"[{_ACCENT}]>[/] Output directory",
+            default=default,
+        )
+        return raw.strip()
+
     async def prompt_intent(self) -> str:
         """Ask the user what data they need."""
         raw = await asyncio.to_thread(Prompt.ask, f"\n[bold {_ACCENT}]>[/] [bold]What data do you need?[/]")
