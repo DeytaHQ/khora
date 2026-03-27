@@ -1,0 +1,159 @@
+"""Binary format extraction for discovery fetched files.
+
+Converts PDF, Excel, and other binary formats to text/markdown for
+ingestion into the ontology pipeline.  All extractors are optional —
+they degrade gracefully with a warning when dependencies are missing.
+
+Install: ``pip install khora[discovery]`` for pymupdf + openpyxl.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+from pathlib import Path
+
+from loguru import logger
+
+# ---------------------------------------------------------------------------
+# Optional dependency detection
+# ---------------------------------------------------------------------------
+
+_HAS_PYMUPDF = False
+try:
+    import pymupdf  # noqa: F401
+
+    _HAS_PYMUPDF = True
+except ImportError:
+    pass
+
+_HAS_OPENPYXL = False
+try:
+    import openpyxl  # noqa: F401
+
+    _HAS_OPENPYXL = True
+except ImportError:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Extractors
+# ---------------------------------------------------------------------------
+
+
+def extract_pdf_text(path: Path) -> str:
+    """Extract text content from a PDF file.
+
+    Uses pymupdf (PyMuPDF) for fast text extraction.
+    Returns empty string if pymupdf is not installed.
+    """
+    if not _HAS_PYMUPDF:
+        logger.warning(f"pymupdf not installed — cannot extract text from {path.name}. Install: pip install pymupdf")
+        return ""
+
+    import pymupdf
+
+    try:
+        doc = pymupdf.open(str(path))
+        pages: list[str] = []
+        for page in doc:
+            text = page.get_text()
+            if text.strip():
+                pages.append(text)
+        doc.close()
+
+        full_text = "\n\n---\n\n".join(pages)
+
+        # Check for scanned PDFs (very little text per page)
+        if doc.page_count > 0:
+            chars_per_page = len(full_text) / doc.page_count
+            if chars_per_page < 50:
+                logger.warning(
+                    f"{path.name}: ~{chars_per_page:.0f} chars/page — "
+                    "possibly a scanned PDF (OCR not supported, text may be incomplete)"
+                )
+
+        return full_text
+    except Exception as e:
+        logger.error(f"PDF extraction failed for {path.name}: {e}")
+        return ""
+
+
+def extract_xlsx_text(path: Path) -> str:
+    """Extract text from an Excel (.xlsx) file as CSV-formatted text.
+
+    Uses openpyxl for reading. Returns empty string if not installed.
+    """
+    if not _HAS_OPENPYXL:
+        logger.warning(f"openpyxl not installed — cannot extract text from {path.name}. Install: pip install openpyxl")
+        return ""
+
+    import openpyxl
+
+    try:
+        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+        sections: list[str] = []
+
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            row_count = 0
+
+            for row in ws.iter_rows(values_only=True):
+                writer.writerow([str(cell) if cell is not None else "" for cell in row])
+                row_count += 1
+
+            if row_count > 0:
+                sections.append(f"## Sheet: {sheet_name}\n\n```csv\n{buf.getvalue()}```\n")
+
+        wb.close()
+        return "\n".join(sections)
+    except Exception as e:
+        logger.error(f"Excel extraction failed for {path.name}: {e}")
+        return ""
+
+
+def extract_xls_text(path: Path) -> str:
+    """Extract text from a legacy .xls file.
+
+    Falls back to a warning — xlrd is not included as a dependency.
+    """
+    logger.warning(f"Legacy .xls format not supported: {path.name}. Convert to .xlsx first.")
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher
+# ---------------------------------------------------------------------------
+
+#: Map of file extensions to extraction functions
+_EXTRACTORS: dict[str, callable] = {
+    ".pdf": extract_pdf_text,
+    ".xlsx": extract_xlsx_text,
+    ".xls": extract_xls_text,
+}
+
+
+def extract_if_needed(path: Path) -> Path | None:
+    """Extract text from a binary file if an extractor is available.
+
+    If extraction succeeds, writes a `{name}_extracted.md` file alongside
+    the original and returns the path to it.  Returns None if no
+    extraction was needed or if it failed.
+    """
+    ext = path.suffix.lower()
+    extractor = _EXTRACTORS.get(ext)
+
+    if extractor is None:
+        return None
+
+    text = extractor(path)
+    if not text:
+        return None
+
+    # Write extracted text alongside the original
+    extracted_path = path.with_name(f"{path.stem}_extracted.md")
+    extracted_path.write_text(text, encoding="utf-8")
+    logger.info(f"Extracted {len(text):,} chars from {path.name} → {extracted_path.name}")
+    return extracted_path

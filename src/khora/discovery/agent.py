@@ -370,22 +370,51 @@ class DiscoveryAgent:
             self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
 
     async def _fetch_direct(self, src: DiscoveredSource) -> None:
-        """Fetch a source via direct HTTP download."""
+        """Fetch a source via direct HTTP download.
+
+        Handles both text and binary content. For binary files (PDF, Excel),
+        saves the raw file and attempts text extraction.
+        """
         import httpx
 
         try:
             with self._ui.show_fetching(src.url):
-                async with httpx.AsyncClient(timeout=30.0) as http:
+                async with httpx.AsyncClient(timeout=60.0) as http:
                     resp = await http.get(src.url, follow_redirects=True)
                     resp.raise_for_status()
 
             content_type = resp.headers.get("content-type", "")
-            ext = ".html" if "html" in content_type else ".txt"
-            out_file = self._save_content(src, resp.text, ext)
+            url_path = src.url.split("?")[0]
+            url_ext = Path(url_path).suffix.lower()
+
+            # Determine if this is a binary file
+            binary_extensions = {".pdf", ".xls", ".xlsx", ".doc", ".docx", ".zip", ".gz", ".parquet"}
+            is_binary = (
+                url_ext in binary_extensions or "application/pdf" in content_type or "spreadsheet" in content_type
+            )
+
+            if is_binary:
+                # Save binary file
+                out_file = self._save_binary(src, resp.content, url_ext or ".bin")
+                self._ui.show_fetch_saved(out_file.name, len(resp.content), unit="bytes")
+
+                # Attempt text extraction
+                from .extraction import extract_if_needed
+
+                extracted_path = extract_if_needed(out_file)
+                local_path = str(extracted_path) if extracted_path else str(out_file)
+                if extracted_path:
+                    self._ui.show_info(f"    [dim]extracted text → {extracted_path.name}[/]")
+            else:
+                ext = ".html" if "html" in content_type else ".txt"
+                out_file = self._save_content(src, resp.text, ext)
+                local_path = str(out_file)
+                self._ui.show_fetch_saved(out_file.name, len(resp.content), unit="bytes")
+
             self._state.fetched.append(
                 FetchResult(
                     source=src,
-                    local_path=str(out_file),
+                    local_path=local_path,
                     content_type=content_type,
                     size_bytes=len(resp.content),
                     success=True,
@@ -398,7 +427,6 @@ class DiscoveryAgent:
                     ],
                 )
             )
-            self._ui.show_fetch_saved(out_file.name, len(resp.content), unit="bytes")
         except Exception as e:
             self._ui.show_fetch_failed(str(e))
             self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
@@ -476,10 +504,19 @@ class DiscoveryAgent:
             self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
 
     def _save_content(self, src: DiscoveredSource, content: str, ext: str) -> Path:
-        """Write content to a file in the output directory."""
+        """Write text content to a file in the output directory."""
         safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in src.title[:50])
         if not safe_name:
             safe_name = "source"
         out_file = self._output_dir / f"{safe_name}{ext}"
         out_file.write_text(content, encoding="utf-8")
+        return out_file
+
+    def _save_binary(self, src: DiscoveredSource, data: bytes, ext: str) -> Path:
+        """Write binary content to a file in the output directory."""
+        safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in src.title[:50])
+        if not safe_name:
+            safe_name = "source"
+        out_file = self._output_dir / f"{safe_name}{ext}"
+        out_file.write_bytes(data)
         return out_file
