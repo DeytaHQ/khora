@@ -29,6 +29,7 @@ class TestAgentPhase:
             "select_sources",
             "fetch",
             "review",
+            "augment",
             "ingest",
             "done",
         }

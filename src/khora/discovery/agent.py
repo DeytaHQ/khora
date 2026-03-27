@@ -77,6 +77,7 @@ class DiscoveryAgent:
             AgentPhase.SELECT_SOURCES: self._handle_select_sources,
             AgentPhase.FETCH: self._handle_fetch,
             AgentPhase.REVIEW: self._handle_review,
+            AgentPhase.AUGMENT: self._handle_augment,
         }
 
         while self._state.phase != AgentPhase.DONE:
@@ -254,6 +255,8 @@ class DiscoveryAgent:
         choice = await self._ui.prompt_review_action()
         if choice == "accept":
             return AgentPhase.DONE
+        elif choice == "add":
+            return AgentPhase.AUGMENT
         elif choice == "retry":
             self._state.fetched.clear()
             return AgentPhase.FETCH
@@ -261,6 +264,117 @@ class DiscoveryAgent:
             return AgentPhase.GATHER_INTENT
         else:
             return AgentPhase.DONE
+
+    async def _handle_augment(self) -> AgentPhase:
+        """Handle the augment phase — add more sources without restarting.
+
+        The user can: provide a URL directly, run a new search, select
+        from previously discovered-but-not-fetched sources, or finish.
+        Fetches accumulate (existing fetches are preserved).
+        """
+        self._ui.show_collection_summary(
+            fetched_count=len(self._state.successful_fetches),
+            discovered_count=len(self._state.discovered),
+            selected_count=len(self._state.selected_indices),
+        )
+
+        action = await self._ui.prompt_augment_action()
+
+        if action == "url":
+            url = await self._ui.prompt_url()
+            if url:
+                self._state.discovered.append(
+                    DiscoveredSource(url=url, title=url.split("/")[-1] or url, discovered_via="user")
+                )
+                idx = len(self._state.discovered) - 1
+                self._state.selected_indices = [idx]
+                return AgentPhase.FETCH
+            return AgentPhase.AUGMENT
+
+        elif action == "search":
+            return AgentPhase.GATHER_INTENT
+
+        elif action == "select":
+            # Show all discovered sources and let user pick from unfetched ones
+            if self._state.discovered:
+                self._ui.show_sources(self._state.discovered)
+                indices = await self._ui.prompt_source_selection(len(self._state.discovered))
+                if indices is not None:
+                    self._state.selected_indices = indices
+                    return AgentPhase.FETCH
+            else:
+                self._ui.show_info("[dim]No discovered sources available. Try a search.[/]")
+            return AgentPhase.AUGMENT
+
+        else:  # "done"
+            return AgentPhase.REVIEW
+
+    # ------------------------------------------------------------------
+    # Index page detection
+    # ------------------------------------------------------------------
+
+    async def _check_for_index_pages(self) -> list[DiscoveredSource]:
+        """Check successful fetches for index pages and offer deep crawl.
+
+        Returns new DiscoveredSource objects for document links if the
+        user chooses to download them, or an empty list otherwise.
+        """
+        from .validation import ContentClass, classify_content
+
+        new_sources: list[DiscoveredSource] = []
+
+        for fetch in self._state.successful_fetches:
+            if not fetch.local_path or not Path(fetch.local_path).exists():
+                continue
+
+            try:
+                content = Path(fetch.local_path).read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            classification = classify_content(content, fetch.source.url)
+            if classification.content_class != ContentClass.INDEX:
+                continue
+
+            doc_count = len(classification.document_links)
+            sub_count = len(classification.subpage_links)
+
+            if doc_count == 0 and sub_count == 0:
+                continue
+
+            self._ui.show_index_detected(fetch.source.title, doc_count, sub_count)
+
+            action = await self._ui.prompt_index_action(doc_count)
+
+            if action == "skip":
+                continue
+
+            links = classification.document_links
+            if action == "pick":
+                start, end = await self._ui.prompt_pick_range(len(links))
+                links = links[start:end]
+
+            # Create DiscoveredSource for each selected document link
+            for title, url in links:
+                ext = Path(url.split("?")[0]).suffix.lower()
+                from .state import SourceType
+
+                source_type = SourceType.PDF if ext == ".pdf" else SourceType.CSV if ext == ".csv" else SourceType.OTHER
+                new_sources.append(
+                    DiscoveredSource(
+                        url=url,
+                        title=title or Path(url).name,
+                        source_type=source_type,
+                        access_method="direct_download",
+                        discovered_via="index_extraction",
+                        discovery_query=self._state.user_intent,
+                        relevance_score=fetch.source.relevance_score,
+                    )
+                )
+
+            self._ui.show_info(f"  [{len(new_sources)} document(s) queued for download]")
+
+        return new_sources
 
     # ------------------------------------------------------------------
     # Index page detection
