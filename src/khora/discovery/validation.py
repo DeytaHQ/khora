@@ -328,6 +328,146 @@ def estimate_relevance(content: str, query: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Content classification (link-index detection)
+# ---------------------------------------------------------------------------
+
+#: File extensions that indicate downloadable documents
+_DOCUMENT_EXTENSIONS = frozenset(
+    {
+        ".pdf",
+        ".csv",
+        ".xls",
+        ".xlsx",
+        ".doc",
+        ".docx",
+        ".json",
+        ".jsonl",
+        ".xml",
+        ".zip",
+        ".gz",
+        ".parquet",
+        ".ppt",
+        ".pptx",
+        ".txt",
+        ".tsv",
+    }
+)
+
+_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)]+)\)")
+
+
+class ContentClass:
+    """Classification of fetched content."""
+
+    CONTENT = "content"  # actual data/text
+    INDEX = "index"  # link directory (e.g., DOJ page with PDF links)
+    METADATA = "metadata"  # about page, FAQ, etc.
+    ERROR = "error"  # auth wall, 404, captcha
+
+
+@dataclass(slots=True)
+class ContentClassification:
+    """Result of classifying fetched content."""
+
+    content_class: str = ContentClass.CONTENT
+    document_links: list[tuple[str, str]] = field(default_factory=list)  # (title, url)
+    subpage_links: list[tuple[str, str]] = field(default_factory=list)  # (title, url)
+    link_count: int = 0
+    prose_lines: int = 0
+    reason: str = ""
+
+
+def classify_content(content: str, source_url: str = "") -> ContentClassification:
+    """Classify fetched content using heuristics (no LLM needed).
+
+    Detects link-index pages (like DOJ pages listing 100+ PDF links),
+    error pages (auth walls, 404s), and metadata pages.
+
+    Args:
+        content: The fetched text/markdown content.
+        source_url: Original URL for domain matching.
+
+    Returns:
+        ContentClassification with detected type and extracted links.
+    """
+    result = ContentClassification()
+
+    if not content or len(content.strip()) < 50:
+        result.content_class = ContentClass.ERROR
+        result.reason = "empty or very short content"
+        return result
+
+    lines = content.strip().splitlines()
+
+    # Extract all markdown links
+    all_links = _LINK_RE.findall(content)
+    result.link_count = len(all_links)
+
+    # Count prose lines (non-empty, non-link-only lines)
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("- [") and not stripped.startswith("* ["):
+            if not _LINK_RE.fullmatch(stripped):
+                result.prose_lines += 1
+
+    # Classify links into document links and subpage links
+    for title, url in all_links:
+        url_lower = url.lower()
+        ext = Path(url_lower.split("?")[0]).suffix
+        if ext in _DOCUMENT_EXTENSIONS:
+            result.document_links.append((title, url))
+        elif source_url:
+            # Same domain, no file extension = likely a subpage
+            from urllib.parse import urlparse
+
+            src_domain = urlparse(source_url).netloc
+            link_domain = urlparse(url).netloc
+            if src_domain and link_domain == src_domain and ext not in _DOCUMENT_EXTENSIONS:
+                result.subpage_links.append((title, url))
+
+    # -- Error detection --
+    lower = content.lower()
+    error_patterns = [
+        "403 forbidden",
+        "401 unauthorized",
+        "access denied",
+        "sign in",
+        "login required",
+        "captcha",
+        "404 not found",
+    ]
+    if len(content) < 500 and any(p in lower for p in error_patterns):
+        result.content_class = ContentClass.ERROR
+        result.reason = "error/auth page detected"
+        return result
+
+    # -- Index detection --
+    if result.link_count > 10 and len(result.document_links) > 5:
+        # Mostly file links = file index
+        result.content_class = ContentClass.INDEX
+        result.reason = f"{len(result.document_links)} document links detected"
+        return result
+
+    if result.link_count > 10 and result.prose_lines > 0:
+        link_ratio = result.link_count / max(1, result.prose_lines)
+        if link_ratio > 2.0:
+            result.content_class = ContentClass.INDEX
+            result.reason = f"high link-to-prose ratio ({link_ratio:.1f})"
+            return result
+
+    # -- Metadata detection --
+    meta_patterns = ["about us", "contact us", "privacy policy", "terms of service", "frequently asked"]
+    meta_hits = sum(1 for p in meta_patterns if p in lower)
+    if meta_hits >= 2 and result.prose_lines < 50:
+        result.content_class = ContentClass.METADATA
+        result.reason = f"metadata/about page ({meta_hits} patterns)"
+        return result
+
+    result.content_class = ContentClass.CONTENT
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Deduplication
 # ---------------------------------------------------------------------------
 

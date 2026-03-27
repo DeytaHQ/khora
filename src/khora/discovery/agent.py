@@ -215,6 +215,16 @@ class DiscoveryAgent:
     async def _handle_review(self) -> AgentPhase:
         self._ui.show_review_summary(self._state.fetched)
 
+        # Check for index pages and offer deep crawl
+        index_sources = await self._check_for_index_pages()
+        if index_sources:
+            # Add new sources from index pages and go back to fetch
+            self._state.discovered.extend(index_sources)
+            new_indices = list(range(len(self._state.discovered) - len(index_sources), len(self._state.discovered)))
+            self._state.selected_indices = new_indices
+            return AgentPhase.FETCH
+
+
         # Run validation on successful fetches
         successful = self._state.successful_fetches
         if successful:
@@ -224,12 +234,11 @@ class DiscoveryAgent:
             if paths:
                 val_results = validate_batch(paths, query=self._state.user_intent)
 
-                # Enrich with LLM summaries for the top results
+                # Enrich with LLM summaries for the top results (limit to 5 to save cost)
                 enriched: list[dict] = []
                 for vr in val_results:
                     entry = vr.to_dict()
-                    # Summarize content for accepted/review files
-                    if vr.decision in ("accept", "review"):
+                    if vr.decision in ("accept", "review") and len(enriched) < 5:
                         try:
                             content = Path(vr.path).read_text(encoding="utf-8", errors="replace")
                             summary = await self._planner.summarize_content(content, Path(vr.path).name)
@@ -253,6 +262,73 @@ class DiscoveryAgent:
             return AgentPhase.GATHER_INTENT
         else:
             return AgentPhase.DONE
+
+    # ------------------------------------------------------------------
+    # Index page detection
+    # ------------------------------------------------------------------
+
+    async def _check_for_index_pages(self) -> list[DiscoveredSource]:
+        """Check successful fetches for index pages and offer deep crawl.
+
+        Returns new DiscoveredSource objects for document links if the
+        user chooses to download them, or an empty list otherwise.
+        """
+        from .validation import ContentClass, classify_content
+
+        new_sources: list[DiscoveredSource] = []
+
+        for fetch in self._state.successful_fetches:
+            if not fetch.local_path or not Path(fetch.local_path).exists():
+                continue
+
+            try:
+                content = Path(fetch.local_path).read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            classification = classify_content(content, fetch.source.url)
+            if classification.content_class != ContentClass.INDEX:
+                continue
+
+            doc_count = len(classification.document_links)
+            sub_count = len(classification.subpage_links)
+
+            if doc_count == 0 and sub_count == 0:
+                continue
+
+            self._ui.show_index_detected(fetch.source.title, doc_count, sub_count)
+
+            action = await self._ui.prompt_index_action(doc_count)
+
+            if action == "skip":
+                continue
+
+            links = classification.document_links
+            if action == "pick":
+                start, end = await self._ui.prompt_pick_range(len(links))
+                links = links[start:end]
+
+            # Create DiscoveredSource for each selected document link
+            for title, url in links:
+                ext = Path(url.split("?")[0]).suffix.lower()
+                from .state import SourceType
+
+                source_type = SourceType.PDF if ext == ".pdf" else SourceType.CSV if ext == ".csv" else SourceType.OTHER
+                new_sources.append(
+                    DiscoveredSource(
+                        url=url,
+                        title=title or Path(url).name,
+                        source_type=source_type,
+                        access_method="direct_download",
+                        discovered_via="index_extraction",
+                        discovery_query=self._state.user_intent,
+                        relevance_score=fetch.source.relevance_score,
+                    )
+                )
+
+            self._ui.show_info(f"  [{len(new_sources)} document(s) queued for download]")
+
+        return new_sources
 
     # ------------------------------------------------------------------
     # Fetch helpers

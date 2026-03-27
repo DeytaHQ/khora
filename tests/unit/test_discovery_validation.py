@@ -284,3 +284,55 @@ class TestValidateBatch:
     def test_empty_batch(self) -> None:
         results = validate_batch([])
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Content classification
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyContent:
+    def test_index_page_with_pdfs(self) -> None:
+        """A page listing many PDF links should be classified as INDEX."""
+        from khora.discovery.validation import ContentClass, classify_content
+
+        content = "# Data Set 1 Files\n\n"
+        for i in range(50):
+            content += f"- [EFTA{i:05d}.pdf](https://example.gov/files/EFTA{i:05d}.pdf)\n"
+        result = classify_content(content, "https://example.gov/dataset")
+        assert result.content_class == ContentClass.INDEX
+        assert len(result.document_links) == 50
+
+    def test_normal_content(self) -> None:
+        """Normal prose content should be classified as CONTENT."""
+        from khora.discovery.validation import ContentClass, classify_content
+
+        content = "# Wine Quality Analysis\n\n" + ("This is a detailed analysis of wine data. " * 50)
+        result = classify_content(content)
+        assert result.content_class == ContentClass.CONTENT
+
+    def test_error_page(self) -> None:
+        """Short error content should be classified as ERROR."""
+        from khora.discovery.validation import ContentClass, classify_content
+
+        result = classify_content("403 Forbidden. Access denied.")
+        assert result.content_class == ContentClass.ERROR
+
+    def test_empty_content(self) -> None:
+        from khora.discovery.validation import ContentClass, classify_content
+
+        result = classify_content("")
+        assert result.content_class == ContentClass.ERROR
+
+    def test_link_extraction_filters_by_extension(self) -> None:
+        from khora.discovery.validation import classify_content
+
+        content = (
+            "- [data.pdf](https://example.com/data.pdf)\n"
+            "- [info.csv](https://example.com/info.csv)\n"
+            "- [About](https://example.com/about)\n"
+            "- [Home](https://other.com/home)\n"
+        )
+        result = classify_content(content, "https://example.com/page")
+        assert len(result.document_links) == 2
+        assert result.document_links[0][1] == "https://example.com/data.pdf"
