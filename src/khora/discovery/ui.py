@@ -304,15 +304,34 @@ class DiscoveryUI:
             )
         )
 
-    async def prompt_review_action(self) -> Literal["accept", "retry", "search", "quit"]:
+    async def prompt_review_action(self) -> Literal["accept", "retry", "search", "add", "quit"]:
         """Ask the user what to do after reviewing fetched data."""
         choice = await asyncio.to_thread(
             Prompt.ask,
-            f"[{_ACCENT}]>[/] Action [{_DIM}](accept/retry/search/quit)[/]",
-            choices=["accept", "retry", "search", "quit"],
+            f"[{_ACCENT}]>[/] Action [{_DIM}](accept/add/retry/search/quit)[/]",
+            choices=["accept", "add", "retry", "search", "quit"],
             default="accept",
         )
         return choice  # type: ignore[return-value]
+
+    async def prompt_augment_action(self) -> str:
+        """Ask what to add during the augment phase."""
+        choice = await asyncio.to_thread(
+            Prompt.ask,
+            f"[{_ACCENT}]>[/] Add sources [{_DIM}](url / search / select / done)[/]",
+            choices=["url", "search", "select", "done"],
+            default="url",
+        )
+        return choice
+
+    def show_collection_summary(self, fetched_count: int, discovered_count: int, selected_count: int) -> None:
+        """Show current collection state during augment."""
+        self._console.print(
+            f"\n[{_ACCENT}]COLLECTION[/]  "
+            f"[{_SUCCESS}]{fetched_count}[/] fetched  "
+            f"[{_ACCENT2}]{discovered_count}[/] discovered  "
+            f"[{_DIM}]{selected_count} selected[/]"
+        )
 
     # ------------------------------------------------------------------
     # Completion / errors

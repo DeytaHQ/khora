@@ -40,6 +40,7 @@ class AgentPhase(str, Enum):
     SELECT_SOURCES = "select_sources"
     FETCH = "fetch"
     REVIEW = "review"
+    AUGMENT = "augment"
     INGEST = "ingest"
     DONE = "done"
 

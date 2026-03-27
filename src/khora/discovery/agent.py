@@ -77,6 +77,7 @@ class DiscoveryAgent:
             AgentPhase.SELECT_SOURCES: self._handle_select_sources,
             AgentPhase.FETCH: self._handle_fetch,
             AgentPhase.REVIEW: self._handle_review,
+            AgentPhase.AUGMENT: self._handle_augment,
         }
 
         while self._state.phase != AgentPhase.DONE:
@@ -254,6 +255,8 @@ class DiscoveryAgent:
         choice = await self._ui.prompt_review_action()
         if choice == "accept":
             return AgentPhase.DONE
+        elif choice == "add":
+            return AgentPhase.AUGMENT
         elif choice == "retry":
             self._state.fetched.clear()
             return AgentPhase.FETCH
@@ -261,6 +264,50 @@ class DiscoveryAgent:
             return AgentPhase.GATHER_INTENT
         else:
             return AgentPhase.DONE
+
+    async def _handle_augment(self) -> AgentPhase:
+        """Handle the augment phase — add more sources without restarting.
+
+        The user can: provide a URL directly, run a new search, select
+        from previously discovered-but-not-fetched sources, or finish.
+        Fetches accumulate (existing fetches are preserved).
+        """
+        self._ui.show_collection_summary(
+            fetched_count=len(self._state.successful_fetches),
+            discovered_count=len(self._state.discovered),
+            selected_count=len(self._state.selected_indices),
+        )
+
+        action = await self._ui.prompt_augment_action()
+
+        if action == "url":
+            url = await self._ui.prompt_url()
+            if url:
+                self._state.discovered.append(
+                    DiscoveredSource(url=url, title=url.split("/")[-1] or url, discovered_via="user")
+                )
+                idx = len(self._state.discovered) - 1
+                self._state.selected_indices = [idx]
+                return AgentPhase.FETCH
+            return AgentPhase.AUGMENT
+
+        elif action == "search":
+            return AgentPhase.GATHER_INTENT
+
+        elif action == "select":
+            # Show all discovered sources and let user pick from unfetched ones
+            if self._state.discovered:
+                self._ui.show_sources(self._state.discovered)
+                indices = await self._ui.prompt_source_selection(len(self._state.discovered))
+                if indices is not None:
+                    self._state.selected_indices = indices
+                    return AgentPhase.FETCH
+            else:
+                self._ui.show_info("[dim]No discovered sources available. Try a search.[/]")
+            return AgentPhase.AUGMENT
+
+        else:  # "done"
+            return AgentPhase.REVIEW
 
     # ------------------------------------------------------------------
     # Index page detection
