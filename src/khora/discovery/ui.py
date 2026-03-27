@@ -256,6 +256,40 @@ class DiscoveryUI:
                 name = Path(r.get("path", "?")).name
                 self._console.print(f"  [{_DIM}]{name}:[/] {summary}")
 
+    def show_index_detected(self, source_title: str, doc_count: int, subpage_count: int) -> None:
+        """Show that an index page was detected with downloadable links."""
+        self._console.print(f"\n  [{_WARN}]INDEX PAGE[/]  {source_title}")
+        self._console.print(f"[{_MUTED}]{'─' * 50}[/]")
+        if doc_count:
+            self._console.print(f"    [{_ACCENT}]{doc_count}[/] document links [{_DIM}](PDF, CSV, etc.)[/]")
+        if subpage_count:
+            self._console.print(f"    [{_ACCENT2}]{subpage_count}[/] sub-page links")
+
+    async def prompt_index_action(self, doc_count: int) -> str:
+        """Ask what to do with a detected index page."""
+        choice = await asyncio.to_thread(
+            Prompt.ask,
+            f"[{_ACCENT}]>[/] Action [{_DIM}](download-all / pick / skip)[/]",
+            choices=["download-all", "pick", "skip"],
+            default="download-all" if doc_count <= 50 else "pick",
+        )
+        return choice
+
+    async def prompt_pick_range(self, total: int) -> tuple[int, int]:
+        """Ask for a range of links to download from an index."""
+        raw = await asyncio.to_thread(
+            Prompt.ask,
+            f"[{_ACCENT}]>[/] Range [{_DIM}](e.g. 1-20, max {total})[/]",
+            default=f"1-{min(total, 50)}",
+        )
+        try:
+            parts = raw.split("-")
+            start = max(0, int(parts[0].strip()) - 1)
+            end = min(total, int(parts[1].strip())) if len(parts) > 1 else start + 1
+            return start, end
+        except (ValueError, IndexError):
+            return 0, min(total, 50)
+
     def show_data_preview(self, path: str, content: str, max_chars: int = 500) -> None:
         """Show a preview of fetched data content."""
         preview = content[:max_chars]
