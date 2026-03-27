@@ -25,8 +25,19 @@ def _has_discovery_keys() -> dict[str, bool]:
     }
 
 
+def _default_output_dir(session_id: str) -> Path:
+    """Compute the default output directory using XDG conventions.
+
+    Respects KHORA_DATA_DIR env var, falls back to ~/.local/share/khora/discovery/.
+    """
+    base = os.environ.get("KHORA_DATA_DIR")
+    if base:
+        return Path(base) / "discovery" / session_id[:8]
+    return Path.home() / ".local" / "share" / "khora" / "discovery" / session_id[:8]
+
+
 async def run_discovery_session(
-    output_dir: Path,
+    output_dir: Path | None = None,
     *,
     topic: str = "",
     resume_path: str | None = None,
@@ -35,6 +46,11 @@ async def run_discovery_session(
 
     This is the async entry point called by both the ``discover`` CLI
     command and the ``_phase_sources`` integration in the construct flow.
+
+    Args:
+        output_dir: Where to save fetched data. If None, prompts the user.
+        topic: Pre-fill the intent (skip first prompt).
+        resume_path: Path to a saved session JSON to resume.
 
     Returns:
         List of local file/directory paths containing fetched data.
@@ -55,9 +71,17 @@ async def run_discovery_session(
         state = SessionState.load(resume_path)
         ui.show_info(f"[dim]Resumed session {state.session_id[:8]}... (phase: {state.phase.value})[/]")
     else:
-        state = SessionState(user_intent=topic, output_dir=str(output_dir))
+        state = SessionState(user_intent=topic)
         if topic:
             state.phase = AgentPhase.SEARCH
+
+    # Resolve output directory
+    if output_dir is None:
+        default_dir = _default_output_dir(state.session_id)
+        chosen = await ui.prompt_output_dir(str(default_dir))
+        output_dir = Path(chosen)
+
+    state.output_dir = str(output_dir)
 
     # Show capabilities
     services = []
@@ -86,9 +110,8 @@ async def run_discovery_session(
     "--output-dir",
     "-o",
     type=click.Path(path_type=Path),
-    default="./khora_discovery_data",
-    show_default=True,
-    help="Directory to store fetched data.",
+    default=None,
+    help="Directory to store fetched data (default: ~/.local/share/khora/discovery/).",
 )
 @click.option(
     "--topic",
@@ -103,7 +126,7 @@ async def run_discovery_session(
     default=None,
     help="Resume a saved discovery session.",
 )
-def discover(output_dir: Path, topic: str, resume: str | None) -> None:
+def discover(output_dir: Path | None, topic: str, resume: str | None) -> None:
     """Interactively discover and fetch datasources from the internet.
 
     Uses Perplexity for search and Firecrawl for web scraping.
