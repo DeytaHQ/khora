@@ -207,6 +207,55 @@ class DiscoveryUI:
         for f in failed:
             self._console.print(f"  [{_ERR}]FAIL[/] {f.source.url}: [{_DIM}]{f.error or 'unknown'}[/]")
 
+    def show_validation_results(self, results: list[dict]) -> None:
+        """Show validation quality scores in a table.
+
+        Args:
+            results: List of dicts with keys: path, format_detected, quality_score,
+                     relevance_score, composite_score, decision, content_summary.
+        """
+        if not results:
+            return
+
+        self._console.print(f"\n[bold {_ACCENT}]DATA QUALITY[/]")
+
+        table = Table(border_style=_MUTED, show_lines=True, expand=True)
+        table.add_column("File", style="white", min_width=20)
+        table.add_column("Format", style=_ACCENT2, width=10)
+        table.add_column("Quality", justify="center", width=8)
+        table.add_column("Relevance", justify="center", width=10)
+        table.add_column("Score", justify="center", width=8)
+        table.add_column("Decision", justify="center", width=10)
+
+        for r in results:
+            name = Path(r.get("path", "?")).name
+            fmt = r.get("format_detected", "?")
+            quality = r.get("quality_score", 0.0)
+            relevance = r.get("relevance_score", 0.0)
+            composite = r.get("composite_score", 0.0)
+            decision = r.get("decision", "?")
+
+            dec_color = _SUCCESS if decision == "accept" else _WARN if decision == "review" else _ERR
+            score_color = _SUCCESS if composite >= 0.7 else _WARN if composite >= 0.4 else _ERR
+
+            table.add_row(
+                name,
+                fmt,
+                f"[{score_color}]{quality:.0%}[/]",
+                f"[{score_color}]{relevance:.0%}[/]",
+                f"[{score_color}]{composite:.0%}[/]",
+                f"[{dec_color}]{decision.upper()}[/]",
+            )
+
+        self._console.print(table)
+
+        # Show summaries if available
+        for r in results:
+            summary = r.get("content_summary", "")
+            if summary:
+                name = Path(r.get("path", "?")).name
+                self._console.print(f"  [{_DIM}]{name}:[/] {summary}")
+
     def show_data_preview(self, path: str, content: str, max_chars: int = 500) -> None:
         """Show a preview of fetched data content."""
         preview = content[:max_chars]

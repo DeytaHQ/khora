@@ -310,3 +310,30 @@ class DiscoveryPlanner:
         if isinstance(result, dict):
             return result.get("code", result.get("script", str(result)))
         return str(result)
+
+    async def summarize_content(self, content: str, source_title: str) -> str:
+        """Generate a 2-3 sentence summary of fetched content.
+
+        Args:
+            content: The fetched text content (truncated to save tokens).
+            source_title: Title of the source for context.
+
+        Returns:
+            Short summary string, or empty on failure.
+        """
+        truncated = content[:3000]
+        try:
+            result = await self._llm.complete(
+                system=(
+                    "Summarize the following fetched content in 2-3 sentences. "
+                    "Focus on: what data it contains, how many records/items, "
+                    "and whether it seems useful for knowledge graph construction. "
+                    'Return JSON: {"summary": "..."}'
+                ),
+                user=f"Source: {source_title}\n\nContent:\n{truncated}",
+                temperature=0.1,
+            )
+            return result.get("summary", "")
+        except Exception as e:
+            logger.debug(f"Content summarization failed: {e}")
+            return ""

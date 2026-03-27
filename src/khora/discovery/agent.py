@@ -215,15 +215,30 @@ class DiscoveryAgent:
     async def _handle_review(self) -> AgentPhase:
         self._ui.show_review_summary(self._state.fetched)
 
-        # Show data preview for successful fetches
-        for f in self._state.successful_fetches:
-            path = Path(f.local_path)
-            if path.exists() and path.stat().st_size > 0:
-                try:
-                    content = path.read_text(encoding="utf-8", errors="replace")
-                    self._ui.show_data_preview(f.local_path, content)
-                except Exception:
-                    pass
+        # Run validation on successful fetches
+        successful = self._state.successful_fetches
+        if successful:
+            from .validation import validate_batch
+
+            paths = [Path(f.local_path) for f in successful if f.local_path and Path(f.local_path).exists()]
+            if paths:
+                val_results = validate_batch(paths, query=self._state.user_intent)
+
+                # Enrich with LLM summaries for the top results
+                enriched: list[dict] = []
+                for vr in val_results:
+                    entry = vr.to_dict()
+                    # Summarize content for accepted/review files
+                    if vr.decision in ("accept", "review"):
+                        try:
+                            content = Path(vr.path).read_text(encoding="utf-8", errors="replace")
+                            summary = await self._planner.summarize_content(content, Path(vr.path).name)
+                            entry["content_summary"] = summary
+                        except Exception:
+                            entry["content_summary"] = ""
+                    enriched.append(entry)
+
+                self._ui.show_validation_results(enriched)
 
         if self._planner.cost_usd > 0:
             self._ui.show_cost(self._planner.cost_usd)
