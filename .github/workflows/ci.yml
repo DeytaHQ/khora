@@ -41,7 +41,7 @@ jobs:
         run: uv sync --all-extras
 
       - name: Security scan (bandit)
-        run: uv run bandit -r src/ -f json -o bandit-report.json -ll
+        run: uvx bandit -r src/ -f json -o bandit-report.json -ll
         continue-on-error: false
 
       - name: Type check with ty
