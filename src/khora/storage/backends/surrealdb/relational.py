@@ -179,12 +179,12 @@ class SurrealDBRelationalAdapter:
         where = "WHERE is_active = true" if active_only else ""
 
         count_row = await self._conn.query_one(
-            f"SELECT count() AS total FROM memory_namespace {where} GROUP ALL",
+            f"SELECT count() AS total FROM memory_namespace {where} GROUP ALL",  # nosec B608
         )
         total = count_row["total"] if count_row else 0
 
         rows = await self._conn.query(
-            f"SELECT * FROM memory_namespace {where} ORDER BY id ASC LIMIT $lim START $off",
+            f"SELECT * FROM memory_namespace {where} ORDER BY id ASC LIMIT $lim START $off",  # nosec B608
             {"lim": limit, "off": offset},
         )
         items = [self._row_to_namespace(r) for r in rows]

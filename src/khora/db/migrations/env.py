@@ -34,7 +34,7 @@ target_metadata = Base.metadata
 VERSION_TABLE = "khora_alembic_version"
 
 # Advisory lock ID — deterministic int64 from hashlib, unique to khora migrations
-LOCK_ID = int.from_bytes(hashlib.md5(b"khora_migrations").digest()[:8], "big", signed=True)
+LOCK_ID = int.from_bytes(hashlib.md5(b"khora_migrations", usedforsecurity=False).digest()[:8], "big", signed=True)
 
 
 def _get_url() -> str:
@@ -111,7 +111,7 @@ def do_run_migrations(connection: Connection) -> None:
 
         # Ahead-detection: skip if DB is at a revision this version doesn't know
         try:
-            result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))
+            result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # nosec B608
             row = result.fetchone()
             current_rev = row[0] if row else None
         except Exception:

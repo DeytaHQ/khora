@@ -875,7 +875,7 @@ class ArcadeDBBackend(GraphBackendBase, VectorBackendBase):
         # Build IN clause with placeholders
         placeholders = ", ".join("?" for _ in chunk_ids)
         rows = await self._sql(
-            f"SELECT * FROM Chunk WHERE id IN ({placeholders})",
+            f"SELECT * FROM Chunk WHERE id IN ({placeholders})",  # nosec B608
             params={"positionalParams": [str(cid) for cid in chunk_ids]},
         )
         return {UUID(row["id"]): self._row_to_chunk(row) for row in rows}
