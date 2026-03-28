@@ -94,7 +94,7 @@ config = StorageConfig(
 Or via environment:
 ```bash
 export KHORA_DATABASE_URL="postgresql://user:pass@localhost:5432/khora"
-export KHORA_STORAGE__POOL_PRE_PING=true
+export KHORA_STORAGE_POOL_PRE_PING=true
 ```
 
 **`pool_pre_ping`** issues a lightweight `SELECT 1` before handing out a connection from the pool. This detects stale connections (from network interruptions, DB restarts, or idle timeouts) and transparently replaces them. Adds ~1ms per connection checkout but prevents `connection reset by peer` errors in long-running processes.
@@ -551,9 +551,9 @@ settings = StorageSettings(
 
 Or via environment:
 ```bash
-export KHORA_STORAGE__SURREALDB__URL="ws://localhost:8000/rpc"
-export KHORA_STORAGE__SURREALDB__NAMESPACE="khora"
-export KHORA_STORAGE__SURREALDB__DATABASE="main"
+export KHORA_STORAGE_SURREALDB_URL="ws://localhost:8000/rpc"
+export KHORA_STORAGE_SURREALDB_NAMESPACE="khora"
+export KHORA_STORAGE_SURREALDB_DATABASE="main"
 ```
 
 ### Architecture

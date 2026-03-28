@@ -211,13 +211,17 @@ VectorConfig = Annotated[
 # ---------------------------------------------------------------------------
 
 
-class StorageSettings(BaseModel):
+class StorageSettings(BaseSettings):
     """Storage backend configuration.
 
     Supports both the new discriminated-union graph/vector configs and
     the legacy flat fields (neo4j_url, pgvector_url, etc.) for backwards
     compatibility.
+
+    Env vars: ``KHORA_STORAGE_BACKEND``, ``KHORA_STORAGE_POSTGRESQL_URL``, etc.
     """
+
+    model_config = SettingsConfigDict(env_prefix="KHORA_STORAGE_", case_sensitive=False)
 
     # Unified backend selector (postgres = traditional PG+pgvector+Neo4j, surrealdb = unified)
     backend: str = Field(
@@ -302,8 +306,13 @@ class StorageSettings(BaseModel):
         return data
 
 
-class LLMSettings(BaseModel):
-    """LLM configuration settings."""
+class LLMSettings(BaseSettings):
+    """LLM configuration settings.
+
+    Env vars: ``KHORA_LLM_MODEL``, ``KHORA_LLM_EMBEDDING_MODEL``, etc.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KHORA_LLM_", case_sensitive=False)
 
     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
     api_key_env: str = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
@@ -330,8 +339,13 @@ class LLMSettings(BaseModel):
     router_settings: dict[str, Any] | None = Field(default=None, description="Router settings")
 
 
-class PipelineSettings(BaseModel):
-    """Pipeline configuration settings."""
+class PipelineSettings(BaseSettings):
+    """Pipeline configuration settings.
+
+    Env vars: ``KHORA_PIPELINES_CHUNK_SIZE``, ``KHORA_PIPELINES_SELECTIVE_EXTRACTION``, etc.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KHORA_PIPELINES_", case_sensitive=False)
 
     # Chunking settings
     chunking_strategy: str = Field(default="semantic", description="Chunking strategy: fixed, semantic, recursive")
@@ -390,19 +404,25 @@ class PipelineSettings(BaseModel):
     )
 
 
-class TenancySettings(BaseModel):
-    """Multi-tenancy configuration settings."""
+class TenancySettings(BaseSettings):
+    """Multi-tenancy configuration settings.
+
+    Env vars: ``KHORA_TENANCY_DEFAULT_MODE``, ``KHORA_TENANCY_ENFORCE_NAMESPACE``.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KHORA_TENANCY_", case_sensitive=False)
 
     default_mode: str = Field(default="shared", description="Default tenancy mode: shared or isolated")
     enforce_namespace: bool = Field(default=True, description="Enforce namespace isolation")
 
 
-class QuerySettings(BaseModel):
+class QuerySettings(BaseSettings):
     """Query pipeline configuration.
 
-    All fields are flat to allow single-underscore env vars, e.g.:
-    KHORA_QUERY__DEFAULT_MODE, KHORA_QUERY__ENABLE_RERANKING, etc.
+    Env vars: ``KHORA_QUERY_DEFAULT_MODE``, ``KHORA_QUERY_ENABLE_HYDE``, etc.
     """
+
+    model_config = SettingsConfigDict(env_prefix="KHORA_QUERY_", case_sensitive=False)
 
     # Basic search settings
     default_mode: str = Field(default="hybrid", description="Default search mode: vector, graph, hybrid, all")
@@ -514,12 +534,16 @@ class QuerySettings(BaseModel):
     )
 
 
-class DiscoverySettings(BaseModel):
+class DiscoverySettings(BaseSettings):
     """Interactive datasource discovery configuration.
 
     Controls the discovery agent that helps users find and pull
     datasources from the internet when no --source is provided.
+
+    Env vars: ``KHORA_DISCOVERY_MAX_COST_USD``, ``KHORA_DISCOVERY_PERPLEXITY_MODEL``, etc.
     """
+
+    model_config = SettingsConfigDict(env_prefix="KHORA_DISCOVERY_", case_sensitive=False)
 
     # Perplexity search settings
     perplexity_model: str = Field(default="sonar-pro", description="Perplexity model for source discovery")

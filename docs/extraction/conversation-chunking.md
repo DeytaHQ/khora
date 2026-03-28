@@ -72,10 +72,10 @@ These can also be set via `KhoraConfig`:
 
 | Env var | Config field |
 |---------|-------------|
-| `KHORA_PIPELINES__CONVERSATION_TIME_GAP_MINUTES` | `pipelines.conversation_time_gap_minutes` |
-| `KHORA_PIPELINES__CONVERSATION_MAX_GROUP_SIZE` | `pipelines.conversation_max_group_size` |
-| `KHORA_PIPELINES__CONVERSATION_MIN_GROUP_SIZE` | `pipelines.conversation_min_group_size` |
-| `KHORA_PIPELINES__CONVERSATION_SEMANTIC_THRESHOLD` | `pipelines.conversation_semantic_threshold` |
+| `KHORA_PIPELINES_CONVERSATION_TIME_GAP_MINUTES` | `pipelines.conversation_time_gap_minutes` |
+| `KHORA_PIPELINES_CONVERSATION_MAX_GROUP_SIZE` | `pipelines.conversation_max_group_size` |
+| `KHORA_PIPELINES_CONVERSATION_MIN_GROUP_SIZE` | `pipelines.conversation_min_group_size` |
+| `KHORA_PIPELINES_CONVERSATION_SEMANTIC_THRESHOLD` | `pipelines.conversation_semantic_threshold` |
 
 ## Usage
 

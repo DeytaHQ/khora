@@ -434,9 +434,9 @@ async with MemoryLake(db_url, engine="skeleton") as lake:
 ### Via Environment
 
 ```bash
-KHORA_QUERY__HYBRID_ALPHA=0.7
-KHORA_QUERY__DEFAULT_LIMIT=10
-KHORA_QUERY__MIN_SIMILARITY=0.0
+KHORA_QUERY_HYBRID_ALPHA=0.7
+KHORA_QUERY_DEFAULT_LIMIT=10
+KHORA_QUERY_MIN_SIMILARITY=0.0
 ```
 
 ### Via Genesis YAML

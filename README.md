@@ -437,7 +437,7 @@ async with MemoryLake() as lake:
 
 ### Environment Variables
 
-All config uses the `KHORA_` prefix with `__` for nested sections (e.g., `KHORA_LLM__MODEL=gpt-4o`).
+All config uses the `KHORA_` prefix with single underscores (e.g., `KHORA_LLM_MODEL=gpt-4o`). Legacy `__` nesting is also supported for backward compatibility.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -445,14 +445,14 @@ All config uses the `KHORA_` prefix with `__` for nested sections (e.g., `KHORA_
 | `KHORA_NEO4J_URL` | Neo4j connection URL | `bolt://localhost:7687` |
 | `KHORA_NEO4J_USER` | Neo4j username | `neo4j` |
 | `KHORA_NEO4J_PASSWORD` | Neo4j password | Required for Neo4j |
-| `KHORA_STORAGE__BACKEND` | Backend mode | `postgres` or `surrealdb` |
-| `KHORA_LLM__MODEL` | Primary LLM model | `gpt-4o-mini` |
-| `KHORA_LLM__EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
-| `KHORA_LLM__EXTRACTION_MODEL` | Extraction model (optional) | Same as `model` |
-| `KHORA_PIPELINE__CHUNK_SIZE` | Chunk size in tokens | `512` |
-| `KHORA_PIPELINE__SELECTIVE_EXTRACTION` | KET-RAG importance filtering | `true` |
-| `KHORA_QUERY__DEFAULT_MODE` | Default search mode | `hybrid` |
-| `KHORA_QUERY__ENABLE_HYDE` | HyDE query expansion | `auto` |
+| `KHORA_STORAGE_BACKEND` | Backend mode | `postgres` or `surrealdb` |
+| `KHORA_LLM_MODEL` | Primary LLM model | `gpt-4o-mini` |
+| `KHORA_LLM_EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
+| `KHORA_LLM_EXTRACTION_MODEL` | Extraction model (optional) | Same as `model` |
+| `KHORA_PIPELINES_CHUNK_SIZE` | Chunk size in tokens | `512` |
+| `KHORA_PIPELINES_SELECTIVE_EXTRACTION` | KET-RAG importance filtering | `true` |
+| `KHORA_QUERY_DEFAULT_MODE` | Default search mode | `hybrid` |
+| `KHORA_QUERY_ENABLE_HYDE` | HyDE query expansion | `auto` |
 | `KHORA_TELEMETRY_DATABASE_URL` | PostgreSQL for telemetry events | Disabled |
 | `KHORA_ACCEL_BACKEND` | Acceleration tier | Auto-detect (`rust`/`numpy`/`python`) |
 | `KHORA_DEBUG` | Enable debug mode | `false` |
