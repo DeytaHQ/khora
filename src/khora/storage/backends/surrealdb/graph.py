@@ -340,7 +340,7 @@ class SurrealDBGraphAdapter:
     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
         if not entity_ids:
             return {}
-        ids_list = ", ".join(str(_rid("entity", uid)) for uid in entity_ids)
+        ids_list = ", ".join(f"entity:\u27e8{uid}\u27e9" for uid in entity_ids)
         sql = f"SELECT * FROM entity WHERE id IN [{ids_list}]"
         rows = await self._conn.query(sql)
         result: dict[UUID, Entity] = {}
@@ -885,7 +885,7 @@ class SurrealDBGraphAdapter:
 
         # Fetch relationships connecting the center to discovered neighbors
         if seen_ids:
-            neighbor_rids = ", ".join(str(_rid("entity", UUID(nid))) for nid in seen_ids)
+            neighbor_rids = ", ".join(f"entity:\u27e8{nid}\u27e9" for nid in seen_ids)
             rel_sql = (
                 f"SELECT * FROM relates_to WHERE "
                 f"(in = {eid} AND out IN [{neighbor_rids}]) OR "
@@ -982,7 +982,7 @@ class SurrealDBGraphAdapter:
             relationships: list[dict[str, Any]] = []
             if seen_ids:
                 center_rid = _rid("entity", eid)
-                neighbor_rids = ", ".join(str(_rid("entity", UUID(nid))) for nid in seen_ids)
+                neighbor_rids = ", ".join(f"entity:\u27e8{nid}\u27e9" for nid in seen_ids)
                 rel_sql = (
                     f"SELECT * FROM relates_to WHERE "
                     f"(in = {center_rid} AND out IN [{neighbor_rids}]) OR "
