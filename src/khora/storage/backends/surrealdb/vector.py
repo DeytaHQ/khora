@@ -316,7 +316,11 @@ class SurrealDBVectorAdapter:
             bindings["created_before"] = created_before
 
         where_sql = " AND ".join(where_clauses)
-        sql = "SELECT *, search::score(1) AS rank " f"FROM chunk WHERE {where_sql} " "ORDER BY rank DESC LIMIT $limit"  # nosec B608
+        sql = (
+            "SELECT *, search::score(1) AS rank "  # nosec B608
+            f"FROM chunk WHERE {where_sql} "
+            "ORDER BY rank DESC LIMIT $limit"
+        )
 
         rows = await self._conn.query(sql, bindings)
         return [(self._row_to_chunk(row), float(row.get("rank", 0.0))) for row in rows]

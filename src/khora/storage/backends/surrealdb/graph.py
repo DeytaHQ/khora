@@ -747,7 +747,10 @@ class SurrealDBGraphAdapter:
             conditions.append("occurred_at <= $end_time")
             bindings["end_time"] = end_time
 
-        sql = f"SELECT * FROM episode WHERE {' AND '.join(conditions)} " "ORDER BY occurred_at DESC LIMIT $limit"  # nosec B608
+        sql = (
+            f"SELECT * FROM episode WHERE {' AND '.join(conditions)} "  # nosec B608
+            "ORDER BY occurred_at DESC LIMIT $limit"
+        )
         rows = await self._conn.query(sql, bindings)
         return [_row_to_episode(r) for r in rows]
 
@@ -848,7 +851,11 @@ class SurrealDBGraphAdapter:
         # Combine outgoing + incoming neighbor traversal in a single query
         out_arrow = ("->relates_to" + rel_filter + "->entity") * depth
         in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
-        combined_sql = f"SELECT {out_arrow} AS out_neighbors, " f"{in_arrow} AS in_neighbors " f"FROM {eid}"  # nosec B608
+        combined_sql = (
+            f"SELECT {out_arrow} AS out_neighbors, "  # nosec B608
+            f"{in_arrow} AS in_neighbors "
+            f"FROM {eid}"
+        )
         rows = await self._conn.query(combined_sql, rel_bindings or None)
 
         # Collect unique entities from both directions
