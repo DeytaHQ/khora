@@ -231,7 +231,8 @@ class VectorCypherRetriever:
             cache_key = ""
             if self._cache_ttl > 0:
                 cache_key = hashlib.md5(
-                    f"{query}:{namespace_id}:{temporal_filter}:{graph_depth}:{limit}".encode()
+                    f"{query}:{namespace_id}:{temporal_filter}:{graph_depth}:{limit}".encode(),
+                    usedforsecurity=False,
                 ).hexdigest()
 
                 if cache_key in self._cache:

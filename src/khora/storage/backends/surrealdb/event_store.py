@@ -232,7 +232,7 @@ class SurrealDBEventStoreAdapter:
         bindings["off"] = offset
 
         rows = await self._conn.query(
-            f"SELECT * FROM {_TABLE} WHERE {where} ORDER BY timestamp DESC LIMIT $lim START $off",
+            f"SELECT * FROM {_TABLE} WHERE {where} ORDER BY timestamp DESC LIMIT $lim START $off",  # nosec B608
             bindings,
         )
         return [self._row_to_event(r) for r in rows]
@@ -246,7 +246,7 @@ class SurrealDBEventStoreAdapter:
     ) -> list[MemoryEvent]:
         """Get all events for a specific resource."""
         rows = await self._conn.query(
-            f"SELECT * FROM {_TABLE} "
+            f"SELECT * FROM {_TABLE} "  # nosec B608
             "WHERE resource_type = $resource_type AND resource_id = $resource_id "
             "ORDER BY timestamp DESC LIMIT $lim",
             {
@@ -264,7 +264,7 @@ class SurrealDBEventStoreAdapter:
     ) -> MemoryEvent | None:
         """Get the latest event for a resource."""
         row = await self._conn.query_one(
-            f"SELECT * FROM {_TABLE} "
+            f"SELECT * FROM {_TABLE} "  # nosec B608
             "WHERE resource_type = $resource_type AND resource_id = $resource_id "
             "ORDER BY timestamp DESC LIMIT 1",
             {
@@ -298,7 +298,7 @@ class SurrealDBEventStoreAdapter:
         where = " AND ".join(clauses)
 
         row = await self._conn.query_one(
-            f"SELECT count() AS total FROM {_TABLE} WHERE {where} GROUP ALL",
+            f"SELECT count() AS total FROM {_TABLE} WHERE {where} GROUP ALL",  # nosec B608
             bindings,
         )
         if row is None:
