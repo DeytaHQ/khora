@@ -2,6 +2,219 @@
 
 All notable changes to Khora are documented here.
 
+Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
+
+## [Unreleased] — SurrealDB Optimization, Ontology CLI, Discovery Agent
+
+### SurrealDB backend hardening
+
+- Schema parity: added ~50 missing fields to match PostgreSQL ORM (#130, #131)
+- SQL injection: replaced 15+ f-string interpolations with parameterized queries (#131)
+- Entity unique constraint restored: `idx_entity_unique (namespace, name, entity_type)` (#131)
+- Entity key gate: `_SurrealDBEntityKeyGate` prevents concurrent upsert races (#136)
+- SDK upgrade to `surrealdb>=2.0.0a1` for SurrealDB 3.x support (#133)
+- Removed no-op helpers (`_iso`, `_dt_to_iso`); pass UUIDs directly to `RecordID` (#136)
+- Schema init race fix: module-level `asyncio.Lock` for embedded mode (#155)
+- Write conflict retry with exponential backoff and write semaphore (#157)
+
+### SurrealDB performance
+
+- `vector::dot()` for pre-normalized vectors (~3x faster than cosine) (#150)
+- Single-query deletes via `DELETE ... RETURN BEFORE` (50% fewer round-trips) (#150)
+- Composite indexes: `(document, chunk_index)`, `(namespace, created_at)`, `(namespace_id, relationship_type, weight)` (#150)
+- Single-query multi-depth graph traversal (1 round-trip instead of 3) (#154)
+- `INSERT INTO entity $records` for batch creates (replaces FOR loops) (#154)
+- Tuple IN for upsert prefetch: `[name, entity_type] IN $pairs` (#154)
+
+### Ontology CLI (`khora ontology`)
+
+- `khora ontology construct --source <path>` — AI-powered ontology construction from data (#138, #140, #141)
+- `khora ontology validate <file>` — schema + reference integrity validation (#138)
+- `khora ontology preview <file>` — Rich table + tree display (#138)
+- `OntologyLLM` wrapper with token/cost tracking and `--budget` USD cap (#138)
+- Stratified multi-source data sampling (sqrt-weighted allocation) (#140)
+- Domain detection, entity/relationship/rule inference via LLM (#140)
+- Session persistence with `--resume` flag (#141)
+- 50 unit tests (#142)
+
+### Discovery agent (`khora ontology discover`)
+
+- Interactive agent for finding/fetching data from the internet (#164, #167)
+- Perplexity search + Firecrawl scraping API clients (#163)
+- Code generation with AST validation and sandboxed execution (#169)
+- Data validation pipeline with format detection and quality checks (#170, #171)
+- Link-index detection and deep crawl (#176)
+- Binary format extraction (PDF, XLS) (#177)
+- Non-linear conversational interaction (#178)
+- Discovery-to-construct handoff (#174)
+
+### Query engine
+
+- Parallel fallback search via `asyncio.gather()` (~45% latency reduction) (#151)
+- Per-call `chunk_strategy` override on `remember()`/`remember_batch()` (#137)
+
+### Embedding & extraction
+
+- Dynamic embedding batch sizing by token budget (#152)
+- Bisect embedding batches on JSON parse errors (#149)
+- Extraction circuit breaker for batch failures (#187)
+
+### Configuration
+
+- Single-underscore env vars: `KHORA_LLM_MODEL` alongside legacy `KHORA_LLM__MODEL` (#186)
+
+### Infrastructure
+
+- Dev release pipeline: publish to CodeArtifact on every merge to main (#153)
+- Bandit security scanning in CI (#185)
+- khora-accel wheels for Python 3.13 and 3.14 (#162)
+- Shared PG engine for `PgVectorTemporalStore` (#146)
+- Skip migrations gracefully when database is ahead (#144)
+- Smart resolution and HNSW index rebuild optimized (~30min → ~5min) (#147)
+
+### Bug fixes
+
+- Fix `_parse_uuid` for non-UUID SurrealDB record IDs (#168)
+- Fix SurrealDB ingestion performance regression (#160)
+- Fix `temporal_chunk` tags: coerce JSON strings to native arrays (#158)
+- Fix `SurrealDBTemporalStore` import of removed `_iso` helper (#156)
+- Fix alembic `env.py`: replace removed `get_current_revision` API (#180)
+- Fix LLM JSON parser: handle trailing commas, bare arrays, code blocks
+- Fix halfvec HNSW indexes causing full sequential scans (#183)
+- Fix VectorCypher engine dropping non-scalar chunk metadata (#134)
+
+---
+
+## [0.5.5] — 2026-03-26 — Ontology CLI & SurrealDB Hardening
+
+First release with the ontology construction CLI and comprehensive SurrealDB
+optimization audit. Includes the entity key gate, SDK upgrade to 2.0.0a1,
+schema parity fixes, and 15+ SQL injection fixes. See 0.6.0 for the detailed
+breakdown (0.5.5 was the last tagged release before the 0.6.0 cycle).
+
+---
+
+## [0.5.4] — 2026-03-25 — Test Audit & CI Fixes
+
+- Replace `__slots__` implementation-detail tests with behavioral checks (#128)
+- Fix publish-accel uv cache failure (#129)
+- Gitignore `.agents/` folder (#126)
+
+---
+
+## [0.5.3] — 2026-03-24 — macOS Build Fix
+
+- Remove x86_64-apple-darwin from macOS build matrix (#125)
+
+---
+
+## [0.5.2] — 2026-03-24 — Release Pipeline Consolidation
+
+- Consolidate khora and khora-accel into single release pipeline (#124)
+- Fix accel build matrix and sccache configuration (#124)
+
+---
+
+## [0.5.1] — 2026-03-24 — First Tagged Release
+
+First release with git-tag-based versioning via `hatch-vcs`. Includes all
+features from 0.4.0 and 0.5.0 internal versions.
+
+- Add `publish.yml` and `publish-accel.yml` CodeArtifact workflows (#123)
+- Switch to `hatch-vcs` for version derivation from git tags
+- Add sccache for Rust build acceleration
+- Add `docs/RELEASE.md` with release process documentation
+
+---
+
+## [0.5.0] — SurrealDB Unified Backend & Engine Modernization
+
+### SurrealDB unified backend (Phase 1–4)
+
+- Foundation: `SurrealDBConfig`, connection module (memory/embedded/remote modes),
+  relational adapter, vector adapter with HNSW + BM25 (#86–#89)
+- Graph adapter: entities, relationships, episodes, traversal, path finding,
+  neighborhoods, batch operations (#90, #91)
+- Event store adapter (#91)
+- Optimization: coordinator dual-write collapse, crash-safe defaults (#92)
+- VectorCypher engine support for SurrealDB (#109)
+- Skeleton engine `SurrealDBTemporalStore` (#104)
+- 14 bug fixes for SDK compatibility, KNN operator, namespace resolution,
+  connection sharing, datetime handling (#105–#118)
+
+### Engine modernization
+
+- Modernize Skeleton and GraphRAG engines for robustness and performance (#103)
+- Shared `build_storage_config()` helper for all engines
+- Move `TemporalDetector` to shared `query/` location
+- Add `@trace` telemetry to Skeleton and GraphRAG engines
+- Add `bulk_mode` support to all engines
+- Improve GraphRAG `stats()` efficiency
+- Add importance scoring to Skeleton engine
+
+### Expertise & extraction API
+
+- `ExpertiseConfig` as stable public API (ADR-022) with YAML loading,
+  composition, and registry (#96)
+- `LLMUsage` type for token/cost tracking in `RememberResult` and `BatchResult`
+- `expertise` parameter pass-through on `remember()` and `remember_batch()`
+- `extraction_config_hash` column for re-extraction tracking (#97, #99)
+
+### Migrations & deprecations
+
+- Deprecate `create_tables()`/`init_db()` — use `run_migrations()` (#98)
+- Migration drift CI test (`test_migration_drift.py`)
+- `khora_alembic_version` dedicated version table
+- Advisory lock for concurrent migration safety
+- Temporal expression index for query performance (#117)
+
+### Other
+
+- Neo4j connection lifetime and liveness config (#102)
+- Fix conversation-mode entity extraction regression (#122)
+- Widen `extraction_config_hash` to VARCHAR(255) (#99)
+
+---
+
+## [0.4.0] — Logfire Telemetry, Namespace Versioning, Alembic Overhaul
+
+### Logfire / OTEL integration
+
+- Optional `logfire` integration for distributed tracing (#32)
+- `trace_span()` context manager and `@trace` decorator
+- `_HAS_LOGFIRE` feature flag — zero-cost no-op when absent
+- Consumers import from `khora.telemetry`, not `logfire_integration`
+
+### Namespace versioning
+
+- Dual-ID scheme: `id` (row-level, changes per version) + `namespace_id` (stable)
+- `resolve_namespace()` idempotent resolution for public API
+- Flatten namespace hierarchy (migration 010)
+- Add stable `namespace_id` column (migration 012)
+- Drop `previous_version_id` (migration 013)
+- Drop `slug` (migration 011)
+
+### Alembic overhaul
+
+- Bundle migrations in `src/khora/db/migrations/` (not `alembic/`)
+- Dedicated `khora_alembic_version` table (avoids downstream conflicts)
+- `pg_advisory_xact_lock` for concurrent migration safety
+- Programmatic `run_migrations(url)` and `MemoryLake(run_migrations=True)`
+- Sync `document_status` enum (migration 014)
+
+### FastAPI removal
+
+- Remove FastAPI dependency — Khora is a library, not a web app (#35)
+
+### Other
+
+- Fix Alembic migrations on fresh databases (#37)
+- Fix UUID `as_uuid=True` across all 52 columns (migration 006)
+- Add `document_status` enum sync (migration 014)
+- Temporal coalesce expression index (migration 017)
+
+---
+
 ## [0.3.10] — Chunker Safety & Rust Performance
 
 ### Empty chunk filtering
