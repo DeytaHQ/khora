@@ -243,6 +243,38 @@ class LLMEntityExtractor(EntityExtractor):
         self._retry_wait = retry_wait
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
+        # Register litellm failure callback to log 429 rate-limit responses
+        self._register_rate_limit_callback()
+
+    @staticmethod
+    def _register_rate_limit_callback() -> None:
+        """Register a litellm failure callback to log 429 rate-limit responses."""
+        import litellm
+
+        def _on_failure(kwargs: dict[str, Any], response: Any, start_time: Any, end_time: Any) -> None:  # noqa: ANN401
+            if hasattr(response, "status_code") and response.status_code == 429:
+                retry_after = getattr(response, "headers", {}).get("retry-after", "unknown")
+                logger.warning(
+                    "OpenAI rate limit hit (429): retry-after=%s, model=%s",
+                    retry_after,
+                    kwargs.get("model", "unknown"),
+                )
+
+        # Append without clobbering existing callbacks
+        if not isinstance(litellm.failure_callback, list):
+            litellm.failure_callback = []
+        if not any(getattr(cb, "__name__", None) == "_on_failure" for cb in litellm.failure_callback):
+            litellm.failure_callback.append(_on_failure)
+
+    @staticmethod
+    def _log_rate_limit_headers(response: Any) -> None:  # noqa: ANN401
+        """Log rate-limit headers from an LLM response at DEBUG level."""
+        headers = getattr(response, "_headers", {}) or {}
+        rl_limit = headers.get("x-ratelimit-limit-requests", "")
+        rl_remaining = headers.get("x-ratelimit-remaining-requests", "")
+        if rl_limit or rl_remaining:
+            logger.debug("Rate limit: %s/%s remaining requests", rl_remaining, rl_limit)
+
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count for text.
 
@@ -664,10 +696,15 @@ class LLMEntityExtractor(EntityExtractor):
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
-                    "Retrying LLM call (attempt {}) after {!s}",
+                    "Retrying LLM call (attempt %d) after %s: %s",
                     retry_state.attempt_number,
                     (
-                        retry_state.outcome.exception()
+                        type(retry_state.outcome.exception()).__name__
+                        if retry_state.outcome and retry_state.outcome.failed
+                        else "unknown"
+                    ),
+                    (
+                        str(retry_state.outcome.exception())[:200]
                         if retry_state.outcome and retry_state.outcome.failed
                         else "unknown"
                     ),
@@ -703,6 +740,7 @@ class LLMEntityExtractor(EntityExtractor):
                                 response_format=self._get_response_format(),
                             )
                         _latency = (_time.perf_counter() - _t0) * 1000
+                        self._log_rate_limit_headers(response)
 
                         # Record telemetry
                         usage = getattr(response, "usage", None)
@@ -845,6 +883,7 @@ class LLMEntityExtractor(EntityExtractor):
                         response_format=self._get_response_format(),
                     )
                 _latency = (_time.perf_counter() - _t0) * 1000
+                self._log_rate_limit_headers(response)
 
                 usage = getattr(response, "usage", None)
                 _pt = getattr(usage, "prompt_tokens", 0) or 0
@@ -1457,10 +1496,15 @@ Return ONLY valid JSON, no other text."""
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
-                    "Retrying LLM call (attempt {}) after {!s}",
+                    "Retrying LLM call (attempt %d) after %s: %s",
                     retry_state.attempt_number,
                     (
-                        retry_state.outcome.exception()
+                        type(retry_state.outcome.exception()).__name__
+                        if retry_state.outcome and retry_state.outcome.failed
+                        else "unknown"
+                    ),
+                    (
+                        str(retry_state.outcome.exception())[:200]
                         if retry_state.outcome and retry_state.outcome.failed
                         else "unknown"
                     ),
@@ -1493,6 +1537,7 @@ Return ONLY valid JSON, no other text."""
                                 response_format=self._get_multi_response_format(),
                             )
                         _latency = (_time.perf_counter() - _t0) * 1000
+                        self._log_rate_limit_headers(response)
 
                         # Record telemetry
                         usage = getattr(response, "usage", None)
