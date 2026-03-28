@@ -31,7 +31,7 @@ Unified stack:     SurrealDB                      (one database, all roles)
 - **Graph backends:** Neo4j, SurrealDB, Memgraph, ArcadeDB — implement `GraphBackend` in `storage/backends/base.py`
 - **SurrealDB:** unified backend (graph + vector + relational). Modes: `memory://`, `surrealkv://` (embedded), `ws://` (remote). Set `backend: surrealdb` in config
 - **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora ontology construct`
-- **Config:** env vars with `KHORA_` prefix, `__` nesting (e.g., `KHORA_QUERY__ENABLE_HYDE=true`)
+- **Config:** env vars with `KHORA_` prefix and single underscore (e.g., `KHORA_QUERY_ENABLE_HYDE=true`, `KHORA_LLM_MODEL=gpt-4o`). Legacy `__` nesting also supported
 
 ## Public API
 
@@ -132,7 +132,7 @@ Phase 3: Semantic Expansion (optional):
 
 ## Configuration
 
-`KhoraConfig` (Pydantic BaseSettings, env prefix `KHORA_`, nested delimiter `__`):
+`KhoraConfig` (Pydantic BaseSettings, env prefix `KHORA_`). Each section has its own prefix for clean single-underscore env vars (e.g., `KHORA_LLM_MODEL`, `KHORA_QUERY_ENABLE_HYDE`):
 
 | Section | Key Settings |
 |---------|-------------|

@@ -31,7 +31,7 @@ MemoryLake (facade) -> Engine (graphrag | skeleton | vectorcypher) -> StorageCoo
 - Graph backends implement `GraphBackend` in `storage/backends/base.py`
 - Extraction skills are YAML-defined in `extraction/skills/builtin/`
 - `MemoryNamespace` is the sole multi-tenant isolation boundary
-- Config uses `KHORA_` env vars with `__` for nesting
+- Config uses `KHORA_` env vars with single underscore (e.g., `KHORA_LLM_MODEL`)
 
 ## Public API
 
@@ -81,7 +81,7 @@ Entity resolution: 5-strategy dedup (exact → alias → attribute → embedding
 
 ## Configuration
 
-`KhoraConfig` uses Pydantic BaseSettings with `KHORA_` prefix and `__` nesting.
+`KhoraConfig` uses Pydantic BaseSettings with `KHORA_` prefix. Each section has its own env prefix for clean single-underscore vars (e.g., `KHORA_LLM_MODEL`, `KHORA_QUERY_ENABLE_HYDE`).
 
 Key sections: `storage` (backend, graph, vector, PostgreSQL), `llm` (model, embedding_model, extraction_model), `pipeline` (chunking, selective_extraction), `query` (search mode, fusion weights, reranking, HyDE), `tenancy`.
 
