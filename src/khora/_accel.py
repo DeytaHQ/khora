@@ -1684,7 +1684,9 @@ def _py_deduplicate_chunks(
             return [2**63 - 1] * num_perm
         sig = []
         for seed in range(num_perm):
-            min_h = min(int(hashlib.md5(f"{seed}:{s}".encode(), usedforsecurity=False).hexdigest()[:16], 16) for s in shingles)
+            min_h = min(
+                int(hashlib.md5(f"{seed}:{s}".encode(), usedforsecurity=False).hexdigest()[:16], 16) for s in shingles
+            )
             sig.append(min_h)
         return sig
 
