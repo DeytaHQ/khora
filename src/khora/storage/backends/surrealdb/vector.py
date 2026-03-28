@@ -229,7 +229,7 @@ class SurrealDBVectorAdapter:
         bindings: dict[str, Any] = {
             "ns_rid": ns_rid,
             "ns_str": str(namespace_id),
-            "query_embedding": list(query_embedding),
+            "query_embedding": [float(x) for x in query_embedding],
             "limit": limit,
             "ef": self._hnsw_ef_search,
         }
@@ -595,7 +595,7 @@ class SurrealDBVectorAdapter:
         bindings: dict[str, Any] = {
             "ns_rid": ns_rid,
             "ns_str": str(namespace_id),
-            "query_embedding": list(query_embedding),
+            "query_embedding": [float(x) for x in query_embedding],
         }
 
         rows = await self._conn.query(sql, bindings)
