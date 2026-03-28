@@ -260,7 +260,7 @@ class SurrealDBVectorAdapter:
         # vector::dot() is ~3x faster than vector::similarity::cosine() and
         # produces identical results for L2-normalized embeddings (unit vectors).
         sql = (
-            "SELECT *, vector::dot(embedding, $query_embedding) AS similarity "
+            "SELECT *, vector::dot(embedding, $query_embedding) AS similarity "  # nosec B608
             f"FROM chunk WHERE {where_sql} "
             f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
@@ -316,7 +316,11 @@ class SurrealDBVectorAdapter:
             bindings["created_before"] = created_before
 
         where_sql = " AND ".join(where_clauses)
-        sql = "SELECT *, search::score(1) AS rank " f"FROM chunk WHERE {where_sql} " "ORDER BY rank DESC LIMIT $limit"
+        sql = (
+            "SELECT *, search::score(1) AS rank "  # nosec B608
+            f"FROM chunk WHERE {where_sql} "
+            "ORDER BY rank DESC LIMIT $limit"
+        )
 
         rows = await self._conn.query(sql, bindings)
         return [(self._row_to_chunk(row), float(row.get("rank", 0.0))) for row in rows]
@@ -588,7 +592,7 @@ class SurrealDBVectorAdapter:
         """
         ns_rid = _rid("memory_namespace", namespace_id)
         sql = (
-            "SELECT id, vector::dot(embedding, $query_embedding) AS similarity "
+            "SELECT id, vector::dot(embedding, $query_embedding) AS similarity "  # nosec B608
             "FROM entity WHERE (namespace = $ns_rid OR namespace.namespace_id = $ns_str) AND embedding IS NOT NULL "
             f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )

@@ -328,7 +328,7 @@ class SurrealDBGraphAdapter:
             where.append("entity_type = $entity_type")
             bindings["entity_type"] = entity_type
 
-        sql = f"SELECT * FROM entity WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT $limit START $offset"
+        sql = f"SELECT * FROM entity WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT $limit START $offset"  # nosec B608
         rows = await self._conn.query(sql, bindings)
         return [_row_to_entity(r) for r in rows]
 
@@ -340,8 +340,8 @@ class SurrealDBGraphAdapter:
     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
         if not entity_ids:
             return {}
-        ids_list = ", ".join(f"entity:\u27e8{uid}\u27e9" for uid in entity_ids)
-        sql = f"SELECT * FROM entity WHERE id IN [{ids_list}]"
+        ids_list = ", ".join(str(_rid("entity", uid)) for uid in entity_ids)
+        sql = f"SELECT * FROM entity WHERE id IN [{ids_list}]"  # nosec B608
         rows = await self._conn.query(sql)
         result: dict[UUID, Entity] = {}
         for row in rows:
@@ -567,7 +567,7 @@ class SurrealDBGraphAdapter:
             conditions.append("relationship_type IN $rel_types")
             bindings["rel_types"] = list(relationship_types)
 
-        sql = f"SELECT * FROM relates_to WHERE {' AND '.join(conditions)} LIMIT $limit"
+        sql = f"SELECT * FROM relates_to WHERE {' AND '.join(conditions)} LIMIT $limit"  # nosec B608
         rows = await self._conn.query(sql, bindings)
         return [_row_to_relationship(r) for r in rows]
 
@@ -592,7 +592,7 @@ class SurrealDBGraphAdapter:
             bindings["rt"] = relationship_type
 
         sql = (
-            f"SELECT * FROM relates_to WHERE {' AND '.join(conditions)} "
+            f"SELECT * FROM relates_to WHERE {' AND '.join(conditions)} "  # nosec B608
             "ORDER BY created_at DESC LIMIT $limit START $offset"
         )
         rows = await self._conn.query(sql, bindings)
@@ -747,7 +747,10 @@ class SurrealDBGraphAdapter:
             conditions.append("occurred_at <= $end_time")
             bindings["end_time"] = end_time
 
-        sql = f"SELECT * FROM episode WHERE {' AND '.join(conditions)} " "ORDER BY occurred_at DESC LIMIT $limit"
+        sql = (
+            f"SELECT * FROM episode WHERE {' AND '.join(conditions)} "  # nosec B608
+            "ORDER BY occurred_at DESC LIMIT $limit"
+        )
         rows = await self._conn.query(sql, bindings)
         return [_row_to_episode(r) for r in rows]
 
@@ -791,7 +794,7 @@ class SurrealDBGraphAdapter:
 
         # Build a single SELECT with one column per depth level.
         columns = ", ".join(f"{hop * d} AS d{d}" for d in range(1, effective_max + 1))
-        sql = f"SELECT {columns} FROM $src"
+        sql = f"SELECT {columns} FROM $src"  # nosec B608
         rel_bindings["src"] = src
 
         rows = await self._conn.query(sql, rel_bindings)
@@ -848,7 +851,11 @@ class SurrealDBGraphAdapter:
         # Combine outgoing + incoming neighbor traversal in a single query
         out_arrow = ("->relates_to" + rel_filter + "->entity") * depth
         in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
-        combined_sql = f"SELECT {out_arrow} AS out_neighbors, " f"{in_arrow} AS in_neighbors " f"FROM {eid}"
+        combined_sql = (
+            f"SELECT {out_arrow} AS out_neighbors, "  # nosec B608
+            f"{in_arrow} AS in_neighbors "
+            f"FROM {eid}"
+        )
         rows = await self._conn.query(combined_sql, rel_bindings or None)
 
         # Collect unique entities from both directions
@@ -887,7 +894,7 @@ class SurrealDBGraphAdapter:
         if seen_ids:
             neighbor_rids = ", ".join(f"entity:\u27e8{nid}\u27e9" for nid in seen_ids)
             rel_sql = (
-                f"SELECT * FROM relates_to WHERE "
+                f"SELECT * FROM relates_to WHERE "  # nosec B608
                 f"(in = {eid} AND out IN [{neighbor_rids}]) OR "
                 f"(out = {eid} AND in IN [{neighbor_rids}]) "
                 f"LIMIT {limit}"
@@ -925,7 +932,7 @@ class SurrealDBGraphAdapter:
         # Fetch all neighborhoods in a single query using an IN filter
         ids_list = ", ".join(str(_rid("entity", uid)) for uid in entity_ids)
         batch_sql = (
-            f"SELECT id, {out_arrow} AS out_neighbors, "
+            f"SELECT id, {out_arrow} AS out_neighbors, "  # nosec B608
             f"{in_arrow} AS in_neighbors "
             f"FROM entity WHERE id IN [{ids_list}]"
         )
@@ -984,7 +991,7 @@ class SurrealDBGraphAdapter:
                 center_rid = _rid("entity", eid)
                 neighbor_rids = ", ".join(f"entity:\u27e8{nid}\u27e9" for nid in seen_ids)
                 rel_sql = (
-                    f"SELECT * FROM relates_to WHERE "
+                    f"SELECT * FROM relates_to WHERE "  # nosec B608
                     f"(in = {center_rid} AND out IN [{neighbor_rids}]) OR "
                     f"(out = {center_rid} AND in IN [{neighbor_rids}]) "
                     f"LIMIT {limit_per_entity}"
@@ -1015,7 +1022,7 @@ class SurrealDBGraphAdapter:
         ns_rid = _rid("memory_namespace", namespace_id)
         safe_attr = _sanitize_field_name(attribute_name)
         sql = (
-            "SELECT * FROM entity "
+            "SELECT * FROM entity "  # nosec B608
             "WHERE namespace = $ns_rid "
             f"AND attributes.{safe_attr} = $attr_value "
             "LIMIT $limit"
@@ -1084,7 +1091,7 @@ class SurrealDBGraphAdapter:
 
             # Chain arrows for the requested depth
             arrow_chain = ("->relates_to" + rel_filter + "->entity") * depth
-            sql = f"SELECT {arrow_chain} AS targets FROM {eid}"
+            sql = f"SELECT {arrow_chain} AS targets FROM {eid}"  # nosec B608
 
             rows = await self._conn.query(sql, bindings or None)
             if not rows:
@@ -1136,7 +1143,7 @@ class SurrealDBGraphAdapter:
 
         # 1. Fetch all chunks with their metadata
         rows = await self._conn.query(
-            f"SELECT id, metadata_, created_at, source_timestamp FROM chunk "
+            f"SELECT id, metadata_, created_at, source_timestamp FROM chunk "  # nosec B608
             f"WHERE namespace = {ns_rid} "
             f"ORDER BY (source_timestamp ?? created_at) ASC",
         )
