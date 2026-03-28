@@ -4,7 +4,7 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
-## [0.6.0] — SurrealDB Optimization, Ontology CLI, Discovery Agent
+## [Unreleased] — SurrealDB Optimization, Ontology CLI, Discovery Agent
 
 ### SurrealDB backend hardening
 
