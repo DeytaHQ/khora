@@ -543,9 +543,9 @@ class TestRelationalAdapterNamespace:
         adapter = SurrealDBRelationalAdapter(conn)
 
         result = await adapter.resolve_namespace(ns_id)
-        # SurrealDB resolve returns the stable namespace_id (not row-level id)
-        # because chunks store namespace refs using namespace_id
-        assert result == ns_id
+        # SurrealDB resolve now returns the row-level id (matching PostgreSQL contract)
+        # so that get_namespace() and record links work correctly
+        assert result == row_id
 
     async def test_resolve_namespace_raises_on_missing(self) -> None:
         from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter

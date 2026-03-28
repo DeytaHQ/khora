@@ -99,12 +99,16 @@ class SurrealDBRelationalAdapter:
     # ------------------------------------------------------------------
 
     async def resolve_namespace(self, namespace_id: UUID) -> UUID:
-        """Resolve a namespace identifier to the ID used by chunk/entity records.
+        """Resolve a namespace identifier to the row-level id.
 
-        In SurrealDB, chunks and entities store namespace references using the
-        stable ``namespace_id`` (not the row-level ``id``).  This method
-        validates that an active namespace exists and returns the stable
-        ``namespace_id`` so that search filters match stored data.
+        Accepts either a stable ``namespace_id`` or a row-level ``id`` and
+        returns the row-level ``id`` of the active namespace version.  This
+        matches the PostgreSQL backend's contract so that ``get_namespace()``
+        (which queries by record id) works after resolution.
+
+        Chunks and entities store a SurrealDB record link using the row-level
+        id (``memory_namespace:⟨row_id⟩``), so returning the row-level id
+        here also ensures correct record links during ingestion.
         """
         ns_str = str(namespace_id)
         row = await self._conn.query_one(
@@ -114,9 +118,8 @@ class SurrealDBRelationalAdapter:
             {"ns": ns_str, "rid": _record_id("memory_namespace", namespace_id)},
         )
         if row is not None:
-            # Return the stable namespace_id — this is what chunks/entities
-            # use as their namespace record reference.
-            return UUID(row["namespace_id"])
+            # Return the row-level id — matches PostgreSQL contract.
+            return _parse_uuid(row["id"])
         raise ValueError(f"No active namespace found for namespace_id or id={namespace_id}")
 
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
