@@ -8,7 +8,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
-from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
+from tenacity import AsyncRetrying, stop_after_attempt, stop_after_delay, wait_exponential
 
 from .base import (
     EntityExtractor,
@@ -661,7 +661,7 @@ class LLMEntityExtractor(EntityExtractor):
 
         try:
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(self._max_retries),
+                stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
                     "Retrying LLM call (attempt {}) after {!s}",
@@ -699,6 +699,7 @@ class LLMEntityExtractor(EntityExtractor):
                                 temperature=self._temperature,
                                 max_tokens=effective_max_tokens,
                                 timeout=self._timeout,
+                                num_retries=0,
                                 response_format=self._get_response_format(),
                             )
                         _latency = (_time.perf_counter() - _t0) * 1000
@@ -1306,7 +1307,35 @@ class LLMEntityExtractor(EntityExtractor):
         system_prompt = self._render_system_prompt(expertise, context)
         tool_context = self._build_tool_context(expertise, context)
 
+        # Circuit breaker: after consecutive batch failures, skip batch mode entirely
+        _consecutive_batch_failures = 0
+        _BATCH_FAILURE_THRESHOLD = 2
+
         async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
+            nonlocal _consecutive_batch_failures
+
+            # Circuit breaker tripped — go straight to single-doc extraction
+            if _consecutive_batch_failures >= _BATCH_FAILURE_THRESHOLD and len(batch) > 1:
+                logger.warning(
+                    "Circuit breaker active: skipping batch mode after %d consecutive failures, "
+                    "extracting %d texts individually",
+                    _consecutive_batch_failures,
+                    len(batch),
+                )
+                single_results = []
+                for text in batch:
+                    result = await self.extract(
+                        text,
+                        entity_types=entity_types,
+                        relationship_types=relationship_types,
+                        expertise=expertise,
+                        context=context,
+                    )
+                    single_results.append(result)
+                if expertise:
+                    single_results = [self._filter_by_confidence(r, expertise) for r in single_results]
+                return single_results
+
             results = await self._extract_multi_batch(
                 batch,
                 entity_types,
@@ -1321,8 +1350,12 @@ class LLMEntityExtractor(EntityExtractor):
             # Check if batch failed (all results have errors) - fallback to single extraction
             all_failed = all(r.metadata.get("error") for r in results)
             if all_failed and len(batch) > 1:
+                _consecutive_batch_failures += 1
                 logger.info(
-                    f"Batch extraction failed for {len(batch)} texts, falling back to single-document extraction"
+                    "Batch extraction failed for %d texts (consecutive failures: %d), "
+                    "falling back to single-document extraction",
+                    len(batch),
+                    _consecutive_batch_failures,
                 )
                 # Extract documents one at a time
                 single_results = []
@@ -1336,6 +1369,9 @@ class LLMEntityExtractor(EntityExtractor):
                     )
                     single_results.append(result)
                 results = single_results
+            else:
+                # Reset on success
+                _consecutive_batch_failures = 0
 
             if expertise:
                 results = [self._filter_by_confidence(r, expertise) for r in results]
@@ -1418,7 +1454,7 @@ Return ONLY valid JSON, no other text."""
 
         try:
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(self._max_retries),
+                stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
                     "Retrying LLM call (attempt {}) after {!s}",
@@ -1453,6 +1489,7 @@ Return ONLY valid JSON, no other text."""
                                 temperature=self._temperature,
                                 max_tokens=self._max_tokens,
                                 timeout=self._timeout,
+                                num_retries=0,
                                 response_format=self._get_multi_response_format(),
                             )
                         _latency = (_time.perf_counter() - _t0) * 1000
