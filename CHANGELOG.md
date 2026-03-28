@@ -2,6 +2,136 @@
 
 All notable changes to Khora are documented here.
 
+## [0.6.0] — SurrealDB Optimization, Ontology CLI, Discovery Agent
+
+### SurrealDB backend hardening
+
+The SurrealDB unified backend received a comprehensive optimization audit
+and is now production-ready for deployments under 100K vectors per namespace.
+
+- **Schema parity:** added ~50 missing fields across document, chunk, episode,
+  relates_to, and memory_event tables to match the PostgreSQL ORM (#130, #131)
+- **SQL injection fixes:** replaced 15+ f-string namespace interpolations with
+  parameterized `$ns_rid` bindings (#131)
+- **Entity unique constraint:** restored `idx_entity_unique` on
+  `(namespace, name, entity_type)` to prevent duplicate entities (#131)
+- **Entity key gate:** `_SurrealDBEntityKeyGate` serializes concurrent
+  `upsert_entities_batch()` calls by (namespace, name, type) key, preventing
+  the prefetch-compare-update race condition (#136)
+- **SDK upgrade:** pinned `surrealdb>=2.0.0a1` for SurrealDB 3.x server
+  compatibility (#133)
+- **No-op helper removal:** removed `_iso()`, `_dt_to_iso()`, `_iso_to_dt()`
+  identity functions; pass UUIDs directly to `RecordID` (#136)
+- **Batch error reporting:** `create_relationships_batch()` now logs
+  success/failure counts on fallback; episode involves edges upgraded from
+  debug to warning (#136)
+- **Schema init race fix:** module-level `asyncio.Lock` prevents concurrent
+  `DEFINE` statements from multiple adapters on embedded mode (#155)
+- **Write conflict retry:** `_execute_raw()` retries on `"read or write
+  conflict"` with exponential backoff and a write semaphore (3 concurrent)
+  to prevent HNSW index panics (#157)
+
+### SurrealDB performance (Tier 1 + Tier 2)
+
+- **`vector::dot()` for pre-normalized vectors:** ~3x faster than
+  `vector::similarity::cosine()` for unit vectors (#150)
+- **Single-query deletes:** `DELETE ... RETURN BEFORE` replaces the
+  count-then-delete double-query pattern (50% fewer round-trips) (#150)
+- **Composite indexes:** added `(document, chunk_index)`,
+  `(namespace, created_at)`, `(namespace_id, relationship_type, weight)` (#150)
+- **Single-query multi-depth graph traversal:** `find_paths()` now fetches all
+  depths (d1, d2, d3) in one query instead of 3 sequential queries
+  (60–70% latency reduction) (#154)
+- **INSERT INTO for batch creates:** replaces `FOR $e IN $entities { CREATE ... }`
+  loops with native `INSERT INTO entity $records` (10–20% throughput gain) (#154)
+- **Tuple IN for upsert prefetch:** replaces N dynamically-built OR clauses with
+  `[name, entity_type] IN $pairs` (15–25% faster for 200+ entity batches) (#154)
+
+### Ontology CLI (`khora ontology`)
+
+New AI-powered command for constructing extraction ontologies from data.
+
+- `khora ontology construct --source <path>` — guided pipeline: source scanning →
+  stratified data sampling (30K chars, sqrt-weighted) → LLM domain detection →
+  entity/relationship/rule inference → system prompt generation → YAML output
+  with `$EDITOR` integration (#138, #140, #141, #142)
+- `khora ontology validate <file>` — schema + reference integrity checks (#138)
+- `khora ontology preview <file>` — Rich table + tree display (#138)
+- `OntologyLLM` wrapper with per-call token/cost tracking, `--budget` USD cap,
+  tenacity retry, and JSON parsing with markdown code block fallback (#138)
+- 50 unit tests covering sources, sampling, prompts, validation, serialization,
+  session persistence, and CLI integration (#142)
+
+### Discovery agent (`khora ontology discover`)
+
+Interactive agent that finds and fetches data from the internet when no
+local `--source` is provided. Uses Perplexity for search and Firecrawl
+for scraping.
+
+- `DiscoveryAgent` state machine with plan → fetch → review → refine loop (#167)
+- LLM planner generates search queries from user's domain description (#166)
+- Code generation with AST validation and sandboxed execution (#169)
+- Data validation pipeline with format detection and quality checks (#170, #171)
+- Link-index detection and deep crawl for multi-page sources (#176)
+- Binary format extraction (PDF via pypdf, XLS via openpyxl) (#177)
+- Non-linear conversational interaction — user can steer at any phase (#178)
+- Discovery-to-construct handoff with automatic source transfer (#174)
+- Output directory prompt with XDG default (`~/.local/share/khora/`) (#172)
+- Perplexity and Firecrawl API clients with configurable timeouts (#163)
+- DiscoveryUI renderer with TE-inspired terminal aesthetics (#165)
+
+### Query engine improvements
+
+- **Parallel fallback search:** zero-result fallback now runs vector + fulltext
+  via `asyncio.gather()` instead of sequentially (~45% latency reduction) (#151)
+- **Per-call chunk_strategy override:** `remember()` and `remember_batch()` accept
+  `chunk_strategy` parameter for per-document chunking control (#137)
+
+### Embedding & extraction
+
+- **Dynamic embedding batch sizing:** automatically adjusts batch size based on
+  token budget to prevent API rejections for large documents (#152)
+- **Bisect on JSON parse errors:** embedding batch failures now bisect to isolate
+  the problematic document instead of failing the entire batch (#149)
+- **Extraction circuit breaker:** collapsed retry layers and added circuit breaker
+  to prevent cascading LLM failures (#187)
+
+### Configuration
+
+- **Single-underscore env vars:** `KHORA_LLM_MODEL` now works alongside the
+  legacy `KHORA_LLM__MODEL` style. Each settings class has its own `env_prefix`
+  for unambiguous resolution (#186)
+
+### Infrastructure
+
+- **Dev release pipeline:** every merge to main publishes to CodeArtifact with
+  dev version suffix (#153, #159)
+- **Bandit security scanning:** added to CI for Python security audit (#185)
+- **khora-accel multi-Python:** builds wheels for Python 3.13 and 3.14 (#162)
+- **Shared PG engine:** `PgVectorTemporalStore` shares the coordinator's engine
+  pool instead of creating a duplicate (#146)
+- **Skip migrations gracefully:** `run_migrations()` handles databases ahead of
+  the migration head without errors (#144)
+- **Smart resolution optimization:** HNSW index rebuild reduced from ~30min to
+  ~5min via batched upserts and deferred index creation (#147)
+
+### Bug fixes
+
+- Fix SurrealDB `resolve_namespace` returning wrong ID type
+- Fix `_parse_uuid` handling non-UUID SurrealDB record IDs (#168)
+- Fix SurrealDB ingestion performance regression from write semaphore (#160)
+- Fix `temporal_chunk` tags: coerce JSON strings to native arrays (#158)
+- Fix `SurrealDBTemporalStore` import of removed `_iso` helper (#156)
+- Fix alembic `env.py`: replace removed `get_current_revision` API (#180)
+- Fix LLM JSON parser: handle trailing commas, bare arrays, code blocks
+- Fix halfvec HNSW indexes causing full sequential scans (pgvector) (#183)
+
+### Breaking changes
+
+None. All changes are backward compatible.
+
+---
+
 ## [0.3.10] — Chunker Safety & Rust Performance
 
 ### Empty chunk filtering
