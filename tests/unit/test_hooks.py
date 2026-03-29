@@ -319,6 +319,178 @@ class TestHookDispatcherTypeFilter:
 
 
 # ---------------------------------------------------------------------------
+# Embedding filter (Phase 2, Level 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestEmbeddingFilter:
+    def test_to_binary_and_hamming(self) -> None:
+        from khora.hooks.embedding_filter import _hamming_similarity, _to_binary
+
+        a = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]
+        b = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]
+        ba, bb = _to_binary(a), _to_binary(b)
+        assert _hamming_similarity(ba, bb, 8) == 1.0  # identical
+
+    def test_hamming_different(self) -> None:
+        from khora.hooks.embedding_filter import _hamming_similarity, _to_binary
+
+        a = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        b = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
+        ba, bb = _to_binary(a), _to_binary(b)
+        assert _hamming_similarity(ba, bb, 8) == 0.0  # maximally different
+
+    def test_cosine_similarity_identical(self) -> None:
+        from khora.hooks.embedding_filter import cosine_similarity
+
+        a = [1.0, 0.0, 0.0]
+        assert cosine_similarity(a, a) == pytest.approx(1.0)
+
+    def test_cosine_similarity_orthogonal(self) -> None:
+        from khora.hooks.embedding_filter import cosine_similarity
+
+        a = [1.0, 0.0, 0.0]
+        b = [0.0, 1.0, 0.0]
+        assert cosine_similarity(a, b) == pytest.approx(0.0)
+
+    def test_cache_register_and_gate(self) -> None:
+        from khora.hooks.embedding_filter import EmbeddingFilterCache
+
+        cache = EmbeddingFilterCache(hamming_threshold=0.3)
+        f = SemanticFilter(
+            name="test",
+            embedding=[1.0, 0.5, -0.3, 0.8, -0.1, 0.9, -0.5, 0.2],
+            similarity_threshold=0.5,
+        )
+        cache.register_filter(f)
+
+        # Similar embedding should pass
+        similar = [0.9, 0.4, -0.2, 0.7, -0.05, 0.85, -0.4, 0.15]
+        passes, score = cache.passes_embedding_gate(similar, f)
+        assert passes is True
+        assert score is not None
+        assert score > 0.5
+
+    def test_gate_rejects_dissimilar(self) -> None:
+        from khora.hooks.embedding_filter import EmbeddingFilterCache
+
+        cache = EmbeddingFilterCache(hamming_threshold=0.3)
+        f = SemanticFilter(
+            name="test",
+            embedding=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            similarity_threshold=0.8,
+        )
+        cache.register_filter(f)
+
+        # Very different embedding should fail
+        different = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
+        passes, score = cache.passes_embedding_gate(different, f)
+        assert passes is False
+
+    def test_gate_skips_when_no_embedding(self) -> None:
+        from khora.hooks.embedding_filter import EmbeddingFilterCache
+
+        cache = EmbeddingFilterCache()
+        f = SemanticFilter(name="no_emb", embedding=None)
+
+        # No embedding = skip gate (don't reject)
+        passes, score = cache.passes_embedding_gate([1.0, 2.0], f)
+        assert passes is True
+        assert score is None
+
+    def test_gate_disabled_at_zero_threshold(self) -> None:
+        from khora.hooks.embedding_filter import EmbeddingFilterCache
+
+        cache = EmbeddingFilterCache()
+        f = SemanticFilter(
+            name="disabled",
+            embedding=[1.0, 0.0],
+            similarity_threshold=0.0,  # disabled
+        )
+        cache.register_filter(f)
+
+        passes, score = cache.passes_embedding_gate([-1.0, 0.0], f)
+        assert passes is True  # gate disabled
+
+
+@pytest.mark.unit
+class TestDispatcherEmbeddingIntegration:
+    async def test_embedding_filter_in_dispatch(self) -> None:
+        """Embedding filter gates callbacks when entity has embedding in event data."""
+        d = HookDispatcher()
+        cb = AsyncMock()
+
+        # Filter with an embedding
+        f = SemanticFilter(
+            name="similar_only",
+            embedding=[1.0, 0.5, -0.3, 0.8],
+            similarity_threshold=0.5,
+        )
+        d.subscribe(EventType.ENTITY_CREATED, cb, filter=f)
+
+        # Event with similar embedding → should pass
+        event_similar = MemoryEvent.entity_created(
+            namespace_id=uuid4(),
+            entity_id=uuid4(),
+            data={
+                "name": "Test",
+                "entity_type": "CONCEPT",
+                "embedding": [0.9, 0.4, -0.2, 0.7],  # similar
+            },
+        )
+        count = await d.dispatch(event_similar)
+        assert count == 1
+        cb.assert_awaited_once()
+
+    async def test_embedding_filter_rejects_dissimilar(self) -> None:
+        d = HookDispatcher()
+        cb = AsyncMock()
+
+        f = SemanticFilter(
+            name="strict",
+            embedding=[1.0, 1.0, 1.0, 1.0],
+            similarity_threshold=0.9,
+        )
+        d.subscribe(EventType.ENTITY_CREATED, cb, filter=f)
+
+        # Event with very different embedding → should be rejected
+        event_diff = MemoryEvent.entity_created(
+            namespace_id=uuid4(),
+            entity_id=uuid4(),
+            data={
+                "name": "Test",
+                "entity_type": "CONCEPT",
+                "embedding": [-1.0, -1.0, -1.0, -1.0],
+            },
+        )
+        count = await d.dispatch(event_diff)
+        assert count == 0
+        cb.assert_not_awaited()
+
+    async def test_no_embedding_in_event_skips_gate(self) -> None:
+        """When event has no embedding, the gate is skipped (not rejected)."""
+        d = HookDispatcher()
+        cb = AsyncMock()
+
+        f = SemanticFilter(
+            name="with_emb",
+            embedding=[1.0, 0.0],
+            similarity_threshold=0.5,
+        )
+        d.subscribe(EventType.ENTITY_CREATED, cb, filter=f)
+
+        # Event without embedding → gate skipped, callback fires
+        event = MemoryEvent.entity_created(
+            namespace_id=uuid4(),
+            entity_id=uuid4(),
+            data={"name": "Test", "entity_type": "CONCEPT"},
+        )
+        count = await d.dispatch(event)
+        assert count == 1
+
+
+# ---------------------------------------------------------------------------
 # Public API imports
 # ---------------------------------------------------------------------------
 
