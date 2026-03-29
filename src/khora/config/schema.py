@@ -647,6 +647,9 @@ class KhoraConfig(BaseSettings):
     # Discovery agent configuration
     discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
 
+    # Semantic hooks configuration
+    hooks: Any = Field(default=None, description="Semantic hooks configuration (SemanticHooksConfig)")
+
     # Telemetry
     telemetry_database_url: str | None = Field(
         default=None,

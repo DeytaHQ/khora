@@ -1,0 +1,204 @@
+"""Hook dispatcher — routes extraction events to subscribed callbacks."""
+
+from __future__ import annotations
+
+import asyncio
+from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from uuid import UUID
+
+from loguru import logger
+
+from khora.core.models.event import EventType, MemoryEvent
+
+from .models import HookSubscription, SemanticFilter
+
+
+class HookDispatcher:
+    """Manages hook subscriptions and dispatches extraction events.
+
+    This is the Phase 1 (MVP) implementation: lightweight in-process
+    pub/sub on ``MemoryEvent`` during ingestion. Consumers register
+    callbacks by ``EventType`` and optionally attach a ``SemanticFilter``
+    for Phase 2/3 filtering.
+
+    Thread safety: all methods are safe to call from any asyncio task.
+    The dispatcher holds no locks — subscriptions are append-only and
+    dispatch uses ``asyncio.gather`` for concurrent callback execution.
+
+    Example::
+
+        dispatcher = HookDispatcher()
+
+        async def on_entity(event: MemoryEvent) -> None:
+            print(f"New entity: {event.data.get('name')}")
+
+        sub_id = dispatcher.subscribe(EventType.ENTITY_CREATED, on_entity)
+
+        # During ingestion, the pipeline calls:
+        await dispatcher.dispatch(event)
+
+        # Cleanup
+        dispatcher.unsubscribe(sub_id)
+    """
+
+    def __init__(self, *, max_concurrent: int = 10) -> None:
+        self._subscriptions: dict[str, list[HookSubscription]] = defaultdict(list)
+        self._sub_by_id: dict[UUID, HookSubscription] = {}
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    # ------------------------------------------------------------------
+    # Subscription management
+    # ------------------------------------------------------------------
+
+    def subscribe(
+        self,
+        event_type: EventType | str,
+        callback: Callable[[MemoryEvent], Awaitable[None]],
+        *,
+        filter: SemanticFilter | None = None,
+        namespace_id: UUID | None = None,
+    ) -> UUID:
+        """Register a callback for an event type.
+
+        Args:
+            event_type: The event type to subscribe to (e.g., EventType.ENTITY_CREATED).
+            callback: Async function called with the MemoryEvent when it fires.
+            filter: Optional semantic filter. In Phase 1, filters by entity_type
+                only (Level 0). Phase 2 adds embedding similarity, Phase 3 adds LLM.
+            namespace_id: Scope to a specific namespace. None = all namespaces.
+
+        Returns:
+            Subscription UUID for later unsubscribe.
+        """
+        key = event_type.value if isinstance(event_type, EventType) else str(event_type)
+
+        if filter and namespace_id:
+            filter.namespace_id = namespace_id
+
+        sub = HookSubscription(
+            event_type=key,
+            callback=callback,
+            filter=filter,
+        )
+
+        self._subscriptions[key].append(sub)
+        self._sub_by_id[sub.id] = sub
+
+        logger.debug(
+            "Hook registered: {} → {} (filter={})",
+            key,
+            callback.__name__ if hasattr(callback, "__name__") else "callback",
+            filter.name if filter else "none",
+        )
+        return sub.id
+
+    def unsubscribe(self, subscription_id: UUID) -> bool:
+        """Remove a subscription by ID.
+
+        Returns True if found and removed, False if not found.
+        """
+        sub = self._sub_by_id.pop(subscription_id, None)
+        if sub is None:
+            return False
+
+        subs = self._subscriptions.get(sub.event_type, [])
+        self._subscriptions[sub.event_type] = [s for s in subs if s.id != subscription_id]
+        logger.debug("Hook unsubscribed: {}", subscription_id)
+        return True
+
+    def clear(self) -> None:
+        """Remove all subscriptions."""
+        self._subscriptions.clear()
+        self._sub_by_id.clear()
+
+    @property
+    def subscription_count(self) -> int:
+        """Total number of active subscriptions."""
+        return len(self._sub_by_id)
+
+    # ------------------------------------------------------------------
+    # Event dispatch
+    # ------------------------------------------------------------------
+
+    async def dispatch(self, event: MemoryEvent) -> int:
+        """Dispatch an event to all matching subscribers.
+
+        Callbacks run concurrently (up to max_concurrent). Failures in
+        one callback do not affect others — errors are logged but not
+        propagated.
+
+        Args:
+            event: The extraction event to dispatch.
+
+        Returns:
+            Number of callbacks that were invoked (including failures).
+        """
+        key = event.event_type.value if isinstance(event.event_type, EventType) else str(event.event_type)
+        subs = self._subscriptions.get(key, [])
+
+        if not subs:
+            return 0
+
+        # Filter subscriptions by namespace and semantic filter (Level 0)
+        matching = []
+        for sub in subs:
+            if not sub.enabled:
+                continue
+
+            # Namespace scope check
+            if sub.filter and sub.filter.namespace_id:
+                if event.namespace_id != sub.filter.namespace_id:
+                    continue
+
+            # Level 0: entity_type / relationship_type pre-filter
+            if sub.filter and not self._passes_type_filter(event, sub.filter):
+                continue
+
+            matching.append(sub)
+
+        if not matching:
+            return 0
+
+        # Fire callbacks concurrently with semaphore
+        async def _safe_invoke(sub: HookSubscription) -> None:
+            async with self._semaphore:
+                try:
+                    await sub.callback(event)
+                except Exception:
+                    cb_name = getattr(sub.callback, "__name__", "callback")
+                    logger.warning(
+                        "Hook callback {} failed for event {}.{}",
+                        cb_name,
+                        event.event_type.value if isinstance(event.event_type, EventType) else event.event_type,
+                        event.resource_id,
+                    )
+
+        await asyncio.gather(*[_safe_invoke(sub) for sub in matching])
+        return len(matching)
+
+    # ------------------------------------------------------------------
+    # Phase 1: Type-based filtering (Level 0)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _passes_type_filter(event: MemoryEvent, filter: SemanticFilter) -> bool:
+        """Check if an event passes the filter's type constraints.
+
+        Level 0 filtering — zero cost, just list membership checks.
+        """
+        data = event.data
+
+        # Entity events: check entity_type
+        if filter.entity_types and event.resource_type == "entity":
+            entity_type = data.get("entity_type", "")
+            if entity_type and entity_type not in filter.entity_types:
+                return False
+
+        # Relationship events: check relationship_type
+        if filter.relationship_types and event.resource_type == "relationship":
+            rel_type = data.get("relationship_type", "")
+            if rel_type and rel_type not in filter.relationship_types:
+                return False
+
+        return True
