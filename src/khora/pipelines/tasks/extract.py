@@ -21,7 +21,7 @@ async def extract_entities(
     timeout: int = 60,
     max_retries: int = 3,
     retry_wait: float = 2.0,
-    extraction_batch_size: int = 10,
+    extraction_batch_size: int = 5,
     max_tokens: int | None = None,
     entity_types: list[str],
     relationship_types: list[str],
