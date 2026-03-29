@@ -273,7 +273,7 @@ class LLMEntityExtractor(EntityExtractor):
         rl_limit = headers.get("x-ratelimit-limit-requests", "")
         rl_remaining = headers.get("x-ratelimit-remaining-requests", "")
         if rl_limit or rl_remaining:
-            logger.debug("Rate limit: %s/%s remaining requests", rl_remaining, rl_limit)
+            logger.debug("Rate limit: {}/{} remaining requests", rl_remaining, rl_limit)
 
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count for text.
@@ -1340,7 +1340,7 @@ class LLMEntityExtractor(EntityExtractor):
             max_input_tokens=max_input_tokens,
         )
         logger.info(
-            "Extraction starting: model=%s, timeout=%ds, max_tokens=%d, texts=%d, batches=%d",
+            "Extraction starting: model={}, timeout={}s, max_tokens={}, texts={}, batches={}",
             self._model,
             self._timeout,
             self._max_tokens,
@@ -1432,7 +1432,7 @@ class LLMEntityExtractor(EntityExtractor):
 
         error_count = sum(1 for r in all_results if r.metadata.get("error"))
         logger.info(
-            "Extraction complete: %d results (%d errors) from %d texts in %d batches",
+            "Extraction complete: {} results ({} errors) from {} texts in {} batches",
             len(all_results),
             error_count,
             len(texts),
@@ -1563,7 +1563,7 @@ Return ONLY valid JSON, no other text."""
                         _ct = getattr(usage, "completion_tokens", 0) or 0
                         _tt = getattr(usage, "total_tokens", 0) or 0
                         logger.info(
-                            "Batch extraction complete: %d texts in %.0fms, prompt=%d completion=%d tokens",
+                            "Batch extraction complete: {} texts in {:.0f}ms, prompt={} completion={} tokens",
                             len(texts),
                             _latency,
                             _pt,
