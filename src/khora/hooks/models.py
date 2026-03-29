@@ -117,6 +117,10 @@ class SemanticFilter:
     # Per-filter LLM model override. None = use config default.
     filter_model: str | None = None
 
+    # Enable LLM verification (Level 2). When True, entities that pass
+    # Level 0+1 are sent to a nano LLM for yes/no classification.
+    llm_verify: bool = False
+
     # Scope
     namespace_id: UUID | None = None  # None = all namespaces
 

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from .dispatcher import HookDispatcher
 from .embedding_filter import EmbeddingFilterCache, cosine_similarity
+from .llm_evaluator import LLMFilterEvaluator
 from .models import FilterMatch, HookSubscription, SemanticFilter, SemanticHooksConfig
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "FilterMatch",
     "HookDispatcher",
     "HookSubscription",
+    "LLMFilterEvaluator",
     "SemanticFilter",
     "SemanticHooksConfig",
     "cosine_similarity",

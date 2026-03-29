@@ -12,7 +12,8 @@ from loguru import logger
 from khora.core.models.event import EventType, MemoryEvent
 
 from .embedding_filter import EmbeddingFilterCache
-from .models import HookSubscription, SemanticFilter
+from .llm_evaluator import LLMFilterEvaluator
+from .models import HookSubscription, SemanticFilter, SemanticHooksConfig
 
 
 class HookDispatcher:
@@ -43,11 +44,13 @@ class HookDispatcher:
         dispatcher.unsubscribe(sub_id)
     """
 
-    def __init__(self, *, max_concurrent: int = 10) -> None:
+    def __init__(self, *, max_concurrent: int = 10, config: SemanticHooksConfig | None = None) -> None:
         self._subscriptions: dict[str, list[HookSubscription]] = defaultdict(list)
         self._sub_by_id: dict[UUID, HookSubscription] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._embedding_cache = EmbeddingFilterCache()
+        self._llm_evaluator = LLMFilterEvaluator(config)
+        self._config = config or SemanticHooksConfig()
 
     # ------------------------------------------------------------------
     # Subscription management
@@ -177,6 +180,13 @@ class HookDispatcher:
         if not matching:
             return 0
 
+        # Level 2: LLM verification for filters that opt in
+        llm_subs = [s for s in matching if s.filter and s.filter.llm_verify and s.filter.description]
+        if llm_subs:
+            matching = await self._apply_llm_filter(event, matching, llm_subs)
+            if not matching:
+                return 0
+
         # Fire callbacks concurrently with semaphore
         async def _safe_invoke(sub: HookSubscription) -> None:
             async with self._semaphore:
@@ -193,6 +203,65 @@ class HookDispatcher:
 
         await asyncio.gather(*[_safe_invoke(sub) for sub in matching])
         return len(matching)
+
+    # ------------------------------------------------------------------
+    # Phase 3: LLM-based filtering (Level 2)
+    # ------------------------------------------------------------------
+
+    async def _apply_llm_filter(
+        self,
+        event: MemoryEvent,
+        all_matching: list[HookSubscription],
+        llm_subs: list[HookSubscription],
+    ) -> list[HookSubscription]:
+        """Run LLM evaluation on subscriptions that require it.
+
+        Batches entities per filter for efficiency. Subscriptions that
+        fail LLM evaluation are removed from the matching list.
+        Non-LLM subscriptions pass through unchanged.
+        """
+        # Build entity dict from event data
+        entity_data = {
+            "name": event.data.get("name", ""),
+            "entity_type": event.data.get("entity_type", ""),
+            "description": event.data.get("description", ""),
+        }
+
+        # Group LLM subs by filter (batch per filter)
+        llm_pass_ids: set[UUID] = set()
+        seen_filters: dict[UUID, bool] = {}
+
+        for sub in llm_subs:
+            assert sub.filter is not None
+            fid = sub.filter.id
+
+            # Cache: if we already evaluated this filter for this event, reuse
+            if fid in seen_filters:
+                if seen_filters[fid]:
+                    llm_pass_ids.add(sub.id)
+                continue
+
+            # Evaluate via LLM
+            try:
+                results = await self._llm_evaluator.evaluate_batch(
+                    sub.filter,
+                    [entity_data],
+                )
+                passes = results[0].matches if results else False
+            except Exception:
+                logger.warning("LLM filter evaluation failed for '{}', skipping", sub.filter.name)
+                passes = False
+
+            seen_filters[fid] = passes
+            if passes:
+                llm_pass_ids.add(sub.id)
+
+        # Filter: keep non-LLM subs + LLM subs that passed
+        return [
+            s
+            for s in all_matching
+            if not (s.filter and s.filter.llm_verify and s.filter.description) or s.id in llm_pass_ids
+        ]
 
     # ------------------------------------------------------------------
     # Phase 1: Type-based filtering (Level 0)

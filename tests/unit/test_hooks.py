@@ -491,6 +491,166 @@ class TestDispatcherEmbeddingIntegration:
 
 
 # ---------------------------------------------------------------------------
+# LLM evaluator (Phase 3, Level 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLLMFilterEvaluator:
+    def test_resolve_model_default(self) -> None:
+        from khora.hooks.llm_evaluator import LLMFilterEvaluator
+        from khora.hooks.models import SemanticHooksConfig
+
+        config = SemanticHooksConfig(filter_model="gpt-5-nano")
+        evaluator = LLMFilterEvaluator(config)
+
+        f = SemanticFilter(name="test", description="test filter")
+        assert evaluator._resolve_model(f) == "gpt-5-nano"
+
+    def test_resolve_model_per_filter_override(self) -> None:
+        from khora.hooks.llm_evaluator import LLMFilterEvaluator
+
+        evaluator = LLMFilterEvaluator()
+
+        f = SemanticFilter(name="test", description="test", filter_model="gemini-2.5-flash-lite")
+        assert evaluator._resolve_model(f) == "gemini-2.5-flash-lite"
+
+    def test_parse_json_direct(self) -> None:
+        from khora.hooks.llm_evaluator import LLMFilterEvaluator
+
+        result = LLMFilterEvaluator._parse_json('{"0": true, "1": false}')
+        assert result == {"0": True, "1": False}
+
+    def test_parse_json_markdown(self) -> None:
+        from khora.hooks.llm_evaluator import LLMFilterEvaluator
+
+        result = LLMFilterEvaluator._parse_json('Here is the result:\n```json\n{"0": true}\n```')
+        assert result == {"0": True}
+
+    def test_parse_json_invalid(self) -> None:
+        from khora.hooks.llm_evaluator import LLMFilterEvaluator
+
+        result = LLMFilterEvaluator._parse_json("This is not JSON")
+        assert result == {}
+
+    async def test_evaluate_batch_empty(self) -> None:
+        from khora.hooks.llm_evaluator import LLMFilterEvaluator
+
+        evaluator = LLMFilterEvaluator()
+        f = SemanticFilter(name="test", description="test")
+        results = await evaluator.evaluate_batch(f, [])
+        assert results == []
+
+
+@pytest.mark.unit
+class TestDispatcherLLMIntegration:
+    async def test_llm_verify_flag_triggers_evaluation(self) -> None:
+        """When llm_verify=True, the dispatcher should call LLM evaluator."""
+        from unittest.mock import patch
+
+        from khora.hooks.llm_evaluator import LLMFilterResult
+
+        d = HookDispatcher()
+        cb = AsyncMock()
+
+        f = SemanticFilter(
+            name="llm_filter",
+            description="Competitor companies",
+            llm_verify=True,
+        )
+        d.subscribe(EventType.ENTITY_CREATED, cb, filter=f)
+
+        # Mock the LLM evaluator to return a match
+        mock_results = [LLMFilterResult(entity_index=0, matches=True, model_used="gpt-4.1-nano")]
+        with patch.object(d._llm_evaluator, "evaluate_batch", return_value=mock_results) as mock_eval:
+            event = MemoryEvent.entity_created(
+                namespace_id=uuid4(),
+                entity_id=uuid4(),
+                data={"name": "Acme Corp", "entity_type": "ORGANIZATION", "description": "A company"},
+            )
+            count = await d.dispatch(event)
+            assert count == 1
+            cb.assert_awaited_once()
+            mock_eval.assert_awaited_once()
+
+    async def test_llm_verify_rejects_non_match(self) -> None:
+        """LLM says no match → callback should NOT fire."""
+        from unittest.mock import patch
+
+        from khora.hooks.llm_evaluator import LLMFilterResult
+
+        d = HookDispatcher()
+        cb = AsyncMock()
+
+        f = SemanticFilter(
+            name="strict_filter",
+            description="Only healthcare companies",
+            llm_verify=True,
+        )
+        d.subscribe(EventType.ENTITY_CREATED, cb, filter=f)
+
+        mock_results = [LLMFilterResult(entity_index=0, matches=False, model_used="gpt-4.1-nano")]
+        with patch.object(d._llm_evaluator, "evaluate_batch", return_value=mock_results):
+            event = MemoryEvent.entity_created(
+                namespace_id=uuid4(),
+                entity_id=uuid4(),
+                data={"name": "Acme Corp", "entity_type": "ORGANIZATION", "description": "A tech company"},
+            )
+            count = await d.dispatch(event)
+            assert count == 0
+            cb.assert_not_awaited()
+
+    async def test_non_llm_subs_unaffected(self) -> None:
+        """Subscriptions without llm_verify=True should fire normally."""
+        from unittest.mock import patch
+
+        from khora.hooks.llm_evaluator import LLMFilterResult
+
+        d = HookDispatcher()
+        cb_simple = AsyncMock()
+        cb_llm = AsyncMock()
+
+        # Simple filter (no LLM)
+        d.subscribe(EventType.ENTITY_CREATED, cb_simple)
+
+        # LLM filter that rejects
+        f = SemanticFilter(name="llm", description="test", llm_verify=True)
+        d.subscribe(EventType.ENTITY_CREATED, cb_llm, filter=f)
+
+        mock_results = [LLMFilterResult(entity_index=0, matches=False)]
+        with patch.object(d._llm_evaluator, "evaluate_batch", return_value=mock_results):
+            event = MemoryEvent.entity_created(
+                namespace_id=uuid4(),
+                entity_id=uuid4(),
+                data={"name": "X"},
+            )
+            count = await d.dispatch(event)
+            # Simple fires, LLM rejected
+            assert count == 1
+            cb_simple.assert_awaited_once()
+            cb_llm.assert_not_awaited()
+
+    async def test_llm_failure_defaults_to_no_match(self) -> None:
+        """If LLM call fails, the subscription is skipped (not crashed)."""
+        from unittest.mock import patch
+
+        d = HookDispatcher()
+        cb = AsyncMock()
+
+        f = SemanticFilter(name="failing", description="test", llm_verify=True)
+        d.subscribe(EventType.ENTITY_CREATED, cb, filter=f)
+
+        with patch.object(d._llm_evaluator, "evaluate_batch", side_effect=RuntimeError("LLM down")):
+            event = MemoryEvent.entity_created(
+                namespace_id=uuid4(),
+                entity_id=uuid4(),
+                data={"name": "X"},
+            )
+            count = await d.dispatch(event)
+            assert count == 0  # Fail-safe: no match
+
+
+# ---------------------------------------------------------------------------
 # Public API imports
 # ---------------------------------------------------------------------------
 
