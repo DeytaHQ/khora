@@ -1416,8 +1416,11 @@ class LLMEntityExtractor(EntityExtractor):
                 results = [self._filter_by_confidence(r, expertise) for r in results]
             return results
 
-        batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
-        for results in batch_results:
+        # Process batches sequentially so the circuit breaker can trip and prevent
+        # wasting time on doomed batch calls.  Individual extractions within each
+        # batch still run concurrently via the semaphore.
+        for batch in batches:
+            results = await _run_batch(batch)
             all_results.extend(results)
 
         return all_results
