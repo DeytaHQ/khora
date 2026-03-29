@@ -18,7 +18,7 @@ async def extract_entities(
     model: str = "gpt-4o-mini",
     max_concurrent: int = 10,
     context: dict[str, Any] | None = None,
-    timeout: int = 120,
+    timeout: int = 60,
     max_retries: int = 3,
     retry_wait: float = 2.0,
     extraction_batch_size: int = 10,
