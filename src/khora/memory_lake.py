@@ -248,6 +248,15 @@ class MemoryLake:
         )
         await self._engine.connect()
 
+        # Wire hook dispatcher into the storage coordinator so the
+        # ingestion pipeline can dispatch events without knowing about MemoryLake.
+        storage = getattr(self._engine, "_storage", None)
+        if storage is not None:
+            try:
+                storage._hook_dispatcher = self._get_hook_dispatcher()
+            except (AttributeError, TypeError):
+                pass  # Mock or non-standard engine — hooks won't fire
+
         self._connected = True
         logger.info("Memory Lake connected")
 

@@ -31,12 +31,15 @@ Example usage::
 from __future__ import annotations
 
 from .dispatcher import HookDispatcher
+from .embedding_filter import EmbeddingFilterCache, cosine_similarity
 from .models import FilterMatch, HookSubscription, SemanticFilter, SemanticHooksConfig
 
 __all__ = [
+    "EmbeddingFilterCache",
     "FilterMatch",
     "HookDispatcher",
     "HookSubscription",
     "SemanticFilter",
     "SemanticHooksConfig",
+    "cosine_similarity",
 ]

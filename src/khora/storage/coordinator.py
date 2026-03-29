@@ -152,6 +152,16 @@ class StorageCoordinator:
 
     _connected: bool = field(default=False, init=False)
     _is_unified_backend: bool = field(default=False, init=False)
+    _hook_dispatcher: Any = field(default=None, init=False)
+
+    async def dispatch_hook(self, event: Any) -> None:
+        """Dispatch an event to hook subscribers if a dispatcher is attached.
+
+        Called by the ingestion pipeline after extraction/storage operations.
+        No-op if no dispatcher is set (i.e., no hooks subscribed).
+        """
+        if self._hook_dispatcher is not None and self._hook_dispatcher.subscription_count > 0:
+            await self._hook_dispatcher.dispatch(event)
 
     def __post_init__(self) -> None:
         # Detect if graph and vector share a SurrealDB connection (unified backend)

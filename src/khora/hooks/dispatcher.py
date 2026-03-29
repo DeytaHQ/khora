@@ -11,6 +11,7 @@ from loguru import logger
 
 from khora.core.models.event import EventType, MemoryEvent
 
+from .embedding_filter import EmbeddingFilterCache
 from .models import HookSubscription, SemanticFilter
 
 
@@ -46,6 +47,7 @@ class HookDispatcher:
         self._subscriptions: dict[str, list[HookSubscription]] = defaultdict(list)
         self._sub_by_id: dict[UUID, HookSubscription] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._embedding_cache = EmbeddingFilterCache()
 
     # ------------------------------------------------------------------
     # Subscription management
@@ -84,6 +86,10 @@ class HookDispatcher:
 
         self._subscriptions[key].append(sub)
         self._sub_by_id[sub.id] = sub
+
+        # Register embedding for Level 1 filtering
+        if filter and filter.embedding is not None:
+            self._embedding_cache.register_filter(filter)
 
         logger.debug(
             "Hook registered: {} → {} (filter={})",
@@ -154,6 +160,17 @@ class HookDispatcher:
             # Level 0: entity_type / relationship_type pre-filter
             if sub.filter and not self._passes_type_filter(event, sub.filter):
                 continue
+
+            # Level 1: embedding similarity pre-screen (Phase 2)
+            if sub.filter and sub.filter.embedding is not None:
+                entity_embedding = event.data.get("embedding")
+                if entity_embedding is not None:
+                    passes, _score = self._embedding_cache.passes_embedding_gate(
+                        entity_embedding,
+                        sub.filter,
+                    )
+                    if not passes:
+                        continue
 
             matching.append(sub)
 

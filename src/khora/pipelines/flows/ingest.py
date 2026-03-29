@@ -17,6 +17,7 @@ from uuid import UUID
 from loguru import logger
 
 from khora._accel import normalize_entity_names_batch
+from khora.core.models.event import EventType, MemoryEvent
 
 from ..registry import pipeline
 
@@ -1117,6 +1118,26 @@ async def process_document(
                         f"(missing: {len(missing_ids)}, extra: {len(extra_ids)})"
                     )
 
+                # Dispatch entity hooks for each upserted entity
+                for entity, is_new in upsert_results:
+                    event_type = "entity.created" if is_new else "entity.updated"
+                    await storage.dispatch_hook(
+                        MemoryEvent(
+                            namespace_id=document.namespace_id,
+                            event_type=EventType(event_type),
+                            resource_type="entity",
+                            resource_id=entity.id,
+                            data={
+                                "name": entity.name,
+                                "entity_type": entity.entity_type,
+                                "description": entity.description,
+                                "confidence": entity.confidence,
+                                "is_new": is_new,
+                                "document_id": str(document.id),
+                            },
+                        )
+                    )
+
                 store_results: list[tuple[Entity, bool]] = []
 
                 # Batch-normalize entity names for mapping (single FFI call)
@@ -1243,6 +1264,24 @@ async def process_document(
             count = 0
             if valid_relationships:
                 count = await storage.create_relationships_batch(valid_relationships)
+
+                # Dispatch relationship hooks
+                for rel in valid_relationships:
+                    await storage.dispatch_hook(
+                        MemoryEvent(
+                            namespace_id=document.namespace_id,
+                            event_type=EventType.RELATIONSHIP_CREATED,
+                            resource_type="relationship",
+                            resource_id=rel.id,
+                            data={
+                                "relationship_type": rel.relationship_type,
+                                "source_entity_id": str(rel.source_entity_id),
+                                "target_entity_id": str(rel.target_entity_id),
+                                "confidence": rel.confidence,
+                                "document_id": str(document.id),
+                            },
+                        )
+                    )
 
             if skipped > 0:
                 logger.warning(
