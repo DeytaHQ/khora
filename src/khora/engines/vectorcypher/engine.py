@@ -190,6 +190,10 @@ class VectorCypherConfig:
     # Extraction concurrency (aligned with ingest pipeline's default of 20)
     max_concurrent_extractions: int = 20
 
+    # Maximum texts per LLM extraction batch. Lower values reduce output token
+    # requirements and avoid timeouts with strict JSON schema constrained decoding.
+    extraction_batch_size: int = 5
+
     # Streaming pipeline (A-1: batch entity storage across documents)
     streaming_pipeline: bool = True
     enable_smart_resolution: bool = True
@@ -770,6 +774,7 @@ class VectorCypherEngine:
                 max_concurrent=self._vc_config.max_concurrent_extractions,
                 timeout=self._config.llm.timeout,
                 max_tokens=self._config.llm.max_tokens,
+                extraction_batch_size=self._vc_config.extraction_batch_size,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 store_events=self._vc_config.store_events,
@@ -911,6 +916,7 @@ class VectorCypherEngine:
             max_concurrent=self._vc_config.max_concurrent_extractions,
             timeout=self._config.llm.timeout,
             max_tokens=self._config.llm.max_tokens,
+            extraction_batch_size=self._vc_config.extraction_batch_size,
             entity_types=entity_types,
             relationship_types=relationship_types,
             store_events=self._vc_config.store_events,
@@ -1710,6 +1716,7 @@ class VectorCypherEngine:
                                 max_concurrent=1,
                                 timeout=self._config.llm.timeout,
                                 max_tokens=self._config.llm.max_tokens,
+                                extraction_batch_size=self._vc_config.extraction_batch_size,
                                 entity_types=entity_types,
                                 relationship_types=relationship_types,
                                 store_events=self._vc_config.store_events,
@@ -1737,6 +1744,7 @@ class VectorCypherEngine:
                         max_concurrent=self._vc_config.max_concurrent_extractions,
                         timeout=self._config.llm.timeout,
                         max_tokens=self._config.llm.max_tokens,
+                        extraction_batch_size=self._vc_config.extraction_batch_size,
                         entity_types=entity_types,
                         relationship_types=relationship_types,
                         store_events=self._vc_config.store_events,
