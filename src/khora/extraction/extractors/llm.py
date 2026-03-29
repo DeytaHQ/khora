@@ -1339,7 +1339,14 @@ class LLMEntityExtractor(EntityExtractor):
             max_batch_size=batch_size,
             max_input_tokens=max_input_tokens,
         )
-        logger.debug(f"Created {len(batches)} batches from {len(texts)} texts")
+        logger.info(
+            "Extraction starting: model=%s, timeout=%ds, max_tokens=%d, texts=%d, batches=%d",
+            self._model,
+            self._timeout,
+            self._max_tokens,
+            len(texts),
+            len(batches),
+        )
         all_results: list[ExtractionResult] = []
 
         # Build system prompt from expertise if available
@@ -1423,6 +1430,14 @@ class LLMEntityExtractor(EntityExtractor):
             results = await _run_batch(batch)
             all_results.extend(results)
 
+        error_count = sum(1 for r in all_results if r.metadata.get("error"))
+        logger.info(
+            "Extraction complete: %d results (%d errors) from %d texts in %d batches",
+            len(all_results),
+            error_count,
+            len(texts),
+            len(batches),
+        )
         return all_results
 
     async def _extract_multi_batch(
@@ -1547,6 +1562,13 @@ Return ONLY valid JSON, no other text."""
                         _pt = getattr(usage, "prompt_tokens", 0) or 0
                         _ct = getattr(usage, "completion_tokens", 0) or 0
                         _tt = getattr(usage, "total_tokens", 0) or 0
+                        logger.info(
+                            "Batch extraction complete: %d texts in %.0fms, prompt=%d completion=%d tokens",
+                            len(texts),
+                            _latency,
+                            _pt,
+                            _ct,
+                        )
                         get_collector().record_llm_call(
                             operation="entity_extraction_multi",
                             model=self._model,

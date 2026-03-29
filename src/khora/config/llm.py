@@ -184,9 +184,10 @@ def configure_litellm(config: LiteLLMConfig | None = None) -> None:
     # Critical for compatibility across providers
     litellm.drop_params = True
 
-    # Disable verbose logging and telemetry
+    # Disable verbose logging, telemetry, and "Give Feedback" debug messages
     litellm.set_verbose = False
     litellm.telemetry = False  # type: ignore[assignment]
+    litellm.suppress_debug_info = True
 
     # Set up API keys from environment
     api_key = config.get_api_key()
