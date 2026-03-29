@@ -696,7 +696,7 @@ class LLMEntityExtractor(EntityExtractor):
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
-                    "Retrying LLM call (attempt %d) after %s: %s",
+                    "Retrying LLM call (attempt {}) after {}: {}",
                     retry_state.attempt_number,
                     (
                         type(retry_state.outcome.exception()).__name__
@@ -1496,7 +1496,7 @@ Return ONLY valid JSON, no other text."""
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
-                    "Retrying LLM call (attempt %d) after %s: %s",
+                    "Retrying LLM call (attempt {}) after {}: {}",
                     retry_state.attempt_number,
                     (
                         type(retry_state.outcome.exception()).__name__
