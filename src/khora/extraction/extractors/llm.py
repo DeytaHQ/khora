@@ -1431,7 +1431,7 @@ class LLMEntityExtractor(EntityExtractor):
             all_results.extend(results)
 
         error_count = sum(1 for r in all_results if r.metadata.get("error"))
-        logger.info(
+        logger.debug(
             "Extraction complete: {} results ({} errors) from {} texts in {} batches",
             len(all_results),
             error_count,
@@ -1562,7 +1562,7 @@ Return ONLY valid JSON, no other text."""
                         _pt = getattr(usage, "prompt_tokens", 0) or 0
                         _ct = getattr(usage, "completion_tokens", 0) or 0
                         _tt = getattr(usage, "total_tokens", 0) or 0
-                        logger.info(
+                        logger.debug(
                             "Batch extraction complete: {} texts in {:.0f}ms, prompt={} completion={} tokens",
                             len(texts),
                             _latency,
