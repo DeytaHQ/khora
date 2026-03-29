@@ -1339,7 +1339,7 @@ class LLMEntityExtractor(EntityExtractor):
             max_batch_size=batch_size,
             max_input_tokens=max_input_tokens,
         )
-        logger.info(
+        logger.debug(
             "Extraction starting: model={}, timeout={}s, max_tokens={}, texts={}, batches={}",
             self._model,
             self._timeout,
@@ -1363,8 +1363,8 @@ class LLMEntityExtractor(EntityExtractor):
             # Circuit breaker tripped — go straight to single-doc extraction
             if _consecutive_batch_failures >= _BATCH_FAILURE_THRESHOLD and len(batch) > 1:
                 logger.warning(
-                    "Circuit breaker active: skipping batch mode after %d consecutive failures, "
-                    "extracting %d texts individually",
+                    "Circuit breaker active: skipping batch mode after {} consecutive failures, "
+                    "extracting {} texts individually",
                     _consecutive_batch_failures,
                     len(batch),
                 )
@@ -1398,7 +1398,7 @@ class LLMEntityExtractor(EntityExtractor):
             if all_failed and len(batch) > 1:
                 _consecutive_batch_failures += 1
                 logger.info(
-                    "Batch extraction failed for %d texts (consecutive failures: %d), "
+                    "Batch extraction failed for {} texts (consecutive failures: {}), "
                     "falling back to single-document extraction",
                     len(batch),
                     _consecutive_batch_failures,
