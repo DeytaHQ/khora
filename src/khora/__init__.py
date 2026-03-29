@@ -37,8 +37,10 @@ Example usage:
 from .cli import main
 from .config import KhoraConfig
 from .core.models.document import DocumentSource
+from .core.models.event import EventType
 from .engines import create_engine, list_engines, register_engine
 from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTypeConfig
+from .hooks import SemanticFilter
 from .memory_lake import BatchResult, LLMUsage, MemoryLake, RecallResult, RememberResult, Stats
 from .query import SearchMode
 
@@ -63,4 +65,7 @@ __all__ = [
     "ExpertiseConfig",
     "EntityTypeConfig",
     "RelationshipTypeConfig",
+    # Semantic hooks
+    "EventType",
+    "SemanticFilter",
 ]

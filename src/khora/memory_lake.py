@@ -820,6 +820,81 @@ class MemoryLake:
             rel_sources = {did: sources[did] for did in rel.source_document_ids if did in sources}
             rel.source_documents = rel_sources if rel_sources else None
 
+    # ------------------------------------------------------------------
+    # Semantic hooks (subscription API)
+    # ------------------------------------------------------------------
+
+    def subscribe(
+        self,
+        event_type: str,
+        callback: Callable[..., Any],
+        *,
+        filter: Any | None = None,
+        namespace_id: UUID | None = None,
+    ) -> UUID:
+        """Subscribe to extraction events with optional semantic filtering.
+
+        Registers an async callback that fires during document ingestion
+        when an event of the given type occurs. Optionally, attach a
+        ``SemanticFilter`` to narrow matches by entity type, embedding
+        similarity, or LLM evaluation.
+
+        Args:
+            event_type: Event type string or ``EventType`` enum
+                (e.g., ``"entity.created"``, ``EventType.ENTITY_CREATED``).
+            callback: Async function ``async def handler(event: MemoryEvent) -> None``.
+            filter: Optional ``SemanticFilter`` for type/embedding/LLM gating.
+            namespace_id: Scope to a specific namespace (None = all).
+
+        Returns:
+            Subscription UUID for later ``unsubscribe()``.
+
+        Example::
+
+            async def on_entity(event):
+                print(f"New entity: {event.data.get('name')}")
+
+            sub_id = lake.subscribe("entity.created", on_entity)
+            await lake.remember("Acme Corp announced...", ...)
+            lake.unsubscribe(sub_id)
+        """
+        return self._get_hook_dispatcher().subscribe(
+            event_type,
+            callback,
+            filter=filter,
+            namespace_id=namespace_id,
+        )
+
+    def unsubscribe(self, subscription_id: UUID) -> bool:
+        """Remove a hook subscription.
+
+        Returns True if found and removed, False otherwise.
+        """
+        return self._get_hook_dispatcher().unsubscribe(subscription_id)
+
+    def _get_hook_dispatcher(self) -> Any:
+        """Lazy-initialize the hook dispatcher."""
+        if not hasattr(self, "_hook_dispatcher"):
+            from khora.hooks.dispatcher import HookDispatcher
+
+            hooks_config = getattr(self._config, "hooks", None)
+            max_concurrent = 10
+            if hooks_config:
+                max_concurrent = getattr(hooks_config, "max_concurrent_callbacks", 10)
+            self._hook_dispatcher = HookDispatcher(max_concurrent=max_concurrent)
+        return self._hook_dispatcher
+
+    @property
+    def hooks(self) -> Any:
+        """Access the hook dispatcher directly for advanced usage."""
+        return self._get_hook_dispatcher()
+
+    async def _dispatch_hook(self, event: Any) -> None:
+        """Dispatch an event to hook subscribers (internal, called by engines)."""
+        dispatcher = self._get_hook_dispatcher()
+        if dispatcher.subscription_count > 0:
+            await dispatcher.dispatch(event)
+
     async def _resolve_namespace(self, namespace: str | UUID) -> UUID:
         """Resolve a namespace_id to the active version's row-level id.
 
