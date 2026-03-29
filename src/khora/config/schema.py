@@ -317,7 +317,7 @@ class LLMSettings(BaseSettings):
     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
     api_key_env: str = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
     temperature: float = Field(default=0.7, description="Sampling temperature")
-    max_tokens: int = Field(default=2000, description="Maximum tokens to generate")
+    max_tokens: int = Field(default=8192, description="Maximum tokens for LLM extraction output")
     timeout: int = Field(default=30, description="Request timeout in seconds")
     max_retries: int = Field(default=3, description="Maximum retries on failure")
     max_concurrent_llm_calls: int = Field(default=10, description="Maximum concurrent LLM calls")
