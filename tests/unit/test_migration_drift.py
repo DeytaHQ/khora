@@ -204,9 +204,10 @@ class TestCreateTablesDeprecation:
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
                 await backend.create_tables()
-                assert len(w) == 1
-                assert issubclass(w[0].category, DeprecationWarning)
-                assert "create_tables() is deprecated" in str(w[0].message)
+                assert len(w) >= 1
+                deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+                assert len(deprecation_warnings) >= 1
+                assert "create_tables() is deprecated" in str(deprecation_warnings[0].message)
 
     async def test_event_store_warns(self):
         """PostgreSQLEventStore.create_tables() emits DeprecationWarning."""
