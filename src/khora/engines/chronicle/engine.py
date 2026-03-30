@@ -5,11 +5,12 @@ This engine is designed for high-accuracy memory retrieval benchmarks
 all storage is PostgreSQL + pgvector. Unlike Skeleton, it performs full entity
 extraction and 4-channel retrieval with temporal decay scoring.
 
-Phase 1 implements:
+Implements:
 - Full ingest pipeline (chunking, embedding, entity extraction)
-- 2-channel retrieval: semantic + BM25 (temporal + entity channels stubbed)
-- Reciprocal Rank Fusion
+- 4-channel parallel retrieval: semantic + BM25 + temporal + entity co-occurrence
+- Reciprocal Rank Fusion across all channels
 - Temporal decay scoring (Ebbinghaus forgetting curve)
+- Event decomposition (SVO tuples with datetime ranges)
 """
 
 from __future__ import annotations
@@ -405,15 +406,36 @@ class ChronicleEngine:
                 logger.debug("Fulltext backend not available for BM25 search")
             timings["bm25_ms"] = (time.perf_counter() - start) * 1000
 
-        # ── Channel 3: Temporal (Phase 2 stub) ──────────────────────────
-        # Future: time-range filtering, temporal entity resolution
+        # ── Channel 3: Temporal (time-scoped retrieval) ─────────────────
         temporal_results: list[tuple[Chunk, float]] = []
-        timings["temporal_ms"] = 0.0
+        if mode in (SearchMode.HYBRID, SearchMode.ALL):
+            start = time.perf_counter()
+            try:
+                temporal_results = await self._temporal_channel(
+                    namespace_id,
+                    query,
+                    query_embedding,
+                    limit * 2,
+                    temporal_filter,
+                )
+            except Exception:
+                logger.debug("Temporal channel failed")
+            timings["temporal_ms"] = (time.perf_counter() - start) * 1000
 
-        # ── Channel 4: Entity (Phase 2 stub) ────────────────────────────
-        # Future: entity-linked chunk retrieval
+        # ── Channel 4: Entity co-occurrence ─────────────────────────────
         entity_results: list[tuple[Chunk, float]] = []
-        timings["entity_ms"] = 0.0
+        if mode in (SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
+            start = time.perf_counter()
+            try:
+                entity_results = await self._entity_channel(
+                    namespace_id,
+                    query,
+                    query_embedding,
+                    limit * 2,
+                )
+            except Exception:
+                logger.debug("Entity channel failed")
+            timings["entity_ms"] = (time.perf_counter() - start) * 1000
 
         # ── Fusion via Reciprocal Rank Fusion ────────────────────────────
         start = time.perf_counter()
@@ -493,6 +515,132 @@ class ChronicleEngine:
                 "timings": timings,
             },
         )
+
+    # ------------------------------------------------------------------
+    # Retrieval channels (Phase 2)
+    # ------------------------------------------------------------------
+
+    async def _temporal_channel(
+        self,
+        namespace_id: UUID,
+        query: str,
+        query_embedding: list[float] | None,
+        limit: int,
+        temporal_filter: Any | None,
+    ) -> list[tuple[Chunk, float]]:
+        """Channel 3: Time-scoped chunk retrieval.
+
+        Searches for chunks within a temporal window and scores them by
+        both semantic relevance and temporal proximity to the query's
+        referenced time.
+        """
+        storage = self._get_storage()
+
+        # Determine time bounds from temporal_filter or default to recent
+        created_after = None
+        created_before = None
+        if temporal_filter is not None:
+            created_after = getattr(temporal_filter, "start_time", None)
+            created_before = getattr(temporal_filter, "end_time", None)
+
+        if created_after is None and created_before is None:
+            # Default: search recent 7 days for temporal signal
+            from datetime import timedelta
+
+            created_after = datetime.now(UTC) - timedelta(days=7)
+
+        # Use semantic search with temporal bounds
+        if query_embedding is None:
+            return []
+
+        try:
+            results = await storage.search_similar_chunks(
+                namespace_id,
+                query_embedding,
+                limit=limit,
+                created_after=created_after,
+                created_before=created_before,
+            )
+        except Exception:
+            return []
+
+        # Boost chunks that are temporally closer to now (recency signal)
+        now = datetime.now(UTC)
+        scored = []
+        for chunk, sim in results:
+            chunk_time = getattr(chunk, "source_timestamp", None) or chunk.created_at
+            if chunk_time:
+                hours_old = max(0, (now - chunk_time).total_seconds() / 3600)
+                temporal_boost = _ebbinghaus_decay(hours_old, tau_hours=72)  # 3-day half-life
+                blended = sim * 0.6 + temporal_boost * 0.4
+            else:
+                blended = sim
+            scored.append((chunk, blended))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    async def _entity_channel(
+        self,
+        namespace_id: UUID,
+        query: str,
+        query_embedding: list[float],
+        limit: int,
+    ) -> list[tuple[Chunk, float]]:
+        """Channel 4: Entity co-occurrence retrieval.
+
+        Finds entities similar to the query, then retrieves chunks that
+        mention those entities. Provides a "follow the entities" signal
+        complementary to pure semantic search.
+        """
+        storage = self._get_storage()
+
+        # Step 1: Find entities similar to the query
+        try:
+            entity_results = await storage.search_similar_entities(
+                namespace_id,
+                query_embedding,
+                limit=10,
+            )
+        except Exception:
+            return []
+
+        if not entity_results:
+            return []
+
+        # Step 2: Get the source chunk IDs from matching entities
+        entity_ids = [eid for eid, _score in entity_results]
+        entity_scores = {eid: score for eid, score in entity_results}
+
+        try:
+            entities = await storage.get_entities_batch(entity_ids)
+        except Exception:
+            return []
+
+        # Collect chunk IDs from entity sources, weighted by entity similarity
+        chunk_scores: dict[UUID, float] = {}
+        for eid, entity in entities.items():
+            escore = entity_scores.get(eid, 0.0)
+            for cid in entity.source_chunk_ids:
+                chunk_scores[cid] = max(chunk_scores.get(cid, 0.0), escore)
+
+        if not chunk_scores:
+            return []
+
+        # Step 3: Fetch the actual chunks
+        chunk_ids = sorted(chunk_scores, key=lambda k: chunk_scores.get(k, 0.0), reverse=True)[:limit]
+        try:
+            chunks_map = await storage.get_chunks_batch(chunk_ids)
+        except Exception:
+            return []
+
+        results = []
+        for cid in chunk_ids:
+            chunk = chunks_map.get(cid)
+            if chunk:
+                results.append((chunk, chunk_scores[cid]))
+
+        return results
 
     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
         """Remove a memory from the engine."""

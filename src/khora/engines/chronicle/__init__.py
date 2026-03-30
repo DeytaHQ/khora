@@ -26,5 +26,6 @@ Usage:
 from __future__ import annotations
 
 from .engine import ChronicleEngine
+from .events import ChronicleEvent, EventExtractor
 
-__all__ = ["ChronicleEngine"]
+__all__ = ["ChronicleEngine", "ChronicleEvent", "EventExtractor"]
