@@ -24,6 +24,11 @@ down_revision: str | Sequence[str] | None = "017_temporal_coalesce_index"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Default embedding dimension. Deployments using a different
+# embedding_dimension config value will need a custom migration
+# to create indexes matching their dimension.
+_EMBEDDING_DIMENSION = 1536
+
 # Index definitions
 _INDEXES = [
     {
@@ -76,7 +81,7 @@ def upgrade() -> None:
             op.execute(
                 text(
                     f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} "
-                    f"ON {table} USING hnsw ((embedding::halfvec(1536)) halfvec_cosine_ops) "
+                    f"ON {table} USING hnsw ((embedding::halfvec({_EMBEDDING_DIMENSION})) halfvec_cosine_ops) "
                     f"WITH (m = 24, ef_construction = 128)"
                 )
             )

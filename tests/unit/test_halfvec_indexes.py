@@ -100,6 +100,28 @@ class TestConnectHalfvecGuard:
             mock_check.assert_not_called()
             assert backend.halfvec_enabled is False
 
+    async def test_connect_skips_all_halfvec_checks_when_disabled(self) -> None:
+        """When use_halfvec=False, no halfvec detection or index check should occur."""
+        backend = _make_backend(use_halfvec=False)
+
+        with (
+            patch.object(backend, "_detect_halfvec_support", new_callable=AsyncMock) as mock_detect,
+            patch.object(backend, "_check_halfvec_indexes", new_callable=AsyncMock) as mock_check,
+            patch("khora.storage.backends.pgvector.create_async_engine") as mock_engine,
+            patch("khora.storage.backends.pgvector.async_sessionmaker") as mock_session_maker,
+        ):
+            mock_conn = AsyncMock()
+            mock_engine.return_value.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_engine.return_value.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session_maker.return_value = MagicMock()
+
+            await backend.connect()
+
+            mock_detect.assert_not_called()
+            mock_check.assert_not_called()
+            assert backend.halfvec_enabled is False
+            assert backend._halfvec_available is None  # Never touched
+
 
 @pytest.mark.unit
 class TestCheckHalfvecIndexes:
@@ -112,8 +134,8 @@ class TestCheckHalfvecIndexes:
 
         mock_result = MagicMock()
         mock_result.all.return_value = [
-            ("ix_chunks_embedding_halfvec_hnsw",),
-            ("ix_entities_embedding_halfvec_hnsw",),
+            ("ix_chunks_embedding_halfvec_hnsw", True),
+            ("ix_entities_embedding_halfvec_hnsw", True),
         ]
 
         mock_session = AsyncMock()
@@ -133,7 +155,7 @@ class TestCheckHalfvecIndexes:
 
         mock_result = MagicMock()
         mock_result.all.return_value = [
-            ("ix_chunks_embedding_halfvec_hnsw",),
+            ("ix_chunks_embedding_halfvec_hnsw", True),
         ]
 
         mock_session = AsyncMock()
@@ -153,6 +175,27 @@ class TestCheckHalfvecIndexes:
 
         mock_session = AsyncMock()
         mock_session.execute.side_effect = RuntimeError("connection lost")
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(backend, "_get_session", return_value=mock_session):
+            result = await backend._check_halfvec_indexes()
+
+        assert result is False
+
+    async def test_returns_false_when_index_invalid(self) -> None:
+        """Should return False when an index exists but is marked invalid."""
+        backend = _make_backend()
+        backend._session_factory = MagicMock()
+
+        mock_result = MagicMock()
+        mock_result.all.return_value = [
+            ("ix_chunks_embedding_halfvec_hnsw", True),
+            ("ix_entities_embedding_halfvec_hnsw", False),  # invalid
+        ]
+
+        mock_session = AsyncMock()
+        mock_session.execute.return_value = mock_result
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 

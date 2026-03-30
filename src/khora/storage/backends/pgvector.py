@@ -130,24 +130,21 @@ class PgVectorBackend(AsyncSessionMixin):
         async with self._engine.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
-        # Detect halfvec support (pgvector >= 0.7.0)
+        # Detect halfvec support (pgvector >= 0.7.0) and verify HNSW indexes
         if self._use_halfvec:
-            self._halfvec_available = await self._detect_halfvec_support()
-            if self._halfvec_available:
-                logger.info("halfvec (float16) support detected — enabled for similarity search")
-            else:
-                logger.warning(
-                    "halfvec requested but pgvector extension < 0.7.0 — " "falling back to full-precision vectors"
-                )
-
-        # Verify halfvec HNSW indexes exist before enabling halfvec mode
-        if self._halfvec_available:
-            if not await self._check_halfvec_indexes():
+            halfvec_supported = await self._detect_halfvec_support()
+            if not halfvec_supported:
+                self._halfvec_available = False
+                logger.warning("halfvec requested but pgvector < 0.7.0 — falling back to full-precision vectors")
+            elif not await self._check_halfvec_indexes():
                 self._halfvec_available = False
                 logger.warning(
                     "halfvec HNSW indexes not found — falling back to full-precision vectors. "
                     "Run migrations to create them."
                 )
+            else:
+                self._halfvec_available = True
+                logger.info("halfvec (float16) support detected — enabled for similarity search")
 
         logger.info("Connected to pgvector")
 
@@ -195,21 +192,31 @@ class PgVectorBackend(AsyncSessionMixin):
             return False
 
     async def _check_halfvec_indexes(self) -> bool:
-        """Check if both halfvec HNSW indexes exist in the database."""
+        """Check if both halfvec HNSW indexes exist and are valid in the database."""
         required = {"ix_chunks_embedding_halfvec_hnsw", "ix_entities_embedding_halfvec_hnsw"}
         try:
             async with self._get_session() as session:
                 result = await session.execute(
                     text(
-                        "SELECT indexname FROM pg_indexes "
-                        "WHERE indexname IN ('ix_chunks_embedding_halfvec_hnsw', "
+                        "SELECT c.relname, i.indisvalid FROM pg_class c "
+                        "JOIN pg_index i ON i.indexrelid = c.oid "
+                        "WHERE c.relname IN ('ix_chunks_embedding_halfvec_hnsw', "
                         "'ix_entities_embedding_halfvec_hnsw')"
                     )
                 )
-                found = {row[0] for row in result.all()}
-                return required.issubset(found)
+                rows = result.all()
+                valid = set()
+                for name, is_valid in rows:
+                    if is_valid:
+                        valid.add(name)
+                    else:
+                        logger.warning(
+                            f"halfvec index {name} exists but is invalid "
+                            "(interrupted build?) — re-run migrations to rebuild it"
+                        )
+                return required.issubset(valid)
         except Exception as e:
-            logger.debug(f"Failed to check halfvec indexes: {e}")
+            logger.warning(f"Failed to check halfvec indexes: {e}")
             return False
 
     async def create_tables(self) -> None:
