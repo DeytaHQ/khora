@@ -471,56 +471,6 @@ async def reindex_hnsw_concurrently(engine) -> dict:
     return result
 
 
-async def create_halfvec_indexes(
-    engine,
-    *,
-    embedding_dimension: int = 1536,
-    hnsw_m: int = 24,
-    hnsw_ef_construction: int = 128,
-) -> dict:
-    """Create halfvec expression HNSW indexes for reduced index size.
-
-    These indexes cast the full-precision ``vector`` column to ``halfvec``
-    (float16) at index time, yielding ~50% smaller HNSW indexes with
-    minimal recall loss.
-
-    Requires pgvector extension >= 0.7.0.
-
-    Args:
-        engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
-        embedding_dimension: Dimension of embedding vectors.
-        hnsw_m: HNSW M parameter.
-        hnsw_ef_construction: HNSW ef_construction parameter.
-
-    Returns:
-        Dict with ``indexes_created`` count and ``errors``.
-    """
-    from sqlalchemy import text
-
-    result: dict[str, Any] = {
-        "indexes_created": 0,
-        "errors": [],
-    }
-
-    async with engine.begin() as conn:
-        for idx in HALFVEC_INDEXES:
-            try:
-                sql = idx["sql"].format(
-                    dim=embedding_dimension,
-                    m=hnsw_m,
-                    ef_construction=hnsw_ef_construction,
-                )
-                logger.debug(f"Creating halfvec index {idx['name']} ({idx['purpose']})")
-                await conn.execute(text(sql))
-                result["indexes_created"] += 1
-            except Exception as e:
-                msg = f"Halfvec index {idx['name']}: {e}"
-                result["errors"].append(msg)
-                logger.warning(msg)
-
-    return result
-
-
 async def optimize_postgresql(engine, *, reindex_hnsw: bool = True) -> dict:
     """Create optimal PostgreSQL indexes, run ANALYZE, and optionally reindex HNSW.
 
