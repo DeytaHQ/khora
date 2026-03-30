@@ -32,6 +32,17 @@ Example usage:
 
     # Raw search without LLM features (for benchmarks)
     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
+
+    # Chronicle engine — temporal-semantic recall, no graph DB needed
+    async with MemoryLake("postgresql://localhost/mydb", engine="chronicle") as lake:
+        ns = await lake.create_namespace()
+        await lake.remember(
+            "Alice met Bob at the conference on March 15th.",
+            namespace=ns.namespace_id,
+            entity_types=["PERSON", "EVENT"],
+            relationship_types=["ATTENDED"],
+        )
+        result = await lake.recall("Who did Alice meet?", namespace=ns.namespace_id)
 """
 
 from .cli import main

@@ -33,6 +33,7 @@ _ENGINE_REGISTRY: dict[str, tuple[str, str]] = {
     "graphrag": ("khora.engines.graphrag.engine", "GraphRAGEngine"),
     "skeleton": ("khora.engines.skeleton.engine", "SkeletonConstructionEngine"),
     "vectorcypher": ("khora.engines.vectorcypher.engine", "VectorCypherEngine"),
+    "chronicle": ("khora.engines.chronicle.engine", "ChronicleEngine"),
 }
 
 
