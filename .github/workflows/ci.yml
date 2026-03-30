@@ -44,6 +44,12 @@ jobs:
         run: uvx bandit -r src/ -f json -o bandit-report.json -ll
         continue-on-error: false
 
+      - name: Dependency vulnerability scan (pip-audit)
+        run: |
+          uv export --no-dev --no-hashes > /tmp/pip-audit-requirements.txt
+          uvx pip-audit -r /tmp/pip-audit-requirements.txt --progress-spinner off
+        continue-on-error: false
+
       - name: Type check with ty
         run: uv run ty check src/
 

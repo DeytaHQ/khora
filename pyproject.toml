@@ -192,6 +192,14 @@ invalid-return-type = "warn"           # 2 errors, implicit None returns
 not-iterable = "warn"                  # 1 error, exception unpacking pattern
 unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
 
+[tool.uv]
+constraint-dependencies = [
+    # Security: CVE-2026-25645 fixed in 2.33.0
+    "requests>=2.33.0",
+    # Security: CVE-2026-4539 (no listed fix; pin to latest)
+    "pygments>=2.20.0",
+]
+
 [tool.uv.sources]
 khora-accel = { path = "rust/khora-accel", editable = true }
 
