@@ -96,6 +96,8 @@ rust = [
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0a1"]
 embedded = ["surrealdb>=2.0.0a1"]
+# LanceDB embedded vector store (Chronicle engine, zero-infrastructure)
+lancedb = ["lancedb>=0.17.0", "pyarrow>=18.0.0"]
 
 [project.scripts]
 khora = "khora:main"
