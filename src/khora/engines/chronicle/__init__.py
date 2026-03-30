@@ -1,7 +1,7 @@
 """Chronicle — temporal-semantic memory engine.
 
 Optimized for LongMemEval, LoCoMo, and BEAM benchmarks.
-No graph database required — uses PostgreSQL + pgvector only.
+No graph database required — uses PostgreSQL + pgvector (or LanceDB for embedded).
 
 Key techniques:
 - Event decomposition: SVO tuples with datetime ranges
@@ -28,6 +28,7 @@ from __future__ import annotations
 from .compression import FactExtractor, FactOperation, MemoryCompressor, MemoryFact
 from .engine import ChronicleEngine
 from .events import ChronicleEvent, EventExtractor
+from .lancedb_store import LanceDBVectorStore
 
 __all__ = [
     "ChronicleEngine",
@@ -35,6 +36,7 @@ __all__ = [
     "EventExtractor",
     "FactExtractor",
     "FactOperation",
+    "LanceDBVectorStore",
     "MemoryCompressor",
     "MemoryFact",
 ]
