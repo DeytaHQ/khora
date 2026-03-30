@@ -25,7 +25,16 @@ Usage:
 
 from __future__ import annotations
 
+from .compression import FactExtractor, FactOperation, MemoryCompressor, MemoryFact
 from .engine import ChronicleEngine
 from .events import ChronicleEvent, EventExtractor
 
-__all__ = ["ChronicleEngine", "ChronicleEvent", "EventExtractor"]
+__all__ = [
+    "ChronicleEngine",
+    "ChronicleEvent",
+    "EventExtractor",
+    "FactExtractor",
+    "FactOperation",
+    "MemoryCompressor",
+    "MemoryFact",
+]
