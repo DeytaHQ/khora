@@ -99,7 +99,11 @@ def _acquire_advisory_lock(
 
 
 def do_run_migrations(connection: Connection) -> None:
-    """Run migrations with advisory lock."""
+    """Run migrations with advisory lock.
+
+    Uses a SAVEPOINT (nested transaction) for ahead-detection so that a missing
+    version table on a fresh database does not abort the outer transaction.
+    """
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
@@ -109,13 +113,19 @@ def do_run_migrations(connection: Connection) -> None:
     with context.begin_transaction():
         _acquire_advisory_lock(connection)
 
-        # Ahead-detection: skip if DB is at a revision this version doesn't know
+        # Ahead-detection: skip if DB is at a revision this version doesn't know.
+        # Wrap the version-table query in a nested transaction (SAVEPOINT) so that if
+        # the table doesn't exist, rolling back to the savepoint keeps the outer
+        # transaction healthy — PostgreSQL's ABORTED state is scoped to the savepoint.
+        current_rev = None
+        nested = connection.begin_nested()
         try:
             result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # nosec B608
             row = result.fetchone()
             current_rev = row[0] if row else None
+            nested.commit()
         except Exception:
-            current_rev = None
+            nested.rollback()
 
         if current_rev is not None:
             known_revisions = {r.revision for r in ScriptDirectory.from_config(config).walk_revisions()}
