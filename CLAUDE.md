@@ -198,6 +198,7 @@ Versions from git tags — no manual bumps. `git tag vX.Y.Z && git push origin v
 - **Advisory lock:** `run_migrations()` uses `pg_advisory_xact_lock` (ID `6001515088189075507`), 60s timeout
 - **Migrations bundled** in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is dev-only
 - **Skip-ahead:** When multiple services share a DB with different Khora versions, `run_migrations()` detects if the DB revision is unknown (ahead) and skips gracefully — returns `MigrationResult(success=True, skipped=True)`. Signaled via `_DatabaseAheadError` from `env.py` to `session.py`
+- **Fresh-DB behavior:** On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `MemoryLake(run_migrations=True)` correctly creates all tables from scratch. Prior to v0.6.6 (DYT-1447), querying the missing version table inside an explicit transaction caused `InFailedSQLTransactionError`. The fix uses `information_schema.tables` to check table existence before querying it — never issuing a statement that could abort the transaction.
 
 ### UUID & Type Handling
 - **ORM:** all 52 UUID columns use `as_uuid=True` — native `uuid.UUID`, never `str()` wrap

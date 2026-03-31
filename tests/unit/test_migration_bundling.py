@@ -414,9 +414,9 @@ class TestMigrationPackageStructure:
         migration_files = sorted(versions_dir.glob("*.py"))
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
-        assert len(migration_files) == 19, (
-            f"Expected 19 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
-        )
+        assert (
+            len(migration_files) == 19
+        ), f"Expected 19 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
 
     @pytest.mark.unit
     def test_env_py_constants(self):
@@ -572,9 +572,9 @@ class TestAcquireAdvisoryLock:
 
         assert mock_uniform.call_count == num_retries
         for i, call in enumerate(mock_uniform.call_args_list):
-            assert call == ((min_delay, expected_highs[i]),), (
-                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
-            )
+            assert call == (
+                (min_delay, expected_highs[i]),
+            ), f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
 
         # Verify the cap kicks in: attempts 6 and 7 should both be capped at max_delay
         assert expected_highs[6] == max_delay
@@ -616,9 +616,9 @@ class TestAcquireAdvisoryLock:
 
         assert mock_uniform.call_count == num_retries
         for i, call in enumerate(mock_uniform.call_args_list):
-            assert call == ((min_delay, expected_highs[i]),), (
-                f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
-            )
+            assert call == (
+                (min_delay, expected_highs[i]),
+            ), f"attempt {i}: expected uniform({min_delay}, {expected_highs[i]}), got uniform{call}"
 
         # Verify cap applied on last attempt
         assert expected_highs[-1] == max_delay
@@ -805,12 +805,12 @@ class TestDoRunMigrationsAheadDetection:
 
     def _setup_conn(self, version_num: str | None, *, table_exists: bool = True) -> MagicMock:
         """Create a mock connection that returns the given version for the advisory
-        lock query, pg_catalog existence check, and (optionally) the version table query.
+        lock query, information_schema existence check, and (optionally) the version table query.
 
         Execute call order after the fix:
-          1. pg_try_advisory_xact_lock  → scalar() True
-          2. pg_catalog.pg_tables check → scalar() table_exists
-          3. SELECT version_num         → fetchone() row/None  (only when table_exists)
+          1. pg_try_advisory_xact_lock       → scalar() True
+          2. information_schema.tables check → scalar() table_exists
+          3. SELECT version_num              → fetchone() row/None  (only when table_exists)
         """
         conn = MagicMock()
 
@@ -884,7 +884,7 @@ class TestDoRunMigrationsAheadDetection:
 
         Previously this would leave the PostgreSQL transaction in ABORTED state
         (InFailedSQLTransactionError) because querying a missing table inside an
-        explicit transaction aborts it. The fix checks pg_catalog.pg_tables first
+        explicit transaction aborts it. The fix checks information_schema.tables first
         so no statement ever fails inside the transaction. (DYT-1447)
         """
         env = _load_env_functions()
@@ -892,12 +892,36 @@ class TestDoRunMigrationsAheadDetection:
 
         env.do_run_migrations(conn)
 
-        # Exactly 2 execute calls: advisory lock + pg_catalog check — no version query
+        # Exactly 2 execute calls: advisory lock + information_schema check — no version query
         assert conn.execute.call_count == 2
-        # Verify the second call is the pg_catalog existence check by inspecting its
+        # Verify the second call is the information_schema existence check by inspecting its
         # bound parameters — more reliable than parsing the SQL text() object string
         second_call_params = conn.execute.call_args_list[1][0][1]
         assert second_call_params == {"table": env.VERSION_TABLE}
+        env.context.run_migrations.assert_called_once()
+
+    @pytest.mark.unit
+    def test_proceeds_when_version_select_fails(self):
+        """Runs migrations normally when the version table exists but SELECT fails.
+
+        Covers M1: version SELECT failure (e.g. permission denied) after table presence
+        confirmed. The exception is swallowed and ahead-detection is skipped so that
+        migrations can still proceed. (DYT-1447)
+        """
+        env = _load_env_functions()
+        conn = MagicMock()
+
+        lock_result = MagicMock()
+        lock_result.scalar.return_value = True
+
+        existence_result = MagicMock()
+        existence_result.scalar.return_value = True  # table exists
+
+        # Third execute (version SELECT) raises an error
+        conn.execute.side_effect = [lock_result, existence_result, Exception("permission denied")]
+
+        env.do_run_migrations(conn)
+
         env.context.run_migrations.assert_called_once()
 
     @pytest.mark.unit

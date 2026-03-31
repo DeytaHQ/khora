@@ -74,6 +74,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Bug fixes
 
+- Fix `run_migrations()` raising `InFailedSQLTransactionError` on a fresh PostgreSQL database — existence check now uses `information_schema.tables` (SQL-standard, search_path-aware) instead of querying the version table directly inside a transaction (#201, DYT-1447)
 - Fix `_parse_uuid` for non-UUID SurrealDB record IDs (#168)
 - Fix SurrealDB ingestion performance regression (#160)
 - Fix `temporal_chunk` tags: coerce JSON strings to native arrays (#158)
