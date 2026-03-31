@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import ProgrammingError
 
 import khora.db.migrations
 from khora.db.session import MigrationResult, _DatabaseAheadError, _run_migrations_sync, run_migrations
@@ -803,25 +804,39 @@ class TestRunAsyncMigrations:
 class TestDoRunMigrationsAheadDetection:
     """Tests for ahead-detection logic in do_run_migrations()."""
 
-    def _setup_conn(self, version_num: str | None) -> MagicMock:
-        """Create a mock connection that returns the given version for both
-        the advisory lock query and the version table query."""
+    def _setup_conn(self, version_num: str | None, *, table_missing: bool = False) -> MagicMock:
+        """Create a mock connection modeling advisory lock + SAVEPOINT version check.
+
+        Args:
+            version_num: Version string returned by the version table query.
+                None means the table exists but has no rows.
+            table_missing: If True, the version table query raises ProgrammingError
+                (simulating a fresh DB where the table doesn't exist yet).
+        """
         conn = MagicMock()
-        # We need execute to return different results for different queries.
-        # First call: advisory lock (scalar returns True)
-        # Second call: version table query (fetchone returns row or None)
+        # First execute call: advisory lock (scalar returns True)
         lock_result = MagicMock()
         lock_result.scalar.return_value = True
 
-        version_result = MagicMock()
-        if version_num is not None:
-            row = MagicMock()
-            row.__getitem__ = MagicMock(return_value=version_num)
-            version_result.fetchone.return_value = row
+        if table_missing:
+            # Fresh DB: version table absent → ProgrammingError → savepoint rollback
+            conn.execute.side_effect = [
+                lock_result,
+                ProgrammingError("relation does not exist", None, None),
+            ]
         else:
-            version_result.fetchone.return_value = None
+            # Existing DB: version table present, may or may not have a row
+            version_result = MagicMock()
+            if version_num is not None:
+                row = MagicMock()
+                row.__getitem__ = MagicMock(return_value=version_num)
+                version_result.fetchone.return_value = row
+            else:
+                version_result.fetchone.return_value = None
+            conn.execute.side_effect = [lock_result, version_result]
 
-        conn.execute.side_effect = [lock_result, version_result]
+        # SAVEPOINT: begin_nested() returns a context with commit() and rollback()
+        conn.begin_nested.return_value = MagicMock()
         return conn
 
     @pytest.mark.unit
@@ -860,13 +875,49 @@ class TestDoRunMigrationsAheadDetection:
 
     @pytest.mark.unit
     def test_proceeds_when_no_current_revision(self):
-        """Runs migrations normally when DB has no current revision (fresh DB)."""
+        """Runs migrations normally when DB has no current revision (fresh DB with empty table)."""
         env = _load_env_functions()
         conn = self._setup_conn(None)
 
         env.do_run_migrations(conn)
 
         env.context.run_migrations.assert_called_once()
+        conn.begin_nested.return_value.commit.assert_called_once()
+        conn.begin_nested.return_value.rollback.assert_not_called()
+
+    @pytest.mark.unit
+    def test_proceeds_when_version_table_absent(self):
+        """Runs migrations normally when khora_alembic_version table doesn't exist.
+
+        Verifies that ProgrammingError from the missing-table query is caught via
+        the SAVEPOINT (begin_nested), rolling back to the savepoint so the outer
+        transaction stays healthy and context.run_migrations() can proceed.
+        """
+        env = _load_env_functions()
+        conn = self._setup_conn(None, table_missing=True)
+
+        env.do_run_migrations(conn)
+
+        env.context.run_migrations.assert_called_once()
+        conn.begin_nested.return_value.rollback.assert_called_once()
+        conn.begin_nested.return_value.commit.assert_not_called()
+
+    @pytest.mark.unit
+    def test_savepoint_committed_on_known_revision(self):
+        """SAVEPOINT is committed (not rolled back) when the version table is present."""
+        env = _load_env_functions()
+        conn = self._setup_conn("known_rev")
+
+        mock_rev = MagicMock()
+        mock_rev.revision = "known_rev"
+        mock_script_dir = MagicMock()
+        mock_script_dir.walk_revisions.return_value = [mock_rev]
+
+        with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
+            env.do_run_migrations(conn)
+
+        conn.begin_nested.return_value.commit.assert_called_once()
+        conn.begin_nested.return_value.rollback.assert_not_called()
 
     @pytest.mark.unit
     def test_propagates_walk_revisions_error(self):

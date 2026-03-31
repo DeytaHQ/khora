@@ -14,6 +14,7 @@ from alembic import context
 from alembic.script import ScriptDirectory
 from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.db.models import Base
@@ -124,7 +125,7 @@ def do_run_migrations(connection: Connection) -> None:
             row = result.fetchone()
             current_rev = row[0] if row else None
             nested.commit()
-        except Exception:
+        except ProgrammingError:
             nested.rollback()
 
         if current_rev is not None:
