@@ -517,6 +517,26 @@ class QuerySettings(BaseSettings):
         default=0.5, ge=0.0, le=1.0, description="Diversity vs relevance tradeoff (0=pure diversity, 1=pure relevance)"
     )
 
+    # Structured document features (opt-in, default off)
+    enable_relationship_expansion: bool = Field(
+        default=False,
+        description="After retrieval, follow relationship edges from top entities to inject "
+        "related chunks. Useful for structured documents with dense cross-references. "
+        "No effect if the graph has no relationships.",
+    )
+    relationship_expansion_max: int = Field(
+        default=5, ge=1, le=20, description="Maximum additional chunks from relationship expansion"
+    )
+    enable_taxonomy_boost: bool = Field(
+        default=False,
+        description="Classify query against document hierarchy (chapters/topics) and boost chunks "
+        "from matching scope. Requires taxonomy metadata in namespace. "
+        "No effect if no taxonomy data is present.",
+    )
+    taxonomy_boost_factor: float = Field(
+        default=1.5, ge=1.0, le=3.0, description="Score multiplier for chunks from taxonomy-matched scope"
+    )
+
     # Two-tier temporal resolver
     enable_temporal_resolver: bool = Field(
         default=True, description="Enable two-tier temporal resolver (dateparser + LLM)"

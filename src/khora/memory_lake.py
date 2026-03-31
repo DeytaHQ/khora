@@ -117,6 +117,28 @@ class RecallResult:
     llm_usage: list[LLMUsage] = field(default_factory=list)
 
 
+@dataclass(slots=True, frozen=True)
+class SynthesizeResult:
+    """Result of a synthesize operation.
+
+    Synthesize = recall + LLM answer generation. The LLM reads retrieved
+    chunks and writes a focused answer with citations.
+
+    Attributes:
+        answer: LLM-generated answer text.
+        citations: Section/entity references extracted from the answer.
+        recall_result: The underlying RecallResult (chunks, entities, etc.).
+        model: LLM model used for synthesis.
+        llm_usage: Token usage for the synthesis LLM call.
+    """
+
+    answer: str
+    citations: list[str]
+    recall_result: RecallResult
+    model: str = ""
+    llm_usage: list[LLMUsage] = field(default_factory=list)
+
+
 class MemoryLake:
     """Primary interface for Khora Memory Lake.
 
@@ -589,6 +611,113 @@ class MemoryLake:
         finally:
             collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
+
+    async def synthesize(
+        self,
+        query: str,
+        *,
+        namespace: str | UUID,
+        limit: int = 20,
+        mode: SearchMode = SearchMode.HYBRID,
+        model: str = "gpt-4o",
+        system_prompt: str | None = None,
+        expertise: ExpertiseConfig | None = None,
+    ) -> SynthesizeResult:
+        """Recall memories and synthesize a focused answer.
+
+        This is recall() + LLM answer generation. The LLM reads retrieved
+        chunks and writes a cited answer based on the domain context.
+
+        The system prompt is resolved in priority order:
+        1. Explicit ``system_prompt`` parameter
+        2. ``expertise.system_prompt`` if expertise is provided
+        3. A sensible default prompt
+
+        Args:
+            query: Question to answer
+            namespace: Namespace UUID
+            limit: Maximum chunks to retrieve and show to the LLM
+            mode: Search mode for recall
+            model: LLM model for answer generation (default: gpt-4o)
+            system_prompt: Override system prompt for the LLM
+            expertise: Optional ExpertiseConfig (uses its system_prompt if set)
+
+        Returns:
+            SynthesizeResult with answer, citations, and underlying recall result
+        """
+        import re
+
+        import litellm
+
+        # Step 1: Recall
+        recall_result = await self.recall(
+            query,
+            namespace=namespace,
+            limit=limit,
+            mode=mode,
+            include_sources=True,
+        )
+
+        # Step 2: Build context from chunks
+        context_parts = []
+        for chunk, score in recall_result.chunks:
+            title = ""
+            if hasattr(chunk, "source_document") and chunk.source_document:
+                title = chunk.source_document.title or ""
+            header = f"[{title}]" if title else ""
+            context_parts.append(f"{header}\n{chunk.content}")
+
+        context_text = "\n\n---\n\n".join(context_parts)
+
+        # Step 3: Resolve system prompt
+        if system_prompt is None:
+            if expertise and hasattr(expertise, "system_prompt") and expertise.system_prompt:
+                system_prompt = expertise.system_prompt
+            else:
+                system_prompt = (
+                    "You are an expert assistant. Answer the user's question based ONLY on "
+                    "the retrieved content provided below. Cite specific sections or sources "
+                    "when stating facts. If the retrieved content doesn't contain enough "
+                    "information, say what you CAN answer and note what's missing. "
+                    "Be specific and concise."
+                )
+
+        # Step 4: Call LLM
+        user_msg = f"QUESTION: {query}\n\nRETRIEVED CONTENT:\n\n{context_text}"
+
+        with trace_span("khora.synthesize", query=query, model=model):
+            response = await litellm.acompletion(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+
+        answer = response.choices[0].message.content.strip()
+
+        # Step 5: Extract citations (section references)
+        citations = list(set(re.findall(r"SEC\.\s*([\d.]+[A-Za-z]?\.?[\d.]*)", answer)))
+
+        # Track LLM usage
+        usage = getattr(response, "usage", None)
+        synth_usage = LLMUsage(
+            operation="synthesize",
+            model=model,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+        )
+
+        return SynthesizeResult(
+            answer=answer,
+            citations=citations,
+            recall_result=recall_result,
+            model=model,
+            llm_usage=[synth_usage],
+        )
 
     async def forget(
         self,
