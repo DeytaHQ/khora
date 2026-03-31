@@ -803,25 +803,35 @@ class TestRunAsyncMigrations:
 class TestDoRunMigrationsAheadDetection:
     """Tests for ahead-detection logic in do_run_migrations()."""
 
-    def _setup_conn(self, version_num: str | None) -> MagicMock:
-        """Create a mock connection that returns the given version for both
-        the advisory lock query and the version table query."""
+    def _setup_conn(self, version_num: str | None, *, table_exists: bool = True) -> MagicMock:
+        """Create a mock connection that returns the given version for the advisory
+        lock query, information_schema existence check, and (optionally) the version table query.
+
+        Execute call order after the fix:
+          1. pg_try_advisory_xact_lock       → scalar() True
+          2. information_schema.tables check → scalar() table_exists
+          3. SELECT version_num              → fetchone() row/None  (only when table_exists)
+        """
         conn = MagicMock()
-        # We need execute to return different results for different queries.
-        # First call: advisory lock (scalar returns True)
-        # Second call: version table query (fetchone returns row or None)
+
         lock_result = MagicMock()
         lock_result.scalar.return_value = True
 
-        version_result = MagicMock()
-        if version_num is not None:
-            row = MagicMock()
-            row.__getitem__ = MagicMock(return_value=version_num)
-            version_result.fetchone.return_value = row
-        else:
-            version_result.fetchone.return_value = None
+        pg_catalog_result = MagicMock()
+        pg_catalog_result.scalar.return_value = table_exists
 
-        conn.execute.side_effect = [lock_result, version_result]
+        if table_exists:
+            version_result = MagicMock()
+            if version_num is not None:
+                row = MagicMock()
+                row.__getitem__ = MagicMock(return_value=version_num)
+                version_result.fetchone.return_value = row
+            else:
+                version_result.fetchone.return_value = None
+            conn.execute.side_effect = [lock_result, pg_catalog_result, version_result]
+        else:
+            conn.execute.side_effect = [lock_result, pg_catalog_result]
+
         return conn
 
     @pytest.mark.unit
@@ -860,9 +870,55 @@ class TestDoRunMigrationsAheadDetection:
 
     @pytest.mark.unit
     def test_proceeds_when_no_current_revision(self):
-        """Runs migrations normally when DB has no current revision (fresh DB)."""
+        """Runs migrations normally when version table exists but is empty (no rows)."""
         env = _load_env_functions()
-        conn = self._setup_conn(None)
+        conn = self._setup_conn(None, table_exists=True)
+
+        env.do_run_migrations(conn)
+
+        env.context.run_migrations.assert_called_once()
+
+    @pytest.mark.unit
+    def test_proceeds_when_version_table_absent(self):
+        """Runs migrations normally on a fresh DB where the version table doesn't exist.
+
+        Previously this would leave the PostgreSQL transaction in ABORTED state
+        (InFailedSQLTransactionError) because querying a missing table inside an
+        explicit transaction aborts it. The fix checks information_schema.tables first
+        so no statement ever fails inside the transaction. (DYT-1447)
+        """
+        env = _load_env_functions()
+        conn = self._setup_conn(None, table_exists=False)
+
+        env.do_run_migrations(conn)
+
+        # Exactly 2 execute calls: advisory lock + information_schema check — no version query
+        assert conn.execute.call_count == 2
+        # Verify the second call is the information_schema existence check by inspecting its
+        # bound parameters — more reliable than parsing the SQL text() object string
+        second_call_params = conn.execute.call_args_list[1][0][1]
+        assert second_call_params == {"table": env.VERSION_TABLE}
+        env.context.run_migrations.assert_called_once()
+
+    @pytest.mark.unit
+    def test_proceeds_when_version_select_fails(self):
+        """Runs migrations normally when the version table exists but SELECT fails.
+
+        Covers M1: version SELECT failure (e.g. permission denied) after table presence
+        confirmed. The exception is swallowed and ahead-detection is skipped so that
+        migrations can still proceed. (DYT-1447)
+        """
+        env = _load_env_functions()
+        conn = MagicMock()
+
+        lock_result = MagicMock()
+        lock_result.scalar.return_value = True
+
+        existence_result = MagicMock()
+        existence_result.scalar.return_value = True  # table exists
+
+        # Third execute (version SELECT) raises an error
+        conn.execute.side_effect = [lock_result, existence_result, Exception("permission denied")]
 
         env.do_run_migrations(conn)
 

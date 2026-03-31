@@ -109,13 +109,34 @@ def do_run_migrations(connection: Connection) -> None:
     with context.begin_transaction():
         _acquire_advisory_lock(connection)
 
-        # Ahead-detection: skip if DB is at a revision this version doesn't know
-        try:
-            result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # nosec B608
-            row = result.fetchone()
-            current_rev = row[0] if row else None
-        except Exception:
-            current_rev = None
+        # Ahead-detection: skip if DB is at a revision this version doesn't know.
+        # Use information_schema.tables (SQL-standard, respects search_path) to check
+        # existence before querying the version table. Querying a missing table inside
+        # an explicit transaction puts PostgreSQL into ABORTED state, preventing
+        # context.run_migrations() from running (InFailedSQLTransactionError). (DYT-1447)
+        #
+        # Note: a SAVEPOINT-based approach (SAVEPOINT + SELECT + ROLLBACK TO SAVEPOINT on
+        # failure) is an alternative that avoids the existence check entirely and would
+        # reduce the call count by one. Consider as a future simplification.
+        table_exists = connection.execute(
+            text("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = :table)"),
+            {"table": VERSION_TABLE},
+        ).scalar()
+
+        current_rev = None
+        if table_exists:
+            try:
+                result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # nosec B608
+                row = result.fetchone()
+                current_rev = row[0] if row else None
+            except Exception:
+                # Version SELECT failed after table was confirmed present (e.g. permission
+                # denied, transient error). Treat as no current revision so migrations
+                # can still proceed. (DYT-1447)
+                logger.warning(
+                    "Could not read current revision from %s — proceeding without ahead-detection.",
+                    VERSION_TABLE,
+                )
 
         if current_rev is not None:
             known_revisions = {r.revision for r in ScriptDirectory.from_config(config).walk_revisions()}
