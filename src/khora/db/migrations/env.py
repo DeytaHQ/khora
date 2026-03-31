@@ -113,6 +113,8 @@ def do_run_migrations(connection: Connection) -> None:
         # Use pg_catalog to check existence first — querying a missing table inside
         # an explicit transaction puts PostgreSQL into ABORTED state, which would
         # prevent context.run_migrations() from running (InFailedSQLTransactionError).
+        # pg_catalog is a system catalog that is always readable by any connected user,
+        # so this check never triggers a transaction abort regardless of DB state. (DYT-1447)
         table_exists = connection.execute(
             text(
                 "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_tables WHERE schemaname = 'public' AND tablename = :table)"

@@ -894,10 +894,10 @@ class TestDoRunMigrationsAheadDetection:
 
         # Exactly 2 execute calls: advisory lock + pg_catalog check — no version query
         assert conn.execute.call_count == 2
-        # pg_catalog.pg_tables query must be the second call (not a direct version-table SELECT)
-        second_call_sql = str(conn.execute.call_args_list[1][0][0])
-        assert "pg_catalog" in second_call_sql
-        assert env.VERSION_TABLE not in second_call_sql.replace("pg_catalog", "")
+        # Verify the second call is the pg_catalog existence check by inspecting its
+        # bound parameters — more reliable than parsing the SQL text() object string
+        second_call_params = conn.execute.call_args_list[1][0][1]
+        assert second_call_params == {"table": env.VERSION_TABLE}
         env.context.run_migrations.assert_called_once()
 
     @pytest.mark.unit
