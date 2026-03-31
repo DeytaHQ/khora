@@ -109,12 +109,21 @@ def do_run_migrations(connection: Connection) -> None:
     with context.begin_transaction():
         _acquire_advisory_lock(connection)
 
-        # Ahead-detection: skip if DB is at a revision this version doesn't know
-        try:
+        # Ahead-detection: skip if DB is at a revision this version doesn't know.
+        # Use pg_catalog to check existence first — querying a missing table inside
+        # an explicit transaction puts PostgreSQL into ABORTED state, which would
+        # prevent context.run_migrations() from running (InFailedSQLTransactionError).
+        table_exists = connection.execute(
+            text(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_tables WHERE schemaname = 'public' AND tablename = :table)"
+            ),
+            {"table": VERSION_TABLE},
+        ).scalar()
+        if table_exists:
             result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # nosec B608
             row = result.fetchone()
             current_rev = row[0] if row else None
-        except Exception:
+        else:
             current_rev = None
 
         if current_rev is not None:
