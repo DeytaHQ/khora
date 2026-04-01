@@ -219,6 +219,7 @@ __marimo__/
 
 # Claude Code settings
 .claude/
+!.claude/docs/
 
 # TTOJ installer metadata
 .ttoj.toml
