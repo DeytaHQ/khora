@@ -476,6 +476,13 @@ class QueryConfig:
     # Linked entity boost
     linked_entity_boost: float = 1.5
 
+    # Fusion strategy
+    fusion_strategy: str = "rrf"
+    fusion_normalization: str = "z_score"
+
+    # Adaptive diversity
+    adaptive_diversity: bool = True
+
     @classmethod
     def from_settings(cls, settings: Any) -> QueryConfig:
         """Create QueryConfig from QuerySettings.
@@ -551,6 +558,11 @@ class QueryConfig:
             graph_chunk_query_sim_weight=getattr(settings, "graph_chunk_query_sim_weight", 0.6),
             expanded_query_discount=getattr(settings, "expanded_query_discount", 0.7),
             linked_entity_boost=getattr(settings, "linked_entity_boost", 1.5),
+            # Fusion strategy
+            fusion_strategy=getattr(settings, "fusion_strategy", "rrf"),
+            fusion_normalization=getattr(settings, "fusion_normalization", "z_score"),
+            # Adaptive diversity
+            adaptive_diversity=getattr(settings, "adaptive_diversity", True),
         )
 
 

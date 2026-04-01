@@ -583,6 +583,26 @@ class QuerySettings(BaseSettings):
         description="Score multiplier for entities matched via entity linking.",
     )
 
+    # Fusion strategy
+    fusion_strategy: str = Field(
+        default="rrf",
+        description="Fusion strategy: 'rrf' (default), 'weighted_sum', 'combmnz'. "
+        "RRF is rank-based (ignores score magnitudes), weighted_sum uses normalized scores, "
+        "CombMNZ boosts items appearing in multiple sources.",
+    )
+    fusion_normalization: str = Field(
+        default="z_score",
+        description="Score normalization for weighted_sum/combmnz: 'z_score' (robust to outliers) "
+        "or 'min_max' (bounded [0,1]).",
+    )
+
+    # Adaptive diversity lambda
+    adaptive_diversity: bool = Field(
+        default=True,
+        description="When True, diversity_lambda is adjusted per query type from query understanding. "
+        "Entity disambiguation → 0.3 (diverse), timeline → 0.7 (relevant), default → 0.5.",
+    )
+
     # Two-tier temporal resolver
     enable_temporal_resolver: bool = Field(
         default=True, description="Enable two-tier temporal resolver (dateparser + LLM)"
