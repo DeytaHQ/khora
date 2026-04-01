@@ -1267,7 +1267,6 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
     4: [  # AGGREGATE
         "how many times",
         "how many total",
-        "how many ",
         "how frequently",
         "how often ",
         "all instances",
@@ -1279,11 +1278,8 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "count of",
         "number of times",
         "frequency of",
-        "whenever ",
         "on average",
-        "across all",
         "all the times",
-        "throughout ",
     ],
     5: [  # RECENCY
         "most recent",
@@ -1300,7 +1296,6 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "what's new",
         "up to date",
         "the last thing",
-        "as of ",
     ],
     6: [  # CHANGE
         "changed",
@@ -1327,16 +1322,7 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "changed her mind",
         "different now",
         "differently now",
-        "evolved",
-        "revised",
-        "modified",
-        "pivoted",
         "shifted to",
-        "dropped",
-        "gave up",
-        "picked up",
-        "started ",
-        "stopped ",
     ],
 }
 

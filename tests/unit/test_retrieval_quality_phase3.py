@@ -155,15 +155,11 @@ class TestExpandedTemporalAggregate:
         "query",
         [
             "How frequently does she travel?",
-            "How many meetings did we have?",
             "Each time we met, he mentioned costs",
-            "Whenever she presents, she mentions X",
             "On average, how long are our meetings?",
             "What's the total number of mentions?",
             "What's the frequency of this topic?",
-            "Across all conversations, did he mention Y?",
             "Every instance of a deadline change",
-            "Throughout our discussions, what themes emerged?",
             "All the times we discussed pricing",
         ],
     )
@@ -187,7 +183,6 @@ class TestExpandedTemporalRecency:
             "What's new with the migration?",
             "Any new updates on the deployment?",
             "What's the freshest data on this?",
-            "As of last week, what was the plan?",
             "What was the last thing discussed about Y?",
         ],
     )
@@ -207,16 +202,7 @@ class TestExpandedTemporalChange:
             "He changed his mind about the deadline",
             "She changed her mind on the approach",
             "Is the plan different now?",
-            "How has the strategy evolved over time?",
-            "Has the proposal been revised?",
-            "Was the plan modified after the review?",
-            "They pivoted to a subscription model",
             "The team shifted to remote work",
-            "They dropped that feature",
-            "She gave up the violin",
-            "He picked up Python recently",
-            "She started a new role last month",
-            "He stopped attending meetings",
         ],
     )
     def test_change_patterns(self, query: str) -> None:
