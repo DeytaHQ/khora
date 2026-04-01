@@ -7,6 +7,7 @@ with Reciprocal Rank Fusion for result combination.
 from __future__ import annotations
 
 from .engine import HybridQueryEngine, QueryConfig, QueryResult, SearchMode
+from .engine_profiles import apply_engine_profile, get_engine_profile, list_engine_profiles
 from .fusion import reciprocal_rank_fusion
 from .keyword import BM25Index, KeywordSearcher, build_keyword_index, normalize_bm25_score, tokenize
 from .linking import EntityLinker, LinkedEntity, LinkingResult, link_query_entities
@@ -35,6 +36,10 @@ __all__ = [
     "QueryResult",
     "SearchMode",
     "reciprocal_rank_fusion",
+    # Engine profiles
+    "apply_engine_profile",
+    "get_engine_profile",
+    "list_engine_profiles",
     "TemporalFilter",
     "TemporalQuery",
     # Query understanding
