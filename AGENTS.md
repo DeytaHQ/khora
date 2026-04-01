@@ -98,19 +98,13 @@ When bumping the version, update all of the following and regenerate lockfiles:
 
 # Workflow Reference
 
-<!-- Shared workflow doc installed by TTOJ at .claude/docs/workflow.md.      -->
-<!-- This file is auto-deployed; edits will be overwritten on ttoj update.   -->
-<!-- Project-specific overrides belong in CLAUDE.md.                         -->
-
 ## Workflow Lifecycle
 
 Every feature, bugfix, or task follows: **Linear ticket → branch → implement → PR → done**.
 
-If your project uses Linear (has `project.linear_team` in `.ttoj.toml`):
-
 ### Starting work
 1. Search Linear for an existing ticket matching the task. If none exists, create one.
-2. Assign yourself (or the requesting user) to the ticket.
+2. Assign the ticket to the appropriate user.
 3. Move the ticket to **In Progress**.
 4. Create a branch from `staging` (default) following the branch naming convention below. For hotfixes, branch from `main`.
 5. Begin implementation.
@@ -155,7 +149,7 @@ The `initials` and `TICKET-ID` are required. Every branch must trace back to a L
 
 ## Linear Integration
 
-Use the Linear MCP tools for all ticket operations. Refer to the `linear-workflow` skill for exact tool patterns.
+Use the Linear MCP tools (`list_issues`, `save_issue`, `save_comment`, etc.) for all ticket operations.
 
 ### Status transitions
 - **Backlog** → **Todo** → **In Progress** → **Done**
@@ -195,48 +189,40 @@ When working as part of an agent team:
 
 ## PRD & ADR
 
-Major features require a PRD in `docs/prds/`. Significant architectural decisions require an ADR in `docs/adrs/`. Use `/plan:create` and `/plan:adr` to scaffold these documents. See the TTOJ repo for templates.
+Major features require a PRD in `docs/prds/`. Significant architectural decisions require an ADR in `docs/adrs/`. Use the `plan-create` and `plan-adr` skills to scaffold these documents.
 
 ## Agent Teams
 
-Use `/team:feature`, `/team:bugfix`, or `/team:review` for purpose-built teams. Default to single-agent work unless the task clearly benefits from parallelism. Role definitions are in the TTOJ repo under `content/templates/team-profiles/` and are available via the `/team:*` commands.
+Use `team-feature`, `team-bugfix`, or `team-review` skills for purpose-built teams. Default to single-agent work unless the task clearly benefits from parallelism.
 
 ## Slack Integration
 
-Commands post to team-wide default channels (deployed via TTOJ):
-- `/done` → `#pull-requests` — PR opened notification with detailed context in thread.
-- `/automerge` → `#pull-requests` — merge success or CI failure.
-- `/plan:create` → `#engineering` — optionally shares a PRD summary with goals and requirements in thread.
-- `/slack:notify` — sends an ad-hoc message to any channel or user.
+Skills post to team-wide default channels:
+- `done` → `#pull-requests` — PR opened notification with detailed context in thread.
+- `automerge` → `#pull-requests` — merge success or CI failure.
+- `plan-create` → `#engineering` — optionally shares a PRD summary with goals and requirements in thread.
+- `slack-notify` — sends an ad-hoc message to any channel or user.
 
-Default channels are defined in the `slack-workflow` skill. Commands never fail due to Slack errors.
-
-Codex uses the same `slack-notify.py` backend through its own installed skills (`slack-pr-notify`, `slack-merge-notify`, `slack-prd-notify`, `slack-notify`). The notification behavior is identical across both hosts.
+Default channels are configured per-project via TTOJ. Skills never fail due to Slack errors.
 
 ## Orchestrated Workflow
 
-The recommended command sequence for feature development:
+Recommended skill sequence for feature development:
 
-1. `/plan:create` — scaffold a PRD (optionally share on Slack)
-2. `/plan:adr` — document key decisions (if needed)
-3. `/plan:expand` — break PRD into Linear tickets
-4. `/workflow` — pick a ticket, create branch, start work
-5. Implement (solo or `/team:feature`)
-6. `/done` — commit, PR, update Linear, notify Slack
-7. `/audit` — review the PR
+1. `plan-create` — scaffold a PRD (optionally share on Slack)
+2. `plan-adr` — document key decisions (if needed)
+3. `plan-expand` — break PRD into Linear tickets
+4. `workflow` — pick a ticket, create branch, start work
+5. Implement (solo or `team-feature`)
+6. `done` — commit, PR, update Linear, notify Slack
+7. `audit` — review the PR
 
 ## Tool Preferences
 
 - **Documentation lookup**: Use Context7 MCP for up-to-date library docs.
-- **Linear operations**: Use Linear MCP tools (list_issues, save_issue, save_comment, etc.).
+- **Linear operations**: Use Linear MCP tools (`list_issues`, `save_issue`, `save_comment`, etc.).
 - **GitHub operations**: Use `gh` CLI for PRs, issues, and repo operations.
-- **File operations**: Prefer dedicated Claude Code tools (Read, Write, Edit, Grep, Glob) over shell equivalents.
 - **Web research**: Use WebSearch/WebFetch for current information beyond training data.
-
-## Team Configuration
-
-Default team profiles are deployed to `.ttoj/templates/team-profiles/` and referenced by the `/team:*` commands. To customize team composition for this project, edit the deployed profiles or create project-specific overrides in `.claude/commands/team/`.
-
 
 ## Codex Skill Mapping
 
