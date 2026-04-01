@@ -161,7 +161,8 @@ class SurrealDBConnection:
                         last_err = e
                     else:
                         raise
-            raise last_err  # type: ignore[misc]
+            assert last_err is not None  # guaranteed by loop with retries > 0
+            raise last_err
 
         if self._write_sem is not None:
             async with self._write_sem:
