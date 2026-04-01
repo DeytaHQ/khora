@@ -455,6 +455,27 @@ class QueryConfig:
     temporal_sql_pushdown: bool = True
     temporal_date_validation: bool = True
 
+    # Stage 1 recall budget distribution
+    stage1_vector_ratio: float = 0.5
+    stage1_graph_ratio: float = 0.3
+    stage1_keyword_ratio: float = 0.3
+
+    # Reranking blend weight
+    reranking_blend_weight: float = 0.7
+
+    # Temporal scoring parameters
+    temporal_hard_cutoff_days: float = 30.0
+    temporal_half_life_hours: float = 24.0
+
+    # Graph search scoring
+    graph_chunk_query_sim_weight: float = 0.6
+
+    # Expanded query discount
+    expanded_query_discount: float = 0.7
+
+    # Linked entity boost
+    linked_entity_boost: float = 1.5
+
     @classmethod
     def from_settings(cls, settings: Any) -> QueryConfig:
         """Create QueryConfig from QuerySettings.
@@ -520,6 +541,16 @@ class QueryConfig:
             temporal_resolver_strategy=getattr(settings, "temporal_resolver_strategy", "hybrid"),
             temporal_sql_pushdown=getattr(settings, "temporal_sql_pushdown", True),
             temporal_date_validation=getattr(settings, "temporal_date_validation", True),
+            # Previously hardcoded values (now configurable)
+            stage1_vector_ratio=getattr(settings, "stage1_vector_ratio", 0.5),
+            stage1_graph_ratio=getattr(settings, "stage1_graph_ratio", 0.3),
+            stage1_keyword_ratio=getattr(settings, "stage1_keyword_ratio", 0.3),
+            reranking_blend_weight=getattr(settings, "reranking_blend_weight", 0.7),
+            temporal_hard_cutoff_days=getattr(settings, "temporal_hard_cutoff_days", 30.0),
+            temporal_half_life_hours=getattr(settings, "temporal_half_life_hours", 24.0),
+            graph_chunk_query_sim_weight=getattr(settings, "graph_chunk_query_sim_weight", 0.6),
+            expanded_query_discount=getattr(settings, "expanded_query_discount", 0.7),
+            linked_entity_boost=getattr(settings, "linked_entity_boost", 1.5),
         )
 
 
@@ -1816,8 +1847,9 @@ class HybridQueryEngine:
                             query_sim = sim_results[chunk_id]
                             if query_sim < _min_graph_sim:
                                 continue
-                            # Blend: 60% query similarity + 40% entity score
-                            chunk_score = 0.6 * query_sim + 0.4 * entity_score
+                            # Blend query similarity + entity score (configurable)
+                            qw = config.graph_chunk_query_sim_weight
+                            chunk_score = qw * query_sim + (1.0 - qw) * entity_score
                         else:
                             # No embedding — fall back to entity score only
                             chunk_score = entity_score
@@ -2227,12 +2259,15 @@ class HybridQueryEngine:
     def _soft_temporal_score(
         chunks: list[tuple[Any, float]],
         temporal_filter: TemporalFilter,
+        *,
+        hard_cutoff_days: float = 30.0,
+        half_life_hours: float = 24.0,
     ) -> list[tuple[Any, float]]:
         """Apply soft temporal scoring with exponential decay.
 
         Chunks inside the temporal window keep full score.
         Chunks outside get exponential decay based on distance.
-        Chunks >30 days outside are hard-filtered.
+        Chunks beyond ``hard_cutoff_days`` are dropped entirely.
         """
         import math
 
@@ -2244,9 +2279,7 @@ class HybridQueryEngine:
         end_secs = _dt_to_epoch(_TF._normalize_tz(end)) if end else None
 
         _SECS_PER_DAY = 86400.0
-        _HARD_CUTOFF_DAYS = 30.0
-        _HALF_LIFE_HOURS = 24.0
-        _DECAY_FACTOR = -0.6931471805599453 / (_HALF_LIFE_HOURS * 3600.0)
+        _DECAY_FACTOR = -0.6931471805599453 / (half_life_hours * 3600.0)
 
         result: list[tuple[Any, float]] = []
         for chunk, score in chunks:
@@ -2276,7 +2309,7 @@ class HybridQueryEngine:
                 result.append((chunk, score))
             else:
                 days_outside = secs_outside / _SECS_PER_DAY
-                if days_outside > _HARD_CUTOFF_DAYS:
+                if days_outside > hard_cutoff_days:
                     continue
                 decay = math.exp(_DECAY_FACTOR * secs_outside)
                 result.append((chunk, score * decay))

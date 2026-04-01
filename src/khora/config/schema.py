@@ -455,11 +455,11 @@ class QuerySettings(BaseSettings):
     entity_linking_exact_match: bool = Field(default=True, description="Use exact name matching")
     entity_linking_fuzzy_match: bool = Field(default=True, description="Use fuzzy name matching")
     entity_linking_embedding_match: bool = Field(default=True, description="Use embedding similarity matching")
-    entity_linking_fuzzy_threshold: float = Field(default=0.6, ge=0.0, le=1.0, description="Minimum fuzzy match ratio")
+    entity_linking_fuzzy_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="Minimum fuzzy match ratio")
     entity_linking_embedding_threshold: float = Field(
         default=0.4, ge=0.0, le=1.0, description="Minimum embedding similarity"
     )
-    entity_linking_max_candidates: int = Field(default=5, ge=1, description="Maximum entity candidates per mention")
+    entity_linking_max_candidates: int = Field(default=10, ge=1, description="Maximum entity candidates per mention")
 
     # Reranking
     enable_reranking: bool = Field(default=True, description="Enable result reranking")
@@ -515,6 +515,72 @@ class QuerySettings(BaseSettings):
     enable_diversity: bool = Field(default=True, description="Enable MMR-style diversity selection in Stage 5")
     diversity_lambda: float = Field(
         default=0.5, ge=0.0, le=1.0, description="Diversity vs relevance tradeoff (0=pure diversity, 1=pure relevance)"
+    )
+
+    # Stage 1 recall budget distribution (must sum to ~1.0)
+    stage1_vector_ratio: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of Stage 1 recall budget allocated to vector search",
+    )
+    stage1_graph_ratio: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of Stage 1 recall budget allocated to graph search",
+    )
+    stage1_keyword_ratio: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of Stage 1 recall budget allocated to keyword search",
+    )
+
+    # Reranking blend weight (how much to trust reranker vs original score)
+    reranking_blend_weight: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Weight for reranker score in blend (remainder goes to original). "
+        "0.7 = trust reranker 70%, keep 30% original.",
+    )
+
+    # Temporal scoring parameters (previously hardcoded)
+    temporal_hard_cutoff_days: float = Field(
+        default=30.0,
+        ge=0.0,
+        description="Hard cutoff for soft temporal scoring. Chunks outside the temporal "
+        "window by more than this many days are scored zero.",
+    )
+    temporal_half_life_hours: float = Field(
+        default=24.0,
+        ge=1.0,
+        description="Half-life in hours for temporal decay outside the query window.",
+    )
+
+    # Graph search scoring (previously hardcoded)
+    graph_chunk_query_sim_weight: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Weight for query similarity in graph chunk scoring (remainder = entity score).",
+    )
+
+    # Expanded query discount (previously hardcoded)
+    expanded_query_discount: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Discount factor for HyDE/expansion-generated query results.",
+    )
+
+    # Linked entity boost (previously hardcoded)
+    linked_entity_boost: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=5.0,
+        description="Score multiplier for entities matched via entity linking.",
     )
 
     # Two-tier temporal resolver

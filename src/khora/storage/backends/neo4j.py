@@ -1143,7 +1143,7 @@ class Neo4jBackend(GraphBackendBase):
             logger.debug(f"Included {inverse_count} inverse relationships")
 
         # Find slowest type group for quick diagnosis
-        _slowest_type = max(_per_type_ms, key=_per_type_ms.get, default="") if _per_type_ms else ""  # type: ignore[arg-type]
+        _slowest_type = max(_per_type_ms, key=lambda k: _per_type_ms[k], default="") if _per_type_ms else ""
         _slowest_ms = _per_type_ms.get(_slowest_type, 0.0)
 
         with trace_span(
