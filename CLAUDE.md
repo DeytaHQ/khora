@@ -17,78 +17,13 @@ uv run khora ontology preview <file.yaml>         # Rich preview
 
 ## Architecture
 
-```
-MemoryLake → Engine (graphrag | skeleton | vectorcypher) → StorageCoordinator
-                                        ├── PostgreSQL (documents, tenancy)
-                                        ├── pgvector (embeddings)
-                                        └── Graph backend (Neo4j | SurrealDB | ...)
-
-Traditional stack: PostgreSQL + pgvector + Neo4j  (three databases)
-Unified stack:     SurrealDB                      (one database, all roles)
-```
-
 - **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`
 - **Graph backends:** Neo4j, SurrealDB, Memgraph, ArcadeDB — implement `GraphBackend` in `storage/backends/base.py`
 - **SurrealDB:** unified backend (graph + vector + relational). Modes: `memory://`, `surrealkv://` (embedded), `ws://` (remote). Set `backend: surrealdb` in config
 - **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora ontology construct`
 - **Config:** env vars with `KHORA_` prefix and single underscore (e.g., `KHORA_QUERY_ENABLE_HYDE=true`, `KHORA_LLM_MODEL=gpt-4o`). Legacy `__` nesting also supported
 
-## Public API
-
-Exported from `khora/__init__.py`:
-
-```python
-from khora import (
-    MemoryLake,           # Primary interface (async context manager via memory_lake())
-    RememberResult,       # Result of remember()
-    RecallResult,         # Result of recall()
-    BatchResult,          # Result of remember_batch()
-    Stats,                # Namespace statistics
-    LLMUsage,             # Token/cost tracking (consumed by Poros/Peras — DYT-645)
-    SearchMode,           # VECTOR | GRAPH | HYBRID | ALL
-    KhoraConfig,          # Main Pydantic configuration
-    DocumentSource,       # Lightweight doc metadata for attribution
-    ExpertiseConfig,      # Domain expertise definition (ADR-022 stable API)
-    EntityTypeConfig,     # Entity type definition
-    RelationshipTypeConfig,  # Relationship type definition
-    create_engine,        # Instantiate engine by name
-    list_engines,         # ["graphrag", "skeleton", "vectorcypher"]
-    register_engine,      # Register custom engine class
-)
-```
-
-### MemoryLake Methods
-
-| Method | Purpose |
-|--------|---------|
-| `remember(content, *, namespace, expertise, ...)` | Store content, extract entities |
-| `remember_batch(documents, *, namespace, expertise, ...)` | Batch ingest with optimization |
-| `recall(query, *, namespace, limit, mode, min_similarity, ...)` | Retrieve memories |
-| `forget(document_id, *, namespace)` | Remove a memory |
-| `create_namespace()` / `get_namespace()` / `get_namespace_by_stable_id()` | Namespace management |
-| `get_entity()` / `list_entities()` / `search_entities()` / `find_related_entities()` | Entity operations |
-| `get_document()` / `list_documents()` | Document retrieval |
-| `stats(*, namespace)` | Namespace statistics |
-| `health_check()` | Backend health status |
-| `connect()` / `disconnect()` | Lifecycle (or use `async with memory_lake()`) |
-
-### Result Types (frozen dataclasses)
-
-**LLMUsage** — token tracking for cost attribution (Poros/Peras consume this):
-- `operation`, `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `latency_ms`, `batch_size`
-
-**RememberResult** — single document ingest result:
-- `document_id`, `chunks`, `entities`, `relationships`, `llm_usage: list[LLMUsage]`
-
-**BatchResult** — batch ingest result:
-- `total`, `processed`, `skipped`, `failed`, `chunks`, `entities`, `relationships`, `metadata`, `llm_usage: list[LLMUsage]`
-
-**RecallResult** — query result:
-- `query`, `namespace_id`, `chunks`, `entities`, `context_text` (pre-formatted for LLM), `relationships` (VectorCypher only), `llm_usage`
-
-**Stats** — namespace counters
-
-## Key Entry Points
+### Key Entry Points
 
 - `memory_lake.py` — `remember()`, `recall()`, `forget()`, `remember_batch()`. Accepts `expertise: ExpertiseConfig`
 - `extraction/skills/base.py` — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` (ADR-022 stable)
@@ -103,94 +38,9 @@ from khora import (
 - `config/schema.py` — `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
 - `telemetry/` — Optional PostgreSQL-backed telemetry collector + `@trace` decorator
 
-## Entity Extraction Pipeline
+## Conventions
 
-3-phase pipeline in `pipelines/flows/ingest.py`:
-
-```
-Phase 1: Stage — checksum-based change detection, skip unchanged docs
-Phase 2: Enrich (parallel per document):
-  ├── Chunk (fixed | semantic | recursive | conversation)
-  ├── Embed (LiteLLM, shared embedder) ─┐ concurrent
-  ├── Extract entities (LLM) ───────────┘
-  ├── Selective extraction — score chunks by importance, top-K to LLM
-  ├── Entity deduplication (smart O(1) index or fuzzy resolution)
-  ├── Co-occurrence edges + optional cross-chunk relationships
-  └── Store (chunks → pgvector, entities → graph, embeddings → vector)
-Phase 3: Semantic Expansion (optional):
-  ├── Cross-tool entity unification
-  └── Relationship inference (smart | batch | incremental | none)
-```
-
-**Chunkers** (`extraction/chunkers/`): `FixedChunker` (token-based), `SemanticChunker` (sentence boundaries), `RecursiveChunker` (hierarchical), `ConversationChunker` (speaker-aware)
-
-**Builtin skills** (`extraction/skills/builtin/`): `general.yaml` (9 entity types, 21 relationship types), `slack.yaml` (Slack-optimized with channel/message correlation)
-
-**Entity resolution** (`extraction/entity_resolution.py`): 5-strategy dedup (exact → alias → attribute → embedding → fuzzy). Per-type thresholds (PERSON 0.92, DATE 0.95, default 0.85)
-
-**Semantic expansion** (`extraction/expansion/`): `SemanticExpander` orchestrates `CrossToolUnifier` + `RelationshipInferrer` + `RuleEngine`
-
-## Configuration
-
-`KhoraConfig` (Pydantic BaseSettings, env prefix `KHORA_`). Each section has its own prefix for clean single-underscore env vars (e.g., `KHORA_LLM_MODEL`, `KHORA_QUERY_ENABLE_HYDE`):
-
-| Section | Key Settings |
-|---------|-------------|
-| **storage** | `backend` (`postgres`/`surrealdb`), graph config (Neo4j/Memgraph/ArcadeDB/SurrealDB), vector config (pgvector/ArcadeDB/SurrealDB), PostgreSQL pool tuning, HNSW parameters |
-| **llm** | `model` (default `gpt-4o-mini`), `embedding_model` (`text-embedding-3-small`), `extraction_model`, `embedding_dimension` (1536), temperature, max_tokens, max_concurrent_llm_calls, LiteLLM router config |
-| **pipeline** | `chunking_strategy`, `chunk_size` (512), `extract_entities`, `selective_extraction` (true), `extraction_importance_ratio` (0.7), `skip_embedding_entity_types` (DATE, URL, EMAIL) |
-| **query** | `default_mode` (hybrid), fusion weights (vector 0.5, graph 0.3, keyword 0.2), reranking, HyDE, recency bias, entity linking, BM25, temporal resolver |
-| **tenancy** | `default_mode` (shared/isolated), `enforce_namespace` |
-| Top-level | `database_url`, `neo4j_url`, `debug`, `telemetry_database_url`, `telemetry_service_name` |
-
-## Engine Selection
-
-| Use Case | Engine | Requires |
-|----------|--------|----------|
-| Knowledge bases, entity exploration | `graphrag` | Neo4j or SurrealDB |
-| Multi-hop queries, complex relationships | `vectorcypher` | Neo4j or SurrealDB |
-| Chat history, cost-sensitive | `skeleton` | Graph backend optional |
-
-## Acceleration (`_accel.py`)
-
-3-tier: Rust (`khora-accel` wheel, Pyo3 + rayon) → NumPy/RapidFuzz → pure Python. Override: `KHORA_ACCEL_BACKEND` env var (`rust`/`numpy`/`python`).
-
-Key functions: `cosine_similarity`, `batch_cosine_similarity`, `pairwise_cosine_above_threshold`, `levenshtein_similarity`, `batch_levenshtein`, `pagerank`, `reciprocal_rank_fusion`, `weighted_rrf`, `mmr_diversity_select`, `resolve_entities_batch`, `normalize_entity_name`, `detect_temporal_category`, `batch_temporal_filter`, `detect_communities`, `deduplicate_chunks`, `extract_keywords`
-
-## Dependencies & Extras
-
-Core: `sqlalchemy[asyncio]`, `asyncpg`, `pgvector`, `neo4j`, `litellm`, `tiktoken`, `sentence-transformers`, `pydantic-settings`, `click`, `rich`, `loguru`, `tenacity`, `dateparser`, `jinja2`, `pyyaml`
-
-| Extra | Install | Purpose |
-|-------|---------|---------|
-| `surrealdb` | `pip install khora[surrealdb]` | SurrealDB unified backend |
-| `embedded` | `pip install khora[embedded]` | SurrealDB embedded mode |
-| `logfire` | `pip install khora[logfire]` | Logfire observability |
-| `nlp` | `pip install khora[nlp]` | spaCy NLP |
-| `accel` | `pip install khora[accel]` | RapidFuzz CPU acceleration |
-| `rust` | `pip install khora[rust]` | Rust-accelerated ops (khora-accel) |
-| `memgraph` | `pip install khora[memgraph]` | Memgraph backend |
-| `arcadedb` | `pip install khora[arcadedb]` | ArcadeDB backend |
-| `graph-all` | `pip install khora[graph-all]` | All graph backends |
-| `all-backends` | `pip install khora[all-backends]` | All backends |
-| `reranking` | `pip install khora[reranking]` | Neural reranking |
-| `dev` | `pip install khora[dev]` | Testing & linting |
-
-## Testing
-
-```bash
-uv run pytest tests/unit/ -v               # Unit tests
-uv run pytest -k "test_remember" -v         # By name
-uv run pytest tests/unit/test_memory_lake.py  # Single file
-```
-
-Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`. Async: `asyncio_mode = "auto"`.
-
-## Releasing
-
-Versions from git tags — no manual bumps. `git tag vX.Y.Z && git push origin vX.Y.Z` triggers publish workflows. See [`docs/RELEASE.md`](docs/RELEASE.md).
-
-## Version Bumps
+### Version Bumps
 
 When bumping the version, update all of the following and regenerate lockfiles:
 
@@ -199,8 +49,6 @@ When bumping the version, update all of the following and regenerate lockfiles:
 3. `rust/khora-accel/Cargo.toml`
 4. `rust/khora-accel/pyproject.toml`
 5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
-
-@.claude/docs/workflow.md
 
 ## Gotchas
 
@@ -245,3 +93,5 @@ When bumping the version, update all of the following and regenerate lockfiles:
 - **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
 - **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` changes require coordination
 - `scripts/` vendored from TTOJ — skip in audits
+
+@.claude/docs/workflow.md
