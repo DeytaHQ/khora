@@ -200,7 +200,7 @@ class WeightedSumStrategy:
                 item_scores[item_id] += w * norm_s
 
         # Sort descending
-        sorted_ids = sorted(item_scores, key=item_scores.get, reverse=True)
+        sorted_ids = sorted(item_scores, key=lambda k: item_scores[k], reverse=True)
         result = [(items_by_id[iid], item_scores[iid]) for iid in sorted_ids]
 
         return FusionResult(
