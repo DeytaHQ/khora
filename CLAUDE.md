@@ -190,6 +190,18 @@ Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`. As
 
 Versions from git tags — no manual bumps. `git tag vX.Y.Z && git push origin vX.Y.Z` triggers publish workflows. See [`docs/RELEASE.md`](docs/RELEASE.md).
 
+## Version Bumps
+
+When bumping the version, update all of the following and regenerate lockfiles:
+
+1. `pyproject.toml`
+2. `src/khora/__init__.py`
+3. `rust/khora-accel/Cargo.toml`
+4. `rust/khora-accel/pyproject.toml`
+5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
+
+@.claude/docs/workflow.md
+
 ## Gotchas
 
 ### Migrations & Schema
