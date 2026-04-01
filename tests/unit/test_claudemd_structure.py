@@ -62,33 +62,21 @@ class TestCriticalGotchas:
     """Four critical gotchas that must never be lost during restructuring."""
 
     def test_create_tables_deprecated(self, claude_md_content: str) -> None:
-        assert "create_tables()" in claude_md_content, (
-            "Missing critical gotcha: create_tables() deprecation warning"
-        )
-        assert "deprecated" in claude_md_content.lower(), (
-            "create_tables() must be marked as deprecated"
-        )
+        assert "create_tables()" in claude_md_content, "Missing critical gotcha: create_tables() deprecation warning"
+        assert "deprecated" in claude_md_content.lower(), "create_tables() must be marked as deprecated"
 
     def test_khora_alembic_version_table(self, claude_md_content: str) -> None:
-        assert "khora_alembic_version" in claude_md_content, (
-            "Missing critical gotcha: khora_alembic_version table naming"
-        )
+        assert (
+            "khora_alembic_version" in claude_md_content
+        ), "Missing critical gotcha: khora_alembic_version table naming"
 
     def test_as_uuid_true(self, claude_md_content: str) -> None:
-        assert "as_uuid=True" in claude_md_content, (
-            "Missing critical gotcha: as_uuid=True UUID handling"
-        )
-        assert "52 UUID columns" in claude_md_content, (
-            "Must mention all 52 UUID columns"
-        )
+        assert "as_uuid=True" in claude_md_content, "Missing critical gotcha: as_uuid=True UUID handling"
+        assert "52 UUID columns" in claude_md_content, "Must mention all 52 UUID columns"
 
     def test_surrealdb_knn_broken(self, claude_md_content: str) -> None:
-        assert "SurrealDB KNN broken" in claude_md_content, (
-            "Missing critical gotcha: SurrealDB KNN broken"
-        )
-        assert "<|K|>" in claude_md_content, (
-            "Must mention <|K|> operator as unreliable"
-        )
+        assert "SurrealDB KNN broken" in claude_md_content, "Missing critical gotcha: SurrealDB KNN broken"
+        assert "<|K|>" in claude_md_content, "Must mention <|K|> operator as unreliable"
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +152,4 @@ class TestRemovedDuplicateContent:
         ],
     )
     def test_readme_sections_removed(self, claude_md_content: str, heading: str) -> None:
-        assert heading not in claude_md_content, (
-            f"README-duplicated section should be removed: {heading}"
-        )
+        assert heading not in claude_md_content, f"README-duplicated section should be removed: {heading}"
