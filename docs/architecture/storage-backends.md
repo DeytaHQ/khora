@@ -461,7 +461,7 @@ class GraphBackendProtocol(Protocol):
     ) -> int: ...
 ```
 
-This means you can swap pgvector for ArcadeDB, or Neo4j for Kùzu/Memgraph, without changing the rest of the system. The protocols define the contract; implementations fulfill it.
+This means you can swap pgvector for SurrealDB, or Neo4j for Memgraph, without changing the rest of the system. The protocols define the contract; implementations fulfill it.
 
 ## Alternative Graph Backends
 
@@ -472,8 +472,7 @@ Beyond Neo4j, Khora supports three additional graph backends:
 | **Neo4j** (default) | Server | Bolt/Cypher | Production, multi-user, large graphs |
 | **Kùzu** | Embedded | Cypher | Single-process, CI/testing, edge devices |
 | **Memgraph** | Server | Bolt/Cypher | In-memory, low-latency, streaming |
-| **ArcadeDB** | Server | HTTP/Cypher+SQL | Multi-model (graph + vector in one DB) |
-| **SurrealDB** | Server | WebSocket/HTTP | Unified multi-model (graph + vector + relational in one DB) |
+| **SurrealDB** | Server/Embedded | WebSocket/HTTP | Unified multi-model (graph + vector + relational in one DB) |
 
 ### Kùzu (Embedded)
 
@@ -504,22 +503,6 @@ storage:
     backend: memgraph
     url: bolt://localhost:7687
     user: memgraph
-```
-
-### ArcadeDB (Multi-Model)
-
-ArcadeDB can serve as **both** graph and vector backend. When both configs point to the same instance, Khora creates one backend object for both roles:
-
-```yaml
-storage:
-  graph:
-    backend: arcadedb
-    url: http://localhost:2480
-    database: khora
-  vector:
-    backend: arcadedb
-    url: http://localhost:2480
-    database: khora
 ```
 
 ## SurrealDB: The Unified Backend
@@ -587,7 +570,7 @@ src/khora/storage/backends/surrealdb/
 |---------|------|----------|
 | **pgvector** (default) | PostgreSQL extension | Most deployments, colocated with relational data |
 | **SurrealDB** | WebSocket/HTTP | Unified single-server setup |
-| **ArcadeDB** | HTTP/REST | Multi-model single-server setup |
+| **LanceDB** | Embedded (file-backed) | Chronicle engine, zero-infrastructure deployments |
 
 ## Bulk Mode
 
@@ -649,8 +632,6 @@ export KHORA_NEO4J_URL="bolt://neo4j:password@localhost:7687"
 # Install specific backend
 pip install khora[kuzu]
 pip install khora[memgraph]
-pip install khora[arcadedb]
-
 # Install all graph backends
 pip install khora[graph-all]
 
