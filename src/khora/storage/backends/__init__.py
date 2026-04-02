@@ -24,11 +24,6 @@ try:
 except ImportError:
     MemgraphBackend = None  # type: ignore[assignment,misc]
 
-try:
-    from .arcadedb import ArcadeDBBackend
-except ImportError:
-    ArcadeDBBackend = None  # type: ignore[assignment,misc]
-
 __all__ = [
     # Protocols
     "RelationalBackendProtocol",
@@ -44,5 +39,4 @@ __all__ = [
     "Neo4jBackend",
     "KuzuBackend",
     "MemgraphBackend",
-    "ArcadeDBBackend",
 ]

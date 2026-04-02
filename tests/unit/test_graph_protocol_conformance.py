@@ -26,11 +26,6 @@ try:
 except ImportError:
     HAS_MEMGRAPH = False
 
-HAS_ARCADEDB = True
-try:
-    from khora.storage.backends.arcadedb import ArcadeDBBackend
-except ImportError:
-    HAS_ARCADEDB = False
 
 
 @pytest.mark.unit
@@ -50,11 +45,6 @@ class TestProtocolConformance:
     @pytest.mark.skipif(not HAS_MEMGRAPH, reason="neo4j package not installed")
     def test_memgraph_implements_protocol(self):
         backend = MemgraphBackend("bolt://localhost:7687")
-        self._assert_graph_protocol(backend)
-
-    @pytest.mark.skipif(not HAS_ARCADEDB, reason="httpx not installed")
-    def test_arcadedb_implements_protocol(self):
-        backend = ArcadeDBBackend("http://localhost:2480")
         self._assert_graph_protocol(backend)
 
     def _assert_graph_protocol(self, backend):
@@ -124,11 +114,3 @@ class TestFromConfig:
         assert backend._url == "bolt://mg:7687"
         assert backend._user == "mg"
 
-    @pytest.mark.skipif(not HAS_ARCADEDB, reason="httpx not installed")
-    def test_arcadedb_from_config(self):
-        from khora.config.schema import ArcadeDBGraphConfig
-
-        config = ArcadeDBGraphConfig(url="http://arcade:2480", database="testdb")
-        backend = ArcadeDBBackend.from_config(config)
-        assert backend._url == "http://arcade:2480"
-        assert backend._database == "testdb"

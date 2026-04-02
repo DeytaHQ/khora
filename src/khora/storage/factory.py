@@ -30,13 +30,11 @@ _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
     "neo4j": ("khora.storage.backends.neo4j", "Neo4jBackend"),
     "kuzu": ("khora.storage.backends.kuzu", "KuzuBackend"),
     "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
-    "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
     "surrealdb": ("khora.storage.backends.surrealdb.graph", "SurrealDBGraphAdapter"),
 }
 
 _VECTOR_REGISTRY: dict[str, tuple[str, str]] = {
     "pgvector": ("khora.storage.backends.pgvector", "PgVectorBackend"),
-    "arcadedb": ("khora.storage.backends.arcadedb", "ArcadeDBBackend"),
     "surrealdb": ("khora.storage.backends.surrealdb.vector", "SurrealDBVectorAdapter"),
 }
 
@@ -126,9 +124,6 @@ class StorageConfig:
             event_store_url=storage_config.get("event_store", {}).get("url") or postgresql_url,
         )
 
-
-# Cache for ArcadeDB dual-role instance sharing
-_arcadedb_instances: dict[str, Any] = {}
 
 # Cache for SurrealDB dual-role instance sharing
 _surrealdb_instances: dict[str, Any] = {}
@@ -312,18 +307,7 @@ class StorageFactory:
         config: Any,
         role: str,
     ) -> Any | None:
-        """Create a backend instance from registry via lazy import + from_config().
-
-        For ArcadeDB, reuses the same instance when it serves both graph and vector roles.
-        """
-        if backend_name == "arcadedb":
-            # ArcadeDB dual-role: reuse instance for same URL
-            url = getattr(config, "url", None) or ""
-            cache_key = f"arcadedb:{url}"
-            if cache_key in _arcadedb_instances:
-                logger.info(f"Reusing ArcadeDB instance for {role} role (url={url})")
-                return _arcadedb_instances[cache_key]
-
+        """Create a backend instance from registry via lazy import + from_config()."""
         if backend_name == "surrealdb":
             # SurrealDB dual-role: reuse instance for same endpoint
             url = getattr(config, "url", None) or ""
@@ -344,10 +328,6 @@ class StorageFactory:
             raise ValueError(f"Backend class {class_name} does not implement from_config()")
 
         instance = cls.from_config(config)
-
-        if backend_name == "arcadedb":
-            url = getattr(config, "url", None) or ""
-            _arcadedb_instances[f"arcadedb:{url}"] = instance
 
         if backend_name == "surrealdb":
             url = getattr(config, "url", None) or ""

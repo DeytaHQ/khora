@@ -6,7 +6,7 @@ Provides unified access to multiple storage backends:
 - Neo4j: Knowledge graph (entities, relationships)
 - Kùzu: Embedded graph database (optional)
 - Memgraph: In-memory graph database (optional)
-- ArcadeDB: Multi-model graph + vector database (optional)
+- SurrealDB: Unified multi-model backend (graph + vector + relational)
 """
 
 from __future__ import annotations

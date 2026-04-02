@@ -3,7 +3,6 @@
 import pytest
 
 from khora.config.schema import (
-    ArcadeDBGraphConfig,
     KuzuConfig,
     MemgraphConfig,
     Neo4jConfig,
@@ -20,11 +19,9 @@ class TestRegistryContents:
         assert "neo4j" in _GRAPH_REGISTRY
         assert "kuzu" in _GRAPH_REGISTRY
         assert "memgraph" in _GRAPH_REGISTRY
-        assert "arcadedb" in _GRAPH_REGISTRY
 
     def test_vector_registry_has_all_backends(self):
         assert "pgvector" in _VECTOR_REGISTRY
-        assert "arcadedb" in _VECTOR_REGISTRY
 
 
 @pytest.mark.unit
@@ -96,16 +93,6 @@ class TestFactoryNewStyleDispatch:
         # Uses neo4j driver, should succeed
         if backend is not None:
             assert type(backend).__name__ == "MemgraphBackend"
-
-    def test_arcadedb_graph_config_dispatch(self):
-        config = StorageConfig(
-            graph_config=ArcadeDBGraphConfig(url="http://localhost:2480"),
-        )
-        factory = StorageFactory(config=config)
-        backend = factory.create_graph_backend()
-        # httpx is a core dep, so this should succeed
-        if backend is not None:
-            assert type(backend).__name__ == "ArcadeDBBackend"
 
     def test_pgvector_config_dispatch(self):
         config = StorageConfig(

@@ -105,17 +105,6 @@ class MemgraphConfig(BaseModel):
     password: str = Field(default="", description="Memgraph password")
 
 
-class ArcadeDBGraphConfig(BaseModel):
-    """ArcadeDB graph backend configuration."""
-
-    backend: Literal["arcadedb"] = "arcadedb"
-    url: str | None = Field(default=None, description="ArcadeDB HTTP URL")
-    database: str = Field(default="khora", description="ArcadeDB database name")
-    user: str = Field(default="root", description="ArcadeDB username")
-    password: str = Field(default="", description="ArcadeDB password")
-    query_language: str = Field(default="cypher", description="Query language: cypher or gremlin")
-
-
 class SurrealDBConfig(BaseModel):
     """SurrealDB unified backend configuration (graph role).
 
@@ -145,7 +134,6 @@ GraphConfig = Annotated[
     Annotated[Neo4jConfig, Tag("neo4j")]
     | Annotated[KuzuConfig, Tag("kuzu")]
     | Annotated[MemgraphConfig, Tag("memgraph")]
-    | Annotated[ArcadeDBGraphConfig, Tag("arcadedb")]
     | Annotated[SurrealDBConfig, Tag("surrealdb")],
     Discriminator(_graph_discriminator),
 ]
@@ -161,17 +149,6 @@ class PgVectorConfig(BaseModel):
 
     backend: Literal["pgvector"] = "pgvector"
     url: str | None = Field(default=None, description="pgvector connection URL")
-    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
-
-
-class ArcadeDBVectorConfig(BaseModel):
-    """ArcadeDB vector backend configuration."""
-
-    backend: Literal["arcadedb"] = "arcadedb"
-    url: str | None = Field(default=None, description="ArcadeDB HTTP URL")
-    database: str = Field(default="khora", description="ArcadeDB database name")
-    user: str = Field(default="root", description="ArcadeDB username")
-    password: str = Field(default="", description="ArcadeDB password")
     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
 
 
@@ -200,7 +177,6 @@ def _vector_discriminator(v: Any) -> str:
 
 VectorConfig = Annotated[
     Annotated[PgVectorConfig, Tag("pgvector")]
-    | Annotated[ArcadeDBVectorConfig, Tag("arcadedb")]
     | Annotated[SurrealDBVectorConfig, Tag("surrealdb")],
     Discriminator(_vector_discriminator),
 ]
