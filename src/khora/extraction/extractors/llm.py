@@ -241,6 +241,7 @@ class LLMEntityExtractor(EntityExtractor):
         self._timeout = timeout
         self._max_retries = max_retries
         self._retry_wait = retry_wait
+        self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
         # Register litellm failure callback to log 429 rate-limit responses
@@ -1423,12 +1424,24 @@ class LLMEntityExtractor(EntityExtractor):
                 results = [self._filter_by_confidence(r, expertise) for r in results]
             return results
 
-        # Process batches sequentially so the circuit breaker can trip and prevent
-        # wasting time on doomed batch calls.  Individual extractions within each
-        # batch still run concurrently via the semaphore.
-        for batch in batches:
-            results = await _run_batch(batch)
-            all_results.extend(results)
+        # Process batches in waves: concurrent within each wave, circuit breaker
+        # checked between waves.  This restores most of the throughput of the
+        # original asyncio.gather() while letting the breaker trip before the
+        # next wave launches.  Worst-case waste: (wave_size - 1) extra doomed
+        # API calls in the wave where the first failure occurs.
+        wave_size = 4
+        for wave_start in range(0, len(batches), wave_size):
+            if _consecutive_batch_failures >= _BATCH_FAILURE_THRESHOLD:
+                # Circuit breaker tripped between waves — remaining batches
+                # go through single-doc extraction via _run_batch's own check.
+                for batch in batches[wave_start:]:
+                    results = await _run_batch(batch)
+                    all_results.extend(results)
+                break
+            wave = batches[wave_start : wave_start + wave_size]
+            wave_results = await asyncio.gather(*[_run_batch(b) for b in wave])
+            for results in wave_results:
+                all_results.extend(results)
 
         error_count = sum(1 for r in all_results if r.metadata.get("error"))
         logger.debug(
