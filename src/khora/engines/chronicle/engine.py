@@ -144,8 +144,8 @@ class ChronicleEngine:
         """
         self._config = config
 
-        # Build storage config (shared helper handles SurrealDB, pool_pre_ping, etc.)
-        self._storage_config = storage_config or build_storage_config(config)
+        # Build storage config — skip graph backend (chronicle is PostgreSQL + pgvector only)
+        self._storage_config = storage_config or build_storage_config(config, skip_graph=True)
 
         self._storage: StorageCoordinator | None = None
         self._embedder: LiteLLMEmbedder | None = None

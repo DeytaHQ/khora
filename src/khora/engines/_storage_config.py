@@ -15,11 +15,17 @@ if TYPE_CHECKING:
     from khora.config import KhoraConfig
 
 
-def build_storage_config(config: KhoraConfig) -> StorageConfig:
+def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> StorageConfig:
     """Build a StorageConfig from a KhoraConfig, handling all backend types.
 
     This replaces the ~20-line inline config construction that was
     duplicated in Skeleton, GraphRAG, and VectorCypher engines.
+
+    Args:
+        config: The KhoraConfig to build from.
+        skip_graph: When True, omit graph backend config even if Neo4j URL
+            is set. Used by engines that don't need a graph database
+            (skeleton, chronicle).
 
     Supports:
     - Traditional PostgreSQL + pgvector + Neo4j/Kuzu/Memgraph stack
@@ -38,7 +44,7 @@ def build_storage_config(config: KhoraConfig) -> StorageConfig:
 
     # --- Traditional PostgreSQL + graph backend ---
     postgresql_url = config.get_postgresql_url()
-    graph_config = config.get_graph_config()
+    graph_config = None if skip_graph else config.get_graph_config()
 
     storage_kwargs: dict[str, Any] = {
         "postgresql_url": postgresql_url,
