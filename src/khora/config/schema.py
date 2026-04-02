@@ -176,8 +176,7 @@ def _vector_discriminator(v: Any) -> str:
 
 
 VectorConfig = Annotated[
-    Annotated[PgVectorConfig, Tag("pgvector")]
-    | Annotated[SurrealDBVectorConfig, Tag("surrealdb")],
+    Annotated[PgVectorConfig, Tag("pgvector")] | Annotated[SurrealDBVectorConfig, Tag("surrealdb")],
     Discriminator(_vector_discriminator),
 ]
 

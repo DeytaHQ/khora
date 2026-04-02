@@ -27,7 +27,6 @@ except ImportError:
     HAS_MEMGRAPH = False
 
 
-
 @pytest.mark.unit
 class TestProtocolConformance:
     """Verify that all backend classes have the required protocol methods."""
@@ -113,4 +112,3 @@ class TestFromConfig:
         backend = MemgraphBackend.from_config(config)
         assert backend._url == "bolt://mg:7687"
         assert backend._user == "mg"
-
