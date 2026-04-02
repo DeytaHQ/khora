@@ -1032,7 +1032,7 @@ class HybridQueryEngine:
                     edge_list: list[tuple[str, str]] = []
                     for eid in seed_entity_ids:
                         if eid in neighborhoods:
-                            for rel in neighborhoods[eid]:
+                            for rel in neighborhoods[eid].get("relationships", []):
                                 src = str(rel.get("source_id", ""))
                                 tgt = str(rel.get("target_id", ""))
                                 if src and tgt:

@@ -1229,7 +1229,7 @@ class VectorCypherEngine:
                             break
                         if eid not in neighborhoods:
                             continue
-                        for neighbor in neighborhoods[eid]:
+                        for neighbor in neighborhoods[eid].get("entities", []):
                             if expansion_count >= max_expansion:
                                 break
                             # Each neighbor has source_chunk_ids
