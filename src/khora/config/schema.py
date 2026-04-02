@@ -583,6 +583,26 @@ class QuerySettings(BaseSettings):
         description="Score multiplier for entities matched via entity linking.",
     )
 
+    # Structured document features (default on, no-op without khora metadata)
+    enable_relationship_expansion: bool = Field(
+        default=True,
+        description="After retrieval, follow relationship edges from top entities to inject "
+        "related chunks. Useful for structured documents with dense cross-references. "
+        "No effect if the graph has no relationships.",
+    )
+    relationship_expansion_max: int = Field(
+        default=5, ge=1, le=20, description="Maximum additional chunks from relationship expansion"
+    )
+    enable_taxonomy_boost: bool = Field(
+        default=True,
+        description="Classify query against document hierarchy (chapters/topics) and boost chunks "
+        "from matching scope. Reads from namespace.metadata['khora']['taxonomy']. "
+        "No effect if no taxonomy data is present under the khora key.",
+    )
+    taxonomy_boost_factor: float = Field(
+        default=1.5, ge=1.0, le=3.0, description="Score multiplier for chunks from taxonomy-matched scope"
+    )
+
     # Two-tier temporal resolver
     enable_temporal_resolver: bool = Field(
         default=True, description="Enable two-tier temporal resolver (dateparser + LLM)"
