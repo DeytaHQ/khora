@@ -590,13 +590,38 @@ class VectorCypherRetriever:
         entity_ids_str = [str(eid) for eid, _ in all_entity_scores]
 
         # Start relationship fetch immediately (doesn't need full Entity objects)
-        rels_task = asyncio.create_task(
-            self._dual_nodes.get_relationships_between(
-                entity_ids_str,
-                str(namespace_id),
-                limit=self._config.max_relationships,
+        if self._dual_nodes is not None:
+            rels_task = asyncio.create_task(
+                self._dual_nodes.get_relationships_between(
+                    entity_ids_str,
+                    str(namespace_id),
+                    limit=self._config.max_relationships,
+                )
             )
-        )
+        else:
+            # SurrealDB: no dual node manager, fetch via storage coordinator
+            async def _fetch_rels_from_storage() -> list:
+                if not self._storage or not self._storage.graph:
+                    return []
+                rels = []
+                for eid in entity_ids_to_fetch[:10]:
+                    try:
+                        entity_rels = await self._storage.graph.get_entity_relationships(eid, limit=20)
+                        for r in entity_rels:
+                            rels.append(
+                                {
+                                    "id": str(r.id),
+                                    "source_entity_id": str(r.source_entity_id),
+                                    "target_entity_id": str(r.target_entity_id),
+                                    "relationship_type": r.relationship_type,
+                                    "description": r.description or "",
+                                }
+                            )
+                    except Exception:
+                        pass
+                return rels
+
+            rels_task = asyncio.create_task(_fetch_rels_from_storage())
 
         # Batch-fetch full entities from storage in parallel
         entity_results: list[tuple[Entity, float]] = []
@@ -910,14 +935,23 @@ class VectorCypherRetriever:
         with trace_span("khora.vectorcypher.cypher_expand", entry_count=len(entry_entity_ids), depth=depth) as span:
             depth = min(max(1, depth), self._config.max_depth)
 
-            # Get neighborhoods from dual node manager
-            neighborhoods = await self._dual_nodes.get_entity_neighborhoods(
-                entity_ids=entry_entity_ids,
-                namespace_id=namespace_id,
-                depth=depth,
-                limit_per_entity=20,
-                prefer_current=prefer_current,
-            )
+            # Get neighborhoods from dual node manager (Neo4j) or storage coordinator (SurrealDB)
+            if self._dual_nodes is not None:
+                neighborhoods = await self._dual_nodes.get_entity_neighborhoods(
+                    entity_ids=entry_entity_ids,
+                    namespace_id=namespace_id,
+                    depth=depth,
+                    limit_per_entity=20,
+                    prefer_current=prefer_current,
+                )
+            elif self._storage and self._storage.graph:
+                neighborhoods = await self._storage.get_neighborhoods_batch(
+                    entry_entity_ids,
+                    depth=depth,
+                    limit_per_entity=20,
+                )
+            else:
+                neighborhoods = {}
 
             # Score entities by distance from entry points and collect entity info
             entity_scores: dict[UUID, float] = {}
@@ -1167,14 +1201,41 @@ class VectorCypherRetriever:
             entity_count=len(entity_ids),
             namespace_id=str(namespace_id),
         ) as span:
-            chunk_records = await self._dual_nodes.get_chunks_by_entities(
-                entity_ids=entity_ids,
-                namespace_id=namespace_id,
-                temporal_filter=temporal_filter,
-                temporal_sort=temporal_sort,
-                prefer_current=prefer_current,
-                limit=limit,
-            )
+            if self._dual_nodes is not None:
+                chunk_records = await self._dual_nodes.get_chunks_by_entities(
+                    entity_ids=entity_ids,
+                    namespace_id=namespace_id,
+                    temporal_filter=temporal_filter,
+                    temporal_sort=temporal_sort,
+                    prefer_current=prefer_current,
+                    limit=limit,
+                )
+            elif self._storage:
+                # SurrealDB fallback: get chunks via entity source_chunk_ids
+                chunk_records = []
+                try:
+                    entities_map = await self._storage.get_entities_batch(entity_ids)
+                    all_chunk_ids: list[UUID] = []
+                    for entity in entities_map.values():
+                        all_chunk_ids.extend(entity.source_chunk_ids[:5])
+                    if all_chunk_ids:
+                        chunks_map = await self._storage.get_chunks_batch(all_chunk_ids)
+                        for cid, chunk in chunks_map.items():
+                            chunk_records.append(
+                                {
+                                    "chunk_id": str(cid),
+                                    "content": chunk.content,
+                                    "embedding": chunk.embedding,
+                                    "total_mentions": 1,
+                                    "entity_ids": [],
+                                    "occurred_at": getattr(chunk, "source_timestamp", None),
+                                }
+                            )
+                except Exception as e:
+                    logger.warning(f"SurrealDB chunk fetch fallback failed: {e}")
+                    chunk_records = []
+            else:
+                chunk_records = []
 
             results: list[tuple[UUID, float, Chunk]] = []
             for record in chunk_records:
