@@ -1,19 +1,19 @@
 # Engine Comparison
 
-Khora supports three pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
+Khora supports four pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
 
 ## Quick Comparison
 
-| Aspect | GraphRAG | Skeleton Construction | VectorCypher |
-|--------|----------|----------------------|--------------|
-| **Primary Focus** | Knowledge graphs | Temporal events | Hybrid retrieval |
-| **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) | Skeleton (70%) |
-| **Core Data Model** | Entities & relationships | Chunks with temporal metadata | Dual nodes (Entity + Chunk) |
-| **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Bi-temporal + temporal detection (7 query categories) |
-| **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) |
-| **Graph Backend** | Required (Neo4j/Kuzu/Memgraph) | Not required | Required (Neo4j) |
-| **Search Modes** | Vector + Graph + Keyword | Vector + BM25 Hybrid | Vector + Cypher + RRF |
-| **Best For** | Knowledge bases | Chat history, logs, events | Complex multi-hop queries, temporal reasoning |
+| Aspect | GraphRAG | Skeleton Construction | VectorCypher | Chronicle |
+|--------|----------|----------------------|--------------|-----------|
+| **Primary Focus** | Knowledge graphs | Temporal events | Hybrid retrieval | Conversational memory |
+| **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) | Skeleton (70%) | Full extraction |
+| **Core Data Model** | Entities & relationships | Chunks with temporal metadata | Dual nodes (Entity + Chunk) | SVO events + facts |
+| **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Bi-temporal + temporal detection (7 categories) | Triple timestamps + Ebbinghaus decay |
+| **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) | Medium (~700 calls/1000 docs) |
+| **Graph Backend** | Required (Neo4j/Memgraph) | Not required | Required (Neo4j) | Not required |
+| **Search Modes** | Vector + Graph + Keyword | Vector + BM25 Hybrid | Vector + Cypher + RRF | 4-channel: Semantic + BM25 + Temporal + Entity |
+| **Best For** | Knowledge bases | Chat history, logs, events | Complex multi-hop queries | Temporal queries, long conversations |
 
 ## Detailed Comparison
 
@@ -363,7 +363,9 @@ KHORA_DATABASE_URL=postgresql://localhost/khora
 
 ## Related Documentation
 
-- [Skeleton Construction Engine](skeleton-engine.md) - Detailed Skeleton Construction engine documentation
-- [Temporal Model](temporal-model.md) - Bi-temporal design deep dive
-- [Skeleton Indexing](skeleton-indexing.md) - Cost optimization via PageRank
-- [Hybrid Search](hybrid-search.md) - Vector + BM25 fusion
+- [Chronicle Engine](chronicle-engine.md) — Temporal-semantic memory with 4-channel retrieval
+- [Skeleton Construction Engine](skeleton-engine.md) — Temporal-first, cost-optimized engine
+- [VectorCypher Engine](vectorcypher-engine.md) — Hybrid vector + Cypher graph traversal
+- [Temporal Model](temporal-model.md) — Bi-temporal design deep dive
+- [Skeleton Indexing](skeleton-indexing.md) — Cost optimization via PageRank
+- [Hybrid Search](hybrid-search.md) — Vector + BM25 fusion

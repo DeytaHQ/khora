@@ -4,7 +4,56 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
-## [Unreleased] — SurrealDB Optimization, Ontology CLI, Discovery Agent
+## [0.7.0] — 2026-04-02 — Chronicle Engine, Semantic Hooks, Retrieval Quality
+
+### Chronicle engine (new)
+
+- 4th memory engine optimized for temporal/conversational memory (LongMemEval, LoCoMo, BEAM) (#199, #200)
+- 4-channel parallel retrieval: semantic + BM25 + temporal decay + entity co-occurrence
+- Ebbinghaus forgetting curve for temporal decay scoring
+- Event decomposition into SVO tuples with triple timestamps (observation, referenced, relative)
+- Progressive memory compression with contradiction detection (ADD/UPDATE/DELETE/NOOP)
+- LanceDB embedded vector store option — file-backed, no server (`pip install khora[lancedb]`)
+- Rust-accelerated temporal scoring via khora-accel
+- No graph database required — PostgreSQL + pgvector only
+
+### Semantic hooks
+
+- Event subscription system: `lake.subscribe("entity.created", callback)` (#193)
+- `SemanticFilter` with 3-level cascade: type pre-filter (free) → embedding similarity (sub-ms) → LLM yes/no (#194)
+- `HookDispatcher` with async concurrent dispatch and failure isolation
+- Binary-quantized embedding cache for sub-microsecond pre-screening (Hamming distance)
+- Configurable via `KHORA_HOOKS_ENABLED`, `KHORA_HOOKS_FILTER_MODEL` env vars
+- Wired into ingestion pipeline — fires during entity/relationship extraction
+
+### Retrieval quality
+
+- Expose 16 previously hardcoded scoring parameters as configurable `QuerySettings` fields (#206)
+- Entity linking thresholds tuned: fuzzy 0.6→0.5, max_candidates 5→10
+- Fix halfvec HNSW indexes causing full sequential scans (#183)
+
+### CI & infrastructure
+
+- Upgrade CI actions to Node.js 24 (actions/checkout v6, setup-python v6, codecov v5) (#197)
+- Add pip-audit dependency vulnerability scanning
+- Upgrade aiohttp 3.13.3→3.13.5 (CVE-2026-22815)
+- Upgrade all dependencies to latest compatible versions
+- Fix ty 0.0.27 type errors from dependency upgrade
+- Rust edition 2021→2024, minimum rustc 1.83→1.85 (#209)
+
+### Bug fixes
+
+- Fix `run_migrations()` on fresh PostgreSQL database — use `information_schema.tables` (#201, DYT-1447)
+- Reduce extraction batch size from 10 to 5 and make configurable (#195)
+- Move per-document extraction log lines from INFO to DEBUG (#196)
+
+### Version
+
+- khora-accel 0.7.0, Rust edition 2024 (#209)
+
+---
+
+## [0.6.0] — 2026-03-28 — SurrealDB Optimization, Ontology CLI, Discovery Agent
 
 ### SurrealDB backend hardening
 
@@ -74,14 +123,12 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Bug fixes
 
-- Fix `run_migrations()` raising `InFailedSQLTransactionError` on a fresh PostgreSQL database — existence check now uses `information_schema.tables` (SQL-standard, search_path-aware) instead of querying the version table directly inside a transaction (#201, DYT-1447)
 - Fix `_parse_uuid` for non-UUID SurrealDB record IDs (#168)
 - Fix SurrealDB ingestion performance regression (#160)
 - Fix `temporal_chunk` tags: coerce JSON strings to native arrays (#158)
 - Fix `SurrealDBTemporalStore` import of removed `_iso` helper (#156)
 - Fix alembic `env.py`: replace removed `get_current_revision` API (#180)
 - Fix LLM JSON parser: handle trailing commas, bare arrays, code blocks
-- Fix halfvec HNSW indexes causing full sequential scans (#183)
 - Fix VectorCypher engine dropping non-scalar chunk metadata (#134)
 
 ---
