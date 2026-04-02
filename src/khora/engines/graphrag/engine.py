@@ -1,8 +1,8 @@
 """GraphRAG engine implementation.
 
 This is the default memory engine for Khora, providing:
-- Knowledge graph storage (Neo4j, Kuzu, Memgraph, ArcadeDB)
-- Vector embeddings (pgvector, ArcadeDB)
+- Knowledge graph storage (Neo4j, Memgraph, SurrealDB)
+- Vector embeddings (pgvector, SurrealDB)
 - LLM-based entity extraction
 - Hybrid search (vector + graph + keyword)
 """

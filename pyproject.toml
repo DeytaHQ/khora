@@ -60,9 +60,8 @@ postgres = [
 neo4j = ["neo4j>=6.1.0"]
 kuzu = ["kuzu>=0.11.3"]
 memgraph = ["neo4j>=6.1.0"]  # Memgraph uses bolt protocol via neo4j driver
-arcadedb = ["httpx>=0.28.0"]
 # All graph backends
-graph-all = ["neo4j>=6.1.0", "kuzu>=0.11.3", "httpx>=0.28.1"]
+graph-all = ["neo4j>=6.1.0", "kuzu>=0.11.3"]
 # Weaviate vector database
 weaviate = ["weaviate-client>=4.20.1"]
 # All backends

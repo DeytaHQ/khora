@@ -3,8 +3,6 @@
 import pytest
 
 from khora.config.schema import (
-    ArcadeDBGraphConfig,
-    ArcadeDBVectorConfig,
     KhoraConfig,
     KuzuConfig,
     MemgraphConfig,
@@ -48,14 +46,6 @@ class TestStorageSettingsBackwardsCompat:
         assert isinstance(settings.graph, KuzuConfig)
         assert settings.graph.database_path == "/tmp/kuzu"
 
-    def test_new_style_vector_config_takes_precedence(self):
-        settings = StorageSettings(
-            pgvector_url="postgresql://old:5432/db",
-            vector=ArcadeDBVectorConfig(url="http://localhost:2480"),
-        )
-        assert isinstance(settings.vector, ArcadeDBVectorConfig)
-        assert settings.vector.url == "http://localhost:2480"
-
     def test_defaults(self):
         settings = StorageSettings()
         # Graph backend is optional - None by default
@@ -85,24 +75,6 @@ class TestDiscriminatedUnionParsing:
         )
         assert isinstance(settings.graph, MemgraphConfig)
         assert settings.graph.url == "bolt://mg:7687"
-
-    def test_arcadedb_graph_config_from_dict(self):
-        settings = StorageSettings.model_validate(
-            {
-                "graph": {"backend": "arcadedb", "url": "http://arcade:2480"},
-            }
-        )
-        assert isinstance(settings.graph, ArcadeDBGraphConfig)
-        assert settings.graph.url == "http://arcade:2480"
-
-    def test_arcadedb_vector_config_from_dict(self):
-        settings = StorageSettings.model_validate(
-            {
-                "vector": {"backend": "arcadedb", "url": "http://arcade:2480", "embedding_dimension": 768},
-            }
-        )
-        assert isinstance(settings.vector, ArcadeDBVectorConfig)
-        assert settings.vector.embedding_dimension == 768
 
     def test_neo4j_is_default_graph_backend(self):
         settings = StorageSettings.model_validate(
@@ -152,19 +124,3 @@ class TestKhoraConfigGraphHelpers:
         vector = config.get_vector_config()
         assert isinstance(vector, PgVectorConfig)
         assert vector.url == "postgresql://localhost:5432/khora"
-
-
-@pytest.mark.unit
-class TestArcadeDBDualRole:
-    """ArcadeDB dual-role detection."""
-
-    def test_both_graph_and_vector_arcadedb(self):
-        settings = StorageSettings.model_validate(
-            {
-                "graph": {"backend": "arcadedb", "url": "http://localhost:2480"},
-                "vector": {"backend": "arcadedb", "url": "http://localhost:2480"},
-            }
-        )
-        assert isinstance(settings.graph, ArcadeDBGraphConfig)
-        assert isinstance(settings.vector, ArcadeDBVectorConfig)
-        assert settings.graph.url == settings.vector.url
