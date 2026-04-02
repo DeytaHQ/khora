@@ -1221,7 +1221,7 @@ class VectorCypherEngine:
                         limit_per_entity=5,
                     )
                     # Collect chunk IDs from neighboring entities
-                    existing_ids = {c.id for c, _ in result.chunks}
+                    existing_ids = {str(c.id) for c, _ in result.chunks}
                     expansion_count = 0
                     expanded_chunks = list(result.chunks)
                     for eid in top_entity_ids:
