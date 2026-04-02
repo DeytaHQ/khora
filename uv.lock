@@ -1148,9 +1148,6 @@ all-backends = [
     { name = "surrealdb" },
     { name = "weaviate-client" },
 ]
-arcadedb = [
-    { name = "httpx" },
-]
 dev = [
     { name = "black" },
     { name = "coverage" },
@@ -1171,7 +1168,6 @@ embedded = [
     { name = "surrealdb" },
 ]
 graph-all = [
-    { name = "httpx" },
     { name = "kuzu" },
     { name = "neo4j" },
 ]
@@ -1236,8 +1232,6 @@ requires-dist = [
     { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.13.4" },
     { name = "dateparser", specifier = ">=1.2.0" },
     { name = "httpx", marker = "extra == 'all-backends'", specifier = ">=0.28.1" },
-    { name = "httpx", marker = "extra == 'arcadedb'", specifier = ">=0.28.0" },
-    { name = "httpx", marker = "extra == 'graph-all'", specifier = ">=0.28.1" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "khora-accel", marker = "extra == 'rust'", editable = "rust/khora-accel" },
@@ -1282,7 +1276,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'all-backends'", specifier = ">=4.20.1" },
     { name = "weaviate-client", marker = "extra == 'weaviate'", specifier = ">=4.20.1" },
 ]
-provides-extras = ["accel", "all-backends", "arcadedb", "dev", "discovery", "embedded", "graph-all", "kuzu", "lancedb", "logfire", "memgraph", "neo4j", "nlp", "postgres", "reranking", "rust", "surrealdb", "weaviate"]
+provides-extras = ["accel", "all-backends", "dev", "discovery", "embedded", "graph-all", "kuzu", "lancedb", "logfire", "memgraph", "neo4j", "nlp", "postgres", "reranking", "rust", "surrealdb", "weaviate"]
 
 [package.metadata.requires-dev]
 dev = [
