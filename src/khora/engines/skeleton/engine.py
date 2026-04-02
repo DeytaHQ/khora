@@ -85,8 +85,8 @@ class SkeletonConstructionEngine:
         self._backend_type = backend
         self._weaviate_url = weaviate_url
 
-        # Build storage config (shared helper handles SurrealDB, pool_pre_ping, etc.)
-        self._storage_config = storage_config or build_storage_config(config)
+        # Build storage config — skip graph backend (skeleton is vector + BM25 only)
+        self._storage_config = storage_config or build_storage_config(config, skip_graph=True)
 
         self._storage: StorageCoordinator | None = None
         self._temporal_store: TemporalVectorStore | None = None
