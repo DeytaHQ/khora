@@ -68,7 +68,8 @@ jobs:
         uses: codecov/codecov-action@v5
         if: always()
         with:
-          file: ./coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
           flags: unittests
           name: khora-coverage
           fail_ci_if_error: false
