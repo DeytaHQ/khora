@@ -4,6 +4,16 @@
 <!-- This file is auto-deployed; edits will be overwritten on ttoj update.   -->
 <!-- Project-specific overrides belong in CLAUDE.md.                         -->
 
+## Default Branch Detection
+
+Different repos use different default branches (`main`, `staging`, etc.). **Always detect the repo's default branch dynamically** rather than assuming a specific branch name:
+
+```bash
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+```
+
+Use `$DEFAULT_BRANCH` wherever this document refers to "the default branch." This ensures the workflow works regardless of whether the repo targets `main`, `staging`, or any other branch.
+
 ## Workflow Lifecycle
 
 Every feature, bugfix, or task follows: **Linear ticket → branch → implement → PR → done**.
@@ -14,7 +24,7 @@ If your project uses Linear (has `project.linear_team` in `.ttoj.toml`):
 1. Search Linear for an existing ticket matching the task. If none exists, create one.
 2. Assign yourself (or the requesting user) to the ticket.
 3. Move the ticket to **In Progress**.
-4. Create a branch from `staging` (default) following the branch naming convention below. For hotfixes, branch from `main`.
+4. Create a branch from the repo's default branch following the branch naming convention below. For hotfixes, branch from `main`.
 5. Begin implementation.
 
 ### During work
@@ -25,7 +35,7 @@ If your project uses Linear (has `project.linear_team` in `.ttoj.toml`):
 ### Finishing work
 1. Run any project-defined lint/format/test commands.
 2. Commit all changes with a clear message.
-3. Push the branch and create a PR following PR standards below. PRs target `staging` by default; only hotfixes target `main`.
+3. Push the branch and create a PR following PR standards below. PRs target the default branch; only hotfixes target `main`.
 4. Add the PR link as a comment on the Linear ticket.
 5. The ticket stays **In Progress** until the PR is merged, then move to **Done**.
 
@@ -45,14 +55,14 @@ The `initials` and `TICKET-ID` are required. Every branch must trace back to a L
 - Reference the Linear ticket ID when relevant
 
 ### Branching strategy
-- `main` = production. `staging` = staging / default PR target.
-- Feature branches are created from `staging` (default). For hotfixes, branch from `main`.
-- PRs **always** target `staging`, unless it's a hotfix.
+- `main` = production. The repo's default branch is the PR target (detect via `gh repo view`).
+- Feature branches are created from the default branch. For hotfixes, branch from `main`.
+- PRs **always** target the default branch, unless it's a hotfix.
 - Hotfixes: branch from `main`, PR targets `main` (production deploy).
 
 ### Rules
-- Never force-push to `main`, `staging`, or shared branches.
-- Rebase feature branches on the PR target branch (`staging` or `main` for hotfixes) before opening a PR when possible.
+- Never force-push to `main`, the default branch, or shared branches.
+- Rebase feature branches on the PR target branch (the default branch, or `main` for hotfixes) before opening a PR when possible.
 - Delete branches after merge.
 
 ## Linear Integration
@@ -83,7 +93,7 @@ Use the Linear MCP tools (`list_issues`, `save_issue`, `save_comment`, etc.) for
 - How to verify the changes work
 ```
 
-- PRs target `staging` by default; hotfix PRs target `main`.
+- PRs target the repo's default branch; hotfix PRs target `main`.
 - Keep it concise. The code should speak for itself.
 
 ## Multi-Agent Coordination
@@ -118,7 +128,8 @@ This is the only reliable way to signal ownership when all agents share the same
 **Never use `git checkout` to switch branches in the main repo.** Always create a worktree:
 
 ```bash
-git worktree add .claude/worktrees/{TICKET-ID}-short-desc -b {initials}/{TICKET-ID}-short-desc staging
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+git worktree add .claude/worktrees/{TICKET-ID}-short-desc -b {initials}/{TICKET-ID}-short-desc "$DEFAULT_BRANCH"
 cd .claude/worktrees/{TICKET-ID}-short-desc
 # Run project-specific install (e.g., bun install, npm install)
 # Re-deploy TTOJ surface (.ttoj/ is not shared across worktrees):
