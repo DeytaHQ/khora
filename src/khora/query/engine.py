@@ -477,10 +477,10 @@ class QueryConfig:
     # Linked entity boost
     linked_entity_boost: float = 1.5
 
-    # Structured document features (default on, no-op without khora metadata)
-    enable_relationship_expansion: bool = True
+    # Structured document features (default off to avoid per-query DB lookups)
+    enable_relationship_expansion: bool = False
     relationship_expansion_max: int = 5
-    enable_taxonomy_boost: bool = True
+    enable_taxonomy_boost: bool = False
     taxonomy_boost_factor: float = 1.5
 
     @classmethod
@@ -559,9 +559,9 @@ class QueryConfig:
             expanded_query_discount=getattr(settings, "expanded_query_discount", 0.7),
             linked_entity_boost=getattr(settings, "linked_entity_boost", 1.5),
             # Structured document features
-            enable_relationship_expansion=getattr(settings, "enable_relationship_expansion", True),
+            enable_relationship_expansion=getattr(settings, "enable_relationship_expansion", False),
             relationship_expansion_max=getattr(settings, "relationship_expansion_max", 5),
-            enable_taxonomy_boost=getattr(settings, "enable_taxonomy_boost", True),
+            enable_taxonomy_boost=getattr(settings, "enable_taxonomy_boost", False),
             taxonomy_boost_factor=getattr(settings, "taxonomy_boost_factor", 1.5),
         )
 

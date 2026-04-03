@@ -558,21 +558,21 @@ class QuerySettings(BaseSettings):
         description="Score multiplier for entities matched via entity linking.",
     )
 
-    # Structured document features (default on, no-op without khora metadata)
+    # Structured document features (default off — enable per-namespace to avoid per-query DB lookups)
     enable_relationship_expansion: bool = Field(
-        default=True,
+        default=False,
         description="After retrieval, follow relationship edges from top entities to inject "
-        "related chunks. Useful for structured documents with dense cross-references. "
-        "No effect if the graph has no relationships.",
+        "related chunks. Enable per-namespace for structured documents with dense cross-references. "
+        "When True, adds a DB round-trip per query to check for relationship data.",
     )
     relationship_expansion_max: int = Field(
         default=5, ge=1, le=20, description="Maximum additional chunks from relationship expansion"
     )
     enable_taxonomy_boost: bool = Field(
-        default=True,
+        default=False,
         description="Classify query against document hierarchy (chapters/topics) and boost chunks "
         "from matching scope. Reads from namespace.metadata['khora']['taxonomy']. "
-        "No effect if no taxonomy data is present under the khora key.",
+        "When True, adds a DB round-trip per query to fetch namespace metadata.",
     )
     taxonomy_boost_factor: float = Field(
         default=1.5, ge=1.0, le=3.0, description="Score multiplier for chunks from taxonomy-matched scope"
