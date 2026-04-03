@@ -322,7 +322,13 @@ class SurrealDBVectorAdapter:
             "ORDER BY rank DESC LIMIT $limit"
         )
 
-        rows = await self._conn.query(sql, bindings)
+        try:
+            rows = await self._conn.query(sql, bindings)
+        except Exception as e:
+            if "no suitable index" in str(e).lower():
+                logger.warning("BM25 index not available — run optimize_storage() to create search indexes")
+                return []
+            raise
         return [(self._row_to_chunk(row), float(row.get("rank", 0.0))) for row in rows]
 
     async def count_chunks(self, namespace_id: UUID) -> int:

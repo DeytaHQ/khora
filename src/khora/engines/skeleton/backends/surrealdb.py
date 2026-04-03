@@ -428,7 +428,13 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         )
         params = {**bindings, "query_text": query_text, "bm25_limit": limit}
 
-        rows = await self._conn.query(sql, params)
+        try:
+            rows = await self._conn.query(sql, params)
+        except Exception as e:
+            if "no suitable index" in str(e).lower():
+                logger.warning("BM25 index not available — run optimize_storage() to create search indexes")
+                return []
+            raise
 
         return [
             TemporalSearchResult(
