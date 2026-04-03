@@ -38,6 +38,8 @@ uv run khora ontology preview <file.yaml>         # Rich preview
 - `config/schema.py` — `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
 - `telemetry/` — Optional PostgreSQL-backed telemetry collector + `@trace` decorator
 
+@.claude/docs/workflow.md
+
 ## Conventions
 
 ### Version Bumps
@@ -96,5 +98,3 @@ Always run `make format && make test` before committing. CI will reject PRs that
 - **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
 - **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` changes require coordination
 - `scripts/` vendored from TTOJ — skip in audits
-
-@.claude/docs/workflow.md
